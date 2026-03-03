@@ -13,14 +13,18 @@
 //! - **RuVectorStore** (feature `ruvector`): HNSW-indexed vector database
 //!   for semantic search. Sub-millisecond recall at scale.
 
+pub mod auto_capture;
 pub mod error;
 pub mod fs_store;
 #[cfg(feature = "ruvector")]
 pub mod ruvector_store;
 pub mod store;
 
+pub use auto_capture::{
+    AutoCapture, AutoCaptureConfig, DraftRejectEvent, GoalCompleteEvent, HumanGuidanceEvent,
+};
 pub use error::MemoryError;
 pub use fs_store::FsMemoryStore;
 #[cfg(feature = "ruvector")]
 pub use ruvector_store::RuVectorStore;
-pub use store::{MemoryEntry, MemoryQuery, MemoryStore};
+pub use store::{MemoryCategory, MemoryEntry, MemoryQuery, MemoryStore, StoreParams};

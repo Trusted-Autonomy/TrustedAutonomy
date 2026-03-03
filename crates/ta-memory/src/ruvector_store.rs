@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::error::MemoryError;
-use crate::store::{MemoryEntry, MemoryQuery, MemoryStore};
+use crate::store::{MemoryCategory, MemoryEntry, MemoryQuery, MemoryStore, StoreParams};
 
 /// Embedding dimension used for hash-based text embeddings.
 /// Matches ruvector-core's default hash embedding output size.
@@ -115,6 +115,17 @@ impl MemoryStore for RuVectorStore {
         tags: Vec<String>,
         source: &str,
     ) -> Result<MemoryEntry, MemoryError> {
+        self.store_with_params(key, value, tags, source, StoreParams::default())
+    }
+
+    fn store_with_params(
+        &mut self,
+        key: &str,
+        value: serde_json::Value,
+        tags: Vec<String>,
+        source: &str,
+        params: StoreParams,
+    ) -> Result<MemoryEntry, MemoryError> {
         let now = Utc::now();
 
         // Check for existing entry to preserve ID and created_at.
@@ -136,7 +147,8 @@ impl MemoryStore for RuVectorStore {
             value: value.clone(),
             tags,
             source: source.to_string(),
-            goal_id: None,
+            goal_id: params.goal_id,
+            category: params.category,
             created_at,
             updated_at: now,
         };
@@ -181,6 +193,11 @@ impl MemoryStore for RuVectorStore {
                 }
                 if let Some(goal_id) = query.goal_id {
                     if e.goal_id != Some(goal_id) {
+                        return false;
+                    }
+                }
+                if let Some(ref cat) = query.category {
+                    if e.category.as_ref() != Some(cat) {
                         return false;
                     }
                 }
@@ -326,6 +343,9 @@ fn entry_to_metadata(entry: &MemoryEntry) -> HashMap<String, serde_json::Value> 
     if let Some(goal_id) = entry.goal_id {
         meta.insert("goal_id".into(), serde_json::json!(goal_id.to_string()));
     }
+    if let Some(ref category) = entry.category {
+        meta.insert("category".into(), serde_json::json!(category.to_string()));
+    }
     meta.insert(
         "created_at".into(),
         serde_json::json!(entry.created_at.to_rfc3339()),
@@ -373,6 +393,11 @@ fn metadata_to_entry(rv_entry: &RvEntry) -> Option<MemoryEntry> {
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .unwrap_or_else(Utc::now);
 
+    let category = meta
+        .get("category")
+        .and_then(|v| v.as_str())
+        .map(MemoryCategory::from_str_lossy);
+
     Some(MemoryEntry {
         entry_id,
         key,
@@ -380,6 +405,7 @@ fn metadata_to_entry(rv_entry: &RvEntry) -> Option<MemoryEntry> {
         tags,
         source,
         goal_id,
+        category,
         created_at,
         updated_at,
     })

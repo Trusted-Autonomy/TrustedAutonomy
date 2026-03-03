@@ -1378,7 +1378,7 @@ Store/recall round-trip, semantic search returns relevant results, self-learning
 - ✅ Bug fix: macro session exit no longer errors when goal already applied/submitted via MCP
 
 ### v0.5.6 — Framework-Agnostic Agent State
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Use TA's memory store as the canonical source of project state so users can switch between agentic frameworks (Claude Code, Codex, Cursor, Claude Flow, etc.) across tasks — or run them simultaneously — without losing context or locking into any framework's native state management.
 
 > **Problem today**: Each framework keeps its own state. Claude Code has CLAUDE.md and project memory. Codex has session state. Cursor has codebase indices. None of it transfers. When you switch agents mid-project, the new agent starts cold — it doesn't know what the previous agent learned, what conventions the human established, or what approaches were tried and rejected.
@@ -1440,6 +1440,18 @@ ta_context recall "test-conventions"
 
 #### Tests (minimum 6)
 Auto-capture on goal complete, auto-capture on rejection, context injection into CLAUDE.md, context injection via MCP tool, cross-framework recall (store from "claude-code", recall from "codex"), repeated-correction auto-promotion.
+
+#### Completed
+- ✅ `MemoryCategory` enum (convention, architecture, history, preference, relationship, other)
+- ✅ `StoreParams` with `goal_id` and `category` — `store_with_params()` on `MemoryStore` trait
+- ✅ `AutoCaptureConfig` parsed from `.ta/workflow.toml` `[memory.auto_capture]` section
+- ✅ `AutoCapture` event handlers: `on_goal_complete`, `on_draft_reject`, `on_human_guidance`, `check_repeated_correction`
+- ✅ `build_memory_context_section()` for CLAUDE.md injection from prior sessions
+- ✅ `ta_context` MCP tool extended: `source`, `goal_id`, `category` params; new `search` action
+- ✅ Draft submit wired: PrApproved/PrDenied events dispatched, rejection auto-captured to memory
+- ✅ `ta run` context injection: memory context section injected into CLAUDE.md at launch
+- ✅ `ta run` auto-capture: goal completion + change_summary captured after draft build
+- ✅ Tests: auto_capture_goal_complete, auto_capture_draft_rejection, context_injection_builds_markdown_section, cross_framework_recall, repeated_correction_auto_promotes, config_parsing_from_toml, config_defaults_when_no_section, disabled_capture_is_noop, slug_generation (9 new tests, 18 total in ta-memory)
 
 ### v0.5.7 — Semantic Memory Queries & Memory Dashboard
 <!-- status: pending -->

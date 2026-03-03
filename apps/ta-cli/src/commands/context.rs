@@ -186,6 +186,7 @@ fn list_entries(
             key_prefix: prefix.map(|s| s.to_string()),
             tags: tags.to_vec(),
             goal_id: None,
+            category: None,
             limit,
         })?
     };

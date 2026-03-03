@@ -470,6 +470,11 @@ pub fn execute(
         false
     };
 
+    // 7b. Auto-capture goal completion into memory (v0.5.6).
+    if draft_built {
+        auto_capture_goal_completion(config, goal, &staging_path);
+    }
+
     // 8. Mark interactive session as completed.
     if let Some((store, mut session)) = session_store {
         if draft_built {
@@ -1190,6 +1195,9 @@ fn inject_claude_md(
         String::new()
     };
 
+    // Build memory context section from prior sessions (v0.5.6).
+    let memory_section = build_memory_context_section_for_inject(config, title);
+
     let injected = format!(
         r#"# Trusted Autonomy — Mediated Goal
 
@@ -1197,7 +1205,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 **Goal:** {}
 **Goal ID:** {}
-{}{}{}
+{}{}{}{}
 ## How this works
 
 - This directory is a copy of the original project
@@ -1261,11 +1269,86 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
 
 {}
 "#,
-        title, goal_id, plan_section, parent_section, macro_section, existing_section
+        title,
+        goal_id,
+        plan_section,
+        parent_section,
+        macro_section,
+        memory_section,
+        existing_section
     );
 
     std::fs::write(&claude_md_path, injected)?;
     Ok(())
+}
+
+/// Auto-capture goal completion into memory (v0.5.6).
+///
+/// Reads `.ta/change_summary.json` from the staging workspace and stores
+/// the goal completion event in the memory store for future context injection.
+fn auto_capture_goal_completion(
+    config: &GatewayConfig,
+    goal: &ta_goal::GoalRun,
+    staging_path: &Path,
+) {
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let mut store = ta_memory::FsMemoryStore::new(&memory_dir);
+
+    let workflow_toml = config.workspace_root.join(".ta").join("workflow.toml");
+    let capture_config = ta_memory::auto_capture::load_config(&workflow_toml);
+    let capture = ta_memory::AutoCapture::new(capture_config);
+
+    // Try to read change_summary.json from staging.
+    let summary_path = staging_path.join(".ta").join("change_summary.json");
+    let change_summary = if summary_path.exists() {
+        std::fs::read_to_string(&summary_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        None
+    };
+
+    // Extract changed file list from change_summary if available.
+    let changed_files = change_summary
+        .as_ref()
+        .and_then(|v: &serde_json::Value| v.get("changes"))
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| c.get("path").and_then(|p| p.as_str()).map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let event = ta_memory::GoalCompleteEvent {
+        goal_id: goal.goal_run_id,
+        title: goal.title.clone(),
+        agent_framework: goal.agent_id.clone(),
+        change_summary,
+        changed_files,
+    };
+
+    if let Err(e) = capture.on_goal_complete(&mut store, &event) {
+        tracing::warn!("failed to auto-capture goal completion: {}", e);
+    }
+}
+
+/// Build a memory context section from prior sessions for CLAUDE.md injection (v0.5.6).
+///
+/// Queries the memory store for relevant entries and formats them as a
+/// markdown section. Returns an empty string if no entries are found or
+/// if the memory store is unavailable.
+fn build_memory_context_section_for_inject(config: &GatewayConfig, goal_title: &str) -> String {
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let store = ta_memory::FsMemoryStore::new(&memory_dir);
+
+    // Load auto-capture config for max_context_entries setting.
+    let workflow_toml = config.workspace_root.join(".ta").join("workflow.toml");
+    let capture_config = ta_memory::auto_capture::load_config(&workflow_toml);
+    let max_entries = capture_config.max_context_entries;
+
+    ta_memory::auto_capture::build_memory_context_section(&store, goal_title, max_entries)
+        .unwrap_or_default()
 }
 
 /// Restore the original CLAUDE.md content before computing diffs.

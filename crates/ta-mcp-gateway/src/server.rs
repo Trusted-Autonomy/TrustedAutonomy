@@ -35,7 +35,7 @@ use ta_changeset::review_channel::{ReviewChannel, ReviewChannelError};
 use ta_changeset::terminal_channel::AutoApproveChannel;
 use ta_connector_fs::FsConnector;
 use ta_goal::{EventDispatcher, GoalRun, GoalRunState, GoalRunStore, LogSink, TaEvent};
-use ta_memory::{FsMemoryStore, MemoryStore};
+use ta_memory::{AutoCapture, DraftRejectEvent, FsMemoryStore, MemoryStore};
 use ta_policy::{
     AlignmentProfile, CompilerOptions, PolicyCompiler, PolicyDecision, PolicyEngine, PolicyRequest,
 };
@@ -182,10 +182,10 @@ pub struct PlanToolParams {
     pub status_note: Option<String>,
 }
 
-/// Parameters for `ta_context` (persistent memory tool, v0.5.4).
+/// Parameters for `ta_context` (persistent memory tool, v0.5.4+).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ContextToolParams {
-    /// Action: "store", "recall", "list", or "forget".
+    /// Action: "store", "recall", "list", "forget", or "search".
     pub action: String,
     /// Key for the memory entry (required for store, recall, forget).
     #[serde(default)]
@@ -196,9 +196,23 @@ pub struct ContextToolParams {
     /// Tags for the entry (used with "store" action).
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Maximum entries to return (used with "list" action).
+    /// Maximum entries to return (used with "list" and "search" actions).
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Source framework identifier (v0.5.6). Defaults to "agent".
+    /// Examples: "claude-code", "codex", "cursor", "claude-flow".
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Associate this entry with a specific goal (v0.5.6).
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    /// Knowledge category (v0.5.6): "convention", "architecture",
+    /// "history", "preference", "relationship".
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Search query text (used with "search" action, v0.5.6).
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 // ── Gateway state ────────────────────────────────────────────────
@@ -220,6 +234,8 @@ pub struct GatewayState {
     pub review_channel: Box<dyn ReviewChannel>,
     /// Persistent memory store for cross-agent context (v0.5.4).
     pub memory_store: FsMemoryStore,
+    /// Auto-capture config for lifecycle events (v0.5.6).
+    pub auto_capture_config: ta_memory::AutoCaptureConfig,
     /// MCP tool call interceptor for capturing external actions (v0.5.1).
     pub interceptor: ToolCallInterceptor,
     /// Pending actions captured by the interceptor, keyed by goal_run_id.
@@ -236,6 +252,10 @@ impl GatewayState {
         event_dispatcher.add_sink(Box::new(LogSink::new(&config.events_log)));
         let memory_store = FsMemoryStore::new(config.workspace_root.join(".ta").join("memory"));
 
+        // Load auto-capture config from .ta/workflow.toml (v0.5.6).
+        let workflow_toml = config.workspace_root.join(".ta").join("workflow.toml");
+        let auto_capture_config = ta_memory::auto_capture::load_config(&workflow_toml);
+
         Ok(Self {
             config,
             policy_engine: PolicyEngine::new(),
@@ -246,6 +266,7 @@ impl GatewayState {
             event_dispatcher,
             review_channel: Box::new(AutoApproveChannel::new()),
             memory_store,
+            auto_capture_config,
             interceptor: ToolCallInterceptor::new(),
             pending_actions: HashMap::new(),
         })
@@ -935,14 +956,53 @@ impl TaGatewayServer {
                         let (review_status, review_decision) = match &review_result {
                             Ok(resp) => {
                                 let decision_str = format!("{}", resp.decision);
-                                // If approved and this is a macro goal, transition back to Running.
-                                if decision_str == "approved" && goal.is_macro {
-                                    if let Ok(Some(mut g)) = state.goal_store.get(goal_run_id) {
-                                        if g.state == GoalRunState::PrReady {
-                                            let _ = g.transition(GoalRunState::Running);
-                                            let _ = state.goal_store.save(&g);
+                                if decision_str == "approved" {
+                                    // Dispatch PrApproved event (v0.5.6).
+                                    state.event_dispatcher.dispatch(&TaEvent::PrApproved {
+                                        goal_run_id,
+                                        pr_package_id: pkg_id,
+                                        approved_by: "human".to_string(),
+                                        timestamp: Utc::now(),
+                                    });
+
+                                    // If macro goal, transition back to Running.
+                                    if goal.is_macro {
+                                        if let Ok(Some(mut g)) = state.goal_store.get(goal_run_id) {
+                                            if g.state == GoalRunState::PrReady {
+                                                let _ = g.transition(GoalRunState::Running);
+                                                let _ = state.goal_store.save(&g);
+                                            }
                                         }
                                     }
+                                } else {
+                                    // Dispatch PrDenied event (v0.5.6).
+                                    state.event_dispatcher.dispatch(&TaEvent::PrDenied {
+                                        goal_run_id,
+                                        pr_package_id: pkg_id,
+                                        reason: resp
+                                            .reasoning
+                                            .clone()
+                                            .unwrap_or_else(|| "denied".to_string()),
+                                        denied_by: "human".to_string(),
+                                        timestamp: Utc::now(),
+                                    });
+
+                                    // Auto-capture rejection in memory (v0.5.6).
+                                    // Clone config to avoid borrow conflict on state.
+                                    let reject_event = DraftRejectEvent {
+                                        goal_id: goal_run_id,
+                                        draft_id: pkg_id,
+                                        agent_framework: goal.agent_id.clone(),
+                                        attempted: goal.title.clone(),
+                                        rejection_reason: resp
+                                            .reasoning
+                                            .clone()
+                                            .unwrap_or_else(|| "denied".to_string()),
+                                    };
+                                    let capture =
+                                        AutoCapture::new(state.auto_capture_config.clone());
+                                    let _ = capture
+                                        .on_draft_reject(&mut state.memory_store, &reject_event);
                                 }
                                 ("reviewed".to_string(), decision_str)
                             }
@@ -1311,10 +1371,11 @@ impl TaGatewayServer {
     /// persists across sessions and works across different agent frameworks.
     ///
     /// Actions:
-    /// - "store": Save a memory entry (key + value + optional tags).
+    /// - "store": Save a memory entry (key + value + optional tags/source/goal_id/category).
     /// - "recall": Retrieve a single entry by exact key.
     /// - "list": List all entries (optionally limited).
     /// - "forget": Delete an entry by key.
+    /// - "search": Semantic search by query text (v0.5.6).
     #[tool]
     fn ta_context(
         &self,
@@ -1333,16 +1394,30 @@ impl TaGatewayServer {
                     .ok_or_else(|| McpError::invalid_params("key required for store", None))?;
                 let value = params.value.clone().unwrap_or(serde_json::Value::Null);
                 let tags = params.tags.clone().unwrap_or_default();
+                let source = params.source.as_deref().unwrap_or("agent");
 
+                // Parse optional goal_id and category (v0.5.6).
+                let goal_id = params
+                    .goal_id
+                    .as_deref()
+                    .and_then(|s| s.parse::<Uuid>().ok());
+                let category = params
+                    .category
+                    .as_deref()
+                    .map(ta_memory::MemoryCategory::from_str_lossy);
+
+                let store_params = ta_memory::StoreParams { goal_id, category };
                 let entry = state
                     .memory_store
-                    .store(key, value, tags, "agent")
+                    .store_with_params(key, value, tags, source, store_params)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
                 let response = serde_json::json!({
                     "status": "stored",
                     "entry_id": entry.entry_id.to_string(),
                     "key": entry.key,
+                    "source": entry.source,
+                    "category": entry.category.as_ref().map(|c| c.to_string()),
                 });
                 Ok(CallToolResult::success(vec![Content::json(response)
                     .map_err(|e| {
@@ -1367,6 +1442,8 @@ impl TaGatewayServer {
                             "value": e.value,
                             "tags": e.tags,
                             "source": e.source,
+                            "category": e.category.as_ref().map(|c| c.to_string()),
+                            "goal_id": e.goal_id.map(|id| id.to_string()),
                             "created_at": e.created_at.to_rfc3339(),
                             "updated_at": e.updated_at.to_rfc3339(),
                         });
@@ -1400,6 +1477,7 @@ impl TaGatewayServer {
                             "key": e.key,
                             "tags": e.tags,
                             "source": e.source,
+                            "category": e.category.as_ref().map(|c| c.to_string()),
                             "updated_at": e.updated_at.to_rfc3339(),
                         })
                     })
@@ -1434,9 +1512,47 @@ impl TaGatewayServer {
                         McpError::internal_error(e.to_string(), None)
                     })?]))
             }
+            "search" => {
+                let query = params
+                    .query
+                    .as_deref()
+                    .or(params.key.as_deref())
+                    .ok_or_else(|| {
+                        McpError::invalid_params("query or key required for search", None)
+                    })?;
+                let k = params.limit.unwrap_or(5);
+
+                let entries = state
+                    .memory_store
+                    .semantic_search(query, k)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                let items: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "key": e.key,
+                            "value": e.value,
+                            "tags": e.tags,
+                            "source": e.source,
+                            "category": e.category.as_ref().map(|c| c.to_string()),
+                        })
+                    })
+                    .collect();
+
+                let response = serde_json::json!({
+                    "count": items.len(),
+                    "results": items,
+                    "backend": if items.is_empty() { "no results (semantic search requires ruvector backend)" } else { "ok" },
+                });
+                Ok(CallToolResult::success(vec![Content::json(response)
+                    .map_err(|e| {
+                        McpError::internal_error(e.to_string(), None)
+                    })?]))
+            }
             _ => Err(McpError::invalid_params(
                 format!(
-                    "unknown action '{}'. Expected: store, recall, list, forget",
+                    "unknown action '{}'. Expected: store, recall, list, forget, search",
                     params.action
                 ),
                 None,

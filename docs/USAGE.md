@@ -831,18 +831,68 @@ TA returns:  { "rule": "Always use tempfile::tempdir() for filesystem tests" }
 
 This works identically for Claude Code, Codex, or any agent connected via MCP. The agent doesn't need to know which framework stored the entry.
 
+The `ta_context` MCP tool also supports `source` and `category` parameters (v0.5.6):
+
+```
+Agent calls: ta_context {
+  action: "store",
+  key: "test-fixtures",
+  value: {"rule": "Use tempfile::tempdir()"},
+  tags: ["convention", "testing"],
+  source: "claude-code",
+  category: "convention"
+}
+```
+
+And a `search` action for semantic search (requires ruvector backend):
+
+```
+Agent calls: ta_context { action: "search", query: "testing conventions", limit: 5 }
+```
+
+#### Automatic State Capture (v0.5.6)
+
+TA can automatically capture knowledge from lifecycle events so agents don't repeat mistakes and new agents start with context from previous sessions:
+
+```toml
+# .ta/workflow.toml
+[memory.auto_capture]
+on_goal_complete = true        # Store "what worked" from approved drafts
+on_draft_reject = true         # Store rejection reasons to prevent repeated mistakes
+on_human_guidance = true       # Store human feedback as persistent knowledge
+on_repeated_correction = true  # Auto-promote patterns corrected 3+ times
+correction_threshold = 3       # How many repeats before auto-promotion
+max_context_entries = 10       # Max entries injected into agent context
+```
+
+All settings default to `true` (enabled). Create `.ta/workflow.toml` to customize.
+
+**What gets captured automatically:**
+
+| Event | What's stored | Category |
+|-------|--------------|----------|
+| Goal completes | Title, changed files, change summary | history |
+| Draft rejected | What was attempted, rejection reason | history |
+| Human guidance | The guidance text and tags | preference |
+| Repeated correction | Promoted to persistent preference | preference |
+
+#### Context Injection on Launch
+
+When `ta run` launches an agent, it queries the memory store and injects relevant entries into a "Prior Context" section in CLAUDE.md. This means every agent starts with knowledge from all previous sessions, regardless of which framework produced it.
+
 #### What gets stored
 
 | Category | Example | How it's captured |
 |----------|---------|-------------------|
-| **Conventions** | "Use 4-space indent", "Run clippy before commit" | Human stores via CLI or agent stores via MCP |
-| **Architecture** | "Auth is JWT-based, module at src/auth/" | Agent stores during goal work |
-| **Decisions** | "Chose SQLite over Postgres for MVP" | Stored from draft review discussions |
-| **Preferences** | "Human prefers small focused PRs" | Stored from repeated review patterns |
+| **Conventions** | "Use 4-space indent", "Run clippy before commit" | Human guidance, repeated corrections, auto-capture |
+| **Architecture** | "Auth is JWT-based, module at src/auth/" | Goal completion auto-capture, agent via MCP |
+| **History** | "Tried Redis caching, rejected -- too complex for MVP" | Draft rejection auto-capture |
+| **Preferences** | "Human prefers small focused PRs" | Repeated correction auto-promotion |
+| **Relationships** | "config.toml depends on src/config.rs" | Agent stores via MCP |
 
 #### Storage details
 
-Entries are JSON files in `.ta/memory/`, one per key. The filesystem backend is the zero-dependency default. For semantic search (find memories *similar to* a query rather than exact-match), a future phase adds the [ruvector](https://github.com/ruvnet/ruvector) vector database backend -- see [Roadmap](#roadmap).
+Entries are JSON files in `.ta/memory/`, one per key. The filesystem backend is the zero-dependency default. For semantic search, enable the ruvector backend (v0.5.5+).
 
 #### Configuration
 
@@ -1035,7 +1085,8 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.5.2 | Minimal web review UI | Done |
 | v0.5.3 | ReviewChannel adapters (webhook, Slack/email stubs) | Done |
 | v0.5.4 | Context memory store (filesystem backend) | Done |
-| v0.5.5 | RuVector memory backend (semantic search, HNSW indexing) | Pending |
+| v0.5.5 | RuVector memory backend (semantic search, HNSW indexing) | Done |
+| v0.5.6 | Framework-agnostic agent state (auto-capture, context injection) | Done |
 | v0.5.6 | Framework-agnostic agent state (cross-framework context) | Pending |
 | v0.5.7 | Semantic memory queries and memory dashboard | Pending |
 

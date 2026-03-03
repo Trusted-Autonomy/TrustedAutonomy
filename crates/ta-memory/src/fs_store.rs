@@ -13,7 +13,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::error::MemoryError;
-use crate::store::{MemoryEntry, MemoryQuery, MemoryStore};
+use crate::store::{MemoryEntry, MemoryQuery, MemoryStore, StoreParams};
 
 /// Filesystem-backed memory store.
 pub struct FsMemoryStore {
@@ -87,6 +87,17 @@ impl MemoryStore for FsMemoryStore {
         tags: Vec<String>,
         source: &str,
     ) -> Result<MemoryEntry, MemoryError> {
+        self.store_with_params(key, value, tags, source, StoreParams::default())
+    }
+
+    fn store_with_params(
+        &mut self,
+        key: &str,
+        value: serde_json::Value,
+        tags: Vec<String>,
+        source: &str,
+        params: StoreParams,
+    ) -> Result<MemoryEntry, MemoryError> {
         fs::create_dir_all(&self.base_dir)?;
 
         let now = Utc::now();
@@ -109,7 +120,8 @@ impl MemoryStore for FsMemoryStore {
             value,
             tags,
             source: source.to_string(),
-            goal_id: None,
+            goal_id: params.goal_id,
+            category: params.category,
             created_at,
             updated_at: now,
         };
@@ -145,6 +157,11 @@ impl MemoryStore for FsMemoryStore {
                 }
                 if let Some(goal_id) = query.goal_id {
                     if e.goal_id != Some(goal_id) {
+                        return false;
+                    }
+                }
+                if let Some(ref cat) = query.category {
+                    if e.category.as_ref() != Some(cat) {
                         return false;
                     }
                 }
