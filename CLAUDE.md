@@ -50,16 +50,19 @@ Plan progress:
 - [x] Phase v0.5.5 — RuVector Memory Backend
 - [x] Phase v0.5.6 — Framework-Agnostic Agent State
 - [ ] Phase v0.5.7 — Semantic Memory Queries & Memory Dashboard
-- [ ] Phase v0.6.0 — Supervisor Agent & Constitutional Workflows
-- [ ] Phase v0.6.1 — Cost Tracking & Budget Limits
-- [ ] Phase v0.7.0 — Agent-Guided Setup (`ta setup`
-- [ ] Phase v0.7.1 — Domain Workflow Templates
-- [ ] Phase v0.8.0 — Event System & Orchestration API
+- [ ] Phase v0.6.0 — Session & Human Control Plane
+- [ ] Phase v0.6.1 — Unified Policy Config
+- [ ] Phase v0.6.2 — Resource Mediation Trait
+- [ ] Phase v0.7.0 — Channel Registry
+- [ ] Phase v0.7.1 — API Mediator
+- [ ] Phase v0.7.2 — Agent-Guided Setup
+- [ ] Phase v0.8.0 — Event System & Subscription API
 - [ ] Phase v0.8.1 — Community Memory
 - [ ] Phase v0.9.0 — Distribution & Packaging
 - [ ] Phase v0.9.1 — Native Windows Support
 - [ ] Phase v0.9.2 — Sandbox Runner (optional hardening
-- [ ] Phase v1.0.0 — Virtual Office Runtime
+- [ ] Virtual Office Runtime (separate project)
+- [ ] Autonomous Infra Ops (separate project)
 
 ## Macro Goal Mode (Inner-Loop Iteration)
 
@@ -211,16 +214,19 @@ Plan progress:
 - [ ] Phase v0.5.2 — Minimal Web Review UI
 - [ ] Phase v0.5.3 — Additional ReviewChannel Adapters
 - [ ] Phase v0.5.4 — Context Memory Store (ruvector integration
-- [ ] Phase v0.6.0 — Supervisor Agent & Constitutional Workflows
-- [ ] Phase v0.6.1 — Cost Tracking & Budget Limits
-- [ ] Phase v0.7.0 — Agent-Guided Setup (`ta setup`
-- [ ] Phase v0.7.1 — Domain Workflow Templates
-- [ ] Phase v0.8.0 — Event System & Orchestration API
+- [ ] Phase v0.6.0 — Session & Human Control Plane
+- [ ] Phase v0.6.1 — Unified Policy Config
+- [ ] Phase v0.6.2 — Resource Mediation Trait
+- [ ] Phase v0.7.0 — Channel Registry
+- [ ] Phase v0.7.1 — API Mediator
+- [ ] Phase v0.7.2 — Agent-Guided Setup
+- [ ] Phase v0.8.0 — Event System & Subscription API
 - [ ] Phase v0.8.1 — Community Memory
 - [ ] Phase v0.9.0 — Distribution & Packaging
 - [ ] Phase v0.9.1 — Native Windows Support
 - [ ] Phase v0.9.2 — Sandbox Runner (optional hardening
-- [ ] Phase v1.0.0 — Virtual Office Runtime
+- [ ] Virtual Office Runtime (separate project)
+- [ ] Autonomous Infra Ops (separate project)
 
 ## Macro Goal Mode (Inner-Loop Iteration)
 

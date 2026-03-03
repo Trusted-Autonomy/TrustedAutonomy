@@ -1482,126 +1482,124 @@ Auto-capture on goal complete, auto-capture on rejection, context injection into
 
 ---
 
-## v0.6 — Supervisor & Auto-Approval *(release: tag v0.6.0-alpha)*
+## v0.6 — Platform Substrate *(release: tag v0.6.0-alpha)*
 
-### v0.6.0 — Supervisor Agent & Constitutional Workflows
+> **Architecture**: See `docs/ADR-product-concept-model.md` for the 5-layer model driving these phases.
+> TA is a governance infrastructure platform. v0.6 completes the substrate that projects (Virtual Office, Infra Ops) build on.
+
+### v0.6.0 — Session & Human Control Plane (Layer 3)
 <!-- status: pending -->
-**Goal**: A TA-internal supervisor agent that verifies agent work stays within constitutional bounds before auto-approving. Enables trust escalation from "approve everything" to "auto-approve within policy."
+**Goal**: The TA Session — an ongoing interactive session between the human and TA that the agent framework does not see or control. Fluid sessions as the default; checkpoint mode opt-in.
 
-> **Key insight**: Auto-approval isn't "skip review." It's "have the supervisor review instead of the human, within bounds the human defined." The human sets the constitution; the supervisor enforces it.
+> **Key insight**: The human control plane is TA's most distinctive feature. Session commands that agents cannot see are the safety boundary that distinguishes TA from running agents directly.
 
-- **Workflow constitution**: Per-workflow YAML defining what's in-bounds for auto-approval:
-```yaml
-# .ta/constitutions/code-review.yaml
-name: "Code changes — low risk"
-auto_approve_when:
-  risk_score_max: 20
-  artifact_count_max: 10
-  file_patterns: ["src/**", "tests/**"]    # only source files
-  no_new_dependencies: true
-  no_security_sensitive_files: true        # no .env, credentials, CI configs
-  change_types: [modify]                   # no deletes, no new files
-  agent_drift_clear: true                  # no drift alerts (v0.4.2)
-escalate_to_human_when:
-  - "any artifact rejected in previous draft for same goal"
-  - "agent accessed files outside file_patterns"
-  - "risk_score > threshold"
-notify_on_auto_approve: true               # always tell the human what was auto-approved
-```
-- **Supervisor verification**: Before auto-approving, the supervisor agent checks:
-  1. All artifacts within constitutional bounds
-  2. No drift alerts active for this agent
-  3. Access constitution (v0.4.3) not violated if one exists
-  4. No new patterns not seen in agent's historical baseline
-- **Trust levels**: None (all manual) → Constitutional (auto within bounds) → Full (auto-approve everything, audit only). Default: None. User escalates explicitly.
-- **Audit trail**: Every auto-approval records: which constitution, which checks passed, supervisor reasoning. Human can audit retroactively.
-- **"TA supervises TA"**: The supervisor itself runs through TA governance — its config is a draft that the human approves. Supervisor can't expand its own authority.
+- **`TaSession`**: Core session object tracking `active_goals` (goal stack), `active_agents` (multiple frameworks simultaneously), `pending_reviews`, and `event_stream` (broadcast channel).
+- **New crate: `ta-session`**: Session lifecycle, event streaming, goal stacking. Depends on `ta-goal`, `ta-changeset`.
+- **Human control plane commands** (via TA CLI, invisible to agents):
+  - `ta session status` — what the agent is doing right now
+  - `ta session guide "..."` — inject guidance (agent sees it as context update)
+  - `ta session pause/resume` — pause/resume agent execution
+  - `ta session switch <agent>` — swap agent framework mid-session
+  - `ta session stack <goal>` — queue a new goal onto the current session
+- **SessionEvent** stream: `FileChanged`, `ActionIntercepted`, `DraftReady`, `AgentOutput`, `AgentWaiting`, `GoalCompleted`, `ReviewDecision`. Published to all connected IO channels.
+- **Goal stacking**: Queue goals while the agent works. Goals can use different agent frameworks. When current goal completes/pauses, next starts.
+- **Agent framework intermingling**: A single session can run Claude Code + Codex + Claude Flow simultaneously, sharing memory, credentials, and policy.
+- **Dual MCP endpoints**: Human control plane endpoint (session commands) vs. agent gateway endpoint (tool calls). Agent never sees session commands.
+- **Fluid mode (default)**: Agent works continuously, human reviews in real-time, injects guidance anytime.
+- **Checkpoint mode (opt-in)**: `--checkpoint` flag for batch/CI workflows.
 
-### v0.6.1 — Cost Tracking & Budget Limits
+### v0.6.1 — Unified Policy Config (Layer 2)
 <!-- status: pending -->
-- Track token usage per goal, per agent, per session
-- Estimated cost displayed in draft summary: "This goal used ~45K tokens ($0.18)"
-- Budget limits in workflow config: `max_cost_per_goal: 5.00`, `max_cost_per_day: 50.00`
-- Agent warned at 80% budget; stopped at 100%. Human can override.
-- Cost history: `ta audit cost --agent claude-code --last 30d`
+**Goal**: All supervision configuration resolves to a single `PolicyDocument` loaded from `.ta/policy.yaml`.
+
+- **PolicyDocument** merges: `built_in_defaults + .ta/policy.yaml + agents/<name>.yaml + constitutions/goal-<id>.yaml + CLI overrides`
+- **`.ta/policy.yaml`**: Central config surface with `defaults`, `schemes` (per-URI-scheme rules), `escalation` triggers, and `agents` overrides.
+- **PolicyContext** on every request: `goal_id`, `session_id`, `budget_spent`, `action_count`, `drift_score` for runtime-aware decisions.
+- **Security levels**: Open (audit-only) → Checkpoint (default, review at draft) → Supervised (approve each state change) → Strict (constitutions required).
+- **Supervisor agent**: Verifies agent work within constitutional bounds for auto-approval. Trust levels: None → Constitutional → Full.
+- **Cost tracking**: Token usage per goal/agent/session. Budget limits in policy. Agent warned at 80%; stopped at 100%.
+- **"TA supervises TA"**: Supervisor config is a draft the human approves. Supervisor can't expand its own authority.
+
+### v0.6.2 — Resource Mediation Trait (Layer 1)
+<!-- status: pending -->
+**Goal**: Generalize the staging pattern from files to any resource.
+
+- **New crate: `ta-mediation`**: `ResourceMediator` trait + shared types (`ProposedAction`, `StagedMutation`, `MutationPreview`, `ActionClassification`).
+- **`FsMediator`**: Adapts existing `FsConnector` + `StagingWorkspace` to implement `ResourceMediator`.
+- **Mediator registry**: `MediatorRegistry` in `ta-mcp-gateway` routes tool calls to the correct mediator by URI scheme.
+- **Config**: `.ta/config.yaml` → `mediators:` section to enable/disable per-scheme, link credentials.
+- **Output alignment**: `StagedMutation` maps to existing `DraftPackage.changes` (Artifacts, PatchSets, PendingActions).
 
 ---
 
-## v0.7 — Guided Setup & Workflow Templates *(release: tag v0.7.0-alpha)*
+## v0.7 — Extensibility *(release: tag v0.7.0-alpha)*
 
-> **Design principle**: All setup operates like a smart agent acting in the user's best interests, with full review via TA's own draft model. "Use TA to build TA user config."
+> TA becomes extensible: pluggable IO channels, non-file mediators, and the event subscription API.
 
-### v0.7.0 — Agent-Guided Setup (`ta setup`)
+### v0.7.0 — Channel Registry (Layer 5)
 <!-- status: pending -->
-**Goal**: A conversational setup flow where a TA agent helps configure workflows, connect services, and create role definitions — and the resulting config is a TA draft the user reviews before activation.
+**Goal**: Pluggable IO channel system where all channels (CLI, web, Slack, Discord, email) are equal.
 
-- **`ta setup`**: Launches a TA goal where the agent is the setup assistant. User describes what they want in natural language. Agent proposes:
-  - Workflow config (`.ta/workflow.toml`)
-  - Agent configs (`agents/*.yaml`)
-  - Credential connections (OAuth flows)
-  - Role definitions (for virtual office)
-  - Plan schema (`.ta/plan-schema.yaml`)
-- **Output is a draft**: All proposed configs appear as artifacts in a TA draft. User reviews each config file, approves/rejects/edits. Nothing activates until approved.
-- **Templates**: Pre-built workflow templates for common use cases:
-  - `ta setup --template sw-engineer` — git integration, code review, plan tracking
-  - `ta setup --template email-assistant` — Gmail connection, auto-draft replies, daily digest
-  - `ta setup --template social-media` — scheduled posts, content calendar, engagement tracking
-  - `ta setup --template home-finance` — bank connections (Plaid), transaction categorization, monthly reports
-  - `ta setup --template family-office` — multi-account aggregation, portfolio dashboards, tax document prep
-- **Progressive disclosure**: Start simple, add complexity as needed. Initial setup creates minimal config. User can run `ta setup refine` later to add more.
+- **`ChannelFactory` trait**: `build_review() → Box<dyn ReviewChannel>`, `build_session() → Box<dyn SessionChannel>`, `capabilities()`.
+- **`ChannelRegistry`**: HashMap of channel type → factory. Channels register at startup.
+- **Channel routing config** (`.ta/config.yaml`):
+  ```yaml
+  channels:
+    review: { type: slack, channel: "#reviews" }
+    notify: [{ type: terminal }, { type: slack, level: warning }]
+    session: { type: terminal }
+    escalation: { type: email, to: "mgr@co.com" }
+  ```
+- **Default agent per channel**: Channels can set `default_agent` and `default_workflow` for routing.
+- **First plugin: `ta-channel-slack`** — Slack integration for review notifications, approval buttons, and session streaming.
+- **Webhook improvements**: Signature verification, retry logic, structured payloads.
 
-### v0.7.1 — Domain Workflow Templates
+### v0.7.1 — API Mediator (Layer 1)
 <!-- status: pending -->
-**Pre-built workflow definitions for specific domains**. Each template defines roles, triggers, constitutional bounds, and MCP server requirements.
+**Goal**: Stage, preview, and apply intercepted MCP tool calls (builds on existing `PendingAction` from v0.5.1).
 
-#### Software Engineering
-- Code review workflow: goal → agent works → draft with diffs + explanations → approve → commit
-- CI/CD integration: `ta release` pipeline, test-before-merge gates
-- Plan-driven development: optional, activates when plan exists
+- **`ApiMediator`**: Implements `ResourceMediator` for `mcp://` scheme.
+- **Stage**: Serialize the MCP tool call (name + parameters) as a `StagedMutation`.
+- **Preview**: Human-readable summary of what the API call would do (tool name, key parameters, classification).
+- **Apply**: Replay the original MCP tool call after human approval.
+- **Rollback**: Best-effort (some API calls are not reversible). Record outcome for audit.
+- **Integration with ToolCallInterceptor**: Existing `ActionKind` classification drives the mediator's behavior.
 
-#### Personal Productivity (Email + Social)
-- Email triage: agent categorizes, drafts replies for routine emails, escalates complex ones
-- Social media: content calendar → scheduled post drafts → review → publish
-- Calendar management: meeting prep, follow-up drafts
+### v0.7.2 — Agent-Guided Setup
+<!-- status: pending -->
+**Goal**: Conversational setup flow where a TA agent helps configure workflows — and the resulting config is a TA draft the user reviews.
 
-#### Home Finance
-- **Bank integration**: Plaid MCP server for transaction feeds. TA holds all financial data locally — never in cloud.
-- **Transaction categorization**: Agent categorizes transactions, human reviews miscategorized ones. Learns over time.
-- **Monthly dashboard**: Agent generates spending summary, budget vs actual, investment performance. Output as HTML report (same adapter system as `ta draft view`).
-- **Bill tracking**: Agent monitors recurring charges, flags anomalies (unexpected charges, price increases)
-- **Tax prep**: Agent collects deductible transactions, generates summary for accountant
-
-#### Family Office Finance
-- **Multi-account aggregation**: Multiple bank/brokerage accounts across family members. Per-member dashboards.
-- **Tiered access**: Principal sees everything. Advisor sees portfolio. Accountant sees tax-relevant transactions. Enforced via TA's identity/credential system (v0.5.0).
-- **Portfolio reporting**: Agent aggregates positions, generates performance reports, tracks rebalancing needs
-- **Document management**: Agent organizes financial documents (statements, tax forms, contracts) via MCP to Google Drive/local filesystem
-- **Compliance**: Audit trail of every agent access to financial data. Who saw what, when, why.
+- **`ta setup`**: Launches a TA goal where the agent is the setup assistant.
+- **Output is a draft**: Proposed workflow config, agent configs, credential connections appear as artifacts for review.
+- **Progressive disclosure**: Minimal config first, `ta setup refine` for more.
+- **Extension point**: Projects on top (Virtual Office, Infra Ops) can provide setup templates that `ta setup --template <name>` consumes.
 
 ---
 
-## v0.8 — Events & Orchestration *(release: tag v0.8.0-beta)*
+## v0.8 — Event System & Stable API *(release: tag v0.8.0-beta)*
 
-### v0.8.0 — Event System & Orchestration API
+> TA publishes stable event types that projects on top subscribe to. This is the "platform API" layer.
+
+### v0.8.0 — Event System & Subscription API (Layer 3 → projects)
 <!-- status: pending -->
 > See `docs/VISION-virtual-office.md` for full vision.
-- `--json` output flag on all CLI commands for programmatic consumption
-- Event hook execution: call webhooks/scripts on goal + draft state transitions
-- `ta events listen` command — stream JSON events for external consumers
-- Stable event schema matching `docs/plugins-architecture-guidance.md` hooks
-- Non-interactive approval API: token-based approve/reject (for Slack buttons, email replies)
-- Foundation for virtual office runtime
-- **Compliance event export**: Structured event stream enables external compliance dashboards
+
+- **Stable `SessionEvent` schema**: Versioned event types with backward compatibility guarantees.
+- **`ta events listen`**: Stream JSON events for external consumers.
+- **Event hook execution**: Webhooks/scripts on goal + draft state transitions.
+- **Non-interactive approval API**: Token-based approve/reject (for Slack buttons, email replies).
+- **`--json` output flag**: All CLI commands support programmatic consumption.
+- **Compliance event export**: Structured event stream for external compliance dashboards.
+- **Extension point for projects**: Virtual Office subscribes to `SessionEvent`s to trigger workflow logic. Infra Ops subscribes to detect infrastructure drift.
 
 ### v0.8.1 — Community Memory
 <!-- status: pending -->
-**Goal**: Opt-in sharing of memory across TA instances. Builds on the `MemoryStore` and ruvector backend from v0.5.4.
+**Goal**: Opt-in sharing of memory across TA instances.
 
-- **Local memory already exists** (v0.5.4): Each TA instance has a `MemoryStore` with automatic capture from goal results, draft reviews, and human guidance.
-- **Community sync layer**: Publish anonymized problem → solution pairs to a shared registry. ruvector's distributed sync (Raft consensus) provides the replication mechanism.
-- **Privacy controls**: User chooses what to share — tag-based opt-in, never auto-publish. PII stripping before publish.
-- **Retrieval**: `ta context recall` searches local memory first, then community registry if opt-in is enabled. Local results ranked higher.
-- **Not a chatbot knowledge base** — focused on actionable problem → solution pairs with provenance and verification status (did this actually work when applied?)
+- **Community sync layer**: Publish anonymized problem → solution pairs to a shared registry.
+- **Privacy controls**: Tag-based opt-in, never auto-publish. PII stripping before publish.
+- **Retrieval**: `ta context recall` searches local first, then community if opted in.
+- **Provenance tracking**: Did this solution actually work when applied?
 
 ---
 
@@ -1613,54 +1611,57 @@ notify_on_auto_approve: true               # always tell the human what was auto
 - Desktop: installer with bundled daemon, git, rg/jq, common MCP servers
 - Cloud: OCI image for daemon + MCP servers, ephemeral virtual workspaces
 - Full web UI for review/approval (extends v0.5.2 minimal UI)
-- Mobile-responsive web UI (not a native app — PWA is sufficient for v1.0)
+- Mobile-responsive web UI (PWA)
 
 ### v0.9.1 — Native Windows Support
 <!-- status: pending -->
-**Goal**: First-class Windows experience without requiring WSL, timed for when non-engineers (home finance, family office, personal productivity users) begin adopting TA via v0.7's guided setup and v0.9.0's desktop installer.
+**Goal**: First-class Windows experience without requiring WSL.
 
-- **Windows MSVC build target**: Add `x86_64-pc-windows-msvc` to CI release matrix (GitHub Actions `windows-latest` runner). Ship `.zip` archive with `ta.exe`.
-- **Path handling**: Audit all `Path`/`PathBuf` usage for Unix assumptions (`/` separators, `/tmp`, `/usr/local/bin`). Use `std::path` consistently; replace hard-coded `/` with `std::path::MAIN_SEPARATOR` where needed.
-- **Process management**: Replace Unix-specific signal handling (`SIGTERM`, `SIGINT`) with cross-platform equivalents. Use `ctrlc` crate for Ctrl+C handling on Windows.
-- **Shell command execution**: Agent configs currently assume `bash`. Add `shell` field to agent YAML (`bash`, `powershell`, `cmd`). Default: auto-detect from OS.
-- **Installer**: MSI or NSIS installer bundled with desktop build (v0.9.0). Add to `winget` and `scoop` package managers.
-- **Testing**: Add Windows CI job running full test suite. Gate releases on Windows tests passing.
-- **Known limitations for v0.9.1**: Sandbox runner (v0.9.2) may not support Windows initially — gVisor is Linux-only. Document WSL2 as fallback for sandboxed execution on Windows.
+- **Windows MSVC build target**: `x86_64-pc-windows-msvc` in CI release matrix.
+- **Path handling**: Audit `Path`/`PathBuf` for Unix assumptions.
+- **Process management**: Cross-platform signal handling via `ctrlc` crate.
+- **Shell command execution**: Add `shell` field to agent YAML (`bash`, `powershell`, `cmd`). Auto-detect default.
+- **Installer**: MSI installer, `winget` and `scoop` packages.
+- **Testing**: Windows CI job, gate releases on Windows tests passing.
 
-> **Why v0.9.1**: Non-engineer users arrive at v0.7 (guided setup) and v0.9.0 (desktop installer). By v0.9.1, the install experience must be native on all three platforms. Earlier phases target developers who are comfortable with macOS/Linux and WSL.
-
-### v0.9.2 — Sandbox Runner (optional hardening)
+### v0.9.2 — Sandbox Runner (optional hardening, Layer 2)
 <!-- status: pending -->
-> Moved from v0.6. Optional for users who need kernel-level isolation. Not a prerequisite for v1.0.
+> Optional for users who need kernel-level isolation. Not a prerequisite for v1.0.
 
 - OCI/gVisor sandbox for agent execution
 - Allowlisted command execution (rg, fmt, test profiles)
 - CWD enforcement — agents can't escape virtual workspace
 - Command transcripts hashed into audit log
 - Network access policy: allow/deny per-domain
-- **Enterprise state intercept**: For environments requiring network-level capture, see `docs/enterprise-state-intercept.md`. Integrates with sandbox for traffic routing.
+- **Enterprise state intercept**: See `docs/enterprise-state-intercept.md`.
 
 ---
 
-## v1.0 — Virtual Office *(release: tag v1.0.0)*
+## Projects On Top (separate repos, built on TA)
 
-### v1.0.0 — Virtual Office Runtime
-<!-- status: pending -->
+> These are NOT part of TA core. They are independent projects that consume TA's extension points.
+> See `docs/ADR-product-concept-model.md` for how they integrate.
+
+### Virtual Office Runtime *(separate project)*
 > Thin orchestration layer that composes TA, agent frameworks, and MCP servers.
 
 - Role definition schema (YAML): purpose, triggers, agent, capabilities, notification channel
 - Trigger system: cron scheduler + webhook receiver + TA event listener
 - Office manager daemon: reads role configs, routes triggers, calls `ta run`
-- `ta office start/stop/status` CLI commands
-- Role-scoped TA policies auto-generated from role capability declarations
-- Constitutional auto-approval (v0.6.0) active by default — supervisor reviews routine work
-- Credential broker (v0.5.0) manages all service access — no role holds raw credentials
-- Community memory (v0.8.1) shared across office roles
-- Does NOT duplicate orchestration — composes existing tools with role/trigger glue
-- **Multi-agent alignment verification**: Before agents co-operate on shared resources, TA verifies alignment profile compatibility (v0.4.0 profiles)
-- **Compliance dashboard**: Aggregate decision reasoning, drift reports, cost tracking, and approval records into a per-role compliance view. Exportable as ISO/IEC 42001 evidence package.
+- Multi-agent workflow design with detailed agent guidance
+- Smart security plan generation → produces `AlignmentProfile` + `AccessConstitution` YAML consumed by TA
+- Constitutional auto-approval active by default
+- **Compliance dashboard**: ISO/IEC 42001, EU AI Act evidence package
+- Domain workflow templates (sw-engineer, email, finance, etc.)
 
-> **Standards**: Virtual office with defined roles, capability boundaries, human oversight at checkpoints, and continuous drift monitoring satisfies **ISO/IEC 42001**, **EU AI Act** (Articles 9, 14, 50), and **Singapore IMDA Agentic AI Framework**.
+### Autonomous Infra Ops *(separate project)*
+> Builder intent → best-practice IaC, self-healing with observability.
+
+- Builder intent language → IaC generation (Terraform, Pulumi, CDK)
+- TA mediates all infrastructure changes (ResourceMediator for cloud APIs)
+- Self-healing loop: observability alerts → agent proposes fix → TA reviews → apply
+- Best-practice templates for common infrastructure patterns
+- Cost-aware: TA budget limits enforce infrastructure spend caps
 
 ---
 
@@ -1670,9 +1671,9 @@ notify_on_auto_approve: true               # always tell the human what was auto
 
 | Mode | Standard Claude/Codex | TA-mediated |
 |------|----------------------|-------------|
-| **Active coding** | Continuous back-and-forth. User prompts, reads output, prompts again. ~100% attention. | `ta run` launches agent. User checks back when draft is ready. ~10-20% attention. Review takes 2-5 min per draft. |
-| **Overnight/batch** | Not possible — agent exits when session closes. | `ta run` in background. Review next morning. 0% attention during execution. |
-| **Auto-approved (v0.6)** | N/A | Supervisor handles review. User sees daily summary. ~1% attention. Escalations interrupt. |
-| **Virtual office (v1.0)** | N/A | Roles run on triggers. User reviews when notified. Minutes per day for routine workflows. |
+| **Active coding** | Continuous back-and-forth. ~100% attention. | Fluid session: agent works, human reviews in real-time. ~10-20% attention. |
+| **Overnight/batch** | Not possible — agent exits when session closes. | `ta run --checkpoint` in background. Review next morning. 0% attention during execution. |
+| **Auto-approved (v0.6)** | N/A | Supervisor handles review within constitutional bounds. User sees daily summary. ~1% attention. Escalations interrupt. |
+| **Virtual office** | N/A | Roles run on triggers. User reviews when notified. Minutes per day for routine workflows. |
 
-**Key shift**: Standard agent usage demands synchronous human attention. TA shifts to asynchronous review — the agent works independently, the human reviews completed work. This gets more asynchronous over time as trust (constitutional auto-approval) increases.
+**Key shift**: Standard agent usage demands synchronous human attention. TA shifts to fluid, asynchronous review — the agent works independently, the human reviews in real-time or retroactively. Trust increases over time as constitutional auto-approval proves reliable.
