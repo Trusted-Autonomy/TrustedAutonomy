@@ -201,7 +201,7 @@ This enables rules like "allow file writes, but escalate after 50 writes" or "al
 | Supervised | Every state-changing action needs approval | Production, external comms |
 | Strict | Everything logged, constitutions required | Regulated environments |
 
-**Extension point — policy generation:** TA evaluates any YAML you give it. External tools (including the paid Policy Studio — see `docs/paid-addons/policy-studio.md`) can generate and validate policy YAML. Virtual Office and Infra Ops generate `AlignmentProfile` and `AccessConstitution` YAML that TA consumes. Projects own "smart security plan" generation; TA owns enforcement.
+**Extension point — policy generation:** TA evaluates any YAML you give it. External tools (including the paid Policy Studio) can generate and validate policy YAML. Virtual Office and Infra Ops generate `AlignmentProfile` and `AccessConstitution` YAML that TA consumes. Projects own "smart security plan" generation; TA owns enforcement.
 
 **Crate:** `ta-policy` gains `PolicyDocument` loading. `ta-audit` unchanged.
 
@@ -455,11 +455,11 @@ Paid add-ons are convenience and enterprise features — they never gate core fu
 
 **Boundary:** Open-source core has all traits, the default-deny engine, file mediation, terminal/web UI, and the audit trail. Paid add-ons provide better tooling, enterprise integrations, and compliance packaging.
 
-See `docs/paid-addons/` for detailed specifications:
-- `docs/paid-addons/policy-studio.md` — Interactive policy generation and compliance mapping
-- `docs/paid-addons/enterprise-channels.md` — Teams, ServiceNow, PagerDuty channel implementations
-- `docs/paid-addons/advanced-mediators.md` — Production DB and cloud API mediators
-- `docs/paid-addons/compliance-reporting.md` — Audit report generation for regulatory frameworks
+**Planned add-ons** (maintained in a separate project):
+- **Policy Studio** — Interactive policy YAML generation, compliance mapping, drift analysis
+- **Enterprise Channels** — Teams, ServiceNow, PagerDuty, Jira channel implementations
+- **Advanced Mediators** — Production DB (with staging overlay), cloud API, and social media mediators
+- **Compliance Reporting** — ISO 42001, EU AI Act, NIST AI RMF evidence package generation
 
 ---
 
