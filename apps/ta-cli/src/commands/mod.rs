@@ -1,5 +1,7 @@
 pub mod adapter;
 pub mod audit;
+pub mod context;
+pub mod credentials;
 pub mod draft;
 pub mod goal;
 pub mod plan;

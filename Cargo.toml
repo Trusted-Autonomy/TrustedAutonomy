@@ -10,6 +10,8 @@ members = [
     "crates/ta-sandbox",
     "crates/ta-submit",
     "crates/ta-workspace",
+    "crates/ta-credentials",
+    "crates/ta-memory",
     "crates/ta-connectors/fs",
     "crates/ta-connectors/web",
     "crates/ta-connectors/mock-drive",
@@ -66,6 +68,10 @@ regex = "1"
 
 # PTY support — raw libc bindings for openpty/fork/exec.
 libc = "0.2"
+
+# Web framework — minimal async HTTP server for the review web UI (v0.5.2).
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
 
 # Testing utilities
 tempfile = "3"

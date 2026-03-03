@@ -40,6 +40,11 @@ pub struct GatewayConfig {
     /// ReviewChannel configuration (v0.4.1.1).
     #[serde(default)]
     pub review_channel: ReviewChannelConfig,
+
+    /// Optional port for the web review UI (v0.5.2).
+    /// When set, the daemon serves a web UI at `http://127.0.0.1:{port}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_ui_port: Option<u16>,
 }
 
 impl GatewayConfig {
@@ -57,6 +62,7 @@ impl GatewayConfig {
             pr_packages_dir: ta_dir.join("pr_packages"),
             interactive_sessions_dir: ta_dir.join("interactive_sessions"),
             review_channel: ReviewChannelConfig::default(),
+            web_ui_port: None,
         }
     }
 }

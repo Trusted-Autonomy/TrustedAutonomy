@@ -107,6 +107,16 @@ enum Commands {
         #[command(subcommand)]
         command: commands::plan::PlanCommands,
     },
+    /// Manage persistent context memory across agents and sessions.
+    Context {
+        #[command(subcommand)]
+        command: commands::context::ContextCommands,
+    },
+    /// Manage stored credentials for external services.
+    Credentials {
+        #[command(subcommand)]
+        command: commands::credentials::CredentialsCommands,
+    },
     /// Manage agent adapter integrations.
     Adapter {
         #[command(subcommand)]
@@ -209,6 +219,8 @@ fn main() -> anyhow::Result<()> {
         ),
         Commands::Session { command } => commands::session::execute(command, &config),
         Commands::Plan { command } => commands::plan::execute(command, &config),
+        Commands::Context { command } => commands::context::execute(command, &config),
+        Commands::Credentials { command } => commands::credentials::execute(command, &config),
         Commands::Adapter { command } => commands::adapter::execute(command, &project_root),
         Commands::Release { command } => commands::release::execute(command, &config),
         Commands::Serve => commands::serve::execute(&project_root),

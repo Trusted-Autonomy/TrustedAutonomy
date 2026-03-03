@@ -25,11 +25,12 @@ pub mod session_channel;
 pub mod supervisor;
 pub mod terminal_channel;
 pub mod uri_pattern;
+pub mod webhook_channel;
 
 pub use changeset::{ChangeKind, ChangeSet, CommitIntent};
 pub use diff::DiffContent;
 pub use diff_handlers::{DiffHandlerError, DiffHandlersConfig, HandlerRule};
-pub use draft_package::{DraftPackage, DraftStatus, ExplanationTiers};
+pub use draft_package::{ActionKind, DraftPackage, DraftStatus, ExplanationTiers, PendingAction};
 pub use error::ChangeSetError;
 pub use explanation::ExplanationSidecar;
 pub use interaction::{
@@ -38,7 +39,7 @@ pub use interaction::{
 };
 pub use interactive_session_store::InteractiveSessionStore;
 pub use output_adapters::{DetailLevel, OutputAdapter, OutputFormat, RenderContext};
-pub use review_channel::{ReviewChannel, ReviewChannelConfig, ReviewChannelError};
+pub use review_channel::{build_channel, ReviewChannel, ReviewChannelConfig, ReviewChannelError};
 pub use review_session::{
     ArtifactReview, Comment, CommentThread, DispositionCounts, ReviewReasoning, ReviewSession,
     ReviewState, SessionNote,
@@ -53,6 +54,7 @@ pub use supervisor::{
 };
 pub use terminal_channel::{AutoApproveChannel, TerminalChannel};
 pub use uri_pattern::{filter_uris, matches_uri};
+pub use webhook_channel::WebhookChannel;
 
 // Backwards compatibility: export old names as aliases
 pub use draft_package::DraftPackage as PRPackage;

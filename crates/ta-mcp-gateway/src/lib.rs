@@ -29,6 +29,7 @@
 
 pub mod config;
 pub mod error;
+pub mod interceptor;
 pub mod server;
 
 pub use config::GatewayConfig;

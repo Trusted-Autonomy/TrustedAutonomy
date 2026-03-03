@@ -81,6 +81,11 @@ pub struct ReviewChannelConfig {
     /// Notification level filter: "debug", "info", "warning", "error".
     #[serde(default = "default_notification_level")]
     pub notification_level: String,
+
+    /// Channel-specific configuration (webhook URL, Slack token, etc.).
+    /// Interpretation depends on `channel_type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_config: Option<serde_json::Value>,
 }
 
 fn default_channel_type() -> String {
@@ -101,7 +106,43 @@ impl Default for ReviewChannelConfig {
             channel_type: default_channel_type(),
             blocking_mode: true,
             notification_level: default_notification_level(),
+            channel_config: None,
         }
+    }
+}
+
+/// Construct a ReviewChannel from config (v0.5.3).
+///
+/// This factory function selects the appropriate channel implementation
+/// based on `config.channel_type`. Unknown types return an error.
+pub fn build_channel(
+    config: &ReviewChannelConfig,
+) -> Result<Box<dyn ReviewChannel>, ReviewChannelError> {
+    use crate::terminal_channel::{AutoApproveChannel, TerminalChannel};
+
+    match config.channel_type.as_str() {
+        "terminal" => Ok(Box::new(TerminalChannel::stdio())),
+        "auto-approve" => Ok(Box::new(AutoApproveChannel::new())),
+        "webhook" => {
+            let channel_cfg = config.channel_config.as_ref().ok_or_else(|| {
+                ReviewChannelError::Other(
+                    "webhook channel requires channel_config with 'endpoint' field".into(),
+                )
+            })?;
+            let endpoint = channel_cfg
+                .get("endpoint")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ReviewChannelError::Other("webhook channel_config missing 'endpoint'".into())
+                })?;
+            Ok(Box::new(crate::webhook_channel::WebhookChannel::new(
+                endpoint,
+            )))
+        }
+        other => Err(ReviewChannelError::Other(format!(
+            "unknown channel type: '{}'. Available: terminal, auto-approve, webhook",
+            other,
+        ))),
     }
 }
 
@@ -133,6 +174,7 @@ mod tests {
             channel_type: "slack".into(),
             blocking_mode: false,
             notification_level: "debug".into(),
+            channel_config: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let restored: ReviewChannelConfig = serde_json::from_str(&json).unwrap();

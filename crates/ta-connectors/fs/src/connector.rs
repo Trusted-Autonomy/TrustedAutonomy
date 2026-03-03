@@ -274,6 +274,7 @@ impl<S: ChangeStore> FsConnector<S> {
             changes: Changes {
                 artifacts,
                 patch_sets: vec![],
+                pending_actions: vec![],
             },
             risk: Risk {
                 risk_score: 0,

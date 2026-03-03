@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.4.5-alpha
+**Version**: v0.5.0-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -745,6 +745,196 @@ TA maintains an append-only, SHA-256 hash-chained audit log of every action:
 - Human review decisions with reasoning
 - Conflict detection and resolution
 
+### Credential Management
+
+TA manages credentials so agents never hold raw secrets. Agents request access; TA provides scoped, time-limited session tokens. This is the foundation for all external service integrations (MCP servers that need auth, API keys, OAuth tokens).
+
+```bash
+# Add a credential (secret is stored with 0600 file permissions)
+ta credentials add --name "GitHub Token" --service github --secret "ghp_..."
+
+# Add with scopes
+ta credentials add --name "Gmail Read" --service gmail --secret "ya29.a0..." \
+  --scope "read" --scope "labels"
+
+# List credentials (secrets are never shown -- only name, service, scopes)
+ta credentials list
+
+# Revoke a credential
+ta credentials revoke <credential-id>
+```
+
+Credentials are stored in `.ta/credentials.json`. The `FileVault` issues session tokens with configurable TTL:
+
+```
+Agent requests: "I need gmail read access for goal abc123"
+TA issues:      SessionToken { ttl: 3600s, scopes: ["read"], agent: "claude-code" }
+Agent uses:     The token (never the raw credential)
+TA proxies:     Token → real credential on each API call
+```
+
+### Context Memory
+
+Persistent, framework-agnostic memory that survives across sessions and works with any agent. When you switch from Claude Code to Codex mid-project, or run multiple agents in parallel, context doesn't get lost. TA owns the memory -- agents consume it.
+
+#### Why this matters
+
+Each agent framework has its own memory: Claude Code has CLAUDE.md and project memory, Codex has session state, Cursor has codebase indices. None of it transfers. TA's context memory is the *shared layer* that all agents read from and write to.
+
+#### Basic operations
+
+```bash
+# Store a convention your team follows
+ta context store "test-fixtures" \
+  --value '{"rule": "Always use tempfile::tempdir() for filesystem tests"}' \
+  --tag "convention" --tag "testing"
+
+# Store structured project knowledge
+ta context store "auth-architecture" \
+  --value '{"approach": "JWT with RS256", "module": "src/auth/", "decided": "2026-01"}'
+
+# Recall by exact key
+ta context recall "test-fixtures"
+
+# List all entries
+ta context list
+
+# List with limit
+ta context list --limit 10
+
+# Remove an entry
+ta context forget "auth-architecture"
+```
+
+#### How agents use memory
+
+During macro goal sessions, agents access memory through the `ta_context` MCP tool:
+
+```
+Agent calls: ta_context { action: "recall", key: "test-fixtures" }
+TA returns:  { "rule": "Always use tempfile::tempdir() for filesystem tests" }
+```
+
+This works identically for Claude Code, Codex, or any agent connected via MCP. The agent doesn't need to know which framework stored the entry.
+
+#### What gets stored
+
+| Category | Example | How it's captured |
+|----------|---------|-------------------|
+| **Conventions** | "Use 4-space indent", "Run clippy before commit" | Human stores via CLI or agent stores via MCP |
+| **Architecture** | "Auth is JWT-based, module at src/auth/" | Agent stores during goal work |
+| **Decisions** | "Chose SQLite over Postgres for MVP" | Stored from draft review discussions |
+| **Preferences** | "Human prefers small focused PRs" | Stored from repeated review patterns |
+
+#### Storage details
+
+Entries are JSON files in `.ta/memory/`, one per key. The filesystem backend is the zero-dependency default. For semantic search (find memories *similar to* a query rather than exact-match), a future phase adds the [ruvector](https://github.com/ruvnet/ruvector) vector database backend -- see [Roadmap](#roadmap).
+
+#### Configuration
+
+```toml
+# .ta/workflow.toml
+[memory]
+backend = "filesystem"    # "filesystem" (default) or "ruvector" (v0.5.5+)
+```
+
+### Web Review UI
+
+Review drafts from a browser instead of the terminal. Useful for non-CLI users, team reviews, or when you want a visual overview.
+
+```bash
+# Start the daemon with web UI on port 7676
+ta-daemon --project-root . --web-port 7676
+```
+
+Open `http://127.0.0.1:7676` to see:
+- **Draft list** -- all drafts with status badges (Draft, Pending, Approved, Denied), timestamps, and artifact counts
+- **Draft detail** -- click a draft to see its artifacts, pending actions (intercepted MCP tool calls), and summary
+- **Approve/Deny** -- one-click buttons with optional denial reason
+
+The web UI reads from the same `.ta/pr_packages/` directory as the CLI. Approving a draft in the browser is reflected in `ta draft list` and vice versa.
+
+You can also set the port in your gateway config so it starts automatically:
+
+```toml
+# .ta/workflow.toml or gateway config
+[gateway]
+web_ui_port = 7676
+```
+
+### Webhook Review Channel
+
+Route draft review interactions to external systems via a file-based webhook exchange. This enables CI bots, Slack integrations, or any external process to participate in the review workflow.
+
+#### Setup
+
+```toml
+# .ta/workflow.toml
+[review_channel]
+channel_type = "webhook"
+
+[review_channel.channel_config]
+endpoint = "/tmp/ta-reviews"   # directory for file exchange
+```
+
+#### How it works
+
+1. TA writes `request-{id}.json` to the endpoint directory with the full `InteractionRequest`
+2. Your external process reads it, makes a decision, writes `response-{id}.json`
+3. TA polls for the response (default: every 2s, timeout: 1 hour)
+
+#### Response format
+
+```json
+{
+  "decision": "approve",
+  "reasoning": "All tests pass, no security issues found",
+  "responder_id": "ci-bot-v2"
+}
+```
+
+Valid `decision` values:
+- `approve` / `approved` -- accept the draft
+- `reject` / `rejected` / `deny` / `denied` -- reject (include `reasoning`)
+- `discuss` -- request more information
+
+#### Available channel types
+
+| Channel | Status | Description |
+|---------|--------|-------------|
+| `terminal` | Default | Interactive terminal prompts |
+| `auto-approve` | Available | Auto-approves everything (for CI/batch) |
+| `webhook` | Available | File-based exchange for external integrations |
+| `slack` | Stub | Future: Slack Block Kit cards with button callbacks |
+| `email` | Stub | Future: SMTP send with IMAP reply parsing |
+
+### MCP Tool Call Interception
+
+When agents call MCP tools, TA classifies each call and decides whether to pass it through immediately or capture it for human review.
+
+#### Classification rules
+
+| Classification | Tools | What happens |
+|---------------|-------|-------------|
+| **Passthrough** (read-only) | `ta_fs_read`, `ta_goal_status`, `ta_goal_list`, `ta_fs_list`, `ta_fs_diff`, `ta_pr_status` | Executes immediately, no review needed |
+| **Captured** (state-changing) | `ta_fs_write`, all external/unknown tools | Added to draft as a `PendingAction` for review |
+
+Tools with names matching read patterns (`read`, `get`, `list`, `search`, `status`, `diff`, `query`, `fetch`, `describe`) are classified as passthrough. Everything else is captured.
+
+#### What you see in review
+
+```bash
+ta draft view <draft-id>
+# ...
+# Pending Actions (2):
+#   1. gmail_send [state_changing] — Send email via Gmail MCP
+#   2. slack_post [state_changing] — Post message to Slack channel
+#
+# These actions will execute when the draft is applied.
+```
+
+Pending actions appear alongside file artifacts in the draft. You can approve the file changes but reject the external actions, or vice versa.
+
 ### Claude Flow Optimization
 
 When using Claude Flow as your agent:
@@ -776,7 +966,7 @@ See `examples/claude-settings.json` for a complete optimized configuration.
 
 ### What's Done
 
-TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, and decision observability.
+TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, decision observability, credential management, MCP tool call interception, web review UI, webhook review channels, and persistent context memory.
 
 ### Phase Status
 
@@ -816,16 +1006,29 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.4.3 | Access constitutions | Done |
 | v0.4.4 | Interactive session completion (PTY) | Done |
 | v0.4.5 | CLI UX polish | Done |
+| v0.5.0 | Credential broker and identity abstraction | Done |
+| v0.5.1 | MCP tool call interception | Done |
+| v0.5.2 | Minimal web review UI | Done |
+| v0.5.3 | ReviewChannel adapters (webhook) | Done |
+| v0.5.4 | Context memory store | Done |
 
-### What's Next (v0.5 -- v0.6)
+### v0.5 -- MCP Interception & External Actions
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| v0.5.0 | Credential broker and identity abstraction | Pending |
-| v0.5.1 | MCP tool call interception (Gmail, Slack, etc.) | Pending |
-| v0.5.2 | Minimal web review UI | Pending |
-| v0.5.3 | Additional ReviewChannel adapters (Slack, Discord, email) | Pending |
-| v0.5.4 | Context memory store (ruvector integration) | Pending |
+| v0.5.0 | Credential broker and identity abstraction | Done |
+| v0.5.1 | MCP tool call interception | Done |
+| v0.5.2 | Minimal web review UI | Done |
+| v0.5.3 | ReviewChannel adapters (webhook, Slack/email stubs) | Done |
+| v0.5.4 | Context memory store (filesystem backend) | Done |
+| v0.5.5 | RuVector memory backend (semantic search, HNSW indexing) | Pending |
+| v0.5.6 | Framework-agnostic agent state (cross-framework context) | Pending |
+| v0.5.7 | Semantic memory queries and memory dashboard | Pending |
+
+### What's Next (v0.6+)
+
+| Phase | Description | Status |
+|-------|-------------|--------|
 | v0.6.0 | Supervisor agent and constitutional auto-approval | Pending |
 | v0.6.1 | Cost tracking and budget limits | Pending |
 

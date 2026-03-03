@@ -1707,6 +1707,7 @@ pre_launch:
             changes: Changes {
                 artifacts: vec![artifact_with_comments],
                 patch_sets: vec![],
+                pending_actions: vec![],
             },
             risk: Risk {
                 risk_score: 0,
@@ -1855,6 +1856,7 @@ pre_launch:
             changes: Changes {
                 artifacts: vec![artifact_no_comments],
                 patch_sets: vec![],
+                pending_actions: vec![],
             },
             risk: Risk {
                 risk_score: 0,

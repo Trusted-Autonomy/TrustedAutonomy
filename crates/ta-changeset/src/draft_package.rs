@@ -78,11 +78,66 @@ pub struct Summary {
 
 // ---- Changes ----
 
-/// The changes section: artifacts (local FS changes) + patch_sets (external changes).
+/// The changes section: artifacts (local FS changes) + patch_sets (external changes)
+/// + pending_actions (intercepted MCP tool calls, v0.5.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Changes {
     pub artifacts: Vec<Artifact>,
     pub patch_sets: Vec<PatchSet>,
+    /// MCP tool calls intercepted for human review (v0.5.1).
+    /// State-changing external actions are captured here instead of being
+    /// executed immediately. Read-only calls pass through unintercepted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_actions: Vec<PendingAction>,
+}
+
+/// An MCP tool call intercepted during agent execution, pending human review.
+///
+/// When an agent calls an external MCP tool (e.g., `gmail_send`, `slack_post`),
+/// TA intercepts the call, records it here, and holds it for human approval.
+/// Read-only calls (search, list, get) pass through immediately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingAction {
+    /// Unique identifier for this action instance.
+    pub action_id: Uuid,
+    /// The MCP tool name that was called (e.g., "gmail_send", "slack_post").
+    pub tool_name: String,
+    /// Serialized tool parameters as provided by the agent (credentials redacted).
+    pub parameters: serde_json::Value,
+    /// How this action was classified.
+    pub kind: ActionKind,
+    /// When the tool call was intercepted.
+    pub intercepted_at: DateTime<Utc>,
+    /// Human-readable description for the reviewer.
+    pub description: String,
+    /// Resource this action targets (URI scheme, e.g., "mcp://gmail/send").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_uri: Option<String>,
+    /// Whether this action has been approved for replay.
+    #[serde(default)]
+    pub disposition: ArtifactDisposition,
+}
+
+/// How an intercepted MCP tool call is classified.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionKind {
+    /// Read-only — no side effects. Passed through without interception.
+    ReadOnly,
+    /// Produces a side effect — captured for human review.
+    StateChanging,
+    /// Cannot be automatically classified — requires human review.
+    Unclassified,
+}
+
+impl fmt::Display for ActionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActionKind::ReadOnly => write!(f, "read-only"),
+            ActionKind::StateChanging => write!(f, "state-changing"),
+            ActionKind::Unclassified => write!(f, "unclassified"),
+        }
+    }
 }
 
 /// Three-tier explanation for an artifact (v0.2.3).
@@ -523,6 +578,7 @@ mod tests {
                     amendment: None,
                 }],
                 patch_sets: vec![],
+                pending_actions: vec![],
             },
             risk: Risk {
                 risk_score: 10,

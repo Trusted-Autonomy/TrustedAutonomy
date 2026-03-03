@@ -1,0 +1,20 @@
+[package]
+name = "ta-memory"
+version = "0.5.0-alpha"
+edition = "2021"
+description = "Agent-agnostic persistent memory store for Trusted Autonomy"
+license = "Apache-2.0"
+repository = "https://github.com/trustedautonomy/ta"
+homepage = "https://github.com/trustedautonomy/ta"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+glob = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

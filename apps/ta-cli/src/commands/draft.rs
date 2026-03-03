@@ -894,6 +894,7 @@ fn build_package(
         changes: Changes {
             artifacts,
             patch_sets: vec![],
+            pending_actions: vec![],
         },
         risk: Risk {
             risk_score: 0,
@@ -1229,6 +1230,31 @@ fn view_package(
     let output = adapter.render(&ctx).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     println!("{}", output);
+
+    // Show pending actions if any (v0.5.1).
+    if !pkg.changes.pending_actions.is_empty() {
+        println!();
+        println!("Pending Actions ({}):", pkg.changes.pending_actions.len());
+        println!("{}", "-".repeat(60));
+        for (i, action) in pkg.changes.pending_actions.iter().enumerate() {
+            println!(
+                "  {}. [{}] {} ({})",
+                i + 1,
+                action.disposition,
+                action.description,
+                action.kind,
+            );
+            if let Some(uri) = &action.target_uri {
+                println!("     URI: {}", uri);
+            }
+            if effective_detail != DetailLevel::Top {
+                let params_str = serde_json::to_string_pretty(&action.parameters)
+                    .unwrap_or_else(|_| action.parameters.to_string());
+                println!("     Parameters: {}", params_str);
+            }
+        }
+    }
+
     Ok(())
 }
 

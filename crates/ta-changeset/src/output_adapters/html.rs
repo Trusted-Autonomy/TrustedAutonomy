@@ -278,6 +278,7 @@ mod tests {
                     dependencies: vec![],
                 }],
                 patch_sets: vec![],
+                pending_actions: vec![],
             },
             risk: Risk {
                 risk_score: 0,
