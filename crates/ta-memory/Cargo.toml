@@ -7,6 +7,10 @@ license = "Apache-2.0"
 repository = "https://github.com/trustedautonomy/ta"
 homepage = "https://github.com/trustedautonomy/ta"
 
+[features]
+default = []
+ruvector = ["dep:ruvector-core"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -15,6 +19,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 glob = { workspace = true }
+ruvector-core = { version = "2.0", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -445,27 +445,56 @@ pub fn execute(
     }
 
     // 7. Build draft package from the diff.
-    super::draft::execute(
-        &super::draft::DraftCommands::Build {
-            goal_id: goal_id.clone(),
-            summary: format!("Changes from goal: {}", title),
-            latest: false,
-        },
-        config,
-    )?;
+    //    In macro sessions, the agent may have already submitted/applied drafts
+    //    via MCP tools, transitioning the goal out of Running state. Only build
+    //    a draft if the goal is still running.
+    let goal_current = goal_store
+        .get(goal.goal_run_id)?
+        .unwrap_or_else(|| goal.clone());
+    let draft_built = if matches!(goal_current.state, ta_goal::GoalRunState::Running) {
+        super::draft::execute(
+            &super::draft::DraftCommands::Build {
+                goal_id: goal_id.clone(),
+                summary: format!("Changes from goal: {}", title),
+                latest: false,
+            },
+            config,
+        )?;
+        true
+    } else {
+        println!(
+            "\nGoal is already in {} state — skipping automatic draft build.",
+            goal_current.state
+        );
+        println!("(Drafts were submitted during the macro session.)");
+        false
+    };
 
     // 8. Mark interactive session as completed.
     if let Some((store, mut session)) = session_store {
-        session.log_message("ta-system", "Agent exited, draft built");
+        if draft_built {
+            session.log_message("ta-system", "Agent exited, draft built");
+        } else {
+            session.log_message(
+                "ta-system",
+                &format!("Agent exited, goal already {}", goal_current.state),
+            );
+        }
         let _ = session.transition(InteractiveSessionState::Completed);
         store.save(&session)?;
     }
 
-    println!("\nNext steps:");
-    println!("  ta draft list");
-    println!("  ta draft view <draft-id>");
-    println!("  ta draft approve <draft-id>");
-    println!("  ta draft apply <draft-id> --git-commit");
+    if draft_built {
+        println!("\nNext steps:");
+        println!("  ta draft list");
+        println!("  ta draft view <draft-id>");
+        println!("  ta draft approve <draft-id>");
+        println!("  ta draft apply <draft-id> --git-commit");
+    } else {
+        println!("\nNext steps:");
+        println!("  ta draft list      — view submitted drafts");
+        println!("  ta goal status     — check goal state");
+    }
     if interactive {
         println!("  ta session list");
         println!("  ta session show <session-id>");
