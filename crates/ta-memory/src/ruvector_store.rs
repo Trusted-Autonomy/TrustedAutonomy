@@ -149,6 +149,8 @@ impl MemoryStore for RuVectorStore {
             source: source.to_string(),
             goal_id: params.goal_id,
             category: params.category,
+            expires_at: params.expires_at,
+            confidence: params.confidence.unwrap_or(0.5),
             created_at,
             updated_at: now,
         };
@@ -354,6 +356,10 @@ fn entry_to_metadata(entry: &MemoryEntry) -> HashMap<String, serde_json::Value> 
         "updated_at".into(),
         serde_json::json!(entry.updated_at.to_rfc3339()),
     );
+    if let Some(ref exp) = entry.expires_at {
+        meta.insert("expires_at".into(), serde_json::json!(exp.to_rfc3339()));
+    }
+    meta.insert("confidence".into(), serde_json::json!(entry.confidence));
     meta
 }
 
@@ -398,6 +404,17 @@ fn metadata_to_entry(rv_entry: &RvEntry) -> Option<MemoryEntry> {
         .and_then(|v| v.as_str())
         .map(MemoryCategory::from_str_lossy);
 
+    let expires_at = meta
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    let confidence = meta
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.5);
+
     Some(MemoryEntry {
         entry_id,
         key,
@@ -406,6 +423,8 @@ fn metadata_to_entry(rv_entry: &RvEntry) -> Option<MemoryEntry> {
         source,
         goal_id,
         category,
+        expires_at,
+        confidence,
         created_at,
         updated_at,
     })
@@ -544,6 +563,9 @@ mod tests {
             tags: vec!["old".into()],
             source: "fs".to_string(),
             goal_id: None,
+            category: None,
+            expires_at: None,
+            confidence: 0.5,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

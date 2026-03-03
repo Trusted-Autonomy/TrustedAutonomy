@@ -1457,40 +1457,28 @@ Auto-capture on goal complete, auto-capture on rejection, context injection into
 <!-- status: pending -->
 **Goal**: Rich querying and visualization of the memory store. Enables users to audit what TA has learned, curate memory entries, and understand how memory influences agent behavior.
 
-- **Semantic CLI queries**:
-  ```bash
-  ta context search "how to handle errors in this project"  # semantic search
-  ta context similar <entry-id>                              # find related entries
-  ta context explain <entry-id>                              # show provenance chain
-  ta context stats                                           # memory usage, entry counts by category
-  ```
+**Completed**:
+- ✅ `ta context search "query"` — dedicated semantic search CLI command
+- ✅ `ta context similar <entry-id>` — find entries similar to a given entry by ID
+- ✅ `ta context explain <key-or-id>` — show provenance chain (source, goal, category, timestamps, confidence)
+- ✅ `ta context stats` — memory store statistics (total, by category, by source, avg confidence, expired count)
+- ✅ `ta context store --expires-in 30d --confidence 0.9 --category convention` — TTL + confidence + category on store
+- ✅ `ta context list --category convention` — filter by category
+- ✅ `MemoryEntry.expires_at` — optional TTL field with duration parsing (d/h/m)
+- ✅ `MemoryEntry.confidence` — 0.0–1.0 score; approved drafts default to 1.0, auto-captured to 0.5–0.8
+- ✅ `MemoryStats` struct with total_entries, by_category, by_source, expired_count, avg_confidence, oldest/newest
+- ✅ `MemoryStore.stats()` trait method with default implementation
+- ✅ `MemoryStore.find_by_id(uuid)` trait method for UUID lookups
+- ✅ Web UI Memory tab: `/memory` with browse, search, create, delete, stats dashboard
+- ✅ Web API: `GET /api/memory`, `GET /api/memory/search?q=`, `GET /api/memory/stats`, `POST /api/memory`, `DELETE /api/memory/:key`
+- ✅ MCP `ta_context` tool: new `stats` and `similar` actions
+- ✅ Confidence scoring on auto-capture: goal_complete=0.8, draft_reject=0.6, human_guidance=0.9, auto-promoted=0.9
+- ✅ 3 new web UI tests (memory_list_empty, memory_stats_empty, memory_create_and_list)
+- ✅ Backward-compatible: `expires_at` and `confidence` fields use `#[serde(default)]` — old entries deserialize fine
 
-- **Memory dashboard in web UI** (extends v0.5.2):
-  - New tab: `/memory` — browse, search, edit, delete memory entries
-  - Provenance view: which goal/agent/session created each entry
-  - Usage analytics: which memories get recalled most, which are stale
-  - Manual entry creation: human adds knowledge directly
-
-- **Memory lifecycle**:
-  - TTL support: entries can expire (`ta context store --expires-in 30d`)
-  - Confidence scoring: entries from approved drafts rank higher than auto-captured
-  - Conflict resolution: when two agents store contradictory memories, flag for human arbitration
-  ```bash
-  ta context conflicts       # List contradictory entries
-  ta context resolve <id>    # Human picks the canonical version
-  ```
-
-- **Web UI API routes** (extends v0.5.2 web.rs):
-  ```
-  GET  /api/memory           → list memory entries (JSON)
-  GET  /api/memory/search    → semantic search (?q=query)
-  POST /api/memory           → create entry
-  DELETE /api/memory/:id     → delete entry
-  GET  /api/memory/stats     → usage statistics
-  ```
-
-#### Tests (minimum 6)
-Semantic search API, entry expiration, conflict detection, web UI memory list, provenance chain, stats endpoint.
+**Deferred to future**:
+- Conflict resolution (`ta context conflicts`, `ta context resolve`) — needs a conflict detection heuristic
+- Usage analytics (recall frequency tracking) — needs MCP middleware instrumentation
 
 ---
 

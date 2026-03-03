@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.5.6-alpha"
+version = "0.5.7-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2420,6 +2420,7 @@ dependencies = [
  "serde_json",
  "ta-changeset",
  "ta-mcp-gateway",
+ "ta-memory",
  "tempfile",
  "tokio",
  "tower",
@@ -2467,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "ta-memory"
-version = "0.5.6-alpha"
+version = "0.5.7-alpha"
 dependencies = [
  "chrono",
  "glob",

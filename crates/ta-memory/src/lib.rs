@@ -27,4 +27,4 @@ pub use error::MemoryError;
 pub use fs_store::FsMemoryStore;
 #[cfg(feature = "ruvector")]
 pub use ruvector_store::RuVectorStore;
-pub use store::{MemoryCategory, MemoryEntry, MemoryQuery, MemoryStore, StoreParams};
+pub use store::{MemoryCategory, MemoryEntry, MemoryQuery, MemoryStats, MemoryStore, StoreParams};

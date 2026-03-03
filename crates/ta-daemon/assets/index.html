@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trusted Autonomy — Draft Review</title>
+<title>Trusted Autonomy — Dashboard</title>
 <style>
   :root {
     --bg: #0f1117; --surface: #1a1d27; --border: #2d3148;
@@ -15,7 +15,12 @@
          background: var(--bg); color: var(--text); line-height: 1.6; }
   .container { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; }
   h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
-  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem; }
+  .tabs { display: flex; gap: 0; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+  .tab { padding: 0.6rem 1.25rem; cursor: pointer; color: var(--muted); font-size: 0.9rem;
+         font-weight: 500; border-bottom: 2px solid transparent; transition: all 0.15s; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
   .card { background: var(--surface); border: 1px solid var(--border);
           border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; cursor: pointer;
           transition: border-color 0.15s; }
@@ -27,6 +32,7 @@
   .badge-pending { background: var(--accent); color: #fff; }
   .badge-approved { background: var(--green); color: #000; }
   .badge-denied { background: var(--red); color: #fff; }
+  .badge-cat { background: var(--border); color: var(--text); font-size: 0.7rem; }
   .card-meta { color: var(--muted); font-size: 0.8rem; margin-top: 0.5rem; }
   .detail { background: var(--surface); border: 1px solid var(--border);
             border-radius: 8px; padding: 1.5rem; }
@@ -39,6 +45,8 @@
   .btn:hover { opacity: 0.85; }
   .btn-approve { background: var(--green); color: #000; }
   .btn-deny { background: var(--red); color: #fff; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-sm { padding: 0.3rem 0.8rem; font-size: 0.8rem; }
   .section { margin-top: 1.25rem; }
   .section h3 { font-size: 0.95rem; color: var(--muted); margin-bottom: 0.5rem;
                 text-transform: uppercase; letter-spacing: 0.05em; }
@@ -50,18 +58,50 @@
   .loading { text-align: center; padding: 3rem; color: var(--muted); }
   pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
         padding: 1rem; overflow-x: auto; font-size: 0.85rem; margin-top: 0.5rem; }
+  .search-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+  .search-bar input { flex: 1; background: var(--surface); border: 1px solid var(--border);
+                      border-radius: 6px; padding: 0.5rem 0.75rem; color: var(--text);
+                      font-size: 0.9rem; }
+  .search-bar input::placeholder { color: var(--muted); }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+               gap: 0.75rem; margin-bottom: 1.25rem; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border);
+               border-radius: 8px; padding: 1rem; text-align: center; }
+  .stat-value { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
+  .stat-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
+  .tag { display: inline-block; background: var(--border); border-radius: 4px;
+         padding: 0.1rem 0.4rem; font-size: 0.7rem; margin-right: 0.25rem; }
+  .confidence-bar { display: inline-block; width: 60px; height: 6px; background: var(--border);
+                    border-radius: 3px; vertical-align: middle; margin-left: 0.5rem; }
+  .confidence-fill { height: 100%; border-radius: 3px; background: var(--green); }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>Trusted Autonomy</h1>
-  <p class="subtitle">Draft Review Dashboard</p>
-  <div id="app"><div class="loading">Loading drafts...</div></div>
+  <p class="subtitle">Review Dashboard</p>
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('drafts')">Drafts</div>
+    <div class="tab" onclick="switchTab('memory')">Memory</div>
+  </div>
+  <div id="app"><div class="loading">Loading...</div></div>
 </div>
 <script>
 const app = document.getElementById('app');
+let currentTab = 'drafts';
 let drafts = [];
 
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => {
+    if (t.textContent.toLowerCase() === tab) t.classList.add('active');
+  });
+  if (tab === 'drafts') loadDrafts();
+  else loadMemory();
+}
+
+// ── Drafts ──────────────────────────────────────────────────
 function badgeClass(status) {
   const s = status.toLowerCase();
   if (s.includes('approved')) return 'badge-approved';
@@ -85,19 +125,19 @@ async function loadDrafts() {
   try {
     const resp = await fetch('/api/drafts');
     drafts = await resp.json();
-    renderList();
+    renderDraftList();
   } catch (e) {
-    app.innerHTML = '<div class="empty">Failed to load drafts. Is the server running?</div>';
+    app.innerHTML = '<div class="empty">Failed to load drafts.</div>';
   }
 }
 
-function renderList() {
+function renderDraftList() {
   if (drafts.length === 0) {
-    app.innerHTML = '<div class="empty">No drafts yet. Start a goal with <code>ta run</code> to create drafts.</div>';
+    app.innerHTML = '<div class="empty">No drafts yet. Start a goal with <code>ta run</code>.</div>';
     return;
   }
   app.innerHTML = drafts.map(d => `
-    <div class="card" onclick="showDetail('${d.package_id}')">
+    <div class="card" onclick="showDraftDetail('${d.package_id}')">
       <div class="card-header">
         <span class="card-title">${esc(d.title)}</span>
         <span class="badge ${badgeClass(d.status)}">${esc(d.status)}</span>
@@ -107,21 +147,21 @@ function renderList() {
   `).join('');
 }
 
-async function showDetail(id) {
+async function showDraftDetail(id) {
   app.innerHTML = '<div class="loading">Loading draft...</div>';
   try {
     const resp = await fetch('/api/drafts/' + id);
-    if (!resp.ok) { renderList(); return; }
+    if (!resp.ok) { renderDraftList(); return; }
     const d = await resp.json();
-    renderDetail(d);
-  } catch (e) { renderList(); }
+    renderDraftDetail(d);
+  } catch (e) { renderDraftList(); }
 }
 
-function renderDetail(d) {
+function renderDraftDetail(d) {
   const artifacts = d.changes.artifacts || [];
   const actions = d.changes.pending_actions || [];
   app.innerHTML = `
-    <span class="back" onclick="renderList()">&larr; Back to list</span>
+    <span class="back" onclick="renderDraftList()">&larr; Back to list</span>
     <div class="detail">
       <div class="card-header">
         <span class="card-title">${esc(d.goal.title)}</span>
@@ -149,14 +189,14 @@ function renderDetail(d) {
         `).join('')}
       </div>` : ''}
       <div class="actions">
-        <button class="btn btn-approve" onclick="doAction('${d.package_id}','approve')">Approve</button>
-        <button class="btn btn-deny" onclick="doAction('${d.package_id}','deny')">Deny</button>
+        <button class="btn btn-approve" onclick="doDraftAction('${d.package_id}','approve')">Approve</button>
+        <button class="btn btn-deny" onclick="doDraftAction('${d.package_id}','deny')">Deny</button>
       </div>
     </div>
   `;
 }
 
-async function doAction(id, action) {
+async function doDraftAction(id, action) {
   try {
     const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
     if (action === 'deny') {
@@ -167,6 +207,135 @@ async function doAction(id, action) {
     const resp = await fetch('/api/drafts/' + id + '/' + action, opts);
     if (resp.ok) { await loadDrafts(); }
     else { alert('Action failed: ' + await resp.text()); }
+  } catch (e) { alert('Network error'); }
+}
+
+// ── Memory (v0.5.7) ──────────────────────────────────────────
+async function loadMemory() {
+  app.innerHTML = '<div class="loading">Loading memory...</div>';
+  try {
+    const [statsResp, entriesResp] = await Promise.all([
+      fetch('/api/memory/stats'),
+      fetch('/api/memory?limit=50')
+    ]);
+    const stats = await statsResp.json();
+    const entries = await entriesResp.json();
+    renderMemory(stats, entries);
+  } catch (e) {
+    app.innerHTML = '<div class="empty">Failed to load memory store.</div>';
+  }
+}
+
+function renderMemory(stats, entries) {
+  const cats = Object.entries(stats.by_category || {}).sort((a,b) => b[1]-a[1]);
+  const srcs = Object.entries(stats.by_source || {}).sort((a,b) => b[1]-a[1]);
+
+  app.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-value">${stats.total_entries}</div><div class="stat-label">Total Entries</div></div>
+      <div class="stat-card"><div class="stat-value">${stats.expired_count}</div><div class="stat-label">Expired</div></div>
+      <div class="stat-card"><div class="stat-value">${stats.avg_confidence.toFixed(2)}</div><div class="stat-label">Avg Confidence</div></div>
+      <div class="stat-card"><div class="stat-value">${cats.length}</div><div class="stat-label">Categories</div></div>
+    </div>
+    ${cats.length > 0 ? `<div class="section"><h3>By Category</h3>${cats.map(([c,n]) => `<span class="tag">${esc(c)}: ${n}</span>`).join(' ')}</div>` : ''}
+    ${srcs.length > 0 ? `<div class="section" style="margin-bottom:1rem"><h3>By Source</h3>${srcs.map(([s,n]) => `<span class="tag">${esc(s)}: ${n}</span>`).join(' ')}</div>` : ''}
+    <div class="search-bar">
+      <input type="text" id="memSearch" placeholder="Search memory entries..." onkeydown="if(event.key==='Enter')searchMemory()">
+      <button class="btn btn-primary btn-sm" onclick="searchMemory()">Search</button>
+      <button class="btn btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="showCreateForm()">+ New</button>
+    </div>
+    <div id="memEntries">
+      ${renderMemoryEntries(entries)}
+    </div>
+  `;
+}
+
+function renderMemoryEntries(entries) {
+  if (entries.length === 0) return '<div class="empty">No memory entries.</div>';
+  return entries.map(e => {
+    const val = typeof e.value === 'string' ? e.value : JSON.stringify(e.value);
+    const preview = val.length > 80 ? val.slice(0,77) + '...' : val;
+    const confPct = Math.round(e.confidence * 100);
+    return `
+      <div class="card" style="cursor:default">
+        <div class="card-header">
+          <span class="card-title" style="font-size:0.95rem">${esc(e.key)}</span>
+          <span>
+            ${e.category ? `<span class="badge badge-cat">${esc(e.category)}</span>` : ''}
+            <span class="confidence-bar"><span class="confidence-fill" style="width:${confPct}%"></span></span>
+          </span>
+        </div>
+        <div style="font-size:0.85rem;color:var(--muted);margin-top:0.4rem">${esc(preview)}</div>
+        <div class="card-meta">
+          source: ${esc(e.source)} &middot; ${timeAgo(e.updated_at)}
+          ${e.tags.length ? ' &middot; ' + e.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('') : ''}
+          <span style="float:right;cursor:pointer;color:var(--red)" onclick="deleteMemory('${esc(e.key)}')">delete</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function searchMemory() {
+  const q = document.getElementById('memSearch').value.trim();
+  if (!q) { loadMemory(); return; }
+  try {
+    const resp = await fetch('/api/memory/search?q=' + encodeURIComponent(q));
+    const entries = await resp.json();
+    document.getElementById('memEntries').innerHTML = renderMemoryEntries(entries);
+  } catch (e) { /* ignore */ }
+}
+
+async function deleteMemory(key) {
+  if (!confirm('Delete memory entry "' + key + '"?')) return;
+  try {
+    await fetch('/api/memory/' + encodeURIComponent(key), { method: 'DELETE' });
+    loadMemory();
+  } catch (e) { alert('Failed to delete'); }
+}
+
+function showCreateForm() {
+  const html = `
+    <span class="back" onclick="loadMemory()">&larr; Back to memory</span>
+    <div class="detail">
+      <h3 style="margin-bottom:1rem">Create Memory Entry</h3>
+      <label style="font-size:0.85rem;color:var(--muted)">Key</label>
+      <input id="newKey" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.5rem;color:var(--text);margin-bottom:0.75rem" placeholder="e.g., convention:use-tempdir">
+      <label style="font-size:0.85rem;color:var(--muted)">Value</label>
+      <textarea id="newValue" rows="3" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.5rem;color:var(--text);margin-bottom:0.75rem;resize:vertical" placeholder="Text or JSON value"></textarea>
+      <label style="font-size:0.85rem;color:var(--muted)">Category</label>
+      <select id="newCategory" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.5rem;color:var(--text);margin-bottom:0.75rem">
+        <option value="">None</option>
+        <option value="convention">Convention</option>
+        <option value="architecture">Architecture</option>
+        <option value="history">History</option>
+        <option value="preference">Preference</option>
+        <option value="relationship">Relationship</option>
+      </select>
+      <label style="font-size:0.85rem;color:var(--muted)">Tags (comma-separated)</label>
+      <input id="newTags" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:0.5rem;color:var(--text);margin-bottom:1rem" placeholder="e.g., testing, rust">
+      <button class="btn btn-primary" onclick="createMemory()">Create</button>
+    </div>
+  `;
+  app.innerHTML = html;
+}
+
+async function createMemory() {
+  const key = document.getElementById('newKey').value.trim();
+  if (!key) { alert('Key is required'); return; }
+  const val = document.getElementById('newValue').value.trim() || key;
+  const cat = document.getElementById('newCategory').value || undefined;
+  const tags = document.getElementById('newTags').value.split(',').map(s => s.trim()).filter(Boolean);
+  let value;
+  try { value = JSON.parse(val); } catch { value = val; }
+  try {
+    const resp = await fetch('/api/memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value, tags, category: cat })
+    });
+    if (resp.ok) loadMemory();
+    else alert('Failed: ' + await resp.text());
   } catch (e) { alert('Network error'); }
 }
 

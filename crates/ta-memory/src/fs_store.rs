@@ -122,6 +122,8 @@ impl MemoryStore for FsMemoryStore {
             source: source.to_string(),
             goal_id: params.goal_id,
             category: params.category,
+            expires_at: params.expires_at,
+            confidence: params.confidence.unwrap_or(0.5),
             created_at,
             updated_at: now,
         };

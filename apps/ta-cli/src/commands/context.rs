@@ -19,6 +19,15 @@ pub enum ContextCommands {
         /// Tags for categorization (repeatable).
         #[arg(long)]
         tag: Vec<String>,
+        /// Knowledge category (convention, architecture, history, preference, relationship).
+        #[arg(long)]
+        category: Option<String>,
+        /// Entry expires after this duration (e.g., "30d", "12h", "90m").
+        #[arg(long)]
+        expires_in: Option<String>,
+        /// Confidence score 0.0–1.0 (default: 0.5).
+        #[arg(long)]
+        confidence: Option<f64>,
     },
     /// Recall a specific memory entry by key, or search semantically with --semantic.
     Recall {
@@ -31,6 +40,29 @@ pub enum ContextCommands {
         #[arg(long, default_value = "5")]
         limit: usize,
     },
+    /// Semantic search across memory entries (v0.5.7).
+    Search {
+        /// Query text for semantic similarity search.
+        query: String,
+        /// Maximum results to return.
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+    /// Find entries similar to a given entry by ID (v0.5.7).
+    Similar {
+        /// Entry ID (UUID) to find similar entries for.
+        entry_id: String,
+        /// Maximum results to return.
+        #[arg(long, default_value = "5")]
+        limit: usize,
+    },
+    /// Show provenance and metadata for a memory entry (v0.5.7).
+    Explain {
+        /// Entry key or ID (UUID) to explain.
+        entry: String,
+    },
+    /// Show memory store statistics (v0.5.7).
+    Stats,
     /// List memory entries.
     List {
         /// Filter by tag (repeatable).
@@ -39,6 +71,9 @@ pub enum ContextCommands {
         /// Filter by key prefix.
         #[arg(long)]
         prefix: Option<String>,
+        /// Filter by category (convention, architecture, history, preference, relationship).
+        #[arg(long)]
+        category: Option<String>,
         /// Maximum entries to return.
         #[arg(long)]
         limit: Option<usize>,
@@ -53,9 +88,22 @@ pub enum ContextCommands {
 pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     let memory_dir = config.workspace_root.join(".ta").join("memory");
     match cmd {
-        ContextCommands::Store { key, value, tag } => {
-            store_entry(&memory_dir, key, value.as_deref(), tag)
-        }
+        ContextCommands::Store {
+            key,
+            value,
+            tag,
+            category,
+            expires_in,
+            confidence,
+        } => store_entry(
+            &memory_dir,
+            key,
+            value.as_deref(),
+            tag,
+            category.as_deref(),
+            expires_in.as_deref(),
+            *confidence,
+        ),
         ContextCommands::Recall {
             key,
             semantic,
@@ -67,10 +115,43 @@ pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<
                 recall_entry(&memory_dir, key)
             }
         }
-        ContextCommands::List { tag, prefix, limit } => {
-            list_entries(&memory_dir, tag, prefix.as_deref(), *limit)
-        }
+        ContextCommands::Search { query, limit } => semantic_recall(config, query, *limit),
+        ContextCommands::Similar { entry_id, limit } => find_similar(config, entry_id, *limit),
+        ContextCommands::Explain { entry } => explain_entry(&memory_dir, entry),
+        ContextCommands::Stats => show_stats(&memory_dir),
+        ContextCommands::List {
+            tag,
+            prefix,
+            category,
+            limit,
+        } => list_entries(
+            &memory_dir,
+            tag,
+            prefix.as_deref(),
+            category.as_deref(),
+            *limit,
+        ),
         ContextCommands::Forget { key } => forget_entry(&memory_dir, key),
+    }
+}
+
+fn parse_duration(s: &str) -> anyhow::Result<chrono::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("empty duration");
+    }
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let n: i64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid number in duration '{}'", s))?;
+    match unit {
+        "d" => Ok(chrono::Duration::days(n)),
+        "h" => Ok(chrono::Duration::hours(n)),
+        "m" => Ok(chrono::Duration::minutes(n)),
+        _ => anyhow::bail!(
+            "unknown duration unit '{}'. Use d (days), h (hours), or m (minutes)",
+            unit
+        ),
     }
 }
 
@@ -79,6 +160,9 @@ fn store_entry(
     key: &str,
     value: Option<&str>,
     tags: &[String],
+    category: Option<&str>,
+    expires_in: Option<&str>,
+    confidence: Option<f64>,
 ) -> anyhow::Result<()> {
     let mut store = FsMemoryStore::new(memory_dir);
     let json_value = match value {
@@ -88,12 +172,31 @@ fn store_entry(
         None => serde_json::Value::String(key.to_string()),
     };
 
-    let entry = store.store(key, json_value, tags.to_vec(), "cli")?;
+    let expires_at = match expires_in {
+        Some(d) => Some(chrono::Utc::now() + parse_duration(d)?),
+        None => None,
+    };
+
+    let params = ta_memory::StoreParams {
+        goal_id: None,
+        category: category.map(ta_memory::MemoryCategory::from_str_lossy),
+        expires_at,
+        confidence,
+    };
+
+    let entry = store.store_with_params(key, json_value, tags.to_vec(), "cli", params)?;
     println!("Stored memory entry:");
-    println!("  Key:  {}", entry.key);
-    println!("  ID:   {}", entry.entry_id);
+    println!("  Key:        {}", entry.key);
+    println!("  ID:         {}", entry.entry_id);
+    println!("  Confidence: {:.1}", entry.confidence);
+    if let Some(cat) = &entry.category {
+        println!("  Category:   {}", cat);
+    }
+    if let Some(exp) = &entry.expires_at {
+        println!("  Expires:    {}", exp.format("%Y-%m-%d %H:%M UTC"));
+    }
     if !entry.tags.is_empty() {
-        println!("  Tags: {}", entry.tags.join(", "));
+        println!("  Tags:       {}", entry.tags.join(", "));
     }
     Ok(())
 }
@@ -142,21 +245,7 @@ fn semantic_recall(config: &GatewayConfig, query: &str, limit: usize) -> anyhow:
         );
         println!();
         for e in &results {
-            let value_preview = match &e.value {
-                serde_json::Value::String(s) if s.len() > 60 => format!("\"{}...\"", &s[..57]),
-                v => {
-                    let s = v.to_string();
-                    if s.len() > 60 {
-                        format!("{}...", &s[..57])
-                    } else {
-                        s
-                    }
-                }
-            };
-            println!("  {} = {}", e.key, value_preview);
-            if !e.tags.is_empty() {
-                println!("    tags: {}", e.tags.join(", "));
-            }
+            print_entry_summary(&e);
         }
         Ok(())
     }
@@ -171,22 +260,173 @@ fn semantic_recall(config: &GatewayConfig, query: &str, limit: usize) -> anyhow:
     }
 }
 
+fn find_similar(config: &GatewayConfig, entry_id: &str, limit: usize) -> anyhow::Result<()> {
+    #[cfg(feature = "ruvector")]
+    {
+        let rvf_path = config.workspace_root.join(".ta").join("memory.rvf");
+        let store = ta_memory::RuVectorStore::open(&rvf_path)?;
+
+        let uuid: uuid::Uuid = entry_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid entry ID '{}'. Expected a UUID.", entry_id))?;
+
+        let entry = store
+            .find_by_id(uuid)?
+            .ok_or_else(|| anyhow::anyhow!("no memory entry found with ID '{}'", entry_id))?;
+
+        // Use the entry's value as the semantic query.
+        let query_text = match &entry.value {
+            serde_json::Value::String(s) => s.clone(),
+            v => v.to_string(),
+        };
+
+        let results = store.semantic_search(&query_text, limit + 1)?;
+        // Filter out the original entry.
+        let similar: Vec<_> = results
+            .into_iter()
+            .filter(|e| e.entry_id != uuid)
+            .take(limit)
+            .collect();
+
+        if similar.is_empty() {
+            println!("No similar entries found for '{}'", entry.key);
+            return Ok(());
+        }
+
+        println!("Entries similar to '{}' ({}):", entry.key, similar.len());
+        println!();
+        for e in &similar {
+            print_entry_summary(e);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "ruvector"))]
+    {
+        let _ = (config, entry_id, limit);
+        anyhow::bail!(
+            "Similar entry search requires the ruvector backend.\n\
+             Rebuild with: cargo install ta-cli --features ruvector"
+        );
+    }
+}
+
+fn explain_entry(memory_dir: &std::path::Path, entry_key_or_id: &str) -> anyhow::Result<()> {
+    let store = FsMemoryStore::new(memory_dir);
+
+    // Try exact key first, then UUID lookup.
+    let entry = if let Some(e) = store.recall(entry_key_or_id)? {
+        e
+    } else if let Ok(uuid) = entry_key_or_id.parse::<uuid::Uuid>() {
+        store
+            .find_by_id(uuid)?
+            .ok_or_else(|| anyhow::anyhow!("no entry found for '{}'", entry_key_or_id))?
+    } else {
+        anyhow::bail!("no entry found for '{}'", entry_key_or_id);
+    };
+
+    println!("Memory Entry Provenance");
+    println!("{}", "=".repeat(50));
+    println!("  Key:        {}", entry.key);
+    println!("  ID:         {}", entry.entry_id);
+    println!("  Source:     {}", entry.source);
+    if let Some(cat) = &entry.category {
+        println!("  Category:   {}", cat);
+    }
+    if let Some(goal_id) = &entry.goal_id {
+        println!("  Goal ID:    {}", goal_id);
+    }
+    println!("  Confidence: {:.2}", entry.confidence);
+    println!(
+        "  Created:    {}",
+        entry.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
+    println!(
+        "  Updated:    {}",
+        entry.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
+    if let Some(exp) = &entry.expires_at {
+        let now = chrono::Utc::now();
+        if *exp < now {
+            println!(
+                "  Expires:    {} (EXPIRED)",
+                exp.format("%Y-%m-%d %H:%M UTC")
+            );
+        } else {
+            println!("  Expires:    {}", exp.format("%Y-%m-%d %H:%M UTC"));
+        }
+    }
+    if !entry.tags.is_empty() {
+        println!("  Tags:       {}", entry.tags.join(", "));
+    }
+    println!();
+    println!("Value:");
+    println!("{}", serde_json::to_string_pretty(&entry.value)?);
+    Ok(())
+}
+
+fn show_stats(memory_dir: &std::path::Path) -> anyhow::Result<()> {
+    let store = FsMemoryStore::new(memory_dir);
+    let stats = store.stats()?;
+
+    println!("Memory Store Statistics");
+    println!("{}", "=".repeat(50));
+    println!("  Total entries:    {}", stats.total_entries);
+    println!("  Expired entries:  {}", stats.expired_count);
+    println!("  Avg confidence:   {:.2}", stats.avg_confidence);
+
+    if let Some(oldest) = stats.oldest_entry {
+        println!(
+            "  Oldest entry:     {}",
+            oldest.format("%Y-%m-%d %H:%M UTC")
+        );
+    }
+    if let Some(newest) = stats.newest_entry {
+        println!(
+            "  Newest entry:     {}",
+            newest.format("%Y-%m-%d %H:%M UTC")
+        );
+    }
+
+    if !stats.by_category.is_empty() {
+        println!();
+        println!("  By category:");
+        let mut cats: Vec<_> = stats.by_category.iter().collect();
+        cats.sort_by(|a, b| b.1.cmp(a.1));
+        for (cat, count) in cats {
+            println!("    {:<16} {}", cat, count);
+        }
+    }
+
+    if !stats.by_source.is_empty() {
+        println!();
+        println!("  By source:");
+        let mut srcs: Vec<_> = stats.by_source.iter().collect();
+        srcs.sort_by(|a, b| b.1.cmp(a.1));
+        for (src, count) in srcs {
+            println!("    {:<16} {}", src, count);
+        }
+    }
+    Ok(())
+}
+
 fn list_entries(
     memory_dir: &std::path::Path,
     tags: &[String],
     prefix: Option<&str>,
+    category: Option<&str>,
     limit: Option<usize>,
 ) -> anyhow::Result<()> {
     let store = FsMemoryStore::new(memory_dir);
 
-    let entries = if tags.is_empty() && prefix.is_none() {
+    let entries = if tags.is_empty() && prefix.is_none() && category.is_none() {
         store.list(limit)?
     } else {
         store.lookup(MemoryQuery {
             key_prefix: prefix.map(|s| s.to_string()),
             tags: tags.to_vec(),
             goal_id: None,
-            category: None,
+            category: category.map(ta_memory::MemoryCategory::from_str_lossy),
             limit,
         })?
     };
@@ -201,23 +441,32 @@ fn list_entries(
     println!("Memory entries ({}):", entries.len());
     println!();
     for e in &entries {
-        let value_preview = match &e.value {
-            serde_json::Value::String(s) if s.len() > 60 => format!("\"{}...\"", &s[..57]),
-            v => {
-                let s = v.to_string();
-                if s.len() > 60 {
-                    format!("{}...", &s[..57])
-                } else {
-                    s
-                }
-            }
-        };
-        println!("  {} = {}", e.key, value_preview);
-        if !e.tags.is_empty() {
-            println!("    tags: {}", e.tags.join(", "));
-        }
+        print_entry_summary(e);
     }
     Ok(())
+}
+
+fn print_entry_summary(e: &ta_memory::MemoryEntry) {
+    let value_preview = match &e.value {
+        serde_json::Value::String(s) if s.len() > 60 => format!("\"{}...\"", &s[..57]),
+        v => {
+            let s = v.to_string();
+            if s.len() > 60 {
+                format!("{}...", &s[..57])
+            } else {
+                s
+            }
+        }
+    };
+    let cat_label = e
+        .category
+        .as_ref()
+        .map(|c| format!("[{}] ", c))
+        .unwrap_or_default();
+    println!("  {}{} = {}", cat_label, e.key, value_preview);
+    if !e.tags.is_empty() {
+        println!("    tags: {}", e.tags.join(", "));
+    }
 }
 
 fn forget_entry(memory_dir: &std::path::Path, key: &str) -> anyhow::Result<()> {
