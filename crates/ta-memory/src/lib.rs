@@ -10,11 +10,17 @@
 //!
 //! - **FsMemoryStore** (default): JSON files in `.ta/memory/`, one per key.
 //!   Zero external dependencies. Exact-match and tag-based lookup.
+//! - **RuVectorStore** (feature `ruvector`): HNSW-indexed vector database
+//!   for semantic search. Sub-millisecond recall at scale.
 
 pub mod error;
 pub mod fs_store;
+#[cfg(feature = "ruvector")]
+pub mod ruvector_store;
 pub mod store;
 
 pub use error::MemoryError;
 pub use fs_store::FsMemoryStore;
+#[cfg(feature = "ruvector")]
+pub use ruvector_store::RuVectorStore;
 pub use store::{MemoryEntry, MemoryQuery, MemoryStore};

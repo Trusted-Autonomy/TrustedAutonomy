@@ -20,10 +20,16 @@ pub enum ContextCommands {
         #[arg(long)]
         tag: Vec<String>,
     },
-    /// Recall a specific memory entry by key.
+    /// Recall a specific memory entry by key, or search semantically with --semantic.
     Recall {
-        /// Key to look up.
+        /// Key to look up (or query text when using --semantic).
         key: String,
+        /// Use semantic search instead of exact key match (requires ruvector backend).
+        #[arg(long)]
+        semantic: bool,
+        /// Maximum results for semantic search.
+        #[arg(long, default_value = "5")]
+        limit: usize,
     },
     /// List memory entries.
     List {
@@ -50,7 +56,17 @@ pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<
         ContextCommands::Store { key, value, tag } => {
             store_entry(&memory_dir, key, value.as_deref(), tag)
         }
-        ContextCommands::Recall { key } => recall_entry(&memory_dir, key),
+        ContextCommands::Recall {
+            key,
+            semantic,
+            limit,
+        } => {
+            if *semantic {
+                semantic_recall(config, key, *limit)
+            } else {
+                recall_entry(&memory_dir, key)
+            }
+        }
         ContextCommands::List { tag, prefix, limit } => {
             list_entries(&memory_dir, tag, prefix.as_deref(), *limit)
         }
@@ -93,6 +109,66 @@ fn recall_entry(memory_dir: &std::path::Path, key: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn semantic_recall(config: &GatewayConfig, query: &str, limit: usize) -> anyhow::Result<()> {
+    #[cfg(feature = "ruvector")]
+    {
+        let rvf_path = config.workspace_root.join(".ta").join("memory.rvf");
+        let store = ta_memory::RuVectorStore::open(&rvf_path)?;
+
+        // Auto-migrate from filesystem if the ruvector store is empty.
+        let fs_dir = config.workspace_root.join(".ta").join("memory");
+        if fs_dir.exists() {
+            let migrated = store.migrate_from_fs(&fs_dir)?;
+            if migrated > 0 {
+                println!(
+                    "Migrated {} entries from filesystem to ruvector.\n",
+                    migrated
+                );
+            }
+        }
+
+        let results = store.semantic_search(query, limit)?;
+        if results.is_empty() {
+            println!("No semantic matches found for '{}'", query);
+            return Ok(());
+        }
+
+        println!(
+            "Semantic search results for '{}' ({}):",
+            query,
+            results.len()
+        );
+        println!();
+        for e in &results {
+            let value_preview = match &e.value {
+                serde_json::Value::String(s) if s.len() > 60 => format!("\"{}...\"", &s[..57]),
+                v => {
+                    let s = v.to_string();
+                    if s.len() > 60 {
+                        format!("{}...", &s[..57])
+                    } else {
+                        s
+                    }
+                }
+            };
+            println!("  {} = {}", e.key, value_preview);
+            if !e.tags.is_empty() {
+                println!("    tags: {}", e.tags.join(", "));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "ruvector"))]
+    {
+        let _ = (config, query, limit);
+        anyhow::bail!(
+            "Semantic search requires the ruvector backend.\n\
+             Rebuild with: cargo install ta-cli --features ruvector"
+        );
+    }
 }
 
 fn list_entries(

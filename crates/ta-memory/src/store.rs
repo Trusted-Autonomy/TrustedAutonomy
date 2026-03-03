@@ -57,4 +57,13 @@ pub trait MemoryStore: Send + Sync {
 
     /// Delete an entry by key. Returns true if it existed.
     fn forget(&mut self, key: &str) -> Result<bool, MemoryError>;
+
+    /// Semantic search: find entries whose value is similar to the query text.
+    ///
+    /// Returns up to `k` entries ranked by relevance. Only meaningful with
+    /// vector-capable backends (e.g., `RuVectorStore`). The default
+    /// implementation returns an empty vec for backends without vector support.
+    fn semantic_search(&self, _query: &str, _k: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
+        Ok(vec![])
+    }
 }

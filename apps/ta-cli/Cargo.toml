@@ -1,6 +1,6 @@
 [package]
 name = "ta-cli"
-version = "0.5.0-alpha"
+version = "0.5.5-alpha"
 edition = "2021"
 description = "CLI for goals, PR review, and approvals in Trusted Autonomy"
 license = "Apache-2.0"
@@ -12,6 +12,10 @@ categories = ["command-line-utilities", "development-tools"]
 [[bin]]
 name = "ta"
 path = "src/main.rs"
+
+[features]
+default = []
+ruvector = ["ta-memory/ruvector"]
 
 [dependencies]
 anyhow = { workspace = true }

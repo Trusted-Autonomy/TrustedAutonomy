@@ -1322,7 +1322,7 @@ ta context forget <id>                                               # delete en
 | **v1.0 Virtual office** | Role-specific memory: "the code reviewer role remembers common review feedback for this codebase." |
 
 ### v0.5.5 — RuVector Memory Backend
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Replace the filesystem JSON backend with [ruvector](https://github.com/ruvnet/ruvector) for semantic search, self-learning retrieval, and sub-millisecond recall at scale. The `MemoryStore` trait stays the same — this is a backend swap behind a cargo feature flag.
 
 > **Why now**: v0.5.4 shipped the `MemoryStore` trait and `FsMemoryStore` backend. That's sufficient for key-value recall by exact match or prefix. But the real value of persistent memory is *semantic retrieval* — "find memories similar to this problem" — which requires vector embeddings and approximate nearest-neighbor search. ruvector provides this in pure Rust with zero external services.
@@ -1363,6 +1363,19 @@ ta context recall "auth-token-pattern"  # exact key match
 
 #### Tests (minimum 8)
 Store/recall round-trip, semantic search returns relevant results, self-learning improves ranking after repeated queries, migration from filesystem, feature-flag gating (fs-only build still compiles), concurrent access safety, HNSW index rebuild, empty-store search returns empty.
+
+#### Completed
+- ✅ `crates/ta-memory/src/ruvector_store.rs` — `RuVectorStore` implementing `MemoryStore` with all trait methods + `semantic_search`
+- ✅ `ruvector` cargo feature in `crates/ta-memory/Cargo.toml` — optional `ruvector-core` v2.0.5 dependency
+- ✅ `semantic_search()` added to `MemoryStore` trait with default no-op for `FsMemoryStore`
+- ✅ Hash-based embeddings (FNV-1a n-gram + cosine similarity) — zero-config, pure Rust
+- ✅ HNSW indexing via `ruvector-core::VectorDB` with persistent `.rvf` storage
+- ✅ Auto-migration from `.ta/memory/*.json` to ruvector on first use
+- ✅ `ta context recall "query" --semantic` CLI flag with `--limit`
+- ✅ Feature-flag gating — `cargo build` without `ruvector` feature works (fs-only)
+- ✅ `ruvector` feature forwarded from `ta-cli` Cargo.toml
+- ✅ 10 ruvector tests: roundtrip, semantic search, overwrite, forget, list, empty search, migration, lookup by tag, concurrent access, forget-nonexistent
+- ✅ Bug fix: macro session exit no longer errors when goal already applied/submitted via MCP
 
 ### v0.5.6 — Framework-Agnostic Agent State
 <!-- status: pending -->

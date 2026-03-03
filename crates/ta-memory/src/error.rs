@@ -12,4 +12,7 @@ pub enum MemoryError {
 
     #[error("memory entry not found: {0}")]
     NotFound(String),
+
+    #[error("vector database error: {0}")]
+    VectorDb(String),
 }

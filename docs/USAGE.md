@@ -796,6 +796,10 @@ ta context store "auth-architecture" \
 # Recall by exact key
 ta context recall "test-fixtures"
 
+# Semantic search (requires --features ruvector)
+ta context recall "how do we handle authentication" --semantic
+ta context recall "testing conventions" --semantic --limit 3
+
 # List all entries
 ta context list
 
@@ -805,6 +809,16 @@ ta context list --limit 10
 # Remove an entry
 ta context forget "auth-architecture"
 ```
+
+#### Semantic search with ruvector (optional)
+
+By default, context memory uses a filesystem backend (JSON files in `.ta/memory/`). For semantic search — "find memories *similar to* this query" — enable the ruvector backend:
+
+```bash
+cargo install ta-cli --features ruvector
+```
+
+With ruvector enabled, `--semantic` finds relevant entries by meaning rather than exact key match. Existing filesystem entries are auto-migrated on first use. The ruvector backend stores entries in `.ta/memory.rvf` using HNSW indexing for sub-millisecond recall.
 
 #### How agents use memory
 
