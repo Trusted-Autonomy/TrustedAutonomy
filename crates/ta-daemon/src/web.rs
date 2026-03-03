@@ -404,7 +404,11 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_router(dir: PathBuf) -> Router {
-        build_router(dir)
+        // Pass a subdirectory as pr_packages_dir so memory_dir resolves
+        // to a sibling within the same temp dir (avoiding cross-test pollution).
+        let packages_dir = dir.join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        build_router(packages_dir)
     }
 
     #[tokio::test]
