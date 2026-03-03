@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trusted Autonomy — Draft Review</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2d3148;
+    --text: #e1e4ed; --muted: #8b8fa3; --accent: #6c8cff;
+    --green: #4ade80; --red: #f87171; --yellow: #fbbf24;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: var(--bg); color: var(--text); line-height: 1.6; }
+  .container { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; cursor: pointer;
+          transition: border-color 0.15s; }
+  .card:hover { border-color: var(--accent); }
+  .card-header { display: flex; justify-content: space-between; align-items: center; }
+  .card-title { font-weight: 600; font-size: 1.05rem; }
+  .badge { padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+  .badge-draft { background: var(--yellow); color: #000; }
+  .badge-pending { background: var(--accent); color: #fff; }
+  .badge-approved { background: var(--green); color: #000; }
+  .badge-denied { background: var(--red); color: #fff; }
+  .card-meta { color: var(--muted); font-size: 0.8rem; margin-top: 0.5rem; }
+  .detail { background: var(--surface); border: 1px solid var(--border);
+            border-radius: 8px; padding: 1.5rem; }
+  .back { color: var(--accent); cursor: pointer; font-size: 0.9rem;
+          margin-bottom: 1rem; display: inline-block; }
+  .back:hover { text-decoration: underline; }
+  .actions { display: flex; gap: 0.75rem; margin-top: 1.25rem; }
+  .btn { padding: 0.5rem 1.25rem; border: none; border-radius: 6px; font-size: 0.9rem;
+         font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+  .btn:hover { opacity: 0.85; }
+  .btn-approve { background: var(--green); color: #000; }
+  .btn-deny { background: var(--red); color: #fff; }
+  .section { margin-top: 1.25rem; }
+  .section h3 { font-size: 0.95rem; color: var(--muted); margin-bottom: 0.5rem;
+                text-transform: uppercase; letter-spacing: 0.05em; }
+  .artifact { background: var(--bg); border: 1px solid var(--border);
+              border-radius: 6px; padding: 0.75rem; margin-bottom: 0.5rem;
+              font-family: 'SF Mono', Monaco, monospace; font-size: 0.85rem; }
+  .artifact-uri { color: var(--accent); }
+  .empty { text-align: center; padding: 3rem; color: var(--muted); }
+  .loading { text-align: center; padding: 3rem; color: var(--muted); }
+  pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+        padding: 1rem; overflow-x: auto; font-size: 0.85rem; margin-top: 0.5rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Trusted Autonomy</h1>
+  <p class="subtitle">Draft Review Dashboard</p>
+  <div id="app"><div class="loading">Loading drafts...</div></div>
+</div>
+<script>
+const app = document.getElementById('app');
+let drafts = [];
+
+function badgeClass(status) {
+  const s = status.toLowerCase();
+  if (s.includes('approved')) return 'badge-approved';
+  if (s.includes('denied')) return 'badge-denied';
+  if (s.includes('pending')) return 'badge-pending';
+  return 'badge-draft';
+}
+
+function timeAgo(iso) {
+  const d = new Date(iso);
+  const now = new Date();
+  const mins = Math.floor((now - d) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  return Math.floor(hrs / 24) + 'd ago';
+}
+
+async function loadDrafts() {
+  try {
+    const resp = await fetch('/api/drafts');
+    drafts = await resp.json();
+    renderList();
+  } catch (e) {
+    app.innerHTML = '<div class="empty">Failed to load drafts. Is the server running?</div>';
+  }
+}
+
+function renderList() {
+  if (drafts.length === 0) {
+    app.innerHTML = '<div class="empty">No drafts yet. Start a goal with <code>ta run</code> to create drafts.</div>';
+    return;
+  }
+  app.innerHTML = drafts.map(d => `
+    <div class="card" onclick="showDetail('${d.package_id}')">
+      <div class="card-header">
+        <span class="card-title">${esc(d.title)}</span>
+        <span class="badge ${badgeClass(d.status)}">${esc(d.status)}</span>
+      </div>
+      <div class="card-meta">${d.artifact_count} artifact${d.artifact_count !== 1 ? 's' : ''} &middot; ${timeAgo(d.created_at)} &middot; ${d.package_id.slice(0,8)}</div>
+    </div>
+  `).join('');
+}
+
+async function showDetail(id) {
+  app.innerHTML = '<div class="loading">Loading draft...</div>';
+  try {
+    const resp = await fetch('/api/drafts/' + id);
+    if (!resp.ok) { renderList(); return; }
+    const d = await resp.json();
+    renderDetail(d);
+  } catch (e) { renderList(); }
+}
+
+function renderDetail(d) {
+  const artifacts = d.changes.artifacts || [];
+  const actions = d.changes.pending_actions || [];
+  app.innerHTML = `
+    <span class="back" onclick="renderList()">&larr; Back to list</span>
+    <div class="detail">
+      <div class="card-header">
+        <span class="card-title">${esc(d.goal.title)}</span>
+        <span class="badge ${badgeClass(d.status)}">${d.status}</span>
+      </div>
+      <div class="card-meta">${d.package_id} &middot; ${new Date(d.created_at).toLocaleString()}</div>
+      ${d.summary ? `<div class="section"><h3>Summary</h3><p>${esc(d.summary.description || '')}</p></div>` : ''}
+      <div class="section">
+        <h3>Artifacts (${artifacts.length})</h3>
+        ${artifacts.length === 0 ? '<p style="color:var(--muted)">No artifacts</p>' :
+          artifacts.map(a => `
+            <div class="artifact">
+              <span class="artifact-uri">${esc(a.resource_uri)}</span>
+              ${a.disposition ? ' &middot; ' + esc(a.disposition) : ''}
+            </div>
+          `).join('')}
+      </div>
+      ${actions.length > 0 ? `
+      <div class="section">
+        <h3>Pending Actions (${actions.length})</h3>
+        ${actions.map(a => `
+          <div class="artifact">
+            <span class="artifact-uri">${esc(a.tool_name)}</span> &middot; ${esc(a.kind)} &middot; ${esc(a.description)}
+          </div>
+        `).join('')}
+      </div>` : ''}
+      <div class="actions">
+        <button class="btn btn-approve" onclick="doAction('${d.package_id}','approve')">Approve</button>
+        <button class="btn btn-deny" onclick="doAction('${d.package_id}','deny')">Deny</button>
+      </div>
+    </div>
+  `;
+}
+
+async function doAction(id, action) {
+  try {
+    const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+    if (action === 'deny') {
+      const reason = prompt('Reason for denial:', 'Needs revision');
+      if (reason === null) return;
+      opts.body = JSON.stringify({ reason });
+    }
+    const resp = await fetch('/api/drafts/' + id + '/' + action, opts);
+    if (resp.ok) { await loadDrafts(); }
+    else { alert('Action failed: ' + await resp.text()); }
+  } catch (e) { alert('Network error'); }
+}
+
+function esc(s) {
+  if (!s) return '';
+  const el = document.createElement('span');
+  el.textContent = String(s);
+  return el.innerHTML;
+}
+
+loadDrafts();
+</script>
+</body>
+</html>

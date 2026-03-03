@@ -6,6 +6,9 @@
 //! connects to. All agent tool calls flow through the gateway's policy
 //! engine, staging workspace, and audit log.
 //!
+//! Optionally serves a web review UI at `--web-port <port>` for
+//! browser-based draft review.
+//!
 //! ## Usage
 //!
 //! Typically started automatically by the MCP client via `.mcp.json`:
@@ -20,6 +23,8 @@
 //!   }
 //! }
 //! ```
+
+mod web;
 
 use anyhow::Result;
 use clap::Parser;
@@ -36,6 +41,11 @@ struct Cli {
     /// Project root directory (defaults to current directory).
     #[arg(long, default_value = ".")]
     project_root: PathBuf,
+
+    /// Port for the web review UI. When set, serves a browser-based
+    /// dashboard for reviewing draft packages.
+    #[arg(long)]
+    web_port: Option<u16>,
 }
 
 #[tokio::main]
@@ -58,9 +68,22 @@ async fn main() -> Result<()> {
     tracing::info!("Project root: {}", project_root.display());
 
     let config = GatewayConfig::for_project(&project_root);
+    let pr_packages_dir = config.pr_packages_dir.clone();
+    let web_port = cli.web_port.or(config.web_ui_port);
+
     let server = TaGatewayServer::new(config)?;
 
     tracing::info!("MCP server ready, waiting for client connection");
+
+    // Spawn optional web UI server.
+    if let Some(port) = web_port {
+        let dir = pr_packages_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) = web::serve_web_ui(dir, port).await {
+                tracing::error!("Web UI server error: {}", e);
+            }
+        });
+    }
 
     let service = server
         .serve(rmcp::transport::stdio())

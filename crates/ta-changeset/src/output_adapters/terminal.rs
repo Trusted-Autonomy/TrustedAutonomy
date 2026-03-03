@@ -393,6 +393,7 @@ mod tests {
                     amendment: None,
                 }],
                 patch_sets: vec![],
+                pending_actions: vec![],
             },
             risk: Risk {
                 risk_score: 10,

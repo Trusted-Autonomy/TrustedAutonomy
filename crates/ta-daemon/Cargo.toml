@@ -12,6 +12,17 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 rmcp = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
 
 # Internal crates
 ta-mcp-gateway = { path = "../ta-mcp-gateway" }
+ta-changeset = { path = "../ta-changeset" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = { workspace = true }

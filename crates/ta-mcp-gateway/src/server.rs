@@ -35,13 +35,17 @@ use ta_changeset::review_channel::{ReviewChannel, ReviewChannelError};
 use ta_changeset::terminal_channel::AutoApproveChannel;
 use ta_connector_fs::FsConnector;
 use ta_goal::{EventDispatcher, GoalRun, GoalRunState, GoalRunStore, LogSink, TaEvent};
+use ta_memory::{FsMemoryStore, MemoryStore};
 use ta_policy::{
     AlignmentProfile, CompilerOptions, PolicyCompiler, PolicyDecision, PolicyEngine, PolicyRequest,
 };
 use ta_workspace::{JsonFileStore, StagingWorkspace};
 
+use ta_changeset::draft_package::PendingAction;
+
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
+use crate::interceptor::ToolCallInterceptor;
 
 // ── Tool parameter types ─────────────────────────────────────────
 
@@ -178,6 +182,25 @@ pub struct PlanToolParams {
     pub status_note: Option<String>,
 }
 
+/// Parameters for `ta_context` (persistent memory tool, v0.5.4).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ContextToolParams {
+    /// Action: "store", "recall", "list", or "forget".
+    pub action: String,
+    /// Key for the memory entry (required for store, recall, forget).
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Value to store (JSON, used with "store" action).
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+    /// Tags for the entry (used with "store" action).
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Maximum entries to return (used with "list" action).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 // ── Gateway state ────────────────────────────────────────────────
 
 /// Shared mutable state for the gateway server.
@@ -195,6 +218,12 @@ pub struct GatewayState {
     /// ReviewChannel for bidirectional human-agent communication (v0.4.1.1).
     /// Defaults to AutoApproveChannel when no interactive channel is configured.
     pub review_channel: Box<dyn ReviewChannel>,
+    /// Persistent memory store for cross-agent context (v0.5.4).
+    pub memory_store: FsMemoryStore,
+    /// MCP tool call interceptor for capturing external actions (v0.5.1).
+    pub interceptor: ToolCallInterceptor,
+    /// Pending actions captured by the interceptor, keyed by goal_run_id.
+    pub pending_actions: HashMap<Uuid, Vec<PendingAction>>,
 }
 
 impl GatewayState {
@@ -205,6 +234,7 @@ impl GatewayState {
 
         let mut event_dispatcher = EventDispatcher::new();
         event_dispatcher.add_sink(Box::new(LogSink::new(&config.events_log)));
+        let memory_store = FsMemoryStore::new(config.workspace_root.join(".ta").join("memory"));
 
         Ok(Self {
             config,
@@ -215,6 +245,9 @@ impl GatewayState {
             audit_log,
             event_dispatcher,
             review_channel: Box::new(AutoApproveChannel::new()),
+            memory_store,
+            interceptor: ToolCallInterceptor::new(),
+            pending_actions: HashMap::new(),
         })
     }
 
@@ -1273,6 +1306,143 @@ impl TaGatewayServer {
             )),
         }
     }
+
+    /// Persistent memory store — agents can store and recall context that
+    /// persists across sessions and works across different agent frameworks.
+    ///
+    /// Actions:
+    /// - "store": Save a memory entry (key + value + optional tags).
+    /// - "recall": Retrieve a single entry by exact key.
+    /// - "list": List all entries (optionally limited).
+    /// - "forget": Delete an entry by key.
+    #[tool]
+    fn ta_context(
+        &self,
+        Parameters(params): Parameters<ContextToolParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
+
+        match params.action.as_str() {
+            "store" => {
+                let key = params
+                    .key
+                    .as_deref()
+                    .ok_or_else(|| McpError::invalid_params("key required for store", None))?;
+                let value = params.value.clone().unwrap_or(serde_json::Value::Null);
+                let tags = params.tags.clone().unwrap_or_default();
+
+                let entry = state
+                    .memory_store
+                    .store(key, value, tags, "agent")
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                let response = serde_json::json!({
+                    "status": "stored",
+                    "entry_id": entry.entry_id.to_string(),
+                    "key": entry.key,
+                });
+                Ok(CallToolResult::success(vec![Content::json(response)
+                    .map_err(|e| {
+                        McpError::internal_error(e.to_string(), None)
+                    })?]))
+            }
+            "recall" => {
+                let key = params
+                    .key
+                    .as_deref()
+                    .ok_or_else(|| McpError::invalid_params("key required for recall", None))?;
+
+                let entry = state
+                    .memory_store
+                    .recall(key)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                match entry {
+                    Some(e) => {
+                        let response = serde_json::json!({
+                            "key": e.key,
+                            "value": e.value,
+                            "tags": e.tags,
+                            "source": e.source,
+                            "created_at": e.created_at.to_rfc3339(),
+                            "updated_at": e.updated_at.to_rfc3339(),
+                        });
+                        Ok(CallToolResult::success(vec![Content::json(response)
+                            .map_err(|e| {
+                                McpError::internal_error(e.to_string(), None)
+                            })?]))
+                    }
+                    None => {
+                        let response = serde_json::json!({
+                            "status": "not_found",
+                            "key": key,
+                        });
+                        Ok(CallToolResult::success(vec![Content::json(response)
+                            .map_err(|e| {
+                                McpError::internal_error(e.to_string(), None)
+                            })?]))
+                    }
+                }
+            }
+            "list" => {
+                let entries = state
+                    .memory_store
+                    .list(params.limit)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                let items: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "key": e.key,
+                            "tags": e.tags,
+                            "source": e.source,
+                            "updated_at": e.updated_at.to_rfc3339(),
+                        })
+                    })
+                    .collect();
+
+                let response = serde_json::json!({
+                    "count": items.len(),
+                    "entries": items,
+                });
+                Ok(CallToolResult::success(vec![Content::json(response)
+                    .map_err(|e| {
+                        McpError::internal_error(e.to_string(), None)
+                    })?]))
+            }
+            "forget" => {
+                let key = params
+                    .key
+                    .as_deref()
+                    .ok_or_else(|| McpError::invalid_params("key required for forget", None))?;
+
+                let existed = state
+                    .memory_store
+                    .forget(key)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                let response = serde_json::json!({
+                    "status": if existed { "forgotten" } else { "not_found" },
+                    "key": key,
+                });
+                Ok(CallToolResult::success(vec![Content::json(response)
+                    .map_err(|e| {
+                        McpError::internal_error(e.to_string(), None)
+                    })?]))
+            }
+            _ => Err(McpError::invalid_params(
+                format!(
+                    "unknown action '{}'. Expected: store, recall, list, forget",
+                    params.action
+                ),
+                None,
+            )),
+        }
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────────
@@ -1373,8 +1543,9 @@ mod tests {
         //           fs_read, fs_write, fs_list, fs_diff,
         //           pr_build, pr_status,
         //           ta_draft, ta_goal_inner, ta_plan (v0.4.1 macro goal tools)
+        //           ta_context (v0.5.4 memory store)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 12, "expected 12 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 13, "expected 13 tools, got: {:?}", names);
     }
 
     #[test]

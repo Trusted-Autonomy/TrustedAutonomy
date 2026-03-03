@@ -1,6 +1,6 @@
 [package]
 name = "ta-cli"
-version = "0.4.5-alpha"
+version = "0.5.0-alpha"
 edition = "2021"
 description = "CLI for goals, PR review, and approvals in Trusted Autonomy"
 license = "Apache-2.0"
@@ -30,6 +30,8 @@ libc = { workspace = true }
 
 # Internal crates
 ta-audit = { path = "../../crates/ta-audit" }
+ta-credentials = { path = "../../crates/ta-credentials" }
+ta-memory = { path = "../../crates/ta-memory" }
 ta-changeset = { path = "../../crates/ta-changeset" }
 ta-connector-fs = { path = "../../crates/ta-connectors/fs" }
 ta-goal = { path = "../../crates/ta-goal" }

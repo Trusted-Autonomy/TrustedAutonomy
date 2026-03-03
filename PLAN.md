@@ -1156,7 +1156,7 @@ access:
 > checkpoint, replay on apply.
 
 ### v0.5.0 — Credential Broker & Identity Abstraction
-<!-- status: pending -->
+<!-- status: done -->
 **Prerequisite for all external actions**: Agents must never hold raw credentials. TA acts as an identity broker — agents request access, TA provides scoped, short-lived session tokens.
 
 - **Credential vault**: TA stores OAuth tokens, API keys, database credentials in an encrypted local vault (age/sops or OS keychain integration). Agents never see raw secrets.
@@ -1181,7 +1181,7 @@ services:
 ```
 
 ### v0.5.1 — MCP Tool Call Interception
-<!-- status: pending -->
+<!-- status: done -->
 **Core**: Intercept outbound MCP tool calls that change external state. Hold them in the draft as pending actions. Replay on apply.
 
 - **MCP action capture**: When an agent calls an MCP tool (e.g., `gmail_send`, `slack_post`, `tweet_create`), TA intercepts the call, records the tool name + arguments + timestamp in the draft as a `PendingAction`
@@ -1210,7 +1210,7 @@ pub struct PendingAction {
 - TA only adds: credential brokering, interception, capture, display, approval, replay.
 
 ### v0.5.2 — Minimal Web Review UI
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: A single-page web UI served by `ta daemon` at localhost for draft review and approval. Unblocks non-CLI users.
 
 - **Scope**: View draft list, view draft detail (same as `ta draft view`), approve/reject/comment per artifact and per action. That's it.
@@ -1219,7 +1219,7 @@ pub struct PendingAction {
 - **Foundation**: This becomes the shell that the full web app (v0.9) fills in.
 
 ### v0.5.3 — Additional ReviewChannel Adapters
-<!-- status: pending -->
+<!-- status: done -->
 > Moved up from v0.10 — non-dev users need notifications from day one of MCP usage.
 
 > **Architecture note**: These are implementations of the `ReviewChannel` trait from v0.4.1.1, not a separate notification system. Every interaction point (draft review, approval, plan negotiation, escalation) flows through the same trait — adding a channel adapter means all interactions work through that medium automatically.
@@ -1236,7 +1236,7 @@ pub struct PendingAction {
 - **ISO/IEC 42001 A.10.3**: Third-party AI component management via governance wrapper
 
 ### v0.5.4 — Context Memory Store (ruvector integration)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Agent-agnostic persistent memory that works across agent frameworks. When a user switches from Claude Code to Codex mid-project, or runs multiple agents in parallel, context doesn't get lost. TA owns the memory — agents consume it.
 
 > **Problem today**: Each agent framework has its own memory (Claude Code's CLAUDE.md/project memory, Codex's session state, Cursor's codebase index). None of it transfers. TA currently relies on "agent-native mechanisms" for session resume, which means TA has no control over context persistence. A user who switches agents mid-goal starts from scratch.
@@ -1320,6 +1320,152 @@ ta context forget <id>                                               # delete en
 | **v0.8.1 Community memory** | ruvector becomes the backing store. Local → shared is just a sync layer on top. |
 | **v0.4.2 Drift detection** | Store agent behavioral baselines as vectors. Detect when new behavior deviates from learned patterns. |
 | **v1.0 Virtual office** | Role-specific memory: "the code reviewer role remembers common review feedback for this codebase." |
+
+### v0.5.5 — RuVector Memory Backend
+<!-- status: pending -->
+**Goal**: Replace the filesystem JSON backend with [ruvector](https://github.com/ruvnet/ruvector) for semantic search, self-learning retrieval, and sub-millisecond recall at scale. The `MemoryStore` trait stays the same — this is a backend swap behind a cargo feature flag.
+
+> **Why now**: v0.5.4 shipped the `MemoryStore` trait and `FsMemoryStore` backend. That's sufficient for key-value recall by exact match or prefix. But the real value of persistent memory is *semantic retrieval* — "find memories similar to this problem" — which requires vector embeddings and approximate nearest-neighbor search. ruvector provides this in pure Rust with zero external services.
+
+#### Implementation
+
+- **New file**: `crates/ta-memory/src/ruvector_store.rs` — `RuVectorStore` implementing `MemoryStore`
+- **Cargo feature**: `ruvector` in `crates/ta-memory/Cargo.toml`, optional dependency on `ruvector` crate
+- **Trait extension**: Add `semantic_search(&self, query: &str, k: usize) -> Result<Vec<MemoryEntry>>` to `MemoryStore` (with default no-op impl for `FsMemoryStore`)
+- **Embedding pipeline**: On `store()`, generate a vector embedding from the value. Options:
+  1. Use ruvector's built-in SONA engine for zero-config embeddings
+  2. Use agent LLM as embedding source (higher quality, adds API cost)
+  3. Ship a small local ONNX model (~50MB) for offline embeddings
+  Decision: Start with ruvector's native embeddings; add LLM embeddings as opt-in.
+- **HNSW index**: ruvector's HNSW indexing provides O(log n) semantic recall vs O(n) filesystem scan
+- **Self-learning**: ruvector's GNN layer improves search quality over time as agents store/query context — no explicit retraining needed
+- **Storage format**: Single `.rvf` cognitive container file at `.ta/memory.rvf` (replaces JSON directory)
+- **Migration**: Auto-import existing `.ta/memory/*.json` entries on first run when `ruvector` feature is enabled
+
+#### Config
+
+```toml
+# .ta/workflow.toml
+[memory]
+backend = "ruvector"      # "filesystem" (default) or "ruvector"
+embedding_model = "sona"  # "sona" (built-in), "local-onnx", or "llm"
+# ruvector_path = ".ta/memory.rvf"  # default
+```
+
+#### CLI changes
+```bash
+# Semantic search (only available with ruvector backend)
+ta context recall "how do we handle authentication" --semantic
+
+# Existing exact-match still works
+ta context recall "auth-token-pattern"  # exact key match
+```
+
+#### Tests (minimum 8)
+Store/recall round-trip, semantic search returns relevant results, self-learning improves ranking after repeated queries, migration from filesystem, feature-flag gating (fs-only build still compiles), concurrent access safety, HNSW index rebuild, empty-store search returns empty.
+
+### v0.5.6 — Framework-Agnostic Agent State
+<!-- status: pending -->
+**Goal**: Use TA's memory store as the canonical source of project state so users can switch between agentic frameworks (Claude Code, Codex, Cursor, Claude Flow, etc.) across tasks — or run them simultaneously — without losing context or locking into any framework's native state management.
+
+> **Problem today**: Each framework keeps its own state. Claude Code has CLAUDE.md and project memory. Codex has session state. Cursor has codebase indices. None of it transfers. When you switch agents mid-project, the new agent starts cold — it doesn't know what the previous agent learned, what conventions the human established, or what approaches were tried and rejected.
+
+> **TA's advantage**: TA already wraps every agent framework. It sees every goal, every draft, every approval, every rejection. It can capture this knowledge into the memory store and inject it into *any* agent's context on the next run, regardless of framework.
+
+#### Automatic state capture (opt-in per workflow)
+
+```toml
+# .ta/workflow.toml
+[memory.auto_capture]
+on_goal_complete = true    # Extract "what worked" patterns from approved drafts
+on_draft_reject = true     # Store rejection reason + what the agent tried (learn from mistakes)
+on_human_guidance = true   # Store human feedback from interactive sessions
+on_repeated_correction = true  # Auto-promote to persistent memory ("user always wants X")
+```
+
+Capture events:
+- **Goal completion** → extract working patterns, conventions discovered, successful approaches
+- **Draft rejection** → record what was tried, why it failed, what the human said — prevents repeating mistakes
+- **Human guidance** → "always use tempfile::tempdir()" becomes persistent knowledge, not session-ephemeral
+- **Repeated corrections** → if the human corrects the same pattern 3 times, TA auto-stores it as a persistent preference
+
+#### Context injection on agent launch
+
+When `ta run` launches any agent, TA:
+1. Queries the memory store for entries relevant to the goal title, objective, and affected file paths
+2. Ranks by relevance (semantic if ruvector, tag-match if filesystem)
+3. Injects top-K entries into the agent's context:
+   - For Claude Code: appended to CLAUDE.md injection
+   - For Codex: included in system prompt
+   - For custom agents: available via `ta_context` MCP tool at session start
+4. The agent sees unified project knowledge regardless of which agent produced it
+
+#### MCP tool: `ta_context` (already exists from v0.5.4)
+
+Extended with framework metadata:
+```bash
+# Agent stores a convention it discovered
+ta_context store --key "test-conventions" \
+  --value '{"pattern": "Use tempfile::tempdir() for all filesystem tests"}' \
+  --tags "convention,testing" \
+  --source "claude-code:goal-abc123"
+
+# Different agent recalls it in a later session
+ta_context recall "test-conventions"
+# → Returns the entry regardless of which agent stored it
+```
+
+#### State categories
+
+| Category | Example | Capture trigger |
+|----------|---------|----------------|
+| **Conventions** | "Use 4-space indent", "Always run clippy" | Human guidance, repeated corrections |
+| **Architecture** | "Auth module is in src/auth/", "Uses JWT not sessions" | Goal completion, draft review |
+| **History** | "Tried Redis caching, rejected — too complex for MVP" | Draft rejection |
+| **Preferences** | "Human prefers small PRs", "Never auto-commit" | Repeated human behavior patterns |
+| **Relationships** | "config.toml depends on src/config.rs" | Draft dependency analysis |
+
+#### Tests (minimum 6)
+Auto-capture on goal complete, auto-capture on rejection, context injection into CLAUDE.md, context injection via MCP tool, cross-framework recall (store from "claude-code", recall from "codex"), repeated-correction auto-promotion.
+
+### v0.5.7 — Semantic Memory Queries & Memory Dashboard
+<!-- status: pending -->
+**Goal**: Rich querying and visualization of the memory store. Enables users to audit what TA has learned, curate memory entries, and understand how memory influences agent behavior.
+
+- **Semantic CLI queries**:
+  ```bash
+  ta context search "how to handle errors in this project"  # semantic search
+  ta context similar <entry-id>                              # find related entries
+  ta context explain <entry-id>                              # show provenance chain
+  ta context stats                                           # memory usage, entry counts by category
+  ```
+
+- **Memory dashboard in web UI** (extends v0.5.2):
+  - New tab: `/memory` — browse, search, edit, delete memory entries
+  - Provenance view: which goal/agent/session created each entry
+  - Usage analytics: which memories get recalled most, which are stale
+  - Manual entry creation: human adds knowledge directly
+
+- **Memory lifecycle**:
+  - TTL support: entries can expire (`ta context store --expires-in 30d`)
+  - Confidence scoring: entries from approved drafts rank higher than auto-captured
+  - Conflict resolution: when two agents store contradictory memories, flag for human arbitration
+  ```bash
+  ta context conflicts       # List contradictory entries
+  ta context resolve <id>    # Human picks the canonical version
+  ```
+
+- **Web UI API routes** (extends v0.5.2 web.rs):
+  ```
+  GET  /api/memory           → list memory entries (JSON)
+  GET  /api/memory/search    → semantic search (?q=query)
+  POST /api/memory           → create entry
+  DELETE /api/memory/:id     → delete entry
+  GET  /api/memory/stats     → usage statistics
+  ```
+
+#### Tests (minimum 6)
+Semantic search API, entry expiration, conflict detection, web UI memory list, provenance chain, stats endpoint.
 
 ---
 
