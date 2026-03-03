@@ -50,7 +50,7 @@ Every state-changing action an agent proposes is staged before it touches the re
 
 ```rust
 trait ResourceMediator: Send + Sync {
-    fn scheme(&self) -> &str;           // "fs", "gmail", "db", "mcp"
+    fn scheme(&self) -> &str;           // "fs", "email", "db", "api"
     fn stage(&self, action: ProposedAction) -> Result<StagedMutation>;
     fn preview(&self, staged: &StagedMutation) -> Result<MutationPreview>;
     fn apply(&self, staged: &StagedMutation) -> Result<ApplyResult>;
@@ -59,20 +59,34 @@ trait ResourceMediator: Send + Sync {
 }
 ```
 
+**URI schemes are categories, not products.** `email://` is the scheme; Gmail, Outlook, Fastmail are provider variants configured via credentials. Same pattern: `db://` with Postgres/MySQL/SQLite variants, `cloud://` with AWS/GCP/Azure variants.
+
+| Scheme | Provider examples | Staging mechanism |
+|---|---|---|
+| `fs://` | local filesystem | Copy to staging directory |
+| `email://` | Gmail, Outlook, Fastmail | Create draft via provider API |
+| `db://` | Postgres, MySQL, SQLite | Record SQL in transaction log |
+| `api://` | Any MCP tool call | Serialize request + parameters |
+| `social://` | Twitter/X, LinkedIn, Bluesky | Create draft post |
+| `cloud://` | AWS, GCP, Azure | Record IaC change / API call |
+
 **Core vs. extension:**
 - Core: `ResourceMediator` trait, `FsMediator` (wraps existing `FsConnector` + `StagingWorkspace`)
-- Extension: `EmailMediator`, `DbMediator`, `ApiMediator` — each a separate crate
+- Extension: `EmailMediator`, `DbMediator`, `ApiMediator` — each a separate crate with provider-specific adapters
 
 **Configuration** (`.ta/config.yaml`):
 ```yaml
 mediators:
   fs:
     enabled: true              # always on
-  gmail:
+  email:
     enabled: true
+    provider: gmail            # provider variant
     credential: "gmail-oauth"  # references CredentialVault entry
   db:
     enabled: false             # opt-in
+    provider: postgres
+    credential: "pg-prod"
 ```
 
 **Opt-in scope:** File mediation is always on. Other mediators are enabled explicitly by the human, not the agent. You would NOT mediate a resource when: (a) it's read-only, (b) it's in a sandbox with no real-world effect, or (c) the cost of review exceeds the cost of the mistake.
@@ -89,12 +103,35 @@ mediators:
 
 Every proposed action is evaluated against policy before staging. The policy engine is default-deny — no manifest means denied.
 
-**Unified PolicyDocument** — all policy inputs merge:
+#### Policy cascade: layers that stack
+
+Policies compose through a layered cascade. Each layer can tighten but never loosen the layer above it:
+
 ```
-built_in_defaults + .ta/policy.yaml + agents/<name>.yaml + constitutions/goal-<id>.yaml + CLI overrides
+┌─────────────────────────────────────────────┐
+│  1. Built-in defaults (hardcoded)           │  Path traversal always denied.
+│     Cannot be overridden.                   │  Approval-required verbs enforced.
+├─────────────────────────────────────────────┤
+│  2. Project policy (.ta/policy.yaml)        │  Global rules for this project.
+│     Sets the baseline for all agents/goals. │  Schemes, escalation, security level.
+├─────────────────────────────────────────────┤
+│  3. Workflow policy (.ta/workflows/*.yaml)  │  Per-workflow overrides.
+│     E.g., "code-review" vs. "email-triage"  │  Can restrict, cannot expand.
+├─────────────────────────────────────────────┤
+│  4. Agent profile (agents/<name>.yaml)      │  Per-agent capabilities.
+│     E.g., claude-code vs. codex             │  Bounded actions, forbidden actions.
+├─────────────────────────────────────────────┤
+│  5. Goal constitution (.ta/constitutions/)  │  Per-goal scope.
+│     E.g., "this goal can only touch src/"   │  Narrowest scope wins.
+├─────────────────────────────────────────────┤
+│  6. CLI overrides (flags)                   │  Session-level tweaks.
+│     E.g., --auto-approve, --strict          │  Temporary, not persisted.
+└─────────────────────────────────────────────┘
 ```
 
-**Central configuration** (`.ta/policy.yaml`):
+**Resolution rule:** At each layer, rules can only add restrictions or escalation triggers — never remove them. If the project policy says `email: { approval_required: [send] }`, a workflow policy cannot set `email: { approval_required: [] }`. It can add `email: { approval_required: [send, delete] }`.
+
+**Project policy** (`.ta/policy.yaml`):
 ```yaml
 version: "1"
 
@@ -107,7 +144,7 @@ defaults:
 schemes:
   fs:
     approval_required: [apply, delete]
-  gmail:
+  email:
     approval_required: [send, delete]
     credential_required: true
   db:
@@ -119,6 +156,27 @@ escalation:
   - breaking_change
   - budget_exceeded
   - external_communication
+```
+
+**Workflow policy** (`.ta/workflows/code-review.yaml`):
+```yaml
+extends: .ta/policy.yaml         # inherits project defaults
+schemes:
+  fs:
+    file_patterns: ["src/**", "tests/**"]   # restrict to source files only
+    approval_required: [apply, delete]
+auto_approve:
+  supervisor: true                # enable constitutional auto-approval
+  risk_score_max: 20
+```
+
+**Goal constitution** (`.ta/constitutions/goal-<id>.yaml`):
+```yaml
+# Narrowest scope — this specific goal can only touch these URIs
+allowed_uris:
+  - "fs://workspace/src/auth/**"
+  - "fs://workspace/tests/auth/**"
+enforcement: error                # violations block the draft
 ```
 
 **Runtime-aware decisions** via `PolicyContext`:
@@ -143,9 +201,7 @@ This enables rules like "allow file writes, but escalate after 50 writes" or "al
 | Supervised | Every state-changing action needs approval | Production, external comms |
 | Strict | Everything logged, constitutions required | Regulated environments |
 
-**Paid add-on: Policy Studio** — generates `.ta/policy.yaml` interactively, maps to compliance frameworks (ISO 42001, EU AI Act), analyzes drift patterns and recommends tighter rules. The open-source engine evaluates any YAML you give it; the Studio generates better YAML faster.
-
-**Extension point for projects on top:** Virtual Office and Infra Ops generate `AlignmentProfile` YAML and `AccessConstitution` YAML that TA consumes. Projects own the "smart security plan" generation; TA owns the enforcement.
+**Extension point — policy generation:** TA evaluates any YAML you give it. External tools (including the paid Policy Studio) can generate and validate policy YAML. Virtual Office and Infra Ops generate `AlignmentProfile` and `AccessConstitution` YAML that TA consumes. Projects own "smart security plan" generation; TA owns enforcement.
 
 **Crate:** `ta-policy` gains `PolicyDocument` loading. `ta-audit` unchanged.
 
@@ -248,7 +304,7 @@ TA provides MCP tools, credential brokering, memory, and context injection. It d
 - Agent selection ("which agent for this task?")
 - Goal decomposition ("break this into sub-tasks")
 - Agent-to-agent communication
-- Tool implementation (TA intercepts calls, doesn't implement `gmail_send`)
+- Tool implementation (TA intercepts calls, doesn't implement `email_send`)
 
 **Extension points for projects on top:**
 - Virtual Office generates agent guidance + workflow definitions → TA consumes as `AlignmentProfile` + `AgentLaunchConfig`
@@ -357,14 +413,14 @@ struct ChannelRegistry {
 ## Data Flow (complete request)
 
 ```
-Agent calls gmail_send via MCP
+Agent calls email_send via MCP
   → L4 (Agent Integration): MCP gateway receives the tool call
-  → L2 (Supervision): PolicyEngine evaluates — check gmail grants, budget, drift
-  → L1 (Resource Mediation): EmailMediator.stage() → creates Gmail draft
+  → L2 (Supervision): PolicyEngine evaluates — check email:// grants, budget, drift
+  → L1 (Resource Mediation): EmailMediator.stage() → creates provider draft (Gmail, Outlook, etc.)
   → L3 (Session & Review): StagedMutation added to DraftPackage
   → L5 (IO): Slack notification — "Agent wants to send email to X, approve?"
   → Human approves via Slack
-  → L1 (Resource Mediation): EmailMediator.apply() → sends the email
+  → L1 (Resource Mediation): EmailMediator.apply() → sends via provider
   → L2 (Supervision): AuditLog records outcome
 ```
 
@@ -393,16 +449,17 @@ Agent calls gmail_send via MCP
 
 ---
 
-## Paid Add-On Surface
+## Paid Add-Ons
 
-| Add-On | Layer | What it provides |
-|---|---|---|
-| Policy Studio | L2 | Interactive policy YAML generation, compliance mapping (ISO 42001, EU AI Act), drift analysis |
-| Enterprise Channels | L5 | Teams, ServiceNow, PagerDuty channel implementations |
-| Advanced Mediators | L1 | Production DB mediator with rollback, cloud API mediator |
-| Compliance Reporting | L2 | Audit report generation for regulatory frameworks |
+Paid add-ons are convenience and enterprise features — they never gate core functionality. A solo developer can use TA fully with hand-written YAML and the terminal.
 
-**Boundary:** Open-source core has all traits, the default-deny engine, file mediation, terminal/web UI, and the audit trail. Paid add-ons provide convenience (Studio), enterprise integrations (channels, mediators), and compliance tooling (reports).
+**Boundary:** Open-source core has all traits, the default-deny engine, file mediation, terminal/web UI, and the audit trail. Paid add-ons provide better tooling, enterprise integrations, and compliance packaging.
+
+**Planned add-ons** (maintained in a separate project):
+- **Policy Studio** — Interactive policy YAML generation, compliance mapping, drift analysis
+- **Enterprise Channels** — Teams, ServiceNow, PagerDuty, Jira channel implementations
+- **Advanced Mediators** — Production DB (with staging overlay), cloud API, and social media mediators
+- **Compliance Reporting** — ISO 42001, EU AI Act, NIST AI RMF evidence package generation
 
 ---
 
