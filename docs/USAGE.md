@@ -810,6 +810,40 @@ ta context list --limit 10
 ta context forget "auth-architecture"
 ```
 
+#### New commands (v0.5.7)
+
+```bash
+# Semantic search (dedicated command)
+ta context search "how to handle errors in this project"
+ta context search "testing conventions" --limit 3
+
+# Find entries similar to an existing entry (by UUID)
+ta context similar a1b2c3d4-...
+
+# Show full provenance for an entry (by key or UUID)
+ta context explain "test-fixtures"
+
+# Memory store statistics
+ta context stats
+
+# Store with TTL, confidence, and category
+ta context store "temp-note" --value "remember this for 30 days" \
+  --expires-in 30d --confidence 0.9 --category convention
+
+# Filter list by category
+ta context list --category architecture
+```
+
+#### Memory dashboard (v0.5.7)
+
+When running `ta serve`, the web UI at `http://127.0.0.1:<port>` now includes a **Memory** tab alongside Drafts. The memory dashboard lets you:
+
+- Browse all memory entries with category badges and confidence bars
+- Search entries by key prefix
+- Create new entries directly from the UI
+- Delete entries
+- View aggregate statistics (total entries, by category, by source, average confidence)
+
 #### Semantic search with ruvector (optional)
 
 By default, context memory uses a filesystem backend (JSON files in `.ta/memory/`). For semantic search — "find memories *similar to* this query" — enable the ruvector backend:
@@ -818,7 +852,7 @@ By default, context memory uses a filesystem backend (JSON files in `.ta/memory/
 cargo install ta-cli --features ruvector
 ```
 
-With ruvector enabled, `--semantic` finds relevant entries by meaning rather than exact key match. Existing filesystem entries are auto-migrated on first use. The ruvector backend stores entries in `.ta/memory.rvf` using HNSW indexing for sub-millisecond recall.
+With ruvector enabled, `ta context search` and `ta context similar` find relevant entries by meaning rather than exact key match. Existing filesystem entries are auto-migrated on first use. The ruvector backend stores entries in `.ta/memory.rvf` using HNSW indexing for sub-millisecond recall.
 
 #### How agents use memory
 
@@ -844,10 +878,17 @@ Agent calls: ta_context {
 }
 ```
 
-And a `search` action for semantic search (requires ruvector backend):
+And additional actions (v0.5.6+):
 
 ```
+# Semantic search (requires ruvector backend)
 Agent calls: ta_context { action: "search", query: "testing conventions", limit: 5 }
+
+# Memory statistics (v0.5.7)
+Agent calls: ta_context { action: "stats" }
+
+# Find similar entries by ID (v0.5.7, requires ruvector)
+Agent calls: ta_context { action: "similar", key: "entry-uuid-here", limit: 5 }
 ```
 
 #### Automatic State Capture (v0.5.6)

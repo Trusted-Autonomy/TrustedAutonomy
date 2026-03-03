@@ -149,6 +149,8 @@ impl AutoCapture {
         let params = StoreParams {
             goal_id: Some(event.goal_id),
             category: Some(MemoryCategory::History),
+            confidence: Some(0.8),
+            ..Default::default()
         };
 
         store.store_with_params(&key, value, tags, "ta-system", params)?;
@@ -182,6 +184,8 @@ impl AutoCapture {
         let params = StoreParams {
             goal_id: Some(event.goal_id),
             category: Some(MemoryCategory::History),
+            confidence: Some(0.6),
+            ..Default::default()
         };
 
         store.store_with_params(&key, value, tags, "ta-system", params)?;
@@ -211,6 +215,8 @@ impl AutoCapture {
         let params = StoreParams {
             goal_id: event.goal_id,
             category: Some(MemoryCategory::Preference),
+            confidence: Some(0.9),
+            ..Default::default()
         };
 
         store.store_with_params(&key, value, tags, "ta-system", params)?;
@@ -255,6 +261,8 @@ impl AutoCapture {
             let params = StoreParams {
                 goal_id: None,
                 category: Some(MemoryCategory::Preference),
+                confidence: Some(0.9),
+                ..Default::default()
             };
             store.store_with_params(
                 &promo_key,
@@ -524,6 +532,7 @@ mod tests {
                 StoreParams {
                     goal_id: None,
                     category: Some(MemoryCategory::Convention),
+                    ..Default::default()
                 },
             )
             .unwrap();

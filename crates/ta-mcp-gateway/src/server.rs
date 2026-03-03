@@ -185,7 +185,7 @@ pub struct PlanToolParams {
 /// Parameters for `ta_context` (persistent memory tool, v0.5.4+).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ContextToolParams {
-    /// Action: "store", "recall", "list", "forget", or "search".
+    /// Action: "store", "recall", "list", "forget", "search", "stats", or "similar".
     pub action: String,
     /// Key for the memory entry (required for store, recall, forget).
     #[serde(default)]
@@ -1406,7 +1406,11 @@ impl TaGatewayServer {
                     .as_deref()
                     .map(ta_memory::MemoryCategory::from_str_lossy);
 
-                let store_params = ta_memory::StoreParams { goal_id, category };
+                let store_params = ta_memory::StoreParams {
+                    goal_id,
+                    category,
+                    ..Default::default()
+                };
                 let entry = state
                     .memory_store
                     .store_with_params(key, value, tags, source, store_params)
@@ -1550,9 +1554,90 @@ impl TaGatewayServer {
                         McpError::internal_error(e.to_string(), None)
                     })?]))
             }
+            "stats" => {
+                let stats = state
+                    .memory_store
+                    .stats()
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                let response = serde_json::json!({
+                    "total_entries": stats.total_entries,
+                    "by_category": stats.by_category,
+                    "by_source": stats.by_source,
+                    "expired_count": stats.expired_count,
+                    "avg_confidence": stats.avg_confidence,
+                    "oldest_entry": stats.oldest_entry.map(|t| t.to_rfc3339()),
+                    "newest_entry": stats.newest_entry.map(|t| t.to_rfc3339()),
+                });
+                Ok(CallToolResult::success(vec![Content::json(response)
+                    .map_err(|e| {
+                        McpError::internal_error(e.to_string(), None)
+                    })?]))
+            }
+            "similar" => {
+                let entry_id = params
+                    .key
+                    .as_deref()
+                    .ok_or_else(|| {
+                        McpError::invalid_params("key (entry_id) required for similar", None)
+                    })?;
+                let uuid: uuid::Uuid = entry_id.parse().map_err(|_| {
+                    McpError::invalid_params(
+                        format!("invalid UUID '{}' for similar lookup", entry_id),
+                        None,
+                    )
+                })?;
+                let k = params.limit.unwrap_or(5);
+
+                let entry = state
+                    .memory_store
+                    .find_by_id(uuid)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
+                    .ok_or_else(|| {
+                        McpError::invalid_params(
+                            format!("no entry found with ID '{}'", entry_id),
+                            None,
+                        )
+                    })?;
+
+                let query_text = match &entry.value {
+                    serde_json::Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                };
+
+                let results = state
+                    .memory_store
+                    .semantic_search(&query_text, k + 1)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                let items: Vec<serde_json::Value> = results
+                    .iter()
+                    .filter(|e| e.entry_id != uuid)
+                    .take(k)
+                    .map(|e| {
+                        serde_json::json!({
+                            "key": e.key,
+                            "value": e.value,
+                            "tags": e.tags,
+                            "source": e.source,
+                            "category": e.category.as_ref().map(|c| c.to_string()),
+                        })
+                    })
+                    .collect();
+
+                let response = serde_json::json!({
+                    "reference_key": entry.key,
+                    "count": items.len(),
+                    "similar": items,
+                });
+                Ok(CallToolResult::success(vec![Content::json(response)
+                    .map_err(|e| {
+                        McpError::internal_error(e.to_string(), None)
+                    })?]))
+            }
             _ => Err(McpError::invalid_params(
                 format!(
-                    "unknown action '{}'. Expected: store, recall, list, forget, search",
+                    "unknown action '{}'. Expected: store, recall, list, forget, search, stats, similar",
                     params.action
                 ),
                 None,

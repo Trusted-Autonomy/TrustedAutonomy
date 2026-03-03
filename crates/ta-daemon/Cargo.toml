@@ -22,6 +22,7 @@ tower-http = { workspace = true }
 # Internal crates
 ta-mcp-gateway = { path = "../ta-mcp-gateway" }
 ta-changeset = { path = "../ta-changeset" }
+ta-memory = { path = "../ta-memory" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
