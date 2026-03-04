@@ -1688,6 +1688,26 @@ New/modified files:
 - **Progressive disclosure**: Minimal config first, `ta setup refine` for more.
 - **Extension point**: Projects on top (Virtual Office, Infra Ops) can provide setup templates that `ta setup --template <name>` consumes.
 
+### v0.7.3 — Project Template Repository & `ta init`
+<!-- status: pending -->
+**Goal**: Starter project templates for different project types. `ta init` runs an agent to generate project structure, workflow config, memory key schema, and agent configs — all as a reviewable TA draft.
+
+- **`ta init`**: Creates a new TA-managed project from a template. Runs an agent to generate initial config.
+- **`ta init --template <name>`**: Use a named template (e.g., `rust-workspace`, `typescript-monorepo`, `python-ml`, `generic`).
+- **`ta init --detect`**: Auto-detect project type from existing files and generate appropriate TA config.
+- **Template contents**: Each template produces:
+  - `.ta/workflow.toml` — workflow config with sensible defaults for the project type
+  - `.ta/memory.toml` — key schema and backend config
+  - `.ta/policy.yaml` — starter policy with project-appropriate security level
+  - `.ta/agents/<framework>.yaml` — agent configs with bounded actions matching the project's toolchain
+  - `.taignore` — exclude patterns for the language/framework
+  - `.ta/constitutions/` — optional starter constitutions for common task types
+  - Seeded memory entries: `arch:module-map`, `conv:*` entries from the template
+- **Template repository**: Templates stored in a public repo (or bundled in the binary). Users can contribute templates via PR.
+- **Agent-assisted generation**: The init agent reads existing project files (Cargo.toml, package.json, etc.) and generates config tailored to the actual project structure — not just generic templates.
+- **Output is a draft**: Everything generated is a TA draft. User reviews before anything lands in the project.
+- **Integration with v0.7.2**: `ta setup` is interactive refinement of existing config; `ta init` is bootstrapping a new project. Both produce drafts.
+
 ---
 
 ## v0.8 — Event System & Stable API *(release: tag v0.8.0-beta)*

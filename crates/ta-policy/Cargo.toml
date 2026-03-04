@@ -1,6 +1,6 @@
 [package]
 name = "ta-policy"
-version = "0.6.0-alpha"
+version = "0.6.3-alpha"
 edition = "2021"
 description = "Capability manifests and policy evaluation for Trusted Autonomy"
 license = "Apache-2.0"

@@ -1,6 +1,6 @@
 [package]
 name = "ta-submit"
-version = "0.4.5-alpha"
+version = "0.6.3-alpha"
 edition = "2021"
 description = "Submit adapters for VCS integration in Trusted Autonomy"
 license = "Apache-2.0"

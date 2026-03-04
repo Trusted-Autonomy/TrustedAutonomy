@@ -1,6 +1,6 @@
 [package]
 name = "ta-session"
-version = "0.6.0-alpha"
+version = "0.6.3-alpha"
 edition = "2021"
 description = "Session & Human Control Plane — continuous conversation lifecycle for TA goals"
 

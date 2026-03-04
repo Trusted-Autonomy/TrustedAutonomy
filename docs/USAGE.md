@@ -9,10 +9,47 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
 ## Table of Contents
 
 1. [Quick Start](#quick-start)
+   - [Install](#install)
+   - [Your first goal in three commands](#your-first-goal-in-three-commands)
+   - [Typical session workflow](#typical-session-workflow)
 2. [Core Concepts](#core-concepts)
+   - [The Staging Model](#the-staging-model)
+   - [Goals](#goals)
+   - [Drafts](#drafts)
+   - [Agents](#agents)
 3. [Common Workflows](#common-workflows)
+   - [Single Task](#single-task)
+   - [Follow-Up Iterations](#follow-up-iterations)
+   - [Macro Goals (multi-draft sessions)](#macro-goals-multi-draft-sessions)
+   - [Interactive Sessions (real-time streaming)](#interactive-sessions-real-time-streaming)
+   - [Macro vs Interactive: when to use which](#macro-vs-interactive-when-to-use-which)
+   - [Plan-Linked Goals](#plan-linked-goals)
+   - [Review Sessions](#review-sessions)
+   - [Correcting a Draft](#correcting-a-draft)
+   - [Draft Lifecycle Hygiene](#draft-lifecycle-hygiene)
 4. [Configuration](#configuration)
+   - [Workflow Config](#workflow-config-taworkflowtoml)
+   - [Agent Configuration](#agent-configuration)
+   - [Alignment Profiles](#alignment-profiles)
+   - [Access Constitutions](#access-constitutions)
+   - [Configurable Summary Exemption](#configurable-summary-exemption)
+   - [Plan Schema](#plan-schema-taplan-schemayaml)
 5. [Advanced Features](#advanced-features)
+   - [Selective Approval](#selective-approval)
+   - [Behavioral Drift Detection](#behavioral-drift-detection)
+   - [Conflict Detection](#conflict-detection)
+   - [External Diff Handlers](#external-diff-handlers)
+   - [Git Integration](#git-integration)
+   - [Release Pipeline](#release-pipeline)
+   - [Decision Observability](#decision-observability)
+   - [Credential Management](#credential-management)
+   - [Context Memory](#context-memory)
+   - [Web Review UI](#web-review-ui)
+   - [Webhook Review Channel](#webhook-review-channel)
+   - [MCP Tool Call Interception](#mcp-tool-call-interception)
+   - [Session Lifecycle](#session-lifecycle)
+   - [Unified Policy Config](#unified-policy-config)
+   - [Resource Mediation](#resource-mediation)
 6. [Roadmap](#roadmap)
 7. [Troubleshooting](#troubleshooting)
 8. [Getting Help](#getting-help)
@@ -240,19 +277,19 @@ default_mode = "extend"       # "extend" (reuse staging) or "standalone" (fresh 
 auto_supersede = true          # auto-supersede parent draft when extending
 ```
 
-### Macro Goals (Inner-Loop Iteration)
+### Macro Goals (multi-draft sessions)
 
-For complex tasks, let the agent stay in a single session and submit multiple drafts:
+For complex tasks that span multiple logical units of change, use `--macro`. The agent stays in a single long-running session and can submit multiple drafts for review without exiting.
 
 ```bash
-ta run "Build the v0.5 features" --source . --macro
+ta run "Build the v0.7 features" --source . --macro
 ```
 
-The agent receives MCP tools (`ta_draft`, `ta_goal_inner`, `ta_plan`) and can:
+**How it works**: The agent receives MCP tools (`ta_draft`, `ta_goal_inner`, `ta_plan`) and can:
 1. Work on a logical unit of change
-2. Build and submit a draft for review
-3. Wait for your approval or feedback
-4. Continue working based on your response
+2. Call `ta_draft { action: "build" }` to package changes
+3. Call `ta_draft { action: "submit" }` — this **blocks** until you respond
+4. Receive your feedback and continue to the next unit
 
 You review inline as the agent works:
 
@@ -266,46 +303,68 @@ You review inline as the agent works:
   Approved. Agent continuing...
 ```
 
-Use `d` to give feedback:
+Use `d` to give feedback that the agent will see and act on:
 
 ```
 > d please use the existing AuthError type from src/error.rs
 ```
 
-The agent receives your feedback and revises. Every sub-goal draft goes through the same human review gate.
+**When to use**: Multi-phase features, large refactors, anything where you want to review incremental progress rather than waiting for one big draft at the end.
 
-### Interactive Sessions
+### Interactive Sessions (real-time streaming)
 
-Run an interactive session with PTY capture and session lifecycle:
+Use `--interactive` when you want to **see what the agent is doing in real-time** and be able to inject guidance mid-session.
 
 ```bash
-ta run "Implement feature X" --source . --interactive
+ta run "Implement channel registry" --source . --interactive
 ```
 
-In interactive mode:
-- Agent output streams to your terminal in real-time
-- You can type guidance mid-session
+**How it works**: TA wraps the agent subprocess in a PTY, so:
+- Agent output streams to your terminal as it happens (you see edits, test runs, thinking)
+- You can type guidance at any time — TA routes it to the agent via the ReviewChannel
+- All interactions are logged in the session history
 - Sessions support pause/resume
 
 ```bash
 # Resume a paused session
 ta run --resume <session-id>
 
-# Or via the session subcommand
-ta session resume <session-id>
-
-# List sessions
-ta session list
-
-# View session details and history
-ta session show <session-id>
+# Session management
+ta session list                    # List sessions
+ta session show <session-id>       # View details and history
+ta session pause <session-id>      # Pause a running session
+ta session resume <session-id>     # Resume
+ta session abort <session-id>      # Cancel
 ```
 
-Combine with `--macro` for interactive inner-loop iteration:
+**When to use**: When you want visibility into the agent's process — watching it work, steering it when it goes off track, or learning how it approaches a problem.
+
+### Macro vs Interactive: when to use which
+
+These are **different concerns** and can be combined:
+
+| Flag | What it controls | Adds |
+|------|-----------------|------|
+| `--macro` | **Review loop** — agent can submit multiple drafts mid-session | MCP tools for draft/plan/sub-goal management |
+| `--interactive` | **I/O mode** — real-time PTY streaming + human input | PTY capture, stdin interleaving, session persistence |
+
+**Decision guide**:
+
+| Scenario | Recommended flags |
+|----------|------------------|
+| Simple single-file fix | *(neither)* — default mode, one draft on exit |
+| Complex feature (multiple files, needs incremental review) | `--macro` |
+| Unfamiliar codebase (want to watch and steer) | `--interactive` |
+| Large multi-phase implementation with oversight | `--macro --interactive` |
+| CI/batch automation | *(neither)* — or `--macro` with `auto-approve` channel |
+
+**The full experience** — both flags together:
 
 ```bash
-ta run "Refactor auth" --source . --macro --interactive
+ta run "Build the v0.7 features" --source . --macro --interactive --phase v0.7.0
 ```
+
+You see the agent working in real-time, can inject guidance, and review each logical unit of change as it's submitted. This is the recommended mode for implementing plan phases.
 
 ### Plan-Linked Goals
 

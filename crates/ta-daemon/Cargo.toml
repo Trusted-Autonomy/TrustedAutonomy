@@ -1,6 +1,6 @@
 [package]
 name = "ta-daemon"
-version = "0.4.5-alpha"
+version = "0.6.3-alpha"
 edition = "2021"
 description = "MCP server daemon for Trusted Autonomy"
 license = "Apache-2.0"
