@@ -1195,8 +1195,8 @@ fn inject_claude_md(
         String::new()
     };
 
-    // Build memory context section from prior sessions (v0.5.6).
-    let memory_section = build_memory_context_section_for_inject(config, title);
+    // Build memory context section from prior sessions (v0.6.3: phase-aware).
+    let memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
 
     let injected = format!(
         r#"# Trusted Autonomy — Mediated Goal
@@ -1326,6 +1326,7 @@ fn auto_capture_goal_completion(
         agent_framework: goal.agent_id.clone(),
         change_summary,
         changed_files,
+        phase_id: goal.plan_phase.clone(),
     };
 
     if let Err(e) = capture.on_goal_complete(&mut store, &event) {
@@ -1333,22 +1334,46 @@ fn auto_capture_goal_completion(
     }
 }
 
-/// Build a memory context section from prior sessions for CLAUDE.md injection (v0.5.6).
+/// Build a memory context section from prior sessions for CLAUDE.md injection (v0.6.3).
 ///
-/// Queries the memory store for relevant entries and formats them as a
-/// markdown section. Returns an empty string if no entries are found or
-/// if the memory store is unavailable.
-fn build_memory_context_section_for_inject(config: &GatewayConfig, goal_title: &str) -> String {
-    let memory_dir = config.workspace_root.join(".ta").join("memory");
-    let store = ta_memory::FsMemoryStore::new(&memory_dir);
-
-    // Load auto-capture config for max_context_entries setting.
+/// Phase-aware: filters entries by the current plan phase. Uses RuVector
+/// for semantic search when available, falling back to FsMemoryStore.
+fn build_memory_context_section_for_inject(
+    config: &GatewayConfig,
+    goal_title: &str,
+    phase_id: Option<&str>,
+) -> String {
     let workflow_toml = config.workspace_root.join(".ta").join("workflow.toml");
     let capture_config = ta_memory::auto_capture::load_config(&workflow_toml);
     let max_entries = capture_config.max_context_entries;
 
-    ta_memory::auto_capture::build_memory_context_section(&store, goal_title, max_entries)
-        .unwrap_or_default()
+    // v0.6.3: Try RuVector backend first for semantic search.
+    #[cfg(feature = "ruvector")]
+    {
+        let rvf_path = config.workspace_root.join(".ta").join("memory.rvf");
+        if rvf_path.exists() {
+            if let Ok(store) = ta_memory::RuVectorStore::open(&rvf_path) {
+                return ta_memory::auto_capture::build_memory_context_section_with_phase(
+                    &store,
+                    goal_title,
+                    max_entries,
+                    phase_id,
+                )
+                .unwrap_or_default();
+            }
+        }
+    }
+
+    // Fallback: FsMemoryStore.
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let store = ta_memory::FsMemoryStore::new(&memory_dir);
+    ta_memory::auto_capture::build_memory_context_section_with_phase(
+        &store,
+        goal_title,
+        max_entries,
+        phase_id,
+    )
+    .unwrap_or_default()
 }
 
 /// Restore the original CLAUDE.md content before computing diffs.

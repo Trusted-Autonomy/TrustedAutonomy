@@ -893,13 +893,9 @@ When running `ta serve`, the web UI at `http://127.0.0.1:<port>` now includes a 
 
 #### Semantic search with ruvector (optional)
 
-By default, context memory uses a filesystem backend (JSON files in `.ta/memory/`). For semantic search — "find memories *similar to* this query" — enable the ruvector backend:
+Since v0.6.3, the ruvector backend is **enabled by default**, providing semantic search out of the box. `ta context search` and `ta context similar` find relevant entries by meaning rather than exact key match. Existing filesystem entries are auto-migrated on first use. The ruvector backend stores entries in `.ta/memory.rvf` using HNSW indexing for sub-millisecond recall.
 
-```bash
-cargo install ta-cli --features ruvector
-```
-
-With ruvector enabled, `ta context search` and `ta context similar` find relevant entries by meaning rather than exact key match. Existing filesystem entries are auto-migrated on first use. The ruvector backend stores entries in `.ta/memory.rvf` using HNSW indexing for sub-millisecond recall.
+To use the filesystem-only backend instead, set `backend = "fs"` in `.ta/memory.toml`.
 
 #### How agents use memory
 
@@ -959,8 +955,8 @@ All settings default to `true` (enabled). Create `.ta/workflow.toml` to customiz
 
 | Event | What's stored | Category |
 |-------|--------------|----------|
-| Goal completes | Title, changed files, change summary | history |
-| Draft rejected | What was attempted, rejection reason | history |
+| Goal completes | Title, changed files, change summary, module map | history, architecture |
+| Draft rejected | What was attempted, rejection reason | negative_path |
 | Human guidance | The guidance text and tags | preference |
 | Repeated correction | Promoted to persistent preference | preference |
 
@@ -968,13 +964,54 @@ All settings default to `true` (enabled). Create `.ta/workflow.toml` to customiz
 
 When `ta run` launches an agent, it queries the memory store and injects relevant entries into a "Prior Context" section in CLAUDE.md. This means every agent starts with knowledge from all previous sessions, regardless of which framework produced it.
 
+**Phase-aware injection (v0.6.3)**: When a goal is linked to a plan phase (`--phase v0.6.3`), only entries matching that phase or global entries (no phase) are injected. Entries are grouped by category with priority ordering: Architecture > Negative Paths > Conventions > State > History.
+
+**Semantic ranking**: With the ruvector backend (now default), injection uses semantic similarity to rank entries by relevance to the goal title.
+
+#### Project-Aware Key Schema (v0.6.3)
+
+Memory keys use `{domain}:{topic}` format with domains auto-detected from your project type:
+
+| Project Type | Detected By | Module Map Key | Type System Key |
+|---|---|---|---|
+| Rust workspace | `Cargo.toml` with `[workspace]` | `arch:crate-map` | `arch:trait:*` |
+| TypeScript | `package.json` + `tsconfig.json` | `arch:package-map` | `arch:interface:*` |
+| Python | `pyproject.toml` | `arch:module-map` | `arch:protocol:*` |
+| Go | `go.mod` | `arch:package-map` | `arch:interface:*` |
+| Generic | fallback | `arch:component-map` | `arch:type:*` |
+
+Inspect your project's key schema:
+
+```bash
+ta context schema
+```
+
+Override auto-detection via `.ta/memory.toml`:
+
+```toml
+[project]
+type = "rust-workspace"
+
+[key_domains]
+module_map = "crate-map"
+type_system = "trait"
+
+backend = "ruvector"   # default; or "fs" for filesystem-only
+```
+
+#### Negative Paths (v0.6.3)
+
+When a draft is rejected, TA stores it as a **negative path** entry (`negative_path` category) with a `neg:{phase}:{slug}` key. Future agents see these during context injection and avoid repeating the same mistakes.
+
 #### What gets stored
 
 | Category | Example | How it's captured |
 |----------|---------|-------------------|
 | **Conventions** | "Use 4-space indent", "Run clippy before commit" | Human guidance, repeated corrections, auto-capture |
-| **Architecture** | "Auth is JWT-based, module at src/auth/" | Goal completion auto-capture, agent via MCP |
-| **History** | "Tried Redis caching, rejected -- too complex for MVP" | Draft rejection auto-capture |
+| **Architecture** | "Auth is JWT-based, module at src/auth/" | Goal completion auto-capture (v0.6.3: module extraction), agent via MCP |
+| **Negative Paths** | "Tried Redis caching, rejected -- too complex for MVP" | Draft rejection auto-capture (v0.6.3) |
+| **State** | "Plan progress snapshot", "dependency graph" | Agent stores via MCP (v0.6.3) |
+| **History** | "Goal completed: fixed auth bug" | Goal completion auto-capture |
 | **Preferences** | "Human prefers small focused PRs" | Repeated correction auto-promotion |
 | **Relationships** | "config.toml depends on src/config.rs" | Agent stores via MCP |
 

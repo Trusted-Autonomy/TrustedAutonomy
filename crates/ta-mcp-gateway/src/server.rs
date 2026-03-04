@@ -998,6 +998,7 @@ impl TaGatewayServer {
                                             .reasoning
                                             .clone()
                                             .unwrap_or_else(|| "denied".to_string()),
+                                        phase_id: goal.plan_phase.clone(),
                                     };
                                     let capture =
                                         AutoCapture::new(state.auto_capture_config.clone());

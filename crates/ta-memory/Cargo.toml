@@ -1,6 +1,6 @@
 [package]
 name = "ta-memory"
-version = "0.5.7-alpha"
+version = "0.6.3-alpha"
 edition = "2021"
 description = "Agent-agnostic persistent memory store for Trusted Autonomy"
 license = "Apache-2.0"
@@ -8,7 +8,7 @@ repository = "https://github.com/trustedautonomy/ta"
 homepage = "https://github.com/trustedautonomy/ta"
 
 [features]
-default = []
+default = ["ruvector"]
 ruvector = ["dep:ruvector-core"]
 
 [dependencies]

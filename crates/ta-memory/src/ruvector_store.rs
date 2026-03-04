@@ -151,6 +151,7 @@ impl MemoryStore for RuVectorStore {
             category: params.category,
             expires_at: params.expires_at,
             confidence: params.confidence.unwrap_or(0.5),
+            phase_id: params.phase_id,
             created_at,
             updated_at: now,
         };
@@ -201,6 +202,13 @@ impl MemoryStore for RuVectorStore {
                 if let Some(ref cat) = query.category {
                     if e.category.as_ref() != Some(cat) {
                         return false;
+                    }
+                }
+                // Phase filter: match entries for this phase OR global entries (v0.6.3).
+                if let Some(ref phase) = query.phase_id {
+                    match &e.phase_id {
+                        Some(entry_phase) if entry_phase != phase => return false,
+                        _ => {} // None (global) or matching phase — include
                     }
                 }
                 true
@@ -360,6 +368,9 @@ fn entry_to_metadata(entry: &MemoryEntry) -> HashMap<String, serde_json::Value> 
         meta.insert("expires_at".into(), serde_json::json!(exp.to_rfc3339()));
     }
     meta.insert("confidence".into(), serde_json::json!(entry.confidence));
+    if let Some(ref phase) = entry.phase_id {
+        meta.insert("phase_id".into(), serde_json::json!(phase));
+    }
     meta
 }
 
@@ -415,6 +426,11 @@ fn metadata_to_entry(rv_entry: &RvEntry) -> Option<MemoryEntry> {
         .and_then(|v| v.as_f64())
         .unwrap_or(0.5);
 
+    let phase_id = meta
+        .get("phase_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     Some(MemoryEntry {
         entry_id,
         key,
@@ -425,6 +441,7 @@ fn metadata_to_entry(rv_entry: &RvEntry) -> Option<MemoryEntry> {
         category,
         expires_at,
         confidence,
+        phase_id,
         created_at,
         updated_at,
     })
@@ -566,6 +583,7 @@ mod tests {
             category: None,
             expires_at: None,
             confidence: 0.5,
+            phase_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

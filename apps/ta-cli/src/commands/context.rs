@@ -5,7 +5,7 @@
 
 use clap::Subcommand;
 use ta_mcp_gateway::GatewayConfig;
-use ta_memory::{FsMemoryStore, MemoryQuery, MemoryStore};
+use ta_memory::{FsMemoryStore, KeySchema, MemoryQuery, MemoryStore};
 
 #[derive(Subcommand)]
 pub enum ContextCommands {
@@ -83,6 +83,8 @@ pub enum ContextCommands {
         /// Key to delete.
         key: String,
     },
+    /// Show the project's key schema and domain mapping (v0.6.3).
+    Schema,
 }
 
 pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -132,6 +134,7 @@ pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<
             *limit,
         ),
         ContextCommands::Forget { key } => forget_entry(&memory_dir, key),
+        ContextCommands::Schema => show_schema(config),
     }
 }
 
@@ -182,6 +185,7 @@ fn store_entry(
         category: category.map(ta_memory::MemoryCategory::from_str_lossy),
         expires_at,
         confidence,
+        ..Default::default()
     };
 
     let entry = store.store_with_params(key, json_value, tags.to_vec(), "cli", params)?;
@@ -428,6 +432,7 @@ fn list_entries(
             goal_id: None,
             category: category.map(ta_memory::MemoryCategory::from_str_lossy),
             limit,
+            ..Default::default()
         })?
     };
 
@@ -476,5 +481,30 @@ fn forget_entry(memory_dir: &std::path::Path, key: &str) -> anyhow::Result<()> {
     } else {
         println!("No memory entry found for key '{}'", key);
     }
+    Ok(())
+}
+
+fn show_schema(config: &GatewayConfig) -> anyhow::Result<()> {
+    let schema = KeySchema::resolve(&config.workspace_root);
+
+    println!("Memory Key Schema (v0.6.3)");
+    println!("{}", "=".repeat(50));
+    println!("  Project type:  {}", schema.project_type);
+    println!("  Backend:       {}", schema.backend);
+    println!();
+    println!("  Key domains:");
+    println!("    Module map:  arch:{}", schema.domains.module_map);
+    println!("    Module:      arch:{}:<name>", schema.domains.module);
+    println!(
+        "    Type system: arch:{}:<name>",
+        schema.domains.type_system
+    );
+    println!("    Build tool:  arch:{}:<name>", schema.domains.build_tool);
+    println!();
+    println!("  Special keys:");
+    println!("    Negative:    neg:<phase>:<slug>");
+    println!("    State:       state:<topic>");
+    println!();
+    println!("  Configure: .ta/memory.toml (optional)");
     Ok(())
 }

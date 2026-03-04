@@ -1544,7 +1544,7 @@ Auto-capture on goal complete, auto-capture on rejection, context injection into
 - Output alignment with DraftPackage.changes (needs draft builder integration)
 
 ### v0.6.3 — Active Memory Injection & Project-Aware Key Schema
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Agents start smart. Instead of spending hours exploring the codebase, `ta run` injects structured architectural knowledge, conventions, negative paths, and project state from the memory store into the agent's context. Keys are project-aware (auto-detected from project type) and phase-tagged.
 
 > **Problem today**: Memory captures lifecycle events (goal completions, rejections) but not active project state. Agents launched via `ta run` still spend extensive time re-discovering crate maps, trait signatures, coding patterns, and module relationships that previous sessions already established.
@@ -1625,6 +1625,24 @@ New/modified files:
 - Architectural knowledge extraction from goal completion
 - RuVector semantic search as primary injection path
 - Backward compatibility (old entries without phase_id work)
+
+#### Completed ✅
+- ✅ `NegativePath` and `State` MemoryCategory variants added to `store.rs`
+- ✅ `phase_id: Option<String>` added to `MemoryEntry`, `StoreParams`, `MemoryQuery`
+- ✅ Phase-aware filtering in `FsMemoryStore` and `RuVectorStore` lookup
+- ✅ `key_schema.rs` — project type detection (Rust, TS, Python, Go, Generic), `KeyDomainMap`, `.ta/memory.toml` config parsing, key generation helpers
+- ✅ `build_memory_context_section_with_phase()` — phase-filtered, category-prioritized, structured markdown output
+- ✅ Draft rejection auto-capture uses `NegativePath` category with `neg:{phase}:{slug}` keys
+- ✅ Goal completion auto-capture extracts architectural module map from `change_summary`
+- ✅ `build_memory_context_section_for_inject()` uses RuVector backend when available, passes `plan_phase` for filtering
+- ✅ `ta context schema` CLI subcommand to inspect key domain mapping
+- ✅ `ruvector` feature flag default-on in `ta-memory/Cargo.toml`
+- ✅ Version bumped to `0.6.3-alpha`
+- ✅ 10 new tests (5 in key_schema.rs, 5 in auto_capture.rs) covering all 8 required scenarios
+
+#### Remaining (deferred)
+- `.ta/memory.toml` backend toggle (ruvector vs fs) is parsed but not yet consumed by `run.rs` store construction (always uses RuVector-first fallback logic)
+- On human guidance domain auto-classification via key mapping (guidance events pass `phase_id` but don't use `KeyDomainMap` to classify domains)
 
 ---
 

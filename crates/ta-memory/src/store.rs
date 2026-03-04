@@ -26,6 +26,10 @@ pub enum MemoryCategory {
     Preference,
     /// File/module dependency relationships.
     Relationship,
+    /// Approaches tried and failed, with explanation (v0.6.3).
+    NegativePath,
+    /// Mutable project state snapshots (v0.6.3).
+    State,
     /// Uncategorized or user-defined.
     Other,
 }
@@ -38,6 +42,8 @@ impl std::fmt::Display for MemoryCategory {
             Self::History => write!(f, "history"),
             Self::Preference => write!(f, "preference"),
             Self::Relationship => write!(f, "relationship"),
+            Self::NegativePath => write!(f, "negative_path"),
+            Self::State => write!(f, "state"),
             Self::Other => write!(f, "other"),
         }
     }
@@ -52,6 +58,8 @@ impl MemoryCategory {
             "history" => Self::History,
             "preference" => Self::Preference,
             "relationship" => Self::Relationship,
+            "negative_path" => Self::NegativePath,
+            "state" => Self::State,
             _ => Self::Other,
         }
     }
@@ -76,6 +84,10 @@ pub struct MemoryEntry {
     /// auto-captured entries default to 0.5.
     #[serde(default = "default_confidence")]
     pub confidence: f64,
+    /// Plan phase this entry is associated with (v0.6.3).
+    /// Abstract string (not coupled to semver). Entries with `None` are global.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -114,6 +126,8 @@ pub struct MemoryQuery {
     pub goal_id: Option<Uuid>,
     /// Filter by category.
     pub category: Option<MemoryCategory>,
+    /// Filter by phase (v0.6.3). When set, returns entries matching this phase or global (None).
+    pub phase_id: Option<String>,
     /// Maximum number of results.
     pub limit: Option<usize>,
 }
@@ -132,6 +146,8 @@ pub struct StoreParams {
     pub expires_at: Option<DateTime<Utc>>,
     /// Confidence score 0.0–1.0 (v0.5.7). None uses the default (0.5).
     pub confidence: Option<f64>,
+    /// Plan phase to associate this entry with (v0.6.3).
+    pub phase_id: Option<String>,
 }
 
 /// Pluggable memory storage backend.
@@ -163,6 +179,7 @@ pub trait MemoryStore: Send + Sync {
         if let Some(c) = params.confidence {
             entry.confidence = c;
         }
+        entry.phase_id = params.phase_id;
         Ok(entry)
     }
 

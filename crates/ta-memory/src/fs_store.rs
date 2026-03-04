@@ -124,6 +124,7 @@ impl MemoryStore for FsMemoryStore {
             category: params.category,
             expires_at: params.expires_at,
             confidence: params.confidence.unwrap_or(0.5),
+            phase_id: params.phase_id,
             created_at,
             updated_at: now,
         };
@@ -165,6 +166,13 @@ impl MemoryStore for FsMemoryStore {
                 if let Some(ref cat) = query.category {
                     if e.category.as_ref() != Some(cat) {
                         return false;
+                    }
+                }
+                // Phase filter: match entries for this phase OR global entries (v0.6.3).
+                if let Some(ref phase) = query.phase_id {
+                    match &e.phase_id {
+                        Some(entry_phase) if entry_phase != phase => return false,
+                        _ => {} // None (global) or matching phase — include
                     }
                 }
                 true
