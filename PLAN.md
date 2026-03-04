@@ -1640,9 +1640,7 @@ New/modified files:
 - ✅ Version bumped to `0.6.3-alpha`
 - ✅ 10 new tests (5 in key_schema.rs, 5 in auto_capture.rs) covering all 8 required scenarios
 
-#### Remaining (deferred)
-- `.ta/memory.toml` backend toggle (ruvector vs fs) is parsed but not yet consumed by `run.rs` store construction (always uses RuVector-first fallback logic)
-- On human guidance domain auto-classification via key mapping (guidance events pass `phase_id` but don't use `KeyDomainMap` to classify domains)
+#### Remaining — moved to v0.7.4
 
 ---
 
@@ -1707,6 +1705,13 @@ New/modified files:
 - **Agent-assisted generation**: The init agent reads existing project files (Cargo.toml, package.json, etc.) and generates config tailored to the actual project structure — not just generic templates.
 - **Output is a draft**: Everything generated is a TA draft. User reviews before anything lands in the project.
 - **Integration with v0.7.2**: `ta setup` is interactive refinement of existing config; `ta init` is bootstrapping a new project. Both produce drafts.
+
+### v0.7.4 — Memory & Config Cleanup
+<!-- status: pending -->
+**Goal**: Wire up deferred memory integration points from v0.6.3.
+
+- **`.ta/memory.toml` backend toggle**: `run.rs` store construction currently always uses RuVector-first fallback logic. Wire the parsed `backend = "fs"` / `backend = "ruvector"` toggle so users can explicitly choose filesystem-only mode.
+- **Human guidance domain auto-classification**: Guidance events currently pass `phase_id` but don't use `KeyDomainMap` to classify domains. Route human guidance through the key schema so entries get project-appropriate keys (e.g., "always use bun" → `conv:build-tool` instead of a generic slug).
 
 ---
 
