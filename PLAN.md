@@ -1454,7 +1454,7 @@ Auto-capture on goal complete, auto-capture on rejection, context injection into
 - ✅ Tests: auto_capture_goal_complete, auto_capture_draft_rejection, context_injection_builds_markdown_section, cross_framework_recall, repeated_correction_auto_promotes, config_parsing_from_toml, config_defaults_when_no_section, disabled_capture_is_noop, slug_generation (9 new tests, 18 total in ta-memory)
 
 ### v0.5.7 — Semantic Memory Queries & Memory Dashboard
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Rich querying and visualization of the memory store. Enables users to audit what TA has learned, curate memory entries, and understand how memory influences agent behavior.
 
 **Completed**:
