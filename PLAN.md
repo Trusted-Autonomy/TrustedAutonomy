@@ -1995,7 +1995,7 @@ runtime = "native-cli"
 - Extension point documentation for Virtual Office / Infra Ops project subscriptions
 
 ### v0.8.1 — Solution Memory Export
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Extract reusable problem→solution knowledge from TA memory into a curated, git-committed datastore that ships with the project.
 
 - **`ta context export`**: Extracts `NegativePath` and `Convention` entries from `.ta/memory/` into a human-readable `solutions.toml` (or `.ta/solutions/` directory). Strips project-specific paths and IDs. Preserves the problem description, what was tried, why it failed/worked, and the resolution.
@@ -2012,6 +2012,37 @@ runtime = "native-cli"
 - ✅ `ta context import <path>` CLI: reads solutions.toml from local file, merges with deduplication, reports new vs duplicate counts
 - ✅ Injection at `ta run`: `build_solutions_section_for_inject()` adds "Known Solutions" section to CLAUDE.md, filtered by project type
 - ✅ Custom TOML serializer/parser for `solutions.toml` format (no `toml` crate dependency)
+
+### v0.8.2 — Developer Loop Refinements & Orchestrator Wiring
+<!-- status: pending -->
+**Goal**: Fix `ta dev` bugs and wire the orchestrator→implementation agent loop so `ta dev` can actually launch and monitor goals end-to-end.
+
+**Bug fix: `ta dev` no status summary on launch**: `ta dev` builds the plan summary into `--system-prompt` but never prints it to the terminal. The user sees "Starting interactive developer loop..." then Claude starts with no context. Fix: print plan progress + next pending phase to stdout before launching the agent. (`dev.rs:232`)
+
+**Bug fix: `ta dev` no memory injection**: `ta dev` bypasses `build_memory_context_section_for_inject()` entirely. The orchestration agent starts without project architecture, conventions, or negative paths from the memory store. Fix: query memory store in `build_dev_prompt()` and include a "Project Context" section alongside the plan summary.
+
+**Bug fix: `ta dev` shows v0.1/v0.1.1 as next pending**: `build_plan_summary()` picks the first non-done phase linearly. v0.1 (Public Preview) and v0.1.1 (Release Automation) are legitimately pending but shouldn't appear as "next" ahead of v0.8.x. Fix: add `<!-- status: deferred -->` marker support to plan parser. Phases marked `deferred` are excluded from "next pending" but still show in the full checklist. Mark v0.1 and v0.1.1 as deferred.
+
+**Bug fix: Batch phase status marking**: When a macro goal implements multiple plan phases in one draft (e.g., v0.8.0 + v0.8.1), `ta draft apply` only marks one phase as done. Fix: support `--phase v0.8.0,v0.8.1` (comma-separated) on `ta draft apply` to mark multiple phases done in one operation. Or: `ta plan mark-done <phase-id>` command for manual batch marking.
+
+**Orchestrator→agent wiring via events**: When `ta dev` orchestrator calls `ta_goal action:"start"`, it should spawn the implementation agent asynchronously and subscribe to v0.8.0 `SessionEvent`s for goal state transitions. Flow:
+1. `ta_goal action:"start"` creates goal + spawns agent in staging (background)
+2. Orchestrator subscribes to events: `goal.draft_ready`, `goal.completed`, `goal.failed`
+3. When `goal.draft_ready` fires, orchestrator notifies user: "Draft ready — review?"
+4. No polling — event-driven via the v0.8.0 subscription API
+5. This is the same pattern Slack/Discord/web channels would use
+
+**`ta run --headless` flag**: Non-interactive agent execution mode for orchestrator-driven goals. No PTY, pipe stdout, return draft ID on completion. Used internally by `ta_goal` when invoked from an orchestrator session. Agent output can optionally stream to the orchestrator's terminal.
+
+#### Implementation scope
+
+**Modified files:**
+- `apps/ta-cli/src/commands/dev.rs` — print status on launch, inject memory context, deferred phase filtering
+- `apps/ta-cli/src/commands/plan.rs` — add `deferred` status to `PlanStatus` enum and parser
+- `apps/ta-cli/src/commands/run.rs` — add `--headless` flag for non-interactive execution
+- `apps/ta-cli/src/commands/draft.rs` — support comma-separated `--phase` for batch marking
+- `crates/ta-mcp-gateway/src/server.rs` — `ta_goal action:"start"` spawns agent + subscribes to events
+- `PLAN.md` — mark v0.1 and v0.1.1 as `<!-- status: deferred -->`
 
 ---
 

@@ -61,9 +61,10 @@ Plan progress:
 - [x] Phase v0.7.4 — Memory & Config Cleanup
 - [x] Phase v0.7.5 — Interactive Session Fixes & Cross-Platform Release
 - [x] Phase v0.7.6 — Interactive Developer Loop (`ta dev`)
-- [ ] Phase v0.7.7 — Agent Framework Registry & Setup Integration
-- [ ] Phase v0.8.0 — Event System & Subscription API (Layer 3 → projects
-- [ ] Phase v0.8.1 — Solution Memory Export
+- [x] Phase v0.7.7 — Agent Framework Registry & Setup Integration
+- [x] Phase v0.8.0 — Event System & Subscription API (Layer 3 → projects
+- [x] Phase v0.8.1 — Solution Memory Export
+- [ ] Phase v0.8.2 — Developer Loop Refinements & Orchestrator Wiring
 - [ ] Phase v0.9.0 — Distribution & Packaging
 - [ ] Phase v0.9.1 — Native Windows Support
 - [ ] Phase v0.9.2 — Sandbox Runner (optional hardening, Layer 2
@@ -242,9 +243,10 @@ Plan progress:
 - [x] Phase v0.7.4 — Memory & Config Cleanup
 - [x] Phase v0.7.5 — Interactive Session Fixes & Cross-Platform Release
 - [x] Phase v0.7.6 — Interactive Developer Loop (`ta dev`)
-- [ ] Phase v0.7.7 — Agent Framework Registry & Setup Integration
-- [ ] Phase v0.8.0 — Event System & Subscription API
-- [ ] Phase v0.8.1 — Solution Memory Export
+- [x] Phase v0.7.7 — Agent Framework Registry & Setup Integration
+- [x] Phase v0.8.0 — Event System & Subscription API
+- [x] Phase v0.8.1 — Solution Memory Export
+- [ ] Phase v0.8.2 — Developer Loop Refinements & Orchestrator Wiring
 - [ ] Phase v0.9.0 — Distribution & Packaging
 - [ ] Phase v0.9.1 — Native Windows Support
 - [ ] Phase v0.9.2 — Sandbox Runner (optional hardening
@@ -413,7 +415,7 @@ This applies to both manual work and TA-mediated goals. When `ta pr apply --git-
 
 ## Current State
 
-- **Current version**: `0.8.0-alpha`
+- **Current version**: `0.8.1-alpha`
 - See **PLAN.md** for the canonical development roadmap with per-phase status
 - `ta plan list` / `ta plan status` show current progress
 - Goals can link to plan phases: `ta run "title" --source . --phase 4b`
