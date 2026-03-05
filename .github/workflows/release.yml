@@ -22,7 +22,7 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           # macOS — build both architectures on macos-latest (ARM)
@@ -109,9 +109,26 @@ jobs:
           name: release-${{ matrix.target }}
           path: artifacts/
 
+  # Gate job: ensures ALL platform builds pass before publishing.
+  # Prevents partial releases with missing platform binaries.
+  release-gate:
+    name: Release Gate (all platforms must pass)
+    needs: build-release
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all builds succeeded
+        run: |
+          if [ "${{ needs.build-release.result }}" != "success" ]; then
+            echo "One or more platform builds failed. Blocking release."
+            echo "Build result: ${{ needs.build-release.result }}"
+            exit 1
+          fi
+          echo "All platform builds passed. Proceeding to publish."
+
   publish-release:
     name: Publish Release
-    needs: build-release
+    needs: release-gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

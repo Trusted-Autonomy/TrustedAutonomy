@@ -1773,13 +1773,15 @@ New/modified files:
 - ✅ Version bumped to `0.7.0-alpha`
 
 ### v0.7.5 — Interactive Session Fixes & Cross-Platform Release
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix interactive session lifecycle bugs and Linux-musl cross-compilation failure. Harden release pipeline to fail-as-one across all platform targets.
 
-- **`ta session close <id>`**: New CLI command that marks an interactive session as completed. If the session's staging directory has uncommitted changes, automatically triggers `ta draft build` before closing. Prevents orphaned sessions when PTY exits abnormally (Ctrl-C, crash).
-- **PTY health check on `ta session resume`**: Before reattaching to a session socket, check whether the child process is still alive. If the process is dead, inform the user and offer to: (a) build a draft from the staging directory's current state, (b) close the session cleanly. Prevents reattaching to a dead PTY and losing work.
-- **Linux-musl `ioctl` type fix**: `apps/ta-cli/src/commands/pty_capture.rs:190` casts `libc::TIOCSCTTY` as `libc::c_ulong` (u64), but Linux-musl `ioctl()` expects `i32` for the request parameter. Use platform-conditional cast: `#[cfg(target_env = "musl")]` → cast as `libc::c_int`, `#[cfg(not(...))]` → cast as `libc::c_ulong`. Alternatively, use the `nix` crate's `ioctl_write_int_bad!` macro for portable ioctl calls.
-- **Release pipeline fail-as-one**: Update `.github/workflows/release.yml` so all platform build targets (linux-gnu, linux-musl, macos-aarch64, macos-x86_64) run as a single matrix job. If any platform fails, the entire release is blocked — no partial releases with missing platform binaries. Add a final "gate" job that depends on all matrix targets passing before publishing the GitHub release.
+**Completed:**
+- ✅ **`ta session close <id>`**: New CLI command that marks an interactive session as completed. If the session's staging directory has uncommitted changes, automatically triggers `ta draft build` before closing. Prevents orphaned sessions when PTY exits abnormally (Ctrl-C, crash). Supports `--no-draft` flag to skip draft build. 3 new tests.
+- ✅ **PTY health check on `ta session resume`**: Before reattaching to a session, checks workspace health (existence, staging changes). If workspace is gone, informs user and suggests `ta session close` or `ta session abort`. Added `check_session_health()` function and `SessionHealthStatus` enum. `is_process_alive()` utility for PID-based process checks. 2 new tests.
+- ✅ **Linux-musl `ioctl` type fix**: Platform-conditional cast using `#[cfg(target_env = "musl")]` → `libc::c_int`, `#[cfg(not(...))]` → `libc::c_ulong`. Fixes Linux-musl cross-compilation failure.
+- ✅ **Release pipeline fail-as-one**: Updated `.github/workflows/release.yml` with `fail-fast: true` and a `release-gate` job that blocks `publish-release` unless all platform builds succeed. No partial releases with missing platform binaries.
+- ✅ Version bumped to `0.7.5-alpha`
 
 ---
 

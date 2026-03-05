@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.7.0-alpha"
+version = "0.7.5-alpha"
 dependencies = [
  "anyhow",
  "chrono",
