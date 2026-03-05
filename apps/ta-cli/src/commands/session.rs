@@ -330,6 +330,7 @@ fn close_session(config: &GatewayConfig, id: &str, no_draft: bool) -> anyhow::Re
 ///
 /// Used by `ta session resume` to detect dead PTY processes before reattaching.
 /// If the process is dead, the user is informed and offered recovery options.
+#[allow(dead_code)] // Used by execute_resume (unix-only) and tests
 pub fn check_session_health(
     _store: &InteractiveSessionStore,
     goal_store: &GoalRunStore,
@@ -357,6 +358,7 @@ pub fn check_session_health(
 
 /// Health status of a session for resume checks.
 #[derive(Debug)]
+#[allow(dead_code)] // has_staging_changes is read in execute_resume (unix-only)
 pub enum SessionHealthStatus {
     /// Session workspace is intact and ready for resume.
     Healthy { has_staging_changes: bool },

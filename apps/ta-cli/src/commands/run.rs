@@ -753,6 +753,7 @@ fn execute_resume(
     Ok(())
 }
 
+#[cfg(unix)]
 /// Find a session by full UUID or prefix match.
 fn find_session_by_prefix(
     store: &InteractiveSessionStore,
