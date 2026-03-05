@@ -67,6 +67,13 @@ pub enum PlanCommands {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Mark one or more phases as done (comma-separated IDs).
+    ///
+    /// Example: `ta plan mark-done v0.8.0,v0.8.1`
+    MarkDone {
+        /// Comma-separated list of phase IDs to mark as done.
+        phases: String,
+    },
 }
 
 pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -82,6 +89,7 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             template,
             name,
         } => plan_create(config, output, template, name.as_deref()),
+        PlanCommands::MarkDone { phases } => mark_done_batch(config, phases),
     }
 }
 
@@ -93,6 +101,15 @@ pub enum PlanStatus {
     Pending,
     InProgress,
     Done,
+    /// Deferred phases are excluded from "next pending" but still appear in the checklist.
+    Deferred,
+}
+
+impl PlanStatus {
+    /// Returns true if this phase should be considered when finding the "next" phase to work on.
+    pub fn is_actionable(&self) -> bool {
+        matches!(self, PlanStatus::Pending | PlanStatus::InProgress)
+    }
 }
 
 impl fmt::Display for PlanStatus {
@@ -101,6 +118,7 @@ impl fmt::Display for PlanStatus {
             PlanStatus::Pending => write!(f, "pending"),
             PlanStatus::InProgress => write!(f, "in_progress"),
             PlanStatus::Done => write!(f, "done"),
+            PlanStatus::Deferred => write!(f, "deferred"),
         }
     }
 }
@@ -153,6 +171,7 @@ fn default_statuses() -> Vec<String> {
         "done".to_string(),
         "in_progress".to_string(),
         "pending".to_string(),
+        "deferred".to_string(),
     ]
 }
 
@@ -287,6 +306,7 @@ fn parse_status_str(s: &str) -> PlanStatus {
     match s {
         "done" => PlanStatus::Done,
         "in_progress" => PlanStatus::InProgress,
+        "deferred" => PlanStatus::Deferred,
         _ => PlanStatus::Pending,
     }
 }
@@ -382,13 +402,18 @@ pub fn load_plan(project_root: &Path) -> anyhow::Result<Vec<PlanPhase>> {
 pub fn format_plan_checklist(phases: &[PlanPhase], current_phase: Option<&str>) -> String {
     let mut lines = Vec::new();
     for phase in phases {
-        let checkbox = if phase.status == PlanStatus::Done {
-            "[x]"
-        } else {
-            "[ ]"
+        let checkbox = match phase.status {
+            PlanStatus::Done => "[x]",
+            PlanStatus::Deferred => "[-]",
+            _ => "[ ]",
         };
         let current_marker = if current_phase == Some(phase.id.as_str()) {
             " <-- current"
+        } else {
+            ""
+        };
+        let deferred_marker = if phase.status == PlanStatus::Deferred {
+            " *(deferred)*"
         } else {
             ""
         };
@@ -397,13 +422,19 @@ pub fn format_plan_checklist(phases: &[PlanPhase], current_phase: Option<&str>) 
         } else {
             format!("Phase {} — {}", phase.id, phase.title)
         };
-        lines.push(format!("- {} {}{}", checkbox, bold, current_marker));
+        lines.push(format!(
+            "- {} {}{}{}",
+            checkbox, bold, deferred_marker, current_marker
+        ));
     }
     lines.join("\n")
 }
 
-/// Find the next pending phase after the given phase ID.
-/// If `after_phase` is None, returns the first pending phase.
+/// Find the next actionable phase after the given phase ID.
+///
+/// Skips phases marked as `Deferred` or `Done`. Only returns phases with
+/// `Pending` or `InProgress` status. If `after_phase` is None, returns the
+/// first actionable phase.
 pub fn find_next_pending<'a>(
     phases: &'a [PlanPhase],
     after_phase: Option<&str>,
@@ -412,18 +443,15 @@ pub fn find_next_pending<'a>(
         // Find the current phase's position and search forward from there.
         if let Some(idx) = phases.iter().position(|p| p.id == after) {
             // Search forward from the phase after the current one.
-            if let Some(next) = phases[idx + 1..]
-                .iter()
-                .find(|p| p.status == PlanStatus::Pending)
-            {
+            if let Some(next) = phases[idx + 1..].iter().find(|p| p.status.is_actionable()) {
                 return Some(next);
             }
         }
-        // Phase not found or no pending phases after it — don't fall back to
+        // Phase not found or no actionable phases after it — don't fall back to
         // the beginning (which would suggest unrelated earlier phases like v0.1).
         None
     } else {
-        phases.iter().find(|p| p.status == PlanStatus::Pending)
+        phases.iter().find(|p| p.status.is_actionable())
     }
 }
 
@@ -584,6 +612,7 @@ fn list_phases(config: &GatewayConfig) -> anyhow::Result<()> {
             PlanStatus::Done => "done",
             PlanStatus::InProgress => "in_progress",
             PlanStatus::Pending => "pending",
+            PlanStatus::Deferred => "deferred",
         };
         println!(
             "{:<12} {:<40} {:<14}",
@@ -611,6 +640,10 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
         .iter()
         .filter(|p| p.status == PlanStatus::Pending)
         .count();
+    let deferred = phases
+        .iter()
+        .filter(|p| p.status == PlanStatus::Deferred)
+        .count();
     let total = phases.len();
 
     if json_output {
@@ -619,6 +652,7 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
             "done": done,
             "in_progress": in_progress,
             "pending": pending,
+            "deferred": deferred,
             "phases": phases.iter().map(|p| serde_json::json!({
                 "id": p.id,
                 "title": p.title,
@@ -633,12 +667,16 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
     println!("  Done:        {}", done);
     println!("  In Progress: {}", in_progress);
     println!("  Pending:     {}", pending);
+    if deferred > 0 {
+        println!("  Deferred:    {}", deferred);
+    }
 
     if let Some(current) = phases.iter().find(|p| p.status == PlanStatus::InProgress) {
         println!("\nCurrent: Phase {} — {}", current.id, current.title);
     }
 
-    if let Some(next) = phases.iter().find(|p| p.status == PlanStatus::Pending) {
+    // Use find_next_pending to skip deferred phases.
+    if let Some(next) = find_next_pending(&phases, None) {
         println!("Next:    Phase {} — {}", next.id, next.title);
     }
 
@@ -859,6 +897,76 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Mark multiple phases as done in a single operation.
+///
+/// Accepts a comma-separated list of phase IDs (e.g., "v0.8.0,v0.8.1").
+fn mark_done_batch(config: &GatewayConfig, phases_arg: &str) -> anyhow::Result<()> {
+    let phase_ids: Vec<&str> = phases_arg.split(',').map(|s| s.trim()).collect();
+
+    if phase_ids.is_empty() {
+        anyhow::bail!("No phase IDs provided");
+    }
+
+    let schema = PlanSchema::load_or_default(&config.workspace_root);
+    let plan_path = config.workspace_root.join(&schema.source);
+    if !plan_path.exists() {
+        anyhow::bail!("No {} found", schema.source);
+    }
+
+    let mut content = std::fs::read_to_string(&plan_path)?;
+    let mut marked = Vec::new();
+    let mut not_found = Vec::new();
+
+    for phase_id in &phase_ids {
+        let phases = parse_plan_with_schema(&content, &schema);
+        if let Some(phase) = phases.iter().find(|p| phase_ids_match(&p.id, phase_id)) {
+            let old_status = phase.status.clone();
+            if old_status == PlanStatus::Done {
+                println!("Phase {} is already done — skipping", phase_id);
+                continue;
+            }
+            content =
+                update_phase_status_with_schema(&content, phase_id, PlanStatus::Done, &schema);
+            let _ = record_history(
+                &config.workspace_root,
+                phase_id,
+                &old_status,
+                &PlanStatus::Done,
+            );
+            marked.push(phase_id.to_string());
+        } else {
+            not_found.push(phase_id.to_string());
+        }
+    }
+
+    if !marked.is_empty() {
+        std::fs::write(&plan_path, &content)?;
+        println!("Marked {} phase(s) as done:", marked.len());
+        for id in &marked {
+            println!("  ✅ {}", id);
+        }
+    }
+
+    if !not_found.is_empty() {
+        eprintln!(
+            "Warning: {} phase(s) not found in plan: {}",
+            not_found.len(),
+            not_found.join(", ")
+        );
+    }
+
+    // Show next actionable phase.
+    let phases_after = parse_plan_with_schema(&content, &schema);
+    let last_marked = marked.last().map(|s| s.as_str());
+    if let Some(next) = find_next_pending(&phases_after, last_marked) {
+        println!();
+        println!("Next pending phase: {} — {}", next.id, next.title);
+        println!("  To start: {}", suggest_next_goal_command(next));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,11 +1127,12 @@ Release automation.
     }
 
     #[test]
-    fn find_next_pending_returns_first() {
+    fn find_next_pending_returns_first_actionable() {
         let phases = parse_plan(SAMPLE_PLAN);
         let next = find_next_pending(&phases, None);
         assert!(next.is_some());
-        assert_eq!(next.unwrap().id, "4b");
+        // 4a.1 is in_progress — that's actionable, so it comes first.
+        assert_eq!(next.unwrap().id, "4a.1");
     }
 
     #[test]
@@ -1043,6 +1152,64 @@ Release automation.
         let phases = parse_plan(plan);
         let next = find_next_pending(&phases, None);
         assert!(next.is_none());
+    }
+
+    #[test]
+    fn find_next_pending_skips_deferred() {
+        let plan = r#"
+## Phase 0 — Done
+<!-- status: done -->
+
+## Phase 1 — Deferred Phase
+<!-- status: deferred -->
+
+## Phase 2 — Next Phase
+<!-- status: pending -->
+"#;
+        let phases = parse_plan(plan);
+        assert_eq!(phases.len(), 3);
+        assert_eq!(phases[1].status, PlanStatus::Deferred);
+        let next = find_next_pending(&phases, None);
+        assert!(next.is_some());
+        assert_eq!(next.unwrap().id, "2");
+    }
+
+    #[test]
+    fn deferred_status_parsed_correctly() {
+        let plan = r#"
+## Phase 0 — Some Phase
+<!-- status: deferred -->
+"#;
+        let phases = parse_plan(plan);
+        assert_eq!(phases.len(), 1);
+        assert_eq!(phases[0].status, PlanStatus::Deferred);
+        assert!(!phases[0].status.is_actionable());
+    }
+
+    #[test]
+    fn format_checklist_shows_deferred_marker() {
+        let phases = vec![
+            PlanPhase {
+                id: "0".to_string(),
+                title: "Done Phase".to_string(),
+                status: PlanStatus::Done,
+            },
+            PlanPhase {
+                id: "1".to_string(),
+                title: "Deferred Phase".to_string(),
+                status: PlanStatus::Deferred,
+            },
+            PlanPhase {
+                id: "2".to_string(),
+                title: "Pending Phase".to_string(),
+                status: PlanStatus::Pending,
+            },
+        ];
+        let checklist = format_plan_checklist(&phases, None);
+        assert!(checklist.contains("[x]"));
+        assert!(checklist.contains("[-]"));
+        assert!(checklist.contains("*(deferred)*"));
+        assert!(checklist.contains("[ ]"));
     }
 
     #[test]

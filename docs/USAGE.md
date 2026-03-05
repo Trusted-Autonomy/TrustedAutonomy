@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.8.1-alpha
+**Version**: v0.8.2-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -361,6 +361,7 @@ These are **different concerns** and can be combined:
 |------|-----------------|------|
 | `--macro` | **Review loop** — agent can submit multiple drafts mid-session | MCP tools for draft/plan/sub-goal management |
 | `--interactive` | **I/O mode** — real-time PTY streaming + human input | PTY capture, stdin interleaving, session persistence |
+| `--headless` | **Non-interactive** — piped stdout, no PTY, structured JSON result | Orchestrator-driven execution |
 
 **Decision guide**:
 
@@ -370,7 +371,8 @@ These are **different concerns** and can be combined:
 | Complex feature (multiple files, needs incremental review) | `--macro` |
 | Unfamiliar codebase (want to watch and steer) | `--interactive` |
 | Large multi-phase implementation with oversight | `--macro --interactive` |
-| CI/batch automation | *(neither)* — or `--macro` with `auto-approve` channel |
+| CI/batch automation | `--headless` — or `--macro` with `auto-approve` channel |
+| Orchestrator-launched sub-goal | `--headless` — returns draft ID for automated processing |
 
 **The full experience** — both flags together:
 
@@ -392,9 +394,12 @@ ta dev
 ta dev --agent codex
 ```
 
+On launch, `ta dev` prints the current plan status directly to your terminal — you see progress and the next actionable phase before the agent even starts. Deferred phases (like public preview milestones) are automatically skipped.
+
 The dev agent automatically:
 - Reads PLAN.md and shows progress on startup
-- Highlights the next pending phase
+- Injects project memory context (architecture, conventions, negative paths)
+- Highlights the next actionable phase (skips deferred phases)
 - Lists any pending drafts awaiting review
 
 You interact with it using natural language:
@@ -422,12 +427,41 @@ Plan commands:
 ```bash
 ta plan list                         # List all phases with status
 ta plan status                       # Progress summary
+ta plan status --json                # Machine-readable progress (includes deferred count)
 ta plan next                         # Next pending phase with suggested command
 ta plan validate v0.3.1              # Phase details, linked goals, draft summaries
 ta plan history                      # Status transition history
+ta plan mark-done v0.8.0,v0.8.1     # Batch-mark multiple phases as done
 ta plan init                         # Extract plan-schema.yaml from existing plan
 ta plan create                       # Generate new plan from template
 ta plan create --template feature    # Feature template
+```
+
+#### Deferred Phases
+
+Mark phases as `deferred` in PLAN.md when they're legitimate work items but shouldn't block current development:
+
+```markdown
+## Phase v0.1 — Public Preview
+<!-- status: deferred -->
+```
+
+Deferred phases are:
+- Shown with `[-]` in plan checklists
+- Skipped when finding the "next pending" phase
+- Included in status counts (`ta plan status --json`)
+- Not candidates for `ta plan next` suggestions
+
+#### Batch Phase Marking
+
+When a single draft covers multiple plan phases:
+
+```bash
+# Mark multiple phases done at once
+ta plan mark-done v0.8.0,v0.8.1
+
+# Override the goal's phase on apply
+ta draft apply <id> --git-commit --phase v0.8.0,v0.8.1
 ```
 
 ### Review Sessions
@@ -1628,8 +1662,8 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | Phase 4a.1 | Plan tracking and lifecycle | Done |
 | Phase 4b | Per-artifact review model | Done |
 | Phase 4c | Selective review CLI | Done |
-| v0.1 | Public preview and call for feedback | Pending |
-| v0.1.1 | Release automation and binary distribution | In Progress |
+| v0.1 | Public preview and call for feedback | Deferred |
+| v0.1.1 | Release automation and binary distribution | Deferred |
 | v0.1.2 | Follow-up goals and iterative review | Done |
 | v0.2.0 | SubmitAdapter trait and git implementation | Done |
 | v0.2.1 | Concurrent session conflict detection | Done |
@@ -1693,8 +1727,9 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| v0.8.0 | Event system and subscription API | Pending |
-| v0.8.1 | Community memory (shared knowledge across instances) | Pending |
+| v0.8.0 | Event system and subscription API | Done |
+| v0.8.1 | Solution memory export | Done |
+| v0.8.2 | Developer loop refinements and orchestrator wiring | Done |
 | v0.9.0 | Distribution and packaging (desktop, cloud, web UI) | Pending |
 | v0.9.1 | Native Windows support | Pending |
 | v0.9.2 | Sandbox runner (optional kernel-level isolation) | Pending |

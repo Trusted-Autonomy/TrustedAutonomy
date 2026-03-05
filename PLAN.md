@@ -129,7 +129,7 @@ Workspace structure with 12 crates under `crates/` and `apps/`. Resource URIs (`
 - Coupled-change warnings: reject B also requires rejecting A if dependent
 
 ## Phase v0.1 — Public Preview & Call for Feedback
-<!-- status: pending -->
+<!-- status: deferred -->
 **Goal**: Get TA in front of early adopters for feedback. Not production-ready — explicitly disclaimed.
 
 ### Required for v0.1
@@ -165,7 +165,7 @@ Workspace structure with 12 crates under `crates/` and `apps/`. Resource URIs (`
 - "Would you pay for a hosted version? What would that need to include?"
 
 ## Phase v0.1.1 — Release Automation & Binary Distribution
-<!-- status: in_progress -->
+<!-- status: deferred -->
 
 ### Done
 - [x] **GitHub Actions CI** (`.github/workflows/ci.yml`): lint (clippy + fmt), test, build on push/PR
@@ -2034,14 +2034,28 @@ runtime = "native-cli"
 
 **`ta run --headless` flag**: Non-interactive agent execution mode for orchestrator-driven goals. No PTY, pipe stdout, return draft ID on completion. Used internally by `ta_goal` when invoked from an orchestrator session. Agent output can optionally stream to the orchestrator's terminal.
 
+#### Completed
+- [x] `ta dev` prints plan summary + next phase to terminal before launching agent
+- [x] `ta dev` injects memory context (via `build_memory_context_section_for_inject`)
+- [x] `PlanStatus::Deferred` added — deferred phases skipped by `find_next_pending()`
+- [x] v0.1 and v0.1.1 marked `<!-- status: deferred -->` in PLAN.md
+- [x] `ta plan mark-done v0.8.0,v0.8.1` — batch phase status marking
+- [x] `ta draft apply --phase v0.8.0,v0.8.1` — comma-separated phase override
+- [x] `ta run --headless` — non-interactive execution mode (piped stdout, no PTY, structured JSON result)
+- [x] `format_plan_checklist` shows `[-]` for deferred phases
+- [x] `ta plan status --json` includes `deferred` count
+
+#### Remaining (deferred to future)
+- Orchestrator→agent event-driven wiring via v0.8.0 subscription API (event subscriptions for goal.draft_ready, goal.completed, goal.failed) — deferred until event system is proven in use
+
 #### Implementation scope
 
 **Modified files:**
 - `apps/ta-cli/src/commands/dev.rs` — print status on launch, inject memory context, deferred phase filtering
-- `apps/ta-cli/src/commands/plan.rs` — add `deferred` status to `PlanStatus` enum and parser
-- `apps/ta-cli/src/commands/run.rs` — add `--headless` flag for non-interactive execution
-- `apps/ta-cli/src/commands/draft.rs` — support comma-separated `--phase` for batch marking
-- `crates/ta-mcp-gateway/src/server.rs` — `ta_goal action:"start"` spawns agent + subscribes to events
+- `apps/ta-cli/src/commands/plan.rs` — add `Deferred` status to `PlanStatus` enum, parser, and `ta plan mark-done`
+- `apps/ta-cli/src/commands/run.rs` — add `--headless` flag, `launch_agent_headless()`, `find_latest_draft_id()`
+- `apps/ta-cli/src/commands/draft.rs` — `--phase` override on apply, comma-separated batch marking
+- `apps/ta-cli/src/main.rs` — wire `--headless` flag to run command
 - `PLAN.md` — mark v0.1 and v0.1.1 as `<!-- status: deferred -->`
 
 ---

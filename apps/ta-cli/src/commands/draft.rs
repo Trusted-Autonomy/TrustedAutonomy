@@ -136,6 +136,11 @@ pub enum DraftCommands {
         /// Mark artifacts for discussion matching these patterns (repeatable).
         #[arg(long = "discuss")]
         discuss_patterns: Vec<String>,
+        /// Override plan phase(s) to mark done on apply.
+        /// Comma-separated for batch marking (e.g., "v0.8.0,v0.8.1").
+        /// When omitted, uses the goal's linked plan_phase.
+        #[arg(long)]
+        phase: Option<String>,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -335,6 +340,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             approve_patterns,
             reject_patterns,
             discuss_patterns,
+            phase,
         } => {
             // Load workflow config to merge auto_* settings with CLI flags.
             let workflow_config = ta_submit::WorkflowConfig::load_or_default(
@@ -372,6 +378,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                     reject: reject_patterns,
                     discuss: discuss_patterns,
                 },
+                phase.as_deref(),
             )
         }
         DraftCommands::Amend {
@@ -1526,6 +1533,7 @@ fn apply_package(
     git_review: bool,
     conflict_resolution: ta_workspace::ConflictResolution,
     patterns: SelectiveReviewPatterns,
+    phase_override: Option<&str>,
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let mut pkg = load_package(config, package_id)?;
@@ -1801,56 +1809,77 @@ fn apply_package(
         println!("  {}", file);
     }
 
-    // If the goal has a plan_phase, mark it done in PLAN.md + record history + suggest next.
+    // Mark plan phase(s) as done in PLAN.md + record history + suggest next.
+    // Supports comma-separated --phase override (v0.8.2) or falls back to goal.plan_phase.
     // This must happen BEFORE the git commit so the status update is included in the commit.
-    if let Some(ref phase) = goal.plan_phase {
+    let phase_ids: Vec<String> = if let Some(override_phases) = phase_override {
+        override_phases
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else if let Some(ref phase) = goal.plan_phase {
+        vec![phase.clone()]
+    } else {
+        vec![]
+    };
+
+    if !phase_ids.is_empty() {
         let plan_path = target_dir.join("PLAN.md");
         if plan_path.exists() {
-            let content = std::fs::read_to_string(&plan_path)?;
+            let mut content = std::fs::read_to_string(&plan_path)?;
+            let mut last_phase_id = String::new();
 
-            // Record the old status before updating.
-            let phases_before = super::plan::parse_plan(&content);
-            let old_status = phases_before
-                .iter()
-                .find(|p| super::plan::phase_ids_match(&p.id, phase))
-                .map(|p| p.status.clone())
-                .unwrap_or(super::plan::PlanStatus::Pending);
-
-            eprintln!(
-                "[plan-update] goal phase_id={:?}, matched plan id={:?}, old_status={:?}",
-                phase,
-                phases_before
+            for phase in &phase_ids {
+                let phases_before = super::plan::parse_plan(&content);
+                let old_status = phases_before
                     .iter()
                     .find(|p| super::plan::phase_ids_match(&p.id, phase))
-                    .map(|p| &p.id),
-                old_status,
-            );
+                    .map(|p| p.status.clone())
+                    .unwrap_or(super::plan::PlanStatus::Pending);
 
-            let updated =
-                super::plan::update_phase_status(&content, phase, super::plan::PlanStatus::Done);
+                eprintln!(
+                    "[plan-update] goal phase_id={:?}, matched plan id={:?}, old_status={:?}",
+                    phase,
+                    phases_before
+                        .iter()
+                        .find(|p| super::plan::phase_ids_match(&p.id, phase))
+                        .map(|p| &p.id),
+                    old_status,
+                );
 
-            // Verify the update actually changed the content.
-            let changed = updated != content;
-            eprintln!(
-                "[plan-update] content changed={}, writing to {}",
-                changed,
-                plan_path.display()
-            );
+                let updated = super::plan::update_phase_status(
+                    &content,
+                    phase,
+                    super::plan::PlanStatus::Done,
+                );
 
-            std::fs::write(&plan_path, &updated)?;
-            println!("Updated PLAN.md: Phase {} -> done", phase);
+                let changed = updated != content;
+                eprintln!(
+                    "[plan-update] content changed={}, writing to {}",
+                    changed,
+                    plan_path.display()
+                );
 
-            // Record history.
-            let _ = super::plan::record_history(
-                &target_dir,
-                phase,
-                &old_status,
-                &super::plan::PlanStatus::Done,
-            );
+                content = updated;
+                println!("Updated PLAN.md: Phase {} -> done", phase);
 
-            // Auto-suggest the next pending phase.
-            let phases_after = super::plan::parse_plan(&updated);
-            if let Some(next) = super::plan::find_next_pending(&phases_after, Some(phase.as_str()))
+                // Record history.
+                let _ = super::plan::record_history(
+                    &target_dir,
+                    phase,
+                    &old_status,
+                    &super::plan::PlanStatus::Done,
+                );
+                last_phase_id = phase.clone();
+            }
+
+            std::fs::write(&plan_path, &content)?;
+
+            // Auto-suggest the next pending phase (after the last marked phase).
+            let phases_after = super::plan::parse_plan(&content);
+            if let Some(next) =
+                super::plan::find_next_pending(&phases_after, Some(last_phase_id.as_str()))
             {
                 println!();
                 println!("Next pending phase: {} — {}", next.id, next.title);
@@ -2001,6 +2030,7 @@ fn apply_package(
                     super::plan::PlanStatus::Done => "done",
                     super::plan::PlanStatus::InProgress => "in_progress",
                     super::plan::PlanStatus::Pending => "pending",
+                    super::plan::PlanStatus::Deferred => "deferred",
                 };
                 if p.status == super::plan::PlanStatus::Done {
                     println!("  Plan:   {} -> {}", phase, status_str);
@@ -2414,6 +2444,7 @@ fn fix_package(
         false, // not interactive
         false, // not macro
         None,  // not resuming
+        false, // not headless
     )?;
 
     if no_launch {
@@ -3219,6 +3250,7 @@ mod tests {
             false,
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns::default(),
+            None,
         )
         .unwrap();
 
@@ -3307,6 +3339,7 @@ mod tests {
             false,
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns::default(),
+            None,
         )
         .unwrap();
 
@@ -3559,6 +3592,7 @@ mod tests {
                 reject: &[],
                 discuss: &[],
             },
+            None,
         )
         .unwrap();
 
@@ -3621,6 +3655,7 @@ mod tests {
                 reject: &["config.toml".to_string()],
                 discuss: &[],
             },
+            None,
         )
         .unwrap();
 
@@ -3680,6 +3715,7 @@ mod tests {
                 reject: &[],
                 discuss: &[],
             },
+            None,
         )
         .unwrap();
 
@@ -3738,6 +3774,7 @@ mod tests {
                 reject: &["important.txt".to_string()],
                 discuss: &[],
             },
+            None,
         )
         .unwrap();
 
@@ -3835,6 +3872,7 @@ mod tests {
                 reject: &["src/lib.rs".to_string()],
                 discuss: &[],
             },
+            None,
         );
 
         assert!(result.is_err());

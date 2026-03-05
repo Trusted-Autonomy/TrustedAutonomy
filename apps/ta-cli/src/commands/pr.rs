@@ -175,6 +175,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             approve_patterns: approve_patterns.clone(),
             reject_patterns: reject_patterns.clone(),
             discuss_patterns: discuss_patterns.clone(),
+            phase: None,
         },
     }
 }

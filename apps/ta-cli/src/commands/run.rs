@@ -222,6 +222,7 @@ pub fn execute(
     interactive: bool,
     macro_goal: bool,
     resume: Option<&str>,
+    headless: bool,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -376,7 +377,9 @@ pub fn execute(
         agent_config.command
     );
     println!("  Working dir: {}", staging_path.display());
-    if interactive {
+    if headless {
+        println!("  Mode: headless (non-interactive, piped output)");
+    } else if interactive {
         println!("  Mode: interactive (PTY capture + session orchestration)");
     }
     if macro_goal {
@@ -384,8 +387,10 @@ pub fn execute(
     }
     println!();
 
-    // Choose launch mode: PTY-interactive or simple.
-    let launch_result = if interactive {
+    // Choose launch mode: headless (piped), PTY-interactive, or simple.
+    let launch_result = if headless {
+        launch_agent_headless(&agent_config, &staging_path, &prompt).map(|exit| (exit, Vec::new()))
+    } else if interactive {
         launch_agent_interactive(&agent_config, &staging_path, &prompt, &mut session_store)
     } else {
         launch_agent(&agent_config, &staging_path, &prompt).map(|exit| (exit, Vec::new()))
@@ -505,20 +510,38 @@ pub fn execute(
         store.save(&session)?;
     }
 
-    if draft_built {
-        println!("\nNext steps:");
-        println!("  ta draft list");
-        println!("  ta draft view <draft-id>");
-        println!("  ta draft approve <draft-id>");
-        println!("  ta draft apply <draft-id> --git-commit");
+    // In headless mode, output structured JSON for orchestrator consumption.
+    if headless {
+        let draft_id = if draft_built {
+            // Find the most recent draft for this goal.
+            find_latest_draft_id(config, &goal_id)
+        } else {
+            None
+        };
+
+        let output = serde_json::json!({
+            "goal_id": goal_id,
+            "draft_built": draft_built,
+            "draft_id": draft_id,
+            "state": goal_current.state.to_string(),
+        });
+        println!("\n__TA_HEADLESS_RESULT__:{}", output);
     } else {
-        println!("\nNext steps:");
-        println!("  ta draft list      — view submitted drafts");
-        println!("  ta goal status     — check goal state");
-    }
-    if interactive {
-        println!("  ta session list");
-        println!("  ta session show <session-id>");
+        if draft_built {
+            println!("\nNext steps:");
+            println!("  ta draft list");
+            println!("  ta draft view <draft-id>");
+            println!("  ta draft approve <draft-id>");
+            println!("  ta draft apply <draft-id> --git-commit");
+        } else {
+            println!("\nNext steps:");
+            println!("  ta draft list      — view submitted drafts");
+            println!("  ta goal status     — check goal state");
+        }
+        if interactive {
+            println!("  ta session list");
+            println!("  ta session show <session-id>");
+        }
     }
 
     Ok(())
@@ -740,6 +763,48 @@ fn launch_agent(
     cmd.status()
 }
 
+/// Launch an agent in headless (non-interactive) mode.
+///
+/// Stdout/stderr are piped and streamed to the parent process, but no PTY is allocated.
+/// Suitable for orchestrator-driven goals where no human interaction is expected.
+fn launch_agent_headless(
+    config: &AgentLaunchConfig,
+    staging_path: &Path,
+    prompt: &str,
+) -> std::io::Result<std::process::ExitStatus> {
+    use std::io::{BufRead, BufReader};
+
+    let mut cmd = std::process::Command::new(&config.command);
+    cmd.current_dir(staging_path);
+
+    for arg_template in &config.args_template {
+        let arg = arg_template.replace("{prompt}", prompt);
+        cmd.arg(arg);
+    }
+
+    for (key, value) in &config.env {
+        cmd.env(key, value);
+    }
+
+    // Pipe stdout so we can stream it without a PTY.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::inherit());
+    // No stdin — headless mode.
+    cmd.stdin(std::process::Stdio::null());
+
+    let mut child = cmd.spawn()?;
+
+    // Stream stdout lines to the parent's stdout with a [agent] prefix.
+    if let Some(stdout) = child.stdout.take() {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            println!("[agent] {}", line);
+        }
+    }
+
+    child.wait()
+}
+
 /// Launch an agent in interactive PTY mode with stdin interleaving and guidance logging.
 ///
 /// Returns the exit status and a log of (InteractionRequest, InteractionResponse) pairs
@@ -812,6 +877,30 @@ fn launch_agent_interactive(
     }
 
     Ok((result.exit_status, guidance_log))
+}
+
+/// Find the most recent draft ID for a goal (headless output).
+fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Option<String> {
+    use ta_changeset::draft_package::DraftPackage;
+
+    let dir = &config.pr_packages_dir;
+    if !dir.exists() {
+        return None;
+    }
+
+    let mut drafts: Vec<DraftPackage> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|e| {
+            let json = std::fs::read_to_string(e.path()).ok()?;
+            serde_json::from_str::<DraftPackage>(&json).ok()
+        })
+        .filter(|pkg| pkg.goal.goal_id == goal_id)
+        .collect();
+
+    drafts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    drafts.first().map(|d| d.package_id.to_string())
 }
 
 /// Simple shell quoting for display purposes.
@@ -1488,7 +1577,7 @@ fn auto_capture_goal_completion(
 /// Phase-aware: filters entries by the current plan phase. Respects the
 /// `backend` field in `.ta/memory.toml` (v0.7.4): "ruvector" uses semantic
 /// search when available, "fs" forces filesystem-only mode.
-fn build_memory_context_section_for_inject(
+pub fn build_memory_context_section_for_inject(
     config: &GatewayConfig,
     goal_title: &str,
     phase_id: Option<&str>,
@@ -1644,6 +1733,7 @@ mod tests {
             false,
             false,
             None,
+            false, // not headless
         )
         .unwrap();
 

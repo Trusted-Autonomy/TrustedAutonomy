@@ -13,6 +13,7 @@ use std::path::Path;
 use ta_mcp_gateway::GatewayConfig;
 
 use super::plan;
+use super::run::build_memory_context_section_for_inject;
 
 /// Minimal agent config for the dev-loop orchestrator.
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -25,7 +26,8 @@ struct DevLoopConfig {
 
 /// Build the system prompt for the dev-loop agent.
 ///
-/// Includes plan status, pending phases, and instructions for using MCP tools.
+/// Includes plan status, pending phases, memory context, and instructions
+/// for using MCP tools.
 fn build_dev_prompt(project_root: &Path, config: &GatewayConfig) -> String {
     let mut prompt = String::new();
 
@@ -81,7 +83,51 @@ fn build_dev_prompt(project_root: &Path, config: &GatewayConfig) -> String {
         prompt.push('\n');
     }
 
+    // Include project memory context (v0.8.2: fix missing memory injection).
+    let memory_section =
+        build_memory_context_section_for_inject(config, "dev-loop orchestration", None);
+    if !memory_section.is_empty() {
+        prompt.push_str("## Prior Context (from TA memory)\n\n");
+        prompt.push_str(&memory_section);
+        prompt.push('\n');
+    }
+
     prompt
+}
+
+/// Print plan progress summary to stdout before launching the agent (v0.8.2).
+///
+/// Shows done/total, next actionable phase, and any pending drafts — giving
+/// the user immediate context.
+fn print_plan_status_to_terminal(project_root: &Path) {
+    let phases = match plan::load_plan(project_root) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    if phases.is_empty() {
+        return;
+    }
+
+    let total = phases.len();
+    let done = phases
+        .iter()
+        .filter(|p| p.status == plan::PlanStatus::Done)
+        .count();
+    let deferred = phases
+        .iter()
+        .filter(|p| p.status == plan::PlanStatus::Deferred)
+        .count();
+
+    println!();
+    println!("  Plan: {}/{} phases complete", done, total);
+    if deferred > 0 {
+        println!("  Deferred: {}", deferred);
+    }
+
+    if let Some(next) = plan::find_next_pending(&phases, None) {
+        println!("  Next: {} — {}", next.id, next.title);
+    }
 }
 
 /// Build a summary of plan progress for the dev-loop prompt.
@@ -100,10 +146,6 @@ fn build_plan_summary(project_root: &Path) -> String {
         .iter()
         .filter(|p| p.status == plan::PlanStatus::Done)
         .count();
-    let pending: Vec<_> = phases
-        .iter()
-        .filter(|p| p.status != plan::PlanStatus::Done)
-        .collect();
 
     let mut summary = format!("Progress: {}/{} phases complete.\n\n", done, total);
 
@@ -112,8 +154,8 @@ fn build_plan_summary(project_root: &Path) -> String {
     summary.push_str(&checklist);
     summary.push('\n');
 
-    // Highlight next pending phase.
-    if let Some(next) = pending.first() {
+    // Highlight next actionable phase (skips deferred).
+    if let Some(next) = plan::find_next_pending(&phases, None) {
         summary.push_str(&format!(
             "\nNext pending: **{} — {}**\n",
             next.id, next.title
@@ -232,7 +274,10 @@ pub fn execute(
     println!("Starting interactive developer loop...");
     println!("  Project: {}", project_root.display());
 
-    // Build the orchestration prompt with plan status.
+    // Print plan status to terminal so the user sees context before agent starts (v0.8.2).
+    print_plan_status_to_terminal(&project_root);
+
+    // Build the orchestration prompt with plan status + memory context.
     let prompt = build_dev_prompt(&project_root, config);
 
     // Load agent config (dev-loop.yaml or fallback).
