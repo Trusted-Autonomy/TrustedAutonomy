@@ -1910,6 +1910,8 @@ runtime = "native-cli"
 - `agents/langgraph.yaml` — LangGraph stateful agent with TA as a node
 - `agents/bmad.yaml` — BMAD-METHOD workflow (wraps claude-code or other runtime with BMAD system prompt and phased methodology)
 
+**Bug fix: Macro goal MCP server injection** (GitHub [#60](https://github.com/michaelhunley/TrustedAutonomy/issues/60)): `ta run --macro` injects CLAUDE.md with MCP tool documentation and `.claude/settings.local.json` with permissions, but does NOT inject the `trusted-autonomy` MCP server into `.mcp.json`. The agent sees tool descriptions but can't call them. Fix: inject TA MCP server config into staging workspace's `.mcp.json` (merge with existing entries) during macro goal setup in `run.rs`.
+
 **Bug fix: PR "Why" field** (GitHub [#76](https://github.com/michaelhunley/TrustedAutonomy/issues/76)): The draft summary `why` field (`draft.rs:884`) uses `goal.objective` which often just restates the title. The MCP gateway (`server.rs:881`) passes `goal.title` as `summary_why`. When a goal is linked to a plan phase, pull the phase's `**Goal**:` description from PLAN.md as the "why" — that's where the real motivation lives. Falls back to `goal.objective` when no plan phase is linked.
 
 **"Add TA to an existing project" docs**: Add a clear section to `docs/USAGE.md` covering:
@@ -1931,6 +1933,7 @@ runtime = "native-cli"
 **Modified files:**
 - `apps/ta-cli/src/commands/init.rs` — framework selection during init, multi-framework config generation
 - `apps/ta-cli/src/commands/setup.rs` — framework step in wizard, detection + install guidance
+- `apps/ta-cli/src/commands/run.rs` — inject TA MCP server into `.mcp.json` during `--macro` setup
 - `apps/ta-cli/src/commands/draft.rs:884` — replace `goal.objective.clone()` with plan phase description when available
 - `crates/ta-mcp-gateway/src/server.rs:881` — replace `&goal.title` (4th arg) with plan phase description
 - `agents/generic.yaml` — updated with Q&A field annotations for guided custom setup
