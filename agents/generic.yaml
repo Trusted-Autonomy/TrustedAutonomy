@@ -11,27 +11,51 @@
 #   2. ~/.config/ta/agents/<agent-name>.yaml  (user override)
 #   3. <ta-install>/agents/<agent-name>.yaml  (built-in defaults)
 #   4. Hard-coded fallback (launches command with no args)
+#
+# === Quick Setup Q&A ===
+# Answer these questions to configure your agent:
+#
+# Q1: What command runs your agent? (must be on PATH or absolute path)
+#     → Set `command` below
+#
+# Q2: What arguments does it need? Use {prompt} where TA should inject the goal text.
+#     → Set `args_template` below
+#
+# Q3: Does your agent read CLAUDE.md for instructions?
+#     → Set `injects_context_file: true` if yes
+#
+# Q4: Does your agent support .claude/settings.local.json permissions?
+#     → Set `injects_settings: true` if yes (Claude Code-compatible agents only)
+#
+# Q5: Does your agent need an initialization step before running?
+#     → Set `pre_launch` with the init command if yes
+#
+# === Contributing ===
+# To add your framework to TA's built-in registry:
+# 1. Add an entry to `frameworks.toml` (see PLAN.md v0.7.7 for format)
+# 2. Create an agent config YAML in `agents/`
+# 3. Open a PR — community configs are tagged with `community: true`
 
 name: my-agent
 description: "Description of what this agent does"
 
-# The command to execute (must be on PATH or absolute path).
+# Q1: The command to execute (must be on PATH or absolute path).
 command: my-agent-cli
 
-# Arguments passed to the command. Use {prompt} as a placeholder —
+# Q2: Arguments passed to the command. Use {prompt} as a placeholder —
 # TA replaces it with the goal title + objective text.
 args_template:
   - "{prompt}"
 
-# If true, TA injects goal context into CLAUDE.md before launch.
+# Q3: If true, TA injects goal context into CLAUDE.md before launch.
 # Enable for agents that read CLAUDE.md for instructions.
 injects_context_file: false
 
-# If true, TA injects .claude/settings.local.json with permissions.
+# Q4: If true, TA injects .claude/settings.local.json with permissions.
 # Enable for Claude Code-compatible agents.
 injects_settings: false
 
-# Optional command to run before the main agent launch.
+# Q5: Optional command to run before the main agent launch.
 # Set to null if no pre-launch step is needed.
 pre_launch: null
 # Example:

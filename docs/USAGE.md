@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.7.5-alpha
+**Version**: v0.7.7-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -55,6 +55,8 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [API Mediation](#api-mediation)
    - [Project Setup](#project-setup)
    - [Project Initialization](#project-initialization)
+   - [Add TA to an Existing Project](#add-ta-to-an-existing-project)
+   - [Framework Registry](#framework-registry)
 6. [Roadmap](#roadmap)
 7. [Troubleshooting](#troubleshooting)
 8. [Getting Help](#getting-help)
@@ -1436,13 +1438,74 @@ Each template generates:
 
 `ta init` reads existing project files and tailors config to the actual structure — not just generic templates.
 
+### Add TA to an Existing Project
+
+If you have an existing codebase and want to add TA governance:
+
+```bash
+# Auto-detect project type and installed agent frameworks
+ta init run --detect
+
+# Or use the setup wizard for more control
+ta setup wizard
+```
+
+Both commands detect your project type (Rust, TypeScript, Python, Go) and scan for installed agent frameworks on your PATH. They generate appropriate `.ta/` configuration files.
+
+**What TA creates:**
+- `.ta/workflow.toml` — auto-capture settings for memory
+- `.ta/memory.toml` — key schema tuned to your project type
+- `.ta/policy.yaml` — starter security policy (checkpoint mode)
+- `.ta/agents/<framework>.yaml` — agent launch config for each detected framework
+- `.taignore` — exclude patterns for your language/framework
+
+**What you provide:**
+- Your project's source code (TA reads but doesn't modify existing files during setup)
+- A `PLAN.md` if you want plan-linked goals (optional)
+
+**Framework-specific notes:**
+- **Ollama**: Requires a running Ollama server (`ollama serve`). Configure model in `.ta/agents/ollama.yaml`.
+- **LangChain / LangGraph**: Requires Python environment with packages installed (`pip install langchain langchain-cli` or `pip install langgraph langgraph-cli`).
+- **BMAD-METHOD**: Wraps another runtime (typically Claude Code). No separate install needed beyond the wrapped agent.
+
+### Framework Registry
+
+TA ships a built-in registry of known agent frameworks. During `ta init` and `ta setup wizard`, TA checks which frameworks are installed on your PATH and generates agent configs automatically.
+
+**Supported frameworks:**
+
+| Framework | Command | Runtime |
+|-----------|---------|---------|
+| Claude Code | `claude` | native-cli |
+| Codex | `codex` | native-cli |
+| Ollama | `ollama` | native-cli |
+| LangChain | `langchain` | python |
+| LangGraph | `langgraph` | python |
+| BMAD-METHOD | *(methodology)* | wraps another runtime |
+| Claude Flow | `claude-flow` | native-cli |
+
+**Override the registry** by placing a `frameworks.toml` at `.ta/frameworks.toml` (project-level) or `~/.config/ta/frameworks.toml` (user-level). Project overrides take priority.
+
+```toml
+[frameworks.my-agent]
+name = "My Custom Agent"
+description = "A custom agent framework"
+homepage = "https://example.com"
+install = "npm install -g my-agent"
+detect = ["my-agent"]
+agent_config = "my-agent.yaml"
+runtime = "native-cli"
+```
+
+After adding a custom framework, run `ta setup refine agents` to generate its agent config.
+
 ---
 
 ## Roadmap
 
 ### What's Done
 
-TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, decision observability, credential management, MCP tool call interception, web review UI, webhook review channels, persistent context memory with semantic search, session lifecycle management, unified policy configuration (6-layer cascade), resource mediation (extensible by URI scheme), pluggable channel registry, API mediation for MCP tool calls, agent-guided project setup, and project template initialization.
+TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, decision observability, credential management, MCP tool call interception, web review UI, webhook review channels, persistent context memory with semantic search, session lifecycle management, unified policy configuration (6-layer cascade), resource mediation (extensible by URI scheme), pluggable channel registry, API mediation for MCP tool calls, agent-guided project setup, project template initialization, interactive developer loop (`ta dev`), and extensible agent framework registry with auto-detection.
 
 ### Phase Status
 
@@ -1513,6 +1576,9 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.7.2 | Agent-guided setup (`ta setup wizard/refine/show`) | Done |
 | v0.7.3 | Project templates and `ta init` (5 built-in templates) | Done |
 | v0.7.4 | Memory & config cleanup (backend toggle, guidance domain classification) | Done |
+| v0.7.5 | Interactive session fixes & cross-platform release | Done |
+| v0.7.6 | Interactive developer loop (`ta dev`) | Done |
+| v0.7.7 | Agent framework registry & setup integration | Done |
 
 ### What's Next (v0.8+)
 

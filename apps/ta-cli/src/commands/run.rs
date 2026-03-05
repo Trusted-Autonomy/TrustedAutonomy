@@ -284,6 +284,13 @@ pub fn execute(
         inject_claude_settings(&staging_path, source)?;
     }
 
+    // Inject TA MCP server config into .mcp.json for macro goals (#60).
+    // Without this, the agent sees MCP tool documentation in CLAUDE.md but
+    // can't actually call the tools because no MCP server is configured.
+    if macro_goal {
+        inject_mcp_server_config(&staging_path)?;
+    }
+
     // Build the prompt string.
     let prompt = if objective.is_empty() {
         format!("Implement: {}", title)
@@ -299,6 +306,9 @@ pub fn execute(
         }
         if agent_config.injects_settings {
             restore_claude_settings(&staging_path)?;
+        }
+        if macro_goal {
+            restore_mcp_server_config(&staging_path)?;
         }
 
         println!("\nWorkspace ready. To use manually:");
@@ -416,6 +426,9 @@ pub fn execute(
                 if agent_config.injects_settings {
                     restore_claude_settings(&staging_path)?;
                 }
+                if macro_goal {
+                    restore_mcp_server_config(&staging_path)?;
+                }
 
                 println!(
                     "\n'{}' command not found. To use manually:",
@@ -442,6 +455,9 @@ pub fn execute(
     }
     if agent_config.injects_settings {
         restore_claude_settings(&staging_path)?;
+    }
+    if macro_goal {
+        restore_mcp_server_config(&staging_path)?;
     }
 
     // 7. Build draft package from the diff.
@@ -941,6 +957,93 @@ fn restore_claude_settings(staging_path: &Path) -> anyhow::Result<()> {
         std::fs::write(&settings_path, original)?;
     }
 
+    Ok(())
+}
+
+// ── .mcp.json injection for macro goals (#60) ──────────────────
+
+const MCP_JSON_PATH: &str = ".mcp.json";
+const MCP_JSON_BACKUP: &str = ".ta/mcp_json_original";
+
+/// Inject TA MCP server config into the staging workspace's `.mcp.json`.
+///
+/// This allows macro goal agents to call TA's MCP tools (ta_plan, ta_goal,
+/// ta_draft, ta_context). Without this, the agent sees tool documentation
+/// in CLAUDE.md but has no MCP server configured to handle the calls.
+fn inject_mcp_server_config(staging_path: &Path) -> anyhow::Result<()> {
+    let mcp_json_path = staging_path.join(MCP_JSON_PATH);
+    let backup_path = staging_path.join(MCP_JSON_BACKUP);
+
+    // Save original content (or sentinel if file doesn't exist).
+    let original_content = if mcp_json_path.exists() {
+        std::fs::read_to_string(&mcp_json_path)?
+    } else {
+        NO_ORIGINAL_SENTINEL.to_string()
+    };
+
+    let backup_dir = staging_path.join(".ta");
+    std::fs::create_dir_all(&backup_dir)?;
+    std::fs::write(&backup_path, &original_content)?;
+
+    // Build the MCP config with TA server entry.
+    // Resolve the `ta` binary path for the server command.
+    let ta_binary = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "ta".to_string());
+
+    let ta_server_entry = serde_json::json!({
+        "command": ta_binary,
+        "args": ["serve"],
+        "env": {
+            "TA_PROJECT_ROOT": staging_path.display().to_string()
+        }
+    });
+
+    // Merge with existing .mcp.json if present.
+    let mut mcp_config: serde_json::Value = if original_content != NO_ORIGINAL_SENTINEL {
+        serde_json::from_str(&original_content)
+            .unwrap_or_else(|_| serde_json::json!({ "mcpServers": {} }))
+    } else {
+        serde_json::json!({ "mcpServers": {} })
+    };
+
+    // Add or update the "trusted-autonomy" server entry.
+    if let Some(servers) = mcp_config
+        .get_mut("mcpServers")
+        .and_then(|s| s.as_object_mut())
+    {
+        servers.insert("trusted-autonomy".to_string(), ta_server_entry);
+    } else {
+        mcp_config["mcpServers"] = serde_json::json!({
+            "trusted-autonomy": ta_server_entry
+        });
+    }
+
+    std::fs::write(&mcp_json_path, serde_json::to_string_pretty(&mcp_config)?)?;
+    Ok(())
+}
+
+/// Restore the original `.mcp.json` before computing diffs.
+fn restore_mcp_server_config(staging_path: &Path) -> anyhow::Result<()> {
+    let mcp_json_path = staging_path.join(MCP_JSON_PATH);
+    let backup_path = staging_path.join(MCP_JSON_BACKUP);
+
+    if !backup_path.exists() {
+        return Ok(());
+    }
+
+    let original = std::fs::read_to_string(&backup_path)?;
+
+    if original == NO_ORIGINAL_SENTINEL {
+        if mcp_json_path.exists() {
+            std::fs::remove_file(&mcp_json_path)?;
+        }
+    } else {
+        std::fs::write(&mcp_json_path, original)?;
+    }
+
+    std::fs::remove_file(&backup_path)?;
     Ok(())
 }
 

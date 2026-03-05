@@ -1,0 +1,45 @@
+# Agent launch configuration for BMAD-METHOD.
+# Docs: https://github.com/bmad-code-org/BMAD-METHOD
+#
+# BMAD (Business/Market-driven AI Development) is a methodology, not a
+# standalone runtime. It wraps another agent (typically Claude Code) with
+# a structured phased workflow: Business Analysis → Market Analysis →
+# Architecture Design → Development.
+#
+# Override per-project: .ta/agents/bmad.yaml
+# Override per-user:    ~/.config/ta/agents/bmad.yaml
+
+name: bmad
+description: "BMAD-METHOD workflow — wraps claude-code with phased methodology"
+command: claude
+args_template:
+  - "--system-prompt"
+  - "You are operating under the BMAD-METHOD (Business/Market-driven AI Development). Follow the phased methodology: 1) Business Analysis - understand the problem domain, 2) Market Analysis - review existing solutions, 3) Architecture Design - plan the solution, 4) Development - implement following the architecture. Each phase should be completed before moving to the next."
+  - "{prompt}"
+injects_context_file: true
+injects_settings: true
+pre_launch: null
+env: {}
+
+alignment:
+  principal: "project-owner"
+  autonomy_envelope:
+    bounded_actions:
+      - "fs_read"
+      - "fs_write_patch"
+      - "fs_apply"
+    escalation_triggers:
+      - "new_dependency"
+      - "security_sensitive"
+      - "breaking_change"
+    forbidden_actions:
+      - "network_external"
+      - "credential_access"
+  constitution: "default-v1"
+  coordination:
+    allowed_collaborators:
+      - "claude-code"
+      - "codex"
+    shared_resources:
+      - "src/**"
+      - "docs/**"

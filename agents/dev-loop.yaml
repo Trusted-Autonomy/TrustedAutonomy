@@ -13,7 +13,7 @@ command: claude
 args_template:
   - "--allowedTools"
   - "mcp__ta__ta_plan,mcp__ta__ta_goal,mcp__ta__ta_draft,mcp__ta__ta_context,mcp__ta__ta_release,Read,Grep,Glob,WebFetch,WebSearch"
-  - "-p"
+  - "--system-prompt"
   - "{prompt}"
 injects_context_file: false
 injects_settings: false

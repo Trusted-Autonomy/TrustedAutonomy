@@ -1,0 +1,41 @@
+# Agent launch configuration for Ollama (local LLM runner).
+# Docs: https://ollama.ai
+#
+# Requires: Ollama installed and running (`ollama serve`)
+# Install: brew install ollama (macOS) or curl -fsSL https://ollama.ai/install.sh | sh (Linux)
+#
+# Override per-project: .ta/agents/ollama.yaml
+# Override per-user:    ~/.config/ta/agents/ollama.yaml
+#
+# To change the model, edit the args_template below.
+
+name: ollama
+description: "Local LLM via Ollama — run models locally without cloud API keys"
+command: ollama
+args_template:
+  - "run"
+  - "codellama"
+  - "{prompt}"
+injects_context_file: false
+injects_settings: false
+pre_launch: null
+env: {}
+
+# Ollama runs models locally — no external network needed for inference.
+alignment:
+  principal: "project-owner"
+  autonomy_envelope:
+    bounded_actions:
+      - "fs_read"
+      - "fs_write_patch"
+    escalation_triggers:
+      - "new_dependency"
+      - "security_sensitive"
+    forbidden_actions:
+      - "network_external"
+      - "credential_access"
+  constitution: "default-v1"
+  coordination:
+    allowed_collaborators: []
+    shared_resources:
+      - "src/**"

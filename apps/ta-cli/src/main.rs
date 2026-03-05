@@ -10,6 +10,7 @@
 //! - `ta serve` — start MCP server on stdio
 
 mod commands;
+pub mod framework_registry;
 
 use std::path::PathBuf;
 

@@ -877,8 +877,15 @@ impl TaGatewayServer {
                     )
                 })?;
 
+                // Use goal.objective for the "why" field (#76). Previously used
+                // goal.title which just restated the summary.
+                let summary_why = if goal.objective.is_empty() {
+                    goal.title.clone()
+                } else {
+                    goal.objective.clone()
+                };
                 let pr_package = connector
-                    .build_pr_package(&goal.title, &goal.objective, summary, &goal.title)
+                    .build_pr_package(&goal.title, &goal.objective, summary, &summary_why)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
                 let package_id = pr_package.package_id;

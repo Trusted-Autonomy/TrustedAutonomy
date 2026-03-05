@@ -1830,7 +1830,7 @@ New/modified files:
 - ✅ 5 tests: prompt generation, plan summary, drafts summary, config fallback
 
 ### v0.7.7 — Agent Framework Registry & Setup Integration
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make agent frameworks a first-class extensible concept. Ship a framework registry with installation metadata, integrate framework selection into `ta init` and `ta setup wizard`, and add built-in configs for popular frameworks beyond Claude Code.
 
 **Framework Registry**: A `frameworks.toml` (bundled in binary, overridable at `~/.config/ta/frameworks.toml` or `.ta/frameworks.toml`) that maps known frameworks to their metadata:
@@ -1921,6 +1921,24 @@ runtime = "native-cli"
 - Manual setup: copy `generic.yaml`, edit, configure `.ta/` directory
 - What TA creates vs what the user needs to provide
 - Framework-specific setup notes (e.g., Ollama needs a running server, LangChain needs Python env)
+
+#### Completed
+
+- ✅ Framework Registry (`framework_registry.rs`): Custom TOML parser, bundled registry with 7 frameworks (claude-code, codex, ollama, langchain, langgraph, bmad, claude-flow), project/user override support, PATH detection via `which` (11 tests)
+- ✅ `ta init` framework selection: Auto-detects installed frameworks, generates agent YAML configs, shows available-but-not-installed with install instructions
+- ✅ `ta setup wizard` framework step: Uses framework registry for detection, shows installed + available frameworks with install guidance
+- ✅ New agent configs: `ollama.yaml`, `langchain.yaml`, `langgraph.yaml`, `bmad.yaml`
+- ✅ Bug fix: `ta dev` interactive mode — changed `-p` to `--system-prompt` in both `dev-loop.yaml` and hard-coded fallback so Claude stays interactive
+- ✅ Bug fix: Macro goal MCP server injection (#60) — `run.rs` injects TA MCP server into `.mcp.json` during macro goal setup, restores on exit
+- ✅ Bug fix: PR "Why" field (#76) — `draft.rs` resolves phase description from PLAN.md via `extract_phase_description()`, MCP gateway uses `goal.objective` over `goal.title`
+- ✅ Updated `generic.yaml` with Q&A field annotations and community contribution guide
+- ✅ Version bump to 0.7.7-alpha
+- ✅ Documentation: "Add TA to an existing project" section in USAGE.md, framework registry docs
+
+#### Remaining (deferred)
+
+- Custom framework from URL or Q&A (interactive prompting for custom framework setup)
+- Community contribution path documentation (PR workflow for adding frameworks)
 
 #### Implementation scope
 

@@ -1,0 +1,45 @@
+# Agent launch configuration for LangGraph.
+# Docs: https://langchain-ai.github.io/langgraph/
+#
+# Requires: Python environment with langgraph installed
+# Install: pip install langgraph langgraph-cli
+#
+# Override per-project: .ta/agents/langgraph.yaml
+# Override per-user:    ~/.config/ta/agents/langgraph.yaml
+#
+# LangGraph builds stateful multi-agent workflows. This config launches
+# a LangGraph agent as a TA node — TA provides the staging workspace
+# and the agent graph handles multi-step reasoning.
+
+name: langgraph
+description: "LangGraph stateful agent with TA as a node"
+command: python
+args_template:
+  - "-m"
+  - "langgraph_cli"
+  - "run"
+  - "--prompt"
+  - "{prompt}"
+injects_context_file: false
+injects_settings: false
+pre_launch: null
+env: {}
+
+alignment:
+  principal: "project-owner"
+  autonomy_envelope:
+    bounded_actions:
+      - "fs_read"
+      - "fs_write_patch"
+    escalation_triggers:
+      - "new_dependency"
+      - "security_sensitive"
+    forbidden_actions:
+      - "credential_access"
+  constitution: "default-v1"
+  coordination:
+    allowed_collaborators:
+      - "claude-code"
+      - "langchain"
+    shared_resources:
+      - "src/**"

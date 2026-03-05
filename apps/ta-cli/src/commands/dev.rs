@@ -201,12 +201,14 @@ fn load_dev_config(project_root: &Path) -> DevLoopConfig {
     }
 
     // 4. Hard-coded fallback.
+    // Uses --system-prompt (not -p) so Claude stays in interactive mode
+    // instead of processing a single prompt and exiting.
     DevLoopConfig {
         command: "claude".to_string(),
         args_template: vec![
             "--allowedTools".to_string(),
             "mcp__ta__ta_plan,mcp__ta__ta_goal,mcp__ta__ta_draft,mcp__ta__ta_context,mcp__ta__ta_release,Read,Grep,Glob,WebFetch,WebSearch".to_string(),
-            "-p".to_string(),
+            "--system-prompt".to_string(),
             "{prompt}".to_string(),
         ],
         env: Default::default(),
@@ -346,6 +348,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = load_dev_config(dir.path());
         assert_eq!(config.command, "claude");
-        assert!(config.args_template.contains(&"-p".to_string()));
+        // Uses --system-prompt (not -p) so Claude stays interactive.
+        assert!(config
+            .args_template
+            .contains(&"--system-prompt".to_string()));
+        assert!(!config.args_template.contains(&"-p".to_string()));
     }
 }

@@ -1,0 +1,44 @@
+# Agent launch configuration for LangChain.
+# Docs: https://python.langchain.com
+#
+# Requires: Python environment with langchain installed
+# Install: pip install langchain langchain-cli
+#
+# Override per-project: .ta/agents/langchain.yaml
+# Override per-user:    ~/.config/ta/agents/langchain.yaml
+#
+# This config assumes a LangChain agent runner script at .ta/agents/langchain_runner.py
+# or on PATH as `langchain-ta-agent`. Adapt the command and args to your setup.
+
+name: langchain
+description: "LangChain agent runner with TA tool integration"
+command: python
+args_template:
+  - "-m"
+  - "langchain_cli"
+  - "run"
+  - "--prompt"
+  - "{prompt}"
+injects_context_file: false
+injects_settings: false
+pre_launch: null
+env:
+  LANGCHAIN_TRACING_V2: "false"
+
+alignment:
+  principal: "project-owner"
+  autonomy_envelope:
+    bounded_actions:
+      - "fs_read"
+      - "fs_write_patch"
+    escalation_triggers:
+      - "new_dependency"
+      - "security_sensitive"
+    forbidden_actions:
+      - "credential_access"
+  constitution: "default-v1"
+  coordination:
+    allowed_collaborators:
+      - "claude-code"
+    shared_resources:
+      - "src/**"

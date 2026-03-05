@@ -22,7 +22,7 @@ use ta_changeset::review_session_store::ReviewSessionStore;
 use ta_changeset::supervisor::{SupervisorAgent, ValidationWarning};
 use ta_changeset::uri_pattern;
 use ta_connector_fs::FsConnector;
-use ta_goal::{GoalRunState, GoalRunStore};
+use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
 use ta_mcp_gateway::GatewayConfig;
 use ta_workspace::{
     ChangeStore, ExcludePatterns, JsonFileStore, OverlayWorkspace, StagingWorkspace,
@@ -881,7 +881,7 @@ pub(crate) fn build_package(
         },
         summary: Summary {
             what_changed: effective_summary,
-            why: goal.objective.clone(),
+            why: resolve_draft_why(&goal, source_dir),
             impact: format!("{} file(s) changed", artifacts.len()),
             rollback_plan: "Revert changes from staging".to_string(),
             open_questions: dependency_notes.into_iter().collect(),
@@ -984,6 +984,23 @@ pub(crate) fn build_package(
     println!("Approve with: ta draft approve {}", package_id);
 
     Ok(())
+}
+
+/// Resolve the "why" field for a draft summary (#76).
+///
+/// When a goal is linked to a plan phase, extract the phase's `**Goal**:`
+/// description from PLAN.md — that's where the real motivation lives.
+/// Falls back to `goal.objective` when no plan phase is linked or when
+/// the description can't be extracted.
+fn resolve_draft_why(goal: &GoalRun, source_dir: &std::path::Path) -> String {
+    if let Some(ref phase_id) = goal.plan_phase {
+        if let Some(desc) =
+            crate::framework_registry::extract_phase_description(source_dir, phase_id)
+        {
+            return desc;
+        }
+    }
+    goal.objective.clone()
 }
 
 fn list_packages(
