@@ -2014,7 +2014,7 @@ runtime = "native-cli"
 - ✅ Custom TOML serializer/parser for `solutions.toml` format (no `toml` crate dependency)
 
 ### v0.8.2 — Developer Loop Refinements & Orchestrator Wiring
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix `ta dev` bugs and wire the orchestrator→implementation agent loop so `ta dev` can actually launch and monitor goals end-to-end.
 
 **Bug fix: `ta dev` no status summary on launch**: `ta dev` builds the plan summary into `--system-prompt` but never prints it to the terminal. The user sees "Starting interactive developer loop..." then Claude starts with no context. Fix: print plan progress + next pending phase to stdout before launching the agent. (`dev.rs:232`)
