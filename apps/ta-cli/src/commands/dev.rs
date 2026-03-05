@@ -51,7 +51,8 @@ fn build_dev_prompt(project_root: &Path, config: &GatewayConfig, unrestricted: b
         "- **Review drafts**: Use `ta_draft` to list, view, approve, or deny agent work\n",
     );
     prompt.push_str("- **Search memory**: Use `ta_context` to search project memory and context\n");
-    prompt.push_str("- **Cut releases**: Use `ta_release` to run the release pipeline\n\n");
+    prompt.push_str("- **Cut releases**: Use `ta_release` to run the release pipeline\n");
+    prompt.push_str("- **Watch events**: Use `ta_event_subscribe` to check for goal completions, failures, and draft events without polling\n\n");
 
     prompt.push_str("## Workflow\n\n");
     prompt.push_str("1. Show the current plan status and next pending phase\n");
@@ -79,7 +80,7 @@ fn build_dev_prompt(project_root: &Path, config: &GatewayConfig, unrestricted: b
         prompt.push_str(
             "- **Read-only project access**: You may use Read, Grep, Glob to inspect the project\n",
         );
-        prompt.push_str("- **TA MCP tools only**: All actions (goals, drafts, releases) go through `ta_plan`, `ta_goal`, `ta_draft`, `ta_context`, `ta_release`\n\n");
+        prompt.push_str("- **TA MCP tools only**: All actions go through `ta_plan`, `ta_goal`, `ta_draft`, `ta_context`, `ta_release`, `ta_event_subscribe`\n\n");
         prompt.push_str("Implementation happens in **sub-goals** — you launch them, review their drafts, and approve or deny.\n\n");
     }
 
@@ -91,7 +92,8 @@ fn build_dev_prompt(project_root: &Path, config: &GatewayConfig, unrestricted: b
     prompt.push_str("- \"show drafts\" → list pending drafts\n");
     prompt.push_str("- \"approve <id>\" → approve a draft\n");
     prompt.push_str("- \"release\" → run the release pipeline\n");
-    prompt.push_str("- \"context search X\" → search project memory\n\n");
+    prompt.push_str("- \"context search X\" → search project memory\n");
+    prompt.push_str("- \"check events\" → query recent events for goal completions/failures\n\n");
 
     // Include current plan status.
     let plan_section = build_plan_summary(project_root);
@@ -284,7 +286,7 @@ fn load_dev_config(project_root: &Path, unrestricted: bool) -> DevLoopConfig {
         command: "claude".to_string(),
         args_template: vec![
             "--allowedTools".to_string(),
-            "mcp__ta__ta_plan,mcp__ta__ta_goal,mcp__ta__ta_draft,mcp__ta__ta_context,mcp__ta__ta_release,Read,Grep,Glob,WebFetch,WebSearch".to_string(),
+            "mcp__ta__ta_plan,mcp__ta__ta_goal,mcp__ta__ta_draft,mcp__ta__ta_context,mcp__ta__ta_release,mcp__ta__ta_event_subscribe,Read,Grep,Glob,WebFetch,WebSearch".to_string(),
             "--system-prompt".to_string(),
             "{prompt}".to_string(),
         ],

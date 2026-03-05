@@ -424,7 +424,7 @@ ta dev --unrestricted
 
 On launch, `ta dev` prints the current plan status directly to your terminal — you see progress and the next actionable phase before the agent even starts. Deferred phases (like public preview milestones) are automatically skipped.
 
-**Security model:** By default, the orchestrator agent runs in **restricted mode** — it can only read project files and use TA MCP tools. No file writes, no shell access, no outbound mutations. The `--allowedTools` flag limits the agent to `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and TA tools (`ta_plan`, `ta_goal`, `ta_draft`, `ta_context`, `ta_release`). The MCP gateway enforces `CallerMode::Orchestrator` which blocks `ta_fs_write` at the server level.
+**Security model:** By default, the orchestrator agent runs in **restricted mode** — it can only read project files and use TA MCP tools. No file writes, no shell access, no outbound mutations. The `--allowedTools` flag limits the agent to `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and TA tools (`ta_plan`, `ta_goal`, `ta_draft`, `ta_context`, `ta_release`, `ta_event_subscribe`). The MCP gateway enforces `CallerMode::Orchestrator` which blocks `ta_fs_write` at the server level.
 
 Use `--unrestricted` if you need the orchestrator to have full access (logs a warning and removes tool restrictions).
 
@@ -441,6 +441,7 @@ You interact with it using natural language:
 - "run v0.7.6" — launch a sub-goal for that phase
 - "show drafts" — list drafts pending review
 - "approve abc123" — approve a draft
+- "check events" — query recent lifecycle events
 - "release" — run the release pipeline
 - "context search X" — search project memory
 
@@ -1219,7 +1220,7 @@ Events are persisted to `.ta/events/<YYYY-MM-DD>.jsonl` files, rotated daily.
 
 #### Event types
 
-Events cover the full TA lifecycle: `goal_started`, `goal_completed`, `draft_built`, `draft_submitted`, `draft_approved`, `draft_denied`, `draft_applied`, `session_paused`, `session_resumed`, `session_aborted`, `plan_phase_completed`, `review_requested`, `policy_violation`, `memory_stored`.
+Events cover the full TA lifecycle: `goal_started`, `goal_completed`, `goal_failed`, `draft_built`, `draft_submitted`, `draft_approved`, `draft_denied`, `draft_applied`, `session_paused`, `session_resumed`, `session_aborted`, `plan_phase_completed`, `review_requested`, `policy_violation`, `memory_stored`.
 
 #### Event hooks
 
@@ -1242,6 +1243,23 @@ Hook commands receive the event JSON via the `TA_EVENT_JSON` environment variabl
 # View configured hooks
 ta events hooks
 ```
+
+#### MCP event queries
+
+MCP-connected agents (orchestrators, macro goal agents) can query events programmatically via the `ta_event_subscribe` tool:
+
+```json
+// Query events since a cursor timestamp
+{ "action": "query", "since": "2026-03-05T10:00:00Z", "event_types": ["goal_failed", "draft_approved"] }
+
+// Watch for new events (pass the cursor from the previous response)
+{ "action": "watch", "since": "2026-03-05T10:05:23.456Z", "goal_id": "<goal-id>" }
+
+// Get the most recent events
+{ "action": "latest", "limit": 10 }
+```
+
+The response includes a `cursor` timestamp — pass it back as `since` on the next call to get only newer events. This enables efficient polling without re-reading old events.
 
 #### JSON output
 

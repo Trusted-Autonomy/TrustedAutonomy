@@ -129,6 +129,13 @@ pub enum SessionEvent {
         category: Option<String>,
         source: String,
     },
+
+    /// A goal failed due to agent exit, crash, or workspace error (v0.9.4).
+    GoalFailed {
+        goal_id: Uuid,
+        error: String,
+        exit_code: Option<i32>,
+    },
 }
 
 impl SessionEvent {
@@ -149,6 +156,7 @@ impl SessionEvent {
             Self::ReviewRequested { .. } => "review_requested",
             Self::PolicyViolation { .. } => "policy_violation",
             Self::MemoryStored { .. } => "memory_stored",
+            Self::GoalFailed { .. } => "goal_failed",
         }
     }
 
@@ -162,7 +170,8 @@ impl SessionEvent {
             | Self::DraftApproved { goal_id, .. }
             | Self::DraftDenied { goal_id, .. }
             | Self::DraftApplied { goal_id, .. }
-            | Self::ReviewRequested { goal_id, .. } => Some(*goal_id),
+            | Self::ReviewRequested { goal_id, .. }
+            | Self::GoalFailed { goal_id, .. } => Some(*goal_id),
             Self::PolicyViolation { goal_id, .. } => *goal_id,
             _ => None,
         }
@@ -289,11 +298,16 @@ mod tests {
                 category: None,
                 source: "cli".into(),
             },
+            SessionEvent::GoalFailed {
+                goal_id: gid,
+                error: "agent crashed".into(),
+                exit_code: Some(1),
+            },
         ];
         for e in &events {
             assert!(!e.event_type().is_empty());
         }
-        assert_eq!(events.len(), 14);
+        assert_eq!(events.len(), 15);
     }
 
     #[test]

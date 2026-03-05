@@ -165,6 +165,14 @@ pub enum TaEvent {
         iteration: u32,
         timestamp: DateTime<Utc>,
     },
+
+    /// A goal failed due to agent exit, crash, or workspace setup error (v0.9.4).
+    GoalFailed {
+        goal_run_id: Uuid,
+        error: String,
+        exit_code: Option<i32>,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 impl TaEvent {
@@ -188,6 +196,7 @@ impl TaEvent {
             TaEvent::DraftBuilt { .. } => "draft_built",
             TaEvent::ReviewDecision { .. } => "review_decision",
             TaEvent::SessionIteration { .. } => "session_iteration",
+            TaEvent::GoalFailed { .. } => "goal_failed",
         }
     }
 
@@ -267,6 +276,16 @@ impl TaEvent {
         TaEvent::SessionIteration {
             session_id,
             iteration,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create a GoalFailed event (v0.9.4).
+    pub fn goal_failed(goal_run_id: Uuid, error: &str, exit_code: Option<i32>) -> Self {
+        TaEvent::GoalFailed {
+            goal_run_id,
+            error: error.to_string(),
+            exit_code,
             timestamp: Utc::now(),
         }
     }
@@ -473,6 +492,28 @@ mod tests {
             let restored: TaEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(event.event_type(), restored.event_type());
         }
+    }
+
+    #[test]
+    fn goal_failed_event_v094() {
+        let gid = Uuid::new_v4();
+        let event = TaEvent::goal_failed(gid, "agent exited with code 1", Some(1));
+        assert_eq!(event.event_type(), "goal_failed");
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("goal_failed"));
+        assert!(json.contains("agent exited with code 1"));
+        assert!(json.contains("\"exit_code\":1"));
+
+        let restored: TaEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.event_type(), "goal_failed");
+    }
+
+    #[test]
+    fn goal_failed_no_exit_code() {
+        let gid = Uuid::new_v4();
+        let event = TaEvent::goal_failed(gid, "workspace setup failed", None);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"exit_code\":null"));
     }
 
     #[test]

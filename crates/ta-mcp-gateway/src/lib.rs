@@ -4,7 +4,7 @@
 //!
 //! Exposes TA's staging, policy, and goal lifecycle as MCP tools that
 //! any MCP-compatible agent (Claude Code, Codex, etc.) can call. All
-//! file operations flow through policy → staging → changeset → audit,
+//! file operations flow through policy -> staging -> changeset -> audit,
 //! enforcing the core thesis: every agent action is mediated.
 //!
 //! ## Architecture
@@ -26,11 +26,14 @@
 //! - `ta_fs_diff` — show diff for a staged file
 //! - `ta_pr_build` — bundle staged changes into PR package
 //! - `ta_pr_status` — check PR package status
+//! - `ta_event_subscribe` — query/watch events for orchestration (v0.9.4)
 
 pub mod config;
 pub mod error;
 pub mod interceptor;
 pub mod server;
+pub mod tools;
+pub mod validation;
 
 pub use config::GatewayConfig;
 pub use error::GatewayError;

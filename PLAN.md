@@ -2151,7 +2151,7 @@ runtime = "native-cli"
 - Full tool-call audit logging in gateway: currently logs session start/end; per-tool-call logging deferred to event system integration.
 
 ### v0.9.4 — Orchestrator Event Wiring & Gateway Refactor
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Wire the `ta dev` orchestrator to actually launch implementation agents, handle failures, and receive events — plus refactor the growing MCP gateway.
 
 1. **Fix `ta_goal_start` MCP → full agent launch**: Currently `ta_goal_start` via MCP only creates goal metadata — it doesn't copy the project to staging, inject CLAUDE.md, or launch the agent process. The orchestrator (`ta dev`) cannot actually launch implementation agents. Wire `ta_goal_start` (and `ta_goal_inner` with `launch:true`) to perform the full `ta run` lifecycle: overlay workspace copy → context injection → agent spawn. This is the critical blocker for `ta dev` orchestration.
@@ -2165,6 +2165,14 @@ runtime = "native-cli"
    - `tools/plan.rs` → `ta_plan`
    - `tools/context.rs` → `ta_context`
    - `validation.rs` → `parse_uuid`, `enforce_policy`, `validate_goal_exists` (shared helpers)
+
+**Completed:**
+- [x] `GoalFailed` event variant added to `TaEvent` (ta-goal/events.rs) and `SessionEvent` (ta-events/schema.rs) with helper constructors, serialization tests
+- [x] `ta_event_subscribe` MCP tool with query/watch/latest actions, cursor-based pagination, type/goal/time filtering
+- [x] MCP gateway refactored: `server.rs` split into `tools/{goal,fs,draft,plan,context,event}.rs` + `validation.rs`
+- [x] `GoalFailed` emitted on agent launch failure in `ta_goal_inner` with `launch:true`, transitions goal to Failed state
+- [x] `ta dev` prompt and allowed-tools list updated to include `ta_event_subscribe`
+- [x] 14 MCP tools (was 13), 30 gateway tests pass, 2 new GoalFailed event tests
 
 ---
 
