@@ -138,6 +138,9 @@ enum Commands {
         /// Agent system to use for orchestration (defaults to dev-loop config).
         #[arg(long)]
         agent: Option<String>,
+        /// Bypass security restrictions (allows Write, Edit, Bash, etc.). Logs a warning.
+        #[arg(long)]
+        unrestricted: bool,
     },
     /// Interactive setup wizard for TA configuration.
     Setup {
@@ -253,7 +256,10 @@ fn main() -> anyhow::Result<()> {
         ),
         Commands::Events { command } => commands::events::execute(command, &config),
         Commands::Token { command } => commands::token::execute(command, &config),
-        Commands::Dev { agent } => commands::dev::execute(&config, &project_root, agent.as_deref()),
+        Commands::Dev {
+            agent,
+            unrestricted,
+        } => commands::dev::execute(&config, &project_root, agent.as_deref(), *unrestricted),
         Commands::Session { command } => commands::session::execute(command, &config),
         Commands::Plan { command } => commands::plan::execute(command, &config),
         Commands::Context { command } => commands::context::execute(command, &config),

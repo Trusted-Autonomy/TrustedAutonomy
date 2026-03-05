@@ -251,6 +251,60 @@ pub struct GatewayState {
     pub interceptor: ToolCallInterceptor,
     /// Pending actions captured by the interceptor, keyed by goal_run_id.
     pub pending_actions: HashMap<Uuid, Vec<PendingAction>>,
+    /// v0.9.3: Caller mode — "orchestrator" blocks write tools, "unrestricted" allows all.
+    /// Set via `TA_CALLER_MODE` env var by `ta dev`.
+    pub caller_mode: CallerMode,
+    /// v0.9.3: Dev session ID for audit correlation. Set via `TA_DEV_SESSION_ID` env var.
+    pub dev_session_id: Option<String>,
+}
+
+/// Caller mode determines what operations the MCP gateway allows.
+///
+/// When `ta dev` launches the MCP server, it sets `TA_CALLER_MODE` to control
+/// whether the orchestrator can call write tools (`ta_fs_write`, `ta_goal_start`, etc.)
+/// or is restricted to read-only operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallerMode {
+    /// Normal mode — all tools available. Used by `ta run` and direct `ta serve`.
+    Normal,
+    /// Orchestrator mode — write tools blocked at the gateway level.
+    /// Set by `ta dev` (without `--unrestricted`).
+    Orchestrator,
+    /// Unrestricted orchestrator — all tools available but audit-logged.
+    /// Set by `ta dev --unrestricted`.
+    Unrestricted,
+}
+
+impl CallerMode {
+    /// Parse from the `TA_CALLER_MODE` env var.
+    pub fn from_env() -> Self {
+        match std::env::var("TA_CALLER_MODE").as_deref() {
+            Ok("orchestrator") => CallerMode::Orchestrator,
+            Ok("unrestricted") => CallerMode::Unrestricted,
+            _ => CallerMode::Normal,
+        }
+    }
+
+    /// Check if a tool call is forbidden in this caller mode.
+    ///
+    /// In orchestrator mode, only read-only TA tools and plan/draft management
+    /// are allowed. Write operations (`ta_fs_write`, `ta_goal_start` — which
+    /// creates staging workspaces) are allowed because they're mediated, but
+    /// the orchestrator's prompt instructions prevent it from using them directly.
+    ///
+    /// The gateway-level enforcement is a defense-in-depth layer — the primary
+    /// restriction is the `--allowedTools` list in the agent config.
+    pub fn is_tool_forbidden(&self, tool_name: &str) -> bool {
+        match self {
+            CallerMode::Normal | CallerMode::Unrestricted => false,
+            CallerMode::Orchestrator => {
+                // In orchestrator mode, block direct file writes.
+                // ta_fs_write is the staging write tool — orchestrators should not
+                // use it directly (that's what implementation agents do).
+                matches!(tool_name, "ta_fs_write")
+            }
+        }
+    }
 }
 
 impl GatewayState {
@@ -280,6 +334,8 @@ impl GatewayState {
             auto_capture_config,
             interceptor: ToolCallInterceptor::new(),
             pending_actions: HashMap::new(),
+            caller_mode: CallerMode::from_env(),
+            dev_session_id: std::env::var("TA_DEV_SESSION_ID").ok(),
         })
     }
 
@@ -636,6 +692,15 @@ impl TaGatewayServer {
             .state
             .lock()
             .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
+
+        // v0.9.3: Enforce caller mode — orchestrators cannot use ta_fs_write.
+        if state.caller_mode.is_tool_forbidden("ta_fs_write") {
+            return Err(McpError::invalid_request(
+                "ta_fs_write is forbidden in orchestrator mode. Use ta_goal to launch an implementation agent instead.".to_string(),
+                None,
+            ));
+        }
+
         let goal_run_id = parse_uuid(&params.goal_run_id)?;
         let agent_id = state
             .agent_for_goal(goal_run_id)
@@ -2093,5 +2158,40 @@ mod tests {
         assert_eq!(files2.len(), 1);
         assert!(files1.contains(&"g1.txt".to_string()));
         assert!(files2.contains(&"g2.txt".to_string()));
+    }
+
+    // v0.9.3: CallerMode tests.
+
+    #[test]
+    fn caller_mode_normal_allows_all_tools() {
+        let mode = CallerMode::Normal;
+        assert!(!mode.is_tool_forbidden("ta_fs_write"));
+        assert!(!mode.is_tool_forbidden("ta_goal_start"));
+        assert!(!mode.is_tool_forbidden("ta_draft"));
+    }
+
+    #[test]
+    fn caller_mode_orchestrator_blocks_fs_write() {
+        let mode = CallerMode::Orchestrator;
+        assert!(mode.is_tool_forbidden("ta_fs_write"));
+        // Other tools are allowed — orchestrator needs plan, goal, draft, context.
+        assert!(!mode.is_tool_forbidden("ta_plan"));
+        assert!(!mode.is_tool_forbidden("ta_goal_start"));
+        assert!(!mode.is_tool_forbidden("ta_draft"));
+        assert!(!mode.is_tool_forbidden("ta_context"));
+    }
+
+    #[test]
+    fn caller_mode_unrestricted_allows_all_tools() {
+        let mode = CallerMode::Unrestricted;
+        assert!(!mode.is_tool_forbidden("ta_fs_write"));
+        assert!(!mode.is_tool_forbidden("ta_goal_start"));
+    }
+
+    #[test]
+    fn caller_mode_from_env_defaults_to_normal() {
+        // When TA_CALLER_MODE is not set, defaults to Normal.
+        std::env::remove_var("TA_CALLER_MODE");
+        assert_eq!(CallerMode::from_env(), CallerMode::Normal);
     }
 }

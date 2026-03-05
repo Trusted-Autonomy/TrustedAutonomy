@@ -7,15 +7,16 @@
 // Unlike `ta run`, `ta dev` does NOT create a staging workspace. The agent
 // operates in the project directory with read-only access, using TA's MCP
 // tools (ta_plan, ta_goal, ta_draft, ta_context) for all actions.
+//
+// v0.9.3: Security hardening — orchestrator is restricted by default.
+// `--unrestricted` flag bypasses restrictions for power users.
 
 use std::path::Path;
 
 use ta_mcp_gateway::GatewayConfig;
 
 use super::plan;
-use super::run::{
-    build_memory_context_section_for_inject, inject_mcp_server_config, restore_mcp_server_config,
-};
+use super::run::{build_memory_context_section_for_inject, restore_mcp_server_config};
 
 /// Minimal agent config for the dev-loop orchestrator.
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -30,7 +31,7 @@ struct DevLoopConfig {
 ///
 /// Includes plan status, pending phases, memory context, and instructions
 /// for using MCP tools.
-fn build_dev_prompt(project_root: &Path, config: &GatewayConfig) -> String {
+fn build_dev_prompt(project_root: &Path, config: &GatewayConfig, unrestricted: bool) -> String {
     let mut prompt = String::new();
 
     prompt.push_str(
@@ -59,19 +60,28 @@ fn build_dev_prompt(project_root: &Path, config: &GatewayConfig) -> String {
     prompt.push_str("4. Approve good work, deny and re-launch if needed\n");
     prompt.push_str("5. Cut releases when milestones are reached\n\n");
 
-    prompt.push_str("## Security Boundaries\n\n");
-    prompt.push_str(
-        "You are a **read-only orchestrator**. You MUST NOT write files, execute shell commands, \
-         or make outbound change operations. Specifically:\n\n",
-    );
-    prompt.push_str("- **No file writes**: Do not use Write, Edit, NotebookEdit, or any tool that modifies files\n");
-    prompt.push_str("- **No shell access**: Do not use Bash or any shell execution tool\n");
-    prompt.push_str("- **No outbound mutations**: Do not make HTTP POST/PUT/DELETE requests or modify external resources\n");
-    prompt.push_str(
-        "- **Read-only project access**: You may use Read, Grep, Glob to inspect the project\n",
-    );
-    prompt.push_str("- **TA MCP tools only**: All actions (goals, drafts, releases) go through `ta_plan`, `ta_goal`, `ta_draft`, `ta_context`, `ta_release`\n\n");
-    prompt.push_str("Implementation happens in **sub-goals** — you launch them, review their drafts, and approve or deny.\n\n");
+    // Security boundaries — included unless --unrestricted.
+    if unrestricted {
+        prompt.push_str("## Security Mode: UNRESTRICTED\n\n");
+        prompt.push_str(
+            "This session is running in unrestricted mode. You have full access to all tools \
+             including Write, Edit, Bash, and network operations. Use with caution.\n\n",
+        );
+    } else {
+        prompt.push_str("## Security Boundaries\n\n");
+        prompt.push_str(
+            "You are a **read-only orchestrator**. You MUST NOT write files, execute shell commands, \
+             or make outbound change operations. Specifically:\n\n",
+        );
+        prompt.push_str("- **No file writes**: Do not use Write, Edit, NotebookEdit, or any tool that modifies files\n");
+        prompt.push_str("- **No shell access**: Do not use Bash or any shell execution tool\n");
+        prompt.push_str("- **No outbound mutations**: Do not make HTTP POST/PUT/DELETE requests or modify external resources\n");
+        prompt.push_str(
+            "- **Read-only project access**: You may use Read, Grep, Glob to inspect the project\n",
+        );
+        prompt.push_str("- **TA MCP tools only**: All actions (goals, drafts, releases) go through `ta_plan`, `ta_goal`, `ta_draft`, `ta_context`, `ta_release`\n\n");
+        prompt.push_str("Implementation happens in **sub-goals** — you launch them, review their drafts, and approve or deny.\n\n");
+    }
 
     prompt.push_str("## Natural Language Commands\n\n");
     prompt.push_str("Respond to conversational requests like:\n");
@@ -227,7 +237,16 @@ fn build_drafts_summary(config: &GatewayConfig) -> String {
 }
 
 /// Load agent config for the dev-loop agent from YAML or fall back to defaults.
-fn load_dev_config(project_root: &Path) -> DevLoopConfig {
+fn load_dev_config(project_root: &Path, unrestricted: bool) -> DevLoopConfig {
+    // In unrestricted mode, skip the restrictive YAML config and use a permissive fallback.
+    if unrestricted {
+        return DevLoopConfig {
+            command: "claude".to_string(),
+            args_template: vec!["--system-prompt".to_string(), "{prompt}".to_string()],
+            env: Default::default(),
+        };
+    }
+
     let filename = "dev-loop.yaml";
 
     // 1. Project override: .ta/agents/dev-loop.yaml
@@ -278,23 +297,66 @@ fn try_load_config(path: &Path) -> Option<DevLoopConfig> {
     serde_yaml::from_str(&content).ok()
 }
 
+/// Write an audit log entry for the dev session start/end.
+///
+/// Uses the `.ta/dev-audit.log` file, appending JSON lines with session ID,
+/// timestamp, event type, and optional context.
+fn write_dev_audit(project_root: &Path, session_id: &str, event: &str, context: Option<&str>) {
+    let ta_dir = project_root.join(".ta");
+    if std::fs::create_dir_all(&ta_dir).is_err() {
+        return;
+    }
+
+    let log_path = ta_dir.join("dev-audit.log");
+    let entry = serde_json::json!({
+        "session_id": session_id,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "event": event,
+        "context": context,
+    });
+
+    let line = format!("{}\n", entry);
+    // Append to log file.
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 pub fn execute(
     config: &GatewayConfig,
     project_root: &Path,
     agent: Option<&str>,
+    unrestricted: bool,
 ) -> anyhow::Result<()> {
     let project_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
 
+    // Generate a session ID for audit trail.
+    let session_id = uuid::Uuid::new_v4().to_string();
+
     println!("Starting interactive developer loop...");
     println!("  Project: {}", project_root.display());
+    println!("  Session: {}", &session_id[..8]);
+
+    if unrestricted {
+        eprintln!();
+        eprintln!("  ⚠ WARNING: Running in UNRESTRICTED mode.");
+        eprintln!("  The orchestrator agent has full access to all tools.");
+        eprintln!("  This bypasses read-only enforcement and sandbox restrictions.");
+        eprintln!();
+    }
 
     // Print plan status to terminal so the user sees context before agent starts (v0.8.2).
     print_plan_status_to_terminal(&project_root);
 
     // Build the orchestration prompt with plan status + memory context.
-    let prompt = build_dev_prompt(&project_root, config);
+    let prompt = build_dev_prompt(&project_root, config, unrestricted);
 
     // Load agent config (dev-loop.yaml or fallback).
     let agent_config = if let Some(agent_id) = agent {
@@ -304,19 +366,41 @@ pub fn execute(
             env: Default::default(),
         }
     } else {
-        load_dev_config(&project_root)
+        load_dev_config(&project_root, unrestricted)
+    };
+
+    let mode_label = if unrestricted {
+        "unrestricted"
+    } else {
+        "restricted (read-only)"
     };
 
     println!("  Agent: {}", agent_config.command);
-    println!("  Mode: orchestration (no staging overlay)");
+    println!("  Mode: orchestration — {}", mode_label);
     println!();
 
     // Inject TA MCP server into .mcp.json so the agent can call ta_plan,
     // ta_goal, ta_draft, ta_context, ta_release via MCP.
     // Without this, the agent has no MCP server to handle those tool calls.
-    inject_mcp_server_config(&project_root)?;
+    //
+    // v0.9.3: Pass the session ID and caller mode as env vars to the MCP server
+    // so it can log tool calls with the session ID and enforce policy for
+    // orchestrator callers.
+    inject_mcp_server_config_with_session(&project_root, &session_id, unrestricted)?;
     println!("  MCP: registered TA server (ta serve) in .mcp.json");
     println!();
+
+    // Audit: log session start.
+    write_dev_audit(
+        &project_root,
+        &session_id,
+        "session_start",
+        Some(if unrestricted {
+            "unrestricted"
+        } else {
+            "restricted"
+        }),
+    );
 
     // Launch the agent in the project directory (not a staging workspace).
     let args: Vec<String> = agent_config
@@ -333,12 +417,22 @@ pub fn execute(
         cmd.env(key, value);
     }
 
+    // Pass session ID to the agent process so it's available for audit correlation.
+    cmd.env("TA_DEV_SESSION_ID", &session_id);
+
     let result = cmd.status();
 
     // Always restore .mcp.json, even if the agent failed.
     if let Err(e) = restore_mcp_server_config(&project_root) {
         eprintln!("Warning: failed to restore .mcp.json: {}", e);
     }
+
+    // Audit: log session end.
+    let exit_info = match &result {
+        Ok(exit) => format!("exit_code={}", exit),
+        Err(e) => format!("error={}", e),
+    };
+    write_dev_audit(&project_root, &session_id, "session_end", Some(&exit_info));
 
     match result {
         Ok(exit) => {
@@ -368,6 +462,78 @@ pub fn execute(
     Ok(())
 }
 
+/// Inject the TA MCP server with session-specific env vars for audit and policy.
+///
+/// This is an enhanced version of `inject_mcp_server_config` that adds:
+/// - `TA_DEV_SESSION_ID`: correlates tool calls with the dev session for audit
+/// - `TA_CALLER_MODE`: "orchestrator" (default) or "unrestricted" — gateway uses
+///   this to enforce forbidden actions for orchestrator callers
+fn inject_mcp_server_config_with_session(
+    project_root: &Path,
+    session_id: &str,
+    unrestricted: bool,
+) -> anyhow::Result<()> {
+    use super::run::{MCP_JSON_BACKUP, MCP_JSON_PATH, NO_ORIGINAL_SENTINEL};
+
+    let mcp_json_path = project_root.join(MCP_JSON_PATH);
+    let backup_path = project_root.join(MCP_JSON_BACKUP);
+
+    // Save original content (or sentinel if file doesn't exist).
+    let original_content = if mcp_json_path.exists() {
+        std::fs::read_to_string(&mcp_json_path)?
+    } else {
+        NO_ORIGINAL_SENTINEL.to_string()
+    };
+
+    let backup_dir = project_root.join(".ta");
+    std::fs::create_dir_all(&backup_dir)?;
+    std::fs::write(&backup_path, &original_content)?;
+
+    // Resolve the `ta` binary path for the server command.
+    let ta_binary = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "ta".to_string());
+
+    let caller_mode = if unrestricted {
+        "unrestricted"
+    } else {
+        "orchestrator"
+    };
+
+    let ta_server_entry = serde_json::json!({
+        "command": ta_binary,
+        "args": ["serve"],
+        "env": {
+            "TA_PROJECT_ROOT": project_root.display().to_string(),
+            "TA_DEV_SESSION_ID": session_id,
+            "TA_CALLER_MODE": caller_mode
+        }
+    });
+
+    // Merge with existing .mcp.json if present.
+    let mut mcp_config: serde_json::Value = if original_content != NO_ORIGINAL_SENTINEL {
+        serde_json::from_str(&original_content)
+            .unwrap_or_else(|_| serde_json::json!({ "mcpServers": {} }))
+    } else {
+        serde_json::json!({ "mcpServers": {} })
+    };
+
+    if let Some(servers) = mcp_config
+        .get_mut("mcpServers")
+        .and_then(|s| s.as_object_mut())
+    {
+        servers.insert("ta".to_string(), ta_server_entry);
+    } else {
+        mcp_config["mcpServers"] = serde_json::json!({
+            "ta": ta_server_entry
+        });
+    }
+
+    std::fs::write(&mcp_json_path, serde_json::to_string_pretty(&mcp_config)?)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,7 +542,7 @@ mod tests {
     fn test_build_dev_prompt_includes_capabilities() {
         let dir = tempfile::tempdir().unwrap();
         let config = GatewayConfig::for_project(dir.path());
-        let prompt = build_dev_prompt(dir.path(), &config);
+        let prompt = build_dev_prompt(dir.path(), &config, false);
         assert!(prompt.contains("Your Capabilities"));
         assert!(prompt.contains("ta_plan"));
         assert!(prompt.contains("ta_goal"));
@@ -387,8 +553,28 @@ mod tests {
     fn test_build_dev_prompt_no_plan() {
         let dir = tempfile::tempdir().unwrap();
         let config = GatewayConfig::for_project(dir.path());
-        let prompt = build_dev_prompt(dir.path(), &config);
+        let prompt = build_dev_prompt(dir.path(), &config, false);
         assert!(prompt.contains("No PLAN.md found"));
+    }
+
+    #[test]
+    fn test_build_dev_prompt_restricted_has_security_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let prompt = build_dev_prompt(dir.path(), &config, false);
+        assert!(prompt.contains("Security Boundaries"));
+        assert!(prompt.contains("No file writes"));
+        assert!(prompt.contains("No shell access"));
+        assert!(!prompt.contains("UNRESTRICTED"));
+    }
+
+    #[test]
+    fn test_build_dev_prompt_unrestricted_has_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let prompt = build_dev_prompt(dir.path(), &config, true);
+        assert!(prompt.contains("UNRESTRICTED"));
+        assert!(!prompt.contains("No file writes"));
     }
 
     #[test]
@@ -419,14 +605,67 @@ mod tests {
     }
 
     #[test]
-    fn test_load_dev_config_fallback() {
+    fn test_load_dev_config_fallback_restricted() {
         let dir = tempfile::tempdir().unwrap();
-        let config = load_dev_config(dir.path());
+        let config = load_dev_config(dir.path(), false);
         assert_eq!(config.command, "claude");
         // Uses --system-prompt (not -p) so Claude stays interactive.
         assert!(config
             .args_template
             .contains(&"--system-prompt".to_string()));
         assert!(!config.args_template.contains(&"-p".to_string()));
+        // Has --allowedTools in restricted mode.
+        assert!(config.args_template.contains(&"--allowedTools".to_string()));
+    }
+
+    #[test]
+    fn test_load_dev_config_unrestricted_no_allowed_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = load_dev_config(dir.path(), true);
+        assert_eq!(config.command, "claude");
+        // Unrestricted mode has NO --allowedTools restriction.
+        assert!(!config.args_template.contains(&"--allowedTools".to_string()));
+    }
+
+    #[test]
+    fn test_write_dev_audit_creates_log() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dev_audit(
+            dir.path(),
+            "test-session-id",
+            "test_event",
+            Some("test context"),
+        );
+        let log_path = dir.path().join(".ta/dev-audit.log");
+        assert!(log_path.exists());
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("test-session-id"));
+        assert!(content.contains("test_event"));
+        assert!(content.contains("test context"));
+    }
+
+    #[test]
+    fn test_inject_mcp_server_with_session() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        inject_mcp_server_config_with_session(dir.path(), "sess-123", false).unwrap();
+
+        let mcp_json = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&mcp_json).unwrap();
+        let env = &config["mcpServers"]["ta"]["env"];
+        assert_eq!(env["TA_DEV_SESSION_ID"], "sess-123");
+        assert_eq!(env["TA_CALLER_MODE"], "orchestrator");
+    }
+
+    #[test]
+    fn test_inject_mcp_server_unrestricted_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        inject_mcp_server_config_with_session(dir.path(), "sess-456", true).unwrap();
+
+        let mcp_json = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&mcp_json).unwrap();
+        let env = &config["mcpServers"]["ta"]["env"];
+        assert_eq!(env["TA_CALLER_MODE"], "unrestricted");
     }
 }
