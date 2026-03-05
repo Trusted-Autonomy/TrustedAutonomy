@@ -1783,6 +1783,45 @@ New/modified files:
 - ✅ **Release pipeline fail-as-one**: Updated `.github/workflows/release.yml` with `fail-fast: true` and a `release-gate` job that blocks `publish-release` unless all platform builds succeed. No partial releases with missing platform binaries.
 - ✅ Version bumped to `0.7.5-alpha`
 
+### v0.7.6 — Interactive Developer Loop (`ta dev`)
+<!-- status: pending -->
+**Goal**: Ship `ta dev` — a local interactive channel where an LLM agent orchestrates the development loop using TA's MCP tools. The agent reads the plan, suggests next goals, launches implementation agents, handles draft review, and cuts releases — all from one persistent session.
+
+**Architecture**: `ta dev` is the **local terminal channel** — the same pattern as Slack, Discord, or a web app. It uses a reusable `agents/dev-loop.yaml` config that any channel can consume. `ta dev` is the convenience CLI entry point that skips staging (orchestration, not implementation), auto-selects `--macro --interactive`, and uses the built-in dev-loop agent config.
+
+```
+┌───────────────────────────────────────┐
+│  ta dev (local terminal channel)      │  ← LLM agent with system prompt
+├───────────────────────────────────────┤
+│  TA MCP Gateway                       │  ← ta_plan, ta_draft, ta_goal, ta_context
+├───────────────────────────────────────┤
+│  TA Core (policy, audit, staging)     │  ← already built
+└───────────────────────────────────────┘
+```
+
+- **`ta dev` CLI command**: Launches an orchestration agent session. No staging overlay needed — this agent doesn't write code, it coordinates. Auto-reads plan on startup, shows next pending phase with summary.
+- **`agents/dev-loop.yaml`**: Agent config with orchestration-focused system prompt. Instructs the agent to: read plan status, suggest next goals, launch sub-goals with implementation agents, handle draft review inline, manage releases. Reusable by any channel (Slack bot, web app).
+- **Plan-aware goal launch**: When the user says "run that" or "run v0.7.5", the dev-loop agent calls `ta_goal` with the correct `--phase`, `--source`, and `--agent` (auto-detected from project type + agent configs). No manual flag composition.
+- **Inline draft review**: Implementation agent finishes → draft surfaces in the dev session. User can view diff, approve, deny, or ask questions — without leaving the session.
+- **Status and navigation**: Agent responds to natural language: "what's next", "status", "show plan", "release", "context search X". Maps to MCP tool calls (`ta_plan`, `ta_draft`, `ta_context`, etc.).
+- **Session continuity**: The dev session persists across multiple goals. Step through v0.7.5 → v0.8.0 → release without restarting.
+- **No staging for orchestration**: `ta dev` does not create an overlay workspace. The orchestration agent has read-only access to the project (via MCP tools and plan status). Implementation happens in sub-goals with their own staging.
+
+#### Implementation scope
+
+**New files:**
+- `apps/ta-cli/src/commands/dev.rs` — `ta dev` command: session setup, agent launch (no staging), plan auto-read on startup
+- `agents/dev-loop.yaml` — orchestration agent config with system prompt, tool permissions (ta_plan, ta_goal, ta_draft, ta_context, ta_release), no filesystem write access
+
+**Modified files:**
+- `apps/ta-cli/src/commands/mod.rs` — register `dev` subcommand
+- `apps/ta-cli/src/main.rs` — wire `dev` command
+
+**Not in scope:**
+- Remote channels (Slack, web) — those are projects on top
+- New MCP tools — uses existing ta_plan, ta_goal, ta_draft, ta_context
+- Changes to goal lifecycle or draft workflow — orchestration only
+
 ---
 
 ## v0.8 — Event System & Stable API *(release: tag v0.8.0-beta)*
