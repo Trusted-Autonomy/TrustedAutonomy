@@ -2133,15 +2133,22 @@ runtime = "native-cli"
 - Enterprise state intercept (see `docs/enterprise-state-intercept.md`)
 
 ### v0.9.3 — Dev Loop Access Hardening
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Severely limit what the `ta dev` orchestrator agent can do — read-only project access, only TA MCP tools, no filesystem writes.
 
-- **`--allowedTools` enforcement**: `ta dev` agent config restricts to `mcp__ta__*` tools + read-only builtins (`Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`). No `Write`, `Edit`, `Bash`, `NotebookEdit`.
-- **Sandbox integration**: Wire `ta-sandbox` to validate any command the orchestrator tries to run. Orchestrator can only call TA MCP tools and read project files.
-- **`.mcp.json` scoping**: When `ta dev` injects the TA MCP server, add `allowedTools` to the Claude config to prevent the agent from discovering/using other MCP servers' write tools.
-- **Policy enforcement**: `ta dev` applies a `Supervised` security level with `alignment.forbidden_actions: [fs_write_patch, fs_apply, network_external, credential_access]` enforced at the MCP gateway layer.
-- **Audit trail**: All `ta dev` tool calls logged with the orchestrator session ID for post-session review.
-- **Escape hatch**: `ta dev --unrestricted` flag for power users who want full access (logs a warning).
+**Completed:**
+- ✅ `--allowedTools` enforcement: agent config restricts to `mcp__ta__*` + read-only builtins. No Write, Edit, Bash, NotebookEdit.
+- ✅ `.mcp.json` scoping: `inject_mcp_server_config_with_session()` passes `TA_DEV_SESSION_ID` and `TA_CALLER_MODE` env vars to the MCP server for per-session audit and policy enforcement.
+- ✅ Policy enforcement: `CallerMode` enum (`Normal`/`Orchestrator`/`Unrestricted`) in MCP gateway. `ta_fs_write` blocked at gateway level in orchestrator mode. Security Boundaries section in system prompt.
+- ✅ Audit trail: `write_dev_audit()` logs session start/end with session ID, mode, exit status to `.ta/dev-audit.log`. `TA_DEV_SESSION_ID` env var passed to agent process and MCP server for correlation.
+- ✅ Escape hatch: `ta dev --unrestricted` bypasses restrictions, logs warning, removes `--allowedTools` from agent config.
+- ✅ `dev-loop.yaml` alignment profile: `forbidden_actions` includes `fs_write_patch`, `fs_apply`, `shell_execute`, `network_external`, `credential_access`, `notebook_edit`.
+- ✅ 12 tests: prompt security boundaries, unrestricted warning, config loading (restricted/unrestricted), audit logging, MCP injection with session, CallerMode enforcement.
+- ✅ Version bump to 0.9.3-alpha.
+
+**Remaining (deferred):**
+- Sandbox runtime integration: wire `ta-sandbox` as command validator for orchestrator process. Currently relies on `--allowedTools` client-side + gateway-side `CallerMode` enforcement.
+- Full tool-call audit logging in gateway: currently logs session start/end; per-tool-call logging deferred to event system integration.
 
 ---
 

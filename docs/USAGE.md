@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.9.0-alpha
+**Version**: v0.9.3-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -73,7 +73,7 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
 curl -fsSL https://raw.githubusercontent.com/trustedautonomy/ta/main/install.sh | bash
 ```
 
-Set a specific version: `TA_VERSION=v0.9.0-alpha curl -fsSL ... | bash`
+Set a specific version: `TA_VERSION=v0.9.3-alpha curl -fsSL ... | bash`
 
 **Option B -- Binary download**
 
@@ -417,9 +417,18 @@ ta dev
 
 # Use a custom agent for orchestration
 ta dev --agent codex
+
+# Bypass security restrictions (full access — use with caution)
+ta dev --unrestricted
 ```
 
 On launch, `ta dev` prints the current plan status directly to your terminal — you see progress and the next actionable phase before the agent even starts. Deferred phases (like public preview milestones) are automatically skipped.
+
+**Security model:** By default, the orchestrator agent runs in **restricted mode** — it can only read project files and use TA MCP tools. No file writes, no shell access, no outbound mutations. The `--allowedTools` flag limits the agent to `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and TA tools (`ta_plan`, `ta_goal`, `ta_draft`, `ta_context`, `ta_release`). The MCP gateway enforces `CallerMode::Orchestrator` which blocks `ta_fs_write` at the server level.
+
+Use `--unrestricted` if you need the orchestrator to have full access (logs a warning and removes tool restrictions).
+
+All dev sessions are audit-logged to `.ta/dev-audit.log` with session ID, timestamps, and mode.
 
 The dev agent automatically:
 - Reads PLAN.md and shows progress on startup
@@ -1755,9 +1764,10 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.8.0 | Event system and subscription API | Done |
 | v0.8.1 | Solution memory export | Done |
 | v0.8.2 | Developer loop refinements and orchestrator wiring | Done |
-| v0.9.0 | Distribution and packaging (desktop, cloud, web UI) | Pending |
-| v0.9.1 | Native Windows support | Pending |
-| v0.9.2 | Sandbox runner (optional kernel-level isolation) | Pending |
+| v0.9.0 | Distribution and packaging (Dockerfile, install.sh, PWA) | Done |
+| v0.9.1 | Native Windows support (CI, cross-platform builds) | Done |
+| v0.9.2 | Sandbox runner (command allowlisting, path escape detection) | Done |
+| v0.9.3 | Dev loop access hardening (`--unrestricted`, audit, CallerMode) | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

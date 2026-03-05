@@ -1095,8 +1095,8 @@ fn restore_claude_settings(staging_path: &Path) -> anyhow::Result<()> {
 
 // ── .mcp.json injection for macro goals (#60) ──────────────────
 
-const MCP_JSON_PATH: &str = ".mcp.json";
-const MCP_JSON_BACKUP: &str = ".ta/mcp_json_original";
+pub(crate) const MCP_JSON_PATH: &str = ".mcp.json";
+pub(crate) const MCP_JSON_BACKUP: &str = ".ta/mcp_json_original";
 
 /// Inject TA MCP server config into a directory's `.mcp.json`.
 ///
@@ -1187,7 +1187,7 @@ pub(crate) fn restore_mcp_server_config(staging_path: &Path) -> anyhow::Result<(
 // ── CLAUDE.md injection and restoration ─────────────────────────
 
 const CLAUDE_MD_BACKUP: &str = ".ta/claude_md_original";
-const NO_ORIGINAL_SENTINEL: &str = "__TA_NO_ORIGINAL__";
+pub(crate) const NO_ORIGINAL_SENTINEL: &str = "__TA_NO_ORIGINAL__";
 
 /// Build a plan context section for CLAUDE.md injection.
 /// Returns empty string if no PLAN.md or no phase specified.
