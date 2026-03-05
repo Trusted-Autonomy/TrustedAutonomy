@@ -553,7 +553,7 @@ fn is_auto_summary_exempt_with_patterns(uri: &str, source_dir: Option<&std::path
     patterns.is_exempt(uri)
 }
 
-fn build_package(
+pub(crate) fn build_package(
     config: &GatewayConfig,
     goal_id: &str,
     summary: &str,

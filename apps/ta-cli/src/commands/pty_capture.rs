@@ -187,6 +187,11 @@ impl PtySession {
             // Create a new session and set controlling terminal.
             unsafe {
                 libc::setsid();
+                // Linux-musl ioctl() expects c_int for the request parameter,
+                // while glibc/macOS use c_ulong. Use platform-conditional cast.
+                #[cfg(target_env = "musl")]
+                libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_int, 0);
+                #[cfg(not(target_env = "musl"))]
                 libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0);
             }
 
@@ -359,6 +364,20 @@ impl Drop for PtySession {
             libc::kill(self.child_pid, libc::SIGHUP);
         }
     }
+}
+
+/// Check if a process with the given PID is still alive.
+///
+/// Uses `kill(pid, 0)` which checks for process existence without sending a signal.
+/// Returns `true` if the process exists and we have permission to signal it.
+#[allow(dead_code)]
+pub fn is_process_alive(pid: libc::pid_t) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // Safety: kill with signal 0 is a safe existence check.
+    let ret = unsafe { libc::kill(pid, 0) };
+    ret == 0
 }
 
 /// Configuration for an interactive PTY launch.
@@ -741,6 +760,18 @@ mod tests {
             "sink collected: {:?}",
             collected
         );
+    }
+
+    #[test]
+    fn is_process_alive_current_process() {
+        let pid = std::process::id() as libc::pid_t;
+        assert!(is_process_alive(pid));
+    }
+
+    #[test]
+    fn is_process_alive_invalid_pid() {
+        assert!(!is_process_alive(0));
+        assert!(!is_process_alive(-1));
     }
 
     #[test]

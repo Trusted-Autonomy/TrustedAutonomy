@@ -543,10 +543,52 @@ fn execute_resume(
 
     let staging_path = &goal.workspace_path;
     if !staging_path.exists() {
+        // v0.7.5: PTY health check — workspace is gone.
+        // Offer to close the session cleanly instead of erroring.
+        eprintln!(
+            "Staging workspace no longer exists: {}",
+            staging_path.display()
+        );
+        eprintln!("The child process appears to have exited or the workspace was cleaned up.");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!(
+            "  ta session close {}  — close the session cleanly",
+            &session.session_id.to_string()[..8]
+        );
+        eprintln!(
+            "  ta session abort {}  — abort and discard",
+            &session.session_id.to_string()[..8]
+        );
         anyhow::bail!(
             "Staging workspace no longer exists: {}",
             staging_path.display()
         );
+    }
+
+    // v0.7.5: PTY health check — verify workspace health before reattaching.
+    let health = super::session::check_session_health(&store, &goal_store, &session);
+    match health {
+        super::session::SessionHealthStatus::WorkspaceMissing => {
+            eprintln!("Warning: staging workspace health check failed.");
+            eprintln!("Options:");
+            eprintln!(
+                "  ta session close {}  — build a draft and close",
+                &session.session_id.to_string()[..8]
+            );
+            eprintln!(
+                "  ta session abort {}  — abort the session",
+                &session.session_id.to_string()[..8]
+            );
+            anyhow::bail!("Session workspace is not healthy — cannot resume");
+        }
+        super::session::SessionHealthStatus::Healthy {
+            has_staging_changes,
+        } => {
+            if has_staging_changes {
+                println!("Note: staging workspace has uncommitted changes from a previous run.");
+            }
+        }
     }
 
     let agent_config = agent_launch_config(agent, goal.source_dir.as_deref());

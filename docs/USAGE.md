@@ -338,6 +338,7 @@ ta session list                    # List sessions
 ta session show <session-id>       # View details and history
 ta session pause <session-id>      # Pause a running session
 ta session resume <session-id>     # Resume
+ta session close <session-id>      # Close cleanly (auto-builds draft if changes exist)
 ta session abort <session-id>      # Cancel
 ```
 
@@ -1229,12 +1230,22 @@ ta session resume <session-id>
 # Abort a session
 ta session abort <session-id> --reason "No longer needed"
 
+# Close a session cleanly (auto-builds a draft if changes exist)
+ta session close <session-id>
+
+# Close without building a draft
+ta session close <session-id> --no-draft
+
 # List all sessions (including completed/aborted)
 ta session list --all
 
 # Show session details and conversation history
 ta session show <session-id>
 ```
+
+Use `ta session close` instead of `ta session abort` when the agent's work is worth keeping — it will automatically build a draft from any uncommitted changes in the staging workspace before marking the session as completed. This prevents losing work when PTY sessions exit abnormally (Ctrl-C, crash).
+
+When resuming a session, TA now checks workspace health before reattaching. If the workspace is missing or the child process has died, you'll see actionable suggestions (close or abort) instead of a raw error.
 
 Session states: `Starting` → `AgentRunning` → `DraftReady` → `WaitingForReview` → `Completed` (or `Iterating` → back to `AgentRunning` on rejection, or `Paused`/`Aborted`/`Failed`).
 

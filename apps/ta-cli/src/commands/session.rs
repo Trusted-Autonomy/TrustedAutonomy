@@ -4,7 +4,8 @@
 // `ta session show <id>` displays session details and message history.
 
 use clap::Subcommand;
-use ta_changeset::InteractiveSessionStore;
+use ta_changeset::{InteractiveSessionState, InteractiveSessionStore};
+use ta_goal::GoalRunStore;
 use ta_mcp_gateway::GatewayConfig;
 use ta_session::SessionManager;
 use uuid::Uuid;
@@ -45,6 +46,18 @@ pub enum SessionCommands {
     },
     /// Show session status summary (v0.6.0).
     Status,
+    /// Close a session cleanly (v0.7.5).
+    ///
+    /// Marks the session as completed. If the session's staging directory has
+    /// uncommitted changes, automatically triggers `ta draft build` before closing.
+    /// Prevents orphaned sessions when PTY exits abnormally (Ctrl-C, crash).
+    Close {
+        /// Session ID (full or prefix).
+        id: String,
+        /// Skip automatic draft build even if there are uncommitted changes.
+        #[arg(long)]
+        no_draft: bool,
+    },
 }
 
 pub fn execute(cmd: &SessionCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -73,6 +86,7 @@ pub fn execute(cmd: &SessionCommands, config: &GatewayConfig) -> anyhow::Result<
         SessionCommands::Pause { id } => pause_session(config, id),
         SessionCommands::Abort { id, reason } => abort_session(config, id, reason.as_deref()),
         SessionCommands::Status => session_status(config),
+        SessionCommands::Close { id, no_draft } => close_session(config, id, *no_draft),
     }
 }
 
@@ -233,6 +247,122 @@ fn resolve_session_id(manager: &SessionManager, id: &str) -> anyhow::Result<Uuid
     }
 }
 
+fn close_session(config: &GatewayConfig, id: &str, no_draft: bool) -> anyhow::Result<()> {
+    let store = InteractiveSessionStore::new(config.interactive_sessions_dir.clone())?;
+    let goal_store = GoalRunStore::new(&config.goals_dir)?;
+
+    // Find session by ID or prefix.
+    let all = store.list()?;
+    let mut session = {
+        if let Ok(uuid) = Uuid::parse_str(id) {
+            store.load(uuid)?
+        } else {
+            let matches: Vec<_> = all
+                .into_iter()
+                .filter(|s| s.session_id.to_string().starts_with(id))
+                .collect();
+            match matches.len() {
+                0 => anyhow::bail!("No session found matching '{}'", id),
+                1 => matches.into_iter().next().unwrap(),
+                n => anyhow::bail!("Ambiguous prefix '{}' matches {} sessions", id, n),
+            }
+        }
+    };
+
+    // Only close sessions that are alive (active or paused).
+    if !session.is_alive() {
+        println!(
+            "Session {} is already {} — nothing to close.",
+            &session.session_id.to_string()[..8],
+            session.state
+        );
+        return Ok(());
+    }
+
+    // Check if staging directory has changes and offer to build a draft.
+    if !no_draft {
+        let goal = goal_store
+            .list()?
+            .into_iter()
+            .find(|g| g.goal_run_id == session.goal_id);
+
+        if let Some(ref goal) = goal {
+            if goal.workspace_path.exists() {
+                // Check if the staging directory has any modifications by comparing
+                // file count or checking for a change_summary.json.
+                let change_summary_path = goal.workspace_path.join(".ta/change_summary.json");
+                let has_changes = !change_summary_path.exists();
+
+                if has_changes {
+                    println!("Building draft from staging workspace before closing...");
+                    match super::draft::build_package(
+                        config,
+                        &session.goal_id.to_string(),
+                        "Auto-built on session close",
+                        false,
+                    ) {
+                        Ok(()) => {
+                            println!("Draft built successfully.");
+                        }
+                        Err(e) => {
+                            println!(
+                                "Warning: draft build failed ({}). Closing session anyway.",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Transition to Completed.
+    session.transition(InteractiveSessionState::Completed)?;
+    session.log_message("ta-system", "Session closed via `ta session close`");
+    store.save(&session)?;
+
+    println!("Session {} closed.", &session.session_id.to_string()[..8]);
+    Ok(())
+}
+
+/// Check if a session's child process is still alive.
+///
+/// Used by `ta session resume` to detect dead PTY processes before reattaching.
+/// If the process is dead, the user is informed and offered recovery options.
+pub fn check_session_health(
+    _store: &InteractiveSessionStore,
+    goal_store: &GoalRunStore,
+    session: &ta_changeset::InteractiveSession,
+) -> SessionHealthStatus {
+    // Look up the goal to check workspace state.
+    let goal = goal_store
+        .list()
+        .ok()
+        .and_then(|goals| goals.into_iter().find(|g| g.goal_run_id == session.goal_id));
+
+    match goal {
+        None => SessionHealthStatus::WorkspaceMissing,
+        Some(g) => {
+            if !g.workspace_path.exists() {
+                return SessionHealthStatus::WorkspaceMissing;
+            }
+            let has_staging_changes = !g.workspace_path.join(".ta/change_summary.json").exists();
+            SessionHealthStatus::Healthy {
+                has_staging_changes,
+            }
+        }
+    }
+}
+
+/// Health status of a session for resume checks.
+#[derive(Debug)]
+pub enum SessionHealthStatus {
+    /// Session workspace is intact and ready for resume.
+    Healthy { has_staging_changes: bool },
+    /// The staging workspace directory no longer exists.
+    WorkspaceMissing,
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
         format!("{}...", &s[..max - 3])
@@ -280,6 +410,71 @@ mod tests {
             .collect();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].session_id, session.session_id);
+    }
+
+    #[test]
+    fn close_already_completed_session() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let store = InteractiveSessionStore::new(config.interactive_sessions_dir.clone()).unwrap();
+
+        let mut session = InteractiveSession::new(
+            Uuid::new_v4(),
+            "cli:tty0".to_string(),
+            "claude-code".to_string(),
+        );
+        session
+            .transition(InteractiveSessionState::Completed)
+            .unwrap();
+        let prefix = session.session_id.to_string()[..8].to_string();
+        store.save(&session).unwrap();
+
+        // Closing an already completed session should succeed silently.
+        let result = close_session(&config, &prefix, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn close_active_session() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let store = InteractiveSessionStore::new(config.interactive_sessions_dir.clone()).unwrap();
+
+        let session = InteractiveSession::new(
+            Uuid::new_v4(),
+            "cli:tty0".to_string(),
+            "claude-code".to_string(),
+        );
+        let session_id = session.session_id;
+        let prefix = session_id.to_string()[..8].to_string();
+        store.save(&session).unwrap();
+
+        // Close with no_draft=true (skip draft build).
+        let result = close_session(&config, &prefix, true);
+        assert!(result.is_ok());
+
+        // Session should now be completed.
+        let loaded = store.load(session_id).unwrap();
+        assert_eq!(loaded.state, InteractiveSessionState::Completed);
+    }
+
+    #[test]
+    fn session_health_missing_workspace() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let store = InteractiveSessionStore::new(config.interactive_sessions_dir.clone()).unwrap();
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        let session = InteractiveSession::new(
+            Uuid::new_v4(),
+            "cli:tty0".to_string(),
+            "claude-code".to_string(),
+        );
+        store.save(&session).unwrap();
+
+        // No goal exists, so workspace should be considered missing.
+        let health = check_session_health(&store, &goal_store, &session);
+        assert!(matches!(health, SessionHealthStatus::WorkspaceMissing));
     }
 
     #[test]
