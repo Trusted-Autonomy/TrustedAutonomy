@@ -1806,7 +1806,6 @@ New/modified files:
 - **Status and navigation**: Agent responds to natural language: "what's next", "status", "show plan", "release", "context search X". Maps to MCP tool calls (`ta_plan`, `ta_draft`, `ta_context`, etc.).
 - **Session continuity**: The dev session persists across multiple goals. Step through v0.7.5 → v0.8.0 → release without restarting.
 - **No staging for orchestration**: `ta dev` does not create an overlay workspace. The orchestration agent has read-only access to the project (via MCP tools and plan status). Implementation happens in sub-goals with their own staging.
-- **Bug fix: PR "Why" field**: The draft summary `why` field (`draft.rs:884`) uses `goal.objective` which often just restates the title. The MCP gateway (`server.rs:881`) passes `goal.title` as `summary_why`. When a goal is linked to a plan phase, pull the phase's `**Goal**:` description from PLAN.md as the "why" — that's where the real motivation lives. Falls back to `goal.objective` when no plan phase is linked.
 
 #### Implementation scope
 
@@ -1817,8 +1816,6 @@ New/modified files:
 **Modified files:**
 - `apps/ta-cli/src/commands/mod.rs` — register `dev` subcommand
 - `apps/ta-cli/src/main.rs` — wire `dev` command
-- `apps/ta-cli/src/commands/draft.rs:884` — replace `goal.objective.clone()` with plan phase description when available
-- `crates/ta-mcp-gateway/src/server.rs:881` — replace `&goal.title` (4th arg) with plan phase description
 
 **Not in scope:**
 - Remote channels (Slack, web) — those are projects on top
@@ -1913,6 +1910,8 @@ runtime = "native-cli"
 - `agents/langgraph.yaml` — LangGraph stateful agent with TA as a node
 - `agents/bmad.yaml` — BMAD-METHOD workflow (wraps claude-code or other runtime with BMAD system prompt and phased methodology)
 
+**Bug fix: PR "Why" field** (GitHub [#76](https://github.com/michaelhunley/TrustedAutonomy/issues/76)): The draft summary `why` field (`draft.rs:884`) uses `goal.objective` which often just restates the title. The MCP gateway (`server.rs:881`) passes `goal.title` as `summary_why`. When a goal is linked to a plan phase, pull the phase's `**Goal**:` description from PLAN.md as the "why" — that's where the real motivation lives. Falls back to `goal.objective` when no plan phase is linked.
+
 **"Add TA to an existing project" docs**: Add a clear section to `docs/USAGE.md` covering:
 - `ta init --detect` for existing projects (auto-detects project type + installed frameworks)
 - Manual setup: copy `generic.yaml`, edit, configure `.ta/` directory
@@ -1932,6 +1931,8 @@ runtime = "native-cli"
 **Modified files:**
 - `apps/ta-cli/src/commands/init.rs` — framework selection during init, multi-framework config generation
 - `apps/ta-cli/src/commands/setup.rs` — framework step in wizard, detection + install guidance
+- `apps/ta-cli/src/commands/draft.rs:884` — replace `goal.objective.clone()` with plan phase description when available
+- `crates/ta-mcp-gateway/src/server.rs:881` — replace `&goal.title` (4th arg) with plan phase description
 - `agents/generic.yaml` — updated with Q&A field annotations for guided custom setup
 - `docs/USAGE.md` — "Add TA to an existing project" section, framework contribution guide
 
