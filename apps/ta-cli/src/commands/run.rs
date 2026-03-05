@@ -1343,6 +1343,9 @@ fn inject_claude_md(
     // Build memory context section from prior sessions (v0.6.3: phase-aware).
     let memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
 
+    // Build solutions section from curated knowledge base (v0.8.1).
+    let solutions_section = build_solutions_section_for_inject(config);
+
     let injected = format!(
         r#"# Trusted Autonomy — Mediated Goal
 
@@ -1350,7 +1353,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 **Goal:** {}
 **Goal ID:** {}
-{}{}{}{}
+{}{}{}{}{}
 ## How this works
 
 - This directory is a copy of the original project
@@ -1420,6 +1423,7 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
         parent_section,
         macro_section,
         memory_section,
+        solutions_section,
         existing_section
     );
 
@@ -1524,6 +1528,64 @@ fn build_memory_context_section_for_inject(
         phase_id,
     )
     .unwrap_or_default()
+}
+
+/// Build the solutions section for CLAUDE.md injection (v0.8.1).
+///
+/// Reads from `.ta/solutions/solutions.toml` and includes relevant entries
+/// matched by project type.
+fn build_solutions_section_for_inject(config: &GatewayConfig) -> String {
+    let solutions_path = config
+        .workspace_root
+        .join(".ta")
+        .join("solutions")
+        .join("solutions.toml");
+    let store = ta_memory::SolutionStore::new(&solutions_path);
+
+    let solutions = match store.load() {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+
+    if solutions.is_empty() {
+        return String::new();
+    }
+
+    // Filter by project type.
+    let schema = ta_memory::KeySchema::resolve(&config.workspace_root);
+    let language = match schema.project_type {
+        ta_memory::ProjectType::RustWorkspace => Some("rust"),
+        ta_memory::ProjectType::TypeScript => Some("typescript"),
+        ta_memory::ProjectType::Python => Some("python"),
+        ta_memory::ProjectType::Go => Some("go"),
+        ta_memory::ProjectType::Generic => None,
+    };
+
+    let relevant: Vec<_> = solutions
+        .iter()
+        .filter(|s| {
+            // Include if context language matches or is unset.
+            match (&s.context.language, language) {
+                (Some(sl), Some(pl)) => sl == pl,
+                (None, _) => true,
+                (_, None) => true,
+            }
+        })
+        .take(15) // Limit to avoid overwhelming the context.
+        .collect();
+
+    if relevant.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from("\n## Known Solutions\n\n");
+    section
+        .push_str("The following problem/solution pairs were captured from previous sessions:\n\n");
+    for sol in &relevant {
+        section.push_str(&format!("- **{}**: {}\n", sol.problem, sol.solution));
+    }
+    section.push('\n');
+    section
 }
 
 /// Restore the original CLAUDE.md content before computing diffs.

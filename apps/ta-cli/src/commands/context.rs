@@ -85,6 +85,20 @@ pub enum ContextCommands {
     },
     /// Show the project's key schema and domain mapping (v0.6.3).
     Schema,
+    /// Export memory entries to a curated solutions.toml file (v0.8.1).
+    Export {
+        /// Output path (default: .ta/solutions/solutions.toml).
+        #[arg(long)]
+        output: Option<String>,
+        /// Skip interactive confirmation.
+        #[arg(long)]
+        non_interactive: bool,
+    },
+    /// Import solutions from a local file or URL (v0.8.1).
+    Import {
+        /// Path or URL to a solutions.toml file.
+        source: String,
+    },
 }
 
 pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -135,6 +149,11 @@ pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<
         ),
         ContextCommands::Forget { key } => forget_entry(&memory_dir, key),
         ContextCommands::Schema => show_schema(config),
+        ContextCommands::Export {
+            output,
+            non_interactive,
+        } => export_solutions(config, output.as_deref(), *non_interactive),
+        ContextCommands::Import { source } => import_solutions(config, source),
     }
 }
 
@@ -482,6 +501,180 @@ fn forget_entry(memory_dir: &std::path::Path, key: &str) -> anyhow::Result<()> {
         println!("No memory entry found for key '{}'", key);
     }
     Ok(())
+}
+
+fn export_solutions(
+    config: &GatewayConfig,
+    output: Option<&str>,
+    non_interactive: bool,
+) -> anyhow::Result<()> {
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let store = FsMemoryStore::new(&memory_dir);
+
+    // Gather NegativePath and Convention entries.
+    let negative = store.lookup(MemoryQuery {
+        category: Some(ta_memory::MemoryCategory::NegativePath),
+        ..Default::default()
+    })?;
+    let convention = store.lookup(MemoryQuery {
+        category: Some(ta_memory::MemoryCategory::Convention),
+        ..Default::default()
+    })?;
+
+    let all_entries: Vec<_> = negative.into_iter().chain(convention).collect();
+
+    if all_entries.is_empty() {
+        println!("No NegativePath or Convention memory entries found to export.");
+        return Ok(());
+    }
+
+    // Convert memory entries to solution entries.
+    let solution_store_path = match output {
+        Some(p) => std::path::PathBuf::from(p),
+        None => config
+            .workspace_root
+            .join(".ta")
+            .join("solutions")
+            .join("solutions.toml"),
+    };
+
+    let schema = KeySchema::resolve(&config.workspace_root);
+    let language = match schema.project_type {
+        ta_memory::ProjectType::RustWorkspace => Some("rust".to_string()),
+        ta_memory::ProjectType::TypeScript => Some("typescript".to_string()),
+        ta_memory::ProjectType::Python => Some("python".to_string()),
+        ta_memory::ProjectType::Go => Some("go".to_string()),
+        ta_memory::ProjectType::Generic => None,
+    };
+
+    let sol_store = ta_memory::SolutionStore::new(&solution_store_path);
+
+    println!("Found {} memory entries to export:", all_entries.len());
+    println!();
+
+    let mut solutions = Vec::new();
+    let mut idx: u32 = 0;
+    for entry in &all_entries {
+        idx += 1;
+        let value_text = match &entry.value {
+            serde_json::Value::String(s) => s.clone(),
+            v => v.to_string(),
+        };
+        let category_str = entry
+            .category
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "other".to_string());
+
+        // Strip UUIDs from the value text.
+        let cleaned = strip_uuids(&value_text);
+
+        let sol = ta_memory::SolutionEntry {
+            id: format!("sol_{:03}", idx),
+            problem: entry.key.clone(),
+            solution: cleaned,
+            context: ta_memory::SolutionContext {
+                language: language.clone(),
+                framework: None,
+            },
+            tags: entry.tags.clone(),
+            source_category: Some(category_str.clone()),
+            created_at: entry.created_at,
+        };
+
+        println!(
+            "  [{}] {} = {}",
+            category_str,
+            entry.key,
+            truncate(&value_text, 60)
+        );
+        solutions.push(sol);
+    }
+
+    if !non_interactive {
+        println!();
+        print!(
+            "Export {} entries to {}? [y/N] ",
+            solutions.len(),
+            solution_store_path.display()
+        );
+        use std::io::Write;
+        std::io::stdout().flush()?;
+
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Export cancelled.");
+            return Ok(());
+        }
+    }
+
+    let (new_count, dup_count) = sol_store.merge(&solutions)?;
+    println!(
+        "Exported: {} new, {} duplicate(s) skipped. File: {}",
+        new_count,
+        dup_count,
+        solution_store_path.display()
+    );
+
+    Ok(())
+}
+
+fn import_solutions(config: &GatewayConfig, source: &str) -> anyhow::Result<()> {
+    let content = if source.starts_with("http://") || source.starts_with("https://") {
+        anyhow::bail!(
+            "URL import is not yet supported. Download the file first and pass a local path."
+        );
+    } else {
+        std::fs::read_to_string(source)
+            .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", source, e))?
+    };
+
+    // Parse the incoming solutions file.
+    let solution_store_path = config
+        .workspace_root
+        .join(".ta")
+        .join("solutions")
+        .join("solutions.toml");
+    let sol_store = ta_memory::SolutionStore::new(&solution_store_path);
+
+    // Write content to a temp file, parse, then clean up.
+    let tmp_path = std::env::temp_dir().join(format!("ta_import_{}.toml", std::process::id()));
+    std::fs::write(&tmp_path, &content)?;
+    let tmp_store = ta_memory::SolutionStore::new(&tmp_path);
+    let incoming = tmp_store.load()?;
+    let _ = std::fs::remove_file(&tmp_path);
+
+    if incoming.is_empty() {
+        println!("No solution entries found in '{}'.", source);
+        return Ok(());
+    }
+
+    let (new_count, dup_count) = sol_store.merge(&incoming)?;
+    println!(
+        "Imported from '{}': {} new, {} duplicate(s) skipped.",
+        source, new_count, dup_count
+    );
+    println!("Solutions file: {}", solution_store_path.display());
+
+    Ok(())
+}
+
+fn strip_uuids(s: &str) -> String {
+    // Simple UUID pattern stripping: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    let re = regex::Regex::new(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+    )
+    .unwrap();
+    re.replace_all(s, "<id>").to_string()
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
 }
 
 fn show_schema(config: &GatewayConfig) -> anyhow::Result<()> {

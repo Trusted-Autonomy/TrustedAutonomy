@@ -32,7 +32,11 @@ pub enum PlanCommands {
     /// List all plan phases with their status.
     List,
     /// Show a summary of plan progress.
-    Status,
+    Status {
+        /// Output as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the next pending phase and suggest creating a goal for it.
     Next,
     /// Show plan change history (status transitions recorded in .ta/plan_history.jsonl).
@@ -68,7 +72,7 @@ pub enum PlanCommands {
 pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match cmd {
         PlanCommands::List => list_phases(config),
-        PlanCommands::Status => show_status(config),
+        PlanCommands::Status { json } => show_status(config, *json),
         PlanCommands::Next => show_next(config),
         PlanCommands::History => show_history(config),
         PlanCommands::Validate { phase } => validate_phase(config, phase),
@@ -592,7 +596,7 @@ fn list_phases(config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show_status(config: &GatewayConfig) -> anyhow::Result<()> {
+fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> {
     let phases = load_plan(&config.workspace_root)?;
 
     let done = phases
@@ -608,6 +612,22 @@ fn show_status(config: &GatewayConfig) -> anyhow::Result<()> {
         .filter(|p| p.status == PlanStatus::Pending)
         .count();
     let total = phases.len();
+
+    if json_output {
+        let data = serde_json::json!({
+            "total": total,
+            "done": done,
+            "in_progress": in_progress,
+            "pending": pending,
+            "phases": phases.iter().map(|p| serde_json::json!({
+                "id": p.id,
+                "title": p.title,
+                "status": format!("{}", p.status),
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&data)?);
+        return Ok(());
+    }
 
     println!("Plan Progress: {}/{} phases complete", done, total);
     println!("  Done:        {}", done);

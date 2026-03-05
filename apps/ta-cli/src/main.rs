@@ -118,6 +118,16 @@ enum Commands {
         #[command(subcommand)]
         command: commands::credentials::CredentialsCommands,
     },
+    /// Stream and inspect lifecycle events.
+    Events {
+        #[command(subcommand)]
+        command: commands::events::EventsCommands,
+    },
+    /// Manage approval tokens for non-interactive workflows.
+    Token {
+        #[command(subcommand)]
+        command: commands::token::TokenCommands,
+    },
     /// Interactive developer loop — orchestrate plan execution, goal launches,
     /// draft review, and releases from one persistent session.
     Dev {
@@ -235,6 +245,8 @@ fn main() -> anyhow::Result<()> {
             *macro_goal,
             resume.as_deref(),
         ),
+        Commands::Events { command } => commands::events::execute(command, &config),
+        Commands::Token { command } => commands::token::execute(command, &config),
         Commands::Dev { agent } => commands::dev::execute(&config, &project_root, agent.as_deref()),
         Commands::Session { command } => commands::session::execute(command, &config),
         Commands::Plan { command } => commands::plan::execute(command, &config),

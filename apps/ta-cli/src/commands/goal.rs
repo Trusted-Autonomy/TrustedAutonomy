@@ -173,6 +173,9 @@ pub enum GoalCommands {
     Status {
         /// Goal run ID.
         id: String,
+        /// Output as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
     /// Delete a goal run and its staging directory.
     Delete {
@@ -302,7 +305,7 @@ pub fn execute(cmd: &GoalCommands, config: &GatewayConfig) -> anyhow::Result<()>
             objective_file.as_deref(),
         ),
         GoalCommands::List { state } => list_goals(&store, state.as_deref()),
-        GoalCommands::Status { id } => show_status(&store, id),
+        GoalCommands::Status { id, json } => show_status(&store, id, *json),
         GoalCommands::Delete { id } => delete_goal(&store, id),
         GoalCommands::Constitution { command } => execute_constitution(command, config, &store),
     }
@@ -498,10 +501,15 @@ fn list_goals(store: &GoalRunStore, state: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show_status(store: &GoalRunStore, id: &str) -> anyhow::Result<()> {
+fn show_status(store: &GoalRunStore, id: &str, json_output: bool) -> anyhow::Result<()> {
     let goal_run_id = resolve_goal_id(id, store)?;
     match store.get(goal_run_id)? {
         Some(g) => {
+            if json_output {
+                let json = serde_json::to_string_pretty(&g)?;
+                println!("{}", json);
+                return Ok(());
+            }
             println!("Goal Run: {}", g.goal_run_id);
             println!("Title:    {}", g.title);
             println!("Objective: {}", g.objective);

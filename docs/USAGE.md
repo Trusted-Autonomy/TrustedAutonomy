@@ -1127,6 +1127,115 @@ Entries are JSON files in `.ta/memory/`, one per key. The filesystem backend is 
 backend = "filesystem"    # "filesystem" (default) or "ruvector" (v0.5.5+)
 ```
 
+### Event System
+
+TA publishes structured lifecycle events that external tools and scripts can consume.
+
+#### Streaming events
+
+```bash
+# Stream all events as NDJSON (one JSON object per line)
+ta events listen
+
+# Filter by event type
+ta events listen --filter draft_approved --filter goal_completed
+
+# Filter by goal
+ta events listen --goal <goal-id>
+
+# Limit results
+ta events listen --limit 50
+```
+
+Events are persisted to `.ta/events/<YYYY-MM-DD>.jsonl` files, rotated daily.
+
+#### Event types
+
+Events cover the full TA lifecycle: `goal_started`, `goal_completed`, `draft_built`, `draft_submitted`, `draft_approved`, `draft_denied`, `draft_applied`, `session_paused`, `session_resumed`, `session_aborted`, `plan_phase_completed`, `review_requested`, `policy_violation`, `memory_stored`.
+
+#### Event hooks
+
+Configure shell commands or webhooks to run when specific events occur:
+
+```toml
+# .ta/hooks.toml
+[[hooks]]
+event = "draft_approved"
+command = "notify-send 'Draft approved!'"
+
+[[hooks]]
+event = "policy_violation"
+webhook = "https://hooks.slack.com/services/..."
+```
+
+Hook commands receive the event JSON via the `TA_EVENT_JSON` environment variable and the event type via `TA_EVENT_TYPE`.
+
+```bash
+# View configured hooks
+ta events hooks
+```
+
+#### JSON output
+
+Key CLI commands support `--json` for programmatic consumption:
+
+```bash
+ta draft list --json
+ta draft view <id> --json
+ta goal status <id> --json
+ta plan status --json
+```
+
+### Approval Tokens
+
+For CI pipelines, chatbots, or other automated workflows, create tokens that authorize draft approval without interactive confirmation:
+
+```bash
+# Create a token (default: 24h expiry, draft:approve scope)
+ta token create --scope draft:approve --expires 24h
+
+# Use the token for non-interactive approval
+ta draft approve <draft-id> --token <token-value>
+
+# List all tokens
+ta token list
+
+# Clean up expired tokens
+ta token cleanup
+```
+
+### Solution Knowledge Base
+
+TA can extract reusable problem/solution pairs from memory into a curated `solutions.toml` file that ships with your project.
+
+#### Exporting solutions
+
+```bash
+# Export NegativePath and Convention entries to .ta/solutions/solutions.toml
+ta context export
+
+# Skip interactive confirmation
+ta context export --non-interactive
+
+# Custom output path
+ta context export --output path/to/solutions.toml
+```
+
+Each solution entry contains a problem description, solution, context (language/framework), and tags. Project-specific paths and UUIDs are stripped automatically.
+
+#### Importing solutions
+
+```bash
+# Import from a local file
+ta context import path/to/other/solutions.toml
+```
+
+Duplicate entries (matching by problem text) are automatically skipped.
+
+#### Injection at runtime
+
+When `ta run` launches an agent, solution entries matching the project type are included in the CLAUDE.md context injection under a "Known Solutions" section. Agents benefit from past solutions without rediscovering them.
+
 ### Web Review UI
 
 Review drafts from a browser instead of the terminal. Useful for non-CLI users, team reviews, or when you want a visual overview.

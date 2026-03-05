@@ -1,6 +1,6 @@
 [package]
 name = "ta-cli"
-version = "0.7.7-alpha"
+version = "0.8.0-alpha"
 edition = "2021"
 description = "CLI for goals, PR review, and approvals in Trusted Autonomy"
 license = "Apache-2.0"
@@ -43,6 +43,7 @@ ta-mcp-gateway = { path = "../../crates/ta-mcp-gateway" }
 ta-policy = { path = "../../crates/ta-policy" }
 ta-mediation = { path = "../../crates/ta-mediation" }
 ta-session = { path = "../../crates/ta-session" }
+ta-events = { path = "../../crates/ta-events" }
 ta-submit = { path = "../../crates/ta-submit" }
 ta-workspace = { path = "../../crates/ta-workspace" }
 

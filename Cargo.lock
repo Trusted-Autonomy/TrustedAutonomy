@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.7.7-alpha"
+version = "0.8.0-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2337,6 +2337,7 @@ dependencies = [
  "ta-changeset",
  "ta-connector-fs",
  "ta-credentials",
+ "ta-events",
  "ta-goal",
  "ta-mcp-gateway",
  "ta-mediation",
@@ -2433,6 +2434,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ta-events"
+version = "0.8.0-alpha"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ta-goal"
 version = "0.7.5-alpha"
 dependencies = [
@@ -2485,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "ta-memory"
-version = "0.7.5-alpha"
+version = "0.8.0-alpha"
 dependencies = [
  "chrono",
  "glob",

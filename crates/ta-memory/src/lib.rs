@@ -19,6 +19,7 @@ pub mod fs_store;
 pub mod key_schema;
 #[cfg(feature = "ruvector")]
 pub mod ruvector_store;
+pub mod solutions;
 pub mod store;
 
 pub use auto_capture::{
@@ -29,4 +30,5 @@ pub use fs_store::FsMemoryStore;
 pub use key_schema::{KeyDomainMap, KeySchema, ProjectType};
 #[cfg(feature = "ruvector")]
 pub use ruvector_store::RuVectorStore;
+pub use solutions::{SolutionContext, SolutionEntry, SolutionStore};
 pub use store::{MemoryCategory, MemoryEntry, MemoryQuery, MemoryStats, MemoryStore, StoreParams};

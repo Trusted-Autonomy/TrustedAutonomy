@@ -1966,7 +1966,7 @@ runtime = "native-cli"
 > TA publishes stable event types that projects on top subscribe to. This is the "platform API" layer.
 
 ### v0.8.0 — Event System & Subscription API (Layer 3 → projects)
-<!-- status: pending -->
+<!-- status: done -->
 > See `docs/VISION-virtual-office.md` for full vision.
 
 - **Stable `SessionEvent` schema**: Versioned event types with backward compatibility guarantees.
@@ -1977,6 +1977,23 @@ runtime = "native-cli"
 - **Compliance event export**: Structured event stream for external compliance dashboards.
 - **Extension point for projects**: Virtual Office subscribes to `SessionEvent`s to trigger workflow logic. Infra Ops subscribes to detect infrastructure drift.
 
+#### Completed
+
+- ✅ New `crates/ta-events` crate with `EventEnvelope`, `SessionEvent` enum (14 variants), schema versioning (33 tests)
+- ✅ `EventBus` with `tokio::sync::broadcast` channel, `EventFilter` (All, ByType, ByGoal, ByPhase), filtered subscriptions
+- ✅ `FsEventStore` writing NDJSON to `.ta/events/<YYYY-MM-DD>.jsonl` with date-based rotation and query filtering
+- ✅ `HookConfig` parsed from `.ta/hooks.toml`, `HookRunner` executing shell commands on matching events with env vars
+- ✅ `TokenStore` with HMAC-SHA256 tokens, scope-based validation, expiration, single-use marking, cleanup
+- ✅ `ta events listen` CLI: NDJSON streaming with `--filter`, `--goal`, `--limit` flags
+- ✅ `ta events stats` and `ta events hooks` CLI commands
+- ✅ `ta token create/list/cleanup` CLI commands for non-interactive approval workflows
+- ✅ `--json` flag on `ta draft list`, `ta draft view`, `ta goal status`, `ta plan status`
+
+#### Remaining (deferred)
+
+- Compliance event export (structured event stream for external dashboards)
+- Extension point documentation for Virtual Office / Infra Ops project subscriptions
+
 ### v0.8.1 — Solution Memory Export
 <!-- status: pending -->
 **Goal**: Extract reusable problem→solution knowledge from TA memory into a curated, git-committed datastore that ships with the project.
@@ -1986,6 +2003,15 @@ runtime = "native-cli"
 - **Git-committed knowledge**: `solutions.toml` lives in the repo. New team members and future agents benefit from accumulated knowledge without needing a shared registry.
 - **Injection at `ta run`**: `build_memory_context_section()` includes relevant solution entries (matched by project type + semantic similarity) in the agent's CLAUDE.md injection. Agents learn from past mistakes without rediscovering them.
 - **Import from community**: `ta context import <url>` fetches a solutions file from a public URL or another project and merges it into the local datastore. Community-curated solution packs can be shared as gists or repos.
+
+#### Completed
+
+- ✅ `SolutionEntry` struct with `problem`, `solution`, `context` (language/framework), `tags`, `source_category`, `created_at` (12 tests)
+- ✅ `SolutionStore` with TOML serialization, load/save/add/remove/find_by_tag/find_by_context/merge, deduplication by word-set Jaccard similarity
+- ✅ `ta context export` CLI: reads NegativePath + Convention entries, strips UUIDs, interactive confirmation, `--non-interactive` flag
+- ✅ `ta context import <path>` CLI: reads solutions.toml from local file, merges with deduplication, reports new vs duplicate counts
+- ✅ Injection at `ta run`: `build_solutions_section_for_inject()` adds "Known Solutions" section to CLAUDE.md, filtered by project type
+- ✅ Custom TOML serializer/parser for `solutions.toml` format (no `toml` crate dependency)
 
 ---
 

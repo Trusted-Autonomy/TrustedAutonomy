@@ -51,6 +51,9 @@ pub enum DraftCommands {
         /// Show only stale drafts (non-terminal states older than threshold).
         #[arg(long)]
         stale: bool,
+        /// Output as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
     /// View draft package details and diffs.
     View {
@@ -79,6 +82,9 @@ pub enum DraftCommands {
         /// Enable ANSI color output (terminal format only). Default: off.
         #[arg(long)]
         color: bool,
+        /// Output as structured JSON (overrides --format).
+        #[arg(long)]
+        json: bool,
     },
     /// Approve a draft package for application.
     Approve {
@@ -285,7 +291,9 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             summary,
             latest,
         } => build_package(config, goal_id, summary, *latest),
-        DraftCommands::List { goal, stale } => list_packages(config, goal.as_deref(), *stale),
+        DraftCommands::List { goal, stale, json } => {
+            list_packages(config, goal.as_deref(), *stale, *json)
+        }
         DraftCommands::View {
             id,
             summary,
@@ -294,16 +302,23 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             detail,
             format,
             color,
-        } => view_package(
-            config,
-            id,
-            *summary,
-            file.as_deref(),
-            open_external,
-            detail,
-            format,
-            *color,
-        ),
+            json,
+        } => {
+            if *json {
+                view_package_json(config, id)
+            } else {
+                view_package(
+                    config,
+                    id,
+                    *summary,
+                    file.as_deref(),
+                    open_external,
+                    detail,
+                    format,
+                    *color,
+                )
+            }
+        }
         DraftCommands::Approve { id, reviewer } => approve_package(config, id, reviewer),
         DraftCommands::Deny {
             id,
@@ -1007,6 +1022,7 @@ fn list_packages(
     config: &GatewayConfig,
     goal_filter: Option<&str>,
     stale_only: bool,
+    json_output: bool,
 ) -> anyhow::Result<()> {
     let packages = load_all_packages(config)?;
 
@@ -1036,6 +1052,24 @@ fn list_packages(
             true
         })
         .collect();
+
+    if json_output {
+        let json_data: Vec<serde_json::Value> = filtered
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.package_id.to_string(),
+                    "goal_id": p.goal.goal_id,
+                    "status": format!("{:?}", p.status),
+                    "artifact_count": p.changes.artifacts.len(),
+                    "created_at": p.created_at.to_rfc3339(),
+                    "summary": p.summary.what_changed,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json_data)?);
+        return Ok(());
+    }
 
     if filtered.is_empty() {
         if stale_only {
@@ -1158,6 +1192,14 @@ impl DiffProvider for StagingDiffProvider {
         // For v0.2.3, we'll return a placeholder and enhance in follow-up.
         Ok(format!("[Diff content for {}]", diff_ref))
     }
+}
+
+fn view_package_json(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
+    let package_id = resolve_draft_id(id, config)?;
+    let pkg = load_package(config, package_id)?;
+    let json = serde_json::to_string_pretty(&pkg)?;
+    println!("{}", json);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

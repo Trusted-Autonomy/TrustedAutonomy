@@ -122,6 +122,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
         PrCommands::List { goal } => draft::DraftCommands::List {
             goal: goal.clone(),
             stale: false,
+            json: false,
         },
         PrCommands::View {
             id,
@@ -139,6 +140,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             detail: detail.clone(),
             format: format.clone(),
             color: *color,
+            json: false,
         },
         PrCommands::Approve { id, reviewer } => draft::DraftCommands::Approve {
             id: id.clone(),
