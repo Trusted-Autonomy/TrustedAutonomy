@@ -1,6 +1,6 @@
 [package]
 name = "ta-mediation"
-version = "0.6.3-alpha"
+version = "0.7.5-alpha"
 edition = "2021"
 description = "Resource mediation trait — generalizes the staging pattern from files to any resource"
 

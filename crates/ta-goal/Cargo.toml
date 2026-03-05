@@ -1,6 +1,6 @@
 [package]
 name = "ta-goal"
-version = "0.6.3-alpha"
+version = "0.7.5-alpha"
 edition = "2021"
 description = "GoalRun lifecycle management and event dispatch for Trusted Autonomy"
 license = "Apache-2.0"
