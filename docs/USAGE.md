@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.7.0-alpha
+**Version**: v0.7.5-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -10,8 +10,9 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
 
 1. [Quick Start](#quick-start)
    - [Install](#install)
-   - [Your first goal in three commands](#your-first-goal-in-three-commands)
-   - [Typical session workflow](#typical-session-workflow)
+   - [Set up your project](#set-up-your-project)
+   - [Start a development session](#start-a-development-session)
+   - [Your first goal](#your-first-goal)
 2. [Core Concepts](#core-concepts)
    - [The Staging Model](#the-staging-model)
    - [Goals](#goals)
@@ -98,7 +99,60 @@ cd ta
 # Binary is at target/release/ta
 ```
 
-### Your first goal in three commands
+### Set up your project
+
+**New project** -- generate TA config from a template:
+
+```bash
+mkdir my-project && cd my-project
+git init
+ta init run --template rust-workspace   # or: typescript-monorepo, python-ml, go-service, generic
+```
+
+This creates `.ta/` with workflow config, agent configs, policy, memory settings, and a `.taignore`. Everything is generated as a reviewable draft.
+
+**Existing project** -- auto-detect what's in use:
+
+```bash
+cd my-existing-project
+ta init --detect
+```
+
+TA scans your project root (Cargo.toml, package.json, pyproject.toml, go.mod, etc.) and generates config matched to your toolchain, test runner, and build system.
+
+**See what was detected:**
+
+```bash
+ta setup show                    # display resolved config
+ta setup refine agents           # tweak agent config
+ta setup refine workflow         # adjust workflow settings
+```
+
+**Available templates:**
+
+```bash
+ta init templates                # list all built-in templates
+```
+
+### Start a development session
+
+The fastest way to work with TA is `ta dev` -- an interactive session where TA reads your plan, suggests what to do next, and handles the goal → draft → review → apply loop:
+
+```bash
+ta dev
+```
+
+From inside the session you can say things like:
+- "what's next" -- shows the next pending plan phase
+- "run that" -- kicks off the goal with the right agent and phase
+- "status" -- plan progress summary
+- "release" -- cut a release
+
+If you prefer manual control, use individual commands instead (see [Common Workflows](#common-workflows)).
+
+### Your first goal
+
+The manual equivalent of `ta dev` -- three commands:
 
 ```bash
 # 1. Run a goal -- TA copies your project to an isolated workspace,
@@ -113,61 +167,14 @@ ta draft approve <draft-id>
 ta draft apply <draft-id>
 ```
 
-### What just happened
+**What just happened:**
 
-1. **Staging**: TA copied your project into an isolated virtual workspace (`.ta/staging/`). The agent worked there, not in your real files.
-2. **Draft**: When the agent finished, TA diffed the workspace against your source and packaged the changes into a draft.
-3. **Review**: You reviewed the draft -- every changed file with a summary of what changed and why.
-4. **Apply**: After approval, TA copied the approved changes back into your project.
+1. **Staging**: TA copied your project into `.ta/staging/`. The agent worked there, not in your real files.
+2. **Draft**: TA diffed the workspace against your source and packaged the changes into a reviewable draft.
+3. **Review**: You saw every changed file with a summary of what changed and why.
+4. **Apply**: Approved changes were copied back into your project.
 
-The agent never touched your real files. If you reject the draft, nothing changes.
-
-### Typical session workflow
-
-Most TA usage follows this pattern. Whether you're implementing a feature, fixing a bug, or refactoring, the steps are the same:
-
-```bash
-# 1. Start a goal linked to a plan phase (if you have PLAN.md)
-ta run "Implement credential broker" --source . --phase v0.5.0
-
-# 2. Wait for the agent to finish (or use --macro for mid-session review)
-
-# 3. Review what it did
-ta draft list                    # find the draft
-ta draft view <id>               # see changes + rationale per file
-
-# 4. Three paths:
-#    a) Accept and apply
-ta draft approve <id>
-ta draft apply <id> --git-commit
-
-#    b) Reject and try again with feedback
-ta draft deny <id> --reason "Wrong approach -- use JWT not sessions"
-ta run "Fix: use JWT auth" --source . --follow-up
-
-#    c) Partially accept
-ta draft apply <id> --approve "src/**" --reject "config.toml"
-ta run "Fix config.toml per review" --source . --follow-up
-```
-
-**For complex work** (multiple logical units), use macro mode so the agent can submit drafts mid-session and you review inline:
-
-```bash
-ta run "Build the v0.7 features" --source . --macro --phase v0.7.0
-```
-
-**For iterative refinement** (CI failures, review feedback), follow up without losing context:
-
-```bash
-ta run "Fix clippy warnings" --source . --follow-up
-```
-
-**To check what's next** in your plan:
-
-```bash
-ta plan next                     # shows next pending phase + suggested command
-ta plan status                   # progress summary
-```
+The agent never touched your real files. Reject the draft and nothing changes.
 
 ---
 
