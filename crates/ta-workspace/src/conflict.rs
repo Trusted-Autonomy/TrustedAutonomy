@@ -175,7 +175,7 @@ impl SourceSnapshot {
                 } else {
                     rel_dir.join(&file_name)
                 };
-                let rel_path_str = rel_path.to_string_lossy().to_string();
+                let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
 
                 // Skip infrastructure directories (always) and user-excluded paths.
                 if is_infra_path(&rel_path_str) || should_skip(&rel_path_str) {
@@ -261,7 +261,7 @@ impl SourceSnapshot {
                 } else {
                     rel_dir.join(&file_name)
                 };
-                let rel_path_str = rel_path.to_string_lossy().to_string();
+                let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
 
                 // Skip infra dirs and user-excluded paths (target/, node_modules/, etc.).
                 if is_infra_path(&rel_path_str) || should_skip(&rel_path_str) {

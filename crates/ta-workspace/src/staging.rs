@@ -223,9 +223,9 @@ impl StagingWorkspace {
             if path.is_dir() {
                 self.walk_dir(&path, root, files)?;
             } else {
-                // Convert to relative path string.
+                // Convert to relative path string with forward slashes for cross-platform consistency.
                 if let Ok(rel) = path.strip_prefix(root) {
-                    files.push(rel.to_string_lossy().to_string());
+                    files.push(rel.to_string_lossy().replace('\\', "/"));
                 }
             }
         }
