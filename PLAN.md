@@ -1977,14 +1977,15 @@ runtime = "native-cli"
 - **Compliance event export**: Structured event stream for external compliance dashboards.
 - **Extension point for projects**: Virtual Office subscribes to `SessionEvent`s to trigger workflow logic. Infra Ops subscribes to detect infrastructure drift.
 
-### v0.8.1 — Community Memory
+### v0.8.1 — Solution Memory Export
 <!-- status: pending -->
-**Goal**: Opt-in sharing of memory across TA instances.
+**Goal**: Extract reusable problem→solution knowledge from TA memory into a curated, git-committed datastore that ships with the project.
 
-- **Community sync layer**: Publish anonymized problem → solution pairs to a shared registry.
-- **Privacy controls**: Tag-based opt-in, never auto-publish. PII stripping before publish.
-- **Retrieval**: `ta context recall` searches local first, then community if opted in.
-- **Provenance tracking**: Did this solution actually work when applied?
+- **`ta context export`**: Extracts `NegativePath` and `Convention` entries from `.ta/memory/` into a human-readable `solutions.toml` (or `.ta/solutions/` directory). Strips project-specific paths and IDs. Preserves the problem description, what was tried, why it failed/worked, and the resolution.
+- **Curated format**: Each entry has `problem`, `solution`, `context` (language/framework/platform), and `tags`. Entries are reviewed by the user before committing — not auto-published.
+- **Git-committed knowledge**: `solutions.toml` lives in the repo. New team members and future agents benefit from accumulated knowledge without needing a shared registry.
+- **Injection at `ta run`**: `build_memory_context_section()` includes relevant solution entries (matched by project type + semantic similarity) in the agent's CLAUDE.md injection. Agents learn from past mistakes without rediscovering them.
+- **Import from community**: `ta context import <url>` fetches a solutions file from a public URL or another project and merges it into the local datastore. Community-curated solution packs can be shared as gists or repos.
 
 ---
 
@@ -2062,3 +2063,18 @@ runtime = "native-cli"
 | **Virtual office** | N/A | Roles run on triggers. User reviews when notified. Minutes per day for routine workflows. |
 
 **Key shift**: Standard agent usage demands synchronous human attention. TA shifts to fluid, asynchronous review — the agent works independently, the human reviews in real-time or retroactively. Trust increases over time as constitutional auto-approval proves reliable.
+
+---
+
+## Future Improvements (unscheduled)
+
+> Ideas that are valuable but not yet prioritized into a release phase. Pull into a versioned phase when ready.
+
+### Community Memory Sync
+Federated sharing of anonymized problem→solution pairs across TA instances. Builds on v0.8.1 (Solution Memory Export) with:
+- **Community sync layer**: Publish anonymized entries to a shared registry (hosted service or federated protocol).
+- **Privacy controls**: Tag-based opt-in, never auto-publish. PII stripping before publish. User reviews every entry before it leaves the local machine.
+- **Retrieval**: `ta context recall` searches local first, then community if opted in.
+- **Provenance tracking**: Did this solution actually work when applied downstream? Feedback loop from consumers back to publishers.
+- **Trust model**: Reputation scoring for contributors. Verified solutions (applied successfully N times) ranked higher.
+- **Spam/quality**: Moderation queue for new contributors. Automated quality checks (is the problem statement clear? is the solution actionable?).

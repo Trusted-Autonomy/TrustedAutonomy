@@ -63,7 +63,7 @@ Plan progress:
 - [x] Phase v0.7.6 — Interactive Developer Loop (`ta dev`)
 - [ ] Phase v0.7.7 — Agent Framework Registry & Setup Integration
 - [ ] Phase v0.8.0 — Event System & Subscription API (Layer 3 → projects
-- [ ] Phase v0.8.1 — Community Memory
+- [ ] Phase v0.8.1 — Solution Memory Export
 - [ ] Phase v0.9.0 — Distribution & Packaging
 - [ ] Phase v0.9.1 — Native Windows Support
 - [ ] Phase v0.9.2 — Sandbox Runner (optional hardening, Layer 2
@@ -244,7 +244,7 @@ Plan progress:
 - [x] Phase v0.7.6 — Interactive Developer Loop (`ta dev`)
 - [ ] Phase v0.7.7 — Agent Framework Registry & Setup Integration
 - [ ] Phase v0.8.0 — Event System & Subscription API
-- [ ] Phase v0.8.1 — Community Memory
+- [ ] Phase v0.8.1 — Solution Memory Export
 - [ ] Phase v0.9.0 — Distribution & Packaging
 - [ ] Phase v0.9.1 — Native Windows Support
 - [ ] Phase v0.9.2 — Sandbox Runner (optional hardening
