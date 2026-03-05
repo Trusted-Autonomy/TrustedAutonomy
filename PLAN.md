@@ -1822,6 +1822,109 @@ New/modified files:
 - New MCP tools — uses existing ta_plan, ta_goal, ta_draft, ta_context
 - Changes to goal lifecycle or draft workflow — orchestration only
 
+### v0.7.7 — Agent Framework Registry & Setup Integration
+<!-- status: pending -->
+**Goal**: Make agent frameworks a first-class extensible concept. Ship a framework registry with installation metadata, integrate framework selection into `ta init` and `ta setup wizard`, and add built-in configs for popular frameworks beyond Claude Code.
+
+**Framework Registry**: A `frameworks.toml` (bundled in binary, overridable at `~/.config/ta/frameworks.toml` or `.ta/frameworks.toml`) that maps known frameworks to their metadata:
+
+```toml
+[frameworks.claude-code]
+name = "Claude Code"
+description = "Anthropic's Claude Code CLI — interactive coding agent"
+homepage = "https://docs.anthropic.com/en/docs/claude-code"
+install = "npm install -g @anthropic-ai/claude-code"
+detect = ["claude"]  # commands to check on PATH
+agent_config = "claude-code.yaml"
+runtime = "native-cli"
+
+[frameworks.codex]
+name = "OpenAI Codex CLI"
+homepage = "https://github.com/openai/codex"
+install = "npm install -g @openai/codex"
+detect = ["codex"]
+agent_config = "codex.yaml"
+runtime = "native-cli"
+
+[frameworks.ollama]
+name = "Ollama"
+description = "Local LLM runner — run models locally without cloud API keys"
+homepage = "https://ollama.ai"
+install = { macos = "brew install ollama", linux = "curl -fsSL https://ollama.ai/install.sh | sh" }
+detect = ["ollama"]
+agent_config = "ollama.yaml"
+runtime = "local-llm"
+
+[frameworks.langchain]
+name = "LangChain"
+description = "Python framework for LLM application development"
+homepage = "https://python.langchain.com"
+install = "pip install langchain langchain-cli"
+detect = ["langchain"]
+agent_config = "langchain.yaml"
+runtime = "python"
+
+[frameworks.langgraph]
+name = "LangGraph"
+description = "LangChain's framework for building stateful multi-agent workflows"
+homepage = "https://langchain-ai.github.io/langgraph/"
+install = "pip install langgraph langgraph-cli"
+detect = ["langgraph"]
+agent_config = "langgraph.yaml"
+runtime = "python"
+
+[frameworks.bmad]
+name = "BMAD-METHOD"
+description = "Business/Market-driven AI Development methodology"
+homepage = "https://github.com/bmad-code-org/BMAD-METHOD"
+install = "See https://github.com/bmad-code-org/BMAD-METHOD#installation"
+detect = []
+agent_config = "bmad.yaml"
+runtime = "methodology"  # wraps another runtime (claude-code, etc.)
+
+[frameworks.claude-flow]
+name = "Claude Flow"
+description = "Multi-agent orchestration with MCP coordination"
+homepage = "https://github.com/ruvnet/claude-flow"
+install = "npm install -g claude-flow"
+detect = ["claude-flow"]
+agent_config = "claude-flow.yaml"
+runtime = "native-cli"
+```
+
+- **`ta init` framework selection**: During `ta init run`, prompt user to select agent framework(s) from the registry. Show detected (on PATH) frameworks first, then available-but-not-installed, then "Custom". For not-installed frameworks, show install instructions and link. Generate `.ta/agents/<framework>.yaml` for each selected framework.
+- **`ta setup wizard` framework step**: Add a framework selection step to the setup wizard. Detect installed frameworks, show registry options, generate agent configs. If user selects a framework not on PATH, show installation instructions and offer to re-detect after install.
+- **Custom framework from URL or Q&A**: User can select "Custom" → prompted for: command name, args template, whether it reads CLAUDE.md, whether it needs settings injection. Generates a config from `generic.yaml` template with answers filled in. Or user can point to a URL/repo for a community-contributed config.
+- **Community contribution path**: Document how to add a framework to the registry via PR (add entry to `frameworks.toml` + agent config YAML in `agents/`). Community configs tagged with `community: true` in the registry.
+
+**New built-in agent configs:**
+- `agents/ollama.yaml` — local LLM via Ollama CLI, configurable model selection
+- `agents/langchain.yaml` — LangChain agent runner with TA tool integration
+- `agents/langgraph.yaml` — LangGraph stateful agent with TA as a node
+- `agents/bmad.yaml` — BMAD-METHOD workflow (wraps claude-code or other runtime with BMAD system prompt and phased methodology)
+
+**"Add TA to an existing project" docs**: Add a clear section to `docs/USAGE.md` covering:
+- `ta init --detect` for existing projects (auto-detects project type + installed frameworks)
+- Manual setup: copy `generic.yaml`, edit, configure `.ta/` directory
+- What TA creates vs what the user needs to provide
+- Framework-specific setup notes (e.g., Ollama needs a running server, LangChain needs Python env)
+
+#### Implementation scope
+
+**New files:**
+- `agents/ollama.yaml` — Ollama agent config
+- `agents/langchain.yaml` — LangChain agent config
+- `agents/langgraph.yaml` — LangGraph agent config
+- `agents/bmad.yaml` — BMAD-METHOD agent config
+- `apps/ta-cli/src/framework_registry.rs` — registry loader, detection, install instructions
+- Bundled `frameworks.toml` — framework metadata registry
+
+**Modified files:**
+- `apps/ta-cli/src/commands/init.rs` — framework selection during init, multi-framework config generation
+- `apps/ta-cli/src/commands/setup.rs` — framework step in wizard, detection + install guidance
+- `agents/generic.yaml` — updated with Q&A field annotations for guided custom setup
+- `docs/USAGE.md` — "Add TA to an existing project" section, framework contribution guide
+
 ---
 
 ## v0.8 — Event System & Stable API *(release: tag v0.8.0-beta)*
