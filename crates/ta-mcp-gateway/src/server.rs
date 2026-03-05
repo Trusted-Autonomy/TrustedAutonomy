@@ -163,6 +163,17 @@ pub struct GoalToolParams {
     /// Goal run ID to check status of (used with "status").
     #[serde(default)]
     pub goal_run_id: Option<String>,
+    /// Whether to launch the implementation agent asynchronously (default: false).
+    /// When true, spawns `ta run --headless` in the background and returns immediately.
+    /// The orchestrator can poll status via action:"status" to track progress.
+    #[serde(default)]
+    pub launch: Option<bool>,
+    /// Agent to use for the sub-goal (default: inherits from macro goal).
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Plan phase ID for the sub-goal (default: inherits from macro goal).
+    #[serde(default)]
+    pub phase: Option<String>,
 }
 
 /// Parameters for `ta_plan` (inner-loop agent tool).
@@ -1132,7 +1143,7 @@ impl TaGatewayServer {
     }
 
     #[tool(
-        description = "Manage sub-goals within a macro goal session. Actions: start (create a sub-goal that inherits the macro goal's context), status (check sub-goal progress). Sub-goals share the macro goal's workspace, plan phase, and agent config."
+        description = "Manage sub-goals within a macro goal session. Actions: start (create a sub-goal that inherits the macro goal's context), status (check sub-goal progress). Sub-goals share the macro goal's workspace, plan phase, and agent config. For start: set launch:true to spawn the implementation agent in the background (headless mode). Use agent and phase params to override inherited values."
     )]
     fn ta_goal_inner(
         &self,
@@ -1188,26 +1199,110 @@ impl TaGatewayServer {
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?
                     .ok_or_else(|| McpError::internal_error("sub-goal vanished", None))?;
                 updated_sub.parent_macro_id = Some(macro_goal_id);
-                updated_sub.plan_phase = macro_goal.plan_phase.clone();
+                // Phase: use explicit param, fall back to macro goal's phase.
+                updated_sub.plan_phase = params
+                    .phase
+                    .clone()
+                    .or_else(|| macro_goal.plan_phase.clone());
                 updated_sub.source_dir = macro_goal.source_dir.clone();
+                // Agent: use explicit param, fall back to macro goal's agent.
+                let agent_id = params
+                    .agent
+                    .clone()
+                    .unwrap_or_else(|| macro_goal.agent_id.clone());
+                updated_sub.agent_id = agent_id.clone();
                 state
                     .goal_store
                     .save(&updated_sub)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
                 // Add sub-goal ID to macro goal's list.
-                let mut updated_macro = macro_goal;
+                let mut updated_macro = macro_goal.clone();
                 updated_macro.sub_goal_ids.push(sub_id);
                 state
                     .goal_store
                     .save(&updated_macro)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+                // Optionally launch the implementation agent in the background (v0.8.2).
+                let launched = if params.launch.unwrap_or(false) {
+                    if let Some(ref source_dir) = macro_goal.source_dir {
+                        let phase_arg = updated_sub.plan_phase.clone();
+                        let source = source_dir.clone();
+                        let sub_title = title.to_string();
+                        let sub_objective = objective.to_string();
+
+                        // Spawn `ta run --headless` as a background process.
+                        let mut cmd = std::process::Command::new("ta");
+                        cmd.arg("run")
+                            .arg(&sub_title)
+                            .arg("--source")
+                            .arg(&source)
+                            .arg("--agent")
+                            .arg(&agent_id)
+                            .arg("--objective")
+                            .arg(&sub_objective)
+                            .arg("--headless");
+
+                        if let Some(ref phase) = phase_arg {
+                            cmd.arg("--phase").arg(phase);
+                        }
+
+                        // Detach: redirect output to null, don't inherit stdin.
+                        cmd.stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+
+                        match cmd.spawn() {
+                            Ok(_child) => {
+                                tracing::info!(
+                                    "Launched headless agent for sub-goal {} ({})",
+                                    sub_id,
+                                    sub_title
+                                );
+                                true
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to launch agent for sub-goal {}: {}",
+                                    sub_id,
+                                    e
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                // Publish GoalStarted event to the file-based event store.
+                {
+                    use ta_events::{EventStore, FsEventStore};
+                    let events_dir = state.config.workspace_root.join(".ta").join("events");
+                    let event_store = FsEventStore::new(&events_dir);
+                    let event = ta_events::SessionEvent::GoalStarted {
+                        goal_id: sub_id,
+                        title: title.to_string(),
+                        agent_id: agent_id.clone(),
+                        phase: updated_sub.plan_phase.clone(),
+                    };
+                    let envelope = ta_events::EventEnvelope::new(event);
+                    if let Err(e) = event_store.append(&envelope) {
+                        tracing::warn!("Failed to persist GoalStarted event: {}", e);
+                    }
+                }
+
                 let response = serde_json::json!({
                     "sub_goal_id": sub_id.to_string(),
                     "macro_goal_id": macro_goal_id.to_string(),
                     "title": title,
                     "state": "running",
+                    "launched": launched,
+                    "agent": agent_id,
+                    "phase": updated_sub.plan_phase,
                 });
                 Ok(CallToolResult::success(vec![Content::json(response)
                     .map_err(|e| {

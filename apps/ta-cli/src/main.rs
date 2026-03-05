@@ -97,6 +97,10 @@ enum Commands {
         /// Resume an existing interactive session (ID or prefix).
         #[arg(long)]
         resume: Option<String>,
+        /// Non-interactive (headless) execution for orchestrator-driven goals.
+        /// No PTY, pipes stdout, returns draft ID on completion.
+        #[arg(long)]
+        headless: bool,
     },
     /// Manage interactive sessions.
     Session {
@@ -231,6 +235,7 @@ fn main() -> anyhow::Result<()> {
             interactive,
             macro_goal,
             resume,
+            headless,
         } => commands::run::execute(
             &config,
             title.as_deref(),
@@ -244,6 +249,7 @@ fn main() -> anyhow::Result<()> {
             *interactive,
             *macro_goal,
             resume.as_deref(),
+            *headless,
         ),
         Commands::Events { command } => commands::events::execute(command, &config),
         Commands::Token { command } => commands::token::execute(command, &config),

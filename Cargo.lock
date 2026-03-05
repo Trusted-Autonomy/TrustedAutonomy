@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.8.1-alpha"
+version = "0.8.2-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2473,6 +2473,7 @@ dependencies = [
  "ta-audit",
  "ta-changeset",
  "ta-connector-fs",
+ "ta-events",
  "ta-goal",
  "ta-memory",
  "ta-policy",

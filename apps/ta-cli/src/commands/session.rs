@@ -81,6 +81,7 @@ pub fn execute(cmd: &SessionCommands, config: &GatewayConfig) -> anyhow::Result<
                 true,
                 false,
                 Some(id.as_str()),
+                false, // not headless
             )
         }
         SessionCommands::Pause { id } => pause_session(config, id),

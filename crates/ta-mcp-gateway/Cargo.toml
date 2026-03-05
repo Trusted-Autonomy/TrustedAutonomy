@@ -18,6 +18,7 @@ tokio = { workspace = true }
 
 # Internal crates
 ta-audit = { path = "../ta-audit" }
+ta-events = { path = "../ta-events" }
 ta-memory = { path = "../ta-memory" }
 ta-changeset = { path = "../ta-changeset" }
 ta-connector-fs = { path = "../ta-connectors/fs" }
