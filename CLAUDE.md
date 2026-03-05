@@ -54,13 +54,13 @@ Plan progress:
 - [x] Phase v0.6.1 — Unified Policy Config (Layer 2
 - [x] Phase v0.6.2 — Resource Mediation Trait (Layer 1
 - [x] Phase v0.6.3 — Active Memory Injection & Project-Aware Key Schema
-- [ ] Phase v0.7.0 — Channel Registry (Layer 5
-- [ ] Phase v0.7.1 — API Mediator (Layer 1
-- [ ] Phase v0.7.2 — Agent-Guided Setup
-- [ ] Phase v0.7.3 — Project Template Repository & `ta init`
-- [ ] Phase v0.7.4 — Memory & Config Cleanup
-- [ ] Phase v0.7.5 — Interactive Session Fixes & Cross-Platform Release
-- [ ] Phase v0.7.6 — Interactive Developer Loop (`ta dev`)
+- [x] Phase v0.7.0 — Channel Registry (Layer 5
+- [x] Phase v0.7.1 — API Mediator (Layer 1
+- [x] Phase v0.7.2 — Agent-Guided Setup
+- [x] Phase v0.7.3 — Project Template Repository & `ta init`
+- [x] Phase v0.7.4 — Memory & Config Cleanup
+- [x] Phase v0.7.5 — Interactive Session Fixes & Cross-Platform Release
+- [x] Phase v0.7.6 — Interactive Developer Loop (`ta dev`)
 - [ ] Phase v0.7.7 — Agent Framework Registry & Setup Integration
 - [ ] Phase v0.8.0 — Event System & Subscription API (Layer 3 → projects
 - [ ] Phase v0.8.1 — Community Memory
@@ -235,13 +235,13 @@ Plan progress:
 - [x] Phase v0.6.1 — Unified Policy Config
 - [x] Phase v0.6.2 — Resource Mediation Trait
 - [x] Phase v0.6.3 — Active Memory Injection & Project-Aware Key Schema
-- [ ] Phase v0.7.0 — Channel Registry
-- [ ] Phase v0.7.1 — API Mediator
-- [ ] Phase v0.7.2 — Agent-Guided Setup
-- [ ] Phase v0.7.3 — Project Template Repository & `ta init`
-- [ ] Phase v0.7.4 — Memory & Config Cleanup
-- [ ] Phase v0.7.5 — Interactive Session Fixes & Cross-Platform Release
-- [ ] Phase v0.7.6 — Interactive Developer Loop (`ta dev`)
+- [x] Phase v0.7.0 — Channel Registry
+- [x] Phase v0.7.1 — API Mediator
+- [x] Phase v0.7.2 — Agent-Guided Setup
+- [x] Phase v0.7.3 — Project Template Repository & `ta init`
+- [x] Phase v0.7.4 — Memory & Config Cleanup
+- [x] Phase v0.7.5 — Interactive Session Fixes & Cross-Platform Release
+- [x] Phase v0.7.6 — Interactive Developer Loop (`ta dev`)
 - [ ] Phase v0.7.7 — Agent Framework Registry & Setup Integration
 - [ ] Phase v0.8.0 — Event System & Subscription API
 - [ ] Phase v0.8.1 — Community Memory

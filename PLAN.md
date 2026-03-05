@@ -1649,7 +1649,7 @@ New/modified files:
 > TA becomes extensible: pluggable IO channels, non-file mediators, and the event subscription API.
 
 ### v0.7.0 — Channel Registry (Layer 5)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Pluggable IO channel system where all channels (CLI, web, Slack, Discord, email) are equal.
 
 - **`ChannelFactory` trait**: `build_review() → Box<dyn ReviewChannel>`, `build_session() → Box<dyn SessionChannel>`, `capabilities()`.
@@ -1684,7 +1684,7 @@ New/modified files:
 - Webhook signature verification, retry logic — deferred to v0.8+
 
 ### v0.7.1 — API Mediator (Layer 1)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Stage, preview, and apply intercepted MCP tool calls (builds on existing `PendingAction` from v0.5.1).
 
 - **`ApiMediator`**: Implements `ResourceMediator` for `mcp://` scheme.
@@ -1708,7 +1708,7 @@ New/modified files:
 - ✅ 12 tests covering stage/preview/apply/rollback/classify/extract/describe
 
 ### v0.7.2 — Agent-Guided Setup
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Conversational setup flow where a TA agent helps configure workflows — and the resulting config is a TA draft the user reviews.
 
 - **`ta setup`**: Launches a TA goal where the agent is the setup assistant.
@@ -1726,7 +1726,7 @@ New/modified files:
 - ✅ 5 tests covering wizard, refine, show, and project detection
 
 ### v0.7.3 — Project Template Repository & `ta init`
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Starter project templates for different project types. `ta init` runs an agent to generate project structure, workflow config, memory key schema, and agent configs — all as a reviewable TA draft.
 
 - **`ta init`**: Creates a new TA-managed project from a template. Runs an agent to generate initial config.
@@ -1757,7 +1757,7 @@ New/modified files:
 - ✅ 10 tests covering init, templates, detection, memory seeding, workspace extraction
 
 ### v0.7.4 — Memory & Config Cleanup
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Wire up deferred memory integration points from v0.6.3.
 
 - **`.ta/memory.toml` backend toggle**: `run.rs` store construction currently always uses RuVector-first fallback logic. Wire the parsed `backend = "fs"` / `backend = "ruvector"` toggle so users can explicitly choose filesystem-only mode.
@@ -1909,6 +1909,8 @@ runtime = "native-cli"
 - `agents/langchain.yaml` — LangChain agent runner with TA tool integration
 - `agents/langgraph.yaml` — LangGraph stateful agent with TA as a node
 - `agents/bmad.yaml` — BMAD-METHOD workflow (wraps claude-code or other runtime with BMAD system prompt and phased methodology)
+
+**Bug fix: `ta dev` exits immediately instead of starting interactive session**: `ta dev` prints plan status and pending phases then exits. It should start a persistent interactive agent session (LLM agent with TA MCP tools) where the user can issue natural language commands ("run that", "status", "release"). The dev command needs to launch the agent using the `dev-loop.yaml` config and keep the session alive for user interaction — same pattern as `ta run --interactive` but without staging.
 
 **Bug fix: Macro goal MCP server injection** (GitHub [#60](https://github.com/michaelhunley/TrustedAutonomy/issues/60)): `ta run --macro` injects CLAUDE.md with MCP tool documentation and `.claude/settings.local.json` with permissions, but does NOT inject the `trusted-autonomy` MCP server into `.mcp.json`. The agent sees tool descriptions but can't call them. Fix: inject TA MCP server config into staging workspace's `.mcp.json` (merge with existing entries) during macro goal setup in `run.rs`.
 
