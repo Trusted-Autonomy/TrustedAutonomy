@@ -3281,6 +3281,104 @@ Agent: [starts goal for Phase 1]
 
 ---
 
+### v0.9.10 — Multi-Project Daemon & Office Configuration
+<!-- status: pending -->
+**Goal**: Extend the TA daemon to manage multiple projects simultaneously, with channel-to-project routing so a single Discord bot, Slack app, or email address can serve as the interface for several independent TA workspaces.
+
+#### Problem
+Today each `ta daemon` instance serves a single project. Users managing multiple projects need separate daemon instances and separate channel configurations. This makes it impossible to say "@ta inventory-service plan list" in a shared Discord channel — there's no way to route the message to the right project.
+
+#### Architecture
+
+```
+                    ┌──────────────────────────────┐
+  Discord/Slack/    │      Multi-Project Daemon     │
+  Email/CLI ───────▶│                                │
+                    │  ┌──────────────────────────┐  │
+                    │  │    Message Router         │  │
+                    │  │  channel → project map    │  │
+                    │  │  thread context tracking  │  │
+                    │  │  explicit prefix parsing  │  │
+                    │  └──────┬──────┬──────┬──────┘  │
+                    │         │      │      │         │
+                    │    ┌────▼──┐ ┌─▼───┐ ┌▼────┐   │
+                    │    │Proj A │ │Proj B│ │Proj C│  │
+                    │    │context│ │ctxt  │ │ctxt  │  │
+                    │    └───────┘ └──────┘ └──────┘  │
+                    └──────────────────────────────┘
+```
+
+Each `ProjectContext` holds:
+- Workspace path + `.ta/` directory
+- GoalRunStore, DraftStore, AuditLog
+- PolicyDocument (per-project)
+- ChannelRegistry (per-project, but channel listeners are shared)
+
+#### Items
+
+1. **`ProjectContext` struct**: Encapsulate per-project state (stores, policy, workspace path, plan). Refactor `GatewayState` to hold a `HashMap<String, ProjectContext>` instead of a single project context. Single-project mode (no `office.yaml`) remains the default — wraps current behavior in one `ProjectContext`.
+2. **Office config schema**: Define `office.yaml` with `projects`, `channels.routes`, and `daemon` sections:
+   ```yaml
+   office:
+     name: "My Dev Office"
+     daemon:
+       socket: ~/.ta/office.sock
+       http_port: 3140
+   projects:
+     inventory-service:
+       path: ~/dev/inventory-service
+       plan: PLAN.md
+       default_branch: main
+     customer-portal:
+       path: ~/dev/customer-portal
+   channels:
+     discord:
+       token_env: TA_DISCORD_TOKEN
+       routes:
+         "#backend-reviews": { project: inventory-service, type: review }
+         "#backend-chat":    { project: inventory-service, type: session }
+         "#frontend-reviews": { project: customer-portal, type: review }
+         "#office-status":   { type: notify, projects: all }
+     email:
+       routes:
+         "backend@acme.dev":  { project: inventory-service, type: review }
+         "frontend@acme.dev": { project: customer-portal, type: review }
+   ```
+3. **Message routing**: Implement channel → project resolution with precedence:
+   - Dedicated channel route (from config)
+   - Thread context (reply in a goal thread → same project)
+   - Explicit prefix (`@ta <project-name> <command>`)
+   - User's `default_project` setting
+   - Ambiguous → ask user to clarify
+4. **`ta office` CLI commands**:
+   - `ta office start --config office.yaml` — start multi-project daemon
+   - `ta office stop` — graceful shutdown (finish active goals)
+   - `ta office status` — overview of projects, active goals, channel connections
+   - `ta office status <project>` — per-project detail
+   - `ta office project add/remove` — runtime project management
+   - `ta office reload` — reload config without restart
+5. **Daemon API expansion**: Extend daemon HTTP/socket API with project scoping:
+   - All existing endpoints gain optional `?project=<name>` query parameter
+   - `GET /api/projects` — list managed projects with status
+   - `GET /api/projects/:name/status` — per-project detail
+   - `POST /api/projects` — add project at runtime
+   - `DELETE /api/projects/:name` — remove project
+6. **Per-project overrides**: Support `.ta/office-override.yaml` in each project for project-specific policy or channel overrides that take precedence over the office config.
+7. **Backward compatibility**: When no `office.yaml` exists, `ta daemon` works exactly as before (single project). The multi-project behavior is opt-in.
+
+#### Implementation scope
+- `crates/ta-daemon/src/project_context.rs` — `ProjectContext` struct with per-project stores (~150 lines)
+- `crates/ta-daemon/src/office.rs` — office config parsing, project registry, lifecycle (~200 lines)
+- `crates/ta-daemon/src/router.rs` — message routing with channel→project resolution (~150 lines)
+- `crates/ta-daemon/src/web.rs` — project-scoped API endpoints (~100 lines)
+- `apps/ta-cli/src/commands/office.rs` — `ta office` subcommands (~200 lines)
+- `docs/USAGE.md` — multi-project setup guide, office.yaml reference
+- Tests: project context isolation, routing precedence, runtime add/remove, backward compat with single-project mode
+
+#### Version: `0.9.10-alpha`
+
+---
+
 ### v0.10.0 — Gateway Channel Wiring & Multi-Channel Routing
 <!-- status: pending -->
 **Goal**: Wire `ChannelRegistry` into the MCP gateway so `.ta/config.yaml` actually controls which channels handle reviews, notifications, and escalations — and support routing a single event to multiple channels simultaneously.
