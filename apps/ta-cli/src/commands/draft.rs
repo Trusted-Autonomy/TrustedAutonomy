@@ -1931,6 +1931,24 @@ fn apply_package(
 
         println!("\nUsing submit adapter: {}", adapter.name());
 
+        // Save original branch so we can switch back after git operations.
+        let original_branch = if adapter_name == "git" {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(&target_dir)
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+
         // Prepare (create branch if needed).
         if let Err(e) = adapter.prepare(goal, &workflow_config.submit) {
             eprintln!("Warning: adapter prepare failed: {}", e);
@@ -1981,6 +1999,42 @@ fn apply_package(
                 Err(e) => {
                     eprintln!("Warning: PR creation failed: {}", e);
                     eprintln!("  You can manually create a PR from the pushed branch.");
+                }
+            }
+        }
+
+        // Switch back to the original branch.
+        if let Some(ref orig) = original_branch {
+            let current = std::process::Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(&target_dir)
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            if current != *orig {
+                match std::process::Command::new("git")
+                    .args(["checkout", orig])
+                    .current_dir(&target_dir)
+                    .output()
+                {
+                    Ok(o) if o.status.success() => {
+                        println!("Switched back to branch: {}", orig);
+                    }
+                    _ => {
+                        eprintln!(
+                            "Warning: could not switch back to '{}'. Currently on '{}'.",
+                            orig, current
+                        );
+                        eprintln!("  Run: git checkout {}", orig);
+                    }
                 }
             }
         }
@@ -3427,9 +3481,10 @@ mod tests {
         )
         .unwrap();
 
-        // Verify git log has new commit.
+        // Verify git log on the feature branch has the new commit.
+        // After apply, we're back on the original branch; check --all.
         let log = std::process::Command::new("git")
-            .args(["log", "--oneline", "-1"])
+            .args(["log", "--all", "--oneline", "-5"])
             .current_dir(project.path())
             .output()
             .unwrap();
@@ -3437,9 +3492,20 @@ mod tests {
         // Subject line is the goal title; summary is in the commit body.
         assert!(log_output.contains("Git test"));
 
+        // Find the feature branch to read the full commit message.
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", "ta/*"])
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        let branch_name = String::from_utf8_lossy(&branches.stdout)
+            .trim()
+            .trim_start_matches("* ")
+            .to_string();
+
         // Verify full commit message matches ta draft view format.
         let full_log = std::process::Command::new("git")
-            .args(["log", "-1", "--format=%B"])
+            .args(["log", "-1", "--format=%B", &branch_name])
             .current_dir(project.path())
             .output()
             .unwrap();
