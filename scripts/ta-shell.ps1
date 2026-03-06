@@ -73,8 +73,8 @@ function Get-DaemonVersion {
 
 function Get-BuiltVersion {
     try {
-        $help = & $DaemonBin --help 2>&1 | Select-Object -First 1
-        if ($help -match '(\d[\d.]+-[a-z]+)') { return $Matches[1] }
+        $ver = & $DaemonBin --version 2>&1
+        if ($ver -match '(\d[\d.]+-[a-z]+)') { return $Matches[1] }
     } catch {}
     return $null
 }

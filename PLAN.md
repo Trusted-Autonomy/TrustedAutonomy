@@ -2708,9 +2708,12 @@ All complexity lives in the daemon (v0.9.7). The shell is deliberately thin — 
 
 ---
 
-### v0.9.8.1 — Policy-Driven Auto-Approval
+### v0.9.8.1 — Auto-Approval, Lifecycle Hygiene & Operational Polish
 <!-- status: pending -->
-**Goal**: Wire the policy engine into the draft review flow so that drafts matching configurable conditions are auto-approved without human intervention — while preserving full audit trail and the ability to tighten rules at any time.
+**Goal**: Three themes that make TA reliable for sustained multi-phase use:
+- **(A) Policy-driven auto-approval**: Wire the policy engine into draft review so drafts matching configurable conditions are auto-approved — preserving full audit trail and the ability to tighten rules at any time.
+- **(B) Goal lifecycle & GC**: Unified `ta gc`, goal history ledger, `ta goal list --active` filtering, and event store pruning (items 9–10).
+- **(C) Operational observability**: Actionable error messages, timeout diagnostics, daemon version detection, status line accuracy (items 9, plus CLAUDE.md observability mandate).
 
 #### How It Works
 

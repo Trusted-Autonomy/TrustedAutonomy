@@ -47,6 +47,7 @@ use ta_mcp_gateway::{GatewayConfig, TaGatewayServer};
 #[derive(Parser)]
 #[command(
     name = "ta-daemon",
+    version,
     about = "Trusted Autonomy MCP server and HTTP API daemon"
 )]
 struct Cli {

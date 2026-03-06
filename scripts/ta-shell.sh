@@ -75,7 +75,7 @@ daemon_version() {
 }
 
 built_version() {
-  "$DAEMON_BIN" --help 2>&1 | head -1 | grep -o '[0-9][0-9.]*-[a-z]*' || echo "unknown"
+  "$DAEMON_BIN" --version 2>&1 | grep -o '[0-9][0-9.]*-[a-z]*' || echo "unknown"
 }
 
 if daemon_healthy; then
