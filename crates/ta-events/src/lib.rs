@@ -16,6 +16,6 @@ pub mod tokens;
 pub use bus::{EventBus, EventFilter};
 pub use error::EventError;
 pub use hooks::{HookConfig, HookRunner};
-pub use schema::{EventEnvelope, SessionEvent};
+pub use schema::{EventAction, EventEnvelope, SessionEvent};
 pub use store::{EventStore, FsEventStore};
 pub use tokens::{ApprovalToken, TokenStore};

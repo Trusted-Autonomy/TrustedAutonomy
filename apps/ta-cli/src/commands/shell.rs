@@ -639,10 +639,7 @@ fn render_sse_event(frame: &str) -> Option<String> {
             } else {
                 format!("{}s", secs)
             };
-            format!(
-                "goal completed: \"{}\" ({}) [{}]\n  Next: ta draft list | ta draft view <id>",
-                title, duration, goal_id
-            )
+            format!("goal completed: \"{}\" ({}) [{}]", title, duration, goal_id)
         }
         "draft_built" => {
             let count = payload["artifact_count"].as_u64().unwrap_or(0);
@@ -650,11 +647,7 @@ fn render_sse_event(frame: &str) -> Option<String> {
                 .as_str()
                 .map(|s| &s[..8.min(s.len())])
                 .unwrap_or("?");
-            let full_id = payload["draft_id"].as_str().unwrap_or("?");
-            format!(
-                "draft ready: {} files ({})\n  View:    ta draft view {}\n  Approve: ta draft approve {}\n  Deny:    ta draft deny {}",
-                count, draft_id, full_id, full_id, full_id
-            )
+            format!("draft ready: {} files ({})", count, draft_id)
         }
         "draft_approved" | "draft_denied" => {
             let decision = if event_type == "draft_approved" {
@@ -678,7 +671,55 @@ fn render_sse_event(frame: &str) -> Option<String> {
         }
     };
 
-    Some(format!("\n[event] {}\n", detail))
+    // Render structured actions from the event envelope (if present).
+    // Falls back to hardcoded suggestions for backwards compatibility with
+    // events written before the actions field was added.
+    let actions_suffix = render_actions_suffix(event_type, &json);
+
+    Some(format!("\n[event] {}{}\n", detail, actions_suffix))
+}
+
+/// Render the actions section of an SSE event for terminal display.
+///
+/// Reads the `actions` array from the event envelope. If no actions are
+/// present (e.g., older events), falls back to hardcoded suggestions for
+/// the known lifecycle events that warrant them.
+fn render_actions_suffix(event_type: &str, json: &serde_json::Value) -> String {
+    // Prefer structured actions from the envelope.
+    if let Some(actions) = json["actions"].as_array() {
+        if !actions.is_empty() {
+            let mut lines = String::new();
+            for action in actions {
+                if let (Some(label), Some(command)) =
+                    (action["label"].as_str(), action["command"].as_str())
+                {
+                    lines.push_str(&format!("\n  {}: {}", label, command));
+                }
+            }
+            return lines;
+        }
+    }
+
+    // Backwards-compat fallback for events without the actions field.
+    match event_type {
+        "goal_completed" => "\n  Next: ta draft list | ta draft view <id>".to_string(),
+        "draft_built" => {
+            let full_id = json["payload"]["draft_id"].as_str().unwrap_or("?");
+            format!(
+                "\n  View:    ta draft view {}\n  Approve: ta draft approve {}\n  Deny:    ta draft deny {}",
+                full_id, full_id, full_id
+            )
+        }
+        "goal_started" => {
+            let goal_id = json["payload"]["goal_id"].as_str().unwrap_or("");
+            if goal_id.len() >= 8 {
+                format!("\n  Tail: ta shell :tail {}", &goal_id[..8])
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    }
 }
 
 // -- Rustyline helper --------------------------------------------------------
@@ -783,6 +824,60 @@ mod tests {
         assert!(rendered.contains("goal started"));
         assert!(rendered.contains("Fix auth"));
         assert!(rendered.contains("claude-code"));
+    }
+
+    #[test]
+    fn render_sse_event_uses_structured_actions_when_present() {
+        let frame = concat!(
+            "event: draft_built\n",
+            "data: {",
+            "\"event_type\":\"draft_built\",",
+            "\"payload\":{\"artifact_count\":3,\"draft_id\":\"abc12345-0000-0000-0000-000000000000\"},",
+            "\"actions\":[",
+            "{\"verb\":\"view\",\"command\":\"ta draft view abc12345\",\"label\":\"View draft abc12345\"},",
+            "{\"verb\":\"approve\",\"command\":\"ta draft approve abc12345\",\"label\":\"Approve draft abc12345\"}",
+            "]}"
+        );
+        let rendered = render_sse_event(frame).unwrap();
+        // Should use structured actions, not hardcoded fallback.
+        assert!(rendered.contains("View draft abc12345"));
+        assert!(rendered.contains("ta draft view abc12345"));
+        assert!(rendered.contains("Approve draft abc12345"));
+        assert!(rendered.contains("ta draft approve abc12345"));
+    }
+
+    #[test]
+    fn render_sse_event_falls_back_when_no_actions_field() {
+        // Old-format event without an actions field: should use hardcoded fallback.
+        let frame = concat!(
+            "event: goal_completed\n",
+            "data: {",
+            "\"event_type\":\"goal_completed\",",
+            "\"payload\":{\"title\":\"Fix auth\",\"goal_id\":\"abc12345-dead-beef-cafe-000000000000\",\"duration_secs\":120}",
+            "}"
+        );
+        let rendered = render_sse_event(frame).unwrap();
+        assert!(rendered.contains("goal completed"));
+        assert!(rendered.contains("Fix auth"));
+        // Backwards-compat fallback action should appear.
+        assert!(rendered.contains("ta draft list"));
+    }
+
+    #[test]
+    fn render_sse_event_empty_actions_array_uses_fallback() {
+        // Event with an empty actions array: should fall back to hardcoded suggestions.
+        let frame = concat!(
+            "event: draft_built\n",
+            "data: {",
+            "\"event_type\":\"draft_built\",",
+            "\"payload\":{\"artifact_count\":2,\"draft_id\":\"deadbeef-0000-0000-0000-000000000000\"},",
+            "\"actions\":[]",
+            "}"
+        );
+        let rendered = render_sse_event(frame).unwrap();
+        assert!(rendered.contains("draft ready"));
+        // Backwards-compat fallback should appear since actions list is empty.
+        assert!(rendered.contains("ta draft view"));
     }
 
     #[test]

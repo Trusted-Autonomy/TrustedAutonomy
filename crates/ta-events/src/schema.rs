@@ -11,6 +11,36 @@ use uuid::Uuid;
 /// Current schema version. Bumped when backward-incompatible changes are made.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// A structured action that any interface can render as an actionable next step.
+///
+/// Actions are embedded in event envelopes so that non-CLI interfaces (Discord,
+/// Slack, webapp, email) can present the same actionable suggestions that the
+/// CLI shell currently hardcodes in its renderer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventAction {
+    /// Machine-readable verb: "view", "approve", "deny", "tail", "list"
+    pub verb: String,
+    /// The CLI command to execute (interface-agnostic)
+    pub command: String,
+    /// Human-readable label for the action
+    pub label: String,
+}
+
+impl EventAction {
+    /// Create a new action.
+    pub fn new(
+        verb: impl Into<String>,
+        command: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        Self {
+            verb: verb.into(),
+            command: command.into(),
+            label: label.into(),
+        }
+    }
+}
+
 /// Wrapper around every event with metadata for persistence and routing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
@@ -24,17 +54,24 @@ pub struct EventEnvelope {
     pub event_type: String,
     /// The event payload.
     pub payload: SessionEvent,
+    /// Structured actions that any interface can render as next steps.
+    /// Most events have an empty list; key lifecycle events populate this.
+    #[serde(default)]
+    pub actions: Vec<EventAction>,
 }
 
 impl EventEnvelope {
     /// Create a new envelope wrapping the given event.
+    /// Actions are automatically derived from the event payload.
     pub fn new(event: SessionEvent) -> Self {
+        let actions = event.suggested_actions();
         Self {
             id: Uuid::new_v4(),
             timestamp: Utc::now(),
             version: SCHEMA_VERSION,
             event_type: event.event_type().to_string(),
             payload: event,
+            actions,
         }
     }
 }
@@ -185,6 +222,50 @@ impl SessionEvent {
             _ => None,
         }
     }
+
+    /// Return structured actions appropriate for this event type.
+    ///
+    /// These are suggested next steps an operator or interface can present
+    /// to the user. Any interface (CLI, Discord, webapp) can render them
+    /// without hardcoding event-specific logic.
+    pub fn suggested_actions(&self) -> Vec<EventAction> {
+        match self {
+            Self::GoalStarted { goal_id, .. } => {
+                let short_id = &goal_id.to_string()[..8];
+                vec![EventAction::new(
+                    "tail",
+                    format!("ta shell :tail {}", short_id),
+                    format!("Tail live output for goal {}", short_id),
+                )]
+            }
+            Self::GoalCompleted { .. } => {
+                vec![EventAction::new("list", "ta draft list", "List all drafts")]
+            }
+            Self::DraftBuilt { draft_id, .. } => {
+                let full_id = draft_id.to_string();
+                let short_id = &full_id[..8];
+                vec![
+                    EventAction::new(
+                        "view",
+                        format!("ta draft view {}", full_id),
+                        format!("View draft {}", short_id),
+                    ),
+                    EventAction::new(
+                        "approve",
+                        format!("ta draft approve {}", full_id),
+                        format!("Approve draft {}", short_id),
+                    ),
+                    EventAction::new(
+                        "deny",
+                        format!("ta draft deny {}", full_id),
+                        format!("Deny draft {}", short_id),
+                    ),
+                ]
+            }
+            // All other events have no suggested actions.
+            _ => vec![],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +283,95 @@ mod tests {
         let envelope = EventEnvelope::new(event);
         assert_eq!(envelope.version, SCHEMA_VERSION);
         assert_eq!(envelope.event_type, "goal_started");
+    }
+
+    #[test]
+    fn goal_started_envelope_has_tail_action() {
+        let goal_id = Uuid::new_v4();
+        let event = SessionEvent::GoalStarted {
+            goal_id,
+            title: "Fix auth".into(),
+            agent_id: "claude-code".into(),
+            phase: None,
+        };
+        let envelope = EventEnvelope::new(event);
+        assert_eq!(envelope.actions.len(), 1);
+        assert_eq!(envelope.actions[0].verb, "tail");
+        let short_id = &goal_id.to_string()[..8];
+        assert!(envelope.actions[0].command.contains(short_id));
+    }
+
+    #[test]
+    fn draft_built_envelope_has_view_approve_deny_actions() {
+        let draft_id = Uuid::new_v4();
+        let event = SessionEvent::DraftBuilt {
+            goal_id: Uuid::new_v4(),
+            draft_id,
+            artifact_count: 5,
+        };
+        let envelope = EventEnvelope::new(event);
+        assert_eq!(envelope.actions.len(), 3);
+        let verbs: Vec<&str> = envelope.actions.iter().map(|a| a.verb.as_str()).collect();
+        assert!(verbs.contains(&"view"));
+        assert!(verbs.contains(&"approve"));
+        assert!(verbs.contains(&"deny"));
+        let full_id = draft_id.to_string();
+        for action in &envelope.actions {
+            assert!(action.command.contains(&full_id));
+        }
+    }
+
+    #[test]
+    fn goal_completed_envelope_has_list_action() {
+        let event = SessionEvent::GoalCompleted {
+            goal_id: Uuid::new_v4(),
+            title: "Done".into(),
+            duration_secs: Some(90),
+        };
+        let envelope = EventEnvelope::new(event);
+        assert_eq!(envelope.actions.len(), 1);
+        assert_eq!(envelope.actions[0].verb, "list");
+        assert!(envelope.actions[0].command.contains("ta draft list"));
+    }
+
+    #[test]
+    fn other_events_have_no_actions() {
+        let event = SessionEvent::MemoryStored {
+            key: "k".into(),
+            category: None,
+            source: "cli".into(),
+        };
+        let envelope = EventEnvelope::new(event);
+        assert!(envelope.actions.is_empty());
+    }
+
+    #[test]
+    fn envelope_serialization_includes_actions() {
+        let event = SessionEvent::DraftBuilt {
+            goal_id: Uuid::new_v4(),
+            draft_id: Uuid::new_v4(),
+            artifact_count: 2,
+        };
+        let envelope = EventEnvelope::new(event);
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(json.contains("\"actions\""));
+        assert!(json.contains("\"verb\""));
+        assert!(json.contains("\"command\""));
+        assert!(json.contains("\"label\""));
+    }
+
+    #[test]
+    fn envelope_deserialization_backwards_compat_no_actions_field() {
+        // Old events without an `actions` field should deserialize with empty actions.
+        let json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "version": 1,
+            "event_type": "memory_stored",
+            "payload": {"type": "memory_stored", "key": "k", "category": null, "source": "cli"}
+        }"#;
+        let envelope: EventEnvelope = serde_json::from_str(json).unwrap();
+        assert!(envelope.actions.is_empty());
     }
 
     #[test]
