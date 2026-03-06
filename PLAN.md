@@ -3227,6 +3227,54 @@ WorkflowFailed { workflow_id, name, reason, timestamp }
 
 ---
 
+### v0.9.8.3 — Full TUI Shell (`ratatui`)
+<!-- status: pending -->
+**Goal**: Replace the line-mode rustyline shell with a full terminal UI modeled on Claude Code / claude-flow — persistent status bar, scrolling output, and input area, all in one screen.
+
+#### Layout
+```
+┌─────────────────────────────────────────────────────────┐
+│  [scrolling output]                                     │
+│  goal started: "Implement v0.9.8.1" (claude-code)       │
+│  draft built: 15 files (abc123)                         │
+│  $ ta goal list                                         │
+│  ID       Title                    State    Agent       │
+│  ca306e4d Implement v0.9.8.1       running  claude-code │
+│                                                         │
+│                                                         │
+├─────────────────────────────────────────────────────────┤
+│ ta> ta draft list                                       │
+├─────────────────────────────────────────────────────────┤
+│ TrustedAutonomy v0.9.8 │ 1 agent │ 0 drafts │ ◉ daemon│
+└─────────────────────────────────────────────────────────┘
+```
+
+#### Items
+
+1. **`ratatui` + `crossterm` terminal backend**: Full-screen TUI with three zones — output scroll area, input line, status bar. ~1500 lines replacing the current ~500-line rustyline shell.
+
+2. **Status bar** (bottom): Project name, version, active agent count, pending draft count, daemon connection indicator (green dot = connected, red = disconnected), current workflow stage (if any). Updates live via SSE events.
+
+3. **Input area** (above status bar): Text input with history (up/down arrows), tab-completion from `/api/routes`, multi-line support for longer commands. Uses `tui-textarea` or custom widget.
+
+4. **Scrolling output pane** (main area): Command responses, SSE event notifications, workflow prompts. Auto-scrolls but allows scroll-back with PgUp/PgDn. Events are rendered inline with dimmed styling to distinguish from command output.
+
+5. **Workflow interaction mode**: When a `workflow.awaiting_human` event arrives, the output pane shows the prompt/options and the input area switches to `workflow>` mode (from v0.9.8.2 item 11). Normal commands still work during workflow prompts.
+
+6. **Split pane support** (stretch): Optional vertical split showing agent session output on one side, shell commands on the other. Toggle with `Ctrl-W`. Useful when monitoring an agent in real time while reviewing drafts.
+
+7. **Notification badges**: Unread event count shown in status bar. Cleared when user scrolls to bottom. Draft-ready events flash briefly.
+
+#### Implementation scope
+- `apps/ta-cli/src/commands/shell.rs` — rewrite with ratatui (existing rustyline code preserved as `--classic` fallback)
+- `apps/ta-cli/Cargo.toml` — add `ratatui`, `crossterm`, `tui-textarea` dependencies
+- Daemon API layer unchanged — same HTTP/SSE endpoints
+- Tests: status bar rendering, input handling, event notification, workflow prompt mode
+
+#### Version: `0.9.8-alpha.3`
+
+---
+
 ### v0.9.9 — Conversational Project Bootstrapping (`ta new`)
 <!-- status: pending -->
 **Goal**: Start a new project from any interface by describing what you want in natural language. A planner agent generates the project structure and PLAN.md through conversation, then initializes the TA workspace.
