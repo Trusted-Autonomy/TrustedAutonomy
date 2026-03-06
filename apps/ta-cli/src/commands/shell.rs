@@ -127,7 +127,8 @@ async fn run_shell(base_url: String, attach_session: Option<String>) -> anyhow::
     // Start background SSE listener. Use `since=now` to skip historical events
     // and only show events that occur after the shell connects.
     let sse_running = running.clone();
-    let now = chrono::Utc::now().to_rfc3339();
+    // Use `to_rfc3339_opts` with `Z` suffix to avoid unescaped `+` in URL query.
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let sse_url = format!("{}/api/events?since={}", base_url, now);
     let sse_client = client.clone();
     let _sse_handle = tokio::spawn(async move {
