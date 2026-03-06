@@ -101,6 +101,11 @@ enum Commands {
         /// No PTY, pipes stdout, returns draft ID on completion.
         #[arg(long)]
         headless: bool,
+        /// Reuse an existing goal record instead of creating a new one.
+        /// Used by the MCP orchestrator to avoid duplicate goal creation
+        /// when `ta_goal_start` has already created the goal.
+        #[arg(long)]
+        goal_id: Option<String>,
     },
     /// Manage interactive sessions.
     Session {
@@ -239,6 +244,7 @@ fn main() -> anyhow::Result<()> {
             macro_goal,
             resume,
             headless,
+            goal_id,
         } => commands::run::execute(
             &config,
             title.as_deref(),
@@ -253,6 +259,7 @@ fn main() -> anyhow::Result<()> {
             *macro_goal,
             resume.as_deref(),
             *headless,
+            goal_id.as_deref(),
         ),
         Commands::Events { command } => commands::events::execute(command, &config),
         Commands::Token { command } => commands::token::execute(command, &config),

@@ -2461,6 +2461,7 @@ fn fix_package(
         false, // not macro
         None,  // not resuming
         false, // not headless
+        None,  // no existing goal id
     )?;
 
     if no_launch {
@@ -2622,13 +2623,80 @@ fn gc_packages(config: &GatewayConfig, dry_run: bool, archive: bool) -> anyhow::
         }
     }
 
+    // v0.9.5.1: Also clean orphaned pr_package JSON files whose linked goal
+    // is in a terminal state and older than the stale threshold.
+    let mut orphaned_count = 0u32;
+    if config.pr_packages_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&config.pr_packages_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "json") {
+                    continue;
+                }
+                let Ok(json_str) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(pkg) = serde_json::from_str::<DraftPackage>(&json_str) else {
+                    continue;
+                };
+
+                // Check if the package is in a terminal state and old enough.
+                let is_pkg_terminal = matches!(
+                    pkg.status,
+                    DraftStatus::Applied { .. }
+                        | DraftStatus::Denied { .. }
+                        | DraftStatus::Closed { .. }
+                        | DraftStatus::Superseded { .. }
+                );
+                if !is_pkg_terminal || pkg.created_at > cutoff {
+                    continue;
+                }
+
+                // Check if the linked goal is also terminal.
+                let goal_id_ok = pkg.goal.goal_id.parse::<Uuid>().ok();
+                let goal_terminal = goal_id_ok.is_some_and(|gid| {
+                    goal_store.get(gid).ok().flatten().is_some_and(|g| {
+                        matches!(
+                            g.state,
+                            GoalRunState::Applied
+                                | GoalRunState::Completed
+                                | GoalRunState::Failed { .. }
+                        )
+                    })
+                });
+                if !goal_terminal {
+                    continue;
+                }
+
+                if dry_run {
+                    println!(
+                        "[dry-run] Would remove orphaned package: {} ({})",
+                        path.display(),
+                        &pkg.package_id.to_string()[..8],
+                    );
+                } else {
+                    fs::remove_file(&path)?;
+                    println!(
+                        "Removed orphaned package: {}",
+                        &pkg.package_id.to_string()[..8],
+                    );
+                }
+                orphaned_count += 1;
+            }
+        }
+    }
+
     if dry_run {
-        println!("\n{} staging dir(s) would be removed.", cleaned);
+        println!(
+            "\n{} staging dir(s) would be removed. {} orphaned package(s) would be removed.",
+            cleaned, orphaned_count
+        );
     } else {
         println!(
-            "\n{} staging dir(s) {}.",
+            "\n{} staging dir(s) {}. {} orphaned package(s) removed.",
             cleaned,
-            if archive { "archived" } else { "removed" }
+            if archive { "archived" } else { "removed" },
+            orphaned_count,
         );
         if skipped > 0 {
             println!("{} skipped (archive already exists).", skipped);

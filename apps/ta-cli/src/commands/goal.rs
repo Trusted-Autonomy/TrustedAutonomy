@@ -187,6 +187,18 @@ pub enum GoalCommands {
         #[command(subcommand)]
         command: ConstitutionCommands,
     },
+    /// Garbage-collect zombie goals and stale staging directories (v0.9.5.1).
+    Gc {
+        /// Show what would be cleaned without making changes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also delete staging directories for terminal-state goals.
+        #[arg(long)]
+        include_staging: bool,
+        /// Stale threshold in days (default: 7).
+        #[arg(long, default_value = "7")]
+        threshold_days: u32,
+    },
 }
 
 /// Access constitution subcommands (v0.4.3).
@@ -308,6 +320,11 @@ pub fn execute(cmd: &GoalCommands, config: &GatewayConfig) -> anyhow::Result<()>
         GoalCommands::Status { id, json } => show_status(&store, id, *json),
         GoalCommands::Delete { id } => delete_goal(&store, id),
         GoalCommands::Constitution { command } => execute_constitution(command, config, &store),
+        GoalCommands::Gc {
+            dry_run,
+            include_staging,
+            threshold_days,
+        } => gc_goals(&store, config, *dry_run, *include_staging, *threshold_days),
     }
 }
 
@@ -741,6 +758,151 @@ fn execute_constitution(
     Ok(())
 }
 
+/// Garbage-collect zombie goals and stale staging directories (v0.9.5.1).
+fn gc_goals(
+    store: &GoalRunStore,
+    _config: &GatewayConfig,
+    dry_run: bool,
+    include_staging: bool,
+    threshold_days: u32,
+) -> anyhow::Result<()> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(threshold_days as i64);
+    let goals = store.list()?;
+
+    let mut zombie_count = 0u32;
+    let mut staging_count = 0u32;
+    let mut staging_bytes = 0u64;
+
+    for goal in &goals {
+        // 1. Zombie detection: goals stuck in `running` past threshold.
+        if goal.state == GoalRunState::Running && goal.updated_at < cutoff {
+            if dry_run {
+                println!(
+                    "[dry-run] Would transition to failed: {} \"{}\" (running for {}d)",
+                    &goal.goal_run_id.to_string()[..8],
+                    truncate(&goal.title, 40),
+                    (chrono::Utc::now() - goal.updated_at).num_days(),
+                );
+            } else {
+                let mut g = goal.clone();
+                let _ = g.transition(GoalRunState::Failed {
+                    reason: format!("gc: stale goal exceeded {}d threshold", threshold_days),
+                });
+                store.save(&g)?;
+                println!(
+                    "Transitioned to failed: {} \"{}\"",
+                    &goal.goal_run_id.to_string()[..8],
+                    truncate(&goal.title, 40),
+                );
+            }
+            zombie_count += 1;
+        }
+
+        // 2. Missing staging detection: non-terminal goals whose staging dir is gone.
+        let is_terminal = matches!(
+            goal.state,
+            GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Failed { .. }
+        );
+        if !is_terminal
+            && goal.state != GoalRunState::Created
+            && !goal.workspace_path.as_os_str().is_empty()
+            && !goal.workspace_path.exists()
+        {
+            if dry_run {
+                println!(
+                    "[dry-run] Would mark failed (missing staging): {} \"{}\"",
+                    &goal.goal_run_id.to_string()[..8],
+                    truncate(&goal.title, 40),
+                );
+            } else {
+                let mut g = goal.clone();
+                let _ = g.transition(GoalRunState::Failed {
+                    reason: "gc: missing staging workspace".to_string(),
+                });
+                store.save(&g)?;
+                println!(
+                    "Marked failed (missing staging): {} \"{}\"",
+                    &goal.goal_run_id.to_string()[..8],
+                    truncate(&goal.title, 40),
+                );
+            }
+            zombie_count += 1;
+        }
+
+        // 3. Staging cleanup for terminal goals (only with --include-staging).
+        if include_staging
+            && is_terminal
+            && goal.updated_at < cutoff
+            && !goal.workspace_path.as_os_str().is_empty()
+            && goal.workspace_path.exists()
+        {
+            let dir_size = dir_size_bytes(&goal.workspace_path);
+            if dry_run {
+                println!(
+                    "[dry-run] Would remove staging: {} ({}, goal: {})",
+                    goal.workspace_path.display(),
+                    format_bytes(dir_size),
+                    &goal.goal_run_id.to_string()[..8],
+                );
+            } else {
+                std::fs::remove_dir_all(&goal.workspace_path)?;
+                println!(
+                    "Removed staging: {} ({}, goal: {})",
+                    goal.workspace_path.display(),
+                    format_bytes(dir_size),
+                    &goal.goal_run_id.to_string()[..8],
+                );
+            }
+            staging_count += 1;
+            staging_bytes += dir_size;
+        }
+    }
+
+    println!(
+        "\n{}Transitioned {} zombie goal(s) to failed. Reclaimed {} staging director{} ({}).",
+        if dry_run { "[dry-run] " } else { "" },
+        zombie_count,
+        staging_count,
+        if staging_count == 1 { "y" } else { "ies" },
+        format_bytes(staging_bytes),
+    );
+
+    Ok(())
+}
+
+/// Approximate directory size in bytes (non-recursive for speed — counts immediate files).
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    walkdir(path)
+}
+
+fn walkdir(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total += meta.len();
+                } else if meta.is_dir() {
+                    total += walkdir(&entry.path());
+                }
+            }
+        }
+    }
+    total
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.1} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
         format!("{}...", &s[..max - 3])
@@ -913,6 +1075,83 @@ mod tests {
 
         // Verify staging directory is removed.
         assert!(!staging_path.exists());
+    }
+
+    #[test]
+    fn gc_transitions_zombie_goals_to_failed() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        // Create a goal.
+        start_goal(
+            &config,
+            &store,
+            "Old goal",
+            Some(project.path()),
+            "Will become zombie",
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let goals = store.list().unwrap();
+        assert_eq!(goals.len(), 1);
+        let goal_id = goals[0].goal_run_id;
+
+        // Manually backdate the goal's updated_at to make it stale.
+        let mut g = store.get(goal_id).unwrap().unwrap();
+        g.updated_at = chrono::Utc::now() - chrono::Duration::days(10);
+        store.save(&g).unwrap();
+
+        // Run gc in dry-run mode — goal should be listed but not changed.
+        gc_goals(&store, &config, true, false, 7).unwrap();
+        let g = store.get(goal_id).unwrap().unwrap();
+        assert_eq!(g.state, GoalRunState::Running); // unchanged
+
+        // Run gc for real — goal should transition to failed.
+        gc_goals(&store, &config, false, false, 7).unwrap();
+        let g = store.get(goal_id).unwrap().unwrap();
+        assert!(matches!(g.state, GoalRunState::Failed { .. }));
+    }
+
+    #[test]
+    fn gc_detects_missing_staging() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        // Create a goal.
+        start_goal(
+            &config,
+            &store,
+            "Missing staging",
+            Some(project.path()),
+            "Staging will disappear",
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let goals = store.list().unwrap();
+        let goal_id = goals[0].goal_run_id;
+        let staging = goals[0].workspace_path.clone();
+
+        // Remove staging directory.
+        std::fs::remove_dir_all(&staging).unwrap();
+
+        // Run gc — should detect missing staging and mark failed.
+        gc_goals(&store, &config, false, false, 7).unwrap();
+        let g = store.get(goal_id).unwrap().unwrap();
+        assert!(matches!(g.state, GoalRunState::Failed { .. }));
     }
 
     #[test]

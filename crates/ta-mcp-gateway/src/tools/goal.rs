@@ -368,7 +368,11 @@ fn launch_goal_agent(
         .arg(agent_id)
         .arg("--objective")
         .arg(objective)
-        .arg("--headless");
+        .arg("--headless")
+        // v0.9.5.1: Pass the existing goal_run_id so `ta run` reuses it
+        // instead of creating a duplicate goal record.
+        .arg("--goal-id")
+        .arg(goal_id.to_string());
 
     if let Some(phase) = phase {
         cmd.arg("--phase").arg(phase);
@@ -442,7 +446,10 @@ fn launch_sub_goal_agent(
         .arg(agent_id)
         .arg("--objective")
         .arg(objective)
-        .arg("--headless");
+        .arg("--headless")
+        // v0.9.5.1: Pass existing sub-goal ID to avoid duplicate creation.
+        .arg("--goal-id")
+        .arg(sub_id.to_string());
 
     if let Some(phase) = phase {
         cmd.arg("--phase").arg(phase);

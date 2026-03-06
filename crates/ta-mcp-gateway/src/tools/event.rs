@@ -261,13 +261,17 @@ mod tests {
         // Capture the cursor (timestamp of last event).
         let cursor = results.last().unwrap().timestamp;
 
-        // Query with cursor — should get 0 events (nothing newer).
+        // v0.9.5.1: Query with exact cursor — `since` is now strictly-after (>),
+        // so passing the last event's timestamp returns 0 events (no +1ms needed).
         let filter = ta_events::store::EventQueryFilter {
-            since: Some(cursor + chrono::Duration::milliseconds(1)),
+            since: Some(cursor),
             ..Default::default()
         };
         let results = store.query(&filter).unwrap();
-        assert!(results.is_empty());
+        assert!(
+            results.is_empty(),
+            "cursor-exclusive: should not re-fetch the last event"
+        );
 
         // Emit a new event.
         // Small delay to ensure timestamp is after cursor.
@@ -279,9 +283,9 @@ mod tests {
         };
         store.append(&EventEnvelope::new(completed)).unwrap();
 
-        // Query with cursor — should get only the new event.
+        // Query with the same cursor — should get only the new event.
         let filter = ta_events::store::EventQueryFilter {
-            since: Some(cursor + chrono::Duration::milliseconds(1)),
+            since: Some(cursor),
             ..Default::default()
         };
         let results = store.query(&filter).unwrap();

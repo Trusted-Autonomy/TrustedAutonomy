@@ -31,7 +31,7 @@ pub struct EventQueryFilter {
     pub event_types: Vec<String>,
     /// Filter by goal ID.
     pub goal_id: Option<uuid::Uuid>,
-    /// Filter by date range start (inclusive).
+    /// Filter by date range start (exclusive — returns events strictly after this time).
     pub since: Option<chrono::DateTime<Utc>>,
     /// Filter by date range end (inclusive).
     pub until: Option<chrono::DateTime<Utc>>,
@@ -143,8 +143,10 @@ impl EventStore for FsEventStore {
                     }
                 }
                 // Apply time range filters.
+                // v0.9.5.1: Use strictly-after (>) for `since` so cursor-based
+                // polling doesn't re-fetch the last event every time.
                 if let Some(since) = filter.since {
-                    if envelope.timestamp < since {
+                    if envelope.timestamp <= since {
                         continue;
                     }
                 }

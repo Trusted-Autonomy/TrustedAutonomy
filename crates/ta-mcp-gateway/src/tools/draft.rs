@@ -447,10 +447,15 @@ fn handle_draft_status(
 }
 
 fn handle_draft_list(state: &GatewayState) -> Result<CallToolResult, McpError> {
-    let packages: Vec<serde_json::Value> = state
+    // v0.9.5.1: Merge in-memory packages with on-disk packages.
+    // Drafts built by a different process (e.g., `ta run --headless` subprocess)
+    // only exist on disk — the orchestrator's in-memory map won't have them.
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut packages: Vec<serde_json::Value> = state
         .pr_packages
         .values()
         .map(|pkg| {
+            seen_ids.insert(pkg.package_id);
             serde_json::json!({
                 "draft_id": pkg.package_id.to_string(),
                 "status": format!("{:?}", pkg.status),
@@ -459,6 +464,33 @@ fn handle_draft_list(state: &GatewayState) -> Result<CallToolResult, McpError> {
             })
         })
         .collect();
+
+    // Scan disk for packages not already in memory.
+    let disk_dir = state.config.pr_packages_dir.clone();
+    if disk_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&disk_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "json") {
+                    if let Ok(json) = std::fs::read_to_string(&path) {
+                        if let Ok(pkg) =
+                            serde_json::from_str::<ta_changeset::draft_package::DraftPackage>(&json)
+                        {
+                            if !seen_ids.contains(&pkg.package_id) {
+                                packages.push(serde_json::json!({
+                                    "draft_id": pkg.package_id.to_string(),
+                                    "status": format!("{:?}", pkg.status),
+                                    "artifacts": pkg.changes.artifacts.len(),
+                                    "goal_id": &pkg.goal.goal_id,
+                                    "source": "disk",
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let response = serde_json::json!({ "drafts": packages, "count": packages.len() });
     Ok(CallToolResult::success(vec![Content::json(response)

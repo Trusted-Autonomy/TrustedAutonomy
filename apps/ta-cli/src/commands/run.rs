@@ -232,6 +232,7 @@ pub fn execute(
     macro_goal: bool,
     resume: Option<&str>,
     headless: bool,
+    existing_goal_id: Option<&str>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -252,27 +253,72 @@ pub fn execute(
 
     let agent_config = agent_launch_config(agent, source);
 
-    // 1. Start the goal (creates overlay workspace).
+    // 1. Start the goal (creates overlay workspace), or reuse an existing one
+    //    when --goal-id is passed (v0.9.5.1: prevents duplicate goal creation
+    //    when the MCP orchestrator's ta_goal_start already created the goal).
     let goal_store = GoalRunStore::new(&config.goals_dir)?;
 
-    super::goal::execute(
-        &super::goal::GoalCommands::Start {
-            title: title.to_string(),
-            source: source.map(|p| p.to_path_buf()),
-            objective: objective.to_string(),
-            agent: agent.to_string(),
-            phase: phase.map(|p| p.to_string()),
-            follow_up: follow_up.cloned(),
-            objective_file: objective_file.map(|p| p.to_path_buf()),
-        },
-        config,
-    )?;
+    let goal = if let Some(existing_id) = existing_goal_id {
+        let goal_uuid = uuid::Uuid::parse_str(existing_id)
+            .map_err(|e| anyhow::anyhow!("Invalid --goal-id '{}': {}", existing_id, e))?;
+        let mut existing = goal_store
+            .get(goal_uuid)?
+            .ok_or_else(|| anyhow::anyhow!("Goal {} not found", existing_id))?;
 
-    // Get the goal we just created (most recent).
-    let goals = goal_store.list()?;
-    let goal = goals
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("Failed to find created goal"))?;
+        // The MCP tool creates the goal record but the overlay workspace
+        // (full copy of source) hasn't been created yet. Create it now.
+        let source_dir = source
+            .map(|p| p.to_owned())
+            .or_else(|| existing.source_dir.clone())
+            .unwrap_or_else(|| config.workspace_root.clone());
+        let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
+        let excludes = ta_workspace::ExcludePatterns::load(&source_dir);
+        let overlay = ta_workspace::OverlayWorkspace::create(
+            goal_uuid.to_string(),
+            &source_dir,
+            &config.staging_dir,
+            excludes,
+        )?;
+
+        // Capture source snapshot for conflict detection.
+        let snapshot_json = overlay
+            .snapshot()
+            .and_then(|snap| serde_json::to_value(snap).ok());
+
+        // Update goal with overlay workspace paths.
+        existing.workspace_path = overlay.staging_dir().to_path_buf();
+        existing.source_dir = Some(source_dir);
+        existing.source_snapshot = snapshot_json;
+        if let Some(p) = phase {
+            existing.plan_phase = Some(p.to_string());
+        }
+        goal_store.save(&existing)?;
+
+        println!("Reusing existing goal: {}", goal_uuid);
+        println!("  Title:   {}", existing.title);
+        println!("  Staging: {}", existing.workspace_path.display());
+        existing
+    } else {
+        super::goal::execute(
+            &super::goal::GoalCommands::Start {
+                title: title.to_string(),
+                source: source.map(|p| p.to_path_buf()),
+                objective: objective.to_string(),
+                agent: agent.to_string(),
+                phase: phase.map(|p| p.to_string()),
+                follow_up: follow_up.cloned(),
+                objective_file: objective_file.map(|p| p.to_path_buf()),
+            },
+            config,
+        )?;
+
+        // Get the goal we just created (most recent).
+        let goals = goal_store.list()?;
+        goals
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("Failed to find created goal"))?
+            .clone()
+    };
 
     // Mark as macro goal if --macro was specified.
     if macro_goal {
@@ -310,7 +356,8 @@ pub fn execute(
     }
 
     // Emit GoalStarted event to FsEventStore (v0.9.4.1).
-    {
+    // Skip when reusing an existing goal — the MCP tool already emitted GoalStarted.
+    if existing_goal_id.is_none() {
         use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
         let events_dir = config.workspace_root.join(".ta").join("events");
         let event_store = FsEventStore::new(&events_dir);
@@ -420,6 +467,9 @@ pub fn execute(
     }
     println!();
 
+    // Track the start time BEFORE agent launch to compute accurate duration (v0.9.5.1).
+    let agent_start = std::time::Instant::now();
+
     // Choose launch mode: headless (piped), PTY-interactive, or simple.
     // Type alias for the guidance log — on Unix this contains captured human inputs
     // from PTY sessions; on Windows the Vec is always empty.
@@ -448,9 +498,6 @@ pub fn execute(
     } else {
         launch_agent(&agent_config, &staging_path, &prompt).map(|exit| (exit, Vec::new()))
     };
-
-    // Track the start time to compute duration for GoalCompleted.
-    let agent_start = std::time::Instant::now();
 
     match launch_result {
         Ok((exit, guidance_log)) => {
@@ -591,7 +638,7 @@ pub fn execute(
 
     // 7b. Auto-capture goal completion into memory (v0.5.6).
     if draft_built {
-        auto_capture_goal_completion(config, goal, &staging_path);
+        auto_capture_goal_completion(config, &goal, &staging_path);
     }
 
     // 8. Mark interactive session as completed.
@@ -1841,6 +1888,7 @@ mod tests {
             false,
             None,
             false, // not headless
+            None,  // no existing goal id
         )
         .unwrap();
 
