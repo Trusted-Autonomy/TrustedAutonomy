@@ -2220,6 +2220,174 @@ tool. Displayed under "Design Decisions" heading in `ta draft view`.
 
 ---
 
+### v0.10.0 — Gateway Channel Wiring & Multi-Channel Routing
+<!-- status: pending -->
+**Goal**: Wire `ChannelRegistry` into the MCP gateway so `.ta/config.yaml` actually controls which channels handle reviews, notifications, and escalations — and support routing a single event to multiple channels simultaneously.
+
+#### Items
+
+1. **Gateway `ChannelRegistry` integration**: `GatewayState::new()` loads `.ta/config.yaml`, builds `ChannelRegistry` via `default_registry()`, resolves `config.channels.review.type` → `ChannelFactory` → `ReviewChannel`. Replace the hardcoded `AutoApproveChannel` default. Fallback to `TerminalChannel` if config is missing or type is unknown.
+2. **Multi-channel routing**: Allow `review`, `notify`, and `escalation` to each specify multiple targets. A review request is sent to all configured review channels; first response wins. Notifications fan out to all configured channels. Schema:
+   ```yaml
+   channels:
+     review:
+       - type: terminal
+       - type: webhook
+         endpoint: .ta/channel-exchange
+     notify:
+       - type: terminal
+       - type: webhook
+         endpoint: .ta/channel-exchange
+         level: warning
+     escalation:
+       - type: webhook
+         endpoint: .ta/channel-exchange
+   ```
+3. **`MultiChannel` wrapper**: New `MultiReviewChannel` implementing `ReviewChannel` that dispatches to N inner channels. `request_interaction()` sends to all, returns first response. `notify()` fans out to all. Configurable strategy: `first_response` (default) or `quorum` (require N approvals).
+4. **`ta config channels` command**: Show resolved channel configuration — which channels are active, their types, capabilities, and status. Useful for debugging channel setup.
+5. **Channel health check**: `ta config channels --check` verifies each configured channel is reachable (webhook endpoint exists, credentials valid, etc.).
+
+#### Implementation scope
+- `crates/ta-mcp-gateway/src/server.rs` (or post-refactor modules) — registry loading, channel resolution
+- `crates/ta-changeset/src/multi_channel.rs` — `MultiReviewChannel` wrapper
+- `crates/ta-changeset/src/channel_registry.rs` — schema update for array-of-channels
+- `apps/ta-cli/src/commands/config.rs` — `ta config channels` command
+- `docs/USAGE.md` — multi-channel routing docs
+
+#### Version: `0.10.0-alpha`
+
+### v0.10.1 — Native Discord Channel
+<!-- status: pending -->
+**Goal**: `DiscordChannelFactory` implementing `ChannelFactory` with direct Discord gateway connection, eliminating the need for the bridge service.
+
+#### Items
+
+1. **`ta-channel-discord` crate**: New crate at `crates/ta-channel-discord/` with `serenity` (or `twilight`) dependency.
+2. **`DiscordReviewChannel`** implementing `ReviewChannel`:
+   - `request_interaction()` → posts rich embed with Approve/Deny buttons → awaits interaction via Discord gateway → returns decision
+   - `notify()` → posts notification embed
+   - `capabilities()` → review, notify, rich_content, buttons
+   - Sync/async bridge: runs Discord client on background tokio runtime, bridges via oneshot channel
+3. **`DiscordChannelFactory`** implementing `ChannelFactory`:
+   - `channel_type()` → `"discord"`
+   - `build_review(config)` → reads `token_env`, `channel_id`, `allowed_roles`, `allowed_users`
+   - `build_session(config)` → returns error (Discord not suitable for interactive sessions)
+4. **Access control**: `allowed_roles` and `allowed_users` in config restrict who can approve/deny.
+5. **Deny modal**: Uses Discord modal for denial reason input.
+
+#### Config
+```yaml
+channels:
+  review:
+    type: discord
+    token_env: TA_DISCORD_TOKEN
+    channel_id: "123456789"
+    allowed_roles: ["reviewer"]
+    allowed_users: ["user#1234"]
+```
+
+#### Version: `0.10.1-alpha`
+
+### v0.10.2 — Native Slack Channel
+<!-- status: pending -->
+**Goal**: `SlackChannelFactory` implementing `ChannelFactory` with Slack Block Kit and Socket Mode support.
+
+#### Items
+
+1. **`ta-channel-slack` crate**: New crate at `crates/ta-channel-slack/` with `slack-morphism` (or raw `reqwest`) dependency.
+2. **`SlackReviewChannel`** implementing `ReviewChannel`:
+   - `request_interaction()` → posts Block Kit message with Approve/Deny buttons → awaits action payload → returns decision
+   - Socket Mode: connects outbound (no public URL needed) — recommended for solo/small team use
+   - HTTP Mode: runs small Axum server for Slack interactivity endpoint
+   - `notify()` → posts notification message
+3. **`SlackChannelFactory`** implementing `ChannelFactory`:
+   - `channel_type()` → `"slack"`
+   - `build_review(config)` → reads `bot_token_env`, `channel_id`, `socket_mode`, `app_token_env`, `allowed_users`
+4. **Deny modal**: Uses Slack modal (views.open) for denial reason.
+5. **Thread-based detail**: Post main review as message, diff details as thread replies.
+
+#### Config
+```yaml
+channels:
+  review:
+    type: slack
+    bot_token_env: TA_SLACK_BOT_TOKEN
+    channel_id: "C0123456789"
+    socket_mode: true
+    app_token_env: TA_SLACK_APP_TOKEN
+    allowed_users: ["U01234567"]
+```
+
+#### Version: `0.10.2-alpha`
+
+### v0.10.3 — Native Email Channel
+<!-- status: pending -->
+**Goal**: `EmailChannelFactory` implementing `ChannelFactory` with SMTP send and IMAP poll for reply-based approval.
+
+#### Items
+
+1. **`ta-channel-email` crate**: New crate at `crates/ta-channel-email/` with `lettre` (SMTP) and `imap`/`async-imap` dependencies.
+2. **`EmailReviewChannel`** implementing `ReviewChannel`:
+   - `request_interaction()` → sends formatted email via SMTP → polls IMAP for reply → parses APPROVE/DENY keyword from reply body
+   - Subject tagging: `[TA Review] {title}` with `X-TA-Request-ID` header for threading
+   - Strips quoted text (`>` lines, `On ... wrote:` blocks) before parsing
+   - Configurable timeout (default 2 hours — email is slower than chat)
+   - `notify()` → sends notification email (no reply expected)
+3. **`EmailChannelFactory`** implementing `ChannelFactory`:
+   - `channel_type()` → `"email"`
+   - Supports any SMTP/IMAP provider (Gmail, Outlook, self-hosted)
+4. **Multiple reviewers**: Send to comma-separated list, first to reply wins.
+5. **App Password support**: Works with Gmail App Passwords (no OAuth needed for simple setups).
+
+#### Config
+```yaml
+channels:
+  review:
+    type: email
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    imap_host: imap.gmail.com
+    imap_port: 993
+    username_env: TA_EMAIL_USER
+    password_env: TA_EMAIL_PASSWORD
+    reviewer: reviewer@example.com
+    poll_interval_seconds: 30
+    subject_prefix: "[TA Review]"
+```
+
+#### Version: `0.10.3-alpha`
+
+### v0.10.4 — Channel Plugin Loading
+<!-- status: pending -->
+**Goal**: Allow third-party channel plugins without modifying TA source, enabling community-built integrations (Teams, PagerDuty, ServiceNow, etc.).
+
+#### Items
+
+1. **Process-based plugin protocol**: Plugin is an executable that speaks JSON-over-stdio. TA spawns the process, sends `InteractionRequest` JSON via stdin, reads `InteractionResponse` from stdout. Works with any language.
+2. **Plugin discovery**: Scan `~/.config/ta/plugins/channels/` and `.ta/plugins/channels/` for plugin manifests (`channel.toml`):
+   ```toml
+   name = "teams"
+   version = "0.1.0"
+   command = "ta-channel-teams"
+   capabilities = ["review", "notify"]
+   ```
+3. **`ProcessChannelFactory`**: Generic `ChannelFactory` that wraps any plugin executable. Registered in `ChannelRegistry` under the plugin's `name`.
+4. **`ta plugin list`**: Show installed channel plugins with their capabilities and status.
+5. **Plugin install**: `ta plugin install <path-or-url>` copies the executable and manifest to the plugin directory.
+
+#### Config (using a community plugin)
+```yaml
+channels:
+  review:
+    type: teams              # resolved from plugin manifest
+    webhook_url_env: TA_TEAMS_WEBHOOK
+    channel: "General"
+```
+
+#### Version: `0.10.4-alpha`
+
+---
+
 ## Projects On Top (separate repos, built on TA)
 
 > These are NOT part of TA core. They are independent projects that consume TA's extension points.

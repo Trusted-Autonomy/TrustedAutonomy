@@ -1,0 +1,111 @@
+# TA Channel Configuration Template
+#
+# Copy this to .ta/config.yaml in your project root and customize.
+# The WebhookChannel acts as a universal bridge — any external service
+# (Discord, Slack, Gmail, Teams, etc.) can read/write the exchange
+# directory to participate in the review flow.
+#
+# See docs/guides/ for platform-specific setup guides.
+
+channels:
+  # --- Review Channel ---
+  # Where draft reviews are sent for human approval.
+  # Options: terminal (default), webhook, auto-approve
+  review:
+    type: webhook
+    endpoint: .ta/channel-exchange    # directory for request/response JSON files
+    timeout_seconds: 3600             # max wait time (1 hour)
+    poll_interval_ms: 2000            # how often TA checks for responses
+
+  # --- Notification Channels ---
+  # Where status updates are sent. Supports multiple targets.
+  notify:
+    - type: webhook
+      endpoint: .ta/channel-exchange
+      level: warning                  # minimum level: info, warning, error
+
+  # --- Session Channel ---
+  # Interactive sessions (ta dev, ta run --interactive).
+  # Usually stays as terminal since you need real-time I/O.
+  session:
+    type: terminal
+
+  # --- Escalation Channel ---
+  # Where policy violations and drift alerts go.
+  # Optional — defaults to the review channel if not set.
+  # escalation:
+  #   type: webhook
+  #   endpoint: .ta/channel-exchange
+
+  # --- Default Agent ---
+  default_agent: claude-code
+
+
+# ── Example: Discord-only setup ─────────────────────────────────
+# channels:
+#   review:
+#     type: webhook
+#     endpoint: .ta/channel-exchange
+#     timeout_seconds: 3600
+#   notify:
+#     - type: webhook
+#       endpoint: .ta/channel-exchange
+#   session:
+#     type: terminal
+#   default_agent: claude-code
+#
+# Then run: node .ta/bridges/discord/bridge.js
+
+# ── Example: Slack with Socket Mode ─────────────────────────────
+# channels:
+#   review:
+#     type: webhook
+#     endpoint: .ta/channel-exchange
+#     timeout_seconds: 3600
+#   notify:
+#     - type: webhook
+#       endpoint: .ta/channel-exchange
+#   session:
+#     type: terminal
+#   default_agent: claude-code
+#
+# Then run: node .ta/bridges/slack/bridge.js
+
+# ── Example: Gmail (higher timeout for email latency) ───────────
+# channels:
+#   review:
+#     type: webhook
+#     endpoint: .ta/channel-exchange
+#     timeout_seconds: 7200          # 2 hours — email is slower
+#     poll_interval_ms: 5000
+#   notify:
+#     - type: webhook
+#       endpoint: .ta/channel-exchange
+#   session:
+#     type: terminal
+#   default_agent: claude-code
+#
+# Then run: node .ta/bridges/gmail/bridge.js
+
+# ── Future: Native channel types (no bridge needed) ─────────────
+# channels:
+#   review:
+#     type: discord
+#     token_env: TA_DISCORD_TOKEN
+#     channel_id: "123456789"
+#     allowed_roles: ["reviewer"]
+#
+#   review:
+#     type: slack
+#     bot_token_env: TA_SLACK_BOT_TOKEN
+#     channel_id: "C0123456789"
+#     socket_mode: true
+#     app_token_env: TA_SLACK_APP_TOKEN
+#
+#   review:
+#     type: email
+#     smtp_host: smtp.gmail.com
+#     imap_host: imap.gmail.com
+#     username_env: TA_EMAIL_USER
+#     password_env: TA_EMAIL_PASSWORD
+#     reviewer: you@gmail.com
