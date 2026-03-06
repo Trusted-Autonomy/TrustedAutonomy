@@ -2262,7 +2262,7 @@ passing the cursor from the previous response returns only *new* events. Add a t
 ---
 
 ### v0.9.6 — Orchestrator API & Goal-Scoped Agent Tracking
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make MCP tools work without a `goal_run_id` for read-only project-wide operations, and track which agents are working on which goals for observability.
 
 #### Items
@@ -2312,15 +2312,30 @@ passing the cursor from the previous response returns only *new* events. Add a t
    Active goals: 1
    ```
 
+#### Completed
+- [x] Optional `goal_run_id` on `ta_plan read` — falls back to project root PLAN.md
+- [x] `ta_goal list` already project-scoped (no goal_run_id required)
+- [x] `ta_draft list` already project-scoped (no goal_run_id required)
+- [x] `ta_context search/stats/list` already project-scoped
+- [x] `AgentSession` struct with agent_id, agent_type, goal_run_id, caller_mode, started_at, last_heartbeat
+- [x] `GatewayState.active_agents` HashMap with touch_agent_session/end_agent_session methods
+- [x] `AgentSessionStarted`/`AgentSessionEnded` event variants with helpers and tests
+- [x] `ta_agent_status` MCP tool: `list` and `status` actions
+- [x] `CallerMode` expanded enforcement: orchestrator blocks ta_fs_write, ta_pr_build, ta_fs_diff
+- [x] `CallerMode.as_str()` and `requires_goal()` helpers
+- [x] `ta status` CLI command: project name, version, next phase, active agents, pending drafts
+- [x] Tests: agent session lifecycle, CallerMode enforcement, event serialization, status phase parsing
+
+#### Remaining (deferred)
+- [ ] Automatic agent_id extraction from TA_AGENT_ID env var on every tool call
+- [ ] Audit log entries include caller_mode field
+
 #### Implementation scope
 - `crates/ta-mcp-gateway/src/tools/plan.rs` — optional goal_run_id, project-root fallback
-- `crates/ta-mcp-gateway/src/tools/goal.rs` — drop goal_run_id from list, add agent tracking
-- `crates/ta-mcp-gateway/src/tools/draft.rs` — optional goal_run_id on list
-- `crates/ta-mcp-gateway/src/tools/context.rs` — optional goal_run_id
+- `crates/ta-mcp-gateway/src/tools/agent.rs` — new ta_agent_status tool handler
 - `crates/ta-mcp-gateway/src/server.rs` — `AgentSession` tracking, `CallerMode` enforcement
 - `crates/ta-goal/src/events.rs` — `AgentSessionStarted`/`AgentSessionEnded` event variants
 - `apps/ta-cli/src/commands/status.rs` — new `ta status` command
-- Tests: orchestrator read without goal_run_id, agent session lifecycle, CallerMode policy enforcement
 
 #### Version: `0.9.6-alpha`
 

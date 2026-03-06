@@ -167,6 +167,8 @@ enum Commands {
         #[command(subcommand)]
         command: commands::release::ReleaseCommands,
     },
+    /// Project-wide status dashboard: active agents, pending drafts, next phase.
+    Status,
     /// Start the MCP server on stdio.
     Serve,
     /// Review and accept the terms of use.
@@ -275,6 +277,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Setup { command } => commands::setup::execute(command, &config),
         Commands::Init { command } => commands::init::execute(command, &config),
         Commands::Release { command } => commands::release::execute(command, &config),
+        Commands::Status => commands::status::execute(&config),
         Commands::Serve => commands::serve::execute(&project_root),
         // Already handled above.
         Commands::AcceptTerms | Commands::ViewTerms | Commands::TermsStatus => unreachable!(),

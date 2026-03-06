@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.9.5-alpha.1"
+version = "0.9.6-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2463,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mcp-gateway"
-version = "0.9.4-alpha"
+version = "0.9.6-alpha"
 dependencies = [
  "chrono",
  "rmcp",

@@ -173,6 +173,22 @@ pub enum TaEvent {
         exit_code: Option<i32>,
         timestamp: DateTime<Utc>,
     },
+
+    /// An agent session started working on a goal or as orchestrator (v0.9.6).
+    AgentSessionStarted {
+        agent_id: String,
+        agent_type: String,
+        goal_run_id: Option<Uuid>,
+        caller_mode: String,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// An agent session ended (v0.9.6).
+    AgentSessionEnded {
+        agent_id: String,
+        goal_run_id: Option<Uuid>,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 impl TaEvent {
@@ -197,6 +213,8 @@ impl TaEvent {
             TaEvent::ReviewDecision { .. } => "review_decision",
             TaEvent::SessionIteration { .. } => "session_iteration",
             TaEvent::GoalFailed { .. } => "goal_failed",
+            TaEvent::AgentSessionStarted { .. } => "agent_session_started",
+            TaEvent::AgentSessionEnded { .. } => "agent_session_ended",
         }
     }
 
@@ -286,6 +304,31 @@ impl TaEvent {
             goal_run_id,
             error: error.to_string(),
             exit_code,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create an AgentSessionStarted event (v0.9.6).
+    pub fn agent_session_started(
+        agent_id: &str,
+        agent_type: &str,
+        goal_run_id: Option<Uuid>,
+        caller_mode: &str,
+    ) -> Self {
+        TaEvent::AgentSessionStarted {
+            agent_id: agent_id.to_string(),
+            agent_type: agent_type.to_string(),
+            goal_run_id,
+            caller_mode: caller_mode.to_string(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create an AgentSessionEnded event (v0.9.6).
+    pub fn agent_session_ended(agent_id: &str, goal_run_id: Option<Uuid>) -> Self {
+        TaEvent::AgentSessionEnded {
+            agent_id: agent_id.to_string(),
+            goal_run_id,
             timestamp: Utc::now(),
         }
     }
@@ -514,6 +557,32 @@ mod tests {
         let event = TaEvent::goal_failed(gid, "workspace setup failed", None);
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"exit_code\":null"));
+    }
+
+    #[test]
+    fn agent_session_events_v096() {
+        let gid = Uuid::new_v4();
+        let started = TaEvent::agent_session_started("agent-1", "claude-code", Some(gid), "normal");
+        assert_eq!(started.event_type(), "agent_session_started");
+        let json = serde_json::to_string(&started).unwrap();
+        assert!(json.contains("agent_session_started"));
+        assert!(json.contains("claude-code"));
+        let restored: TaEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.event_type(), "agent_session_started");
+
+        let ended = TaEvent::agent_session_ended("agent-1", Some(gid));
+        assert_eq!(ended.event_type(), "agent_session_ended");
+        let json2 = serde_json::to_string(&ended).unwrap();
+        let restored2: TaEvent = serde_json::from_str(&json2).unwrap();
+        assert_eq!(restored2.event_type(), "agent_session_ended");
+    }
+
+    #[test]
+    fn agent_session_no_goal() {
+        let started = TaEvent::agent_session_started("orch-1", "claude-code", None, "orchestrator");
+        let json = serde_json::to_string(&started).unwrap();
+        assert!(json.contains("\"goal_run_id\":null"));
+        assert!(json.contains("orchestrator"));
     }
 
     #[test]
