@@ -587,10 +587,16 @@ ta draft close <draft-id> --reason "Hand-merged upstream"
 # Find forgotten drafts
 ta draft list --stale
 
-# Clean up staging directories for old drafts
+# Clean up staging directories for old drafts (also removes orphaned package files)
 ta draft gc --dry-run       # Preview
 ta draft gc                 # Remove
 ta draft gc --archive       # Archive instead of delete
+
+# Clean up zombie goals (stuck in running, missing staging)
+ta goal gc --dry-run                  # Preview what would be cleaned
+ta goal gc                            # Transition zombie goals to failed
+ta goal gc --include-staging          # Also delete staging dirs for terminal goals
+ta goal gc --threshold-days 3         # Custom stale threshold (default: 7 days)
 ```
 
 Configure thresholds:

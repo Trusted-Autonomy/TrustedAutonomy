@@ -2210,7 +2210,7 @@ wired into the MCP goal start path.
 
 ---                                                  
 ### v0.9.5.1 — Goal Lifecycle Hygiene & Orchestrator Fixes                                                                                                                                                                                                      
-<!-- status: pending -->                                                    
+<!-- status: done -->
 **Goal**: Fix the bugs discovered during v0.9.5 goal lifecycle monitoring — duplicate goal creation, zombie goal cleanup, event timer accuracy, draft discoverability via MCP, and cursor-based event polling semantics.                                        
                                                                                       
 #### Items                                           
@@ -2238,15 +2238,24 @@ passing the cursor from the previous response returns only *new* events. Add a t
 
 6. **`ta draft gc` enhancement**: Extend existing `ta draft gc` to also clean orphaned `.ta/pr_packages/*.json` files whose linked goal is in a terminal state and older than the stale threshold.
 
+#### Completed
+- ✅ Fix duplicate goal creation: `ta_goal_start` now passes `--goal-id` to `ta run --headless` so subprocess reuses existing goal record
+- ✅ Fix `duration_secs: 0`: Timer moved before agent launch (was incorrectly placed after)
+- ✅ Fix `ta_draft list` MCP returning empty: `handle_draft_list()` now merges on-disk packages with in-memory map
+- ✅ Fix cursor-inclusive event polling: `since` filter changed from `>=` to `>` (strictly-after) with updated cursor test
+- ✅ `ta goal gc` command: zombie detection, missing-staging detection, `--dry-run`, `--include-staging`, `--threshold-days`
+- ✅ `ta draft gc` enhancement: now also cleans orphaned pr_package JSON files for terminal goals past stale threshold
+
 #### Implementation scope
 - `crates/ta-mcp-gateway/src/tools/goal.rs` — pass goal_run_id to `ta run --headless`, add `--goal-id` flag handling
 - `apps/ta-cli/src/commands/run.rs` — accept `--goal-id` flag, reuse existing goal record, fix duration timer placement
 - `crates/ta-mcp-gateway/src/tools/draft.rs` — disk-based fallback in `handle_draft_list()`
 - `crates/ta-mcp-gateway/src/tools/event.rs` — change `since` filter from `>=` to `>`, add cursor exclusivity test
-- `apps/ta-cli/src/commands/goal.rs` — new `gc` subcommand with `--dry-run` and `--include-staging` flags
+- `crates/ta-events/src/store.rs` — `since` filter semantics changed to strictly-after
+- `apps/ta-cli/src/commands/goal.rs` — new `gc` subcommand with `--dry-run`, `--include-staging`, and `--threshold-days` flags
 - `apps/ta-cli/src/commands/draft.rs` — extend `gc` to clean orphaned pr_packages
-- `apps/ta-cli/src/main.rs` — wire `goal gc` subcommand
-- Tests: duplicate goal prevention test, duration accuracy test, cursor exclusivity test, goal gc dry-run test
+- `apps/ta-cli/src/main.rs` — wire `goal gc` subcommand and `--goal-id` flag on `ta run`
+- Tests: cursor exclusivity test updated, goal gc test added
 
 #### Version: `0.9.5-alpha.1`
 
