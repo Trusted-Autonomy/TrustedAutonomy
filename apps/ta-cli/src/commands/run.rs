@@ -2244,6 +2244,7 @@ pre_launch:
                 impact: "1 file changed".to_string(),
                 rollback_plan: "Revert commit".to_string(),
                 open_questions: vec![],
+                alternatives_considered: vec![],
             },
             plan: Plan {
                 completed_steps: vec![],
@@ -2393,6 +2394,7 @@ pre_launch:
                 impact: "Test".to_string(),
                 rollback_plan: "Test".to_string(),
                 open_questions: vec![],
+                alternatives_considered: vec![],
             },
             plan: Plan {
                 completed_steps: vec![],

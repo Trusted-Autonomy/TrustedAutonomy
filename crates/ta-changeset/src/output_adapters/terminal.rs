@@ -260,6 +260,97 @@ impl TerminalAdapter {
 
         output
     }
+
+    /// Group artifacts by module (top-level directory) for the "What Changed" section (v0.9.5).
+    fn render_grouped_changes(&self, artifacts: &[&Artifact]) -> String {
+        use std::collections::BTreeMap;
+        let bold = self.bold();
+        let reset = self.reset();
+        let dim = self.dim();
+
+        let mut output = format!("{bold}What Changed ({} files):{reset}\n", artifacts.len());
+
+        // Group by module (first path segment after fs://workspace/).
+        let mut groups: BTreeMap<String, Vec<&Artifact>> = BTreeMap::new();
+        for artifact in artifacts {
+            let path = artifact
+                .resource_uri
+                .strip_prefix("fs://workspace/")
+                .unwrap_or(&artifact.resource_uri);
+            let module = path.split('/').next().unwrap_or("root").to_string();
+            groups.entry(module).or_default().push(artifact);
+        }
+
+        for (module, arts) in &groups {
+            output.push_str(&format!("\n  {bold}{}/{reset}\n", module));
+            for artifact in arts {
+                let icon = self.change_icon(&artifact.change_type);
+                let path = artifact
+                    .resource_uri
+                    .strip_prefix("fs://workspace/")
+                    .unwrap_or(&artifact.resource_uri);
+                let short_path = path.strip_prefix(&format!("{}/", module)).unwrap_or(path);
+
+                let summary_raw = artifact
+                    .explanation_tiers
+                    .as_ref()
+                    .map(|t| t.summary.as_str())
+                    .or(artifact.rationale.as_deref())
+                    .unwrap_or_else(|| {
+                        default_summary(&artifact.resource_uri, &artifact.change_type)
+                    });
+                let summary = Self::strip_html(summary_raw);
+
+                let dep_marker = if !artifact.dependencies.is_empty() {
+                    let deps: Vec<&str> = artifact
+                        .dependencies
+                        .iter()
+                        .map(|d| {
+                            d.target_uri
+                                .strip_prefix("fs://workspace/")
+                                .unwrap_or(&d.target_uri)
+                        })
+                        .collect();
+                    format!(" {dim}[deps: {}]{reset}", deps.join(", "))
+                } else {
+                    String::new()
+                };
+
+                output.push_str(&format!(
+                    "    {} {} — {}{}\n",
+                    icon, short_path, summary, dep_marker
+                ));
+            }
+        }
+
+        output
+    }
+
+    /// Render the "Design Decisions" section from alternatives_considered (v0.9.5).
+    fn render_design_decisions(&self, ctx: &RenderContext) -> String {
+        let alts = &ctx.package.summary.alternatives_considered;
+        if alts.is_empty() {
+            return String::new();
+        }
+
+        let bold = self.bold();
+        let reset = self.reset();
+        let dim = self.dim();
+        let green = self.color_code("\x1b[32m");
+
+        let mut output = format!("\n{bold}Design Decisions:{reset}\n");
+        for alt in alts {
+            let marker = if alt.chosen {
+                format!("{green}[chosen]{reset}")
+            } else {
+                format!("{dim}[considered]{reset}")
+            };
+            output.push_str(&format!("  {} {}\n", marker, alt.option));
+            output.push_str(&format!("    {}\n", alt.rationale));
+        }
+
+        output
+    }
 }
 
 impl OutputAdapter for TerminalAdapter {
@@ -269,10 +360,10 @@ impl OutputAdapter for TerminalAdapter {
         let reset = self.reset();
         let dim = self.dim();
 
-        // Header
+        // ── Summary ──
         output.push_str(&self.render_header(ctx));
 
-        // Artifacts section
+        // Filter artifacts
         let artifacts = &ctx.package.changes.artifacts;
         let filtered_artifacts: Vec<&Artifact> = if let Some(filter) = &ctx.file_filter {
             artifacts
@@ -290,24 +381,30 @@ impl OutputAdapter for TerminalAdapter {
             )));
         }
 
-        output.push_str(&format!(
-            "{bold}Changes ({} artifacts):{reset}\n",
-            filtered_artifacts.len()
-        ));
+        // ── What Changed (module-grouped file list) ──
+        output.push_str(&self.render_grouped_changes(&filtered_artifacts));
 
-        for artifact in filtered_artifacts {
-            match ctx.detail_level {
-                DetailLevel::Top => {
-                    output.push_str(&self.render_artifact_top(artifact));
-                    output.push('\n');
-                }
-                DetailLevel::Medium => {
-                    output.push_str(&self.render_artifact_medium(artifact));
-                    output.push('\n');
-                }
-                DetailLevel::Full => {
-                    output.push_str(&self.render_artifact_full(artifact, ctx));
-                    output.push('\n');
+        // ── Design Decisions ──
+        output.push_str(&self.render_design_decisions(ctx));
+
+        // ── Artifacts (detailed per-artifact view) ──
+        if ctx.detail_level != DetailLevel::Top {
+            output.push_str(&format!(
+                "\n{bold}Artifacts ({}):{reset}\n",
+                filtered_artifacts.len()
+            ));
+
+            for artifact in &filtered_artifacts {
+                match ctx.detail_level {
+                    DetailLevel::Top => unreachable!(),
+                    DetailLevel::Medium => {
+                        output.push_str(&self.render_artifact_medium(artifact));
+                        output.push('\n');
+                    }
+                    DetailLevel::Full => {
+                        output.push_str(&self.render_artifact_full(artifact, ctx));
+                        output.push('\n');
+                    }
                 }
             }
         }
@@ -368,6 +465,7 @@ mod tests {
                 impact: "All users must re-login".to_string(),
                 rollback_plan: "Revert commit".to_string(),
                 open_questions: vec![],
+                alternatives_considered: vec![],
             },
             plan: Plan {
                 completed_steps: vec![],
@@ -433,7 +531,8 @@ mod tests {
         let output = adapter.render(&ctx).unwrap();
         assert!(output.contains("Draft"));
         assert!(output.contains("pending_review"));
-        assert!(output.contains("src/auth.rs"));
+        assert!(output.contains("src/"));
+        assert!(output.contains("auth.rs"));
         assert!(output.contains("Migrated to JWT auth"));
         // Default (no color) should not contain ANSI escape codes.
         assert!(!output.contains("\x1b["));
@@ -583,5 +682,95 @@ mod tests {
             "HTML should be stripped from summary"
         );
         assert!(!output.contains("<span"), "No HTML tags in terminal output");
+    }
+
+    // ── v0.9.5 Structured view tests ──
+
+    #[test]
+    fn render_grouped_changes_by_module() {
+        let adapter = TerminalAdapter::new();
+        let mut package = test_package();
+        package.changes.artifacts.push(Artifact {
+            resource_uri: "fs://workspace/tests/auth_test.rs".to_string(),
+            change_type: ChangeType::Add,
+            diff_ref: "changeset:1".to_string(),
+            tests_run: vec![],
+            disposition: ArtifactDisposition::Pending,
+            rationale: Some("Added auth tests".to_string()),
+            dependencies: vec![],
+            explanation_tiers: None,
+            comments: None,
+            amendment: None,
+        });
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filter: None,
+            diff_provider: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(output.contains("What Changed (2 files):"));
+        assert!(output.contains("src/"));
+        assert!(output.contains("tests/"));
+    }
+
+    #[test]
+    fn render_design_decisions() {
+        let adapter = TerminalAdapter::new();
+        let mut package = test_package();
+        package.summary.alternatives_considered = vec![
+            DesignAlternative {
+                option: "Use HashMap for lookup".to_string(),
+                rationale: "Best performance".to_string(),
+                chosen: true,
+            },
+            DesignAlternative {
+                option: "Use BTreeMap".to_string(),
+                rationale: "Ordered but slower".to_string(),
+                chosen: false,
+            },
+        ];
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filter: None,
+            diff_provider: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(output.contains("Design Decisions:"));
+        assert!(output.contains("[chosen]"));
+        assert!(output.contains("[considered]"));
+        assert!(output.contains("Use HashMap for lookup"));
+        assert!(output.contains("Use BTreeMap"));
+    }
+
+    #[test]
+    fn render_no_design_decisions_when_empty() {
+        let adapter = TerminalAdapter::new();
+        let package = test_package();
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filter: None,
+            diff_provider: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(!output.contains("Design Decisions:"));
+    }
+
+    #[test]
+    fn render_medium_shows_artifacts_section() {
+        let adapter = TerminalAdapter::new();
+        let package = test_package();
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Medium,
+            file_filter: None,
+            diff_provider: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        // Medium shows both grouped summary and detailed artifacts
+        assert!(output.contains("What Changed"));
+        assert!(output.contains("Artifacts (1):"));
     }
 }

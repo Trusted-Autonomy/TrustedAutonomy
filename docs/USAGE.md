@@ -250,6 +250,31 @@ All `<id>` arguments accept either a full UUID or an 8+ character prefix (e.g., 
 
 For simple workflows, `ta draft apply` works directly on unapproved drafts (auto-approves on apply).
 
+#### Draft View Output
+
+`ta draft view` organizes its output into structured sections for clear review:
+
+- **Summary** — high-level what changed, why, and impact
+- **What Changed** — module-grouped file list with change icons (+/~/−), one-line descriptions, and dependency annotations
+- **Design Decisions** — alternatives the agent considered, with `[chosen]`/`[considered]` markers and rationale
+- **Artifacts** — detailed per-file view with explanations (at `--detail medium` or `--detail full`)
+
+```bash
+# Default view (medium detail)
+ta draft view <id>
+
+# Summary only (grouped file list, no detailed artifacts)
+ta draft view <id> --detail top
+
+# Full diffs included
+ta draft view <id> --detail full
+
+# Machine-readable JSON output
+ta draft view <id> --json
+```
+
+Agents can populate the Design Decisions section by passing an `alternatives` array to the `ta_pr_build` MCP tool. Each entry has `option`, `rationale`, and `chosen` fields.
+
 ### Agents
 
 TA wraps any agent framework. Out of the box it supports:

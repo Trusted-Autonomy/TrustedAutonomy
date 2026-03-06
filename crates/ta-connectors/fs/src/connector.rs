@@ -265,6 +265,7 @@ impl<S: ChangeStore> FsConnector<S> {
                 impact: format!("{} file(s) affected", artifacts.len()),
                 rollback_plan: "Revert staged changes".to_string(),
                 open_questions: vec![],
+                alternatives_considered: vec![],
             },
             plan: Plan {
                 completed_steps: vec!["Staged filesystem changes".to_string()],

@@ -2195,26 +2195,16 @@ wired into the MCP goal start path.
 #### Version: `0.9.4-alpha.1`
 
 ### v0.9.5 — Enhanced Draft View Output
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make `ta draft view` output clear and actionable for reviewers — structured "what changed" summaries, design alternatives considered, and grouped visual sections.
 
-#### Items
+#### Completed
 
-1. **Grouped change summary**: `ta draft view` shows a module-grouped file list with per-file classification (created/modified/deleted), one-line "what" and "why", and dependency annotations (which changes depend on each other vs. independent).
-2. **Alternatives considered**: New `alternatives_considered: Vec<AlternativeConsidered>` field on `DraftSummary`. Each entry has `option`, `rationale`, `chosen: bool`. Populated by agents via new optional `alternatives` parameter on `ta_pr_build` MCP
-tool. Displayed under "Design Decisions" heading in `ta draft view`.
-3. **Structured view sections**: `ta draft view` output organized as:
-    - **Summary** — high-level what and why (existing)
-    - **What Changed** — grouped file list with classifications (new)
-    - **Design Decisions** — alternatives considered with rationale (new)
-    - **Artifacts** — per-artifact diffs (existing)
-4. **`--json` on `ta draft view`**: Full structured JSON output for programmatic consumption.
-
-#### Implementation scope
-- `crates/ta-changeset/src/lib.rs` — `AlternativeConsidered` struct, add `alternatives_considered` to `DraftSummary`
-- `apps/ta-cli/src/commands/draft.rs` — structured view formatting, `--json` flag
-- `crates/ta-mcp-gateway/src/tools/draft.rs` — `alternatives` parameter on `ta_pr_build`
-- `docs/USAGE.md` — document improved draft view output
+- ✅ **Grouped change summary**: `ta draft view` shows a module-grouped file list with per-file classification (created/modified/deleted), one-line "what" and "why", and dependency annotations (which changes depend on each other vs. independent).
+- ✅ **Alternatives considered**: New `alternatives_considered: Vec<DesignAlternative>` field on `Summary`. Each entry has `option`, `rationale`, `chosen: bool`. Populated by agents via new optional `alternatives` parameter on `ta_pr_build` MCP tool. Displayed under "Design Decisions" heading in `ta draft view`.
+- ✅ **Structured view sections**: `ta draft view` output organized as Summary → What Changed → Design Decisions → Artifacts.
+- ✅ **`--json` on `ta draft view`**: Full structured JSON output for programmatic consumption (already existed; now includes new fields).
+- ✅ 7 new tests (3 in draft_package.rs, 4 in terminal.rs).
 
 #### Version: `0.9.5-alpha`
 

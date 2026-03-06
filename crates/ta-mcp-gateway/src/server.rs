@@ -123,6 +123,21 @@ pub struct PrBuildParams {
     pub title: String,
     /// Summary of what changed and why.
     pub summary: String,
+    /// Design alternatives considered (v0.9.5). Each entry has `option`, `rationale`, `chosen`.
+    #[serde(default)]
+    pub alternatives: Option<Vec<PrBuildAlternative>>,
+}
+
+/// A design alternative for the `ta_pr_build` MCP tool (v0.9.5).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PrBuildAlternative {
+    /// The option that was considered.
+    pub option: String,
+    /// Why this option was chosen or rejected.
+    pub rationale: String,
+    /// Whether this was the chosen approach.
+    #[serde(default)]
+    pub chosen: bool,
 }
 
 // ── Macro goal / inner-loop parameter types ─────────────────────

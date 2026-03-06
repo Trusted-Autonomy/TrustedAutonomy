@@ -907,6 +907,7 @@ pub(crate) fn build_package(
             impact: format!("{} file(s) changed", artifacts.len()),
             rollback_plan: "Revert changes from staging".to_string(),
             open_questions: dependency_notes.into_iter().collect(),
+            alternatives_considered: vec![],
         },
         plan: Plan {
             completed_steps: vec!["Agent completed work in staging".to_string()],
@@ -1525,8 +1526,8 @@ fn build_commit_message(goal: &ta_goal::GoalRun, pkg: &DraftPackage) -> String {
     // Git convention: first line is the subject, then blank line, then body.
     // The terminal adapter starts with "Draft: <id>\nStatus: ...\n..." which isn't
     // a good subject line. Replace the header with goal title as subject.
-    let body = if let Some(pos) = rendered.find("Changes (") {
-        // Extract from "Changes (...)" onward — the artifact listing.
+    let body = if let Some(pos) = rendered.find("What Changed (") {
+        // Extract from "What Changed (...)" onward — the grouped file listing.
         &rendered[pos..]
     } else {
         rendered.as_str()
@@ -3377,10 +3378,9 @@ mod tests {
         let full_msg = String::from_utf8_lossy(&full_log.stdout);
         // First line is the goal title (subject).
         assert!(full_msg.starts_with("Git test\n"));
-        // Body includes artifact listing with change icons and disposition badges.
-        assert!(full_msg.contains("Changes ("));
-        assert!(full_msg.contains("[pending]"));
-        assert!(full_msg.contains("fs://workspace/README.md"));
+        // Body includes module-grouped file listing with change icons.
+        assert!(full_msg.contains("What Changed ("));
+        assert!(full_msg.contains("README.md"));
         // No Debug-format change types like "Modify" — should use ~ + - > icons.
         assert!(!full_msg.contains("Modify  "));
     }

@@ -35,7 +35,9 @@ pub use channel_registry::{
 };
 pub use diff::DiffContent;
 pub use diff_handlers::{DiffHandlerError, DiffHandlersConfig, HandlerRule};
-pub use draft_package::{ActionKind, DraftPackage, DraftStatus, ExplanationTiers, PendingAction};
+pub use draft_package::{
+    ActionKind, DesignAlternative, DraftPackage, DraftStatus, ExplanationTiers, PendingAction,
+};
 pub use error::ChangeSetError;
 pub use explanation::ExplanationSidecar;
 pub use interaction::{

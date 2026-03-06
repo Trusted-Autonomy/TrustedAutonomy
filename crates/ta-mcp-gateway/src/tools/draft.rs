@@ -37,9 +37,21 @@ pub fn handle_pr_build(
         )
     })?;
 
-    let pr_package = connector
+    let mut pr_package = connector
         .build_pr_package(&goal.title, &goal.objective, &params.summary, &params.title)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+    // Populate design alternatives if provided (v0.9.5).
+    if let Some(alts) = &params.alternatives {
+        pr_package.summary.alternatives_considered = alts
+            .iter()
+            .map(|a| ta_changeset::DesignAlternative {
+                option: a.option.clone(),
+                rationale: a.rationale.clone(),
+                chosen: a.chosen,
+            })
+            .collect();
+    }
 
     let package_id = pr_package.package_id;
     state

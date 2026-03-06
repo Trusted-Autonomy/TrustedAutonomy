@@ -74,6 +74,25 @@ pub struct Summary {
     pub rollback_plan: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_questions: Vec<String>,
+    /// Design alternatives considered during this work (v0.9.5).
+    /// Populated by agents via the `alternatives` parameter on `ta_pr_build`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives_considered: Vec<DesignAlternative>,
+}
+
+/// A design alternative considered during agent work (v0.9.5).
+///
+/// Agents report which options they evaluated and why they chose one over others.
+/// Displayed under "Design Decisions" in `ta draft view`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DesignAlternative {
+    /// The option that was considered (e.g., "Use a HashMap for lookup").
+    pub option: String,
+    /// Why this option was chosen or rejected.
+    pub rationale: String,
+    /// Whether this was the chosen approach.
+    #[serde(default)]
+    pub chosen: bool,
 }
 
 // ---- Changes ----
@@ -558,6 +577,7 @@ mod tests {
                 impact: "No production impact".to_string(),
                 rollback_plan: "Delete the file".to_string(),
                 open_questions: vec![],
+                alternatives_considered: vec![],
             },
             plan: Plan {
                 completed_steps: vec!["Created file".to_string()],
@@ -1032,5 +1052,61 @@ mod tests {
         }"#;
         let artifact: Artifact = serde_json::from_str(json).unwrap();
         assert!(artifact.amendment.is_none());
+    }
+
+    // ── v0.9.5 Design Alternatives tests ──
+
+    #[test]
+    fn design_alternative_serialization() {
+        let alt = DesignAlternative {
+            option: "Use HashMap for O(1) lookup".to_string(),
+            rationale: "Best performance for frequent reads".to_string(),
+            chosen: true,
+        };
+        let json = serde_json::to_string(&alt).unwrap();
+        assert!(json.contains("\"option\""));
+        assert!(json.contains("\"chosen\":true"));
+        let restored: DesignAlternative = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, alt);
+    }
+
+    #[test]
+    fn summary_with_alternatives_round_trip() {
+        let summary = Summary {
+            what_changed: "Refactored lookup".to_string(),
+            why: "Performance".to_string(),
+            impact: "None".to_string(),
+            rollback_plan: "Revert".to_string(),
+            open_questions: vec![],
+            alternatives_considered: vec![
+                DesignAlternative {
+                    option: "HashMap".to_string(),
+                    rationale: "O(1) lookup".to_string(),
+                    chosen: true,
+                },
+                DesignAlternative {
+                    option: "BTreeMap".to_string(),
+                    rationale: "Ordered but O(log n)".to_string(),
+                    chosen: false,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let restored: Summary = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.alternatives_considered.len(), 2);
+        assert!(restored.alternatives_considered[0].chosen);
+        assert!(!restored.alternatives_considered[1].chosen);
+    }
+
+    #[test]
+    fn summary_without_alternatives_backward_compatible() {
+        let json = r#"{
+            "what_changed": "test",
+            "why": "test",
+            "impact": "none",
+            "rollback_plan": "revert"
+        }"#;
+        let summary: Summary = serde_json::from_str(json).unwrap();
+        assert!(summary.alternatives_considered.is_empty());
     }
 }

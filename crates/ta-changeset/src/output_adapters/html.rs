@@ -258,6 +258,7 @@ mod tests {
                 impact: "none".to_string(),
                 rollback_plan: "revert".to_string(),
                 open_questions: vec![],
+                alternatives_considered: vec![],
             },
             plan: Plan {
                 completed_steps: vec![],
