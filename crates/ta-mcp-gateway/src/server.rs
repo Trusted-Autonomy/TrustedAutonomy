@@ -11,12 +11,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use chrono::{DateTime, Utc};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use ta_audit::AuditLog;
@@ -233,6 +234,33 @@ pub struct ContextToolParams {
     pub query: Option<String>,
 }
 
+/// Parameters for `ta_agent_status` (v0.9.6).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentStatusParams {
+    /// Action: "list" (all active agents) or "status" (specific agent).
+    pub action: String,
+    /// Agent ID to query (required for "status" action).
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+/// Tracks an active agent session within the gateway (v0.9.6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSession {
+    /// Unique per session (e.g., PID or UUID).
+    pub agent_id: String,
+    /// Agent framework type: "claude-code", "codex", "custom".
+    pub agent_type: String,
+    /// Goal this agent is working on (None for orchestrator).
+    pub goal_run_id: Option<Uuid>,
+    /// Caller mode for this session.
+    pub caller_mode: String,
+    /// When this session started.
+    pub started_at: DateTime<Utc>,
+    /// Last heartbeat (updated on each tool call).
+    pub last_heartbeat: DateTime<Utc>,
+}
+
 // ── Gateway state ────────────────────────────────────────────────
 
 /// Shared mutable state for the gateway server.
@@ -253,6 +281,8 @@ pub struct GatewayState {
     pub caller_mode: CallerMode,
     /// v0.9.3: Dev session ID for audit correlation.
     pub dev_session_id: Option<String>,
+    /// v0.9.6: Active agent sessions keyed by agent_id.
+    pub active_agents: HashMap<String, AgentSession>,
 }
 
 /// Caller mode determines what operations the MCP gateway allows.
@@ -275,7 +305,28 @@ impl CallerMode {
     pub fn is_tool_forbidden(&self, tool_name: &str) -> bool {
         match self {
             CallerMode::Normal | CallerMode::Unrestricted => false,
-            CallerMode::Orchestrator => matches!(tool_name, "ta_fs_write"),
+            CallerMode::Orchestrator => {
+                matches!(tool_name, "ta_fs_write" | "ta_pr_build" | "ta_fs_diff")
+            }
+        }
+    }
+
+    /// Returns true if the tool requires an active goal (mutation tools).
+    pub fn requires_goal(&self, tool_name: &str) -> bool {
+        match self {
+            CallerMode::Orchestrator => matches!(
+                tool_name,
+                "ta_fs_write" | "ta_pr_build" | "ta_fs_diff" | "ta_fs_read" | "ta_fs_list"
+            ),
+            _ => false,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            CallerMode::Normal => "normal",
+            CallerMode::Orchestrator => "orchestrator",
+            CallerMode::Unrestricted => "unrestricted",
         }
     }
 }
@@ -308,6 +359,7 @@ impl GatewayState {
             pending_actions: HashMap::new(),
             caller_mode: CallerMode::from_env(),
             dev_session_id: std::env::var("TA_DEV_SESSION_ID").ok(),
+            active_agents: HashMap::new(),
         })
     }
 
@@ -441,6 +493,51 @@ impl GatewayState {
     /// Send a non-blocking notification through the ReviewChannel.
     pub fn notify_reviewer(&self, notification: &Notification) -> Result<(), ReviewChannelError> {
         self.review_channel.notify(notification)
+    }
+
+    /// Register or update an agent session (v0.9.6).
+    ///
+    /// Called on each tool invocation to track active agents. If the agent_id
+    /// is already known, updates the heartbeat. Otherwise creates a new session.
+    pub fn touch_agent_session(
+        &mut self,
+        agent_id: &str,
+        agent_type: &str,
+        goal_run_id: Option<Uuid>,
+    ) {
+        let now = Utc::now();
+        if let Some(session) = self.active_agents.get_mut(agent_id) {
+            session.last_heartbeat = now;
+            // Update goal association if it changed.
+            if goal_run_id.is_some() {
+                session.goal_run_id = goal_run_id;
+            }
+        } else {
+            let session = AgentSession {
+                agent_id: agent_id.to_string(),
+                agent_type: agent_type.to_string(),
+                goal_run_id,
+                caller_mode: self.caller_mode.as_str().to_string(),
+                started_at: now,
+                last_heartbeat: now,
+            };
+            self.active_agents.insert(agent_id.to_string(), session);
+            self.event_dispatcher
+                .dispatch(&TaEvent::agent_session_started(
+                    agent_id,
+                    agent_type,
+                    goal_run_id,
+                    self.caller_mode.as_str(),
+                ));
+        }
+    }
+
+    /// Remove an agent session (v0.9.6).
+    pub fn end_agent_session(&mut self, agent_id: &str) {
+        if let Some(session) = self.active_agents.remove(agent_id) {
+            self.event_dispatcher
+                .dispatch(&TaEvent::agent_session_ended(agent_id, session.goal_run_id));
+        }
     }
 
     /// Get the agent_id for a goal run.
@@ -612,6 +709,18 @@ impl TaGatewayServer {
         tools::context::handle_context(&self.state, params)
     }
 
+    // ── Agent status tool (v0.9.6) ─────────────────────────────
+
+    #[tool(
+        description = "Query active agent sessions for orchestration diagnostics. Actions: list (all active agents), status (specific agent by agent_id)."
+    )]
+    fn ta_agent_status(
+        &self,
+        Parameters(params): Parameters<AgentStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::agent::handle_agent_status(&self.state, params)
+    }
+
     // ── Event subscription tool (v0.9.4) ─────────────────────
 
     #[tool(
@@ -692,13 +801,13 @@ mod tests {
     fn tool_count_matches_expected() {
         let (server, _dir) = test_server();
         let tools = server.tool_router.list_all();
-        // 14 tools: goal_start, goal_status, goal_list,
+        // 15 tools: goal_start, goal_status, goal_list,
         //           fs_read, fs_write, fs_list, fs_diff,
         //           pr_build, pr_status,
-        //           ta_draft, ta_goal_inner, ta_plan, ta_context
-        //           ta_event_subscribe (v0.9.4)
+        //           ta_draft, ta_goal_inner, ta_plan, ta_context,
+        //           ta_agent_status (v0.9.6), ta_event_subscribe (v0.9.4)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 14, "expected 14 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 15, "expected 15 tools, got: {:?}", names);
     }
 
     #[test]
@@ -948,13 +1057,17 @@ mod tests {
     }
 
     #[test]
-    fn caller_mode_orchestrator_blocks_fs_write() {
+    fn caller_mode_orchestrator_blocks_mutation_tools() {
         let mode = CallerMode::Orchestrator;
         assert!(mode.is_tool_forbidden("ta_fs_write"));
+        assert!(mode.is_tool_forbidden("ta_pr_build"));
+        assert!(mode.is_tool_forbidden("ta_fs_diff"));
         assert!(!mode.is_tool_forbidden("ta_plan"));
         assert!(!mode.is_tool_forbidden("ta_goal_start"));
         assert!(!mode.is_tool_forbidden("ta_draft"));
         assert!(!mode.is_tool_forbidden("ta_context"));
+        assert!(!mode.is_tool_forbidden("ta_agent_status"));
+        assert!(!mode.is_tool_forbidden("ta_goal_list"));
     }
 
     #[test]
@@ -992,6 +1105,54 @@ mod tests {
         let state = server.state.lock().unwrap();
         let result = crate::validation::validate_goal_exists(&state.goal_store, goal_id);
         assert!(result.is_ok());
+    }
+
+    // v0.9.6: Agent session tracking tests.
+
+    #[test]
+    fn agent_session_tracking() {
+        let (server, _dir) = test_server();
+        let goal_id = start_goal(&server);
+
+        {
+            let mut state = server.state.lock().unwrap();
+            state.touch_agent_session("agent-1", "claude-code", Some(goal_id));
+            assert_eq!(state.active_agents.len(), 1);
+            assert_eq!(state.active_agents["agent-1"].agent_type, "claude-code");
+            assert_eq!(state.active_agents["agent-1"].goal_run_id, Some(goal_id));
+        }
+
+        {
+            let mut state = server.state.lock().unwrap();
+            // Touch again — should update heartbeat, not duplicate.
+            state.touch_agent_session("agent-1", "claude-code", Some(goal_id));
+            assert_eq!(state.active_agents.len(), 1);
+        }
+
+        {
+            let mut state = server.state.lock().unwrap();
+            state.end_agent_session("agent-1");
+            assert!(state.active_agents.is_empty());
+        }
+    }
+
+    #[test]
+    fn agent_status_tool_exists() {
+        let (server, _dir) = test_server();
+        let tools = server.tool_router.list_all();
+        let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+        assert!(
+            names.contains(&"ta_agent_status".to_string()),
+            "ta_agent_status tool not found in: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn caller_mode_as_str() {
+        assert_eq!(CallerMode::Normal.as_str(), "normal");
+        assert_eq!(CallerMode::Orchestrator.as_str(), "orchestrator");
+        assert_eq!(CallerMode::Unrestricted.as_str(), "unrestricted");
     }
 
     // v0.9.4: Event subscription tool test.

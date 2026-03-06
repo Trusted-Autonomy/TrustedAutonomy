@@ -1425,6 +1425,45 @@ Valid `decision` values:
 | `slack` | Stub | Future: Slack Block Kit cards with button callbacks |
 | `email` | Stub | Future: SMTP send with IMAP reply parsing |
 
+### Project Status Dashboard
+
+Get a quick overview of your project's current state:
+
+```bash
+ta status
+# Project: MyProject (v0.9.6-alpha)
+# Next phase: v0.9.7 — Daemon API Expansion
+#
+# Active agents:
+#   agent-1 (agent-1) → goal abc12345 "Fix auth bug" [running 12m]
+#
+# Pending drafts: 2
+# Active goals:   1
+# Total goals:    5
+```
+
+This shows the project name, version, next pending plan phase, active agents with their goal associations, and counts of pending drafts and goals.
+
+### Agent Tracking (MCP)
+
+When running as an MCP server, TA tracks active agent sessions for observability. The `ta_agent_status` tool lets orchestrators query which agents are running:
+
+```json
+// List all active agents
+{ "action": "list" }
+// → { "agents": [...], "count": 2 }
+
+// Check a specific agent
+{ "action": "status", "agent_id": "agent-1" }
+// → { "agent_id": "agent-1", "agent_type": "claude-code", "goal_run_id": "abc...", "running_secs": 720 }
+```
+
+Agent sessions emit `AgentSessionStarted` and `AgentSessionEnded` events for the event system.
+
+#### CallerMode enforcement
+
+When `TA_CALLER_MODE=orchestrator`, the MCP gateway restricts operations to read-only project-scoped tools. Orchestrators can read plans, list goals/drafts, query context, and start new goals — but cannot directly write files or build PRs (those require an active goal context).
+
 ### MCP Tool Call Interception
 
 When agents call MCP tools, TA classifies each call and decides whether to pass it through immediately or capture it for human review.
@@ -1819,6 +1858,11 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.9.1 | Native Windows support (CI, cross-platform builds) | Done |
 | v0.9.2 | Sandbox runner (command allowlisting, path escape detection) | Done |
 | v0.9.3 | Dev loop access hardening (`--unrestricted`, audit, CallerMode) | Done |
+| v0.9.4 | Orchestrator event wiring and gateway refactor | Done |
+| v0.9.4.1 | Event emission plumbing fix | Done |
+| v0.9.5 | Enhanced draft view output | Done |
+| v0.9.5.1 | Goal lifecycle hygiene and orchestrator fixes | Done |
+| v0.9.6 | Orchestrator API and goal-scoped agent tracking | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

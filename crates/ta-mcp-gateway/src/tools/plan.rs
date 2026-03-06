@@ -22,20 +22,16 @@ pub fn handle_plan(
 
     match params.action.as_str() {
         "read" => {
-            let goal_run_id =
-                parse_uuid(params.goal_run_id.as_deref().ok_or_else(|| {
-                    McpError::invalid_params("goal_run_id required for read", None)
-                })?)?;
+            // v0.9.6: goal_run_id is optional for read. If provided, reads
+            // from that goal's workspace. If omitted, reads from project root.
+            let plan_path = if let Some(goal_id_str) = params.goal_run_id.as_deref() {
+                let goal_run_id = parse_uuid(goal_id_str)?;
+                let goal = validate_goal_exists(&state.goal_store, goal_run_id)?;
+                goal.workspace_path.join("PLAN.md")
+            } else {
+                state.config.workspace_root.join("PLAN.md")
+            };
 
-            let goal = state
-                .goal_store
-                .get(goal_run_id)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?
-                .ok_or_else(|| {
-                    McpError::invalid_params(format!("goal not found: {}", goal_run_id), None)
-                })?;
-
-            let plan_path = goal.workspace_path.join("PLAN.md");
             if plan_path.exists() {
                 let content = std::fs::read_to_string(&plan_path)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;

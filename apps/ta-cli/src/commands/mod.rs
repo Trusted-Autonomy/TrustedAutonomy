@@ -16,5 +16,6 @@ pub mod run;
 pub mod serve;
 pub mod session;
 pub mod setup;
+pub mod status;
 pub mod terms;
 pub mod token;
