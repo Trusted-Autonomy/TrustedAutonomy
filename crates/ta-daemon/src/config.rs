@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use ta_policy::AccessFilter;
 
 /// Top-level daemon configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -72,7 +73,12 @@ impl Default for AuthConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommandConfig {
+    /// Allowed command patterns. Empty = allow all.
+    /// Use `denied` to explicitly block specific commands (deny takes precedence).
     pub allowed: Vec<String>,
+    /// Denied command patterns. Deny always takes precedence over allowed.
+    #[serde(default)]
+    pub denied: Vec<String>,
     pub write_commands: Vec<String>,
     pub timeout_secs: u64,
     /// Commands that launch long-running processes (agents, dev loops).
@@ -82,12 +88,20 @@ pub struct CommandConfig {
     pub long_timeout_secs: u64,
 }
 
+impl CommandConfig {
+    /// Get the unified AccessFilter for this command config.
+    pub fn access_filter(&self) -> AccessFilter {
+        AccessFilter::new(self.allowed.clone(), self.denied.clone())
+    }
+}
+
 impl Default for CommandConfig {
     fn default() -> Self {
         Self {
             allowed: vec![
                 "*".to_string(), // All commands allowed by default for local human operator.
             ],
+            denied: vec![],
             write_commands: vec![
                 "ta draft approve *".to_string(),
                 "ta draft deny *".to_string(),

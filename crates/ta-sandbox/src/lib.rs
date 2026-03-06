@@ -31,12 +31,17 @@ use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
+use ta_policy::AccessFilter;
 
 /// Sandbox configuration defining what commands are permitted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Allowed commands and their policies.
     pub commands: HashMap<String, CommandPolicy>,
+    /// Explicitly denied commands. Deny takes precedence over `commands` allowlist.
+    /// Supports glob patterns (e.g., "rm", "curl*").
+    #[serde(default)]
+    pub denied_commands: Vec<String>,
     /// Network access policy.
     pub network: NetworkPolicy,
     /// Maximum execution time per command (seconds).
@@ -165,6 +170,17 @@ impl SandboxRunner {
     /// Checks the allowlist, validates arguments, enforces CWD, captures output,
     /// and hashes the transcript.
     pub fn execute(&mut self, command: &str, args: &[&str]) -> Result<SandboxResult, SandboxError> {
+        // 0. Check denied commands first (deny takes precedence over allowlist).
+        if !self.config.denied_commands.is_empty() {
+            let filter = AccessFilter::new(vec![], self.config.denied_commands.clone());
+            if !filter.permits(command) {
+                return Err(SandboxError::CommandNotAllowed(format!(
+                    "{} (explicitly denied)",
+                    command
+                )));
+            }
+        }
+
         // 1. Check allowlist.
         let policy = self
             .config
@@ -323,12 +339,23 @@ impl SandboxRunner {
         &self.workspace_root
     }
 
-    /// Check if a command is in the allowlist.
+    /// Check if a command is permitted (in allowlist and not denied).
     pub fn is_allowed(&self, command: &str) -> bool {
+        // Check denied first.
+        if !self.config.denied_commands.is_empty() {
+            let filter = AccessFilter::new(vec![], self.config.denied_commands.clone());
+            if !filter.permits(command) {
+                return false;
+            }
+        }
         self.config.commands.contains_key(command)
     }
 
     /// Check if a domain is allowed by the network policy.
+    ///
+    /// Uses domain-specific matching (supports `*.github.com` subdomain wildcards)
+    /// rather than generic glob patterns. The semantics follow AccessFilter's model:
+    /// deny takes precedence, then allow, then default action.
     pub fn is_domain_allowed(&self, domain: &str) -> bool {
         // Check deny list first (deny takes priority).
         for denied in &self.config.network.deny_domains {
@@ -448,6 +475,7 @@ impl Default for SandboxConfig {
 
         Self {
             commands,
+            denied_commands: vec![],
             network: NetworkPolicy {
                 default_action: NetworkAction::Deny,
                 allow_domains: vec![
@@ -677,5 +705,33 @@ mod tests {
         assert!(runner.is_allowed("cargo"));
         assert!(!runner.is_allowed("rm"));
         assert!(!runner.is_allowed("curl"));
+    }
+
+    #[test]
+    fn denied_commands_take_precedence() {
+        // cargo is in the allowlist by default, but deny it explicitly.
+        let config = SandboxConfig {
+            denied_commands: vec!["cargo".to_string()],
+            ..SandboxConfig::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let runner = SandboxRunner::new(config, dir.path());
+
+        assert!(!runner.is_allowed("cargo"));
+        assert!(runner.is_allowed("rg")); // still allowed
+    }
+
+    #[test]
+    fn denied_command_execution_blocked() {
+        let config = SandboxConfig {
+            denied_commands: vec!["cat".to_string()],
+            ..SandboxConfig::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "hello").unwrap();
+        let mut runner = SandboxRunner::new(config, dir.path());
+
+        let result = runner.execute("cat", &["test.txt"]);
+        assert!(matches!(result, Err(SandboxError::CommandNotAllowed(_))));
     }
 }

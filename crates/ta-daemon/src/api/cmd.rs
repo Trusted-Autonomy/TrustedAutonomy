@@ -42,11 +42,12 @@ pub async fn execute_command(
             .into_response();
     }
 
-    // Check if command is allowed.
-    if !is_command_allowed(command_str, &state.daemon_config.commands.allowed) {
+    // Check if command is allowed (deny takes precedence over allow).
+    let filter = state.daemon_config.commands.access_filter();
+    if !filter.permits(command_str) {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "command not in allowlist"})),
+            Json(serde_json::json!({"error": "command not permitted (check allowed/denied in daemon.toml)"})),
         )
             .into_response();
     }
@@ -257,6 +258,8 @@ fn find_ta_binary() -> String {
 }
 
 /// Check if a command matches the allowlist using simple glob patterns.
+/// Used in tests only; production code uses `AccessFilter::permits()`.
+#[cfg(test)]
 fn is_command_allowed(command: &str, allowlist: &[String]) -> bool {
     if allowlist.is_empty() {
         return true; // No allowlist = allow everything.
@@ -351,5 +354,27 @@ mod tests {
         ];
         assert!(is_write_command("ta draft approve abc", &write));
         assert!(!is_write_command("ta draft list", &write));
+    }
+
+    #[test]
+    fn access_filter_deny_takes_precedence() {
+        use crate::config::CommandConfig;
+        let config = CommandConfig {
+            allowed: vec!["ta draft *".to_string()],
+            denied: vec!["ta draft apply *".to_string()],
+            ..Default::default()
+        };
+        let filter = config.access_filter();
+        assert!(filter.permits("ta draft list"));
+        assert!(!filter.permits("ta draft apply abc123"));
+    }
+
+    #[test]
+    fn default_command_config_allows_all() {
+        use crate::config::CommandConfig;
+        let config = CommandConfig::default();
+        let filter = config.access_filter();
+        assert!(filter.permits("ta status"));
+        assert!(filter.permits("anything"));
     }
 }

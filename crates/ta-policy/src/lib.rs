@@ -46,8 +46,10 @@ pub use constitution::{
     ConstitutionValidation, EnforcementMode,
 };
 pub use context::PolicyContext;
+pub mod access_filter;
 pub mod auto_approve;
 
+pub use access_filter::AccessFilter;
 pub use auto_approve::{AutoApproveDecision, DraftInfo};
 pub use document::{
     AgentPolicyOverride, AutoApproveConditions, AutoApproveConfig, AutoApproveDraftConfig,

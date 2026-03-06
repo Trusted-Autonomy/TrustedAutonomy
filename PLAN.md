@@ -2959,7 +2959,7 @@ agents:
 ---
 
 ### v0.9.8.1.1 — Unified Allow/Deny List Pattern
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Standardize all allowlist/blocklist patterns across TA to support both allow and deny lists with consistent semantics: deny takes precedence over allow, empty allow = allow all, empty deny = deny nothing.
 
 #### Problem
@@ -3008,6 +3008,19 @@ impl AccessFilter {
 - `crates/ta-sandbox/src/lib.rs` — use `AccessFilter` for command lists
 - Backward-compatible: existing configs with only `allowed` still work (empty `denied` = deny nothing)
 - Tests: deny-wins-over-allow, empty-allow-means-all, glob matching, backward compat
+
+#### Completed
+
+- [x] `AccessFilter` struct in `ta-policy/src/access_filter.rs` with `permits()`, `tighten()`, `from_allowed()`, `allow_all()`, `is_unrestricted()`, `Display` impl, serde support, and 18 tests
+- [x] Daemon `CommandConfig`: added `denied` field alongside `allowed`, `access_filter()` method returning `AccessFilter`, updated `cmd.rs` to use `filter.permits()` instead of `is_command_allowed()` (2 new tests)
+- [x] Auto-approval paths: refactored `should_auto_approve_draft()` to use `AccessFilter` for path matching, `merge_conditions()` to use `AccessFilter::tighten()` (backward compatible — existing YAML field names preserved)
+- [x] Sandbox: added `denied_commands` field to `SandboxConfig`, deny check in `execute()` and `is_allowed()` (2 new tests)
+- [x] Documentation: unified access control pattern in USAGE.md
+
+#### Remaining (deferred)
+
+- [ ] Channel access control: `denied_roles` / `denied_users` fields (requires channel registry changes)
+- [ ] Agent tool access: configurable tool allow/deny per agent config (requires alignment profile changes)
 
 #### Version: `0.9.8-alpha.1.1`
 

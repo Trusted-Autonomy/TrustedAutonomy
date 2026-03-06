@@ -11,9 +11,9 @@
 //   4. phase limits
 //   5. agent security level
 
-use glob::Pattern;
 use serde::{Deserialize, Serialize};
 
+use crate::access_filter::AccessFilter;
 use crate::document::{AutoApproveDraftConfig, PolicyDocument, SecurityLevel};
 
 /// Minimal draft info needed for auto-approval evaluation.
@@ -116,41 +116,31 @@ pub fn should_auto_approve_draft(draft: &DraftInfo, doc: &PolicyDocument) -> Aut
         ));
     }
 
-    // 4. Path rules — blocked_paths first (deny takes precedence).
-    if !conditions.blocked_paths.is_empty() {
+    // 4. Path rules — use AccessFilter (deny takes precedence over allow).
+    let path_filter = AccessFilter::new(
+        conditions.allowed_paths.clone(),
+        conditions.blocked_paths.clone(),
+    );
+    if !path_filter.is_unrestricted() {
         for path in &draft.changed_paths {
             let bare = strip_uri_prefix(path);
-            for pattern in &conditions.blocked_paths {
-                if matches_glob(pattern, bare) {
-                    return AutoApproveDecision::Denied {
-                        blockers: vec![format!(
-                            "path '{}' matches blocked_paths pattern '{}'",
-                            bare, pattern
-                        )],
-                    };
-                }
-            }
-        }
-        reasons.push("no blocked paths matched".to_string());
-    }
-
-    if !conditions.allowed_paths.is_empty() {
-        for path in &draft.changed_paths {
-            let bare = strip_uri_prefix(path);
-            let matched = conditions
-                .allowed_paths
-                .iter()
-                .any(|pattern| matches_glob(pattern, bare));
-            if !matched {
+            if !path_filter.permits(bare) {
+                // Determine whether it was denied or just not allowed.
+                let reason = if conditions
+                    .blocked_paths
+                    .iter()
+                    .any(|p| AccessFilter::from_allowed(vec![p.clone()]).permits(bare))
+                {
+                    format!("path '{}' matches blocked_paths", bare)
+                } else {
+                    format!("path '{}' does not match any allowed_paths pattern", bare)
+                };
                 return AutoApproveDecision::Denied {
-                    blockers: vec![format!(
-                        "path '{}' does not match any allowed_paths pattern",
-                        bare
-                    )],
+                    blockers: vec![reason],
                 };
             }
         }
-        reasons.push(format!("all {} paths match allowed_paths", file_count));
+        reasons.push(format!("all {} paths pass access filter", file_count));
     }
 
     // 5. Phase limits.
@@ -245,29 +235,20 @@ fn merge_conditions(
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         },
-        // Union of blocked paths (more restrictions).
+        // Use AccessFilter::tighten for path merge (union denied, intersect allowed).
         blocked_paths: {
-            let mut merged = base.blocked_paths.clone();
-            for p in &overlay.blocked_paths {
-                if !merged.contains(p) {
-                    merged.push(p.clone());
-                }
-            }
-            merged
+            let base_filter =
+                AccessFilter::new(base.allowed_paths.clone(), base.blocked_paths.clone());
+            let overlay_filter =
+                AccessFilter::new(overlay.allowed_paths.clone(), overlay.blocked_paths.clone());
+            base_filter.tighten(&overlay_filter).denied
         },
-        // Intersection of allowed paths (more restrictive).
-        // If either is empty (allow all), use the other.
-        allowed_paths: if base.allowed_paths.is_empty() {
-            overlay.allowed_paths.clone()
-        } else if overlay.allowed_paths.is_empty() {
-            base.allowed_paths.clone()
-        } else {
-            // Keep only patterns present in both.
-            base.allowed_paths
-                .iter()
-                .filter(|p| overlay.allowed_paths.contains(p))
-                .cloned()
-                .collect()
+        allowed_paths: {
+            let base_filter =
+                AccessFilter::new(base.allowed_paths.clone(), base.blocked_paths.clone());
+            let overlay_filter =
+                AccessFilter::new(overlay.allowed_paths.clone(), overlay.blocked_paths.clone());
+            base_filter.tighten(&overlay_filter).allowed
         },
         // Tighten: if either requires, require.
         require_tests_pass: base.require_tests_pass || overlay.require_tests_pass,
@@ -295,13 +276,6 @@ fn merge_conditions(
 /// Strip the `fs://workspace/` URI prefix to get a bare path.
 fn strip_uri_prefix(uri: &str) -> &str {
     uri.strip_prefix("fs://workspace/").unwrap_or(uri)
-}
-
-/// Match a glob pattern against a path.
-fn matches_glob(pattern: &str, path: &str) -> bool {
-    Pattern::new(pattern)
-        .map(|p| p.matches(path))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

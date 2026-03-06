@@ -53,6 +53,7 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [MCP Tool Call Interception](#mcp-tool-call-interception)
    - [Session Lifecycle](#session-lifecycle)
    - [Unified Policy Config](#unified-policy-config)
+   - [Unified Access Control Pattern](#unified-access-control-pattern)
    - [Resource Mediation](#resource-mediation)
    - [Channel Registry](#channel-registry)
    - [API Mediation](#api-mediation)
@@ -1900,6 +1901,9 @@ allowed = [                 # Command allowlist (glob patterns)
   "ta status",
   "ta context *",
 ]
+denied = [                  # Command denylist (deny takes precedence)
+  "ta draft apply --force *",
+]
 write_commands = [           # Commands requiring write scope
   "ta draft approve *",
   "ta draft deny *",
@@ -2155,6 +2159,46 @@ budget:
 - **Checkpoint** (default): Review at draft submission
 - **Supervised**: Approve each state-changing action
 - **Strict**: Constitutions required for all goals
+
+### Unified Access Control Pattern
+
+All allow/deny lists in TA follow the same `AccessFilter` pattern:
+
+- **Deny always takes precedence** over allow
+- **Empty `allowed`** = allow all
+- **Empty `denied`** = deny nothing
+
+This pattern is used across daemon command routing, auto-approval path matching, and sandbox command policies.
+
+```yaml
+# In .ta/daemon.toml — command access control
+[commands]
+allowed = ["ta draft *", "ta goal *", "ta status"]
+denied = ["ta draft apply --force *"]  # deny always wins
+
+# In .ta/policy.yaml — auto-approval path rules
+defaults:
+  auto_approve:
+    drafts:
+      conditions:
+        allowed_paths: ["tests/**", "docs/**"]
+        blocked_paths: [".ta/**", "**/main.rs"]
+```
+
+The `AccessFilter` struct in `ta-policy` provides this as a reusable building block:
+
+```rust
+use ta_policy::AccessFilter;
+
+let filter = AccessFilter::new(
+    vec!["src/**".to_string()],     // allowed patterns
+    vec!["**/secret*".to_string()], // denied patterns
+);
+assert!(filter.permits("src/lib.rs"));
+assert!(!filter.permits("src/secret_key.rs")); // denied wins
+```
+
+Sandbox commands also support a `denied_commands` list that takes precedence over the allowlist.
 
 ### Resource Mediation (v0.6.2)
 
