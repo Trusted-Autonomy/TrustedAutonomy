@@ -120,15 +120,27 @@ async fn run_shell(base_url: String, attach_session: Option<String>) -> anyhow::
     // Fetch completion words from routes endpoint.
     let completions = fetch_completions(&client, &base_url).await;
 
+    // Connection state: 0 = connected, 1 = disconnected.
+    let running = Arc::new(AtomicBool::new(true));
+    let daemon_down = Arc::new(AtomicBool::new(false));
+
     // Start background SSE listener. Use `since=now` to skip historical events
     // and only show events that occur after the shell connects.
-    let running = Arc::new(AtomicBool::new(true));
     let sse_running = running.clone();
     let now = chrono::Utc::now().to_rfc3339();
     let sse_url = format!("{}/api/events?since={}", base_url, now);
     let sse_client = client.clone();
     let _sse_handle = tokio::spawn(async move {
         sse_listener(sse_client, &sse_url, sse_running).await;
+    });
+
+    // Start periodic health check (every 10s).
+    let health_running = running.clone();
+    let health_down = daemon_down.clone();
+    let health_client = client.clone();
+    let health_url = base_url.clone();
+    let _health_handle = tokio::spawn(async move {
+        health_monitor(health_client, &health_url, health_running, health_down).await;
     });
 
     // Set up rustyline.
@@ -171,10 +183,32 @@ async fn run_shell(base_url: String, attach_session: Option<String>) -> anyhow::
                 }
 
                 // Send input to daemon.
+                if daemon_down.load(Ordering::Relaxed) {
+                    eprintln!("Warning: daemon is disconnected. Waiting for reconnect...");
+                    eprintln!("  (Restart with: ./scripts/ta-shell.sh)");
+                }
                 let result = send_input(&client, &base_url, trimmed, session_id.as_deref()).await;
                 match result {
-                    Ok(output) => print!("{}", output),
-                    Err(e) => eprintln!("Error: {}", e),
+                    Ok(output) => {
+                        // If we thought the daemon was down, it's back.
+                        if daemon_down.load(Ordering::Relaxed) {
+                            daemon_down.store(false, Ordering::Relaxed);
+                            eprintln!("[reconnected] Daemon is back.");
+                        }
+                        print!("{}", output);
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("Cannot reach daemon") {
+                            daemon_down.store(true, Ordering::Relaxed);
+                            eprintln!("Error: {}", e);
+                            eprintln!(
+                                "  The shell will auto-reconnect when the daemon comes back."
+                            );
+                        } else {
+                            eprintln!("Error: {}", e);
+                        }
+                    }
                 }
             }
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
@@ -370,6 +404,50 @@ async fn sse_listener(client: reqwest::Client, url: &str, running: Arc<AtomicBoo
 
         if running.load(Ordering::Relaxed) {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    }
+}
+
+/// Periodic health check — pings `/api/status` every 10s.
+/// Prints a notice when the daemon goes down or comes back up.
+async fn health_monitor(
+    client: reqwest::Client,
+    base_url: &str,
+    running: Arc<AtomicBool>,
+    daemon_down: Arc<AtomicBool>,
+) {
+    let url = format!("{}/api/status", base_url);
+    let mut was_down = false;
+
+    while running.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        if !running.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let healthy = client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .is_ok();
+
+        if !healthy && !was_down {
+            daemon_down.store(true, Ordering::Relaxed);
+            was_down = true;
+            let _ = write!(
+                std::io::stderr(),
+                "\n[disconnected] Daemon unreachable. Will auto-reconnect when it's back.\n"
+            );
+            let _ = std::io::stderr().flush();
+        } else if healthy && was_down {
+            daemon_down.store(false, Ordering::Relaxed);
+            was_down = false;
+            let _ = write!(
+                std::io::stderr(),
+                "\n[reconnected] Daemon is back online.\n"
+            );
+            let _ = std::io::stderr().flush();
         }
     }
 }
