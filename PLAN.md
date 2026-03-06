@@ -2886,6 +2886,28 @@ agents:
    - `ta status --all` shows the full breakdown including stale entries
    - Detection heuristic: if `updated_at` is older than `idle_timeout_secs` (from daemon config, default 30 min) and state is `running`, classify as stale
 
+10. **Goal lifecycle GC & history ledger**: Enhance `ta goal gc` and `ta draft gc` into a unified `ta gc` with a persistent history ledger so archived goals remain queryable.
+    - **Goal history ledger** (`.ta/goal-history.jsonl`): When GC archives or removes a goal, append a compact summary line:
+      ```jsonl
+      {"id":"ca306e4d","title":"Implement v0.9.8.1","state":"applied","phase":"v0.9.8.1","agent":"claude-code","created":"2026-03-06","completed":"2026-03-06","duration_mins":42,"draft_id":"abc123","artifact_count":15,"lines_changed":487}
+      ```
+    - **`ta gc`** — unified top-level command that runs both goal GC and draft GC in one pass:
+      - Transitions stale `running` goals to `failed` (existing behavior)
+      - Also handles `pr_ready` goals older than threshold (draft built but never reviewed)
+      - Writes history summary before archiving/removing goal JSON files
+      - Removes staging directories for all terminal goals
+      - Cleans orphaned draft package JSON files
+      - Flags: `--dry-run`, `--threshold-days N` (default 7), `--all` (ignore threshold, GC everything terminal), `--archive` (move to `.ta/goals/archive/` instead of deleting)
+      - Prints disk usage summary: "Reclaimed 93 GB across 56 staging directories"
+    - **`ta goal history`** — read and render the history ledger:
+      - Default: compact table of recent goals (last 20)
+      - `--phase v0.9.8.1` — filter by plan phase
+      - `--since 2026-03-01` — filter by date
+      - `--agent claude-code` — filter by agent
+      - `--json` — raw JSONL output for scripting
+    - **`ta goal list --active`** — filter to non-terminal goals only (default behavior change: `ta goal list` shows only active, `ta goal list --all` shows everything including terminal)
+    - **Event store pruning**: `ta gc` also prunes events linked to archived goals from the daemon's event store, preventing stale event replay
+
 #### Security Model
 
 - **Default: off** — auto-approval must be explicitly enabled. Fresh `ta init` projects start with `drafts.enabled: false`.
@@ -2902,8 +2924,11 @@ agents:
 - `crates/ta-daemon/src/api/cmd.rs` — same check in daemon's draft submit handler
 - `crates/ta-goal/src/events.rs` — `DraftAutoApproved` event variant
 - `apps/ta-cli/src/commands/policy.rs` — `ta policy check` dry-run command
-- `docs/USAGE.md` — auto-approval configuration guide, security model explanation
-- Tests: condition evaluation (each condition individually), path glob matching, tighten-only cascade, verification command execution, auto-apply flow, audit trail correctness
+- `apps/ta-cli/src/commands/gc.rs` — unified `ta gc` command with history ledger writes
+- `apps/ta-cli/src/commands/goal.rs` — `ta goal list --active`, `ta goal history` subcommand
+- `crates/ta-goal/src/history.rs` — `GoalHistoryEntry` struct, append/read/filter for `.ta/goal-history.jsonl`
+- `docs/USAGE.md` — auto-approval configuration guide, security model explanation, goal GC & history docs
+- Tests: condition evaluation (each condition individually), path glob matching, tighten-only cascade, verification command execution, auto-apply flow, audit trail correctness, history ledger write/read round-trip, GC threshold filtering
 
 #### Version: `0.9.8-alpha.1`
 
