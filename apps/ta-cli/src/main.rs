@@ -255,21 +255,16 @@ fn resolve_phase_title(
 }
 
 /// Try to find a phase in PLAN.md by ID (with or without 'v' prefix).
-fn try_resolve_phase(
-    candidate: &str,
-    project_root: &std::path::Path,
-) -> Option<(String, String)> {
+fn try_resolve_phase(candidate: &str, project_root: &std::path::Path) -> Option<(String, String)> {
     let phases = commands::plan::load_plan(project_root).ok()?;
 
     // Try exact match, then with/without 'v' prefix.
     let stripped = candidate.strip_prefix('v').unwrap_or(candidate);
     let with_v = format!("v{}", stripped);
 
-    let phase = phases.iter().find(|p| {
-        p.id == candidate
-            || p.id == stripped
-            || p.id == with_v
-    })?;
+    let phase = phases
+        .iter()
+        .find(|p| p.id == candidate || p.id == stripped || p.id == with_v)?;
 
     let title = format!("Implement {} — {}", phase.id, phase.title);
     Some((title, phase.id.clone()))
@@ -335,8 +330,7 @@ fn main() -> anyhow::Result<()> {
             // Phase-aware title resolution: if the positional title looks like
             // a phase ID (e.g., "v0.9.8.1", "0.9.8.1", "phase 0.9.8.1"),
             // look it up in PLAN.md and use the phase title + set --phase.
-            let (resolved_title, resolved_phase) =
-                resolve_phase_title(title, phase, &project_root);
+            let (resolved_title, resolved_phase) = resolve_phase_title(title, phase, &project_root);
             commands::run::execute(
                 &config,
                 resolved_title.as_deref(),
