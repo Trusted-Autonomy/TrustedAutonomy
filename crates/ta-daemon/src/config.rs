@@ -81,17 +81,16 @@ impl Default for CommandConfig {
     fn default() -> Self {
         Self {
             allowed: vec![
-                "ta draft *".to_string(),
-                "ta goal *".to_string(),
-                "ta plan *".to_string(),
-                "ta status".to_string(),
-                "ta context *".to_string(),
+                "*".to_string(), // All commands allowed by default for local human operator.
             ],
             write_commands: vec![
                 "ta draft approve *".to_string(),
                 "ta draft deny *".to_string(),
                 "ta draft apply *".to_string(),
                 "ta goal start *".to_string(),
+                "ta run *".to_string(),
+                "ta dev *".to_string(),
+                "ta init *".to_string(),
             ],
             timeout_secs: 30,
         }

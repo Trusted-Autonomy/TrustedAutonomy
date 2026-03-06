@@ -82,6 +82,30 @@ async fn run_shell(base_url: String, attach_session: Option<String>) -> anyhow::
 
     // Fetch initial status for the header.
     let status = fetch_status(&client, &base_url).await;
+
+    if status.version.is_empty() || status.version == "?" {
+        eprintln!("Error: Cannot reach daemon at {}", base_url);
+        eprintln!();
+        eprintln!("Start the daemon with:");
+        eprintln!("  ./scripts/ta-shell.sh          # builds + starts daemon + opens shell");
+        eprintln!("  ta-daemon --api --project-root .");
+        return Err(anyhow::anyhow!("daemon not reachable at {}", base_url));
+    }
+
+    // Warn if the daemon version doesn't match the CLI version.
+    let cli_version = env!("CARGO_PKG_VERSION");
+    if status.version != cli_version {
+        eprintln!(
+            "Warning: daemon is v{} but this CLI is v{}",
+            status.version, cli_version
+        );
+        eprintln!("  The daemon may behave differently than expected.");
+        eprintln!("  To fix: kill the old daemon and restart with the matching version:");
+        eprintln!("    pkill -f 'ta-daemon' && ta-daemon --api --project-root .");
+        eprintln!("  Or use: ./scripts/ta-shell.sh (auto-restarts stale daemons)");
+        eprintln!();
+    }
+
     print_header(&status, &base_url);
 
     // Determine agent session ID.
@@ -96,10 +120,12 @@ async fn run_shell(base_url: String, attach_session: Option<String>) -> anyhow::
     // Fetch completion words from routes endpoint.
     let completions = fetch_completions(&client, &base_url).await;
 
-    // Start background SSE listener.
+    // Start background SSE listener. Use `since=now` to skip historical events
+    // and only show events that occur after the shell connects.
     let running = Arc::new(AtomicBool::new(true));
     let sse_running = running.clone();
-    let sse_url = format!("{}/api/events", base_url);
+    let now = chrono::Utc::now().to_rfc3339();
+    let sse_url = format!("{}/api/events?since={}", base_url, now);
     let sse_client = client.clone();
     let _sse_handle = tokio::spawn(async move {
         sse_listener(sse_client, &sse_url, sse_running).await;
@@ -361,14 +387,57 @@ fn render_sse_event(frame: &str) -> Option<String> {
     let event_type = event_type?;
     let data = data?;
 
-    // Parse JSON data for a human-readable summary.
+    // Parse JSON data for a human-readable one-liner.
     let json: serde_json::Value = serde_json::from_str(data).ok()?;
-    let summary = json["event"]["summary"]
-        .as_str()
-        .or_else(|| json["event_type"].as_str())
-        .unwrap_or(event_type);
+    let payload = &json["payload"];
 
-    Some(format!("\n-- Event: {} --\n", summary))
+    let detail = match event_type {
+        "goal_started" => {
+            let title = payload["title"].as_str().unwrap_or("untitled");
+            let agent = payload["agent_id"].as_str().unwrap_or("?");
+            format!("goal started: \"{}\" ({})", title, agent)
+        }
+        "goal_completed" => {
+            let title = payload["title"].as_str().unwrap_or("untitled");
+            let secs = payload["duration_secs"].as_u64().unwrap_or(0);
+            let mins = secs / 60;
+            if mins > 0 {
+                format!("goal completed: \"{}\" ({}m)", title, mins)
+            } else {
+                format!("goal completed: \"{}\"", title)
+            }
+        }
+        "draft_built" => {
+            let count = payload["artifact_count"].as_u64().unwrap_or(0);
+            let draft_id = payload["draft_id"]
+                .as_str()
+                .map(|s| &s[..8.min(s.len())])
+                .unwrap_or("?");
+            format!("draft built: {} files ({})", count, draft_id)
+        }
+        "draft_approved" | "draft_denied" => {
+            let decision = if event_type == "draft_approved" {
+                "approved"
+            } else {
+                "denied"
+            };
+            let by = payload["approved_by"]
+                .as_str()
+                .or_else(|| payload["denied_by"].as_str())
+                .unwrap_or("?");
+            format!("draft {}: by {}", decision, by)
+        }
+        _ => {
+            // Fallback: use summary field or event type.
+            json["event"]["summary"]
+                .as_str()
+                .or_else(|| json["event_type"].as_str())
+                .unwrap_or(event_type)
+                .to_string()
+        }
+    };
+
+    Some(format!("\n[event] {}\n", detail))
 }
 
 // -- Rustyline helper --------------------------------------------------------
@@ -466,10 +535,19 @@ mod tests {
     }
 
     #[test]
-    fn render_sse_event_no_summary_uses_event_type() {
-        let frame = "event: goal_started\ndata: {\"event_type\":\"goal_started\"}";
+    fn render_sse_event_goal_started_with_payload() {
+        let frame = "event: goal_started\ndata: {\"event_type\":\"goal_started\",\"payload\":{\"title\":\"Fix auth\",\"agent_id\":\"claude-code\"}}";
         let rendered = render_sse_event(frame).unwrap();
-        assert!(rendered.contains("goal_started"));
+        assert!(rendered.contains("goal started"));
+        assert!(rendered.contains("Fix auth"));
+        assert!(rendered.contains("claude-code"));
+    }
+
+    #[test]
+    fn render_sse_event_no_payload_uses_fallback() {
+        let frame = "event: custom_event\ndata: {\"event_type\":\"custom_event\"}";
+        let rendered = render_sse_event(frame).unwrap();
+        assert!(rendered.contains("custom_event"));
     }
 
     #[test]

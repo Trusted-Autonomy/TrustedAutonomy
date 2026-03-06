@@ -12,7 +12,21 @@ NC='\033[0m' # No Color
 
 REPO="trustedautonomy/ta"
 BINARY_NAME="ta"
+DAEMON_NAME="ta-daemon"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DAEMON=true
+
+# Parse arguments.
+for arg in "$@"; do
+    case "$arg" in
+        --no-daemon) INSTALL_DAEMON=false ;;
+        --help)
+            echo "Usage: install.sh [--no-daemon]"
+            echo "  --no-daemon  Skip installing the ta-daemon binary"
+            exit 0
+            ;;
+    esac
+done
 
 # Detect OS and architecture
 detect_platform() {
@@ -84,69 +98,72 @@ get_latest_version() {
     echo -e "${GREEN}Latest version:${NC} $VERSION"
 }
 
-# Download and install binary
-install_binary() {
-    DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/${BINARY_NAME}-${VERSION}-${TARGET}.tar.gz"
+# Download, verify, and install a single binary.
+# Usage: download_and_install <name> <required>
+download_and_install() {
+    local name="$1"
+    local required="$2"
 
-    echo -e "${GREEN}Downloading from:${NC} $DOWNLOAD_URL"
+    local download_url="https://github.com/$REPO/releases/download/$VERSION/${name}-${VERSION}-${TARGET}.tar.gz"
+    local checksum_url="${download_url}.sha256"
+
+    echo -e "${GREEN}Downloading ${name} from:${NC} $download_url"
 
     # Create temporary directory
-    TMP_DIR=$(mktemp -d)
-    trap "rm -rf $TMP_DIR" EXIT
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
 
     # Download archive
-    if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/${BINARY_NAME}.tar.gz"; then
-        echo -e "${RED}Error: Failed to download binary${NC}"
-        echo -e "${YELLOW}URL: $DOWNLOAD_URL${NC}"
-        exit 1
+    if ! curl -fsSL "$download_url" -o "$tmp_dir/${name}.tar.gz"; then
+        if [[ "$required" == "true" ]]; then
+            echo -e "${RED}Error: Failed to download ${name}${NC}"
+            rm -rf "$tmp_dir"
+            exit 1
+        else
+            echo -e "${YELLOW}Warning: ${name} not available in this release, skipping${NC}"
+            rm -rf "$tmp_dir"
+            return 0
+        fi
     fi
 
-    # Download checksum file
-    CHECKSUM_URL="https://github.com/$REPO/releases/download/$VERSION/${BINARY_NAME}-${VERSION}-${TARGET}.tar.gz.sha256"
-    echo -e "${GREEN}Downloading checksum...${NC}"
-    if ! curl -fsSL "$CHECKSUM_URL" -o "$TMP_DIR/${BINARY_NAME}.tar.gz.sha256"; then
-        echo -e "${YELLOW}Warning: Could not download checksum file${NC}"
-        echo -e "${YELLOW}Skipping checksum verification (not recommended)${NC}"
-    else
-        # Verify checksum
+    # Download and verify checksum
+    if curl -fsSL "$checksum_url" -o "$tmp_dir/${name}.tar.gz.sha256" 2>/dev/null; then
         echo -e "${GREEN}Verifying checksum...${NC}"
-        cd "$TMP_DIR"
-
-        # Different SHA256 command formats for different platforms
+        cd "$tmp_dir"
         if command -v sha256sum > /dev/null; then
-            # Linux
-            if ! sha256sum -c "${BINARY_NAME}.tar.gz.sha256" 2>/dev/null; then
-                echo -e "${RED}Error: Checksum verification failed${NC}"
-                echo -e "${RED}The downloaded file may be corrupted or tampered with${NC}"
-                exit 1
-            fi
+            sha256sum -c "${name}.tar.gz.sha256" 2>/dev/null || {
+                echo -e "${RED}Error: Checksum verification failed for ${name}${NC}"
+                cd - > /dev/null; rm -rf "$tmp_dir"; exit 1
+            }
         elif command -v shasum > /dev/null; then
-            # macOS
-            if ! shasum -a 256 -c "${BINARY_NAME}.tar.gz.sha256" 2>/dev/null; then
-                echo -e "${RED}Error: Checksum verification failed${NC}"
-                echo -e "${RED}The downloaded file may be corrupted or tampered with${NC}"
-                exit 1
-            fi
-        else
-            echo -e "${YELLOW}Warning: No SHA256 tool found (sha256sum or shasum)${NC}"
-            echo -e "${YELLOW}Skipping checksum verification (not recommended)${NC}"
+            shasum -a 256 -c "${name}.tar.gz.sha256" 2>/dev/null || {
+                echo -e "${RED}Error: Checksum verification failed for ${name}${NC}"
+                cd - > /dev/null; rm -rf "$tmp_dir"; exit 1
+            }
         fi
-
         cd - > /dev/null
         echo -e "${GREEN}✓ Checksum verified${NC}"
+    else
+        echo -e "${YELLOW}Warning: No checksum for ${name}, skipping verification${NC}"
     fi
 
-    # Extract archive
-    echo -e "${GREEN}Extracting binary...${NC}"
-    tar xzf "$TMP_DIR/${BINARY_NAME}.tar.gz" -C "$TMP_DIR"
-
-    # Create install directory if it doesn't exist
+    # Extract and install
+    tar xzf "$tmp_dir/${name}.tar.gz" -C "$tmp_dir"
     mkdir -p "$INSTALL_DIR"
+    mv "$tmp_dir/${name}" "$INSTALL_DIR/${name}"
+    chmod +x "$INSTALL_DIR/${name}"
+    rm -rf "$tmp_dir"
 
-    # Install binary
-    echo -e "${GREEN}Installing to:${NC} $INSTALL_DIR/$BINARY_NAME"
-    mv "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-    chmod +x "$INSTALL_DIR/$BINARY_NAME"
+    echo -e "${GREEN}✓ Installed ${name}${NC}"
+}
+
+# Download and install binaries
+install_binary() {
+    download_and_install "$BINARY_NAME" "true"
+
+    if [[ "$INSTALL_DAEMON" == true ]]; then
+        download_and_install "$DAEMON_NAME" "false"
+    fi
 
     echo -e "${GREEN}✓ Installation complete!${NC}"
 }
@@ -189,10 +206,13 @@ print_instructions() {
     echo "1. Initialize TA in your project:"
     echo "   cd your-project && ${BINARY_NAME} init from-existing"
     echo ""
-    echo "2. Start the interactive developer loop:"
+    echo "2. Launch the interactive shell (starts daemon automatically):"
+    echo "   ${BINARY_NAME} shell"
+    echo ""
+    echo "3. Or start the developer loop:"
     echo "   ${BINARY_NAME} dev"
     echo ""
-    echo "3. Or run a single mediated goal:"
+    echo "4. Or run a single mediated goal:"
     echo "   ${BINARY_NAME} run \"Fix the auth bug\" --source ."
     echo "   ${BINARY_NAME} draft view <id>"
     echo "   ${BINARY_NAME} draft approve <id>"

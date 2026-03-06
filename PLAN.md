@@ -2880,6 +2880,12 @@ agents:
    Result: WOULD AUTO-APPROVE
    ```
 
+9. **Status line: distinguish active vs tracked agents/goals**: The daemon `/api/status` endpoint currently counts all `GoalRun` entries with state `running` or `pr_ready`, including stale historical goals with no live process. This inflates the agent/goal count shown in `ta shell` and the Console. Fix:
+   - Add `active_agents` (goals with a live process or updated within the last hour) vs `total_tracked` (all non-terminal goals) to the status response
+   - Shell status line shows only active: `2 agents running` not `26 agents`
+   - `ta status --all` shows the full breakdown including stale entries
+   - Detection heuristic: if `updated_at` is older than `idle_timeout_secs` (from daemon config, default 30 min) and state is `running`, classify as stale
+
 #### Security Model
 
 - **Default: off** — auto-approval must be explicitly enabled. Fresh `ta init` projects start with `drafts.enabled: false`.
@@ -2900,6 +2906,61 @@ agents:
 - Tests: condition evaluation (each condition individually), path glob matching, tighten-only cascade, verification command execution, auto-apply flow, audit trail correctness
 
 #### Version: `0.9.8-alpha.1`
+
+---
+
+### v0.9.8.1.1 — Unified Allow/Deny List Pattern
+<!-- status: pending -->
+**Goal**: Standardize all allowlist/blocklist patterns across TA to support both allow and deny lists with consistent semantics: deny takes precedence over allow, empty allow = allow all, empty deny = deny nothing.
+
+#### Problem
+TA has multiple places that use allowlists or blocklists, each with slightly different semantics:
+- **Daemon command routing** (`config.rs`): `commands.allowed` only — no deny list
+- **Auto-approval paths** (`policy.yaml`): `allowed_paths` + `blocked_paths` (deny wins)
+- **Agent tool access**: implicit per-mode (full/plan/review-only) — no configurable lists
+- **Channel reviewer access**: `allowed_roles` / `allowed_users` — no deny
+- **Sandbox command allowlist** (`ta-sandbox`): allow-only
+
+These should share a common pattern.
+
+#### Design
+
+```rust
+/// Reusable allow/deny filter. Deny always takes precedence.
+pub struct AccessFilter {
+    pub allowed: Vec<String>,   // glob patterns; empty = allow all
+    pub denied: Vec<String>,    // glob patterns; empty = deny nothing
+}
+
+impl AccessFilter {
+    /// Returns true if the input is permitted.
+    /// Logic: if denied matches → false (always wins)
+    ///        if allowed is empty → true (allow all)
+    ///        if allowed matches → true
+    ///        else → false
+    pub fn permits(&self, input: &str) -> bool;
+}
+```
+
+#### Items
+
+1. **`AccessFilter` struct** in `ta-policy`: reusable allow/deny with glob matching and `permits()` method
+2. **Daemon command config**: Replace `commands.allowed: Vec<String>` with `commands: AccessFilter` (add `denied` field). Default: `allowed: ["*"]`, `denied: []`
+3. **Auto-approval paths**: Refactor `allowed_paths` / `blocked_paths` to use `AccessFilter` internally (keep YAML field names for backward compat)
+4. **Channel access control**: Add `denied_roles` / `denied_users` alongside existing `allowed_*` fields
+5. **Sandbox commands**: Add `denied` list to complement existing allowlist
+6. **Agent tool access**: Add configurable tool allow/deny per agent config in `agents/*.yaml`
+7. **Documentation**: Explain the unified pattern in USAGE.md — one mental model for all access control
+
+#### Implementation scope
+- `crates/ta-policy/src/access_filter.rs` — `AccessFilter` struct, glob matching, tests (~100 lines)
+- `crates/ta-daemon/src/config.rs` — migrate `CommandConfig.allowed` to `AccessFilter`
+- `crates/ta-policy/src/auto_approve.rs` — use `AccessFilter` for path matching
+- `crates/ta-sandbox/src/lib.rs` — use `AccessFilter` for command lists
+- Backward-compatible: existing configs with only `allowed` still work (empty `denied` = deny nothing)
+- Tests: deny-wins-over-allow, empty-allow-means-all, glob matching, backward compat
+
+#### Version: `0.9.8-alpha.1.1`
 
 ---
 
@@ -3081,6 +3142,40 @@ WorkflowCompleted { workflow_id, name, total_duration_secs, stages_executed, tim
 WorkflowFailed { workflow_id, name, reason, timestamp }
 ```
 
+11. **Interactive workflow interaction from `ta shell`**: When a workflow reaches an `AwaitHuman` stage action, the shell renders it as an interactive prompt the human can respond to in real time.
+    - **`await_human` per-stage config** in workflow YAML:
+      ```yaml
+      stages:
+        - name: planning
+          await_human: always     # always pause for human input before proceeding
+        - name: build
+          await_human: never      # fully automated
+        - name: review
+          await_human: on_fail    # pause only if verdicts fail the pass_threshold
+      ```
+      Values: `always` (pause after every stage completion), `never` (proceed automatically), `on_fail` (pause only when verdicts route back or score below threshold). Default: `never`.
+    - **`InteractionRequest` struct** (part of `AwaitHuman` action):
+      ```rust
+      pub struct InteractionRequest {
+          pub prompt: String,           // what the workflow is asking
+          pub context: serde_json::Value, // stage verdicts, scores, findings
+          pub options: Vec<String>,     // suggested choices (proceed, revise, cancel)
+          pub timeout_secs: Option<u64>, // auto-proceed after timeout (None = wait forever)
+      }
+      ```
+    - **Workflow interaction endpoint**: `POST /api/workflow/:id/input` — accepts `{ "decision": "proceed" | "revise" | "cancel", "feedback": "optional text" }`. The daemon routes the decision to the workflow engine's `inject_feedback()` method.
+    - **Workflow event for shell rendering**: `WorkflowAwaitingHuman { workflow_id, stage, prompt, options, timestamp }` — SSE event that the shell listens for and renders as an interactive prompt with numbered options. The human types their choice, shell POSTs to the interaction endpoint.
+    - **Shell-side UX**: When the shell receives a `workflow.awaiting_human` event, it renders:
+      ```
+      [workflow] Review stage paused — 2 findings need attention:
+        1. Security: SQL injection risk in user input handler (critical)
+        2. Style: Inconsistent error message format (minor)
+
+      Options: [1] proceed  [2] revise planning  [3] cancel workflow
+      workflow> _
+      ```
+      The `workflow>` prompt replaces the normal `ta>` prompt until the human responds. Normal shell commands still work (e.g., `ta draft view` to inspect the draft before deciding).
+
 #### Implementation scope
 - `crates/ta-workflow/` — new crate:
   - `src/lib.rs` — `WorkflowEngine` trait, `StageAction`, re-exports (~100 lines)
@@ -3089,13 +3184,16 @@ WorkflowFailed { workflow_id, name, reason, timestamp }
   - `src/yaml_engine.rs` — built-in YAML engine with DAG execution (~400 lines)
   - `src/process_engine.rs` — JSON-over-stdio plugin bridge (~150 lines)
   - `src/scorer.rs` — feedback scoring agent integration (~100 lines)
+  - `src/interaction.rs` — `InteractionRequest`, `InteractionResponse`, `AwaitHumanConfig` (~80 lines)
 - `crates/ta-goal/src/goal_run.rs` — add workflow_id, stage, role, context_from fields
-- `crates/ta-goal/src/events.rs` — workflow event variants
+- `crates/ta-goal/src/events.rs` — workflow event variants including `WorkflowAwaitingHuman`
 - `crates/ta-mcp-gateway/src/tools/workflow.rs` — `ta_workflow` MCP tool
+- `crates/ta-daemon/src/routes/` — `POST /api/workflow/:id/input` endpoint
 - `apps/ta-cli/src/commands/workflow.rs` — `ta workflow` CLI commands
+- `apps/ta-cli/src/commands/shell.rs` — workflow prompt rendering and interaction input handling
 - `templates/workflows/` — workflow definitions, role library, framework adapters
-- `docs/USAGE.md` — workflow engine docs, framework integration guide
-- Tests: YAML engine stage execution, verdict scoring, routing decisions, goal chaining context propagation, process plugin protocol, loop detection
+- `docs/USAGE.md` — workflow engine docs, framework integration guide, interactive workflow section
+- Tests: YAML engine stage execution, verdict scoring, routing decisions, goal chaining context propagation, process plugin protocol, loop detection, await_human interaction round-trip
 
 #### Version: `0.9.8-alpha.2`
 

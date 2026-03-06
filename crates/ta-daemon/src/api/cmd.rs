@@ -91,11 +91,13 @@ async fn run_command(
     working_dir: &std::path::Path,
     timeout: std::time::Duration,
 ) -> Result<CmdResponse, String> {
+    // Global args (--project-root, --accept-terms) must come before the subcommand.
     let result = tokio::time::timeout(timeout, async {
         tokio::process::Command::new(binary)
-            .args(args)
             .arg("--project-root")
             .arg(working_dir)
+            .arg("--accept-terms")
+            .args(args)
             .current_dir(working_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

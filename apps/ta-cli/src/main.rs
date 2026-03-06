@@ -62,8 +62,13 @@ enum Commands {
         command: commands::audit::AuditCommands,
     },
     /// Run an agent in a TA-mediated staging workspace.
+    ///
+    /// The title can be a phase ID (e.g., "v0.9.8.1" or "0.9.8.1") — TA will
+    /// look up the phase title from PLAN.md automatically and set --phase.
     Run {
-        /// Goal title describing what to accomplish.
+        /// Goal title or plan phase ID (e.g., "v0.9.8.1").
+        /// If this matches a phase in PLAN.md, the title and --phase are
+        /// filled in automatically.
         title: Option<String>,
         /// Agent system to use (claude-code, codex, etc.).
         #[arg(long, default_value = "claude-code")]
@@ -203,6 +208,73 @@ const fn long_version() -> &'static str {
     )
 }
 
+/// Resolve a phase ID from the positional title argument.
+///
+/// If the title looks like a phase ID (e.g., "v0.9.8.1", "0.9.8.1",
+/// "phase 0.9.8.1"), look it up in PLAN.md and return the full phase
+/// title + phase ID. Otherwise, return the original title and phase.
+fn resolve_phase_title(
+    title: &Option<String>,
+    phase: &Option<String>,
+    project_root: &std::path::Path,
+) -> (Option<String>, Option<String>) {
+    let raw = match title.as_deref() {
+        Some(t) => t.trim(),
+        None => {
+            // No title at all — if --phase is set, try to resolve from that.
+            return match phase {
+                Some(p) => match try_resolve_phase(p.trim(), project_root) {
+                    Some((t, id)) => (Some(t), Some(id)),
+                    None => (None, Some(p.clone())),
+                },
+                None => (None, None),
+            };
+        }
+    };
+
+    // Strip optional "phase " prefix (case-insensitive).
+    let candidate = raw
+        .strip_prefix("phase ")
+        .or_else(|| raw.strip_prefix("Phase "))
+        .unwrap_or(raw);
+
+    // Check if it looks like a phase ID (starts with optional 'v', then digits and dots).
+    let is_phase_like = {
+        let c = candidate.strip_prefix('v').unwrap_or(candidate);
+        !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+    };
+
+    if is_phase_like {
+        if let Some((resolved_title, phase_id)) = try_resolve_phase(candidate, project_root) {
+            return (Some(resolved_title), Some(phase_id));
+        }
+    }
+
+    // Not a phase ID — pass through as-is.
+    (Some(raw.to_string()), phase.clone())
+}
+
+/// Try to find a phase in PLAN.md by ID (with or without 'v' prefix).
+fn try_resolve_phase(
+    candidate: &str,
+    project_root: &std::path::Path,
+) -> Option<(String, String)> {
+    let phases = commands::plan::load_plan(project_root).ok()?;
+
+    // Try exact match, then with/without 'v' prefix.
+    let stripped = candidate.strip_prefix('v').unwrap_or(candidate);
+    let with_v = format!("v{}", stripped);
+
+    let phase = phases.iter().find(|p| {
+        p.id == candidate
+            || p.id == stripped
+            || p.id == with_v
+    })?;
+
+    let title = format!("Implement {} — {}", phase.id, phase.title);
+    Some((title, phase.id.clone()))
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -259,22 +331,29 @@ fn main() -> anyhow::Result<()> {
             resume,
             headless,
             goal_id,
-        } => commands::run::execute(
-            &config,
-            title.as_deref(),
-            agent,
-            source.as_deref(),
-            objective,
-            phase.as_deref(),
-            follow_up.as_ref(),
-            objective_file.as_deref(),
-            *no_launch,
-            *interactive,
-            *macro_goal,
-            resume.as_deref(),
-            *headless,
-            goal_id.as_deref(),
-        ),
+        } => {
+            // Phase-aware title resolution: if the positional title looks like
+            // a phase ID (e.g., "v0.9.8.1", "0.9.8.1", "phase 0.9.8.1"),
+            // look it up in PLAN.md and use the phase title + set --phase.
+            let (resolved_title, resolved_phase) =
+                resolve_phase_title(title, phase, &project_root);
+            commands::run::execute(
+                &config,
+                resolved_title.as_deref(),
+                agent,
+                source.as_deref(),
+                objective,
+                resolved_phase.as_deref(),
+                follow_up.as_ref(),
+                objective_file.as_deref(),
+                *no_launch,
+                *interactive,
+                *macro_goal,
+                resume.as_deref(),
+                *headless,
+                goal_id.as_deref(),
+            )
+        }
         Commands::Events { command } => commands::events::execute(command, &config),
         Commands::Token { command } => commands::token::execute(command, &config),
         Commands::Dev {

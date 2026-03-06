@@ -28,3 +28,12 @@ test-crate CRATE:
 
 # Verify everything before committing (format, lint, build, test)
 verify: check build test
+
+# Build and launch the TA shell (starts daemon automatically)
+shell *ARGS:
+    cargo build --bin ta-daemon --bin ta
+    ./scripts/ta-shell.sh --no-build {{ARGS}}
+
+# Start the daemon in API mode (no shell)
+daemon *ARGS:
+    cargo run --bin ta-daemon -- --api {{ARGS}}
