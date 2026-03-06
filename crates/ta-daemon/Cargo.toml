@@ -1,8 +1,8 @@
 [package]
 name = "ta-daemon"
-version = "0.7.5-alpha"
+version = "0.9.7-alpha"
 edition = "2021"
-description = "MCP server daemon for Trusted Autonomy"
+description = "MCP server daemon and HTTP API for Trusted Autonomy"
 license = "Apache-2.0"
 
 [dependencies]
@@ -10,6 +10,7 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 rmcp = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -18,11 +19,16 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
+toml = { workspace = true }
+rand = { workspace = true }
+async-stream = { workspace = true }
 
 # Internal crates
 ta-mcp-gateway = { path = "../ta-mcp-gateway" }
 ta-changeset = { path = "../ta-changeset" }
 ta-memory = { path = "../ta-memory" }
+ta-events = { path = "../ta-events" }
+ta-goal = { path = "../ta-goal" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

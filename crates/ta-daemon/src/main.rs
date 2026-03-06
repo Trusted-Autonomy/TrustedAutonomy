@@ -1,17 +1,18 @@
 //! # ta-daemon
 //!
-//! Trusted Autonomy MCP server daemon.
+//! Trusted Autonomy MCP server daemon and HTTP API.
 //!
 //! Starts an MCP server on stdio that Claude Code (or any MCP client)
 //! connects to. All agent tool calls flow through the gateway's policy
 //! engine, staging workspace, and audit log.
 //!
-//! Optionally serves a web review UI at `--web-port <port>` for
-//! browser-based draft review.
+//! Additionally serves a full HTTP API (v0.9.7) that any interface
+//! (terminal, web, Discord, Slack, email) can connect to for commands,
+//! agent conversations, and event streams.
 //!
 //! ## Usage
 //!
-//! Typically started automatically by the MCP client via `.mcp.json`:
+//! MCP mode (default — started by MCP client via `.mcp.json`):
 //! ```json
 //! {
 //!   "mcpServers": {
@@ -23,7 +24,15 @@
 //!   }
 //! }
 //! ```
+//!
+//! API mode (`--api`):
+//! ```sh
+//! ta-daemon --api                    # Starts HTTP API on 127.0.0.1:7700
+//! ta-daemon --api --web-port 8080    # Also serves web UI on port 8080
+//! ```
 
+mod api;
+mod config;
 mod web;
 
 use anyhow::Result;
@@ -34,9 +43,12 @@ use tracing_subscriber::EnvFilter;
 
 use ta_mcp_gateway::{GatewayConfig, TaGatewayServer};
 
-/// Trusted Autonomy MCP server.
+/// Trusted Autonomy MCP server and HTTP API daemon.
 #[derive(Parser)]
-#[command(name = "ta-daemon", about = "Trusted Autonomy MCP server")]
+#[command(
+    name = "ta-daemon",
+    about = "Trusted Autonomy MCP server and HTTP API daemon"
+)]
 struct Cli {
     /// Project root directory (defaults to current directory).
     #[arg(long, default_value = ".")]
@@ -46,6 +58,11 @@ struct Cli {
     /// dashboard for reviewing draft packages.
     #[arg(long)]
     web_port: Option<u16>,
+
+    /// Run in API server mode instead of MCP stdio mode.
+    /// Starts the full HTTP API on the configured bind address and port.
+    #[arg(long)]
+    api: bool,
 }
 
 #[tokio::main]
@@ -64,34 +81,68 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let project_root = cli.project_root.canonicalize()?;
 
-    tracing::info!("Starting Trusted Autonomy MCP server");
+    tracing::info!("Starting Trusted Autonomy daemon");
     tracing::info!("Project root: {}", project_root.display());
 
-    let config = GatewayConfig::for_project(&project_root);
-    let pr_packages_dir = config.pr_packages_dir.clone();
-    let web_port = cli.web_port.or(config.web_ui_port);
+    // Load daemon configuration.
+    let daemon_config = config::DaemonConfig::load(&project_root);
 
-    let server = TaGatewayServer::new(config)?;
+    if cli.api {
+        // API server mode: start the full HTTP API.
+        tracing::info!("Running in API server mode");
 
-    tracing::info!("MCP server ready, waiting for client connection");
+        // Optionally also serve the legacy web UI on a separate port.
+        if let Some(web_port) = cli.web_port {
+            let gateway_config = GatewayConfig::for_project(&project_root);
+            let dir = gateway_config.pr_packages_dir.clone();
+            tokio::spawn(async move {
+                if let Err(e) = web::serve_web_ui(dir, web_port).await {
+                    tracing::error!("Web UI server error: {}", e);
+                }
+            });
+        }
 
-    // Spawn optional web UI server.
-    if let Some(port) = web_port {
-        let dir = pr_packages_dir.clone();
-        tokio::spawn(async move {
-            if let Err(e) = web::serve_web_ui(dir, port).await {
-                tracing::error!("Web UI server error: {}", e);
-            }
-        });
+        web::serve_daemon_api(project_root, daemon_config).await?;
+    } else {
+        // MCP stdio mode (default): backward-compatible with existing setup.
+        let gateway_config = GatewayConfig::for_project(&project_root);
+        let pr_packages_dir = gateway_config.pr_packages_dir.clone();
+        let web_port = cli.web_port.or(gateway_config.web_ui_port);
+
+        let server = TaGatewayServer::new(gateway_config)?;
+
+        tracing::info!("MCP server ready, waiting for client connection");
+
+        // Spawn optional web UI server.
+        if let Some(port) = web_port {
+            let dir = pr_packages_dir.clone();
+            tokio::spawn(async move {
+                if let Err(e) = web::serve_web_ui(dir, port).await {
+                    tracing::error!("Web UI server error: {}", e);
+                }
+            });
+        }
+
+        // Spawn the daemon API alongside MCP if configured.
+        {
+            let root = project_root.clone();
+            let dc = daemon_config.clone();
+            tokio::spawn(async move {
+                if let Err(e) = web::serve_daemon_api(root, dc).await {
+                    tracing::error!("Daemon API error: {}", e);
+                }
+            });
+        }
+
+        let service = server
+            .serve(rmcp::transport::stdio())
+            .await
+            .inspect_err(|e| tracing::error!("serving error: {:?}", e))?;
+
+        service.waiting().await?;
+
+        tracing::info!("MCP server shutting down");
     }
 
-    let service = server
-        .serve(rmcp::transport::stdio())
-        .await
-        .inspect_err(|e| tracing::error!("serving error: {:?}", e))?;
-
-    service.waiting().await?;
-
-    tracing::info!("MCP server shutting down");
     Ok(())
 }

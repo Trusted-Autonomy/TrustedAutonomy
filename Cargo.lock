@@ -100,6 +100,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2321,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.9.6-alpha"
+version = "0.9.7-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2412,20 +2434,26 @@ dependencies = [
 
 [[package]]
 name = "ta-daemon"
-version = "0.7.5-alpha"
+version = "0.9.7-alpha"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum",
  "chrono",
  "clap",
+ "rand 0.8.5",
  "rmcp",
  "serde",
  "serde_json",
  "ta-changeset",
+ "ta-events",
+ "ta-goal",
  "ta-mcp-gateway",
  "ta-memory",
  "tempfile",
  "tokio",
+ "tokio-stream",
+ "toml",
  "tower",
  "tower-http",
  "tracing",
@@ -2711,6 +2739,18 @@ checksum = "c28327cf380ac148141087fbfb9de9d7bd4e84ab5d2c28fbc911d753de8a7081"
 dependencies = [
  "rustls",
  "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32da49809aab5c3bc678af03902d4ccddea2a87d028d86392a4b1560c6906c70"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

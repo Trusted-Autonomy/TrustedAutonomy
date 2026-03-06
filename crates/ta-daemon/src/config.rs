@@ -1,0 +1,428 @@
+// config.rs — Daemon configuration from `.ta/daemon.toml`.
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// Top-level daemon configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    pub server: ServerConfig,
+    pub auth: AuthConfig,
+    pub commands: CommandConfig,
+    pub agent: AgentConfig,
+    pub routing: RoutingConfig,
+}
+
+impl DaemonConfig {
+    /// Load config from `.ta/daemon.toml`, falling back to defaults.
+    pub fn load(project_root: &Path) -> Self {
+        let config_path = project_root.join(".ta").join("daemon.toml");
+        if config_path.exists() {
+            match std::fs::read_to_string(&config_path) {
+                Ok(content) => match toml::from_str(&content) {
+                    Ok(config) => return config,
+                    Err(e) => {
+                        tracing::warn!("Invalid daemon.toml, using defaults: {}", e);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Cannot read daemon.toml, using defaults: {}", e);
+                }
+            }
+        }
+        Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    pub bind: String,
+    pub port: u16,
+    pub cors_origins: Vec<String>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind: "127.0.0.1".to_string(),
+            port: 7700,
+            cors_origins: vec!["*".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    pub require_token: bool,
+    pub local_bypass: bool,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            require_token: false,
+            local_bypass: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandConfig {
+    pub allowed: Vec<String>,
+    pub write_commands: Vec<String>,
+    pub timeout_secs: u64,
+}
+
+impl Default for CommandConfig {
+    fn default() -> Self {
+        Self {
+            allowed: vec![
+                "ta draft *".to_string(),
+                "ta goal *".to_string(),
+                "ta plan *".to_string(),
+                "ta status".to_string(),
+                "ta context *".to_string(),
+            ],
+            write_commands: vec![
+                "ta draft approve *".to_string(),
+                "ta draft deny *".to_string(),
+                "ta draft apply *".to_string(),
+                "ta goal start *".to_string(),
+            ],
+            timeout_secs: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    pub max_sessions: usize,
+    pub idle_timeout_secs: u64,
+    pub default_agent: String,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_sessions: 3,
+            idle_timeout_secs: 3600,
+            default_agent: "claude-code".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoutingConfig {
+    pub use_shell_config: bool,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            use_shell_config: true,
+        }
+    }
+}
+
+/// Routing configuration from `.ta/shell.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellConfig {
+    #[serde(default)]
+    pub routes: Vec<RouteEntry>,
+    #[serde(default)]
+    pub shortcuts: Vec<ShortcutEntry>,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            routes: vec![
+                RouteEntry {
+                    prefix: "ta ".to_string(),
+                    command: "ta".to_string(),
+                    args: vec![],
+                    strip_prefix: true,
+                },
+                RouteEntry {
+                    prefix: "git ".to_string(),
+                    command: "git".to_string(),
+                    args: vec![],
+                    strip_prefix: true,
+                },
+                RouteEntry {
+                    prefix: "!".to_string(),
+                    command: "sh".to_string(),
+                    args: vec!["-c".to_string()],
+                    strip_prefix: true,
+                },
+            ],
+            shortcuts: vec![
+                ShortcutEntry {
+                    r#match: "approve".to_string(),
+                    expand: "ta draft approve".to_string(),
+                },
+                ShortcutEntry {
+                    r#match: "deny".to_string(),
+                    expand: "ta draft deny".to_string(),
+                },
+                ShortcutEntry {
+                    r#match: "view".to_string(),
+                    expand: "ta draft view".to_string(),
+                },
+                ShortcutEntry {
+                    r#match: "apply".to_string(),
+                    expand: "ta draft apply".to_string(),
+                },
+                ShortcutEntry {
+                    r#match: "status".to_string(),
+                    expand: "ta status".to_string(),
+                },
+                ShortcutEntry {
+                    r#match: "plan".to_string(),
+                    expand: "ta plan list".to_string(),
+                },
+                ShortcutEntry {
+                    r#match: "goals".to_string(),
+                    expand: "ta goal list".to_string(),
+                },
+                ShortcutEntry {
+                    r#match: "drafts".to_string(),
+                    expand: "ta draft list".to_string(),
+                },
+            ],
+        }
+    }
+}
+
+impl ShellConfig {
+    /// Load from `.ta/shell.toml`, falling back to defaults.
+    pub fn load(project_root: &Path) -> Self {
+        let config_path = project_root.join(".ta").join("shell.toml");
+        if config_path.exists() {
+            match std::fs::read_to_string(&config_path) {
+                Ok(content) => match toml::from_str(&content) {
+                    Ok(config) => return config,
+                    Err(e) => {
+                        tracing::warn!("Invalid shell.toml, using defaults: {}", e);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Cannot read shell.toml, using defaults: {}", e);
+                }
+            }
+        }
+        Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteEntry {
+    pub prefix: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub strip_prefix: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShortcutEntry {
+    pub r#match: String,
+    pub expand: String,
+}
+
+/// Token record stored in `.ta/daemon-tokens.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRecord {
+    pub token: String,
+    pub scope: TokenScope,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub label: Option<String>,
+}
+
+/// Token permission scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenScope {
+    Read,
+    Write,
+    Admin,
+}
+
+impl TokenScope {
+    pub fn allows_write(&self) -> bool {
+        matches!(self, Self::Write | Self::Admin)
+    }
+
+    #[allow(dead_code)]
+    pub fn allows_admin(&self) -> bool {
+        matches!(self, Self::Admin)
+    }
+}
+
+/// Manages bearer tokens stored in `.ta/daemon-tokens.json`.
+pub struct TokenStore {
+    tokens_path: PathBuf,
+}
+
+impl TokenStore {
+    pub fn new(project_root: &Path) -> Self {
+        Self {
+            tokens_path: project_root.join(".ta").join("daemon-tokens.json"),
+        }
+    }
+
+    /// Load all tokens from disk.
+    pub fn load(&self) -> Vec<TokenRecord> {
+        if !self.tokens_path.exists() {
+            return vec![];
+        }
+        match std::fs::read_to_string(&self.tokens_path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => vec![],
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn save(&self, tokens: &[TokenRecord]) -> std::io::Result<()> {
+        if let Some(parent) = self.tokens_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(tokens)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        std::fs::write(&self.tokens_path, json)
+    }
+
+    #[allow(dead_code)]
+    pub fn create(&self, scope: TokenScope, label: Option<String>) -> std::io::Result<TokenRecord> {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; 32] = rng.gen();
+        let token = format!("ta_{}", hex_encode(&bytes));
+
+        let record = TokenRecord {
+            token,
+            scope,
+            created_at: chrono::Utc::now(),
+            label,
+        };
+
+        let mut tokens = self.load();
+        tokens.push(record.clone());
+        self.save(&tokens)?;
+
+        Ok(record)
+    }
+
+    /// Validate a token string and return its record if valid.
+    pub fn validate(&self, token: &str) -> Option<TokenRecord> {
+        self.load().into_iter().find(|t| t.token == token)
+    }
+
+    #[allow(dead_code)]
+    pub fn revoke(&self, token: &str) -> std::io::Result<bool> {
+        let mut tokens = self.load();
+        let len_before = tokens.len();
+        tokens.retain(|t| t.token != token);
+        if tokens.len() < len_before {
+            self.save(&tokens)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_daemon_config() {
+        let config = DaemonConfig::default();
+        assert_eq!(config.server.port, 7700);
+        assert_eq!(config.server.bind, "127.0.0.1");
+        assert!(!config.auth.require_token);
+        assert!(config.auth.local_bypass);
+        assert_eq!(config.commands.timeout_secs, 30);
+        assert_eq!(config.agent.max_sessions, 3);
+    }
+
+    #[test]
+    fn default_shell_config() {
+        let config = ShellConfig::default();
+        assert!(!config.routes.is_empty());
+        assert!(!config.shortcuts.is_empty());
+        assert_eq!(config.routes[0].prefix, "ta ");
+        assert_eq!(config.shortcuts[0].r#match, "approve");
+    }
+
+    #[test]
+    fn daemon_config_roundtrip() {
+        let config = DaemonConfig::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: DaemonConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.server.port, config.server.port);
+    }
+
+    #[test]
+    fn shell_config_roundtrip() {
+        let config = ShellConfig::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: ShellConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.routes.len(), config.routes.len());
+    }
+
+    #[test]
+    fn token_scope_permissions() {
+        assert!(!TokenScope::Read.allows_write());
+        assert!(TokenScope::Write.allows_write());
+        assert!(TokenScope::Admin.allows_write());
+        assert!(!TokenScope::Read.allows_admin());
+        assert!(!TokenScope::Write.allows_admin());
+        assert!(TokenScope::Admin.allows_admin());
+    }
+
+    #[test]
+    fn token_store_create_validate_revoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+
+        let store = TokenStore::new(dir.path());
+
+        // Create a token.
+        let record = store.create(TokenScope::Read, Some("test".into())).unwrap();
+        assert!(record.token.starts_with("ta_"));
+
+        // Validate it.
+        let found = store.validate(&record.token);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().scope, TokenScope::Read);
+
+        // Validate unknown token.
+        assert!(store.validate("bogus").is_none());
+
+        // Revoke it.
+        assert!(store.revoke(&record.token).unwrap());
+        assert!(store.validate(&record.token).is_none());
+    }
+
+    #[test]
+    fn load_nonexistent_config() {
+        let config = DaemonConfig::load(Path::new("/nonexistent"));
+        assert_eq!(config.server.port, 7700);
+    }
+}

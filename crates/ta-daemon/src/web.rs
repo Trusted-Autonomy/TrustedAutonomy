@@ -372,7 +372,8 @@ fn update_draft_status(
 
 // ── Router and server ───────────────────────────────────────────
 
-/// Build the Axum router for the web review UI.
+/// Build the legacy web review UI router (draft/memory routes only).
+/// Used by tests that don't need the full daemon API.
 pub fn build_router(pr_packages_dir: PathBuf) -> Router {
     // Derive memory_dir from pr_packages_dir: sibling directory under .ta/
     let memory_dir = pr_packages_dir
@@ -385,6 +386,11 @@ pub fn build_router(pr_packages_dir: PathBuf) -> Router {
         memory_dir,
     });
 
+    build_web_routes(state)
+}
+
+/// Build web UI routes with the given state.
+fn build_web_routes(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/manifest.json", get(manifest))
@@ -402,11 +408,47 @@ pub fn build_router(pr_packages_dir: PathBuf) -> Router {
         .with_state(state)
 }
 
-/// Start the web review UI server.
+/// Build the combined router: web UI routes + full daemon API (v0.9.7).
+pub fn build_full_router(
+    project_root: std::path::PathBuf,
+    daemon_config: crate::config::DaemonConfig,
+) -> Router {
+    let app_state = Arc::new(crate::api::AppState::new(project_root, daemon_config));
+
+    // Web UI routes use their own state (legacy).
+    let web_state = Arc::new(WebState {
+        pr_packages_dir: app_state.pr_packages_dir.clone(),
+        memory_dir: app_state.memory_dir.clone(),
+    });
+
+    let web_routes = build_web_routes(web_state);
+    let api_routes = crate::api::build_api_router(app_state);
+
+    // Merge: API routes take precedence, web routes fill in the rest.
+    api_routes.merge(web_routes)
+}
+
+/// Start the web review UI server (legacy — draft/memory only).
 pub async fn serve_web_ui(pr_packages_dir: PathBuf, port: u16) -> anyhow::Result<()> {
     let app = build_router(pr_packages_dir);
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
     tracing::info!("Web review UI listening on http://127.0.0.1:{}", port);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Start the full daemon API server (v0.9.7).
+pub async fn serve_daemon_api(
+    project_root: std::path::PathBuf,
+    daemon_config: crate::config::DaemonConfig,
+) -> anyhow::Result<()> {
+    let bind = format!(
+        "{}:{}",
+        daemon_config.server.bind, daemon_config.server.port
+    );
+    let app = build_full_router(project_root, daemon_config);
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    tracing::info!("Daemon API listening on http://{}", bind);
     axum::serve(listener, app).await?;
     Ok(())
 }

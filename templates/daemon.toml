@@ -1,0 +1,26 @@
+# Trusted Autonomy Daemon Configuration
+# Place this file at .ta/daemon.toml in your project root.
+
+[server]
+bind = "127.0.0.1"       # Use "0.0.0.0" for remote access
+port = 7700
+cors_origins = ["*"]      # Restrict in production
+
+[auth]
+require_token = false      # Set true for remote access
+local_bypass = true        # Skip auth for 127.0.0.1 connections
+
+[commands]
+# Allowlist for /api/cmd (glob patterns — "ta draft *" matches any draft subcommand)
+allowed = ["ta draft *", "ta goal *", "ta plan *", "ta status", "ta context *"]
+# Commands that require write scope
+write_commands = ["ta draft approve *", "ta draft deny *", "ta draft apply *", "ta goal start *"]
+timeout_secs = 30
+
+[agent]
+max_sessions = 3           # Concurrent agent sessions
+idle_timeout_secs = 3600   # Kill idle sessions after 1 hour
+default_agent = "claude-code"
+
+[routing]
+use_shell_config = true    # Use .ta/shell.toml for command vs agent routing

@@ -1,6 +1,6 @@
 [package]
 name = "ta-cli"
-version = "0.9.6-alpha"
+version = "0.9.7-alpha"
 edition = "2021"
 description = "CLI for goals, PR review, and approvals in Trusted Autonomy"
 license = "Apache-2.0"

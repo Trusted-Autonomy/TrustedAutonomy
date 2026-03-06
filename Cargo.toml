@@ -76,5 +76,15 @@ libc = "0.2"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 
+# TOML config parsing — used for daemon.toml and shell.toml (v0.9.7).
+toml = "0.8"
+
+# Random number generation — used for auth token generation (v0.9.7).
+rand = "0.8"
+
+# Stream utilities — used for SSE event streams (v0.9.7).
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-stream = "0.3"
+
 # Testing utilities
 tempfile = "3"

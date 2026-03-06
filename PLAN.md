@@ -2342,7 +2342,7 @@ passing the cursor from the previous response returns only *new* events. Add a t
 ---
 
 ### v0.9.7 — Daemon API Expansion
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Promote the TA daemon from a draft-review web UI to a full API server that any interface (terminal, web, Discord, Slack, email) can connect to for commands, agent conversations, and event streams.
 
 #### Architecture
@@ -2542,6 +2542,28 @@ passing the cursor from the previous response returns only *new* events. Add a t
    - `POST /api/input` — unified endpoint: daemon checks routing table, dispatches to `/api/cmd` or `/api/agent/ask` accordingly. Clients don't need to know the routing rules — they just send the raw input.
 
 9. **Unix socket for local clients**: In addition to HTTP, the daemon listens on `.ta/daemon.sock` (Unix domain socket). Local clients (`ta shell`, web UI) connect here for zero-config, zero-auth, low-latency access. Remote clients use HTTP with bearer token auth.
+
+#### Completed
+- [x] Command execution API (`POST /api/cmd`) with allowlist validation, write scope enforcement, configurable timeout
+- [x] Agent session API (`/api/agent/start`, `/api/agent/ask`, `/api/agent/sessions`, `DELETE /api/agent/:id`) with session lifecycle management and max session limits
+- [x] SSE event stream API (`GET /api/events`) with cursor-based replay (`?since=`) and event type filtering (`?types=`)
+- [x] Project status API (`GET /api/status`) with JSON dashboard (project, version, phase, agents, drafts, events)
+- [x] Bearer token authentication middleware with scopes (read/write/admin), local bypass for 127.0.0.1
+- [x] Token store (`TokenStore`) with create/validate/revoke persisted in `.ta/daemon-tokens.json`
+- [x] Daemon configuration (`.ta/daemon.toml`) with server, auth, commands, agent, routing sections
+- [x] Configurable input routing (`.ta/shell.toml`) with prefix-based routes and shortcut expansion
+- [x] Unified input endpoint (`POST /api/input`) dispatching to cmd or agent via routing table
+- [x] Route listing endpoint (`GET /api/routes`) for tab completion
+- [x] Combined router merging new API routes with existing draft/memory web UI routes
+- [x] API-only mode (`--api` flag) and co-hosted MCP+API mode
+- [x] Default template files (`templates/daemon.toml`, `templates/shell.toml`)
+- [x] Version bumps: ta-daemon 0.9.7-alpha, ta-cli 0.9.7-alpha
+- [x] 35 tests: config roundtrip, token CRUD, session lifecycle/limits, input routing, glob matching, status parsing, auth scopes
+
+#### Remaining (deferred)
+- Unix domain socket listener (`.ta/daemon.sock`) — deferred until `ta shell` (v0.9.8) needs it
+- Full headless agent subprocess wiring in `/api/agent/ask` — deferred until `ta shell` provides client-side rendering
+- Bridge template updates (`discord-bridge-api.js`, `slack-bridge-api.js`) — deferred to channel phases (v0.10.x)
 
 #### Version: `0.9.7-alpha`
 

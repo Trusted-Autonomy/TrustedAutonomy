@@ -1,0 +1,59 @@
+# Trusted Autonomy Shell Routing Configuration
+# Place this file at .ta/shell.toml in your project root.
+#
+# Routes: prefix -> command execution
+# Anything not matching a route goes to the agent.
+
+[[routes]]
+prefix = "ta "
+command = "ta"
+strip_prefix = true
+
+[[routes]]
+prefix = "git "
+command = "git"
+strip_prefix = true
+
+[[routes]]
+prefix = "cargo "
+command = "./dev cargo"    # Project's nix wrapper
+strip_prefix = true
+
+[[routes]]
+prefix = "!"               # Shell escape: "!ls -la" -> runs "ls -la"
+command = "sh"
+args = ["-c"]
+strip_prefix = true
+
+# Shortcuts: keyword -> expanded command
+[[shortcuts]]
+match = "approve"
+expand = "ta draft approve"
+
+[[shortcuts]]
+match = "deny"
+expand = "ta draft deny"
+
+[[shortcuts]]
+match = "view"
+expand = "ta draft view"
+
+[[shortcuts]]
+match = "apply"
+expand = "ta draft apply"
+
+[[shortcuts]]
+match = "status"
+expand = "ta status"
+
+[[shortcuts]]
+match = "plan"
+expand = "ta plan list"
+
+[[shortcuts]]
+match = "goals"
+expand = "ta goal list"
+
+[[shortcuts]]
+match = "drafts"
+expand = "ta draft list"

@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.9.4-alpha
+**Version**: v0.9.7-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -46,6 +46,7 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [Credential Management](#credential-management)
    - [Context Memory](#context-memory)
    - [Web Review UI](#web-review-ui)
+   - [Daemon API](#daemon-api)
    - [Webhook Review Channel](#webhook-review-channel)
    - [MCP Tool Call Interception](#mcp-tool-call-interception)
    - [Session Lifecycle](#session-lifecycle)
@@ -1377,6 +1378,133 @@ You can also set the port in your gateway config so it starts automatically:
 # .ta/workflow.toml or gateway config
 [gateway]
 web_ui_port = 7676
+```
+
+### Daemon API
+
+The TA daemon exposes a full HTTP API that any interface (terminal, web, Discord, Slack, email) can connect to for commands, agent conversations, and event streams.
+
+#### Starting the API
+
+```bash
+# API mode (standalone HTTP server)
+ta-daemon --api --project-root .
+
+# MCP mode also starts the API server on port 7700
+ta-daemon --project-root .
+```
+
+The API listens on `127.0.0.1:7700` by default. Configure via `.ta/daemon.toml`:
+
+```toml
+[server]
+bind = "127.0.0.1"
+port = 7700
+cors_origins = ["*"]
+```
+
+#### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/cmd` | Execute a `ta` CLI command |
+| `GET` | `/api/status` | Project dashboard (JSON) |
+| `GET` | `/api/events` | SSE event stream |
+| `POST` | `/api/input` | Unified input with routing |
+| `GET` | `/api/routes` | Route table (for tab completion) |
+| `POST` | `/api/agent/start` | Start an agent session |
+| `POST` | `/api/agent/ask` | Send a prompt to an agent |
+| `GET` | `/api/agent/sessions` | List agent sessions |
+| `DELETE` | `/api/agent/:id` | Stop an agent session |
+
+Plus the existing draft and memory endpoints (`/api/drafts/*`, `/api/memory/*`).
+
+#### Command Execution
+
+```bash
+curl -X POST http://127.0.0.1:7700/api/cmd \
+  -H "Content-Type: application/json" \
+  -d '{"command": "ta draft list"}'
+```
+
+Response:
+```json
+{"exit_code": 0, "stdout": "...", "stderr": ""}
+```
+
+Commands are validated against an allowlist in `.ta/daemon.toml`. Write commands (approve, deny, apply) require write scope.
+
+#### Event Stream
+
+Subscribe to real-time events via Server-Sent Events:
+
+```bash
+# Stream all events
+curl -N http://127.0.0.1:7700/api/events
+
+# Replay from a cursor
+curl -N "http://127.0.0.1:7700/api/events?since=2024-01-01T00:00:00Z"
+
+# Filter by event type
+curl -N "http://127.0.0.1:7700/api/events?types=draft_built,goal_completed"
+```
+
+#### Unified Input
+
+The `/api/input` endpoint routes text through the routing table (`.ta/shell.toml`). Input matching a route prefix runs as a command; everything else goes to the agent:
+
+```bash
+# This gets routed to /api/cmd (matches "ta " prefix)
+curl -X POST http://127.0.0.1:7700/api/input \
+  -H "Content-Type: application/json" \
+  -d '{"text": "ta draft list"}'
+
+# This gets routed to the agent (no prefix match)
+curl -X POST http://127.0.0.1:7700/api/input \
+  -H "Content-Type: application/json" \
+  -d '{"text": "What should we work on next?", "session_id": "sess-abc123"}'
+```
+
+Shortcuts expand automatically: `"approve abc123"` becomes `"ta draft approve abc123"`.
+
+#### Authentication
+
+For remote access, enable token authentication:
+
+```toml
+# .ta/daemon.toml
+[auth]
+require_token = true
+local_bypass = true   # 127.0.0.1 connections skip auth
+```
+
+Tokens are stored in `.ta/daemon-tokens.json`. Pass them via the `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer ta_..." http://your-server:7700/api/status
+```
+
+Token scopes: `read` (status, list, events), `write` (approve, deny, agent), `admin` (config, tokens).
+
+#### Input Routing
+
+Customize how input is routed in `.ta/shell.toml`:
+
+```toml
+[[routes]]
+prefix = "ta "
+command = "ta"
+strip_prefix = true
+
+[[routes]]
+prefix = "!"           # Shell escape
+command = "sh"
+args = ["-c"]
+strip_prefix = true
+
+[[shortcuts]]
+match = "approve"
+expand = "ta draft approve"
 ```
 
 ### Webhook Review Channel
