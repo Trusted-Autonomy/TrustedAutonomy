@@ -1,4 +1,4 @@
-// api/agent.rs — Agent session management API.
+// api/agent.rs — Agent session management with real subprocess execution.
 //
 // Manages headless agent subprocesses that persist across requests.
 // The daemon owns the agent's lifecycle.
@@ -32,6 +32,8 @@ pub struct AgentSession {
     pub status: SessionStatus,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_active: chrono::DateTime<chrono::Utc>,
+    /// Number of prompts sent in this session.
+    pub prompt_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,7 @@ impl AgentSessionManager {
             status: SessionStatus::Running,
             created_at: now,
             last_active: now,
+            prompt_count: 0,
         };
 
         sessions.insert(session_id, session.clone());
@@ -85,6 +88,23 @@ impl AgentSessionManager {
 
     pub async fn get_session(&self, session_id: &str) -> Option<AgentSession> {
         self.sessions.lock().await.get(session_id).cloned()
+    }
+
+    /// Get or create a default session for implicit agent access.
+    pub async fn get_or_create_default(&self, default_agent: &str) -> Result<AgentSession, String> {
+        let sessions = self.sessions.lock().await;
+
+        // Find first running session.
+        if let Some(session) = sessions
+            .values()
+            .find(|s| s.status == SessionStatus::Running)
+        {
+            return Ok(session.clone());
+        }
+        drop(sessions);
+
+        // No running session — create one.
+        self.create_session(default_agent.to_string()).await
     }
 
     pub async fn list_sessions(&self) -> Vec<AgentSession> {
@@ -105,6 +125,7 @@ impl AgentSessionManager {
         let mut sessions = self.sessions.lock().await;
         if let Some(session) = sessions.get_mut(session_id) {
             session.last_active = chrono::Utc::now();
+            session.prompt_count += 1;
         }
     }
 }
@@ -126,7 +147,6 @@ pub struct StartSessionResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct AskRequest {
     pub session_id: String,
     pub prompt: String,
@@ -174,10 +194,9 @@ pub async fn start_session(
 
 /// `POST /api/agent/ask` — Send a prompt to an agent session.
 ///
-/// In this initial implementation, the daemon acknowledges the prompt.
-/// Full agent subprocess integration (launching headless claude-code, streaming
-/// responses via SSE) is deferred to a follow-up when `ta shell` provides the
-/// client-side rendering.
+/// Spawns `claude --print -p "<prompt>"` in the project root and returns
+/// the agent's response. Each call is a separate subprocess to avoid
+/// managing long-lived process I/O. The session tracks state and history.
 pub async fn ask_agent(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<CallerIdentity>,
@@ -191,17 +210,31 @@ pub async fn ask_agent(
     match session {
         Some(s) if s.status == SessionStatus::Running => {
             state.agent_sessions.touch_session(&body.session_id).await;
-            // Placeholder: echo the prompt. Full agent subprocess wiring is
-            // implemented when `ta shell` (v0.9.8) provides the client side.
-            Json(AskResponse {
-                session_id: body.session_id,
-                response: format!(
-                    "[Agent session {} ({})]: Received prompt. \
-                     Full agent subprocess integration is available via `ta shell`.",
-                    s.session_id, s.agent
-                ),
-            })
-            .into_response()
+
+            // Run the agent subprocess.
+            let response = run_agent_prompt(
+                &s.agent,
+                &body.prompt,
+                &state.project_root,
+                state.daemon_config.commands.timeout_secs,
+            )
+            .await;
+
+            match response {
+                Ok(output) => Json(AskResponse {
+                    session_id: body.session_id,
+                    response: output,
+                })
+                .into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Agent error: {}", e),
+                        "session_id": body.session_id,
+                    })),
+                )
+                    .into_response(),
+            }
         }
         Some(_) => (
             StatusCode::CONFLICT,
@@ -213,6 +246,87 @@ pub async fn ask_agent(
             Json(serde_json::json!({"error": "session not found"})),
         )
             .into_response(),
+    }
+}
+
+/// Run an agent subprocess and return its output.
+async fn run_agent_prompt(
+    agent: &str,
+    prompt: &str,
+    working_dir: &std::path::Path,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    // Resolve agent binary. Currently supports "claude-code" (claude CLI).
+    let (binary, args) = resolve_agent_command(agent, prompt);
+
+    tracing::info!(
+        "Agent ask: agent={}, binary={}, prompt_len={}",
+        agent,
+        binary,
+        prompt.len()
+    );
+
+    let timeout = std::time::Duration::from_secs(timeout_secs.max(60));
+
+    let result = tokio::time::timeout(timeout, async {
+        tokio::process::Command::new(&binary)
+            .args(&args)
+            .current_dir(working_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+    })
+    .await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            if output.status.success() {
+                if stdout.is_empty() && !stderr.is_empty() {
+                    Ok(stderr)
+                } else {
+                    Ok(stdout)
+                }
+            } else {
+                let code = output.status.code().unwrap_or(-1);
+                Err(format!(
+                    "Agent exited with code {} — {}",
+                    code,
+                    if stderr.is_empty() { stdout } else { stderr }
+                ))
+            }
+        }
+        Ok(Err(e)) => Err(format!(
+            "Failed to start agent '{}' (binary: {}): {}. Is it installed?",
+            agent, binary, e
+        )),
+        Err(_) => Err(format!(
+            "Agent timed out after {}s. Try a simpler prompt.",
+            timeout_secs
+        )),
+    }
+}
+
+/// Resolve agent name to binary + args.
+fn resolve_agent_command(agent: &str, prompt: &str) -> (String, Vec<String>) {
+    match agent {
+        "claude-code" | "claude" => (
+            "claude".to_string(),
+            vec!["--print".to_string(), "-p".to_string(), prompt.to_string()],
+        ),
+        "codex" => (
+            "codex".to_string(),
+            vec![
+                "--quiet".to_string(),
+                "--prompt".to_string(),
+                prompt.to_string(),
+            ],
+        ),
+        // Generic fallback: assume binary name matches agent name.
+        other => (other.to_string(), vec![prompt.to_string()]),
     }
 }
 
@@ -251,6 +365,7 @@ mod tests {
         let s = mgr.create_session("claude-code".into()).await.unwrap();
         assert!(s.session_id.starts_with("sess-"));
         assert_eq!(s.status, SessionStatus::Running);
+        assert_eq!(s.prompt_count, 0);
 
         // List sessions.
         let sessions = mgr.list_sessions().await;
@@ -260,8 +375,10 @@ mod tests {
         let found = mgr.get_session(&s.session_id).await;
         assert!(found.is_some());
 
-        // Touch session.
+        // Touch session (increments prompt count).
         mgr.touch_session(&s.session_id).await;
+        let updated = mgr.get_session(&s.session_id).await.unwrap();
+        assert_eq!(updated.prompt_count, 1);
 
         // Stop session.
         assert!(mgr.stop_session(&s.session_id).await);
@@ -297,5 +414,34 @@ mod tests {
         // Now we should be able to create another.
         let result = mgr.create_session("a3".into()).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn get_or_create_default_reuses_existing() {
+        let mgr = AgentSessionManager::new(3);
+        let s1 = mgr.create_session("claude-code".into()).await.unwrap();
+        let s2 = mgr.get_or_create_default("claude-code").await.unwrap();
+        assert_eq!(s1.session_id, s2.session_id);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_default_creates_new() {
+        let mgr = AgentSessionManager::new(3);
+        let s = mgr.get_or_create_default("claude-code").await.unwrap();
+        assert!(s.session_id.starts_with("sess-"));
+    }
+
+    #[test]
+    fn resolve_claude_code_agent() {
+        let (bin, args) = resolve_agent_command("claude-code", "hello");
+        assert_eq!(bin, "claude");
+        assert_eq!(args, vec!["--print", "-p", "hello"]);
+    }
+
+    #[test]
+    fn resolve_unknown_agent() {
+        let (bin, args) = resolve_agent_command("my-agent", "test");
+        assert_eq!(bin, "my-agent");
+        assert_eq!(args, vec!["test"]);
     }
 }

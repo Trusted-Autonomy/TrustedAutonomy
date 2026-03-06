@@ -14,6 +14,7 @@ pub mod agent;
 pub mod auth;
 pub mod cmd;
 pub mod events;
+pub mod goal_output;
 pub mod input;
 pub mod status;
 
@@ -37,6 +38,7 @@ pub struct AppState {
     pub shell_config: ShellConfig,
     pub token_store: TokenStore,
     pub agent_sessions: agent::AgentSessionManager,
+    pub goal_output: goal_output::GoalOutputManager,
 }
 
 impl AppState {
@@ -53,6 +55,7 @@ impl AppState {
             token_store: TokenStore::new(&project_root),
             shell_config,
             agent_sessions: agent::AgentSessionManager::new(max_sessions),
+            goal_output: goal_output::GoalOutputManager::new(),
             project_root,
             daemon_config,
         }
@@ -73,6 +76,15 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/agent/ask", post(agent::ask_agent))
         .route("/api/agent/sessions", get(agent::list_sessions))
         .route("/api/agent/{id}", delete(agent::stop_session))
+        // Goal output streaming.
+        .route(
+            "/api/goals/active-output",
+            get(goal_output::list_active_output),
+        )
+        .route(
+            "/api/goals/{id}/output",
+            get(goal_output::goal_output_stream),
+        )
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),

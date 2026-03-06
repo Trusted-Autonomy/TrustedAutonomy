@@ -72,17 +72,26 @@ pub async fn handle_input(
             response.into_response()
         }
         RouteDecision::Agent(prompt) => {
-            // Route to agent session.
-            let session_id = body.session_id.unwrap_or_default();
-            if session_id.is_empty() {
-                return Json(InputResponse {
-                    routed_to: "agent".to_string(),
-                    result: serde_json::json!({
-                        "error": "No active agent session. Start one with POST /api/agent/start"
-                    }),
-                })
-                .into_response();
-            }
+            // Route to agent session. Auto-create one if none exists.
+            let session_id = if let Some(id) = body.session_id.filter(|s| !s.is_empty()) {
+                id
+            } else {
+                // Get or create a default session.
+                match state
+                    .agent_sessions
+                    .get_or_create_default(&state.daemon_config.agent.default_agent)
+                    .await
+                {
+                    Ok(session) => session.session_id,
+                    Err(e) => {
+                        return Json(InputResponse {
+                            routed_to: "agent".to_string(),
+                            result: serde_json::json!({"error": e}),
+                        })
+                        .into_response();
+                    }
+                }
+            };
 
             let ask_req = super::agent::AskRequest {
                 session_id: session_id.clone(),
