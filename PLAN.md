@@ -3344,6 +3344,158 @@ WorkflowFailed { workflow_id, name, reason, timestamp }
 
 ---
 
+### v0.9.8.4 — VCS Adapter Abstraction & Plugin Architecture
+<!-- status: pending -->
+**Goal**: Move all version control operations behind the `SubmitAdapter` trait so TA is fully VCS-agnostic. Add adapter-contributed exclude patterns for staging, implement stub adapters for SVN and Perforce, and design the external plugin loading mechanism.
+
+#### Problem
+Today, raw `git` commands leak outside the `SubmitAdapter` trait boundary — branch save/restore in `draft.rs`, VCS auto-detection, `.git/` exclusions hardcoded in `overlay.rs`, and git hash embedding in `build.rs`. This means adding Perforce or SVN support requires modifying core TA code in multiple places rather than simply providing a new adapter.
+
+Additionally, shipping adapters for every VCS/email/database system inside the core `ta` binary doesn't scale. External teams (e.g., a Perforce shop or a custom VCS vendor) should be able to publish a TA adapter as an independent installable package.
+
+#### Design
+
+##### 1. Adapter-contributed exclude patterns
+Each `SubmitAdapter` provides a list of directory/file patterns that should be excluded when copying source to staging. This replaces the hardcoded `.git/` exclusion in `overlay.rs`.
+
+```rust
+pub trait SubmitAdapter: Send + Sync {
+    // ... existing methods ...
+
+    /// Patterns to exclude from staging copy (VCS metadata dirs, etc.)
+    /// Returns patterns in .taignore format: "dirname/", "*.ext", "name"
+    fn exclude_patterns(&self) -> Vec<String> {
+        vec![]
+    }
+
+    /// Save/restore working state around apply operations.
+    /// Git: save current branch, restore after commit.
+    /// Perforce: save current changelist context.
+    /// Default: no-op.
+    fn save_state(&self) -> Result<Option<Box<dyn std::any::Any + Send>>> { Ok(None) }
+    fn restore_state(&self, state: Option<Box<dyn std::any::Any + Send>>) -> Result<()> { Ok(()) }
+
+    /// Auto-detect whether this adapter applies to the given project root.
+    /// Git: checks for .git/ directory
+    /// Perforce: checks for P4CONFIG or .p4config
+    fn detect(project_root: &Path) -> bool where Self: Sized { false }
+}
+```
+
+- `GitAdapter::exclude_patterns()` → `[".git/"]`
+- `SvnAdapter::exclude_patterns()` → `[".svn/"]`
+- `PerforceAdapter::exclude_patterns()` → `[".p4config"]` (P4 doesn't have a metadata dir per se)
+- `overlay.rs` merges adapter excludes with `.taignore` user patterns and built-in defaults (`target/`, `node_modules/`, etc.)
+
+##### 2. Move git-specific code behind the adapter
+
+| Current location | What it does | Where it moves |
+|---|---|---|
+| `draft.rs:1946-2048` | Branch save/restore around apply | `SubmitAdapter::save_state()` / `restore_state()` |
+| `draft.rs:1932` | `.git/` existence check for auto-detect | `SubmitAdapter::detect()` + adapter registry |
+| `overlay.rs:24` | Hardcoded `"target/"` + `.git/` exclusion | Adapter `exclude_patterns()` + `ExcludePatterns::merge()` |
+| `build.rs` | `git rev-parse HEAD` for version hash | `SubmitAdapter::revision_id()` or build-time env var |
+| `shell.rs` | `git status` as shell route | Adapter-provided shell routes (optional) |
+
+##### 3. Stub adapters (untested)
+
+**SVN adapter** (`crates/ta-submit/src/svn.rs`):
+- `prepare()` → no-op (SVN doesn't use branches the same way)
+- `commit()` → `svn add` + `svn commit`
+- `push()` → no-op (SVN commit is already remote)
+- `open_review()` → no-op (SVN doesn't have built-in review)
+- `exclude_patterns()` → `[".svn/"]`
+- `detect()` → check for `.svn/` directory
+- **Note: untested — contributed by AI, needs validation by an SVN user**
+
+**Perforce adapter** (`crates/ta-submit/src/perforce.rs`):
+- `prepare()` → `p4 change -o | p4 change -i` (create pending changelist)
+- `commit()` → `p4 reconcile` + `p4 shelve`
+- `push()` → `p4 submit`
+- `open_review()` → `p4 shelve` + Swarm API (if configured)
+- `exclude_patterns()` → `[".p4config", ".p4ignore"]`
+- `detect()` → check for `P4CONFIG` env var or `.p4config`
+- `save_state()` → record current client/changelist
+- `restore_state()` → revert to saved client state
+- **Note: untested — contributed by AI, needs validation by a Perforce user**
+
+##### 4. Adapter auto-detection registry
+
+```rust
+/// Registry of available adapters with auto-detection.
+pub fn detect_adapter(project_root: &Path) -> Box<dyn SubmitAdapter> {
+    // Check configured adapter first (workflow.toml)
+    // Then auto-detect: try each registered adapter's detect()
+    // Fallback: NoneAdapter
+}
+```
+
+Order: Git → SVN → Perforce → None. First match wins. User can override with `workflow.toml` setting `submit.adapter = "perforce"`.
+
+##### 5. External plugin architecture (design only — implementation deferred)
+
+External adapters loaded as separate executables that communicate via a simple JSON-over-stdio protocol, similar to how `ta run` launches agents:
+
+```
+~/.ta/plugins/
+  ta-submit-perforce    # executable
+  ta-submit-jira        # executable
+  ta-submit-plastic     # executable (Plastic SCM)
+```
+
+**Protocol**: TA spawns the plugin binary and sends JSON commands on stdin, reads JSON responses from stdout:
+```json
+// → plugin
+{"method": "exclude_patterns", "params": {}}
+// ← plugin
+{"result": [".plastic/", ".plastic4.selector"]}
+
+// → plugin
+{"method": "commit", "params": {"goal_id": "abc", "message": "Fix bug", "files": ["src/main.rs"]}}
+// ← plugin
+{"result": {"commit_id": "cs:1234", "message": "Changeset 1234 created"}}
+```
+
+**Discovery**: `ta plugin install <name>` downloads from a registry (crates.io, npm, or TA's own) and places the binary in `~/.ta/plugins/`. Or manual: just drop an executable named `ta-submit-<name>` in the plugins dir.
+
+**Config**: `submit.adapter = "perforce"` → TA first checks built-in adapters, then looks for `~/.ta/plugins/ta-submit-perforce`.
+
+This pattern extends beyond VCS to any adapter type:
+- `ta-channel-slack` — Slack notification channel
+- `ta-channel-discord` — Discord notification channel
+- `ta-channel-email` — Email notification channel
+- `ta-output-jira` — Jira ticket creation from drafts
+- `ta-store-postgres` — PostgreSQL-backed goal/draft store
+
+#### Items
+1. [ ] Add `exclude_patterns()`, `save_state()`/`restore_state()`, `detect()` to `SubmitAdapter` trait
+2. [ ] Implement `exclude_patterns()` for `GitAdapter` (returns `[".git/"]`)
+3. [ ] Move branch save/restore from `draft.rs` into `GitAdapter::save_state()`/`restore_state()`
+4. [ ] Remove hardcoded `.git/` exclusion from `overlay.rs`, merge adapter patterns into `ExcludePatterns`
+5. [ ] Add adapter auto-detection registry in `ta-submit`
+6. [ ] Move `draft.rs` git auto-detection to use adapter registry
+7. [ ] Add `SvnAdapter` stub (`crates/ta-submit/src/svn.rs`) — **untested**
+8. [ ] Add `PerforceAdapter` stub (`crates/ta-submit/src/perforce.rs`) — **untested**
+9. [ ] Add `revision_id()` method to adapter, replace `build.rs` git hash with adapter call
+10. [ ] Update `docs/USAGE.md` with adapter configuration documentation
+11. [ ] Tests: adapter detection, exclude pattern merging, state save/restore lifecycle
+
+#### Implementation scope
+- `crates/ta-submit/src/adapter.rs` — extended `SubmitAdapter` trait with new methods
+- `crates/ta-submit/src/git.rs` — implement new trait methods, absorb branch logic from `draft.rs`
+- `crates/ta-submit/src/svn.rs` — NEW: SVN adapter stub (untested)
+- `crates/ta-submit/src/perforce.rs` — NEW: Perforce adapter stub (untested)
+- `crates/ta-submit/src/registry.rs` — NEW: adapter auto-detection and selection
+- `crates/ta-submit/src/lib.rs` — export new adapters and registry
+- `crates/ta-workspace/src/overlay.rs` — accept adapter exclude patterns, remove hardcoded `.git/`
+- `apps/ta-cli/src/commands/draft.rs` — remove raw git calls, use adapter state save/restore
+- `apps/ta-cli/build.rs` — use adapter-provided revision ID or env var fallback
+- `docs/USAGE.md` — adapter configuration, available adapters, stub adapter warnings
+
+#### Version: `0.9.8-alpha.4`
+
+---
+
 ### v0.9.9 — Conversational Project Bootstrapping (`ta new`)
 <!-- status: pending -->
 **Goal**: Start a new project from any interface by describing what you want in natural language. A planner agent generates the project structure and PLAN.md through conversation, then initializes the TA workspace.
@@ -3836,6 +3988,9 @@ channels:
 ## Future Improvements (unscheduled)
 
 > Ideas that are valuable but not yet prioritized into a release phase. Pull into a versioned phase when ready.
+
+### External Plugin System
+Process-based plugin architecture so third parties can publish TA adapters as independent packages. A Perforce vendor, JIRA integration company, or custom VCS provider can ship a `ta-submit-<name>` executable that TA discovers and communicates with via JSON-over-stdio protocol. Extends beyond VCS to any adapter type: notification channels (`ta-channel-slack`), storage backends (`ta-store-postgres`), output integrations (`ta-output-jira`). Includes `ta plugin install/list/remove` commands, a plugin manifest format, and a plugin registry (crates.io or TA-hosted). Design sketched in v0.9.8.4; implementation deferred until the in-process adapter pattern is validated.
 
 ### Community Memory Sync
 Federated sharing of anonymized problem→solution pairs across TA instances. Builds on v0.8.1 (Solution Memory Export) with:
