@@ -1,7 +1,7 @@
 # Trusted Autonomy
 
-![Latest](https://img.shields.io/badge/latest-v0.7.5-alpha-blue)
-![Released](https://img.shields.io/badge/released-v0.7.5-alpha-green)
+![Latest](https://img.shields.io/badge/latest-v0.9.8-alpha-blue)
+![Released](https://img.shields.io/badge/released-v0.9.8-alpha-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-orange)
 
 **Trusted Autonomy** is a local-first, Rust-based substrate for running autonomous AI agents **safely**, **reviewably**, and **without changing how agents behave**.
