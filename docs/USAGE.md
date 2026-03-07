@@ -859,7 +859,7 @@ adapter = "git"                    # "git", "svn", "perforce", or "none"
 auto_commit = true                 # Commit on ta draft apply
 auto_push = true                   # Push after commit
 auto_review = true                 # Open GitHub PR after push
-co_author = "Trusted Autonomy <ta@trustedautonomy.dev>"  # Co-author trailer on commits
+co_author = "Trusted Autonomy <266386695+trustedautonomy@users.noreply.github.com>"  # Co-author trailer on commits
 
 [submit.git]
 branch_prefix = "ta/"              # Branch naming: ta/goal-title
@@ -886,14 +886,14 @@ Without this file, TA auto-detects your VCS (Git > SVN > Perforce > none) and us
 
 Every commit made through `ta draft apply --git-commit` includes a `Co-Authored-By` trailer. This gives TA shared credit alongside the human author in GitHub's contribution graph, PR history, and `git log`.
 
-The default co-author is `Trusted Autonomy <ta@trustedautonomy.dev>`. To make this appear in GitHub's contribution graph, the email must match a verified email on a GitHub account.
+The default co-author is `Trusted Autonomy <266386695+trustedautonomy@users.noreply.github.com>`. To make this appear in GitHub's contribution graph, the email must match a verified email on a GitHub account.
 
 Configure per-project in `.ta/workflow.toml`:
 
 ```toml
 [submit]
 # Default — shows as TA co-authored on GitHub (requires matching GitHub account)
-co_author = "Trusted Autonomy <ta@trustedautonomy.dev>"
+co_author = "Trusted Autonomy <266386695+trustedautonomy@users.noreply.github.com>"
 
 # Use your org's bot account
 co_author = "my-org-ta-bot <ta-bot@myorg.com>"
@@ -911,7 +911,7 @@ Goal-ID: a1b2c3d4-...
 PR-ID: e5f6g7h8-...
 Phase: v0.3.1
 
-Co-Authored-By: Trusted Autonomy <ta@trustedautonomy.dev>
+Co-Authored-By: Trusted Autonomy <266386695+trustedautonomy@users.noreply.github.com>
 ```
 
 ### VCS Adapters
