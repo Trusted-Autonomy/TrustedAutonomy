@@ -602,7 +602,28 @@ ta plan mark-done v0.8.0,v0.8.1     # Batch-mark multiple phases as done
 ta plan init                         # Extract plan-schema.yaml from existing plan
 ta plan create                       # Generate new plan from template
 ta plan create --template feature    # Feature template
+ta plan from docs/PRD.md             # Generate plan from a product document (interactive)
 ```
+
+#### Generating a Plan from a Document
+
+Use `ta plan from <path>` to generate a phased development plan from a product document (PRD, spec, RFC, design doc, etc.):
+
+```bash
+ta plan from docs/PRD.md
+ta plan from ~/specs/feature-design.md --agent claude-code
+ta plan from requirements.txt --source ./my-project
+```
+
+The agent reads the document, asks clarifying questions interactively, and writes a `PLAN.md` in the staging workspace. The result goes through the standard draft review flow — you review, approve, and apply it just like any other TA draft.
+
+**When to use which command:**
+
+| Command | Use when | AI-powered? |
+|---|---|---|
+| `ta init --detect` | Scaffolding a `.ta/` config for an existing project | No |
+| `ta plan create` | Starting from a generic template (greenfield/feature/bugfix) | No |
+| `ta plan from <doc>` | You have a product document and want a tailored plan | Yes (interactive) |
 
 #### Deferred Phases
 

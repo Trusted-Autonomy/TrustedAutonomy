@@ -2788,7 +2788,7 @@ dependencies = [
 
 [[package]]
 name = "ta-audit"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "serde",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "ta-changeset"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "glob",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-fs"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "serde",
@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-drive"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2886,7 +2886,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-gmail"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-web"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2904,7 +2904,7 @@ dependencies = [
 
 [[package]]
 name = "ta-credentials"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "serde",
@@ -2918,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "ta-daemon"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2948,7 +2948,7 @@ dependencies = [
 
 [[package]]
 name = "ta-events"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "serde",
@@ -2963,7 +2963,7 @@ dependencies = [
 
 [[package]]
 name = "ta-goal"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2977,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mcp-gateway"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "rmcp",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mediation"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "serde",
@@ -3018,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "ta-memory"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "glob",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "ta-policy"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "glob",
@@ -3048,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "ta-sandbox"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -3061,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "ta-session"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "serde",
@@ -3076,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "ta-submit"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "serde",
@@ -3092,7 +3092,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workflow"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "serde",
@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workspace"
-version = "0.9.9-alpha.2"
+version = "0.9.9-alpha.3"
 dependencies = [
  "chrono",
  "serde",

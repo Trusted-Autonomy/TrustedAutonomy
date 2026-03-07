@@ -1,0 +1,40 @@
+# Planner agent configuration for `ta plan from <doc>`.
+#
+# This agent reads a product document, asks clarifying questions via
+# ta_ask_human, and generates a phased PLAN.md. It runs in interactive
+# mode so the human can answer questions in real time.
+#
+# Override per-project: .ta/agents/planner.yaml
+# Override per-user:    ~/.config/ta/agents/planner.yaml
+
+name: planner
+description: "Interactive planning agent — reads product docs, asks questions, generates PLAN.md"
+command: claude
+args_template:
+  - "{prompt}"
+injects_context_file: true
+injects_settings: true
+pre_launch: null
+env: {}
+
+alignment:
+  principal: "project-owner"
+  autonomy_envelope:
+    bounded_actions:
+      - "fs_read"
+      - "fs_write_patch"
+      - "fs_apply"
+    escalation_triggers:
+      - "new_dependency"
+      - "breaking_change"
+    forbidden_actions:
+      - "network_external"
+      - "credential_access"
+      - "shell_execute"
+  constitution: "default-v1"
+  coordination:
+    allowed_collaborators:
+      - "claude-code"
+    shared_resources:
+      - "PLAN.md"
+      - ".ta/**"

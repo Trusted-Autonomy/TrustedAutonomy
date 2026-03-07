@@ -117,6 +117,8 @@ impl Default for CommandConfig {
                 "run *".to_string(),
                 "ta dev *".to_string(),
                 "dev *".to_string(),
+                "ta plan from *".to_string(),
+                "plan from *".to_string(),
             ],
             long_timeout_secs: 3600,
         }

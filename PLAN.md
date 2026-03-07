@@ -3772,29 +3772,19 @@ Human sees question in ta shell / Slack / web UI
 ---
 
 ### v0.9.9.3 — `ta plan from <doc>` Wrapper
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Build a convenience wrapper that uses interactive mode to generate a PLAN.md from a product document. The agent reads the document, asks clarifying questions via `ta_ask_human`, proposes phases, and outputs a plan draft.
 
-#### Items
+#### Completed
 
-1. **`PlanCommands::From` variant** (`apps/ta-cli/src/commands/plan.rs`):
-   - `ta plan from <path>` reads the document, builds a planning system prompt
-   - Launches `ta run --interactive` with the planning prompt injected into CLAUDE.md
-   - Output is PLAN.md in staging → standard draft review flow
-
-2. **`agents/planner.yaml`** — planner agent configuration:
-   - Filesystem read/write access
-   - Planning system prompt (phased development, PLAN.md format, question-asking guidance)
-   - If not already created by v0.9.9
-
-3. **`docs/USAGE.md` updates**:
-   - `ta plan from` documentation with examples
-   - When to use `--detect` vs `plan from` vs `plan create`
-
-4. **Tests**:
-   - Plan generation from sample doc
-   - Prompt template construction
-   - `--follow-up` flag handling
+- ✅ `PlanCommands::From` variant — `ta plan from <path>` reads document, builds planning prompt, delegates to `ta run --interactive` (4 tests)
+- ✅ `build_planning_prompt()` — constructs agent prompt with document content, PLAN.md format guide, and `ta_ask_human` usage instructions; truncates docs >100K chars
+- ✅ `agents/planner.yaml` — planner agent configuration with fs read/write access, no shell/network, planning-oriented alignment
+- ✅ `docs/USAGE.md` updates — `ta plan from` documentation with examples, comparison table for `--detect` vs `plan from` vs `plan create`
+- ✅ Fuzzy document search — `find_document()` searches workspace root, `docs/`, `spec/`, `design/`, `rfcs/`, and subdirs so bare filenames resolve automatically (4 tests)
+- ✅ Shell/daemon integration — `ta plan from *` added to default `long_running` patterns in daemon config for background execution
+- ✅ Validation — rejects missing files, empty documents, directories; observability-compliant error messages with search location details
+- ✅ Version bump to `0.9.9-alpha.3`
 
 #### When to use `--detect` vs `plan from`
 - **`ta init --detect`** — detects project *type* for config scaffolding. Fast, deterministic, no AI.
@@ -3871,6 +3861,23 @@ Today, creating a custom workflow or agent config requires copying an existing f
    - 3-4 workflow examples: code-review, deploy-pipeline, security-audit, milestone-review
    - 3-4 agent examples: developer, auditor, planner, orchestrator
    - `ta workflow list --templates` and `ta agent list --templates` to browse
+
+6. **Planner workflow role** — built-in `planner` role for workflow definitions:
+   - Uses `agents/planner.yaml` (shipped in v0.9.9.3) as the agent config
+   - Enables Plan→Implement→Review→Plan loops in multi-stage workflows
+   - Example workflow: `plan-implement-review.yaml` with planner→engineer→reviewer stages
+   - The planner stage can receive a document path or objective as input
+   - Integrates with `ta plan from` — workflows can invoke planning as a stage
+
+7. **Versioning schema templates** (`templates/version-schemas/`):
+   - Pre-built version schema configs users can adopt or customize:
+     - `semver.yaml` — standard semver (MAJOR.MINOR.PATCH with pre-release)
+     - `calver.yaml` — calendar versioning (YYYY.MM.PATCH)
+     - `sprint.yaml` — sprint-based versioning (sprint-N.iteration)
+     - `milestone.yaml` — milestone-based (v1, v2, v3 with sub-phases)
+   - `ta plan create --version-schema semver` selects a template
+   - Schema defines: version format regex, bump rules, phase-to-version mapping
+   - Users can write custom schemas in `.ta/version-schema.yaml`
 
 #### Version: `0.9.9-alpha.5`
 

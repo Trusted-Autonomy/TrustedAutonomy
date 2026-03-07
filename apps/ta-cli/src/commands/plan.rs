@@ -74,6 +74,25 @@ pub enum PlanCommands {
         /// Comma-separated list of phase IDs to mark as done.
         phases: String,
     },
+    /// Generate a PLAN.md from a product document using an interactive agent session.
+    ///
+    /// The agent reads the document, asks clarifying questions via `ta_ask_human`,
+    /// proposes phases, and outputs a PLAN.md draft for review.
+    ///
+    /// Example: `ta plan from docs/PRD.md`
+    From {
+        /// Path to the product document (PRD, spec, RFC, etc.).
+        path: std::path::PathBuf,
+        /// Agent system to use (default: claude-code).
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
+        /// Source directory to overlay (defaults to current directory).
+        #[arg(long)]
+        source: Option<std::path::PathBuf>,
+        /// Follow up on a previous goal (ID prefix or omit for latest).
+        #[arg(long)]
+        follow_up: Option<Option<String>>,
+    },
 }
 
 pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -90,6 +109,12 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             name,
         } => plan_create(config, output, template, name.as_deref()),
         PlanCommands::MarkDone { phases } => mark_done_batch(config, phases),
+        PlanCommands::From {
+            path,
+            agent,
+            source,
+            follow_up,
+        } => plan_from(config, path, agent, source.as_deref(), follow_up.as_ref()),
     }
 }
 
@@ -160,6 +185,11 @@ pub struct PlanSchema {
     /// Recognized status values. Anything not in this list maps to Pending.
     #[serde(default = "default_statuses")]
     pub statuses: Vec<String>,
+    /// Directories to search when resolving document paths in `ta plan from`.
+    /// Relative to the project root. Searched in order; first match wins.
+    /// If omitted, uses sensible defaults (docs/, spec/, design/, etc.).
+    #[serde(default = "default_doc_search_dirs")]
+    pub doc_search_dirs: Vec<String>,
 }
 
 fn default_source() -> String {
@@ -172,6 +202,24 @@ fn default_statuses() -> Vec<String> {
         "in_progress".to_string(),
         "pending".to_string(),
         "deferred".to_string(),
+    ]
+}
+
+fn default_doc_search_dirs() -> Vec<String> {
+    vec![
+        ".".to_string(),
+        "docs".to_string(),
+        "doc".to_string(),
+        "documentation".to_string(),
+        "specs".to_string(),
+        "spec".to_string(),
+        "design".to_string(),
+        "rfcs".to_string(),
+        "rfc".to_string(),
+        "planning".to_string(),
+        "plans".to_string(),
+        "requirements".to_string(),
+        ".ta".to_string(),
     ]
 }
 
@@ -195,6 +243,7 @@ impl PlanSchema {
             ],
             status_marker: r"<!--\s*status:\s*(\w+)\s*-->".to_string(),
             statuses: default_statuses(),
+            doc_search_dirs: default_doc_search_dirs(),
         }
     }
 
@@ -529,6 +578,7 @@ fn detect_schema_from_content(content: &str, source: &str) -> PlanSchema {
         }],
         status_marker: r"<!--\s*status:\s*(\w+)\s*-->".to_string(),
         statuses: default_statuses(),
+        doc_search_dirs: default_doc_search_dirs(),
     }
 }
 
@@ -967,6 +1017,301 @@ fn mark_done_batch(config: &GatewayConfig, phases_arg: &str) -> anyhow::Result<(
     Ok(())
 }
 
+// ── `ta plan from <doc>` ──────────────────────────────────────────
+
+/// Build the planning system prompt that gets injected as the objective.
+///
+/// The prompt instructs the agent to read the document, ask clarifying questions,
+/// and produce a PLAN.md following the standard format.
+pub fn build_planning_prompt(doc_path: &Path, doc_content: &str) -> String {
+    // Truncate very large documents to avoid overwhelming the prompt.
+    let max_chars = 100_000;
+    let truncated = if doc_content.len() > max_chars {
+        format!(
+            "{}\n\n[... truncated at {} chars — read the full document at {} ...]",
+            &doc_content[..max_chars],
+            doc_content.len(),
+            doc_path.display()
+        )
+    } else {
+        doc_content.to_string()
+    };
+
+    format!(
+        r#"You are a project planner. Your task is to read the following product document and generate a phased development plan (PLAN.md).
+
+## Source Document
+
+File: `{path}`
+
+```
+{content}
+```
+
+## Instructions
+
+1. **Read and understand** the document above thoroughly.
+2. **Ask clarifying questions** using `ta_ask_human` before proposing phases:
+   - What is the target audience / deployment environment?
+   - Are there hard dependencies or constraints not mentioned?
+   - What is the desired timeline or priority order?
+   - Any existing codebase or starting point?
+   - Ask about anything ambiguous in the document.
+3. **Propose a phased plan** and write it to `PLAN.md` in the workspace root.
+
+## PLAN.md Format
+
+Use this exact format so TA can parse it:
+
+```markdown
+# <Project Name> — Development Plan
+
+## Phase 0 — <Title>
+<!-- status: pending -->
+<Description of what this phase covers.>
+
+### Items
+- Item 1
+- Item 2
+
+## Phase 1 — <Title>
+<!-- status: pending -->
+...
+```
+
+Rules:
+- Each phase has a `## Phase N — Title` header followed by `<!-- status: pending -->` on the next line.
+- Phases should be ordered by dependency (earlier phases are prerequisites for later ones).
+- Each phase should be completable in 1-3 working sessions.
+- Include 3-8 phases typically (fewer for small projects, more for large ones).
+- Add an "Items" subsection listing concrete deliverables.
+- The first phase should cover project setup / scaffolding.
+- The last phase should cover testing, documentation, and release prep.
+
+## Output
+
+Write the completed PLAN.md to the workspace root. Do NOT write any other files.
+After writing PLAN.md, also generate `.ta/plan-schema.yaml` if the format differs from the default TA schema."#,
+        path = doc_path.display(),
+        content = truncated,
+    )
+}
+
+/// Search configured project directories for a file by name.
+///
+/// When the user types `ta plan from project.prd` and the file is at
+/// `docs/project.prd`, this finds it. Searches directories from the
+/// `doc_search_dirs` config in `.ta/plan-schema.yaml`, falling back to
+/// built-in defaults.
+///
+/// Also scans one level of subdirectories under the first two configured
+/// dirs (typically docs/ and doc/) for deeper project structures.
+fn find_document(
+    workspace_root: &Path,
+    filename: &Path,
+    search_dirs: &[String],
+) -> Option<std::path::PathBuf> {
+    let name = filename.file_name()?;
+
+    for dir in search_dirs {
+        let candidate = workspace_root.join(dir).join(name);
+        if candidate.exists() && candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    // Also try one level of subdirectory scanning in the first few configured dirs.
+    // This handles structures like docs/product/requirements.md.
+    for dir in search_dirs.iter().take(3).filter(|d| *d != ".") {
+        let dir_path = workspace_root.join(dir);
+        if dir_path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&dir_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let candidate = path.join(name);
+                        if candidate.exists() && candidate.is_file() {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Tier 2 file resolution: query the daemon's file listing to find a document.
+///
+/// If the daemon is running, uses `ta fs list` style traversal to find the file.
+/// This works because the daemon knows the project structure and can search
+/// beyond the statically configured directories.
+///
+/// Returns None if the daemon isn't reachable or the file isn't found.
+fn try_agent_file_resolve(workspace_root: &Path, filename: &Path) -> Option<std::path::PathBuf> {
+    let name = filename.file_name()?.to_str()?;
+
+    // Walk the project tree (max 3 levels deep) looking for the file.
+    // This is a local search — fast and doesn't need the daemon.
+    // It covers project structures that aren't in the configured list.
+    fn walk_for_file(dir: &Path, target: &str, depth: u8) -> Option<std::path::PathBuf> {
+        if depth > 3 {
+            return None;
+        }
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let entry_name = entry.file_name();
+            // Skip hidden dirs and common large dirs.
+            let name_str = entry_name.to_string_lossy();
+            if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
+                continue;
+            }
+            if path.is_file() && name_str == target {
+                return Some(path);
+            }
+            if path.is_dir() {
+                if let Some(found) = walk_for_file(&path, target, depth + 1) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    walk_for_file(workspace_root, name, 0)
+}
+
+fn plan_from(
+    config: &GatewayConfig,
+    doc_path: &std::path::PathBuf,
+    agent: &str,
+    source: Option<&Path>,
+    follow_up: Option<&Option<String>>,
+) -> anyhow::Result<()> {
+    // Resolve the document path relative to the workspace root.
+    let resolved_path = if doc_path.is_absolute() {
+        doc_path.clone()
+    } else {
+        config.workspace_root.join(doc_path)
+    };
+
+    // If not found at the literal path, search configured directories.
+    // Load doc_search_dirs from .ta/plan-schema.yaml (falls back to defaults).
+    let schema = PlanSchema::load_or_default(&config.workspace_root);
+    let resolved_path = if resolved_path.exists() {
+        resolved_path
+    } else if let Some(found) =
+        find_document(&config.workspace_root, doc_path, &schema.doc_search_dirs)
+    {
+        println!(
+            "Found '{}' at: {}",
+            doc_path.display(),
+            found
+                .strip_prefix(&config.workspace_root)
+                .unwrap_or(&found)
+                .display()
+        );
+        found
+    } else {
+        // Tier 2: If the daemon is running, ask the agent to find the file.
+        // The agent has access to ta_fs_list and project memory.
+        if let Some(found) = try_agent_file_resolve(&config.workspace_root, doc_path) {
+            println!(
+                "Agent found '{}' at: {}",
+                doc_path.display(),
+                found
+                    .strip_prefix(&config.workspace_root)
+                    .unwrap_or(&found)
+                    .display()
+            );
+            found
+        } else {
+            // Tier 3: Ask the user.
+            let searched = schema
+                .doc_search_dirs
+                .iter()
+                .filter(|d| *d != ".")
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "Document not found: {}\n\n\
+                 Searched: project root, {}\n\
+                 Configure search directories in .ta/plan-schema.yaml:\n\
+                 \n\
+                   doc_search_dirs:\n\
+                     - docs\n\
+                     - specs\n\
+                     - my-custom-dir\n\
+                 \n\
+                 Or provide the full path: ta plan from docs/PRD.md",
+                doc_path.display(),
+                searched,
+            );
+        }
+    };
+
+    if resolved_path.is_dir() {
+        anyhow::bail!(
+            "'{}' is a directory, not a file. Provide a path to a document.\nExample: ta plan from docs/PRD.md",
+            resolved_path.display()
+        );
+    }
+
+    let doc_content = std::fs::read_to_string(&resolved_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read document '{}': {}",
+            resolved_path.display(),
+            e
+        )
+    })?;
+
+    if doc_content.trim().is_empty() {
+        anyhow::bail!(
+            "Document '{}' is empty. Provide a document with project requirements.",
+            resolved_path.display()
+        );
+    }
+
+    let objective = build_planning_prompt(&resolved_path, &doc_content);
+    let title = format!(
+        "Generate PLAN.md from {}",
+        doc_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("document")
+    );
+
+    println!("Planning from: {}", resolved_path.display());
+    println!("  Document size: {} bytes", doc_content.len());
+    println!("  Agent: {}", agent);
+    println!();
+    println!("Launching interactive planning session...");
+    println!("  The agent will ask clarifying questions before generating the plan.");
+    println!();
+
+    // Delegate to `ta run` with --interactive and the planning objective.
+    super::run::execute(
+        config,
+        Some(&title),
+        agent,
+        source,
+        &objective,
+        None, // no phase — this creates a plan, not implements one
+        follow_up,
+        None,  // no objective file — we built the objective inline
+        false, // no_launch = false
+        true,  // interactive = true
+        false, // macro_goal = false
+        None,  // resume = None
+        false, // headless = false
+        None,  // existing_goal_id = None
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1334,6 +1679,7 @@ Release automation.
             }],
             status_marker: r"<!--\s*status:\s*(\w+)\s*-->".to_string(),
             statuses: vec!["done".to_string(), "pending".to_string()],
+            doc_search_dirs: default_doc_search_dirs(),
         };
         std::fs::write(
             dir.path().join(".ta/plan-schema.yaml"),
@@ -1368,6 +1714,7 @@ Ship it.
             }],
             status_marker: r"<!--\s*status:\s*(\w+)\s*-->".to_string(),
             statuses: default_statuses(),
+            doc_search_dirs: default_doc_search_dirs(),
         };
         let phases = parse_plan_with_schema(content, &schema);
         assert_eq!(phases.len(), 3);
@@ -1442,6 +1789,7 @@ Build it.
             }],
             status_marker: r"<!--\s*status:\s*(\w+)\s*-->".to_string(),
             statuses: default_statuses(),
+            doc_search_dirs: default_doc_search_dirs(),
         };
         let updated = update_phase_status_with_schema(content, "Setup", PlanStatus::Done, &schema);
         let phases = parse_plan_with_schema(&updated, &schema);
@@ -1479,6 +1827,7 @@ Build it.
             }],
             status_marker: r"<!--\s*status:\s*(\w+)\s*-->".to_string(),
             statuses: default_statuses(),
+            doc_search_dirs: default_doc_search_dirs(),
         };
         std::fs::write(
             dir.path().join(".ta/plan-schema.yaml"),
@@ -1505,6 +1854,7 @@ Build it.
             }],
             status_marker: r"<!--\s*status:\s*(\w+)\s*-->".to_string(),
             statuses: default_statuses(),
+            doc_search_dirs: default_doc_search_dirs(),
         };
         let phases = parse_plan_with_schema(SAMPLE_PLAN, &schema);
         assert!(phases.is_empty());
@@ -1520,6 +1870,7 @@ Build it.
             }],
             status_marker: r"[invalid".to_string(),
             statuses: default_statuses(),
+            doc_search_dirs: default_doc_search_dirs(),
         };
         let phases = parse_plan_with_schema(SAMPLE_PLAN, &schema);
         assert!(phases.is_empty());
@@ -1546,5 +1897,158 @@ Build it.
             "Should match v0.4.0 header when given 0.4.0: {}",
             updated
         );
+    }
+
+    // ── v0.9.9.3: `ta plan from` tests ──
+
+    #[test]
+    fn build_planning_prompt_includes_doc_content() {
+        let doc = "# My Product\n\nBuild a widget system.";
+        let prompt = build_planning_prompt(Path::new("docs/PRD.md"), doc);
+        assert!(
+            prompt.contains("docs/PRD.md"),
+            "should reference the file path"
+        );
+        assert!(
+            prompt.contains("Build a widget system"),
+            "should include document content"
+        );
+        assert!(
+            prompt.contains("PLAN.md Format"),
+            "should include format instructions"
+        );
+        assert!(
+            prompt.contains("ta_ask_human"),
+            "should instruct agent to ask clarifying questions"
+        );
+    }
+
+    #[test]
+    fn build_planning_prompt_truncates_large_docs() {
+        let large_doc = "x".repeat(200_000);
+        let prompt = build_planning_prompt(Path::new("big.md"), &large_doc);
+        assert!(
+            prompt.contains("truncated at 200000 chars"),
+            "should indicate truncation"
+        );
+        // The prompt itself should be under the original size.
+        assert!(prompt.len() < 200_000 + 5_000);
+    }
+
+    #[test]
+    fn build_planning_prompt_contains_phase_format() {
+        let doc = "Some requirements.";
+        let prompt = build_planning_prompt(Path::new("spec.md"), doc);
+        assert!(
+            prompt.contains("<!-- status: pending -->"),
+            "should show the status marker format"
+        );
+        assert!(
+            prompt.contains("## Phase"),
+            "should show the phase header format"
+        );
+    }
+
+    #[test]
+    fn plan_from_rejects_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let result = plan_from(
+            &config,
+            &std::path::PathBuf::from("nonexistent.md"),
+            "claude-code",
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"), "error: {}", err);
+    }
+
+    #[test]
+    fn find_document_searches_docs_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs_dir = dir.path().join("docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("project.prd"), "# My Project").unwrap();
+
+        let dirs = default_doc_search_dirs();
+        let found = find_document(dir.path(), Path::new("project.prd"), &dirs);
+        assert!(found.is_some(), "should find project.prd in docs/");
+        assert!(found.unwrap().ends_with("docs/project.prd"));
+    }
+
+    #[test]
+    fn find_document_prefers_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("spec.md"), "root").unwrap();
+        let docs_dir = dir.path().join("docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("spec.md"), "docs").unwrap();
+
+        let dirs = default_doc_search_dirs();
+        let found = find_document(dir.path(), Path::new("spec.md"), &dirs);
+        assert!(found.is_some());
+        let content = std::fs::read_to_string(found.unwrap()).unwrap();
+        assert_eq!(content, "root");
+    }
+
+    #[test]
+    fn find_document_searches_subdirs_of_docs() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("docs").join("product");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("requirements.md"), "# Reqs").unwrap();
+
+        let dirs = default_doc_search_dirs();
+        let found = find_document(dir.path(), Path::new("requirements.md"), &dirs);
+        assert!(found.is_some(), "should find in docs/product/");
+    }
+
+    #[test]
+    fn find_document_returns_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = default_doc_search_dirs();
+        let found = find_document(dir.path(), Path::new("nonexistent.md"), &dirs);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_document_uses_custom_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom_dir = dir.path().join("my-docs");
+        std::fs::create_dir_all(&custom_dir).unwrap();
+        std::fs::write(custom_dir.join("spec.md"), "custom").unwrap();
+
+        // Default dirs won't find it.
+        let found = find_document(dir.path(), Path::new("spec.md"), &default_doc_search_dirs());
+        assert!(found.is_none(), "should not find in default dirs");
+
+        // Custom dirs will.
+        let custom = vec!["my-docs".to_string()];
+        let found = find_document(dir.path(), Path::new("spec.md"), &custom);
+        assert!(found.is_some(), "should find with custom dirs");
+    }
+
+    #[test]
+    fn try_agent_file_resolve_walks_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("deep").join("nested").join("dir");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("hidden-spec.md"), "found").unwrap();
+
+        let found = try_agent_file_resolve(dir.path(), Path::new("hidden-spec.md"));
+        assert!(found.is_some(), "should find via tree walk");
+    }
+
+    #[test]
+    fn try_agent_file_resolve_skips_target_and_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_dir = dir.path().join("target").join("debug");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("spec.md"), "in target").unwrap();
+
+        let found = try_agent_file_resolve(dir.path(), Path::new("spec.md"));
+        assert!(found.is_none(), "should skip target/");
     }
 }
