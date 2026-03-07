@@ -116,7 +116,7 @@ fn default_adapter() -> String {
 }
 
 fn default_co_author() -> String {
-    "Trusted Autonomy <266386695+trustedautonomy@users.noreply.github.com>".to_string()
+    "Trusted Autonomy <266386695+trustedautonomy-agent@users.noreply.github.com>".to_string()
 }
 
 fn default_branch_prefix() -> String {
