@@ -808,7 +808,7 @@ The central configuration file for TA behavior:
 
 ```toml
 [submit]
-adapter = "git"                    # "git" or "none"
+adapter = "git"                    # "git", "svn", "perforce", or "none"
 auto_commit = true                 # Commit on ta draft apply
 auto_push = true                   # Push after commit
 auto_review = true                 # Open GitHub PR after push
@@ -832,7 +832,43 @@ stale_threshold_days = 7
 health_check = true
 ```
 
-Without this file, TA uses sensible defaults (no VCS operations, warning-level enforcement).
+Without this file, TA auto-detects your VCS (Git > SVN > Perforce > none) and uses sensible defaults.
+
+### VCS Adapters
+
+TA uses pluggable adapters for version control operations. When `submit.adapter` is not explicitly set, TA auto-detects the VCS from the project directory:
+
+| Adapter | Detection | Exclude patterns | Status |
+|---------|-----------|-----------------|--------|
+| `git` | `.git/` directory | `.git/` | Fully tested |
+| `svn` | `.svn/` directory | `.svn/` | Stub (untested) |
+| `perforce` | `.p4config` file or `P4CONFIG` env | `.p4config`, `.p4ignore` | Stub (untested) |
+| `none` | Fallback | (none) | Fully tested |
+
+Each adapter contributes VCS-specific exclude patterns that are merged with your `.taignore` and built-in defaults during staging. This means TA never copies VCS metadata into staging directories.
+
+**Adapter operations:**
+
+| Operation | Git | SVN | Perforce |
+|-----------|-----|-----|----------|
+| `prepare()` | Create feature branch | No-op | Create pending changelist |
+| `commit()` | `git add` + `git commit` | `svn add` + `svn commit` | `p4 reconcile` + `p4 shelve` |
+| `push()` | `git push` | No-op (commit is remote) | `p4 submit` |
+| `open_review()` | `gh pr create` | No-op | Helix Swarm (if configured) |
+| `save_state()` | Save current branch | No-op | Save client/changelist |
+| `restore_state()` | Switch back to original branch | No-op | Log restore |
+
+**SVN and Perforce adapters are stubs** — they implement the correct protocol but have not been tested against real servers. If you use SVN or Perforce, please test and report issues.
+
+To explicitly select an adapter (bypassing auto-detection):
+
+```toml
+# .ta/workflow.toml
+[submit]
+adapter = "perforce"
+```
+
+**Build-time VCS revision**: The `ta` binary embeds a VCS revision at build time. Set `TA_REVISION` environment variable to override auto-detection (useful in CI for non-Git builds).
 
 ### Agent Configuration
 
@@ -2622,6 +2658,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.9.8.1.1 | Unified allow/deny list pattern | Done |
 | v0.9.8.2 | Pluggable workflow engine & framework integration | Done |
 | v0.9.8.3 | Full TUI shell (ratatui) | Done |
+| v0.9.8.4 | VCS adapter abstraction & plugin architecture | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

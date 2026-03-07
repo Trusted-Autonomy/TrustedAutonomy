@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use ta_changeset::DraftPackage;
 use ta_goal::GoalRun;
 use thiserror::Error;
@@ -77,9 +78,21 @@ pub struct ReviewResult {
     pub metadata: HashMap<String, String>,
 }
 
+/// Opaque saved VCS state for save/restore around apply operations.
+///
+/// Each adapter stores its own state (e.g., Git saves the current branch name,
+/// Perforce saves the current changelist). The state is passed back to
+/// `restore_state()` after the apply operation completes.
+pub struct SavedVcsState {
+    /// Adapter name that created this state (for safety checks).
+    pub adapter: String,
+    /// Opaque state data — only the creating adapter knows how to interpret this.
+    pub data: Box<dyn std::any::Any + Send>,
+}
+
 /// Pluggable adapter for submitting changes through different VCS workflows
 ///
-/// The staging→review→apply loop is VCS-agnostic. This trait allows
+/// The staging->review->apply loop is VCS-agnostic. This trait allows
 /// different implementations for Git, Perforce, SVN, or custom workflows.
 pub trait SubmitAdapter: Send + Sync {
     /// Create a working branch/changelist/workspace for this goal
@@ -112,4 +125,54 @@ pub trait SubmitAdapter: Send + Sync {
 
     /// Adapter display name (for CLI output)
     fn name(&self) -> &str;
+
+    /// Patterns to exclude from staging copy (VCS metadata dirs, etc.)
+    ///
+    /// Returns patterns in .taignore format: "dirname/", "*.ext", "name".
+    /// These are merged with user .taignore patterns and built-in defaults
+    /// during overlay workspace creation and diffing.
+    fn exclude_patterns(&self) -> Vec<String> {
+        vec![]
+    }
+
+    /// Save working state before apply operations.
+    ///
+    /// Git: saves the current branch name so it can be restored after commit.
+    /// Perforce: saves the current changelist context.
+    /// Default: no-op (returns None).
+    fn save_state(&self) -> Result<Option<SavedVcsState>> {
+        Ok(None)
+    }
+
+    /// Restore working state after apply operations.
+    ///
+    /// Git: switches back to the original branch.
+    /// Perforce: reverts to saved client state.
+    /// Default: no-op.
+    fn restore_state(&self, _state: Option<SavedVcsState>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Get the current revision identifier for the working directory.
+    ///
+    /// Git: short commit hash (e.g., "abc1234")
+    /// SVN: revision number (e.g., "r1234")
+    /// Perforce: changelist number (e.g., "@1234")
+    /// Default: "unknown"
+    fn revision_id(&self) -> Result<String> {
+        Ok("unknown".to_string())
+    }
+
+    /// Auto-detect whether this adapter applies to the given project root.
+    ///
+    /// Git: checks for .git/ directory
+    /// SVN: checks for .svn/ directory
+    /// Perforce: checks for P4CONFIG env var or .p4config
+    fn detect(project_root: &Path) -> bool
+    where
+        Self: Sized,
+    {
+        let _ = project_root;
+        false
+    }
 }

@@ -1,10 +1,13 @@
 //! Git adapter for branch-based workflows with GitHub/GitLab PR creation
 
+use std::path::Path;
 use std::process::Command;
 use ta_changeset::DraftPackage;
 use ta_goal::GoalRun;
 
-use crate::adapter::{CommitResult, PushResult, Result, ReviewResult, SubmitAdapter, SubmitError};
+use crate::adapter::{
+    CommitResult, PushResult, Result, ReviewResult, SavedVcsState, SubmitAdapter, SubmitError,
+};
 use crate::config::SubmitConfig;
 
 /// Git adapter implementing branch-based workflow
@@ -84,6 +87,11 @@ impl GitAdapter {
         };
 
         format!("{}{}", prefix, sanitized)
+    }
+
+    /// Auto-detect whether this is a git repository.
+    pub fn detect(project_root: &Path) -> bool {
+        project_root.join(".git").exists()
     }
 }
 
@@ -224,6 +232,72 @@ impl SubmitAdapter for GitAdapter {
     fn name(&self) -> &str {
         "git"
     }
+
+    fn exclude_patterns(&self) -> Vec<String> {
+        vec![".git/".to_string()]
+    }
+
+    fn save_state(&self) -> Result<Option<SavedVcsState>> {
+        let branch = self.current_branch()?;
+        tracing::debug!(branch = %branch, "GitAdapter: saved branch state");
+        Ok(Some(SavedVcsState {
+            adapter: "git".to_string(),
+            data: Box::new(branch),
+        }))
+    }
+
+    fn restore_state(&self, state: Option<SavedVcsState>) -> Result<()> {
+        let state = match state {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        if state.adapter != "git" {
+            return Err(SubmitError::InvalidState(format!(
+                "Cannot restore state from adapter '{}' in GitAdapter",
+                state.adapter
+            )));
+        }
+
+        let original_branch = state
+            .data
+            .downcast::<String>()
+            .map_err(|_| SubmitError::InvalidState("Invalid saved state type".to_string()))?;
+
+        let current = self.current_branch()?;
+        if current != *original_branch {
+            match self.git_cmd(&["checkout", &original_branch]) {
+                Ok(_) => {
+                    tracing::info!(
+                        branch = %original_branch,
+                        "GitAdapter: restored to original branch"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        branch = %original_branch,
+                        current = %current,
+                        error = %e,
+                        "GitAdapter: could not restore branch. Run: git checkout {}",
+                        original_branch
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn revision_id(&self) -> Result<String> {
+        let hash = self.git_cmd(&["rev-parse", "--short", "HEAD"])?;
+
+        // Check for uncommitted changes
+        let status = self.git_cmd(&["status", "--porcelain"])?;
+        if status.is_empty() {
+            Ok(hash)
+        } else {
+            Ok(format!("{}-dirty", hash))
+        }
+    }
 }
 
 impl GitAdapter {
@@ -325,16 +399,16 @@ impl GitAdapter {
     /// Substitute template variables.
     ///
     /// Available variables:
-    ///   {title}          — goal title
-    ///   {summary}        — what changed (from change_summary.json)
-    ///   {why}            — why it changed
-    ///   {impact}         — impact assessment
-    ///   {objective}      — full goal objective text
-    ///   {artifact_count} — number of files changed
-    ///   {artifacts}      — per-artifact detail with summaries and explanations
-    ///   {goal_id}        — goal UUID
-    ///   {pr_id}          — PR package UUID
-    ///   {plan_phase}     — plan phase (or "N/A")
+    ///   {title}          -- goal title
+    ///   {summary}        -- what changed (from change_summary.json)
+    ///   {why}            -- why it changed
+    ///   {impact}         -- impact assessment
+    ///   {objective}      -- full goal objective text
+    ///   {artifact_count} -- number of files changed
+    ///   {artifacts}      -- per-artifact detail with summaries and explanations
+    ///   {goal_id}        -- goal UUID
+    ///   {pr_id}          -- PR package UUID
+    ///   {plan_phase}     -- plan phase (or "N/A")
     fn substitute_template(&self, template: &str, goal: &GoalRun, pr: &DraftPackage) -> String {
         let artifact_lines = Self::format_artifacts_detail(pr);
 
@@ -355,7 +429,6 @@ impl GitAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use tempfile::tempdir;
 
     fn init_git_repo(dir: &Path) -> Result<()> {
@@ -427,5 +500,71 @@ mod tests {
         // Verify we're on the new branch
         let current = adapter.current_branch().unwrap();
         assert!(current.starts_with("ta/"));
+    }
+
+    #[test]
+    fn test_git_adapter_exclude_patterns() {
+        let dir = tempdir().unwrap();
+        let adapter = GitAdapter::new(dir.path());
+        let patterns = adapter.exclude_patterns();
+        assert_eq!(patterns, vec![".git/"]);
+    }
+
+    #[test]
+    fn test_git_adapter_detect() {
+        let dir = tempdir().unwrap();
+
+        // No .git directory — should not detect
+        assert!(!GitAdapter::detect(dir.path()));
+
+        // Create .git directory — should detect
+        init_git_repo(dir.path()).unwrap();
+        assert!(GitAdapter::detect(dir.path()));
+    }
+
+    #[test]
+    fn test_git_adapter_save_restore_state() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+
+        let adapter = GitAdapter::new(dir.path());
+
+        // Save state on main/master
+        let original_branch = adapter.current_branch().unwrap();
+        let state = adapter.save_state().unwrap();
+        assert!(state.is_some());
+
+        // Create and switch to a new branch
+        let goal = GoalRun::new(
+            "Test Goal",
+            "Test",
+            "test-agent",
+            dir.path().to_path_buf(),
+            dir.path().join("store"),
+        );
+        let config = SubmitConfig::default();
+        adapter.prepare(&goal, &config).unwrap();
+
+        // Verify we're on a different branch
+        let current = adapter.current_branch().unwrap();
+        assert_ne!(current, original_branch);
+
+        // Restore state
+        adapter.restore_state(state).unwrap();
+        let restored = adapter.current_branch().unwrap();
+        assert_eq!(restored, original_branch);
+    }
+
+    #[test]
+    fn test_git_adapter_revision_id() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+
+        let adapter = GitAdapter::new(dir.path());
+        let rev = adapter.revision_id().unwrap();
+
+        // Should be a short hash (7+ chars)
+        assert!(!rev.is_empty());
+        assert_ne!(rev, "unknown");
     }
 }

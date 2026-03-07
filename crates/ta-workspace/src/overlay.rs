@@ -88,6 +88,21 @@ impl ExcludePatterns {
         }
     }
 
+    /// Merge additional patterns (e.g., from a VCS adapter) into this set.
+    /// Deduplicates patterns.
+    pub fn merge(&mut self, additional: &[String]) {
+        for pattern in additional {
+            if !self.patterns.contains(pattern) {
+                self.patterns.push(pattern.clone());
+            }
+        }
+    }
+
+    /// Get the current patterns (for inspection/testing).
+    pub fn patterns(&self) -> &[String] {
+        &self.patterns
+    }
+
     /// V1 TEMPORARY: Check if a file/directory name should be excluded during copy.
     /// Only checks against the immediate name (single path component).
     /// Agent infrastructure directories — always excluded (not work product).
@@ -236,8 +251,9 @@ impl OverlayWorkspace {
     /// Diff the staging workspace against the source to find all changes.
     ///
     /// Walks both directories, comparing files to identify modifications,
-    /// creations, and deletions. Skips `.ta/` and `.git/` when diffing
-    /// (internal state, not agent work product), plus V1 exclude patterns.
+    /// creations, and deletions. Skips `.ta/` and agent infrastructure dirs when
+    /// diffing (internal state, not agent work product), plus V1 exclude patterns
+    /// (which include VCS metadata dirs contributed by the active adapter).
     pub fn diff_all(&self) -> Result<Vec<OverlayChange>, WorkspaceError> {
         let mut changes = Vec::new();
 
@@ -779,7 +795,9 @@ fn walk_dir_relative(
 /// agents may generate in staging (e.g., `cargo build` creates `target/`).
 fn should_skip_for_diff(path: &str, excludes: &ExcludePatterns) -> bool {
     // Agent infrastructure directories (created at runtime, not work product).
-    const INFRA_DIRS: &[&str] = &[".ta", ".git", ".claude-flow", ".hive-mind", ".swarm"];
+    // Note: VCS metadata dirs (e.g., .git/, .svn/) are excluded via adapter-contributed
+    // patterns merged into ExcludePatterns, not hardcoded here.
+    const INFRA_DIRS: &[&str] = &[".ta", ".claude-flow", ".hive-mind", ".swarm"];
 
     for dir in INFRA_DIRS {
         if path == *dir

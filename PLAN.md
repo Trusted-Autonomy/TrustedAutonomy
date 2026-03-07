@@ -3345,7 +3345,7 @@ WorkflowFailed { workflow_id, name, reason, timestamp }
 ---
 
 ### v0.9.8.4 — VCS Adapter Abstraction & Plugin Architecture
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Move all version control operations behind the `SubmitAdapter` trait so TA is fully VCS-agnostic. Add adapter-contributed exclude patterns for staging, implement stub adapters for SVN and Perforce, and design the external plugin loading mechanism.
 
 #### Problem
@@ -3467,18 +3467,18 @@ This pattern extends beyond VCS to any adapter type:
 - `ta-output-jira` — Jira ticket creation from drafts
 - `ta-store-postgres` — PostgreSQL-backed goal/draft store
 
-#### Items
-1. [ ] Add `exclude_patterns()`, `save_state()`/`restore_state()`, `detect()` to `SubmitAdapter` trait
-2. [ ] Implement `exclude_patterns()` for `GitAdapter` (returns `[".git/"]`)
-3. [ ] Move branch save/restore from `draft.rs` into `GitAdapter::save_state()`/`restore_state()`
-4. [ ] Remove hardcoded `.git/` exclusion from `overlay.rs`, merge adapter patterns into `ExcludePatterns`
-5. [ ] Add adapter auto-detection registry in `ta-submit`
-6. [ ] Move `draft.rs` git auto-detection to use adapter registry
-7. [ ] Add `SvnAdapter` stub (`crates/ta-submit/src/svn.rs`) — **untested**
-8. [ ] Add `PerforceAdapter` stub (`crates/ta-submit/src/perforce.rs`) — **untested**
-9. [ ] Add `revision_id()` method to adapter, replace `build.rs` git hash with adapter call
-10. [ ] Update `docs/USAGE.md` with adapter configuration documentation
-11. [ ] Tests: adapter detection, exclude pattern merging, state save/restore lifecycle
+#### Completed
+1. [x] Add `exclude_patterns()`, `save_state()`/`restore_state()`, `detect()`, `revision_id()` to `SubmitAdapter` trait
+2. [x] Implement `exclude_patterns()` for `GitAdapter` (returns `[".git/"]`)
+3. [x] Move branch save/restore from `draft.rs` into `GitAdapter::save_state()`/`restore_state()`
+4. [x] Remove hardcoded `.git/` exclusion from `overlay.rs`, add `ExcludePatterns::merge()` for adapter patterns
+5. [x] Add adapter auto-detection registry in `ta-submit` (`registry.rs`)
+6. [x] Move `draft.rs` git auto-detection to use `select_adapter()` from registry
+7. [x] Add `SvnAdapter` stub (`crates/ta-submit/src/svn.rs`) — **untested**
+8. [x] Add `PerforceAdapter` stub (`crates/ta-submit/src/perforce.rs`) — **untested**
+9. [x] Add `revision_id()` method to adapter, update `build.rs` with `TA_REVISION` env var fallback
+10. [x] Update `docs/USAGE.md` with adapter configuration documentation
+11. [x] Tests: 39 tests — adapter detection (5), exclude patterns (3), state save/restore lifecycle (1), registry selection (6), known adapters, stub adapter basics (8), git operations (4)
 
 #### Implementation scope
 - `crates/ta-submit/src/adapter.rs` — extended `SubmitAdapter` trait with new methods

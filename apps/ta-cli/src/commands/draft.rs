@@ -1921,44 +1921,24 @@ fn apply_package(
 
     // Submit workflow integration (git or other adapters).
     if git_commit {
-        use ta_submit::{GitAdapter, NoneAdapter, SubmitAdapter, WorkflowConfig};
+        use ta_submit::{select_adapter, SubmitAdapter, WorkflowConfig};
 
         // Load workflow config if it exists.
         let workflow_config_path = target_dir.join(".ta/workflow.toml");
         let workflow_config = WorkflowConfig::load_or_default(&workflow_config_path);
 
-        // Select adapter based on config.
-        // Default to "git" if in a git repo and no config exists (backwards compatibility).
-        let is_git_repo = target_dir.join(".git").exists();
-        let adapter_name = if workflow_config.submit.adapter == "none" && is_git_repo {
-            "git"
-        } else {
-            &workflow_config.submit.adapter
-        };
-
-        let adapter: Box<dyn SubmitAdapter> = match adapter_name {
-            "git" => Box::new(GitAdapter::new(&target_dir)),
-            _ => Box::new(NoneAdapter::new()),
-        };
+        // Select adapter via registry (auto-detects VCS if config is default "none").
+        let adapter: Box<dyn SubmitAdapter> = select_adapter(&target_dir, &workflow_config.submit);
 
         println!("\nUsing submit adapter: {}", adapter.name());
 
-        // Save original branch so we can switch back after git operations.
-        let original_branch = if adapter_name == "git" {
-            std::process::Command::new("git")
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(&target_dir)
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    } else {
-                        None
-                    }
-                })
-        } else {
-            None
+        // Save VCS state so we can restore after apply operations.
+        let saved_state = match adapter.save_state() {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(error = %e, "Could not save VCS state before apply");
+                None
+            }
         };
 
         // Prepare (create branch if needed).
@@ -2015,40 +1995,9 @@ fn apply_package(
             }
         }
 
-        // Switch back to the original branch.
-        if let Some(ref orig) = original_branch {
-            let current = std::process::Command::new("git")
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(&target_dir)
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-
-            if current != *orig {
-                match std::process::Command::new("git")
-                    .args(["checkout", orig])
-                    .current_dir(&target_dir)
-                    .output()
-                {
-                    Ok(o) if o.status.success() => {
-                        println!("Switched back to branch: {}", orig);
-                    }
-                    _ => {
-                        eprintln!(
-                            "Warning: could not switch back to '{}'. Currently on '{}'.",
-                            orig, current
-                        );
-                        eprintln!("  Run: git checkout {}", orig);
-                    }
-                }
-            }
+        // Restore VCS state (e.g., switch back to original branch for Git).
+        if let Err(e) = adapter.restore_state(saved_state) {
+            eprintln!("Warning: could not restore VCS state after apply: {}", e);
         }
     }
 
