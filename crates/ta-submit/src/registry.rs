@@ -17,10 +17,20 @@ use crate::svn::SvnAdapter;
 ///
 /// Detection order: Git -> SVN -> Perforce -> None.
 /// First match wins.
+/// Auto-detect the appropriate VCS adapter with default config.
 pub fn detect_adapter(project_root: &Path) -> Box<dyn SubmitAdapter> {
+    detect_adapter_with_config(project_root, &SubmitConfig::default())
+}
+
+/// Auto-detect the appropriate VCS adapter, passing through config
+/// (co-author, branch prefix, etc.) to the detected adapter.
+pub fn detect_adapter_with_config(
+    project_root: &Path,
+    config: &SubmitConfig,
+) -> Box<dyn SubmitAdapter> {
     if GitAdapter::detect(project_root) {
         tracing::info!(adapter = "git", "Auto-detected Git repository");
-        return Box::new(GitAdapter::new(project_root));
+        return Box::new(GitAdapter::with_config(project_root, config.clone()));
     }
 
     if SvnAdapter::detect(project_root) {
@@ -49,7 +59,7 @@ pub fn select_adapter(project_root: &Path, config: &SubmitConfig) -> Box<dyn Sub
     match config.adapter.as_str() {
         "git" => {
             tracing::info!(adapter = "git", "Using configured Git adapter");
-            Box::new(GitAdapter::new(project_root))
+            Box::new(GitAdapter::with_config(project_root, config.clone()))
         }
         "svn" => {
             tracing::info!(adapter = "svn", "Using configured SVN adapter");
@@ -62,7 +72,7 @@ pub fn select_adapter(project_root: &Path, config: &SubmitConfig) -> Box<dyn Sub
         "none" => {
             // "none" is the default — auto-detect unless the user explicitly
             // configured it. We detect by checking if the default was used.
-            detect_adapter(project_root)
+            detect_adapter_with_config(project_root, config)
         }
         other => {
             tracing::warn!(
@@ -71,7 +81,7 @@ pub fn select_adapter(project_root: &Path, config: &SubmitConfig) -> Box<dyn Sub
                  Known adapters: git, svn, perforce, none",
                 other
             );
-            detect_adapter(project_root)
+            detect_adapter_with_config(project_root, config)
         }
     }
 }

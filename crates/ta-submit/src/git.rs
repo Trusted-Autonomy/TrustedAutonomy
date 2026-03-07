@@ -20,6 +20,8 @@ use crate::config::SubmitConfig;
 pub struct GitAdapter {
     /// Working directory for git operations
     work_dir: std::path::PathBuf,
+    /// Submit configuration (co-author, branch prefix, etc.)
+    config: SubmitConfig,
 }
 
 impl GitAdapter {
@@ -27,6 +29,15 @@ impl GitAdapter {
     pub fn new(work_dir: impl Into<std::path::PathBuf>) -> Self {
         Self {
             work_dir: work_dir.into(),
+            config: SubmitConfig::default(),
+        }
+    }
+
+    /// Create a new GitAdapter with explicit configuration
+    pub fn with_config(work_dir: impl Into<std::path::PathBuf>, config: SubmitConfig) -> Self {
+        Self {
+            work_dir: work_dir.into(),
+            config,
         }
     }
 
@@ -134,9 +145,14 @@ impl SubmitAdapter for GitAdapter {
             .as_ref()
             .map(|p| format!("\nPhase: {}", p))
             .unwrap_or_default();
+        let co_author_line = if self.config.co_author.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nCo-Authored-By: {}", self.config.co_author)
+        };
         let commit_msg = format!(
-            "{}\n\nGoal-ID: {}\nPR-ID: {}{}\n\nCo-Authored-By: Trusted Autonomy <ta@trustedautonomy.dev>",
-            message, goal.goal_run_id, pr.package_id, phase_line
+            "{}\n\nGoal-ID: {}\nPR-ID: {}{}{}",
+            message, goal.goal_run_id, pr.package_id, phase_line, co_author_line
         );
 
         // Commit
@@ -153,9 +169,8 @@ impl SubmitAdapter for GitAdapter {
     }
 
     fn push(&self, goal: &GoalRun) -> Result<PushResult> {
-        let config = SubmitConfig::default(); // TODO: pass config through
-        let branch_name = self.branch_name(goal, &config);
-        let remote = &config.git.remote;
+        let branch_name = self.branch_name(goal, &self.config);
+        let remote = &self.config.git.remote;
 
         tracing::info!("GitAdapter: pushing branch {} to {}", branch_name, remote);
 

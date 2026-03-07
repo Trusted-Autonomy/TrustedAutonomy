@@ -50,6 +50,13 @@ pub struct SubmitConfig {
     #[serde(default)]
     pub auto_review: bool,
 
+    /// Co-author trailer appended to every commit made through TA.
+    /// Format: "Name <email>". The email should match a GitHub account's
+    /// verified email for the contribution to appear in GitHub's graph.
+    /// Set to empty string to disable. Default: "Trusted Autonomy <ta@trustedautonomy.dev>"
+    #[serde(default = "default_co_author")]
+    pub co_author: String,
+
     /// Git-specific configuration
     #[serde(default)]
     pub git: GitConfig,
@@ -62,6 +69,7 @@ impl Default for SubmitConfig {
             auto_commit: false,
             auto_push: false,
             auto_review: false,
+            co_author: default_co_author(),
             git: GitConfig::default(),
         }
     }
@@ -105,6 +113,10 @@ impl Default for GitConfig {
 // Serde default functions
 fn default_adapter() -> String {
     "none".to_string()
+}
+
+fn default_co_author() -> String {
+    "Trusted Autonomy <ta@trustedautonomy.dev>".to_string()
 }
 
 fn default_branch_prefix() -> String {
