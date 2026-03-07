@@ -1,0 +1,18 @@
+[package]
+name = "ta-connector-slack"
+version.workspace = true
+edition = "2021"
+description = "Slack channel delivery adapter for Trusted Autonomy"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+async-trait = "0.1"
+ta-events = { path = "../../ta-events" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+uuid = { workspace = true }

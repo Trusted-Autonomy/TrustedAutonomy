@@ -32,6 +32,7 @@
 //! ```
 
 mod api;
+pub mod channel_dispatcher;
 mod config;
 pub mod question_registry;
 mod web;

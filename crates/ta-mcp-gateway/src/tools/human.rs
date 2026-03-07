@@ -180,6 +180,7 @@ pub fn handle_ask_human(
             choices: params.choices.clone(),
             turn,
             timeout_secs: params.timeout_secs,
+            channels: vec![],
         };
         if let Err(e) = event_store.append(&EventEnvelope::new(event)) {
             tracing::warn!("ta_ask_human: failed to emit AgentNeedsInput event: {}", e);

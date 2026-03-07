@@ -13,6 +13,7 @@ pub struct DaemonConfig {
     pub commands: CommandConfig,
     pub agent: AgentConfig,
     pub routing: RoutingConfig,
+    pub channels: ChannelsConfig,
 }
 
 impl DaemonConfig {
@@ -263,6 +264,38 @@ pub struct RouteEntry {
 pub struct ShortcutEntry {
     pub r#match: String,
     pub expand: String,
+}
+
+/// Channel delivery configuration for external question routing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelsConfig {
+    /// Default channels to deliver questions to when no routing hints are specified.
+    /// Empty means questions are only available via the HTTP API / ta shell.
+    pub default_channels: Vec<String>,
+    pub slack: Option<SlackChannelConfig>,
+    pub discord: Option<DiscordChannelConfig>,
+    pub email: Option<EmailChannelConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackChannelConfig {
+    pub bot_token: String,
+    pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordChannelConfig {
+    pub bot_token: String,
+    pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailChannelConfig {
+    pub send_endpoint: String,
+    pub api_key: String,
+    pub from_address: String,
+    pub to_address: String,
 }
 
 /// Token record stored in `.ta/daemon-tokens.json`.

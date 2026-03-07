@@ -7,6 +7,7 @@
 //! non-interactive approval.
 
 pub mod bus;
+pub mod channel;
 pub mod error;
 pub mod hooks;
 pub mod schema;
@@ -14,6 +15,7 @@ pub mod store;
 pub mod tokens;
 
 pub use bus::{EventBus, EventFilter};
+pub use channel::{ChannelDelivery, ChannelQuestion, ChannelRouting, DeliveryResult};
 pub use error::EventError;
 pub use hooks::{HookConfig, HookRunner};
 pub use schema::{EventAction, EventEnvelope, SessionEvent};

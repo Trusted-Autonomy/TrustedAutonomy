@@ -2343,6 +2343,41 @@ Built-in channel types: `terminal`, `auto-approve`, `webhook`. Third-party chann
 
 Each channel declares capabilities (`supports_review`, `supports_session`, `supports_notify`, `supports_rich_media`, `supports_threads`) so TA can validate routing config at startup.
 
+### External Channel Delivery
+
+When an agent calls `ta_ask_human`, the question can be delivered to external channels (Slack, Discord, email) in addition to the local `ta shell`. Configure channels in `.ta/daemon.toml`:
+
+```toml
+[channels]
+default_channels = ["slack"]  # Deliver questions to these channels by default
+
+[channels.slack]
+bot_token = "xoxb-your-bot-token"
+channel_id = "C1234567890"
+
+[channels.discord]
+bot_token = "your-discord-bot-token"
+channel_id = "123456789012345678"
+
+[channels.email]
+send_endpoint = "https://api.sendgrid.com/v3/mail/send"
+api_key = "your-api-key"
+from_address = "agent@yourcompany.com"
+to_address = "reviewer@yourcompany.com"
+```
+
+Each channel renders questions in its native format:
+
+| Channel | Rendering | Response mechanism |
+|---------|-----------|-------------------|
+| **Slack** | Block Kit message with action buttons | Button click or thread reply |
+| **Discord** | Embed with button components | Button interaction or thread reply |
+| **Email** | HTML email with choices listed | Reply email or API call |
+
+All responses flow back through `POST /api/interactions/:id/respond`, which is the same endpoint `ta shell` uses. This means any channel adapter is a thin delivery layer — the core interaction protocol is channel-agnostic.
+
+Questions can specify routing hints via the `channels` field in the `AgentNeedsInput` event. If no hints are provided, the daemon uses `default_channels` from the config.
+
 ### API Mediation
 
 The `ApiMediator` stages intercepted MCP tool calls for human review before execution. It implements the `ResourceMediator` trait for the `mcp://` URI scheme.

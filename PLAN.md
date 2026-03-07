@@ -3796,31 +3796,25 @@ Human sees question in ta shell / Slack / web UI
 ---
 
 ### v0.9.9.4 — External Channel Delivery
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Enable interactive mode questions to flow through external channels (Slack, Discord, email) — not just `ta shell`. The `QuestionRegistry` + HTTP endpoint design is already channel-agnostic; this phase adds the delivery adapters.
 
-#### Items
+#### Completed
 
-1. **Channel delivery interface** (`crates/ta-connectors/`):
-   - Each channel connector implements a `deliver_question()` method
-   - Renders question text, choices, and response hint in the channel's native format
-   - Response webhook calls `POST /api/interactions/:id/respond`
+- ✅ `ChannelDelivery` trait in `ta-events::channel` — async trait with `deliver_question()`, `name()`, `validate()` methods; `ChannelQuestion`, `DeliveryResult`, `ChannelRouting` types (5 tests)
+- ✅ `channels` routing field on `AgentNeedsInput` event — backward-compatible `#[serde(default)]` Vec<String> for channel routing hints
+- ✅ `ta-connector-slack` crate — `SlackAdapter` implementing `ChannelDelivery`, posts Block Kit messages with action buttons for yes/no and choice responses, thread-reply prompts for freeform (7 tests)
+- ✅ `ta-connector-discord` crate — `DiscordAdapter` implementing `ChannelDelivery`, posts embeds with button components (up to 5 per row), footer prompts for freeform (6 tests)
+- ✅ `ta-connector-email` crate — `EmailAdapter` implementing `ChannelDelivery`, sends HTML+text emails via configurable HTTP endpoint, includes interaction metadata headers (7 tests)
+- ✅ `ChannelDispatcher` in `ta-daemon` — routes questions to registered adapters based on channel hints or daemon defaults; `from_config()` factory for building from `daemon.toml` (9 tests)
+- ✅ `ChannelsConfig` in daemon config — `[channels]` section in `daemon.toml` with `default_channels`, `[channels.slack]`, `[channels.discord]`, `[channels.email]` sub-tables
+- ✅ Version bump to `0.9.9-alpha.4`
 
-2. **Slack adapter** (`crates/ta-connectors/slack/`):
-   - Posts question as Block Kit message with action buttons for choices
-   - Slash command or interaction handler calls respond endpoint
+#### Remaining (deferred)
 
-3. **Discord adapter** (`crates/ta-connectors/discord/`):
-   - Posts question as embed with reaction-based or button-based choices
-   - Interaction handler calls respond endpoint
-
-4. **Email adapter** (`crates/ta-connectors/email/`):
-   - Sends question as email with reply-to parsing
-   - Inbound webhook parses reply and calls respond endpoint
-
-5. **Channel routing in events** (`crates/ta-events/src/schema.rs`):
-   - `AgentNeedsInput` event includes channel routing hints
-   - Daemon dispatches to configured channels
+- Slack interaction handler webhook endpoint (receives button clicks, calls respond)
+- Discord interaction handler webhook endpoint (receives button interactions)
+- Email inbound webhook (parses reply emails, extracts interaction ID)
 
 #### Version: `0.9.9-alpha.4`
 

@@ -188,6 +188,10 @@ pub enum SessionEvent {
         turn: u32,
         #[serde(default)]
         timeout_secs: Option<u64>,
+        /// Channel routing hints — which external channels to deliver this
+        /// question to. Empty means use daemon defaults.
+        #[serde(default)]
+        channels: Vec<String>,
     },
 
     /// A human answered an agent's question.
@@ -541,6 +545,7 @@ mod tests {
                 choices: vec![],
                 turn: 1,
                 timeout_secs: None,
+                channels: vec![],
             },
             SessionEvent::AgentQuestionAnswered {
                 goal_id: gid,
@@ -610,6 +615,7 @@ mod tests {
             choices: vec![],
             turn: 1,
             timeout_secs: None,
+            channels: vec![],
         };
         let envelope = EventEnvelope::new(event);
         assert_eq!(envelope.actions.len(), 1);

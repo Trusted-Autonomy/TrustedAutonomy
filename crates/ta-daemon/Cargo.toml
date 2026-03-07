@@ -30,6 +30,10 @@ ta-memory = { path = "../ta-memory" }
 ta-events = { path = "../ta-events" }
 ta-goal = { path = "../ta-goal" }
 ta-policy = { path = "../ta-policy" }
+ta-connector-slack = { path = "../ta-connectors/slack" }
+ta-connector-discord = { path = "../ta-connectors/discord" }
+ta-connector-email = { path = "../ta-connectors/email" }
+async-trait = "0.1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
