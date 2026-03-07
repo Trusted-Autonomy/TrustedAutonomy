@@ -1704,6 +1704,18 @@ fn apply_package(
         .find(|g| g.pr_package_id == Some(package_id))
         .ok_or_else(|| anyhow::anyhow!("No goal found for draft package {}", package_id))?;
 
+    // Pre-flight: validate the state transition before doing any file work.
+    // This ensures the apply is atomic — either everything succeeds or we
+    // fail fast without leaving files in a half-applied state.
+    if !goal.state.can_transition_to(&GoalRunState::Applied) {
+        anyhow::bail!(
+            "Cannot apply: goal {} is in state '{}', which cannot transition to 'applied'.\n\
+             Valid source states: pr_ready, under_review, approved.",
+            &goal.goal_run_id.to_string()[..8],
+            goal.state
+        );
+    }
+
     let target_dir = match target {
         Some(t) => std::path::PathBuf::from(t),
         None => goal
@@ -2040,8 +2052,15 @@ fn apply_package(
         }
     }
 
-    // Transition goal to Applied → update package status.
-    let _ = goal_store.transition(goal.goal_run_id, GoalRunState::Applied);
+    // Transition goal to Applied. The pre-flight check validated the state
+    // machine transition; this call persists it. Use warning (not bail) for
+    // the disk write since files are already applied at this point.
+    if let Err(e) = goal_store.transition(goal.goal_run_id, GoalRunState::Applied) {
+        eprintln!(
+            "Warning: could not persist goal state transition to Applied: {}",
+            e
+        );
+    }
     pkg.status = DraftStatus::Applied {
         applied_at: Utc::now(),
     };

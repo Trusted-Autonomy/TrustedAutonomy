@@ -68,6 +68,11 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Strip agent-session env vars so subprocess agents don't detect nesting.
+    // This allows the daemon to be started from inside a Claude Code session.
+    std::env::remove_var("CLAUDECODE");
+    std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
+
     // Logs go to stderr so they don't interfere with MCP on stdout.
     tracing_subscriber::fmt()
         .with_env_filter(

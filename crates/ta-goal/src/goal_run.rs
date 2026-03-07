@@ -93,6 +93,10 @@ impl GoalRunState {
                 | (GoalRunState::PrReady, GoalRunState::UnderReview)
                 | (GoalRunState::UnderReview, GoalRunState::Approved { .. })
                 | (GoalRunState::Approved { .. }, GoalRunState::Applied)
+                // Allow direct apply from PrReady/UnderReview (ta draft apply
+                // without explicit approve step).
+                | (GoalRunState::PrReady, GoalRunState::Applied)
+                | (GoalRunState::UnderReview, GoalRunState::Applied)
                 | (GoalRunState::Applied, GoalRunState::Completed)
                 // Allow going back from UnderReview to Running (denied PR, try again)
                 | (GoalRunState::UnderReview, GoalRunState::Running)

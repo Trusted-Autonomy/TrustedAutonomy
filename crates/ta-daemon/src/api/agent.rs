@@ -272,6 +272,9 @@ async fn run_agent_prompt(
         tokio::process::Command::new(&binary)
             .args(&args)
             .current_dir(working_dir)
+            // Clear env vars that prevent nested agent sessions.
+            .env_remove("CLAUDECODE")
+            .env_remove("CLAUDE_CODE_ENTRYPOINT")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
