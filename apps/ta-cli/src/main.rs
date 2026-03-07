@@ -184,6 +184,11 @@ enum Commands {
         #[arg(long)]
         url: Option<String>,
     },
+    /// Manage multi-stage workflows with pluggable engines.
+    Workflow {
+        #[command(subcommand)]
+        command: commands::workflow::WorkflowCommands,
+    },
     /// Manage policy configuration and auto-approval.
     Policy {
         #[command(subcommand)]
@@ -385,6 +390,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Shell { init, attach, url } => {
             commands::shell::execute(&project_root, attach.as_deref(), url.as_deref(), *init)
         }
+        Commands::Workflow { command } => commands::workflow::execute(command, &config),
         Commands::Policy { command } => commands::policy::execute(command, &config),
         Commands::Gc {
             dry_run,

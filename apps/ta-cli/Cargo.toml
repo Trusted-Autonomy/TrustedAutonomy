@@ -51,6 +51,7 @@ ta-session = { path = "../../crates/ta-session" }
 ta-events = { path = "../../crates/ta-events" }
 ta-submit = { path = "../../crates/ta-submit" }
 ta-workspace = { path = "../../crates/ta-workspace" }
+ta-workflow = { path = "../../crates/ta-workflow" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

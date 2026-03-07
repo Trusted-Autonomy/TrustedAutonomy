@@ -17,6 +17,7 @@ pub mod events;
 pub mod goal_output;
 pub mod input;
 pub mod status;
+pub mod workflow;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -85,6 +86,9 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             "/api/goals/{id}/output",
             get(goal_output::goal_output_stream),
         )
+        // Workflow routes (v0.9.8.2).
+        .route("/api/workflows", get(workflow::list_workflows))
+        .route("/api/workflow/{id}/input", post(workflow::workflow_input))
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -1,0 +1,39 @@
+# simple-review.yaml — Minimal 2-stage workflow: build + review.
+#
+# Usage:
+#   ta workflow start templates/workflows/simple-review.yaml
+
+name: simple-review
+
+stages:
+  - name: build
+    roles: [engineer]
+    await_human: never
+
+  - name: review
+    depends_on: [build]
+    roles: [reviewer]
+    await_human: on_fail
+    on_fail:
+      route_to: build
+      max_retries: 2
+
+roles:
+  engineer:
+    agent: claude-code
+    prompt: |
+      You are a software engineer. Implement the requested feature or fix
+      following the project's coding standards. Write tests for your changes.
+
+  reviewer:
+    agent: claude-code
+    prompt: |
+      You are a code reviewer. Review the implementation for:
+      - Correctness and completeness
+      - Test coverage
+      - Security issues
+      - Code style consistency
+      Provide a verdict with specific findings.
+
+verdict:
+  pass_threshold: 0.7

@@ -732,6 +732,18 @@ impl TaGatewayServer {
     ) -> Result<CallToolResult, McpError> {
         tools::event::handle_event_subscribe(&self.state, params)
     }
+
+    // ── Workflow tools (v0.9.8.2) ─────────────────────────────
+
+    #[tool(
+        description = "Manage multi-stage workflows. Actions: start (begin a workflow from a YAML definition), status (get workflow status), list (list active/completed workflows), cancel (cancel a running workflow), history (show stage transitions and verdicts)."
+    )]
+    fn ta_workflow(
+        &self,
+        Parameters(params): Parameters<tools::workflow::WorkflowToolParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::workflow::handle_workflow(&self.state, params)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────────
@@ -801,13 +813,14 @@ mod tests {
     fn tool_count_matches_expected() {
         let (server, _dir) = test_server();
         let tools = server.tool_router.list_all();
-        // 15 tools: goal_start, goal_status, goal_list,
+        // 16 tools: goal_start, goal_status, goal_list,
         //           fs_read, fs_write, fs_list, fs_diff,
         //           pr_build, pr_status,
         //           ta_draft, ta_goal_inner, ta_plan, ta_context,
-        //           ta_agent_status (v0.9.6), ta_event_subscribe (v0.9.4)
+        //           ta_agent_status (v0.9.6), ta_event_subscribe (v0.9.4),
+        //           ta_workflow (v0.9.8.2)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 15, "expected 15 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 16, "expected 16 tools, got: {:?}", names);
     }
 
     #[test]

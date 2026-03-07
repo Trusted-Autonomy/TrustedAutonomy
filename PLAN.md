@@ -3027,7 +3027,7 @@ impl AccessFilter {
 ---
 
 ### v0.9.8.2 — Pluggable Workflow Engine & Framework Integration
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Add a `WorkflowEngine` trait to TA core so multi-stage, multi-role, multi-framework workflows can be orchestrated with pluggable engines — built-in YAML for simple cases, framework adapters (LangGraph, CrewAI) for power users, or custom implementations.
 
 #### Design Principle: TA Mediates, Doesn't Mandate
@@ -3256,6 +3256,28 @@ WorkflowFailed { workflow_id, name, reason, timestamp }
 - `templates/workflows/` — workflow definitions, role library, framework adapters
 - `docs/USAGE.md` — workflow engine docs, framework integration guide, interactive workflow section
 - Tests: YAML engine stage execution, verdict scoring, routing decisions, goal chaining context propagation, process plugin protocol, loop detection, await_human interaction round-trip
+
+#### Completed
+- ✅ `WorkflowEngine` trait with start/stage_completed/status/inject_feedback/cancel/list methods
+- ✅ `WorkflowDefinition` schema with stages, roles, verdict config, topological sort
+- ✅ `Verdict` schema with Finding, Severity, VerdictDecision, aggregate scoring
+- ✅ GoalRun extensions: workflow_id, stage, role, context_from fields (backward compatible)
+- ✅ Built-in YAML workflow engine (~400 lines) with retry routing and loop detection
+- ✅ Process-based workflow plugin bridge (JSON-over-stdio protocol types + stub)
+- ✅ Feedback scoring module (ScoringResult, score_verdicts with required role checks)
+- ✅ Interactive human-in-the-loop (AwaitHumanConfig: always/never/on_fail, InteractionRequest/Response)
+- ✅ 7 workflow TaEvent variants: WorkflowStarted, StageStarted, StageCompleted, WorkflowRouted, WorkflowCompleted, WorkflowFailed, WorkflowAwaitingHuman
+- ✅ `ta_workflow` MCP tool (start, status, list, cancel, history actions)
+- ✅ `ta workflow` CLI commands (start, status, list, cancel, history)
+- ✅ Daemon API endpoints: GET /api/workflows, POST /api/workflow/:id/input
+- ✅ Shell SSE rendering for all 7 workflow event types including awaiting_human prompts
+- ✅ Framework integration templates: 3 workflow definitions, 5 role definitions, 2 adapter scripts (LangGraph, CrewAI)
+- ✅ ~44 new tests across ta-workflow (31), ta-goal (3), ta-mcp-gateway (1), ta-cli (2), ta-daemon (1)
+
+#### Remaining (deferred)
+- Goal chaining context propagation (requires daemon runtime for multi-goal orchestration)
+- Full async process engine I/O (requires daemon tokio runtime for child process management)
+- Live scoring agent integration (requires LLM API call from scorer — protocol types ready)
 
 #### Version: `0.9.8-alpha.2`
 

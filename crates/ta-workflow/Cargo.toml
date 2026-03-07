@@ -1,0 +1,18 @@
+[package]
+name = "ta-workflow"
+version.workspace = true
+edition = "2021"
+description = "Pluggable workflow engine for multi-stage, multi-role orchestration in Trusted Autonomy"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

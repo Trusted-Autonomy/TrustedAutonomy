@@ -366,8 +366,8 @@ async fn fetch_completions(client: &reqwest::Client, base_url: &str) -> Vec<Stri
 
 fn default_completions() -> Vec<String> {
     vec![
-        "approve", "deny", "view", "apply", "status", "plan", "goals", "drafts", "exit", "quit",
-        "help", ":status", ":help",
+        "approve", "deny", "view", "apply", "status", "plan", "goals", "drafts", "workflow",
+        "exit", "quit", "help", ":status", ":help",
     ]
     .into_iter()
     .map(String::from)
@@ -660,6 +660,59 @@ fn render_sse_event(frame: &str) -> Option<String> {
                 .or_else(|| payload["denied_by"].as_str())
                 .unwrap_or("?");
             format!("draft {}: by {}", decision, by)
+        }
+        "workflow_started" => {
+            let name = payload["name"].as_str().unwrap_or("unnamed");
+            let stages = payload["stage_count"].as_u64().unwrap_or(0);
+            format!("workflow started: \"{}\" ({} stages)", name, stages)
+        }
+        "stage_started" => {
+            let stage = payload["stage"].as_str().unwrap_or("?");
+            let roles: Vec<&str> = payload["roles"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            format!("stage started: {} [{}]", stage, roles.join(", "))
+        }
+        "stage_completed" => {
+            let stage = payload["stage"].as_str().unwrap_or("?");
+            let score = payload["aggregate_score"].as_f64().unwrap_or(0.0);
+            format!("stage completed: {} (score: {:.0}%)", stage, score * 100.0)
+        }
+        "workflow_routed" => {
+            let from = payload["from_stage"].as_str().unwrap_or("?");
+            let to = payload["to_stage"].as_str().unwrap_or("?");
+            let severity = payload["severity"].as_str().unwrap_or("?");
+            format!("workflow routed: {} -> {} ({})", from, to, severity)
+        }
+        "workflow_completed" => {
+            let name = payload["name"].as_str().unwrap_or("unnamed");
+            let stages = payload["stages_executed"].as_u64().unwrap_or(0);
+            format!("workflow completed: \"{}\" ({} stages)", name, stages)
+        }
+        "workflow_failed" => {
+            let name = payload["name"].as_str().unwrap_or("unnamed");
+            let reason = payload["reason"].as_str().unwrap_or("unknown");
+            format!("workflow failed: \"{}\" - {}", name, reason)
+        }
+        "workflow_awaiting_human" => {
+            let stage = payload["stage"].as_str().unwrap_or("?");
+            let prompt = payload["prompt"].as_str().unwrap_or("Input needed");
+            let options: Vec<&str> = payload["options"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let options_str: Vec<String> = options
+                .iter()
+                .enumerate()
+                .map(|(i, o)| format!("[{}] {}", i + 1, o))
+                .collect();
+            format!(
+                "workflow paused at '{}': {}\n  Options: {}",
+                stage,
+                prompt,
+                options_str.join("  ")
+            )
         }
         _ => {
             // Fallback: use summary field or event type.

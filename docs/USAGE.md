@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.9.8-alpha
+**Version**: v0.9.8-alpha.2
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -61,6 +61,7 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [Project Initialization](#project-initialization)
    - [Add TA to an Existing Project](#add-ta-to-an-existing-project)
    - [Framework Registry](#framework-registry)
+   - [Workflow Engine](#workflow-engine)
 6. [Roadmap](#roadmap)
 7. [Troubleshooting](#troubleshooting)
 8. [Getting Help](#getting-help)
@@ -1442,7 +1443,7 @@ Events are persisted to `.ta/events/<YYYY-MM-DD>.jsonl` files, rotated daily. Bo
 
 #### Event types
 
-Events cover the full TA lifecycle: `goal_started`, `goal_completed`, `goal_failed`, `draft_built`, `draft_submitted`, `draft_approved`, `draft_denied`, `draft_applied`, `session_paused`, `session_resumed`, `session_aborted`, `plan_phase_completed`, `review_requested`, `policy_violation`, `memory_stored`.
+Events cover the full TA lifecycle: `goal_started`, `goal_completed`, `goal_failed`, `draft_built`, `draft_submitted`, `draft_approved`, `draft_denied`, `draft_applied`, `session_paused`, `session_resumed`, `session_aborted`, `plan_phase_completed`, `review_requested`, `policy_violation`, `memory_stored`, `workflow_started`, `stage_started`, `stage_completed`, `workflow_routed`, `workflow_completed`, `workflow_failed`, `workflow_awaiting_human`.
 
 #### Event hooks
 
@@ -2359,13 +2360,146 @@ runtime = "native-cli"
 
 After adding a custom framework, run `ta setup refine agents` to generate its agent config.
 
+### Workflow Engine
+
+TA includes a pluggable workflow engine for orchestrating multi-stage, multi-role workflows. Define stages, assign roles to agents, and let TA handle routing, verdict scoring, and human-in-the-loop interaction.
+
+#### Quick start
+
+```bash
+# Start a workflow from a YAML definition
+ta workflow start templates/workflows/simple-review.yaml
+
+# Check status
+ta workflow status <workflow-id>
+
+# List active workflows
+ta workflow list
+
+# Cancel a workflow
+ta workflow cancel <workflow-id>
+
+# Show stage transitions and routing history
+ta workflow history <workflow-id>
+```
+
+#### Workflow YAML format
+
+```yaml
+name: my-workflow
+stages:
+  - name: build
+    roles: [engineer]
+  - name: review
+    depends_on: [build]
+    roles: [reviewer]
+    review:
+      pass_threshold: 0.7
+      required_pass: [security-reviewer]
+    on_fail:
+      route_to: build
+      max_retries: 3
+    await_human: on_fail    # always | never | on_fail
+
+roles:
+  engineer:
+    agent: claude-code
+    prompt: "Build the feature described in the goal"
+  reviewer:
+    agent: claude-code
+    prompt: "Review the implementation for correctness and security"
+
+verdict:
+  pass_threshold: 0.7
+  required_pass: [security-reviewer]
+  scorer:
+    agent: claude-code
+    prompt: |
+      Synthesize review verdicts into an aggregate assessment.
+      Weight security findings 2x.
+```
+
+**Stages** execute in dependency order (topological sort). Each stage assigns one or more roles. When a stage completes, verdicts are scored and the engine decides: proceed, route back, complete, or pause for human input.
+
+**Verdict scoring** aggregates findings from all roles. Findings have severity levels (critical, major, minor) that affect the aggregate score. Required roles must pass for the overall verdict to pass.
+
+**Failure routing** sends work back to an earlier stage with feedback from the review. `max_retries` prevents infinite loops.
+
+#### Interactive workflow prompts
+
+When a stage has `await_human: always` or `await_human: on_fail` (and the verdict fails), the workflow pauses and presents options in `ta shell`:
+
+```
+[workflow] Review stage paused — 2 findings need attention:
+  1. Security: SQL injection risk (critical)
+  2. Style: Inconsistent error format (minor)
+
+Options: [1] proceed  [2] revise  [3] cancel
+workflow> _
+```
+
+Respond via the daemon API:
+
+```bash
+# POST /api/workflow/:id/input
+curl -X POST http://localhost:3001/api/workflow/<id>/input \
+  -H 'Content-Type: application/json' \
+  -d '{"decision": "proceed", "feedback": "Accepted with minor issue noted"}'
+```
+
+Valid decisions: `proceed`, `revise`, `cancel`.
+
+#### Built-in templates
+
+TA ships three workflow templates:
+
+| Template | Stages | Use case |
+|----------|--------|----------|
+| `simple-review.yaml` | build → review | Quick build-and-review cycle |
+| `milestone-review.yaml` | plan → build → review → approval | Full milestone with scorer |
+| `security-audit.yaml` | scan → review → remediate | Security-focused audit |
+
+Role definitions are in `templates/workflows/roles/` (engineer, reviewer, security-reviewer, planner, pm).
+
+#### Framework adapters
+
+For LangGraph or CrewAI users, TA ships adapter scripts that bridge the JSON-over-stdio protocol:
+
+```bash
+# LangGraph adapter
+python templates/workflows/adapters/langraph_adapter.py
+
+# CrewAI adapter
+python templates/workflows/adapters/crewai_adapter.py
+```
+
+Configure a process-based engine in `.ta/config.yaml`:
+
+```yaml
+workflow:
+  engine: process
+  command: "python templates/workflows/adapters/langraph_adapter.py"
+```
+
+#### MCP tool
+
+Orchestrator agents can manage workflows via the `ta_workflow` MCP tool:
+
+```json
+{"action": "start", "definition_path": "templates/workflows/simple-review.yaml"}
+{"action": "status", "workflow_id": "abc-123"}
+{"action": "list"}
+{"action": "cancel", "workflow_id": "abc-123"}
+{"action": "history", "workflow_id": "abc-123"}
+```
+
 ---
 
 ## Roadmap
 
 ### What's Done
 
-TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, decision observability, credential management, MCP tool call interception, web review UI, webhook review channels, persistent context memory with semantic search, session lifecycle management, unified policy configuration (6-layer cascade), resource mediation (extensible by URI scheme), pluggable channel registry, API mediation for MCP tool calls, agent-guided project setup, project template initialization, interactive developer loop (`ta dev`), extensible agent framework registry with auto-detection, daemon HTTP API with SSE events and agent session management, and an interactive terminal shell (`ta shell`).
+TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, decision observability, credential management, MCP tool call interception, web review UI, webhook review channels, persistent context memory with semantic search, session lifecycle management, unified policy configuration (6-layer cascade), resource mediation (extensible by URI scheme), pluggable channel registry, API mediation for MCP tool calls, agent-guided project setup, project template initialization, interactive developer loop (`ta dev`), extensible agent framework registry with auto-detection, daemon HTTP API with SSE events and agent session management, an interactive terminal shell (`ta shell`), and a pluggable workflow engine for multi-stage, multi-role orchestration with verdict scoring and human-in-the-loop interaction.
 
 ### Phase Status
 
@@ -2458,6 +2592,9 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.9.6 | Orchestrator API and goal-scoped agent tracking | Done |
 | v0.9.7 | Daemon API expansion (HTTP API, SSE events, agent sessions) | Done |
 | v0.9.8 | Interactive TA shell (`ta shell` REPL, daemon client) | Done |
+| v0.9.8.1 | Auto-approval, lifecycle hygiene & operational polish | Done |
+| v0.9.8.1.1 | Unified allow/deny list pattern | Done |
+| v0.9.8.2 | Pluggable workflow engine & framework integration | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

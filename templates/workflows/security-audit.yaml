@@ -1,0 +1,66 @@
+# security-audit.yaml — Security-focused workflow with OWASP reviewer.
+#
+# A 3-stage workflow: scan -> review -> remediate.
+# All findings must be addressed before passing.
+#
+# Usage:
+#   ta workflow start templates/workflows/security-audit.yaml
+
+name: security-audit
+
+stages:
+  - name: scan
+    roles: [scanner]
+    await_human: never
+
+  - name: review
+    depends_on: [scan]
+    roles: [owasp-reviewer, dependency-scanner]
+    await_human: on_fail
+    on_fail:
+      route_to: remediate
+      max_retries: 3
+
+  - name: remediate
+    depends_on: [review]
+    roles: [engineer]
+    await_human: never
+    on_fail:
+      route_to: review
+      max_retries: 2
+
+roles:
+  scanner:
+    agent: claude-code
+    prompt: |
+      You are a security scanner. Analyze the codebase for:
+      - OWASP Top 10 vulnerabilities
+      - Hardcoded credentials or secrets
+      - Insecure configurations
+      - Known CVEs in dependencies
+      Output structured findings with severity ratings.
+
+  owasp-reviewer:
+    agent: claude-code
+    prompt: |
+      You are an OWASP security expert. Review the scan results and
+      verify each finding. Classify by OWASP category (A01-A10).
+      Identify false positives and prioritize remediation.
+
+  dependency-scanner:
+    agent: claude-code
+    prompt: |
+      You are a dependency security analyst. Check all dependencies
+      for known vulnerabilities. Recommend version updates or
+      alternative packages where needed.
+
+  engineer:
+    agent: claude-code
+    prompt: |
+      You are a security engineer. Fix the identified vulnerabilities.
+      Prioritize critical findings first. Ensure fixes don't introduce
+      regressions. Add tests for security-sensitive code paths.
+
+verdict:
+  pass_threshold: 0.8
+  required_pass: [owasp-reviewer]

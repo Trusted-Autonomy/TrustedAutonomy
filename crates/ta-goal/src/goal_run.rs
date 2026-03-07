@@ -162,6 +162,22 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_goal_ids: Vec<Uuid>,
 
+    /// Workflow ID this goal belongs to (v0.9.8.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+
+    /// Workflow stage this goal belongs to (v0.9.8.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+
+    /// Workflow role this goal fulfills (v0.9.8.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+
+    /// Goals whose output feeds into this one's context (v0.9.8.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_from: Vec<Uuid>,
+
     /// The PR package ID, if one has been built.
     pub pr_package_id: Option<Uuid>,
 
@@ -198,6 +214,10 @@ impl GoalRun {
             is_macro: false,
             parent_macro_id: None,
             sub_goal_ids: Vec::new(),
+            workflow_id: None,
+            stage: None,
+            role: None,
+            context_from: Vec::new(),
             pr_package_id: None,
             created_at: now,
             updated_at: now,
@@ -388,6 +408,42 @@ mod tests {
         assert!(!restored.is_macro);
         assert!(restored.parent_macro_id.is_none());
         assert!(restored.sub_goal_ids.is_empty());
+    }
+
+    #[test]
+    fn workflow_fields_serialization_round_trip() {
+        let mut gr = test_goal_run();
+        gr.workflow_id = Some("wf-123".to_string());
+        gr.stage = Some("build".to_string());
+        gr.role = Some("engineer".to_string());
+        let ctx_id = Uuid::new_v4();
+        gr.context_from = vec![ctx_id];
+
+        let json = serde_json::to_string_pretty(&gr).unwrap();
+        assert!(json.contains("\"workflow_id\""));
+        assert!(json.contains("\"stage\""));
+        assert!(json.contains("\"role\""));
+        assert!(json.contains("\"context_from\""));
+
+        let restored: GoalRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.workflow_id, Some("wf-123".to_string()));
+        assert_eq!(restored.stage, Some("build".to_string()));
+        assert_eq!(restored.role, Some("engineer".to_string()));
+        assert_eq!(restored.context_from, vec![ctx_id]);
+    }
+
+    #[test]
+    fn workflow_fields_default_omitted_from_json() {
+        let gr = test_goal_run();
+        let json = serde_json::to_string_pretty(&gr).unwrap();
+        assert!(!json.contains("workflow_id"));
+        assert!(!json.contains("\"stage\""));
+        assert!(!json.contains("\"role\""));
+        assert!(!json.contains("context_from"));
+        // Backward compat: JSON without these fields deserializes fine.
+        let restored: GoalRun = serde_json::from_str(&json).unwrap();
+        assert!(restored.workflow_id.is_none());
+        assert!(restored.context_from.is_empty());
     }
 
     #[test]

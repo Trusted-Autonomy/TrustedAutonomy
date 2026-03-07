@@ -1,0 +1,81 @@
+# milestone-review.yaml — Full plan/build/review workflow.
+#
+# A 4-stage workflow: planning -> build -> review -> approval.
+# Uses the built-in YAML engine with verdict scoring.
+#
+# Usage:
+#   ta workflow start templates/workflows/milestone-review.yaml
+
+name: milestone-review
+
+stages:
+  - name: planning
+    roles: [planner]
+    await_human: always
+
+  - name: build
+    depends_on: [planning]
+    roles: [engineer]
+    await_human: never
+
+  - name: review
+    depends_on: [build]
+    roles: [reviewer, security-reviewer]
+    await_human: on_fail
+    on_fail:
+      route_to: build
+      max_retries: 3
+
+  - name: approval
+    depends_on: [review]
+    roles: [pm]
+    await_human: always
+
+roles:
+  planner:
+    agent: claude-code
+    prompt: |
+      You are a technical planner. Break down the milestone into
+      concrete implementation tasks. Identify risks and dependencies.
+      Output a structured plan with task descriptions and ordering.
+
+  engineer:
+    agent: claude-code
+    prompt: |
+      You are a software engineer. Implement the tasks from the plan.
+      Follow the project's coding standards. Write tests for all changes.
+      Commit in logical units.
+
+  reviewer:
+    agent: claude-code
+    prompt: |
+      You are a code reviewer. Review the implementation for correctness,
+      test coverage, and code quality. Provide specific findings with
+      severity ratings (critical, major, minor).
+
+  security-reviewer:
+    agent: claude-code
+    prompt: |
+      You are a security reviewer. Focus on:
+      - Input validation and sanitization
+      - Authentication and authorization
+      - Data exposure risks
+      - Dependency vulnerabilities
+      Weight security findings at 2x severity.
+
+  pm:
+    agent: claude-code
+    prompt: |
+      You are a project manager. Review the completed work against
+      the original milestone goals. Verify all planned tasks were
+      completed and documented. Approve or request revisions.
+
+verdict:
+  pass_threshold: 0.7
+  required_pass: [security-reviewer]
+  scorer:
+    agent: claude-code
+    prompt: |
+      You are a metacritic reviewer. Given multiple review verdicts,
+      synthesize them into an aggregate assessment. Weight security
+      findings 2x. Classify overall severity and recommend routing.

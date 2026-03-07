@@ -190,6 +190,67 @@ pub enum TaEvent {
         timestamp: DateTime<Utc>,
     },
 
+    /// A workflow was started (v0.9.8.2).
+    WorkflowStarted {
+        workflow_id: String,
+        name: String,
+        stage_count: usize,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// A workflow stage started (v0.9.8.2).
+    StageStarted {
+        workflow_id: String,
+        stage: String,
+        roles: Vec<String>,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// A workflow stage completed with verdicts (v0.9.8.2).
+    StageCompleted {
+        workflow_id: String,
+        stage: String,
+        verdict_count: usize,
+        aggregate_score: f64,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// A workflow routed back to a previous stage (v0.9.8.2).
+    WorkflowRouted {
+        workflow_id: String,
+        from_stage: String,
+        to_stage: String,
+        severity: String,
+        reason: String,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// A workflow completed successfully (v0.9.8.2).
+    WorkflowCompleted {
+        workflow_id: String,
+        name: String,
+        total_duration_secs: u64,
+        stages_executed: usize,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// A workflow failed (v0.9.8.2).
+    WorkflowFailed {
+        workflow_id: String,
+        name: String,
+        reason: String,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// A workflow is awaiting human input (v0.9.8.2).
+    WorkflowAwaitingHuman {
+        workflow_id: String,
+        stage: String,
+        prompt: String,
+        options: Vec<String>,
+        timestamp: DateTime<Utc>,
+    },
+
     /// A draft was auto-approved by policy (v0.9.8.1).
     DraftAutoApproved {
         draft_id: String,
@@ -226,6 +287,13 @@ impl TaEvent {
             TaEvent::GoalFailed { .. } => "goal_failed",
             TaEvent::AgentSessionStarted { .. } => "agent_session_started",
             TaEvent::AgentSessionEnded { .. } => "agent_session_ended",
+            TaEvent::WorkflowStarted { .. } => "workflow_started",
+            TaEvent::StageStarted { .. } => "stage_started",
+            TaEvent::StageCompleted { .. } => "stage_completed",
+            TaEvent::WorkflowRouted { .. } => "workflow_routed",
+            TaEvent::WorkflowCompleted { .. } => "workflow_completed",
+            TaEvent::WorkflowFailed { .. } => "workflow_failed",
+            TaEvent::WorkflowAwaitingHuman { .. } => "workflow_awaiting_human",
             TaEvent::DraftAutoApproved { .. } => "draft_auto_approved",
         }
     }
@@ -341,6 +409,102 @@ impl TaEvent {
         TaEvent::AgentSessionEnded {
             agent_id: agent_id.to_string(),
             goal_run_id,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create a WorkflowStarted event (v0.9.8.2).
+    pub fn workflow_started(workflow_id: &str, name: &str, stage_count: usize) -> Self {
+        TaEvent::WorkflowStarted {
+            workflow_id: workflow_id.to_string(),
+            name: name.to_string(),
+            stage_count,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create a StageStarted event (v0.9.8.2).
+    pub fn stage_started(workflow_id: &str, stage: &str, roles: Vec<String>) -> Self {
+        TaEvent::StageStarted {
+            workflow_id: workflow_id.to_string(),
+            stage: stage.to_string(),
+            roles,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create a StageCompleted event (v0.9.8.2).
+    pub fn stage_completed_event(
+        workflow_id: &str,
+        stage: &str,
+        verdict_count: usize,
+        aggregate_score: f64,
+    ) -> Self {
+        TaEvent::StageCompleted {
+            workflow_id: workflow_id.to_string(),
+            stage: stage.to_string(),
+            verdict_count,
+            aggregate_score,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create a WorkflowRouted event (v0.9.8.2).
+    pub fn workflow_routed(
+        workflow_id: &str,
+        from_stage: &str,
+        to_stage: &str,
+        severity: &str,
+        reason: &str,
+    ) -> Self {
+        TaEvent::WorkflowRouted {
+            workflow_id: workflow_id.to_string(),
+            from_stage: from_stage.to_string(),
+            to_stage: to_stage.to_string(),
+            severity: severity.to_string(),
+            reason: reason.to_string(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create a WorkflowCompleted event (v0.9.8.2).
+    pub fn workflow_completed(
+        workflow_id: &str,
+        name: &str,
+        total_duration_secs: u64,
+        stages_executed: usize,
+    ) -> Self {
+        TaEvent::WorkflowCompleted {
+            workflow_id: workflow_id.to_string(),
+            name: name.to_string(),
+            total_duration_secs,
+            stages_executed,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create a WorkflowFailed event (v0.9.8.2).
+    pub fn workflow_failed(workflow_id: &str, name: &str, reason: &str) -> Self {
+        TaEvent::WorkflowFailed {
+            workflow_id: workflow_id.to_string(),
+            name: name.to_string(),
+            reason: reason.to_string(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Helper to create a WorkflowAwaitingHuman event (v0.9.8.2).
+    pub fn workflow_awaiting_human(
+        workflow_id: &str,
+        stage: &str,
+        prompt: &str,
+        options: Vec<String>,
+    ) -> Self {
+        TaEvent::WorkflowAwaitingHuman {
+            workflow_id: workflow_id.to_string(),
+            stage: stage.to_string(),
+            prompt: prompt.to_string(),
+            options,
             timestamp: Utc::now(),
         }
     }
@@ -621,6 +785,46 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Fix the auth module"));
         assert!(json.contains("\"approved\":false"));
+    }
+
+    #[test]
+    fn workflow_events_v0982() {
+        let started = TaEvent::workflow_started("wf-1", "milestone-review", 3);
+        assert_eq!(started.event_type(), "workflow_started");
+        let json = serde_json::to_string(&started).unwrap();
+        assert!(json.contains("workflow_started"));
+        assert!(json.contains("milestone-review"));
+        let restored: TaEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.event_type(), "workflow_started");
+
+        let stage = TaEvent::stage_started("wf-1", "build", vec!["engineer".to_string()]);
+        assert_eq!(stage.event_type(), "stage_started");
+
+        let completed = TaEvent::stage_completed_event("wf-1", "build", 2, 0.85);
+        assert_eq!(completed.event_type(), "stage_completed");
+        let json = serde_json::to_string(&completed).unwrap();
+        assert!(json.contains("0.85"));
+
+        let routed = TaEvent::workflow_routed("wf-1", "review", "build", "major", "bugs found");
+        assert_eq!(routed.event_type(), "workflow_routed");
+
+        let wf_completed = TaEvent::workflow_completed("wf-1", "milestone-review", 300, 4);
+        assert_eq!(wf_completed.event_type(), "workflow_completed");
+
+        let failed = TaEvent::workflow_failed("wf-1", "milestone-review", "max retries exceeded");
+        assert_eq!(failed.event_type(), "workflow_failed");
+
+        let awaiting = TaEvent::workflow_awaiting_human(
+            "wf-1",
+            "review",
+            "Review needed",
+            vec!["proceed".to_string(), "revise".to_string()],
+        );
+        assert_eq!(awaiting.event_type(), "workflow_awaiting_human");
+        let json = serde_json::to_string(&awaiting).unwrap();
+        assert!(json.contains("Review needed"));
+        let restored: TaEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.event_type(), "workflow_awaiting_human");
     }
 
     #[test]

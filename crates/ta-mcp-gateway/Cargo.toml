@@ -26,6 +26,7 @@ ta-connector-fs = { path = "../ta-connectors/fs" }
 ta-goal = { path = "../ta-goal" }
 ta-policy = { path = "../ta-policy" }
 ta-workspace = { path = "../ta-workspace" }
+ta-workflow = { path = "../ta-workflow" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
