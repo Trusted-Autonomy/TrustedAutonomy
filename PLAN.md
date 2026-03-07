@@ -3676,11 +3676,9 @@ Agent: [starts goal for Phase 1]
 
 ---
 
-### v0.9.9.1 — Interactive Mode & `ta plan from`
-<!-- status: in_progress -->
-**Goal**: Add a general interactive mode primitive — an agent can pause mid-goal to ask the human a question and wait for the answer over any configured channel. `ta plan from <doc>` is the first convenience wrapper built on this primitive.
-
-Interactive mode is micro-iteration within the macro-iteration TA governs. The agent calls `ta_ask_human` (MCP tool), TA delivers the question through whatever channel the human is on (shell, web UI, Slack, Discord, email), and routes the response back. The agent continues.
+### v0.9.9.1 — Interactive Mode Core Plumbing
+<!-- status: done -->
+**Goal**: Add the foundational infrastructure for agent-initiated mid-goal conversations with humans. Interactive mode is the general primitive — micro-iteration within the macro-iteration TA governs. The agent calls `ta_ask_human` (MCP tool), TA delivers the question through whatever channel the human is on, and routes the response back. The agent continues.
 
 #### Architecture
 
@@ -3700,61 +3698,131 @@ Human sees question in ta shell / Slack / web UI
 
 #### Items
 
-1. **`ta_ask_human` MCP tool** (`crates/ta-mcp-gateway/src/tools/human.rs`):
+1. ~~**`ta_ask_human` MCP tool** (`crates/ta-mcp-gateway/src/tools/human.rs`)~~ ✅
    - Parameters: `question`, `context`, `response_hint` (freeform/yes_no/choice), `choices`, `timeout_secs`
    - File-based signaling: writes question file, polls for answer file (1s interval)
    - Emits `AgentNeedsInput` and `AgentQuestionAnswered` events
    - Timeout returns actionable message (not error) so agent can continue
 
-2. **`QuestionRegistry`** (`crates/ta-daemon/src/question_registry.rs`):
+2. ~~**`QuestionRegistry`** (`crates/ta-daemon/src/question_registry.rs`)~~ ✅
    - In-memory coordination for future in-process use (oneshot channels)
    - `PendingQuestion`, `HumanAnswer` types
    - `register()`, `answer()`, `list_pending()`, `cancel()`
 
-3. **HTTP response endpoints** (`crates/ta-daemon/src/api/interactions.rs`):
+3. ~~**HTTP response endpoints** (`crates/ta-daemon/src/api/interactions.rs`)~~ ✅
    - `POST /api/interactions/:id/respond` — writes answer file + fires registry
    - `GET /api/interactions/pending` — lists pending questions
 
-4. **`GoalRunState::AwaitingInput`** (`crates/ta-goal/src/goal_run.rs`):
+4. ~~**`GoalRunState::AwaitingInput`** (`crates/ta-goal/src/goal_run.rs`)~~ ✅
    - New state with `interaction_id` and `question_preview`
    - Valid transitions: `Running → AwaitingInput → Running`, `AwaitingInput → PrReady`
    - Visible in `ta goal list` and external UIs
 
-5. **New `SessionEvent` variants** (`crates/ta-events/src/schema.rs`):
+5. ~~**New `SessionEvent` variants** (`crates/ta-events/src/schema.rs`)~~ ✅
    - `AgentNeedsInput` — with `suggested_actions()` returning a "respond" action
    - `AgentQuestionAnswered`, `InteractiveSessionStarted`, `InteractiveSessionCompleted`
 
-6. **`InteractionKind::AgentQuestion`** (`crates/ta-changeset/src/interaction.rs`):
+6. ~~**`InteractionKind::AgentQuestion`** (`crates/ta-changeset/src/interaction.rs`)~~ ✅
    - New variant for channel rendering dispatch
 
-7. **Conversation history** (`crates/ta-goal/src/conversation.rs`):
+7. ~~**`ConversationStore`** (`crates/ta-goal/src/conversation.rs`)~~ ✅
    - JSONL log at `.ta/conversations/<goal_id>.jsonl`
-   - `ConversationStore` with `append_question()`, `append_answer()`, `load()`, `next_turn()`, `conversation_so_far()`
+   - `append_question()`, `append_answer()`, `load()`, `next_turn()`, `conversation_so_far()`
 
-8. **Shell TUI integration** (`apps/ta-cli/src/commands/shell_tui.rs`):
-   - SSE listener handles `agent_needs_input` event
-   - `pending_question` state switches input routing to respond endpoint
-   - Visual: question displayed prominently, prompt changes to `[agent Q1] >`
+#### Version: `0.9.9-alpha.1`
 
-9. **`ta plan from <doc>` wrapper** (`apps/ta-cli/src/commands/plan.rs`):
-   - `PlanCommands::From` variant
-   - Reads document, builds planning system prompt, launches `ta run --interactive`
-   - Agent calls `ta_ask_human` to clarify requirements, propose phases, refine
+---
+
+### v0.9.9.2 — Shell TUI Interactive Mode
+<!-- status: pending -->
+**Goal**: Wire interactive mode into `ta shell` so humans can see agent questions and respond inline. This is the first user-facing surface for interactive mode.
+
+#### Items
+
+1. **SSE listener for `agent_needs_input`** (`apps/ta-cli/src/commands/shell_tui.rs`):
+   - SSE event handler recognizes `agent_needs_input` event → sends `TuiMessage::AgentQuestion`
+   - Question text displayed prominently in the output pane
+
+2. **Input routing switch** (`apps/ta-cli/src/commands/shell_tui.rs`):
+   - `App` gets `pending_question: Option<PendingQuestion>` field
+   - When `pending_question` is `Some`, prompt changes to `[agent Q1] >`
+   - Enter sends text to `POST /api/interactions/:id/respond` instead of `/api/input`
+   - On success, clears `pending_question`, restores normal prompt
+
+3. **`ta run --interactive` flag** (`apps/ta-cli/src/commands/run.rs`):
+   - Wire `--interactive` flag through to enable `ta_ask_human` in the MCP tool set
+   - When set, agent system prompt includes instructions about `ta_ask_human` availability
+
+4. **`ta conversation <goal_id>` CLI command** (`apps/ta-cli/src/commands/goal.rs` or new subcommand):
+   - Print conversation history from JSONL log
+   - Show turn numbers, roles, timestamps
+
+#### Version: `0.9.9-alpha.2`
+
+---
+
+### v0.9.9.3 — `ta plan from <doc>` Wrapper
+<!-- status: pending -->
+**Goal**: Build a convenience wrapper that uses interactive mode to generate a PLAN.md from a product document. The agent reads the document, asks clarifying questions via `ta_ask_human`, proposes phases, and outputs a plan draft.
+
+#### Items
+
+1. **`PlanCommands::From` variant** (`apps/ta-cli/src/commands/plan.rs`):
+   - `ta plan from <path>` reads the document, builds a planning system prompt
+   - Launches `ta run --interactive` with the planning prompt injected into CLAUDE.md
    - Output is PLAN.md in staging → standard draft review flow
+
+2. **`agents/planner.yaml`** — planner agent configuration:
+   - Filesystem read/write access
+   - Planning system prompt (phased development, PLAN.md format, question-asking guidance)
+   - If not already created by v0.9.9
+
+3. **`docs/USAGE.md` updates**:
+   - `ta plan from` documentation with examples
+   - When to use `--detect` vs `plan from` vs `plan create`
+
+4. **Tests**:
+   - Plan generation from sample doc
+   - Prompt template construction
+   - `--follow-up` flag handling
 
 #### When to use `--detect` vs `plan from`
 - **`ta init --detect`** — detects project *type* for config scaffolding. Fast, deterministic, no AI.
 - **`ta plan from <doc>`** — reads a product document and generates a phased *development plan* via interactive agent session. Use after `ta init`.
 - **`ta plan create`** — generates a generic plan from a hardcoded template. Use when you don't have a product doc.
 
-#### Implementation scope
-- `apps/ta-cli/src/commands/plan.rs` — `PlanCommands::From` variant, `plan_from()` function, prompt template
-- `agents/planner.yaml` — planner agent configuration (if not already created by v0.9.9)
-- `crates/ta-workflow/src/definition.rs` — optional: `{{var}}` expansion in stage action strings
-- `docs/USAGE.md` — `ta plan from` documentation, when to use `--detect` vs `plan from`
-- Tests: plan generation from sample doc, prompt template construction, `--follow-up` flag handling
+#### Version: `0.9.9-alpha.3`
 
-#### Version: `0.9.9-alpha.1`
+---
+
+### v0.9.9.4 — External Channel Delivery
+<!-- status: pending -->
+**Goal**: Enable interactive mode questions to flow through external channels (Slack, Discord, email) — not just `ta shell`. The `QuestionRegistry` + HTTP endpoint design is already channel-agnostic; this phase adds the delivery adapters.
+
+#### Items
+
+1. **Channel delivery interface** (`crates/ta-connectors/`):
+   - Each channel connector implements a `deliver_question()` method
+   - Renders question text, choices, and response hint in the channel's native format
+   - Response webhook calls `POST /api/interactions/:id/respond`
+
+2. **Slack adapter** (`crates/ta-connectors/slack/`):
+   - Posts question as Block Kit message with action buttons for choices
+   - Slash command or interaction handler calls respond endpoint
+
+3. **Discord adapter** (`crates/ta-connectors/discord/`):
+   - Posts question as embed with reaction-based or button-based choices
+   - Interaction handler calls respond endpoint
+
+4. **Email adapter** (`crates/ta-connectors/email/`):
+   - Sends question as email with reply-to parsing
+   - Inbound webhook parses reply and calls respond endpoint
+
+5. **Channel routing in events** (`crates/ta-events/src/schema.rs`):
+   - `AgentNeedsInput` event includes channel routing hints
+   - Daemon dispatches to configured channels
+
+#### Version: `0.9.9-alpha.4`
 
 ---
 
