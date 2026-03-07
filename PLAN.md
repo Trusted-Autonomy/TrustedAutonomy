@@ -3826,6 +3826,46 @@ Human sees question in ta shell / Slack / web UI
 
 ---
 
+### v0.9.9.5 — Workflow & Agent Authoring Tooling
+<!-- status: pending -->
+**Goal**: Make it easy for users to create, validate, and iterate on custom workflow definitions and agent profiles without reading Rust source code or guessing YAML schema.
+
+#### Problem
+Today, creating a custom workflow or agent config requires copying an existing file and modifying it by trial and error. There's no scaffolding command, no schema validation beyond serde parse errors, and no way to check for common mistakes (undefined role references, unreachable stages, missing agent configs). USAGE.md now has authoring guides (added in v0.9.9.1), but tooling support is missing.
+
+#### Items
+
+1. **`ta workflow new <name>`** (`apps/ta-cli/src/commands/workflow.rs`):
+   - Generates `.ta/workflows/<name>.yaml` with annotated comments explaining every field
+   - Includes a 2-stage build→review template as a starting point
+   - Prints the file path and suggests next steps
+
+2. **`ta workflow validate <path>`** (`apps/ta-cli/src/commands/workflow.rs`):
+   - Schema validation: all required fields present, correct types
+   - Reference validation: every role referenced in a stage exists in `roles:`
+   - Dependency validation: no cycles, no references to undefined stages
+   - Agent validation: every `roles.*.agent` has a matching agent config file
+   - Prints actionable errors with line numbers and suggestions
+
+3. **`ta agent new <name>`** (`apps/ta-cli/src/commands/agent.rs` or `setup.rs`):
+   - Generates `.ta/agents/<name>.yaml` with annotated comments
+   - Prompts for agent type (full developer, read-only auditor, orchestrator)
+   - Fills in appropriate `alignment` defaults based on type
+
+4. **`ta agent validate <path>`** (`apps/ta-cli/src/commands/agent.rs`):
+   - Schema validation for agent config YAML
+   - Checks `command` exists on PATH
+   - Warns on common misconfigurations (e.g., `injects_settings: true` without `injects_context_file: true`)
+
+5. **Example library** (`templates/workflows/`, `templates/agents/`):
+   - 3-4 workflow examples: code-review, deploy-pipeline, security-audit, milestone-review
+   - 3-4 agent examples: developer, auditor, planner, orchestrator
+   - `ta workflow list --templates` and `ta agent list --templates` to browse
+
+#### Version: `0.9.9-alpha.5`
+
+---
+
 ### v0.9.10 — Multi-Project Daemon & Office Configuration
 <!-- status: pending -->
 **Goal**: Extend the TA daemon to manage multiple projects simultaneously, with channel-to-project routing so a single Discord bot, Slack app, or email address can serve as the interface for several independent TA workspaces.
@@ -4103,6 +4143,8 @@ Today, workflow YAML files and agent configs (`agents/*.yaml`) live only in the 
 - Pull in community-authored configurations
 - Generate release communications automatically as part of `ta release`
 
+Builds on v0.9.9.5 (local authoring tooling: `ta workflow new`, `ta workflow validate`, `ta agent new`, `ta agent validate`) by adding the external distribution layer.
+
 #### Design
 
 ##### 1. External workflow/agent sources
@@ -4184,6 +4226,7 @@ ta workflow publish deploy-pipeline --bump minor
 **Goal**: Fix release process issues and harden the `ta release run` pipeline.
 
 #### Known Bugs
+- ~~**Releases always marked pre-release**: `release.yml` auto-detected `alpha`/`beta` in the version string and set `prerelease: true`, which meant GitHub never updated "latest release". Fixed in v0.9.9.1 — default is now latest, with explicit `--prerelease` input on `workflow_dispatch`.~~ ✅
 - **`ta_fs_write` forbidden in orchestrator mode**: The release notes agent tries to write `.release-draft.md` directly but is blocked by orchestrator policy. The agent should either use `ta_goal` to delegate the write, or the orchestrator policy should whitelist release artifact writes. Filed as bug — the process should just work without the agent needing workarounds.
 - **Release notes agent workaround**: Currently the agent works around the `ta_fs_write` restriction by using alternative write methods, but this is fragile and shouldn't be necessary.
 

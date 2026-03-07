@@ -2555,6 +2555,297 @@ Orchestrator agents can manage workflows via the `ta_workflow` MCP tool:
 {"action": "history", "workflow_id": "abc-123"}
 ```
 
+### Creating Custom Workflows
+
+You can define project-specific workflows as YAML files in `.ta/workflows/`. A workflow is an ordered pipeline of stages, each assigned to agent roles, with optional review gates and failure routing.
+
+#### Step-by-step
+
+1. Create the workflow file:
+
+```yaml
+# .ta/workflows/deploy.yaml
+name: deploy
+stages:
+  - name: build
+    roles: [engineer]
+  - name: test
+    depends_on: [build]
+    roles: [tester]
+  - name: review
+    depends_on: [test]
+    roles: [reviewer]
+    review:
+      reviewers: [security-reviewer]
+      require_all: true
+    on_fail:
+      route_to: build
+      max_retries: 2
+    await_human: on_fail
+  - name: deploy
+    depends_on: [review]
+    roles: [engineer]
+
+roles:
+  engineer:
+    agent: claude-code
+    prompt: "Build and deploy the feature"
+  tester:
+    agent: claude-code
+    prompt: "Write and run tests for the implementation"
+  reviewer:
+    agent: claude-code
+    prompt: "Review the code for correctness and security"
+  security-reviewer:
+    agent: claude-code
+    prompt: "Audit for OWASP Top 10 vulnerabilities"
+
+verdict:
+  pass_threshold: 0.8
+  required_pass: [security-reviewer]
+```
+
+2. Run it:
+
+```bash
+ta workflow start .ta/workflows/deploy.yaml
+```
+
+#### Workflow YAML reference
+
+**Stages:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Unique stage identifier |
+| `depends_on` | string[] | no | Stages that must complete first (topological sort) |
+| `roles` | string[] | no | Roles that execute in parallel within this stage |
+| `then` | string[] | no | Roles that execute sequentially after parallel roles |
+| `review` | object | no | Review gate configuration |
+| `on_fail` | object | no | Where to route on review failure |
+| `await_human` | string | no | `always`, `never` (default), or `on_fail` |
+
+**Roles:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent` | string | yes | Agent config name (e.g., `claude-code`, `codex`, or custom) |
+| `prompt` | string | no | System prompt for this role |
+| `constitution` | string | no | Path to constitution YAML |
+| `framework` | string | no | Override framework detection |
+
+**Review:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `reviewers` | string[] | `[]` | Roles that perform the review |
+| `require_all` | bool | `true` | All reviewers must pass (vs any one) |
+
+**Failure routing:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `route_to` | string | — | Stage to retry |
+| `max_retries` | int | `3` | Maximum retries before workflow fails |
+
+**Verdict scoring:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pass_threshold` | float | `0.7` | Minimum aggregate score (0.0–1.0) |
+| `required_pass` | string[] | `[]` | Roles that must pass regardless of aggregate |
+| `scorer.agent` | string | — | Agent that synthesizes review verdicts |
+| `scorer.prompt` | string | — | System prompt for the scorer |
+
+#### Example workflows
+
+**Code review pipeline** — build, then parallel code review + security review:
+
+```yaml
+name: code-review
+stages:
+  - name: implement
+    roles: [engineer]
+  - name: review
+    depends_on: [implement]
+    roles: [code-reviewer, security-reviewer]
+    review:
+      reviewers: [code-reviewer, security-reviewer]
+    on_fail:
+      route_to: implement
+      max_retries: 2
+roles:
+  engineer:
+    agent: claude-code
+    prompt: "Implement the feature"
+  code-reviewer:
+    agent: claude-code
+    prompt: "Review for correctness, readability, and test coverage"
+  security-reviewer:
+    agent: claude-code
+    prompt: "Audit for security vulnerabilities (OWASP Top 10)"
+```
+
+**Multi-stage with human gate** — plan, build, review with mandatory human approval:
+
+```yaml
+name: milestone
+stages:
+  - name: plan
+    roles: [planner]
+    await_human: always
+  - name: build
+    depends_on: [plan]
+    roles: [engineer]
+  - name: review
+    depends_on: [build]
+    roles: [reviewer]
+    await_human: always
+roles:
+  planner:
+    agent: claude-code
+    prompt: "Break the goal into implementation steps"
+  engineer:
+    agent: claude-code
+    prompt: "Implement the plan"
+  reviewer:
+    agent: claude-code
+    prompt: "Review the implementation"
+```
+
+### Creating Custom Agent Profiles
+
+Agent profiles control how TA launches and constrains an agent. Create profiles for different roles (auditor, planner, full developer) or different agent tools (Ollama, LangChain, custom CLI).
+
+#### When to customize
+
+| Scenario | What to change |
+|----------|----------------|
+| Use a different AI tool | `command`, `args_template` |
+| Restrict agent to read-only | `alignment.bounded_actions`, `alignment.forbidden_actions` |
+| Agent needs env vars (API keys, config) | `env` |
+| Agent should see goal context in CLAUDE.md | `injects_context_file: true` |
+| Agent needs auto-approved permissions | `injects_settings: true` |
+| Interactive terminal session | `interactive` section |
+| Multi-agent coordination | `alignment.coordination` |
+
+#### Building a read-only auditor
+
+An agent that can read your project but not write files or run commands:
+
+```yaml
+# .ta/agents/auditor.yaml
+name: auditor
+description: "Read-only code auditor — no write access"
+command: claude
+args_template:
+  - "--allowedTools"
+  - "Read,Grep,Glob,WebFetch,WebSearch"
+  - "--system-prompt"
+  - "{prompt}"
+injects_context_file: false
+injects_settings: false
+env: {}
+
+alignment:
+  principal: "project-owner"
+  autonomy_envelope:
+    bounded_actions:
+      - "fs_read"
+    escalation_triggers: []
+    forbidden_actions:
+      - "fs_write_patch"
+      - "fs_apply"
+      - "shell_execute"
+      - "network_external"
+      - "credential_access"
+  constitution: "default-v1"
+```
+
+#### Building a full developer agent
+
+An agent with read/write file access and build tool execution:
+
+```yaml
+# .ta/agents/developer.yaml
+name: developer
+description: "Full developer agent with build tool access"
+command: claude
+args_template:
+  - "{prompt}"
+injects_context_file: true
+injects_settings: true
+env: {}
+
+alignment:
+  principal: "project-owner"
+  autonomy_envelope:
+    bounded_actions:
+      - "fs_read"
+      - "fs_write_patch"
+      - "fs_apply"
+      - "exec: npm test"
+      - "exec: npm run build"
+      - "exec: npm run lint"
+    escalation_triggers:
+      - "new_dependency"
+      - "security_sensitive"
+      - "breaking_change"
+    forbidden_actions:
+      - "network_external"
+      - "credential_access"
+  constitution: "default-v1"
+  coordination:
+    allowed_collaborators: ["auditor"]
+    shared_resources: ["src/**", "tests/**"]
+```
+
+#### Building a non-Claude agent
+
+Any CLI tool that accepts a prompt and writes to the filesystem:
+
+```yaml
+# .ta/agents/ollama-coder.yaml
+name: ollama-coder
+description: "Local Ollama model for code generation"
+command: ollama
+args_template:
+  - "run"
+  - "codellama"
+  - "{prompt}"
+injects_context_file: false
+injects_settings: false
+env:
+  OLLAMA_HOST: "http://localhost:11434"
+
+alignment:
+  principal: "project-owner"
+  autonomy_envelope:
+    bounded_actions:
+      - "fs_read"
+      - "fs_write_patch"
+    forbidden_actions:
+      - "network_external"
+      - "credential_access"
+```
+
+#### Using custom profiles
+
+Reference your custom agent in goals or workflows:
+
+```bash
+# Use directly in a goal
+ta run "Add input validation" --agent auditor
+
+# Reference in a workflow role
+roles:
+  security-check:
+    agent: auditor
+    prompt: "Audit for injection vulnerabilities"
+```
+
+Agent configs are resolved in priority order: `.ta/agents/` (project) → `~/.config/ta/agents/` (user) → built-in defaults.
+
 ---
 
 ## Roadmap

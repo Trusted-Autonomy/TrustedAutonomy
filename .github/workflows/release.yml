@@ -9,6 +9,11 @@ on:
       tag:
         description: 'Tag to release (e.g., v0.1.0)'
         required: true
+      prerelease:
+        description: 'Mark as pre-release (default: false — release is marked as latest)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -232,7 +237,7 @@ jobs:
           tag_name: ${{ steps.get_version.outputs.version }}
           name: Release ${{ steps.get_version.outputs.version }}
           draft: false
-          prerelease: ${{ contains(steps.get_version.outputs.version, 'alpha') || contains(steps.get_version.outputs.version, 'beta') }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease == 'true' }}
           files: artifacts/*
           body_path: release-body.md
 
