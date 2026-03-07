@@ -3942,6 +3942,111 @@ channels:
 
 ---
 
+### v0.10.5 — External Workflow & Agent Definitions
+<!-- status: pending -->
+**Goal**: Allow workflow definitions and agent configurations to be pulled from external sources (registries, git repos, URLs) so teams and third-party authors can publish reusable configurations. Include an automated release process with press-release generation.
+
+#### Problem
+Today, workflow YAML files and agent configs (`agents/*.yaml`) live only in the project's `.ta/` directory. There's no mechanism to:
+- Share a workflow across multiple projects
+- Publish an agent configuration for others to use (e.g., "security-reviewer" agent with specialized system prompt)
+- Pull in community-authored configurations
+- Generate release communications automatically as part of `ta release`
+
+#### Design
+
+##### 1. External workflow/agent sources
+```bash
+# Pull a workflow from a registry
+ta workflow add security-review --from registry:trustedautonomy/workflows
+ta workflow add deploy-pipeline --from gh:myorg/ta-workflows
+
+# Pull an agent config
+ta agent add security-reviewer --from registry:trustedautonomy/agents
+ta agent add code-auditor --from https://example.com/ta-agents/auditor.yaml
+
+# List installed external configs
+ta workflow list --source external
+ta agent list --source external
+```
+
+##### 2. Workflow/agent package format
+```yaml
+# workflow-package.yaml (published to registry)
+name: security-review
+version: 1.0.0
+author: trustedautonomy
+description: "Multi-step security review workflow with SAST, dependency audit, and manual sign-off"
+ta_version: ">=0.9.8"
+files:
+  - workflows/security-review.yaml
+  - agents/security-reviewer.yaml
+  - policies/security-baseline.yaml
+```
+
+##### 3. Release press-release generation
+The `ta release` process includes an optional press-release authoring step where an agent generates a release announcement from the changelog, guided by a user-provided sample:
+
+```bash
+# Configure a sample press release as the style template
+ta release config set press_release_template ./samples/sample-press-release.md
+
+# During release, the agent generates a press release matching the sample's style
+ta release run --press-release
+
+# The user can update the prompt to refine the output
+ta release run --press-release --prompt "Focus on the workflow engine and VCS adapter features"
+```
+
+The agent reads the changelog/release notes, follows the style and tone of the sample document, and produces a draft press release that goes through the normal TA review process (draft → approve → apply).
+
+##### 4. Workflow authoring and publishing
+```bash
+# Author a new workflow
+ta workflow new deploy-pipeline
+# Edit .ta/workflows/deploy-pipeline.yaml
+
+# Publish to registry
+ta workflow publish deploy-pipeline --registry trustedautonomy
+
+# Version management
+ta workflow publish deploy-pipeline --bump minor
+```
+
+#### Items
+1. [ ] External source resolver: registry, GitHub repo, and raw URL fetching for YAML configs
+2. [ ] `ta workflow add/remove/list` commands with `--from` source parameter
+3. [ ] `ta agent add/remove/list` commands with `--from` source parameter
+4. [ ] Workflow/agent package manifest format (`workflow-package.yaml`)
+5. [ ] Local cache for external configs (`~/.ta/cache/workflows/`, `~/.ta/cache/agents/`)
+6. [ ] Version pinning and update checking for external configs
+7. [ ] `ta release` press-release generation step with sample-based style matching
+8. [ ] Press release template configuration (`ta release config set press_release_template`)
+9. [ ] `ta workflow publish` command for authoring and publishing to registry
+10. [ ] Documentation: authoring guide for workflow/agent packages
+
+#### Version: `0.10.5-alpha`
+
+---
+
+### v0.10.6 — Release Process Hardening
+<!-- status: pending -->
+**Goal**: Fix release process issues and harden the `ta release run` pipeline.
+
+#### Known Bugs
+- **`ta_fs_write` forbidden in orchestrator mode**: The release notes agent tries to write `.release-draft.md` directly but is blocked by orchestrator policy. The agent should either use `ta_goal` to delegate the write, or the orchestrator policy should whitelist release artifact writes. Filed as bug — the process should just work without the agent needing workarounds.
+- **Release notes agent workaround**: Currently the agent works around the `ta_fs_write` restriction by using alternative write methods, but this is fragile and shouldn't be necessary.
+
+#### Items
+1. [ ] Fix `ta_fs_write` permission in orchestrator mode for release artifact files (`.release-draft.md`, `CHANGELOG.md`)
+2. [ ] Add orchestrator-mode write whitelist for release-specific file patterns
+3. [ ] End-to-end test for `ta release run` pipeline without manual intervention
+4. [ ] Release dry-run mode: `ta release run --dry-run` that validates all steps without publishing
+
+#### Version: `0.10.6-alpha`
+
+---
+
 ## Projects On Top (separate repos, built on TA)
 
 > These are NOT part of TA core. They are independent projects that consume TA's extension points.
