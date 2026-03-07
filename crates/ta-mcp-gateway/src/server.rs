@@ -744,6 +744,18 @@ impl TaGatewayServer {
     ) -> Result<CallToolResult, McpError> {
         tools::workflow::handle_workflow(&self.state, params)
     }
+
+    // ── Interactive tools (v0.9.9.1) ─────────────────────────
+
+    #[tool(
+        description = "Ask the human a question and wait for their response. Use this when you need clarification, want to propose options, or need human input before proceeding. The question is delivered through whatever channel the human is using (terminal, Slack, Discord, web UI). Your execution pauses until they respond or the timeout expires."
+    )]
+    fn ta_ask_human(
+        &self,
+        Parameters(params): Parameters<tools::human::AskHumanParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::human::handle_ask_human(&self.state, params)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────────
@@ -813,14 +825,14 @@ mod tests {
     fn tool_count_matches_expected() {
         let (server, _dir) = test_server();
         let tools = server.tool_router.list_all();
-        // 16 tools: goal_start, goal_status, goal_list,
+        // 17 tools: goal_start, goal_status, goal_list,
         //           fs_read, fs_write, fs_list, fs_diff,
         //           pr_build, pr_status,
         //           ta_draft, ta_goal_inner, ta_plan, ta_context,
         //           ta_agent_status (v0.9.6), ta_event_subscribe (v0.9.4),
-        //           ta_workflow (v0.9.8.2)
+        //           ta_workflow (v0.9.8.2), ta_ask_human (v0.9.9.1)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 16, "expected 16 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 17, "expected 17 tools, got: {:?}", names);
     }
 
     #[test]

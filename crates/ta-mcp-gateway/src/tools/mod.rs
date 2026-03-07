@@ -6,5 +6,6 @@ pub mod draft;
 pub mod event;
 pub mod fs;
 pub mod goal;
+pub mod human;
 pub mod plan;
 pub mod workflow;
