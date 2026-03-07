@@ -11,6 +11,7 @@ pub mod error;
 pub mod interaction;
 pub mod process_engine;
 pub mod scorer;
+pub mod validate;
 pub mod verdict;
 pub mod yaml_engine;
 

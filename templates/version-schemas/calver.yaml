@@ -1,0 +1,26 @@
+# Version Schema: Calendar Versioning (calver)
+# Uses date-based version numbers: YYYY.MM.PATCH
+#
+# Usage:
+#   cp templates/version-schemas/calver.yaml .ta/version-schema.yaml
+# Or:
+#   ta plan create --version-schema calver
+
+name: calver
+description: Calendar-based versioning (YYYY.MM.PATCH)
+
+format:
+  pattern: "^(?P<year>\\d{4})\\.(?P<month>\\d{1,2})\\.(?P<patch>\\d+)$"
+  template: "{year}.{month}.{patch}"
+
+bump_rules:
+  year: "Automatically set to current year"
+  month: "Automatically set to current month"
+  patch: "Incremented for each release within the same month"
+
+phase_mapping:
+  strategy: auto_date
+  # Versions are derived from the release date, not plan phases.
+  # Patch is incremented for multiple releases in the same month.
+
+initial_version: "2026.1.0"

@@ -1,0 +1,22 @@
+# Agent Template: Developer
+# Full read/write developer agent for building features and fixes.
+#
+# Copy to .ta/agents/ and customize:
+#   cp templates/agents/developer.yaml .ta/agents/my-dev.yaml
+# Or scaffold with:
+#   ta agent new my-dev --type developer
+
+name: developer
+command: claude
+args_template:
+  - "{prompt}"
+
+injects_context_file: true
+injects_settings: true
+
+alignment:
+  security_level: checkpoint
+  allowed_actions:
+    - read
+    - write
+    - execute

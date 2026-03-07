@@ -2511,8 +2511,17 @@ TA includes a pluggable workflow engine for orchestrating multi-stage, multi-rol
 #### Quick start
 
 ```bash
+# Scaffold a new workflow
+ta workflow new my-workflow
+
+# Scaffold from a built-in template
+ta workflow new my-pipeline --from deploy-pipeline
+
+# Validate before running
+ta workflow validate .ta/workflows/my-workflow.yaml
+
 # Start a workflow from a YAML definition
-ta workflow start templates/workflows/simple-review.yaml
+ta workflow start .ta/workflows/my-workflow.yaml
 
 # Check status
 ta workflow status <workflow-id>
@@ -2520,12 +2529,118 @@ ta workflow status <workflow-id>
 # List active workflows
 ta workflow list
 
+# Browse available templates
+ta workflow list --templates
+
 # Cancel a workflow
 ta workflow cancel <workflow-id>
 
 # Show stage transitions and routing history
 ta workflow history <workflow-id>
 ```
+
+#### Authoring a workflow end-to-end
+
+Creating a custom workflow is a three-step process: scaffold the workflow, create any missing agent configs, then validate and run.
+
+**Step 1: Scaffold a workflow.**
+
+```bash
+ta workflow new my-pipeline
+```
+
+This creates `.ta/workflows/my-pipeline.yaml` with annotated comments explaining every field. The default scaffold is a 2-stage build→review workflow. To start from a richer template:
+
+```bash
+ta workflow new my-pipeline --from deploy-pipeline
+```
+
+Available templates: `simple-review`, `security-audit`, `milestone-review`, `deploy-pipeline`, `plan-implement-review`. Browse them with `ta workflow list --templates`.
+
+**Step 2: Create missing agent configs.**
+
+After scaffolding, TA checks which agents the workflow references and tells you which ones are missing:
+
+```
+Created workflow: .ta/workflows/my-pipeline.yaml
+
+Missing agent configs (create them to complete setup):
+  ta agent new claude-code --type developer
+```
+
+Each workflow role has an `agent:` field that points to a config file in `.ta/agents/`. TA guesses the right agent type from the role name (reviewer → auditor, planner → planner, etc.). Run the suggested commands:
+
+```bash
+ta agent new claude-code --type developer
+```
+
+This creates `.ta/agents/claude-code.yaml` with appropriate defaults for the agent type:
+
+| Type | Security level | Permissions |
+|------|---------------|-------------|
+| `developer` | `checkpoint` | read, write, execute |
+| `auditor` | `supervised` | read, list, search (read-only) |
+| `planner` | `checkpoint` | read, list, search, plan |
+| `orchestrator` | `checkpoint` | read, list, search, plan, delegate |
+
+Edit the generated config to customize the command, args, and alignment for your project. Validate it:
+
+```bash
+ta agent validate .ta/agents/claude-code.yaml
+```
+
+This checks required fields, verifies the command exists on PATH, and warns on common misconfigurations (e.g., `injects_settings: true` without `injects_context_file: true`).
+
+**Step 3: Validate and run.**
+
+```bash
+ta workflow validate .ta/workflows/my-pipeline.yaml
+```
+
+Validation checks:
+- **Schema**: required fields, non-empty name, at least one stage
+- **References**: every role used in a stage is defined in `roles:`
+- **Dependencies**: no cycles, no references to undefined stages
+- **Agents**: every `roles.*.agent` has a matching config in `.ta/agents/`
+- **Verdict config**: valid threshold range, referenced roles exist
+
+Even when the workflow is valid, the validator shows any remaining missing agent configs with ready-to-run commands. Once everything passes:
+
+```bash
+ta workflow start .ta/workflows/my-pipeline.yaml
+```
+
+#### Managing agents and workflows
+
+```bash
+# List configured agents
+ta agent list
+
+# List active workflows
+ta workflow list
+
+# Browse agent templates
+ta agent list --templates
+
+# Browse workflow templates
+ta workflow list --templates
+```
+
+#### Version schema templates
+
+Pre-built version schemas in `templates/version-schemas/`:
+
+```bash
+# Copy a version schema to your project
+cp templates/version-schemas/semver.yaml .ta/version-schema.yaml
+```
+
+| Schema | Format | Use case |
+|--------|--------|----------|
+| `semver.yaml` | MAJOR.MINOR.PATCH-pre | Standard semantic versioning |
+| `calver.yaml` | YYYY.MM.PATCH | Calendar-based releases |
+| `sprint.yaml` | sprint-N.iteration | Agile sprint cycles |
+| `milestone.yaml` | vN.phase | Simple milestone tracking |
 
 #### Workflow YAML format
 

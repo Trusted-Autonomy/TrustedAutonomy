@@ -3821,7 +3821,7 @@ Human sees question in ta shell / Slack / web UI
 ---
 
 ### v0.9.9.5 — Workflow & Agent Authoring Tooling
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make it easy for users to create, validate, and iterate on custom workflow definitions and agent profiles without reading Rust source code or guessing YAML schema.
 
 #### Problem
@@ -3872,6 +3872,22 @@ Today, creating a custom workflow or agent config requires copying an existing f
    - `ta plan create --version-schema semver` selects a template
    - Schema defines: version format regex, bump rules, phase-to-version mapping
    - Users can write custom schemas in `.ta/version-schema.yaml`
+
+#### Completed
+- [x] `ta workflow new <name>` with annotated scaffold and `--from` template selection
+- [x] `ta workflow validate <path>` with schema, reference, dependency, and agent config validation
+- [x] `ta agent new <name>` with `--type` (developer, auditor, orchestrator, planner) and alignment defaults
+- [x] `ta agent validate <path>` with schema validation and PATH checking
+- [x] Example library: 5 workflow templates, 6 role templates, 4 agent templates
+- [x] `ta workflow list --templates` and `ta agent list --templates` browsing commands
+- [x] Planner workflow role with `plan-implement-review.yaml` template
+- [x] Versioning schema templates: semver, calver, sprint, milestone
+- [x] Validation module in ta-workflow crate with 12 tests
+- [x] Agent CLI command module with 10 tests
+- [x] Workflow CLI new/validate commands with 7 tests
+
+#### Remaining (deferred)
+- [ ] `ta plan create --version-schema` command integration (requires plan create refactor)
 
 #### Version: `0.9.9-alpha.5`
 

@@ -1,0 +1,60 @@
+# plan-implement-review.yaml — Planner-driven workflow with iterative review.
+#
+# Uses the planner role to decompose objectives, then routes through
+# implementation and review stages. On review failure, routes back to
+# the planner to revise the approach.
+#
+# Usage:
+#   ta workflow start templates/workflows/plan-implement-review.yaml
+
+name: plan-implement-review
+
+stages:
+  - name: plan
+    roles: [planner]
+    await_human: always
+
+  - name: implement
+    depends_on: [plan]
+    roles: [engineer]
+    await_human: never
+
+  - name: review
+    depends_on: [implement]
+    roles: [reviewer]
+    await_human: on_fail
+    on_fail:
+      route_to: plan
+      max_retries: 3
+
+roles:
+  planner:
+    agent: claude-code
+    prompt: |
+      You are a technical planner. Given an objective or document:
+      1. Break it down into concrete implementation tasks
+      2. Identify risks, dependencies, and acceptance criteria
+      3. Order tasks by dependency and priority
+      4. Output a structured plan
+
+      If this is a re-plan after review failure, incorporate the feedback
+      and adjust the approach. Focus on the specific issues raised.
+
+  engineer:
+    agent: claude-code
+    prompt: |
+      You are a software engineer. Follow the plan from the planning stage.
+      Implement each task in order. Write tests for all changes.
+      Commit in logical working units.
+
+  reviewer:
+    agent: claude-code
+    prompt: |
+      You are a code reviewer. Review the implementation against the plan:
+      - Were all planned tasks completed?
+      - Is the code correct and well-tested?
+      - Are there security or quality issues?
+      Provide specific, actionable findings.
+
+verdict:
+  pass_threshold: 0.7

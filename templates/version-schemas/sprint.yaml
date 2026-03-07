@@ -1,0 +1,25 @@
+# Version Schema: Sprint-Based Versioning
+# Uses sprint numbers: sprint-N.iteration
+#
+# Usage:
+#   cp templates/version-schemas/sprint.yaml .ta/version-schema.yaml
+# Or:
+#   ta plan create --version-schema sprint
+
+name: sprint
+description: Sprint-based versioning (sprint-N.iteration)
+
+format:
+  pattern: "^sprint-(?P<sprint>\\d+)\\.(?P<iteration>\\d+)$"
+  template: "sprint-{sprint}.{iteration}"
+
+bump_rules:
+  sprint: "New sprint cycle begins"
+  iteration: "Iteration within a sprint (hotfix, follow-up)"
+
+phase_mapping:
+  strategy: sprint_aligned
+  # Each plan phase maps to a sprint number.
+  # Sub-phases increment the iteration counter.
+
+initial_version: "sprint-1.0"

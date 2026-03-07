@@ -1,0 +1,32 @@
+# Version Schema: Semantic Versioning (semver)
+# Standard MAJOR.MINOR.PATCH with optional pre-release suffix.
+#
+# Usage:
+#   cp templates/version-schemas/semver.yaml .ta/version-schema.yaml
+# Or:
+#   ta plan create --version-schema semver
+
+name: semver
+description: Standard semantic versioning (MAJOR.MINOR.PATCH-prerelease)
+
+format:
+  # Regex pattern for valid version strings.
+  pattern: "^v?(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)(?:-(?P<pre>[a-zA-Z0-9.]+))?$"
+  # Display template.
+  template: "v{major}.{minor}.{patch}"
+  pre_release_template: "v{major}.{minor}.{patch}-{pre}"
+
+bump_rules:
+  # When to bump each component.
+  major: "Breaking changes to public API"
+  minor: "New features, backward-compatible"
+  patch: "Bug fixes, backward-compatible"
+
+phase_mapping:
+  # How plan phases map to versions.
+  # Each phase can specify which component to bump.
+  strategy: explicit
+  # Phases declare their target version in PLAN.md.
+  # Sub-phases use pre-release: v0.4.1-alpha.2
+
+initial_version: "0.1.0-alpha"

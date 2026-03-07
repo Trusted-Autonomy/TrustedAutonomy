@@ -1,0 +1,63 @@
+# deploy-pipeline.yaml — Build, test, and deploy with human gates.
+#
+# A 3-stage workflow with security review at the test stage
+# and mandatory human approval before deployment.
+#
+# Usage:
+#   ta workflow start templates/workflows/deploy-pipeline.yaml
+
+name: deploy-pipeline
+
+stages:
+  - name: build
+    roles: [engineer]
+    await_human: never
+
+  - name: test
+    depends_on: [build]
+    roles: [tester, security-reviewer]
+    await_human: on_fail
+    on_fail:
+      route_to: build
+      max_retries: 2
+
+  - name: deploy
+    depends_on: [test]
+    roles: [deployer]
+    await_human: always
+
+roles:
+  engineer:
+    agent: claude-code
+    prompt: |
+      You are a software engineer. Build and prepare the release.
+      Ensure all compilation, linting, and formatting checks pass.
+
+  tester:
+    agent: claude-code
+    prompt: |
+      You are a QA engineer. Run the full test suite and verify:
+      - All existing tests pass
+      - New code has adequate test coverage
+      - Integration tests cover critical paths
+      Report any failures with reproduction steps.
+
+  security-reviewer:
+    agent: claude-code
+    prompt: |
+      You are a security reviewer. Audit the changes for security
+      implications before deployment. Check for leaked secrets,
+      insecure defaults, and OWASP Top 10 issues.
+
+  deployer:
+    agent: claude-code
+    prompt: |
+      You are a deployment engineer. Prepare the deployment:
+      - Generate release notes
+      - Verify version bumps
+      - Check deployment prerequisites
+      - Document rollback procedures
+
+verdict:
+  pass_threshold: 0.8
+  required_pass: [security-reviewer]

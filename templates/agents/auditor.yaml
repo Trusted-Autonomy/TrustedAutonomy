@@ -1,0 +1,22 @@
+# Agent Template: Auditor
+# Read-only agent for security and code review.
+#
+# Copy to .ta/agents/ and customize:
+#   cp templates/agents/auditor.yaml .ta/agents/my-auditor.yaml
+# Or scaffold with:
+#   ta agent new my-auditor --type auditor
+
+name: auditor
+command: claude
+args_template:
+  - "{prompt}"
+
+injects_context_file: true
+injects_settings: false
+
+alignment:
+  security_level: supervised
+  allowed_actions:
+    - read
+    - list
+    - search

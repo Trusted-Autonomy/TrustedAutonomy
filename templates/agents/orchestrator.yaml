@@ -1,0 +1,24 @@
+# Agent Template: Orchestrator
+# Multi-agent orchestrator with delegation permissions.
+#
+# Copy to .ta/agents/ and customize:
+#   cp templates/agents/orchestrator.yaml .ta/agents/my-orch.yaml
+# Or scaffold with:
+#   ta agent new my-orch --type orchestrator
+
+name: orchestrator
+command: claude
+args_template:
+  - "{prompt}"
+
+injects_context_file: true
+injects_settings: true
+
+alignment:
+  security_level: checkpoint
+  allowed_actions:
+    - read
+    - list
+    - search
+    - plan
+    - delegate

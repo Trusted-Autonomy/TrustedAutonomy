@@ -162,6 +162,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::init::InitCommands,
     },
+    /// Author, validate, and manage agent configurations.
+    Agent {
+        #[command(subcommand)]
+        command: commands::agent::AgentCommands,
+    },
     /// Manage agent adapter integrations.
     Adapter {
         #[command(subcommand)]
@@ -394,6 +399,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Plan { command } => commands::plan::execute(command, &config),
         Commands::Context { command } => commands::context::execute(command, &config),
         Commands::Credentials { command } => commands::credentials::execute(command, &config),
+        Commands::Agent { command } => commands::agent::execute(command, &config),
         Commands::Adapter { command } => commands::adapter::execute(command, &project_root),
         Commands::Setup { command } => commands::setup::execute(command, &config),
         Commands::Init { command } => commands::init::execute(command, &config),

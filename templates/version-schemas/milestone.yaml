@@ -1,0 +1,26 @@
+# Version Schema: Milestone-Based Versioning
+# Simple milestone versioning: v1, v2, v3 with sub-phases.
+#
+# Usage:
+#   cp templates/version-schemas/milestone.yaml .ta/version-schema.yaml
+# Or:
+#   ta plan create --version-schema milestone
+
+name: milestone
+description: Milestone-based versioning (vN with sub-phases)
+
+format:
+  pattern: "^v(?P<milestone>\\d+)(?:\\.(?P<phase>\\d+))?$"
+  template: "v{milestone}"
+  phase_template: "v{milestone}.{phase}"
+
+bump_rules:
+  milestone: "Major milestone reached (e.g., public release, feature complete)"
+  phase: "Sub-phase within a milestone"
+
+phase_mapping:
+  strategy: milestone_aligned
+  # Plan phases map directly to milestone.phase numbers.
+  # v1 = first public release, v1.1 = first follow-up, etc.
+
+initial_version: "v1"

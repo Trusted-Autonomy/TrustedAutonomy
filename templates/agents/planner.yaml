@@ -1,0 +1,23 @@
+# Agent Template: Planner
+# Technical planning and decomposition agent.
+#
+# Copy to .ta/agents/ and customize:
+#   cp templates/agents/planner.yaml .ta/agents/my-planner.yaml
+# Or scaffold with:
+#   ta agent new my-planner --type planner
+
+name: planner
+command: claude
+args_template:
+  - "{prompt}"
+
+injects_context_file: true
+injects_settings: true
+
+alignment:
+  security_level: checkpoint
+  allowed_actions:
+    - read
+    - list
+    - search
+    - plan
