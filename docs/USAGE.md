@@ -482,6 +482,32 @@ ta session abort <session-id>      # Cancel
 
 **When to use**: When you want visibility into the agent's process — watching it work, steering it when it goes off track, or learning how it approaches a problem.
 
+#### Agent Questions (`ta_ask_human`)
+
+When running with `--interactive`, agents can ask you questions using the `ta_ask_human` MCP tool. Questions appear inline in `ta shell` or the classic terminal:
+
+```
+━━━ Agent Question (turn 1) ━━━
+Which database should I use for the backend?
+  Context: Setting up the storage layer for user data.
+  [1] PostgreSQL
+  [2] SQLite
+Type your response and press Enter:
+[agent Q1] > 1
+Response delivered to agent (interaction: abc12345)
+```
+
+The prompt changes to `[agent Q1] >` while a question is pending. Your answer is routed to the agent via the daemon API, and the agent continues with your guidance.
+
+#### Viewing Conversation History
+
+Use `ta conversation` to review the interactive Q&A history for any goal:
+
+```bash
+ta conversation <goal-id>          # Formatted output with turns, roles, timestamps
+ta conversation <goal-id> --json   # Raw JSONL for programmatic access
+```
+
 ### Macro vs Interactive: when to use which
 
 These are **different concerns** and can be combined:

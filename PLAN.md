@@ -3734,7 +3734,7 @@ Human sees question in ta shell / Slack / web UI
 ---
 
 ### v0.9.9.2 — Shell TUI Interactive Mode
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Wire interactive mode into `ta shell` so humans can see agent questions and respond inline. This is the first user-facing surface for interactive mode.
 
 #### Items
@@ -3753,9 +3753,19 @@ Human sees question in ta shell / Slack / web UI
    - Wire `--interactive` flag through to enable `ta_ask_human` in the MCP tool set
    - When set, agent system prompt includes instructions about `ta_ask_human` availability
 
-4. **`ta conversation <goal_id>` CLI command** (`apps/ta-cli/src/commands/goal.rs` or new subcommand):
+4. **`ta conversation <goal_id>` CLI command** (`apps/ta-cli/src/commands/conversation.rs`):
    - Print conversation history from JSONL log
    - Show turn numbers, roles, timestamps
+
+#### Completed
+
+- ✅ SSE listener for `agent_needs_input` — `parse_agent_question()`, `TuiMessage::AgentQuestion` variant (5 tests)
+- ✅ Input routing switch — `pending_question` field, prompt changes to `[agent Q1] >`, routes Enter to `/api/interactions/:id/respond` (3 tests)
+- ✅ `ta run --interactive` flag — `build_interactive_section()` injects `ta_ask_human` documentation into CLAUDE.md (2 tests)
+- ✅ `ta conversation <goal_id>` CLI command — reads JSONL log, formatted + JSON output modes (4 tests)
+- ✅ Classic shell SSE rendering for `agent_needs_input` and `agent_question_answered` events
+- ✅ Status bar indicator for pending agent questions
+- ✅ Version bump to `0.9.9-alpha.2`
 
 #### Version: `0.9.9-alpha.2`
 

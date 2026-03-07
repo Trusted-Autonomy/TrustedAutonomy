@@ -342,6 +342,7 @@ pub fn execute(
             &goal_store,
             config,
             macro_goal,
+            interactive,
         )?;
     }
     if agent_config.injects_settings {
@@ -1523,6 +1524,44 @@ Use these tools to interact with TA during your session:
 /// Inject a CLAUDE.md file into the staging workspace to orient the agent.
 /// Saves the original content to `.ta/claude_md_original` for later restoration.
 #[allow(clippy::too_many_arguments)]
+/// Build the interactive mode section for CLAUDE.md injection (v0.9.9.2).
+fn build_interactive_section() -> String {
+    r#"
+## Interactive Mode
+
+This goal is running in **interactive mode**. You have access to the `ta_ask_human`
+MCP tool, which lets you ask the human operator questions and wait for their response.
+
+### When to use `ta_ask_human`
+
+- **Clarification**: When the goal is ambiguous and you need human guidance
+- **Decision points**: When multiple valid approaches exist and the human should choose
+- **Confirmation**: Before making large or risky changes
+- **Missing information**: When you need project-specific knowledge you don't have
+
+### How it works
+
+Call the `ta_ask_human` tool with:
+- `question` (required): Your question text
+- `context` (optional): What you've done so far, to help the human understand
+- `response_hint`: `"freeform"` (default), `"yes_no"`, or `"choice"`
+- `choices` (optional): List of options when using `"choice"` hint
+- `timeout_secs` (optional): How long to wait (default: 600s)
+
+The human sees your question in their terminal (or other channel) and types a response.
+Your execution pauses until they respond or the timeout expires.
+
+### Guidelines
+
+- Ask focused, specific questions — avoid vague "what should I do?"
+- Provide context so the human can answer without re-reading your work
+- Don't ask about things you can figure out from the codebase
+- If a question times out, proceed with your best judgment
+"#
+    .to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn inject_claude_md(
     staging_path: &Path,
     title: &str,
@@ -1533,6 +1572,7 @@ fn inject_claude_md(
     goal_store: &ta_goal::GoalRunStore,
     config: &GatewayConfig,
     macro_goal: bool,
+    interactive: bool,
 ) -> anyhow::Result<()> {
     let claude_md_path = staging_path.join("CLAUDE.md");
     let backup_path = staging_path.join(CLAUDE_MD_BACKUP);
@@ -1583,6 +1623,13 @@ fn inject_claude_md(
         String::new()
     };
 
+    // Build interactive mode section if --interactive was specified (v0.9.9.2).
+    let interactive_section = if interactive {
+        build_interactive_section()
+    } else {
+        String::new()
+    };
+
     // Build memory context section from prior sessions (v0.6.3: phase-aware).
     let memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
 
@@ -1596,7 +1643,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 **Goal:** {}
 **Goal ID:** {}
-{}{}{}{}{}
+{}{}{}{}{}{}
 ## How this works
 
 - This directory is a copy of the original project
@@ -1665,6 +1712,7 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
         plan_section,
         parent_section,
         macro_section,
+        interactive_section,
         memory_section,
         solutions_section,
         existing_section
@@ -1929,6 +1977,7 @@ mod tests {
             &goal_store,
             &config,
             false,
+            false,
         )
         .unwrap();
 
@@ -1968,6 +2017,7 @@ mod tests {
             &goal_store,
             &config,
             false,
+            false,
         )
         .unwrap();
 
@@ -2002,6 +2052,7 @@ mod tests {
             &goal_store,
             &config,
             false,
+            false,
         )
         .unwrap();
 
@@ -2029,6 +2080,7 @@ mod tests {
             &goal_store,
             &config,
             true, // macro_goal = true
+            false,
         )
         .unwrap();
 
@@ -2039,6 +2091,68 @@ mod tests {
         assert!(claude_md.contains("ta_plan"));
         assert!(claude_md.contains("Inner-Loop"));
         assert!(claude_md.contains("goal-macro-789"));
+    }
+
+    #[test]
+    fn inject_claude_md_with_interactive_section() {
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        inject_claude_md(
+            staging.path(),
+            "Interactive goal",
+            "goal-interactive-101",
+            None,
+            None,
+            None,
+            &goal_store,
+            &config,
+            false,
+            true, // interactive = true
+        )
+        .unwrap();
+
+        let claude_md = std::fs::read_to_string(staging.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            claude_md.contains("Interactive Mode"),
+            "should contain interactive section"
+        );
+        assert!(
+            claude_md.contains("ta_ask_human"),
+            "should mention ta_ask_human tool"
+        );
+        assert!(
+            claude_md.contains("response_hint"),
+            "should document response hints"
+        );
+    }
+
+    #[test]
+    fn inject_claude_md_without_interactive_has_no_interactive_section() {
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        inject_claude_md(
+            staging.path(),
+            "Non-interactive goal",
+            "goal-nointeractive-102",
+            None,
+            None,
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+        )
+        .unwrap();
+
+        let claude_md = std::fs::read_to_string(staging.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            !claude_md.contains("Interactive Mode"),
+            "should NOT contain interactive section"
+        );
     }
 
     #[test]
@@ -2513,6 +2627,7 @@ pre_launch:
             &goal_store,
             &config,
             false,
+            false,
         )
         .unwrap();
 
@@ -2531,6 +2646,7 @@ pre_launch:
             None,
             &goal_store,
             &config,
+            false,
             false,
         )
         .unwrap();

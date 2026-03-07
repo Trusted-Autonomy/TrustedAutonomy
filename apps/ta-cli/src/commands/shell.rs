@@ -720,6 +720,33 @@ pub(crate) fn render_sse_event(frame: &str) -> Option<String> {
                 options_str.join("  ")
             )
         }
+        "agent_needs_input" => {
+            let question = payload["question"].as_str().unwrap_or("?");
+            let turn = payload["turn"].as_u64().unwrap_or(1);
+            let iid = payload["interaction_id"]
+                .as_str()
+                .map(|s| &s[..8.min(s.len())])
+                .unwrap_or("?");
+            let choices: Vec<&str> = payload["choices"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let mut msg = format!("agent needs input (turn {}, {}): {}", turn, iid, question);
+            if !choices.is_empty() {
+                let opts: Vec<String> = choices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("[{}] {}", i + 1, c))
+                    .collect();
+                msg.push_str(&format!("\n  Options: {}", opts.join("  ")));
+            }
+            msg
+        }
+        "agent_question_answered" => {
+            let turn = payload["turn"].as_u64().unwrap_or(1);
+            let responder = payload["responder_id"].as_str().unwrap_or("?");
+            format!("agent question answered (turn {}, by {})", turn, responder)
+        }
         _ => {
             // Fallback: use summary field or event type.
             json["event"]["summary"]

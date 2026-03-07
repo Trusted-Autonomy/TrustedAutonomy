@@ -222,6 +222,14 @@ enum Commands {
     ViewTerms,
     /// Show terms acceptance status.
     TermsStatus,
+    /// View the interactive conversation history for a goal.
+    Conversation {
+        /// Goal run ID (or prefix).
+        goal_id: String,
+        /// Output as raw JSONL instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Build the long version string: "0.1.0-alpha (abc1234 2026-02-11)"
@@ -412,6 +420,9 @@ fn main() -> anyhow::Result<()> {
         } => commands::gc::execute(&config, *dry_run, *threshold_days, *all, *archive),
         Commands::Status => commands::status::execute(&config),
         Commands::Serve => commands::serve::execute(&project_root),
+        Commands::Conversation { goal_id, json } => {
+            commands::conversation::execute(&config, goal_id, *json)
+        }
         // Already handled above.
         Commands::AcceptTerms | Commands::ViewTerms | Commands::TermsStatus => unreachable!(),
     }

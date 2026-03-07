@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod audit;
 pub mod context;
+pub mod conversation;
 pub mod credentials;
 pub mod dev;
 pub mod draft;

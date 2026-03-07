@@ -36,6 +36,22 @@ pub enum TuiMessage {
     DaemonDown,
     /// Daemon came back.
     DaemonUp,
+    /// An agent is asking a question (from SSE `agent_needs_input` event).
+    AgentQuestion(PendingQuestion),
+}
+
+/// A pending question from an agent that needs a human response.
+#[derive(Clone, Debug)]
+pub struct PendingQuestion {
+    pub interaction_id: String,
+    #[allow(dead_code)]
+    pub goal_id: String,
+    pub question: String,
+    pub context: Option<String>,
+    #[allow(dead_code)]
+    pub response_hint: String,
+    pub choices: Vec<String>,
+    pub turn: u32,
 }
 
 /// A line in the output pane, with optional styling.
@@ -107,6 +123,8 @@ struct App {
     completions: Vec<String>,
     /// Session ID (if attached).
     session_id: Option<String>,
+    /// Pending agent question awaiting human response.
+    pending_question: Option<PendingQuestion>,
 }
 
 impl App {
@@ -127,6 +145,7 @@ impl App {
             workflow_prompt: None,
             completions: Vec::new(),
             session_id,
+            pending_question: None,
         }
     }
 
@@ -144,11 +163,13 @@ impl App {
         }
     }
 
-    fn prompt_str(&self) -> &str {
-        if self.workflow_prompt.is_some() {
-            "workflow> "
+    fn prompt_str(&self) -> String {
+        if let Some(ref q) = self.pending_question {
+            format!("[agent Q{}] > ", q.turn)
+        } else if self.workflow_prompt.is_some() {
+            "workflow> ".to_string()
         } else {
-            "ta> "
+            "ta> ".to_string()
         }
     }
 
@@ -514,9 +535,37 @@ async fn handle_terminal_event(
                 (KeyCode::Enter, _) => {
                     if let Some(text) = app.submit() {
                         // Echo the command.
-                        let prompt = app.prompt_str().to_string();
+                        let prompt = app.prompt_str();
                         app.push_output(OutputLine::command(format!("{}{}", prompt, text)));
                         app.scroll_to_bottom();
+
+                        // If there's a pending agent question, route to interaction endpoint.
+                        if let Some(pq) = app.pending_question.take() {
+                            let client = client.clone();
+                            let base_url = app.base_url.clone();
+                            let tx = tx.clone();
+                            tokio::spawn(async move {
+                                let result = send_interaction_response(
+                                    &client,
+                                    &base_url,
+                                    &pq.interaction_id,
+                                    &text,
+                                )
+                                .await;
+                                match result {
+                                    Ok(msg) => {
+                                        let _ = tx.send(TuiMessage::CommandResponse(msg));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(TuiMessage::CommandResponse(format!(
+                                            "Error responding to agent: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            });
+                            return;
+                        }
 
                         // Handle built-in commands.
                         match text.as_str() {
@@ -645,6 +694,26 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                 ));
             }
         }
+        TuiMessage::AgentQuestion(pq) => {
+            app.push_output(OutputLine::info(format!(
+                "\n━━━ Agent Question (turn {}) ━━━",
+                pq.turn
+            )));
+            app.push_output(OutputLine::info(pq.question.clone()));
+            if let Some(ref ctx) = pq.context {
+                app.push_output(OutputLine::event(format!("  Context: {}", ctx)));
+            }
+            if !pq.choices.is_empty() {
+                for (i, choice) in pq.choices.iter().enumerate() {
+                    app.push_output(OutputLine::info(format!("  [{}] {}", i + 1, choice)));
+                }
+            }
+            app.push_output(OutputLine::info(
+                "Type your response and press Enter:".to_string(),
+            ));
+            app.scroll_to_bottom();
+            app.pending_question = Some(pq);
+        }
     }
 }
 
@@ -704,7 +773,7 @@ fn draw_output(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let prompt = app.prompt_str();
-    let display = format!("{}{}", prompt, &app.input);
+    let display = format!("{}{}", &prompt, &app.input);
 
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
@@ -763,6 +832,18 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Agent question indicator.
+    if let Some(ref pq) = app.pending_question {
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            format!(" Q{} pending ", pq.turn),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -835,7 +916,10 @@ async fn background_sse(
             while let Some(pos) = buffer.find("\n\n") {
                 let frame = buffer[..pos].to_string();
                 buffer = buffer[pos + 2..].to_string();
-                if let Some(rendered) = super::shell::render_sse_event(&frame) {
+                // Check if this is an agent_needs_input event before generic rendering.
+                if let Some(pq) = parse_agent_question(&frame) {
+                    let _ = tx.send(TuiMessage::AgentQuestion(pq));
+                } else if let Some(rendered) = super::shell::render_sse_event(&frame) {
                     let _ = tx.send(TuiMessage::SseEvent(rendered));
                 }
             }
@@ -901,6 +985,85 @@ async fn background_health(
     }
 }
 
+/// Parse an SSE frame looking for an `agent_needs_input` event.
+/// Returns `Some(PendingQuestion)` if the frame contains one, `None` otherwise.
+fn parse_agent_question(frame: &str) -> Option<PendingQuestion> {
+    let mut event_type = None;
+    let mut data = None;
+    for line in frame.lines() {
+        if let Some(rest) = line.strip_prefix("event: ") {
+            event_type = Some(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("data: ") {
+            data = Some(rest.trim());
+        }
+    }
+
+    if event_type? != "agent_needs_input" {
+        return None;
+    }
+
+    let json: serde_json::Value = serde_json::from_str(data?).ok()?;
+    let payload = &json["payload"];
+
+    Some(PendingQuestion {
+        interaction_id: payload["interaction_id"].as_str().unwrap_or("").to_string(),
+        goal_id: payload["goal_id"].as_str().unwrap_or("").to_string(),
+        question: payload["question"].as_str().unwrap_or("").to_string(),
+        context: payload["context"].as_str().map(|s| s.to_string()),
+        response_hint: payload["response_hint"]
+            .as_str()
+            .unwrap_or("freeform")
+            .to_string(),
+        choices: payload["choices"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        turn: payload["turn"].as_u64().unwrap_or(1) as u32,
+    })
+}
+
+/// Send a human response to a pending agent question via the daemon API.
+async fn send_interaction_response(
+    client: &reqwest::Client,
+    base_url: &str,
+    interaction_id: &str,
+    answer: &str,
+) -> anyhow::Result<String> {
+    let url = format!("{}/api/interactions/{}/respond", base_url, interaction_id);
+    let body = serde_json::json!({ "answer": answer });
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Cannot reach daemon at {}: {}", base_url, e))?;
+
+    let status_code = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
+
+    if !status_code.is_success() {
+        let err = json["error"]
+            .as_str()
+            .unwrap_or("unknown error")
+            .to_string();
+        return Err(anyhow::anyhow!(
+            "Failed to deliver response (HTTP {}): {}",
+            status_code,
+            err
+        ));
+    }
+
+    Ok(format!(
+        "Response delivered to agent (interaction: {})",
+        interaction_id
+    ))
+}
+
 const HELP_TEXT: &str = "\
 TA Shell -- Interactive terminal for Trusted Autonomy
 
@@ -917,6 +1080,10 @@ Commands:
   goals              Shortcut for: ta goal list
   drafts             Shortcut for: ta draft list
   <anything else>    Sent to agent session (if attached)
+
+Interactive mode:
+  When an agent asks a question, the prompt changes to [agent Q1] >
+  Type your response and press Enter to send it back to the agent.
 
 Shell commands:
   :status            Refresh the status bar
@@ -1072,6 +1239,71 @@ mod tests {
         assert_eq!(app.prompt_str(), "ta> ");
         app.workflow_prompt = Some("review".into());
         assert_eq!(app.prompt_str(), "workflow> ");
+    }
+
+    #[test]
+    fn app_prompt_changes_for_agent_question() {
+        let mut app = App::new("http://localhost".into(), None);
+        assert_eq!(app.prompt_str(), "ta> ");
+        app.pending_question = Some(PendingQuestion {
+            interaction_id: "abc123".into(),
+            goal_id: "goal1".into(),
+            question: "Which DB?".into(),
+            context: None,
+            response_hint: "choice".into(),
+            choices: vec!["Postgres".into(), "SQLite".into()],
+            turn: 3,
+        });
+        assert_eq!(app.prompt_str(), "[agent Q3] > ");
+    }
+
+    #[test]
+    fn parse_agent_question_from_sse_frame() {
+        let frame = concat!(
+            "event: agent_needs_input\n",
+            "data: {",
+            "\"event_type\":\"agent_needs_input\",",
+            "\"payload\":{",
+            "\"goal_id\":\"00000000-0000-0000-0000-000000000001\",",
+            "\"interaction_id\":\"00000000-0000-0000-0000-000000000002\",",
+            "\"question\":\"Which database?\",",
+            "\"context\":\"Setting up storage.\",",
+            "\"response_hint\":\"choice\",",
+            "\"choices\":[\"PostgreSQL\",\"SQLite\"],",
+            "\"turn\":1",
+            "}}"
+        );
+        let pq = parse_agent_question(frame).expect("should parse");
+        assert_eq!(pq.question, "Which database?");
+        assert_eq!(pq.turn, 1);
+        assert_eq!(pq.choices, vec!["PostgreSQL", "SQLite"]);
+        assert_eq!(pq.context.as_deref(), Some("Setting up storage."));
+        assert_eq!(pq.interaction_id, "00000000-0000-0000-0000-000000000002");
+    }
+
+    #[test]
+    fn parse_agent_question_ignores_other_events() {
+        let frame = "event: goal_started\ndata: {\"event_type\":\"goal_started\",\"payload\":{\"title\":\"test\",\"agent_id\":\"claude\"}}";
+        assert!(parse_agent_question(frame).is_none());
+    }
+
+    #[test]
+    fn handle_tui_message_agent_question() {
+        let mut app = App::new("http://localhost".into(), None);
+        let pq = PendingQuestion {
+            interaction_id: "abc".into(),
+            goal_id: "goal1".into(),
+            question: "Proceed?".into(),
+            context: None,
+            response_hint: "yes_no".into(),
+            choices: vec![],
+            turn: 1,
+        };
+        handle_tui_message(&mut app, TuiMessage::AgentQuestion(pq));
+        assert!(app.pending_question.is_some());
+        assert_eq!(app.pending_question.as_ref().unwrap().question, "Proceed?");
+        // Should have added output lines for the question display.
+        assert!(!app.output.is_empty());
     }
 
     #[test]
