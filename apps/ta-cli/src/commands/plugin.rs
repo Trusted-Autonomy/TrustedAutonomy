@@ -215,6 +215,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn which_finds_sh() {
         // sh should be available on all unix systems.
         assert!(which_program("sh"));
