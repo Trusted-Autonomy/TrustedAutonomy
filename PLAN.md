@@ -3165,7 +3165,7 @@ workflow:
    - ~400 lines — deliberately simple. Power users use LangGraph.
 
 7. **Process-based workflow plugin** (`crates/ta-workflow/src/process_engine.rs`):
-   - Same JSON-over-stdio pattern as channel plugins (v0.10.4)
+   - Same JSON-over-stdio pattern as channel plugins (v0.10.2)
    - TA spawns the engine process, sends `WorkflowDefinition` + events via stdin
    - Engine responds with `StageAction` decisions via stdout
    - This is how LangGraph/CrewAI adapters connect
@@ -4061,80 +4061,11 @@ channels:
 
 #### Plugin-readiness note
 
-This is built as an in-process Rust crate (the existing pattern). When v0.10.4 (Channel Plugin Loading) lands, this adapter should be refactorable to an external plugin — it already implements `ChannelDelivery` and uses only HTTP/WebSocket. Design the crate so its core logic (message formatting, button handling, webhook response parsing) is separable from the in-process trait impl. This makes it a reference implementation for community plugins in other languages.
+This is built as an in-process Rust crate (the existing pattern). When v0.10.2 (Channel Plugin Loading) lands, this adapter should be refactorable to an external plugin — it already implements `ChannelDelivery` and uses only HTTP/WebSocket. Design the crate so its core logic (message formatting, button handling, webhook response parsing) is separable from the in-process trait impl. This makes it a reference implementation for community plugins in other languages.
 
 #### Version: `0.10.1-alpha`
 
-### v0.10.2 — Native Slack Channel
-<!-- status: pending -->
-**Goal**: `SlackChannelFactory` implementing `ChannelFactory` with Slack Block Kit and Socket Mode support.
-
-#### Items
-
-1. **`ta-channel-slack` crate**: New crate at `crates/ta-channel-slack/` with `slack-morphism` (or raw `reqwest`) dependency.
-2. **`SlackReviewChannel`** implementing `ReviewChannel`:
-   - `request_interaction()` → posts Block Kit message with Approve/Deny buttons → awaits action payload → returns decision
-   - Socket Mode: connects outbound (no public URL needed) — recommended for solo/small team use
-   - HTTP Mode: runs small Axum server for Slack interactivity endpoint
-   - `notify()` → posts notification message
-3. **`SlackChannelFactory`** implementing `ChannelFactory`:
-   - `channel_type()` → `"slack"`
-   - `build_review(config)` → reads `bot_token_env`, `channel_id`, `socket_mode`, `app_token_env`, `allowed_users`
-4. **Deny modal**: Uses Slack modal (views.open) for denial reason.
-5. **Thread-based detail**: Post main review as message, diff details as thread replies.
-
-#### Config
-```yaml
-channels:
-  review:
-    type: slack
-    bot_token_env: TA_SLACK_BOT_TOKEN
-    channel_id: "C0123456789"
-    socket_mode: true
-    app_token_env: TA_SLACK_APP_TOKEN
-    allowed_users: ["U01234567"]
-```
-
-#### Version: `0.10.2-alpha`
-
-### v0.10.3 — Native Email Channel
-<!-- status: pending -->
-**Goal**: `EmailChannelFactory` implementing `ChannelFactory` with SMTP send and IMAP poll for reply-based approval.
-
-#### Items
-
-1. **`ta-channel-email` crate**: New crate at `crates/ta-channel-email/` with `lettre` (SMTP) and `imap`/`async-imap` dependencies.
-2. **`EmailReviewChannel`** implementing `ReviewChannel`:
-   - `request_interaction()` → sends formatted email via SMTP → polls IMAP for reply → parses APPROVE/DENY keyword from reply body
-   - Subject tagging: `[TA Review] {title}` with `X-TA-Request-ID` header for threading
-   - Strips quoted text (`>` lines, `On ... wrote:` blocks) before parsing
-   - Configurable timeout (default 2 hours — email is slower than chat)
-   - `notify()` → sends notification email (no reply expected)
-3. **`EmailChannelFactory`** implementing `ChannelFactory`:
-   - `channel_type()` → `"email"`
-   - Supports any SMTP/IMAP provider (Gmail, Outlook, self-hosted)
-4. **Multiple reviewers**: Send to comma-separated list, first to reply wins.
-5. **App Password support**: Works with Gmail App Passwords (no OAuth needed for simple setups).
-
-#### Config
-```yaml
-channels:
-  review:
-    type: email
-    smtp_host: smtp.gmail.com
-    smtp_port: 587
-    imap_host: imap.gmail.com
-    imap_port: 993
-    username_env: TA_EMAIL_USER
-    password_env: TA_EMAIL_PASSWORD
-    reviewer: reviewer@example.com
-    poll_interval_seconds: 30
-    subject_prefix: "[TA Review]"
-```
-
-#### Version: `0.10.3-alpha`
-
-### v0.10.4 — Channel Plugin Loading (Multi-Language)
+### v0.10.2 — Channel Plugin Loading (Multi-Language)
 <!-- status: pending -->
 **Goal**: Allow third-party channel plugins without modifying TA source or writing Rust, enabling community-built integrations (Teams, PagerDuty, ServiceNow, etc.) in any language.
 
@@ -4247,7 +4178,74 @@ if __name__ == "__main__":
 
 #### Prep: Built-in channels should follow the same pattern
 
-When v0.10.4 lands, the built-in Slack/Discord/email adapters should be refactorable to external plugins — they already implement `ChannelDelivery` and use only HTTP. The long-term goal: TA ships with zero built-in channel adapters; all channels are plugins. The built-in ones are just pre-installed defaults.
+Slack (v0.10.3) and email (v0.10.4) are built as external plugins from the start. Discord (v0.10.1) was built as an in-process crate — it should be refactorable to an external plugin once the plugin system is proven. The long-term goal: TA ships with zero built-in channel adapters; all channels are plugins. The built-in ones are just pre-installed defaults.
+
+#### Version: `0.10.2-alpha`
+
+---
+
+### v0.10.3 — Slack Channel Plugin
+<!-- status: pending -->
+**Goal**: Slack channel plugin built on the v0.10.2 plugin system — validates that the plugin loading infrastructure works end-to-end with a real service.
+
+#### Approach
+
+Built as an external plugin (JSON-over-stdio or standalone Rust binary), not an in-process crate. Uses Slack Block Kit for rich review messages and Socket Mode for outbound-only connectivity.
+
+#### Items
+
+1. **Plugin binary** (`plugins/ta-channel-slack/`): Reads `ChannelQuestion` JSON from stdin, posts Block Kit message with Approve/Deny buttons to Slack, writes `DeliveryResult` to stdout.
+2. **Socket Mode**: Connects outbound (no public URL needed) — recommended for solo/small team use.
+3. **HTTP Mode**: Alternative for teams with existing Slack interactivity endpoints.
+4. **Deny modal**: Uses Slack modal (`views.open`) for denial reason input.
+5. **Thread-based detail**: Post main review as message, diff details as thread replies.
+6. **`channel.toml` manifest**: Plugin discovery via standard plugin loading (v0.10.2).
+7. **`allowed_users`**: Access control for who can approve/deny via Slack.
+
+#### Config
+```toml
+[[channels.external]]
+name = "slack"
+command = "ta-channel-slack"
+protocol = "json-stdio"
+
+# Plugin reads these env vars directly
+# TA_SLACK_BOT_TOKEN, TA_SLACK_APP_TOKEN, TA_SLACK_CHANNEL_ID
+```
+
+#### Version: `0.10.3-alpha`
+
+---
+
+### v0.10.4 — Email Channel Plugin
+<!-- status: pending -->
+**Goal**: Email channel plugin built on the v0.10.2 plugin system — demonstrates the plugin model works for async, non-real-time channels.
+
+#### Approach
+
+Built as an external plugin. Sends formatted review emails via SMTP, polls IMAP for reply-based approval. Email is inherently slower than chat — validates that the plugin/interaction model handles longer response times gracefully.
+
+#### Items
+
+1. **Plugin binary** (`plugins/ta-channel-email/`): Reads `ChannelQuestion` JSON from stdin, sends email via SMTP, writes `DeliveryResult` to stdout. Spawns background IMAP poller that POSTs answers to `/api/interactions/:id/respond`.
+2. **Subject tagging**: `[TA Review] {title}` with `X-TA-Request-ID` header for threading.
+3. **Reply parsing**: Strips quoted text (`>` lines, `On ... wrote:` blocks), looks for APPROVE/DENY keyword.
+4. **Configurable timeout**: Default 2 hours (email is slower than chat).
+5. **Multiple reviewers**: Send to comma-separated list, first to reply wins.
+6. **App Password support**: Works with Gmail App Passwords (no OAuth needed for simple setups).
+7. **`channel.toml` manifest**: Plugin discovery via standard plugin loading (v0.10.2).
+
+#### Config
+```toml
+[[channels.external]]
+name = "email"
+command = "ta-channel-email"
+protocol = "json-stdio"
+
+# Plugin reads these env vars directly
+# TA_EMAIL_USER, TA_EMAIL_PASSWORD, TA_EMAIL_SMTP_HOST, TA_EMAIL_IMAP_HOST
+# TA_EMAIL_REVIEWER, TA_EMAIL_SUBJECT_PREFIX
+```
 
 #### Version: `0.10.4-alpha`
 
