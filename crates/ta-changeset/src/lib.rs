@@ -19,6 +19,7 @@ pub mod interaction;
 pub mod interactive_session_store;
 pub mod multi_channel;
 pub mod output_adapters;
+pub mod plugin;
 pub mod pr_package;
 pub mod review_channel;
 pub mod review_session;

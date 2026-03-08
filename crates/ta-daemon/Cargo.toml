@@ -34,6 +34,8 @@ ta-policy = { path = "../ta-policy" }
 ta-connector-slack = { path = "../ta-connectors/slack" }
 ta-connector-discord = { path = "../ta-connectors/discord" }
 ta-connector-email = { path = "../ta-connectors/email" }
+reqwest = { workspace = true }
+which = "7"
 async-trait = "0.1"
 
 [dev-dependencies]

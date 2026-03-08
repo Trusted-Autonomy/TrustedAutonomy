@@ -13,6 +13,7 @@ pub mod goal;
 pub mod init;
 pub mod office;
 pub mod plan;
+pub mod plugin;
 pub mod policy;
 pub mod pr;
 #[cfg(unix)]

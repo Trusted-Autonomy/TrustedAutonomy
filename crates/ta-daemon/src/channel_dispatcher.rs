@@ -29,8 +29,8 @@ impl ChannelDispatcher {
 
     /// Build a dispatcher from daemon channel configuration.
     ///
-    /// Registers adapters for each configured channel (Slack, Discord, Email).
-    /// Only channels with complete configuration are registered.
+    /// Registers adapters for each configured channel (Slack, Discord, Email)
+    /// and any external channel plugins from `[[channels.external]]`.
     pub fn from_config(config: &ChannelsConfig) -> Self {
         let mut dispatcher = Self::new(config.default_channels.clone());
 
@@ -62,6 +62,99 @@ impl ChannelDispatcher {
             });
             dispatcher.register(Arc::new(adapter));
             tracing::info!("Registered Email channel adapter");
+        }
+
+        // Register external channel plugins from [[channels.external]].
+        for entry in &config.external {
+            match Self::build_external_adapter(entry) {
+                Ok(adapter) => {
+                    dispatcher.register(Arc::new(adapter));
+                    tracing::info!(
+                        plugin = %entry.name,
+                        protocol = %entry.protocol,
+                        "Registered external channel plugin"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        plugin = %entry.name,
+                        error = %e,
+                        "Failed to register external channel plugin '{}'. \
+                         Check [[channels.external]] config in daemon.toml.",
+                        entry.name
+                    );
+                }
+            }
+        }
+
+        dispatcher
+    }
+
+    /// Build an ExternalChannelAdapter from a daemon.toml config entry.
+    fn build_external_adapter(
+        entry: &crate::config::ExternalChannelEntry,
+    ) -> Result<crate::external_channel::ExternalChannelAdapter, String> {
+        use ta_changeset::plugin::{PluginManifest, PluginProtocol};
+
+        let protocol = match entry.protocol.as_str() {
+            "json-stdio" => PluginProtocol::JsonStdio,
+            "http" => PluginProtocol::Http,
+            other => {
+                return Err(format!(
+                    "Unknown protocol '{}' for plugin '{}'. Use 'json-stdio' or 'http'.",
+                    other, entry.name
+                ));
+            }
+        };
+
+        let manifest = PluginManifest {
+            name: entry.name.clone(),
+            version: "0.0.0".to_string(), // Inline config doesn't have versions.
+            command: entry.command.clone(),
+            args: entry.args.clone(),
+            protocol,
+            deliver_url: entry.deliver_url.clone(),
+            auth_token_env: entry.auth_token_env.clone(),
+            capabilities: vec!["deliver_question".to_string()],
+            description: None,
+            timeout_secs: entry.timeout_secs,
+        };
+
+        manifest.validate().map_err(|e| e.to_string())?;
+
+        Ok(crate::external_channel::ExternalChannelAdapter::from_manifest(manifest))
+    }
+
+    /// Build a dispatcher from config, additionally loading discovered plugins.
+    ///
+    /// Scans `.ta/plugins/channels/` and `~/.config/ta/plugins/channels/`
+    /// for `channel.toml` manifests and registers them alongside inline config.
+    pub fn from_config_with_plugins(
+        config: &ChannelsConfig,
+        project_root: &std::path::Path,
+    ) -> Self {
+        let mut dispatcher = Self::from_config(config);
+
+        // Discover and register plugins from standard directories.
+        let plugins = ta_changeset::plugin::discover_plugins(project_root);
+        for plugin in plugins {
+            if dispatcher.adapters.contains_key(&plugin.manifest.name) {
+                tracing::debug!(
+                    plugin = %plugin.manifest.name,
+                    "Skipping discovered plugin — already registered from daemon.toml"
+                );
+                continue;
+            }
+            let adapter = crate::external_channel::ExternalChannelAdapter::from_manifest(
+                plugin.manifest.clone(),
+            );
+            tracing::info!(
+                plugin = %plugin.manifest.name,
+                protocol = %plugin.manifest.protocol,
+                source = %plugin.source,
+                "Registered discovered channel plugin"
+            );
+            dispatcher.register(Arc::new(adapter));
         }
 
         dispatcher

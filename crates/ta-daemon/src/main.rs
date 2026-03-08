@@ -34,6 +34,7 @@
 mod api;
 pub mod channel_dispatcher;
 mod config;
+pub mod external_channel;
 pub mod office;
 pub mod project_context;
 pub mod question_registry;

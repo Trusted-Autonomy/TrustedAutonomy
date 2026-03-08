@@ -1,0 +1,8 @@
+name = "my-channel"
+version = "0.1.0"
+command = "node"
+args = ["channel_plugin.js"]
+protocol = "json-stdio"
+capabilities = ["deliver_question"]
+description = "Example Node.js channel plugin for TA"
+timeout_secs = 30

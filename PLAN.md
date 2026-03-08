@@ -4066,7 +4066,7 @@ This is built as an in-process Rust crate (the existing pattern). When v0.10.2 (
 #### Version: `0.10.1-alpha`
 
 ### v0.10.2 — Channel Plugin Loading (Multi-Language)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Allow third-party channel plugins without modifying TA source or writing Rust, enabling community-built integrations (Teams, PagerDuty, ServiceNow, etc.) in any language.
 
 #### Current State
@@ -4179,6 +4179,25 @@ if __name__ == "__main__":
 #### Prep: Built-in channels should follow the same pattern
 
 Slack (v0.10.3) and email (v0.10.4) are built as external plugins from the start. Discord (v0.10.1) was built as an in-process crate — it should be refactorable to an external plugin once the plugin system is proven. The long-term goal: TA ships with zero built-in channel adapters; all channels are plugins. The built-in ones are just pre-installed defaults.
+
+#### Completed
+- ✅ `PluginManifest` struct with TOML parsing, validation, protocol enum (JsonStdio, Http)
+- ✅ Plugin discovery: scans `.ta/plugins/channels/` (project) and `~/.config/ta/plugins/channels/` (global) for `channel.toml` manifests
+- ✅ `ExternalChannelAdapter` implementing `ChannelDelivery` for both protocols:
+  - JSON-over-stdio: spawn process, write question JSON to stdin, read result from stdout
+  - HTTP callback: POST question JSON to configured URL, parse response
+  - Comprehensive error handling with actionable messages and timeout support
+- ✅ `[[channels.external]]` config in `daemon.toml` for inline plugin registration
+- ✅ `ChannelDispatcher::from_config_with_plugins()` — loads inline config + discovered plugins
+- ✅ `ta plugin list` — show installed plugins with protocol, capabilities, validation status
+- ✅ `ta plugin install <path>` — copy plugin to project or global directory
+- ✅ `ta plugin validate` — check commands exist on PATH, URLs are well-formed
+- ✅ Plugin SDK templates: Python, Node.js, Go skeletons in `templates/channel-plugins/`
+- ✅ 29 tests: manifest parsing, discovery, installation, stdio/HTTP delivery, error paths, validation
+
+#### Remaining (deferred)
+- Plugin version checking and upgrade management
+- Plugin marketplace / remote install from URL
 
 #### Version: `0.10.2-alpha`
 

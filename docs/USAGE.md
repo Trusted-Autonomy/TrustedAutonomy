@@ -59,6 +59,7 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [Resource Mediation](#resource-mediation)
    - [Channel Registry](#channel-registry)
    - [Multi-Channel Routing](#multi-channel-routing)
+   - [Channel Plugins](#channel-plugins)
    - [Inspecting Channel Configuration](#inspecting-channel-configuration)
    - [API Mediation](#api-mediation)
    - [Project Setup](#project-setup)
@@ -2684,6 +2685,91 @@ Dispatch strategies:
 - **quorum** — require N approvals before returning (default quorum size: 2).
 
 Notifications (`notify`) already support arrays and fan out to all configured channels.
+
+#### Channel Plugins
+
+Add custom channel integrations (Teams, PagerDuty, ServiceNow, etc.) without writing Rust or modifying TA source. Plugins are external executables in any language.
+
+**Two protocols:**
+
+| Protocol | How it works | Best for |
+|----------|-------------|----------|
+| **json-stdio** | TA spawns plugin, sends question JSON on stdin, reads result from stdout | Local tools, scripts, CLIs |
+| **http** | TA POSTs question JSON to a URL, reads result from response body | Cloud functions, webhooks, running services |
+
+**Writing a plugin:**
+
+Create a directory with a `channel.toml` manifest:
+
+```toml
+name = "teams"
+version = "0.1.0"
+command = "python3 ta-channel-teams.py"
+protocol = "json-stdio"
+capabilities = ["deliver_question"]
+description = "Microsoft Teams channel plugin"
+timeout_secs = 30
+```
+
+The plugin reads `ChannelQuestion` JSON from stdin and writes `DeliveryResult` JSON to stdout:
+
+```python
+#!/usr/bin/env python3
+import json, sys
+
+question = json.loads(sys.stdin.readline())
+# Deliver the question (Teams API, webhook, etc.)
+print(json.dumps({
+    "channel": "teams",
+    "delivery_id": "msg-123",
+    "success": True,
+    "error": None
+}))
+```
+
+Human responses flow back via `POST {callback_url}/api/interactions/{id}/respond`.
+
+**Installing plugins:**
+
+```bash
+# Install to project (.ta/plugins/channels/)
+ta plugin install ./my-plugin-dir
+
+# Install globally (~/.config/ta/plugins/channels/)
+ta plugin install ./my-plugin-dir --global
+
+# List installed plugins
+ta plugin list
+
+# Validate all plugins
+ta plugin validate
+```
+
+**Inline config (no install needed):**
+
+Register plugins directly in `.ta/daemon.toml`:
+
+```toml
+[[channels.external]]
+name = "teams"
+command = "ta-channel-teams"
+protocol = "json-stdio"
+
+[[channels.external]]
+name = "pagerduty"
+protocol = "http"
+deliver_url = "https://my-service.com/ta/deliver"
+auth_token_env = "TA_PAGERDUTY_TOKEN"
+```
+
+**Plugin discovery order:**
+1. `[[channels.external]]` in daemon.toml (inline config)
+2. `.ta/plugins/channels/*/channel.toml` (project-local)
+3. `~/.config/ta/plugins/channels/*/channel.toml` (user-global)
+
+Inline config takes priority — if a plugin name is already registered from daemon.toml, discovered plugins with the same name are skipped.
+
+**Starter templates** are provided in `templates/channel-plugins/` for Python, Node.js, and Go.
 
 #### Inspecting Channel Configuration
 

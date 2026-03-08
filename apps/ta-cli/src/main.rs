@@ -197,6 +197,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::office::OfficeCommands,
     },
+    /// Manage channel plugins (list, install, validate).
+    Plugin {
+        #[command(subcommand)]
+        command: commands::plugin::PluginCommands,
+    },
     /// Manage multi-stage workflows with pluggable engines.
     Workflow {
         #[command(subcommand)]
@@ -427,6 +432,10 @@ fn main() -> anyhow::Result<()> {
             *classic,
         ),
         Commands::Office { command } => commands::office::execute(command, &project_root),
+        Commands::Plugin { command } => {
+            commands::plugin::run_plugin(&project_root, command)?;
+            Ok(())
+        }
         Commands::Workflow { command } => commands::workflow::execute(command, &config),
         Commands::Policy { command } => commands::policy::execute(command, &config),
         Commands::Config { command } => commands::config::execute(command, &config),

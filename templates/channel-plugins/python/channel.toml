@@ -1,0 +1,8 @@
+name = "my-channel"
+version = "0.1.0"
+command = "python3"
+args = ["-u", "channel_plugin.py"]
+protocol = "json-stdio"
+capabilities = ["deliver_question"]
+description = "Example Python channel plugin for TA"
+timeout_secs = 30

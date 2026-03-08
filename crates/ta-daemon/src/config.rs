@@ -276,6 +276,56 @@ pub struct ChannelsConfig {
     pub slack: Option<SlackChannelConfig>,
     pub discord: Option<DiscordChannelConfig>,
     pub email: Option<EmailChannelConfig>,
+    /// External channel plugins (v0.10.2).
+    /// Each entry registers an out-of-process plugin via JSON-over-stdio or HTTP.
+    #[serde(default)]
+    pub external: Vec<ExternalChannelEntry>,
+}
+
+/// Inline external channel plugin configuration in daemon.toml.
+///
+/// ```toml
+/// [[channels.external]]
+/// name = "teams"
+/// command = "ta-channel-teams"
+/// protocol = "json-stdio"
+///
+/// [[channels.external]]
+/// name = "pagerduty"
+/// protocol = "http"
+/// deliver_url = "https://my-service.com/ta/deliver"
+/// auth_token_env = "TA_PAGERDUTY_TOKEN"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalChannelEntry {
+    /// Plugin name (used for routing, e.g., "teams", "pagerduty").
+    pub name: String,
+    /// Command to spawn (for json-stdio protocol).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Additional arguments for the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Protocol: "json-stdio" or "http".
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    /// URL to POST questions to (for http protocol).
+    #[serde(default)]
+    pub deliver_url: Option<String>,
+    /// Environment variable name containing an auth token.
+    #[serde(default)]
+    pub auth_token_env: Option<String>,
+    /// Timeout in seconds (default: 30).
+    #[serde(default = "default_plugin_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_protocol() -> String {
+    "json-stdio".to_string()
+}
+
+fn default_plugin_timeout() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

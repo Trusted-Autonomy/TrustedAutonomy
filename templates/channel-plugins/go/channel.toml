@@ -1,0 +1,8 @@
+name = "my-channel"
+version = "0.1.0"
+command = "go"
+args = ["run", "channel_plugin.go"]
+protocol = "json-stdio"
+capabilities = ["deliver_question"]
+description = "Example Go channel plugin for TA"
+timeout_secs = 30
