@@ -4387,6 +4387,34 @@ The human stays in `ta shell` throughout. Release notes go through the standard 
 
 ---
 
+### v0.10.7 — Documentation Review & Consolidation
+<!-- status: pending -->
+**Goal**: Full documentation audit and refinement pass after the v0.10.x feature set is complete. Ensure all docs are accurate, consistent, and organized for both users and integration developers.
+
+#### Scope
+- **USAGE.md**: Verify all commands, flags, and config options are documented. Remove stale references. Ensure progressive disclosure (getting started → daily use → advanced). Add examples for every config section.
+- **MISSION-AND-SCOPE.md**: Confirm feature boundary decisions match implementation. Update protocol tables if anything changed. Validate the scope test against actual shipped features.
+- **CLAUDE.md**: Trim to essentials. Remove references to completed phases. Ensure build/verify instructions are current.
+- **PLAN.md**: Archive completed phases into a collapsed section or separate `docs/PLAN-ARCHIVE.md`. Keep active phases clean.
+- **README.md**: Update for current state — accurate feature list, installation instructions, quick-start guide.
+- **ADRs** (`docs/adr/`): Ensure all significant decisions have ADRs. Check that existing ADRs aren't contradicted by later work.
+- **Plugin/integration docs**: Verify JSON schema examples match actual types. Add end-to-end plugin authoring guide if missing.
+- **Cross-doc consistency**: Terminology (draft, goal, artifact, staging), config field names, version references.
+
+#### Items
+1. [ ] Audit USAGE.md against current CLI `--help` output for every subcommand
+2. [ ] Audit MISSION-AND-SCOPE.md protocol/auth tables against actual implementation
+3. [ ] Review and update README.md for current feature set and installation
+4. [ ] Archive completed PLAN.md phases (pre-v0.9) into `docs/PLAN-ARCHIVE.md`
+5. [ ] Verify all config examples in docs parse correctly against current schema
+6. [ ] Cross-reference ADRs with implementation — flag any stale or contradicted decisions
+7. [ ] Add plugin authoring quickstart guide (`docs/PLUGIN-AUTHORING.md`) with end-to-end example
+8. [ ] Terminology consistency pass across all docs
+
+#### Version: `0.10.7-alpha`
+
+---
+
 ### v0.11.0 — Event-Driven Agent Routing
 <!-- status: pending -->
 **Goal**: Allow any TA event to trigger an agent workflow instead of (or in addition to) a static response. This is intelligent, adaptive event handling — not scripted hooks or n8n-style flowcharts. An agent receives the event context and decides what to do.

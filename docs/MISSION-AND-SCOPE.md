@@ -215,6 +215,109 @@ See `docs/plugins-architecture-guidance.md` for the full plugin event model.
 
 ---
 
+## Integration Protocols
+
+TA uses three protocols. All are JSON-native — no protobuf, no code generation, no language-specific stubs required.
+
+### Protocol summary
+
+| Interface | Protocol | Transport | Auth | Direction |
+|-----------|----------|-----------|------|-----------|
+| Agent ↔ TA | MCP (JSON-RPC 2.0) | stdio pipes | N/A (same process boundary) | Bidirectional |
+| CLI / Web / Plugins ↔ Daemon | REST JSON | HTTP (`127.0.0.1:7700`) | Bearer token | Request/Response |
+| Events (real-time) | SSE | HTTP chunked | Bearer token | Server → Client |
+| Events (external) | Webhook POST | HTTPS | Configurable per-hook | Server → External |
+| Plugin (subprocess) | JSON-over-stdio | stdin/stdout pipes | N/A (same machine) | Bidirectional |
+| Plugin (HTTP callback) | REST JSON | HTTPS | `auth_token_env` per-plugin | Server → External |
+
+### Why REST JSON, not gRPC or GraphQL
+
+**REST JSON** is TA's integration protocol because:
+
+1. **Universal consumability.** Any language, any HTTP client, zero tooling. `curl` works. A 10-line Python script works. No `.proto` files, no code generation, no client library required.
+2. **TA's payloads are small.** Questions, answers, events, and draft metadata are simple JSON objects (typically <10KB). gRPC's value is streaming and large payloads — TA doesn't need either.
+3. **MCP already uses JSON-RPC 2.0.** The agent interface is defined by the MCP spec. Adding a second RPC protocol for plugins would mean two serialization formats, two schema systems, and two sets of client libraries for no benefit.
+4. **Plugin simplicity.** A channel plugin in Python is: read JSON from stdin, POST to a webhook, print JSON to stdout. Adding protobuf compilation or gRPC stubs would make plugins harder to write, not easier.
+
+**When to reconsider:** If a future use case demands high-throughput event streaming (thousands of events/second across many agents), gRPC streaming could be added as an alternative transport alongside REST — not replacing it. This would be an optimization, not an architectural change.
+
+### Authentication
+
+| Boundary | Auth mechanism | Config |
+|----------|---------------|--------|
+| **Daemon API** (inbound) | Bearer token | `daemon.toml: [api] auth_token_env = "TA_API_TOKEN"` |
+| **Webhook hooks** (outbound) | Per-hook token/header | `.ta/hooks.toml: auth_header = "Bearer $TA_HOOK_TOKEN"` |
+| **Plugin HTTP callback** (outbound) | Per-plugin token | `daemon.toml: [[channels.external]] auth_token_env = "..."` |
+| **Plugin subprocess** (local) | Process isolation | Inherits daemon's trust boundary — no network auth needed |
+| **MCP stdio** (local) | Process isolation | Daemon spawns agent — same trust boundary |
+
+**Daemon API token**: Required when the daemon is exposed beyond localhost. When bound to `127.0.0.1` (default), token auth is optional but recommended. External channel services (Discord bots, Slack apps) calling `/api/interactions/:id/respond` must include the bearer token.
+
+**No TLS in the daemon itself.** TA relies on reverse proxies (nginx, Caddy, cloud load balancers) or SSH tunnels for encryption. The daemon is a local-first tool — adding TLS certificate management would add complexity without matching the deployment model. For remote access, put the daemon behind a TLS-terminating proxy.
+
+### JSON schemas
+
+All protocol payloads derive `serde::Serialize`/`Deserialize` and `schemars::JsonSchema`. JSON Schema definitions can be generated from the Rust types for use by plugin authors in any language.
+
+Key schemas for plugin/integration authors:
+
+| Schema | Rust type | Used by |
+|--------|-----------|---------|
+| `ChannelQuestion` | `ta_events::channel::ChannelQuestion` | Channel plugins (inbound question to deliver) |
+| `DeliveryResult` | `ta_events::channel::DeliveryResult` | Channel plugins (delivery confirmation) |
+| `EventEnvelope` | `ta_events::schema::EventEnvelope` | SSE consumers, webhook receivers |
+| `SessionEvent` | `ta_events::schema::SessionEvent` | Event routing, hook payloads |
+| `HumanAnswer` | `ta_daemon::question_registry::HumanAnswer` | `/api/interactions/:id/respond` request body |
+
+**Schema export** (planned — v0.10.4): `ta schema export --format json-schema` dumps all plugin-facing schemas as JSON Schema files. Plugin SDK templates include pre-generated schemas for Python (dataclasses), TypeScript (interfaces), and Go (structs).
+
+### Credential & Secret Configuration
+
+TA has a credential vault (`ta-credentials` crate) that brokers secrets so agents never hold raw credentials. But plugin authors and users deploying TA also need clear patterns for connecting their own credentials.
+
+**How secrets are configured across deployment modes:**
+
+| Deployment | Secret storage | How to configure |
+|------------|---------------|-----------------|
+| **Local development** | Environment variables | `.env` file (gitignored), shell exports, or `daemon.toml` `*_env` references |
+| **CI/CD** | GitHub Actions secrets / CI secret store | Set as env vars in workflow; TA reads via `*_env` config fields |
+| **Cloud hosting** | Cloud secret manager (AWS SSM, GCP Secret Manager, etc.) | Inject as env vars at container/instance startup; TA reads via `*_env` |
+| **TA credential vault** | `.ta/credentials.json` (0600 permissions) | `ta credentials add --name "..." --service ... --secret "..."` |
+
+**The `*_env` pattern**: Throughout TA's configuration, secrets are referenced by environment variable name, never stored in config files directly:
+
+```toml
+# daemon.toml — secrets referenced by env var name
+[api]
+auth_token_env = "TA_API_TOKEN"        # daemon reads $TA_API_TOKEN at startup
+
+[channels.discord]
+token_env = "TA_DISCORD_TOKEN"         # reads $TA_DISCORD_TOKEN
+
+[channels.slack]
+token_env = "TA_SLACK_TOKEN"
+
+[[channels.external]]
+name = "custom"
+auth_token_env = "TA_CUSTOM_TOKEN"     # outbound auth for HTTP callback plugins
+```
+
+```bash
+# Local: .env file (add to .gitignore)
+TA_API_TOKEN=sk-ta-...
+TA_DISCORD_TOKEN=MTIz...
+TA_SLACK_TOKEN=xoxb-...
+
+# Or export directly
+export TA_API_TOKEN=sk-ta-...
+```
+
+**TA credential vault** is for secrets the *agent* needs (API keys for external services the agent calls). Plugin/daemon secrets use env vars because they're consumed at startup, not brokered to agents.
+
+**What TA never does**: Store secrets in TOML/YAML config files, log secret values, or pass raw credentials to agents. The `credential_access` alignment action is forbidden by default for all agent profiles.
+
+---
+
 ## Design Principles
 
 1. **Invisible to agents.** Agents work in staging using their native tools. They don't know TA exists. TA diffs the result and creates drafts.
