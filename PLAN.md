@@ -3894,7 +3894,7 @@ Today, creating a custom workflow or agent config requires copying an existing f
 ---
 
 ### v0.9.10 — Multi-Project Daemon & Office Configuration
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Extend the TA daemon to manage multiple projects simultaneously, with channel-to-project routing so a single Discord bot, Slack app, or email address can serve as the interface for several independent TA workspaces.
 
 #### Problem
@@ -3986,6 +3986,26 @@ Each `ProjectContext` holds:
 - `apps/ta-cli/src/commands/office.rs` — `ta office` subcommands (~200 lines)
 - `docs/USAGE.md` — multi-project setup guide, office.yaml reference
 - Tests: project context isolation, routing precedence, runtime add/remove, backward compat with single-project mode
+
+#### Completed
+
+- [x] `ProjectContext` struct with per-project state encapsulation, path helpers, validation, status summary, per-project overrides from `.ta/office-override.yaml` (8 tests)
+- [x] `OfficeConfig` schema parsing (`office.yaml`): office metadata, daemon settings, project entries, channel routing with route targets (7 tests)
+- [x] `ProjectRegistry` runtime management: single-project and multi-project modes, add/remove at runtime, default project resolution, names listing
+- [x] `MessageRouter` with 5-level precedence routing: dedicated channel route, thread context, explicit `@ta <project>` prefix, user default, ambiguous fallback (10 tests)
+- [x] `ta office` CLI commands: start (foreground/background), stop (PID-based), status (overview + per-project detail), project add/remove/list, reload
+- [x] Daemon API expansion: `GET /api/projects`, `GET /api/projects/:name`, `POST /api/projects`, `DELETE /api/projects/:name`, `POST /api/office/reload`
+- [x] `AppState` extended with `ProjectRegistry`, `resolve_project_root()` for project-scoped queries
+- [x] `--office-config` CLI flag and `TA_OFFICE_CONFIG` env var for multi-project daemon startup
+- [x] Per-project overrides via `.ta/office-override.yaml` (security_level, default_agent, max_sessions, tags)
+- [x] Backward compatibility: no `office.yaml` = single-project mode, all existing behavior preserved
+- [x] Version bump to `0.9.10-alpha`
+
+#### Remaining (deferred)
+
+- [ ] Full GatewayState refactor to hold `HashMap<String, ProjectContext>` with per-project GoalRunStore/AuditLog instances (requires deep refactor of server.rs)
+- [ ] Thread context tracking across conversations (requires session-project binding)
+- [ ] Config hot-reload with live registry update (reload endpoint validates but doesn't swap yet)
 
 #### Version: `0.9.10-alpha`
 

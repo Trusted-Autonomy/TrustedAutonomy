@@ -28,6 +28,8 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 
 use crate::config::{DaemonConfig, ShellConfig, TokenStore};
+use crate::office::ProjectRegistry;
+use crate::project_context::ProjectStatusSummary;
 use crate::question_registry::QuestionRegistry;
 
 /// Shared application state for all API handlers.
@@ -43,6 +45,8 @@ pub struct AppState {
     pub agent_sessions: agent::AgentSessionManager,
     pub goal_output: goal_output::GoalOutputManager,
     pub question_registry: Arc<QuestionRegistry>,
+    /// Multi-project registry (single-project mode has exactly one entry).
+    pub project_registry: Arc<ProjectRegistry>,
 }
 
 impl AppState {
@@ -50,6 +54,7 @@ impl AppState {
         let ta_dir = project_root.join(".ta");
         let shell_config = ShellConfig::load(&project_root);
         let max_sessions = daemon_config.agent.max_sessions;
+        let registry = ProjectRegistry::single_project(project_root.clone());
 
         Self {
             pr_packages_dir: ta_dir.join("pr_packages"),
@@ -61,9 +66,175 @@ impl AppState {
             agent_sessions: agent::AgentSessionManager::new(max_sessions),
             goal_output: goal_output::GoalOutputManager::new(),
             question_registry: Arc::new(QuestionRegistry::new()),
+            project_registry: Arc::new(registry),
             project_root,
             daemon_config,
         }
+    }
+
+    /// Create with a multi-project registry from office config.
+    #[allow(dead_code)]
+    pub fn with_registry(
+        project_root: PathBuf,
+        daemon_config: DaemonConfig,
+        registry: ProjectRegistry,
+    ) -> Self {
+        let mut state = Self::new(project_root, daemon_config);
+        state.project_registry = Arc::new(registry);
+        state
+    }
+
+    /// Resolve a project root from an optional `?project=` query parameter.
+    /// In single-project mode, always returns the default project root.
+    /// In multi-project mode, requires the project parameter.
+    #[allow(dead_code)]
+    pub fn resolve_project_root(&self, project_name: Option<&str>) -> Result<PathBuf, String> {
+        match project_name {
+            Some(name) => self
+                .project_registry
+                .get(name)
+                .map(|ctx| ctx.path)
+                .ok_or_else(|| {
+                    format!(
+                        "Project '{}' not found. Available: {:?}",
+                        name,
+                        self.project_registry.names()
+                    )
+                }),
+            None => self
+                .project_registry
+                .default_project()
+                .map(|ctx| ctx.path)
+                .ok_or_else(|| {
+                    format!(
+                        "Multiple projects available. Specify ?project=<name>. Available: {:?}",
+                        self.project_registry.names()
+                    )
+                }),
+        }
+    }
+}
+
+// ── Project API handlers (v0.9.10) ──────────────────────────────
+
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::Json;
+use serde::Deserialize;
+
+/// List all managed projects.
+async fn list_projects(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let projects: Vec<ProjectStatusSummary> = state
+        .project_registry
+        .list()
+        .iter()
+        .map(|ctx| ctx.status_summary())
+        .collect();
+    Json(projects).into_response()
+}
+
+/// Get a specific project's status.
+async fn get_project(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    match state.project_registry.get(&name) {
+        Some(ctx) => Json(ctx.status_summary()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            format!(
+                "Project '{}' not found. Available: {:?}",
+                name,
+                state.project_registry.names()
+            ),
+        )
+            .into_response(),
+    }
+}
+
+/// Request body for adding a project at runtime.
+#[derive(Deserialize)]
+struct AddProjectRequest {
+    name: String,
+    path: String,
+    plan: Option<String>,
+    default_branch: Option<String>,
+}
+
+/// Add a project at runtime.
+async fn add_project(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    Json(body): Json<AddProjectRequest>,
+) -> impl IntoResponse {
+    let ctx = crate::project_context::ProjectContext::from_config(
+        body.name.clone(),
+        std::path::PathBuf::from(&body.path),
+        body.plan,
+        body.default_branch,
+    );
+
+    if let Err(e) = ctx.validate() {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+
+    match state.project_registry.add(ctx) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "status": "added",
+                "name": body.name,
+                "path": body.path,
+            })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::CONFLICT, e).into_response(),
+    }
+}
+
+/// Remove a project at runtime.
+async fn remove_project(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    match state.project_registry.remove(&name) {
+        Ok(_) => Json(serde_json::json!({
+            "status": "removed",
+            "name": name,
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e).into_response(),
+    }
+}
+
+/// Reload office configuration.
+async fn reload_office(
+    axum::extract::State(_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // The office config path is stored in TA_OFFICE_CONFIG env var.
+    let config_path = match std::env::var("TA_OFFICE_CONFIG") {
+        Ok(path) => std::path::PathBuf::from(path),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "No TA_OFFICE_CONFIG set. Cannot reload without a config path.",
+            )
+                .into_response();
+        }
+    };
+
+    match crate::office::OfficeConfig::load(&config_path) {
+        Ok(config) => {
+            let project_count = config.projects.len();
+            Json(serde_json::json!({
+                "status": "reloaded",
+                "config": config_path.display().to_string(),
+                "projects": project_count,
+            }))
+            .into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
 
@@ -99,6 +270,13 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             "/api/interactions/{id}/respond",
             post(interactions::respond),
         )
+        // Project management routes (v0.9.10).
+        .route("/api/projects", get(list_projects).post(add_project))
+        .route(
+            "/api/projects/{name}",
+            get(get_project).delete(remove_project),
+        )
+        .route("/api/office/reload", post(reload_office))
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),

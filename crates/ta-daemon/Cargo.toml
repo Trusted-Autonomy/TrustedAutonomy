@@ -20,6 +20,7 @@ chrono = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
 toml = { workspace = true }
+serde_yaml = { workspace = true }
 rand = { workspace = true }
 async-stream = { workspace = true }
 

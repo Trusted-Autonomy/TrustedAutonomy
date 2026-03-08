@@ -34,7 +34,10 @@
 mod api;
 pub mod channel_dispatcher;
 mod config;
+pub mod office;
+pub mod project_context;
 pub mod question_registry;
+pub mod router;
 mod web;
 
 use anyhow::Result;
@@ -66,6 +69,11 @@ struct Cli {
     /// Starts the full HTTP API on the configured bind address and port.
     #[arg(long)]
     api: bool,
+
+    /// Path to an office.yaml for multi-project mode.
+    /// Can also be set via TA_OFFICE_CONFIG env var.
+    #[arg(long)]
+    office_config: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -91,6 +99,38 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting Trusted Autonomy daemon");
     tracing::info!("Project root: {}", project_root.display());
+
+    // Check for office config (CLI flag or env var).
+    let office_config_path = cli
+        .office_config
+        .or_else(|| std::env::var("TA_OFFICE_CONFIG").ok().map(PathBuf::from));
+
+    if let Some(ref path) = office_config_path {
+        match office::OfficeConfig::load(path) {
+            Ok(config) => {
+                tracing::info!(
+                    office = %config.office.name,
+                    projects = config.projects.len(),
+                    "Running in multi-project office mode"
+                );
+                match office::ProjectRegistry::from_config(&config) {
+                    Ok(registry) => {
+                        tracing::info!(
+                            count = registry.len(),
+                            "Loaded projects: {:?}",
+                            registry.names()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to build project registry: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Cannot load office config: {}", e);
+            }
+        }
+    }
 
     // Load daemon configuration.
     let daemon_config = config::DaemonConfig::load(&project_root);

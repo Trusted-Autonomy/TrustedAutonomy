@@ -192,6 +192,11 @@ enum Commands {
         #[arg(long)]
         url: Option<String>,
     },
+    /// Multi-project office daemon management.
+    Office {
+        #[command(subcommand)]
+        command: commands::office::OfficeCommands,
+    },
     /// Manage multi-stage workflows with pluggable engines.
     Workflow {
         #[command(subcommand)]
@@ -416,6 +421,7 @@ fn main() -> anyhow::Result<()> {
             *init,
             *classic,
         ),
+        Commands::Office { command } => commands::office::execute(command, &project_root),
         Commands::Workflow { command } => commands::workflow::execute(command, &config),
         Commands::Policy { command } => commands::policy::execute(command, &config),
         Commands::Gc {
