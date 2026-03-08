@@ -412,10 +412,10 @@ The key activates when you `cd` into the project and deactivates when you leave.
 cd your-project/
 
 # One command: create staging copy → launch agent → build Draft on exit
-ta run "Fix the auth bug" --source .
+ta run "Fix the auth bug"
 
 # Uses Claude Code by default. For other agents:
-ta run "Fix the auth bug" --agent claude-flow --source .
+ta run "Fix the auth bug" --agent claude-flow
 
 # TA copies your project to .ta/staging/, injects context into CLAUDE.md,
 # launches the agent in the staging copy. Agent works normally.
@@ -443,7 +443,7 @@ That's it. The agent never knew it was in a staging workspace.
 ```
 Your Project                     Staging Copy (.ta/staging/)
      |                                    |
-     |-- ta run "task" --source . -------->|  (full copy, minus build artifacts)
+     |-- ta run "task" -------->|  (full copy, minus build artifacts)
      |                                    |
      |                              Agent works here
      |                              (reads, writes, tests — normal tools)
@@ -469,7 +469,7 @@ TA is invisible to the agent. It works by:
 
 ```bash
 # 1. Start a goal — creates a staging copy of your project
-ta goal start "Fix the auth bug" --source .
+ta goal start "Fix the auth bug"
 
 # 2. Note the staging path and goal ID from the output, then enter staging
 cd .ta/staging/<goal-id>/
@@ -497,16 +497,16 @@ ta draft apply <package-id> --git-commit
 `ta run` wraps the manual steps into a single command:
 
 ```bash
-ta run "Fix the auth bug" --source .
+ta run "Fix the auth bug"
 # Uses Claude Code by default. For other agents:
-ta run "Fix the auth bug" --agent claude-flow --source .
+ta run "Fix the auth bug" --agent claude-flow
 
 # Follow-up on a previous goal to iterate on feedback:
-ta run "Address config validation" --source . --follow-up
+ta run "Address config validation" --follow-up
 # Automatically links to the most recent goal, includes parent context
 
 # Follow-up with detailed review notes:
-ta run --source . --follow-up --objective-file review-notes.md
+ta run --follow-up --objective-file review-notes.md
 # Then review + approve + apply as above.
 ```
 
@@ -554,7 +554,7 @@ Or add it to your project's `.mcp.json` (TA will copy this into staging):
 
 ```bash
 cd your-project/
-ta goal start "Refactor auth system" --source .
+ta goal start "Refactor auth system"
 # Note the goal ID from the output
 ```
 
@@ -565,7 +565,7 @@ ta goal start "Refactor auth system" --source .
 Use `ta run` to launch Claude Code inside the staging workspace. Because claude-flow is registered as an MCP server, Claude Code can call swarm/memory/task tools automatically:
 
 ```bash
-ta run "Refactor auth system" --source .
+ta run "Refactor auth system"
 
 # Claude Code (default agent) launches in .ta/staging/<goal-id>/
 # It can use mcp__claude-flow__swarm_init, mcp__claude-flow__task_orchestrate,
@@ -587,7 +587,7 @@ cd your-project/
 ta draft build <goal-id> --summary "Auth system refactored"
 ```
 
-> **Note:** `ta run "task" --agent claude-flow --source .` handles `hive-mind init` automatically.
+> **Note:** `ta run "task" --agent claude-flow` handles `hive-mind init` automatically.
 
 **Approach C: Headless swarm (no interactive session)**
 
@@ -644,7 +644,7 @@ export CLAUDE_FLOW_MEMORY_BACKEND=hybrid   # memory persistence backend
 
 ```bash
 # Same workflow — TA doesn't care which agent you use
-ta goal start "Add input validation" --source .
+ta goal start "Add input validation"
 cd .ta/staging/<goal-id>/
 codex    # Codex works in the staging copy like normal
 # Exit Codex, then build/review/apply as above
@@ -745,16 +745,16 @@ When you need to iterate on feedback or address discuss items:
 ta draft apply <id> --approve "src/**" --discuss "config/*"
 
 # Start a follow-up goal to address feedback
-ta run "Fix config validation" --source . --follow-up
+ta run "Fix config validation" --follow-up
 # - Automatically links to most recent goal
 # - Agent receives parent context (what was approved/rejected/discussed)
 # - New Draft supersedes parent Draft if parent wasn't applied yet
 
 # Follow up on a specific goal (ID prefix matching)
-ta run "Address security feedback" --source . --follow-up abc123
+ta run "Address security feedback" --follow-up abc123
 
 # Provide detailed review notes from a file
-ta run --source . --follow-up --objective-file review-feedback.md
+ta run --follow-up --objective-file review-feedback.md
 
 # View goal chain
 ta goal list  # Shows parent relationships: "title (→ parent_id)"

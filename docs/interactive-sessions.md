@@ -41,7 +41,7 @@ The session protocol is designed so that future frontends (Discord, Slack, web a
 
 ```bash
 cd your-project/
-ta run "Add input validation to the API" --source . --interactive
+ta run "Add input validation to the API" --interactive
 ```
 
 Output:
@@ -204,10 +204,10 @@ You can run multiple interactive sessions simultaneously for different goals or 
 
 ```bash
 # Terminal 1: Feature implementation
-ta run "Implement OAuth2 login" --source . --interactive --agent claude-code
+ta run "Implement OAuth2 login" --interactive --agent claude-code
 
 # Terminal 2: Test writing (different goal, same project)
-ta run "Write integration tests for auth" --source . --interactive --agent codex
+ta run "Write integration tests for auth" --interactive --agent codex
 
 # Terminal 3: Monitor both
 ta session list
@@ -227,12 +227,12 @@ Each session has its own staging workspace (via the goal system), so there's no 
 
 ```bash
 # Round 1: Initial implementation
-ta run "Build the search API" --source . --interactive
+ta run "Build the search API" --interactive
 # Review and partially approve...
 ta draft apply <id> --approve "src/search/**" --discuss "src/config/*"
 
 # Round 2: Address feedback with follow-up
-ta run "Fix search config issues" --source . --interactive --follow-up
+ta run "Fix search config issues" --interactive --follow-up
 # Agent receives parent goal context including discuss items
 ```
 
@@ -288,7 +288,7 @@ Interactive sessions complement the existing review session system (from v0.3.0)
 
 ```bash
 # Start an interactive run
-ta run "Implement feature X" --source . --interactive
+ta run "Implement feature X" --interactive
 
 # ... agent works and exits, draft is built ...
 
@@ -399,7 +399,7 @@ The protocol ensures every interaction is audited, regardless of which channel i
 ### `ta run --interactive`
 
 ```bash
-ta run "goal title" --source . --interactive [--agent claude-code]
+ta run "goal title" --interactive [--agent claude-code]
 ```
 
 Creates a goal with an interactive session, launches the agent, and tracks the session lifecycle. On agent exit, builds the draft and marks the session completed.

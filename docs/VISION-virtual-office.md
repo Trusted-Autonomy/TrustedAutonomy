@@ -283,7 +283,7 @@ Each connector is bidirectional:
        │
        ▼
 [ta run "Implement Phase v0.1 requirements"
-  --agent claude-code --source . --phase v0.1]
+  --agent claude-code --phase v0.1]
        │
        ▼
 [Agent works on v0.1 tasks in staging]

@@ -427,7 +427,7 @@ source .env
 node bridge.js
 
 # Terminal 2: Run your agent
-ta run "implement feature X" --source .
+ta run "implement feature X"
 ```
 
 ### 3.3 Review Flow

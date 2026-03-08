@@ -1,6 +1,6 @@
 // run.rs — Orchestrate a full goal lifecycle: start → agent → PR build.
 //
-// `ta run "Fix the auth bug" --source .` is a convenience wrapper that:
+// `ta run "Fix the auth bug"` is a convenience wrapper that:
 // 1. Creates a goal with an overlay workspace
 // 2. Injects context (e.g., CLAUDE.md) for the agent
 // 3. Launches the agent with the goal as its initial prompt

@@ -353,14 +353,14 @@ node bridge.js
 ta daemon start
 
 # Terminal 3: Start your agent session
-ta run "implement feature X" --source .
+ta run "implement feature X"
 ```
 
 ### 3.3 Verify It Works
 
 1. Run a quick test goal:
    ```bash
-   ta goal start "test discord" --source .
+   ta goal start "test discord"
    ta draft build --latest
    ta draft submit --latest
    ```

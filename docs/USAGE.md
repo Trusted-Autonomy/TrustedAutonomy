@@ -235,7 +235,7 @@ The manual equivalent of `ta dev` -- three commands:
 ```bash
 # 1. Run a goal -- TA copies your project to an isolated workspace,
 #    launches the agent, and captures all changes as a draft.
-ta run "Add a README badge for build status" --source .
+ta run "Add a README badge for build status"
 
 # 2. Review the draft -- see what changed and why.
 ta draft view <draft-id>
@@ -276,7 +276,7 @@ Now you're in the interactive shell. Everything happens from here:
 ```
 ta> status                              # See project overview
 ta> plan                                # Check plan phases
-ta> ta run "Add CI workflow" --source . # Start a goal
+ta> ta run "Add CI workflow" # Start a goal
 ta> drafts                              # Wait, then list drafts
 ta> view abc123                         # Review the draft
 ta> approve abc123                      # Approve it
@@ -369,7 +369,7 @@ TA wraps any agent framework. Out of the box it supports:
 Use `--agent` to select:
 
 ```bash
-ta run "Fix the bug" --source . --agent codex
+ta run "Fix the bug" --agent codex
 ```
 
 You can add any agent by creating a YAML config file (see [Agent Configuration](#agent-configuration)).
@@ -383,7 +383,7 @@ You can add any agent by creating a YAML config file (see [Agent Configuration](
 The most basic workflow: one goal, one review, one apply.
 
 ```bash
-ta run "Refactor the auth module" --source .
+ta run "Refactor the auth module"
 # Wait for agent to finish...
 
 ta draft view <draft-id>
@@ -403,16 +403,16 @@ Fix issues discovered during review without losing context:
 
 ```bash
 # Start a follow-up (inherits context from the most recent goal)
-ta run "Fix clippy warnings from review" --source . --follow-up
+ta run "Fix clippy warnings from review" --follow-up
 
 # With a specific parent goal
-ta run "Address review feedback" --source . --follow-up <goal-id-prefix>
+ta run "Address review feedback" --follow-up <goal-id-prefix>
 
 # With detailed instructions
-ta run --source . --follow-up --objective "Fix the discuss items on config.toml -- add env var override support"
+ta run --follow-up --objective "Fix the discuss items on config.toml -- add env var override support"
 
 # From a file
-ta run --source . --follow-up --objective-file review-notes.md
+ta run --follow-up --objective-file review-notes.md
 ```
 
 When the parent goal's staging directory still exists, TA prompts to reuse it. Choosing yes (the default) means work accumulates into a single unified draft.
@@ -429,7 +429,7 @@ auto_supersede = true          # auto-supersede parent draft when extending
 For complex tasks that span multiple logical units of change, use `--macro`. The agent stays in a single long-running session and can submit multiple drafts for review without exiting.
 
 ```bash
-ta run "Build the v0.7 features" --source . --macro
+ta run "Build the v0.7 features" --macro
 ```
 
 **How it works**: The agent receives MCP tools (`ta_draft`, `ta_goal_inner`, `ta_plan`) and can:
@@ -463,7 +463,7 @@ Use `d` to give feedback that the agent will see and act on:
 Use `--interactive` when you want to **see what the agent is doing in real-time** and be able to inject guidance mid-session.
 
 ```bash
-ta run "Implement channel registry" --source . --interactive
+ta run "Implement channel registry" --interactive
 ```
 
 **How it works**: TA wraps the agent subprocess in a PTY, so:
@@ -537,7 +537,7 @@ These are **different concerns** and can be combined:
 **The full experience** — both flags together:
 
 ```bash
-ta run "Build the v0.7 features" --source . --macro --interactive --phase v0.7.0
+ta run "Build the v0.7 features" --macro --interactive --phase v0.7.0
 ```
 
 You see the agent working in real-time, can inject guidance, and review each logical unit of change as it's submitted. This is the recommended mode for implementing plan phases.
@@ -589,7 +589,7 @@ The dev-loop agent config lives at `agents/dev-loop.yaml` and can be overridden 
 Link goals to `PLAN.md` phases for automatic tracking:
 
 ```bash
-ta run "Complete Phase v0.4.5" --source . --phase v0.4.5
+ta run "Complete Phase v0.4.5" --phase v0.4.5
 
 # When applied, PLAN.md is auto-updated to mark the phase done
 ```
@@ -705,7 +705,7 @@ ta draft fix <draft-id> src/draft.rs --guidance "Consolidate the duplicate"
 **Full re-work** -- for architectural changes:
 
 ```bash
-ta run "Rework auth to use JWT per review feedback" --source . --follow-up
+ta run "Rework auth to use JWT per review feedback" --follow-up
 ```
 
 ### Draft Lifecycle Hygiene
@@ -2129,7 +2129,7 @@ A common session using the shell looks like:
 ```
 ta> status                            # Check project state
 ta> plan                              # See plan phases
-ta> ta run "Fix auth bug" --source .  # Start a goal
+ta> ta run "Fix auth bug"  # Start a goal
 ta> drafts                            # Check for completed drafts
 ta> view abc123                       # Review a draft
 ta> approve abc123                    # Approve it
@@ -3647,7 +3647,7 @@ ta draft apply <draft-id> --approve "src/main.rs" --approve "src/lib.rs"
 ```bash
 # Start a fresh goal (safest)
 ta draft apply <draft-id> --conflict-resolution abort
-ta run "Redo the task" --source .
+ta run "Redo the task"
 
 # Force overwrite (use with caution)
 ta draft apply <draft-id> --conflict-resolution force-overwrite

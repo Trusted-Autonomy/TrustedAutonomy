@@ -389,7 +389,7 @@ source .env
 node bridge.js
 
 # Terminal 3: Run your agent
-ta run "implement feature X" --source .
+ta run "implement feature X"
 ```
 
 ### 3.3 Verify
