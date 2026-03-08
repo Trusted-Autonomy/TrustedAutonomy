@@ -1722,7 +1722,7 @@ cors_origins = ["*"]
 | `GET` | `/api/agent/sessions` | List agent sessions |
 | `DELETE` | `/api/agent/:id` | Stop an agent session |
 
-Plus the existing draft and memory endpoints (`/api/drafts/*`, `/api/memory/*`).
+Plus the existing draft and memory endpoints (`/api/drafts/*`, `/api/memory/*`) and multi-project endpoints (`/api/projects/*`, `/api/office/*` — see [Multi-Project Office](#multi-project-office)).
 
 #### Command Execution
 
@@ -1811,6 +1811,110 @@ strip_prefix = true
 match = "approve"
 expand = "ta draft approve"
 ```
+
+### Multi-Project Office
+
+Manage multiple projects with a single daemon using `office.yaml`.
+
+#### Office Configuration
+
+Create an `office.yaml` at your workspace root:
+
+```yaml
+office:
+  name: "My Dev Office"
+  daemon:
+    http_port: 3140
+
+projects:
+  inventory-service:
+    path: ~/dev/inventory-service
+    plan: PLAN.md
+    default_branch: main
+  customer-portal:
+    path: ~/dev/customer-portal
+
+channels:
+  discord:
+    token_env: TA_DISCORD_TOKEN
+    routes:
+      "#backend-reviews":
+        project: inventory-service
+        type: review
+      "#frontend-reviews":
+        project: customer-portal
+        type: review
+      "#office-status":
+        type: notify
+        projects: all
+  email:
+    routes:
+      "backend@acme.dev":
+        project: inventory-service
+        type: review
+```
+
+#### Starting the Office
+
+```bash
+# Start in background
+ta office start --config office.yaml
+
+# Start in foreground (for development)
+ta office start --config office.yaml --foreground
+
+# Or pass via environment variable
+TA_OFFICE_CONFIG=office.yaml ta-daemon --api
+```
+
+#### Office Commands
+
+```bash
+ta office status                    # Overview of all projects
+ta office status inventory-service  # Detail for one project
+ta office project list              # List managed projects
+ta office project add my-proj ~/dev/my-proj  # Add at runtime
+ta office project remove my-proj    # Remove at runtime
+ta office reload                    # Reload config without restart
+ta office stop                      # Graceful shutdown
+```
+
+#### Message Routing
+
+In multi-project mode, messages route to projects using this precedence:
+
+1. **Channel route** — configured in `office.yaml` (`#backend-reviews` → `inventory-service`)
+2. **Thread context** — replies in a goal thread stay with the same project
+3. **Explicit prefix** — `@ta inventory-service plan list`
+4. **User default** — user's `default_project` setting
+5. **Ambiguous** — daemon asks the user to clarify
+
+In single-project mode (no `office.yaml`), routing always resolves to the sole project.
+
+#### Per-Project Overrides
+
+Each project can have a `.ta/office-override.yaml` that overrides office-level settings:
+
+```yaml
+security_level: strict
+default_agent: codex
+max_sessions: 5
+tags:
+  - backend
+  - critical
+```
+
+#### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/projects` | List all managed projects |
+| `GET` | `/api/projects/:name` | Project detail |
+| `POST` | `/api/projects` | Add a project at runtime |
+| `DELETE` | `/api/projects/:name` | Remove a project |
+| `POST` | `/api/office/reload` | Reload office config |
+
+Existing endpoints accept an optional `?project=<name>` query parameter to scope operations to a specific project.
 
 ### Interactive Shell
 

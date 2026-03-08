@@ -10,6 +10,7 @@ pub mod events;
 pub mod gc;
 pub mod goal;
 pub mod init;
+pub mod office;
 pub mod plan;
 pub mod policy;
 pub mod pr;
