@@ -4225,6 +4225,41 @@ The Discord adapter already implements `ChannelDelivery` and uses only HTTP (no 
 
 ---
 
+### v0.10.2.2 — `ta plugin build` Command
+<!-- status: pending -->
+**Goal**: Add a CLI command to build plugin binaries from source, removing the manual `cd && cargo build && cp` workflow.
+
+#### Usage
+```bash
+# Build a specific plugin
+ta plugin build discord
+
+# Build multiple plugins
+ta plugin build discord,slack,email
+
+# Build all plugins found in plugins/
+ta plugin build --all
+```
+
+#### Behavior
+1. Discover plugin source directories under `plugins/ta-channel-<name>/`
+2. Run `cargo build --release` in each plugin directory
+3. Copy the compiled binary + `channel.toml` to `.ta/plugins/channels/<name>/`
+4. Print summary: which plugins built, binary size, install path
+
+#### Items
+1. [ ] `PluginCommands::Build` variant in `apps/ta-cli/src/commands/plugin.rs` with `names: Vec<String>` and `--all` flag
+2. [ ] Plugin source discovery: scan `plugins/` directory for `Cargo.toml` + `channel.toml` pairs
+3. [ ] Build runner: invoke `cargo build --release` in plugin directory, capture output, report errors
+4. [ ] Install step: copy binary + manifest to `.ta/plugins/channels/<name>/`
+5. [ ] `--all` flag: discover and build every plugin in `plugins/`
+6. [ ] Output: progress per plugin, success/failure summary, binary paths
+7. [ ] Error handling: continue building remaining plugins if one fails, report all failures at end
+
+#### Version: `0.10.2-alpha.2`
+
+---
+
 ### v0.10.3 — Slack Channel Plugin
 <!-- status: pending -->
 **Goal**: Slack channel plugin built on the v0.10.2 plugin system — validates that the plugin loading infrastructure works end-to-end with a real service.
