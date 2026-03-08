@@ -27,6 +27,7 @@ ta-goal = { path = "../ta-goal" }
 ta-policy = { path = "../ta-policy" }
 ta-workspace = { path = "../ta-workspace" }
 ta-workflow = { path = "../ta-workflow" }
+ta-channel-discord = { path = "../ta-channel-discord" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

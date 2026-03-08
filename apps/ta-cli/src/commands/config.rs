@@ -25,7 +25,8 @@ pub fn execute(command: &ConfigCommands, config: &GatewayConfig) -> anyhow::Resu
 
 fn show_channels(config: &GatewayConfig, check: bool) -> anyhow::Result<()> {
     let ta_config = channel_registry::load_config(&config.workspace_root);
-    let registry = default_registry();
+    let mut registry = default_registry();
+    registry.register(Box::new(ta_channel_discord::DiscordChannelFactory));
     let routing = &ta_config.channels;
 
     let config_path = config.workspace_root.join(".ta").join("config.yaml");

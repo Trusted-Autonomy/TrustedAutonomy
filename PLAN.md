@@ -4032,23 +4032,21 @@ Each `ProjectContext` holds:
 #### Version: `0.10.0-alpha`
 
 ### v0.10.1 — Native Discord Channel
-<!-- status: pending -->
-**Goal**: `DiscordChannelFactory` implementing `ChannelFactory` with direct Discord gateway connection, eliminating the need for the bridge service.
+<!-- status: done -->
+**Goal**: `DiscordChannelFactory` implementing `ChannelFactory` with direct Discord REST API connection, eliminating the need for the bridge service.
 
-#### Items
+#### Completed
+- ✅ **`ta-channel-discord` crate**: New crate at `crates/ta-channel-discord/` with `reqwest`-based Discord REST API integration (4 modules: lib, channel, factory, payload)
+- ✅ **`DiscordReviewChannel`** implementing `ReviewChannel`: rich embeds with buttons, file-based response exchange, sync/async bridge
+- ✅ **`DiscordChannelFactory`** implementing `ChannelFactory`: `channel_type()` → `"discord"`, config-driven build with `token_env`, `channel_id`, `response_dir`, `allowed_roles`, `allowed_users`, `timeout_secs`, `poll_interval_secs`
+- ✅ **Access control**: `allowed_roles` and `allowed_users` restrict who can approve/deny
+- ✅ **Payload builders**: Interaction-kind-aware embeds and buttons
+- ✅ **Registry integration**: Registered in MCP gateway and CLI config
+- ✅ **30 tests** across all modules
 
-1. **`ta-channel-discord` crate**: New crate at `crates/ta-channel-discord/` with `serenity` (or `twilight`) dependency.
-2. **`DiscordReviewChannel`** implementing `ReviewChannel`:
-   - `request_interaction()` → posts rich embed with Approve/Deny buttons → awaits interaction via Discord gateway → returns decision
-   - `notify()` → posts notification embed
-   - `capabilities()` → review, notify, rich_content, buttons
-   - Sync/async bridge: runs Discord client on background tokio runtime, bridges via oneshot channel
-3. **`DiscordChannelFactory`** implementing `ChannelFactory`:
-   - `channel_type()` → `"discord"`
-   - `build_review(config)` → reads `token_env`, `channel_id`, `allowed_roles`, `allowed_users`
-   - `build_session(config)` → returns error (Discord not suitable for interactive sessions)
-4. **Access control**: `allowed_roles` and `allowed_users` in config restrict who can approve/deny.
-5. **Deny modal**: Uses Discord modal for denial reason input.
+#### Remaining (deferred)
+- Deny modal: Discord modal for denial reason input (requires Discord gateway WebSocket)
+- Thread-based discussions: Use Discord threads for multi-turn review conversations
 
 #### Config
 ```yaml

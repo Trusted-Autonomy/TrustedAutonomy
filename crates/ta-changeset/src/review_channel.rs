@@ -140,7 +140,7 @@ pub fn build_channel(
             )))
         }
         other => Err(ReviewChannelError::Other(format!(
-            "unknown channel type: '{}'. Available: terminal, auto-approve, webhook",
+            "unknown channel type: '{}'. Available: terminal, auto-approve, webhook, discord",
             other,
         ))),
     }

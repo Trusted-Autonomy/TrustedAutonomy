@@ -383,7 +383,8 @@ impl GatewayState {
     /// 5. Fallback: `TerminalChannel` if config missing or type unknown
     fn build_review_channel(config: &GatewayConfig) -> Box<dyn ReviewChannel> {
         let ta_config = channel_registry::load_config(&config.workspace_root);
-        let registry = channel_registry::default_registry();
+        let mut registry = channel_registry::default_registry();
+        registry.register(Box::new(ta_channel_discord::DiscordChannelFactory));
         let routing = &ta_config.channels;
 
         // Parse strategy from config (default: first_response).
