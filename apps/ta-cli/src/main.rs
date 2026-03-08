@@ -207,6 +207,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::policy::PolicyCommands,
     },
+    /// Inspect and validate project configuration (channels, routing).
+    Config {
+        #[command(subcommand)]
+        command: commands::config::ConfigCommands,
+    },
     /// Unified garbage collection: goals, drafts, staging directories, and event store.
     Gc {
         /// Show what would be cleaned without making changes.
@@ -424,6 +429,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Office { command } => commands::office::execute(command, &project_root),
         Commands::Workflow { command } => commands::workflow::execute(command, &config),
         Commands::Policy { command } => commands::policy::execute(command, &config),
+        Commands::Config { command } => commands::config::execute(command, &config),
         Commands::Gc {
             dry_run,
             threshold_days,

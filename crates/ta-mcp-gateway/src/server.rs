@@ -21,10 +21,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use ta_audit::AuditLog;
+use ta_changeset::channel_registry;
 use ta_changeset::interaction::{InteractionRequest, Notification};
+use ta_changeset::multi_channel::MultiChannelStrategy;
 use ta_changeset::pr_package::PRPackage;
 use ta_changeset::review_channel::{ReviewChannel, ReviewChannelError};
-use ta_changeset::terminal_channel::AutoApproveChannel;
 use ta_connector_fs::FsConnector;
 use ta_goal::{EventDispatcher, GoalRun, GoalRunState, GoalRunStore, LogSink, TaEvent};
 use ta_memory::FsMemoryStore;
@@ -333,6 +334,11 @@ impl CallerMode {
 
 impl GatewayState {
     /// Initialize gateway state from config.
+    ///
+    /// Loads `.ta/config.yaml` to resolve channel configuration. If the config
+    /// specifies multiple review channels, they are wrapped in a
+    /// `MultiReviewChannel` (v0.10.0). Falls back to `TerminalChannel` if
+    /// the config is missing or the channel type is unknown.
     pub fn new(config: GatewayConfig) -> Result<Self, GatewayError> {
         let goal_store = GoalRunStore::new(&config.goals_dir)?;
         let audit_log = AuditLog::open(&config.audit_log)?;
@@ -344,6 +350,10 @@ impl GatewayState {
         let workflow_toml = config.workspace_root.join(".ta").join("workflow.toml");
         let auto_capture_config = ta_memory::auto_capture::load_config(&workflow_toml);
 
+        // v0.10.0: Load channel routing from .ta/config.yaml and build review
+        // channel(s) via ChannelRegistry instead of hardcoding AutoApproveChannel.
+        let review_channel = Self::build_review_channel(&config);
+
         Ok(Self {
             config,
             policy_engine: PolicyEngine::new(),
@@ -352,7 +362,7 @@ impl GatewayState {
             pr_packages: HashMap::new(),
             audit_log,
             event_dispatcher,
-            review_channel: Box::new(AutoApproveChannel::new()),
+            review_channel,
             memory_store,
             auto_capture_config,
             interceptor: ToolCallInterceptor::new(),
@@ -361,6 +371,46 @@ impl GatewayState {
             dev_session_id: std::env::var("TA_DEV_SESSION_ID").ok(),
             active_agents: HashMap::new(),
         })
+    }
+
+    /// Build the review channel from `.ta/config.yaml` using the ChannelRegistry.
+    ///
+    /// Resolution order:
+    /// 1. Load `.ta/config.yaml` → `TaConfig.channels.review`
+    /// 2. Build `ChannelRegistry` with all built-in factories
+    /// 3. Resolve each channel type via factory → `ReviewChannel`
+    /// 4. Wrap multiple channels in `MultiReviewChannel` if needed
+    /// 5. Fallback: `TerminalChannel` if config missing or type unknown
+    fn build_review_channel(config: &GatewayConfig) -> Box<dyn ReviewChannel> {
+        let ta_config = channel_registry::load_config(&config.workspace_root);
+        let registry = channel_registry::default_registry();
+        let routing = &ta_config.channels;
+
+        // Parse strategy from config (default: first_response).
+        let strategy = match routing.strategy.as_deref() {
+            Some("quorum") => MultiChannelStrategy::Quorum { quorum_size: 2 },
+            _ => MultiChannelStrategy::FirstResponse,
+        };
+
+        match registry.build_review_from_route(&routing.review, &strategy) {
+            Ok(channel) => {
+                let configs = routing.review.configs();
+                let types: Vec<&str> = configs.iter().map(|c| c.channel_type.as_str()).collect();
+                tracing::info!(
+                    channel_types = ?types,
+                    multi = routing.review.is_multi(),
+                    "gateway: resolved review channel(s) from .ta/config.yaml"
+                );
+                channel
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "gateway: failed to build review channel from config, falling back to terminal"
+                );
+                Box::new(ta_changeset::terminal_channel::TerminalChannel::stdio())
+            }
+        }
     }
 
     /// Start a new goal: create GoalRun, issue manifest, set up connector.

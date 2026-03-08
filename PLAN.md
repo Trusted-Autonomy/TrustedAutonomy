@@ -4012,37 +4012,21 @@ Each `ProjectContext` holds:
 ---
 
 ### v0.10.0 — Gateway Channel Wiring & Multi-Channel Routing
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Wire `ChannelRegistry` into the MCP gateway so `.ta/config.yaml` actually controls which channels handle reviews, notifications, and escalations — and support routing a single event to multiple channels simultaneously.
 
-#### Items
-
-1. **Gateway `ChannelRegistry` integration**: `GatewayState::new()` loads `.ta/config.yaml`, builds `ChannelRegistry` via `default_registry()`, resolves `config.channels.review.type` → `ChannelFactory` → `ReviewChannel`. Replace the hardcoded `AutoApproveChannel` default. Fallback to `TerminalChannel` if config is missing or type is unknown.
-2. **Multi-channel routing**: Allow `review`, `notify`, and `escalation` to each specify multiple targets. A review request is sent to all configured review channels; first response wins. Notifications fan out to all configured channels. Schema:
-   ```yaml
-   channels:
-     review:
-       - type: terminal
-       - type: webhook
-         endpoint: .ta/channel-exchange
-     notify:
-       - type: terminal
-       - type: webhook
-         endpoint: .ta/channel-exchange
-         level: warning
-     escalation:
-       - type: webhook
-         endpoint: .ta/channel-exchange
-   ```
-3. **`MultiChannel` wrapper**: New `MultiReviewChannel` implementing `ReviewChannel` that dispatches to N inner channels. `request_interaction()` sends to all, returns first response. `notify()` fans out to all. Configurable strategy: `first_response` (default) or `quorum` (require N approvals).
-4. **`ta config channels` command**: Show resolved channel configuration — which channels are active, their types, capabilities, and status. Useful for debugging channel setup.
-5. **Channel health check**: `ta config channels --check` verifies each configured channel is reachable (webhook endpoint exists, credentials valid, etc.).
+#### Completed
+- ✅ **Gateway `ChannelRegistry` integration**: `GatewayState::new()` loads `.ta/config.yaml`, builds `ChannelRegistry` via `default_registry()`, resolves `config.channels.review` → `ChannelFactory` → `ReviewChannel`. Replaced hardcoded `AutoApproveChannel` default. Falls back to `TerminalChannel` if config is missing or type is unknown.
+- ✅ **Multi-channel routing**: `review` and `escalation` now accept either a single channel object or an array of channels (backward-compatible via `#[serde(untagged)]`). `notify` already supported arrays. Schema supports `strategy: first_response | quorum`.
+- ✅ **`MultiReviewChannel` wrapper**: New `MultiReviewChannel` implementing `ReviewChannel` that dispatches to N inner channels. `request_interaction()` tries channels sequentially; first response wins (`first_response`) or collects N approvals (`quorum`). `notify()` fans out to all. 9 tests.
+- ✅ **`ta config channels` command**: Shows resolved channel configuration — active channels, types, capabilities, and status. 3 tests.
+- ✅ **Channel health check**: `ta config channels --check` verifies each configured channel is buildable (factory exists, config valid).
 
 #### Implementation scope
-- `crates/ta-mcp-gateway/src/server.rs` (or post-refactor modules) — registry loading, channel resolution
-- `crates/ta-changeset/src/multi_channel.rs` — `MultiReviewChannel` wrapper
-- `crates/ta-changeset/src/channel_registry.rs` — schema update for array-of-channels
-- `apps/ta-cli/src/commands/config.rs` — `ta config channels` command
+- `crates/ta-mcp-gateway/src/server.rs` — registry loading, channel resolution
+- `crates/ta-changeset/src/multi_channel.rs` — `MultiReviewChannel` wrapper (new)
+- `crates/ta-changeset/src/channel_registry.rs` — `ReviewRouteConfig`, `EscalationRouteConfig` enums, `build_review_from_route()`, schema update
+- `apps/ta-cli/src/commands/config.rs` — `ta config channels` command (new)
 - `docs/USAGE.md` — multi-channel routing docs
 
 #### Version: `0.10.0-alpha`

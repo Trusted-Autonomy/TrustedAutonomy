@@ -124,6 +124,29 @@ impl ChannelRegistry {
         factory.build_review(&route.config)
     }
 
+    /// Build a ReviewChannel from a ReviewRouteConfig (single or multi).
+    ///
+    /// If the config specifies multiple channels, returns a `MultiReviewChannel`
+    /// wrapping all of them. If single, returns the channel directly.
+    pub fn build_review_from_route(
+        &self,
+        route: &ReviewRouteConfig,
+        strategy: &crate::multi_channel::MultiChannelStrategy,
+    ) -> Result<Box<dyn ReviewChannel>, ReviewChannelError> {
+        let configs = route.configs();
+        if configs.len() == 1 {
+            return self.build_review_from_config(configs[0]);
+        }
+        let mut channels: Vec<Box<dyn ReviewChannel>> = Vec::with_capacity(configs.len());
+        for config in configs {
+            channels.push(self.build_review_from_config(config)?);
+        }
+        Ok(Box::new(crate::multi_channel::MultiReviewChannel::new(
+            channels,
+            strategy.clone(),
+        )))
+    }
+
     /// Build a SessionChannel from routing config.
     pub fn build_session_from_config(
         &self,
@@ -184,38 +207,106 @@ fn default_notify_level() -> String {
     "info".to_string()
 }
 
+/// One-or-many channel route config (v0.10.0 multi-channel routing).
+///
+/// Accepts either a single channel object or an array of channels:
+/// ```yaml
+/// review: { type: terminal }          # single
+/// review:                              # multiple
+///   - { type: terminal }
+///   - { type: webhook, endpoint: /tmp/review }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReviewRouteConfig {
+    /// A single channel (backward-compatible default).
+    Single(ChannelRouteConfig),
+    /// Multiple channels — dispatched via MultiReviewChannel.
+    Multiple(Vec<ChannelRouteConfig>),
+}
+
+impl Default for ReviewRouteConfig {
+    fn default() -> Self {
+        Self::Single(ChannelRouteConfig::default())
+    }
+}
+
+impl ReviewRouteConfig {
+    /// Return the list of channel configs (always at least one).
+    pub fn configs(&self) -> Vec<&ChannelRouteConfig> {
+        match self {
+            Self::Single(c) => vec![c],
+            Self::Multiple(cs) => cs.iter().collect(),
+        }
+    }
+
+    /// True if this specifies more than one channel.
+    pub fn is_multi(&self) -> bool {
+        matches!(self, Self::Multiple(cs) if cs.len() > 1)
+    }
+}
+
+/// One-or-many escalation route config (v0.10.0).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EscalationRouteConfig {
+    /// A single escalation channel.
+    Single(ChannelRouteConfig),
+    /// Multiple escalation channels.
+    Multiple(Vec<ChannelRouteConfig>),
+}
+
+impl EscalationRouteConfig {
+    /// Return the list of channel configs.
+    pub fn configs(&self) -> Vec<&ChannelRouteConfig> {
+        match self {
+            Self::Single(c) => vec![c],
+            Self::Multiple(cs) => cs.iter().collect(),
+        }
+    }
+}
+
 /// Top-level channel routing configuration.
 ///
 /// Loaded from `.ta/config.yaml`:
 /// ```yaml
 /// channels:
-///   review: { type: terminal }
+///   review: { type: terminal }                  # single channel
+///   review:                                      # multi-channel (v0.10.0)
+///     - { type: terminal }
+///     - { type: webhook, endpoint: /tmp/review }
 ///   notify:
 ///     - { type: terminal }
 ///     - { type: slack, channel: "#reviews", level: warning }
 ///   session: { type: terminal }
 ///   escalation: { type: email, to: "mgr@co.com" }
+///   strategy: first_response                     # or "quorum"
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChannelRoutingConfig {
-    /// Channel for review interactions (draft approve/deny).
+    /// Channel(s) for review interactions (draft approve/deny).
+    /// Supports a single channel or array of channels (v0.10.0).
     #[serde(default)]
-    pub review: ChannelRouteConfig,
+    pub review: ReviewRouteConfig,
     /// Channels for notifications (can be multiple).
     #[serde(default)]
     pub notify: Vec<NotifyRouteConfig>,
     /// Channel for interactive sessions.
     #[serde(default)]
     pub session: ChannelRouteConfig,
-    /// Channel for escalation (high-priority or supervisor review).
+    /// Channel(s) for escalation (high-priority or supervisor review).
+    /// Supports a single channel or array of channels (v0.10.0).
     #[serde(default)]
-    pub escalation: Option<ChannelRouteConfig>,
+    pub escalation: Option<EscalationRouteConfig>,
     /// Default agent to assign when requests come in through a channel.
     #[serde(default)]
     pub default_agent: Option<String>,
     /// Default workflow to use for channel-initiated goals.
     #[serde(default)]
     pub default_workflow: Option<String>,
+    /// Multi-channel dispatch strategy (v0.10.0): "first_response" (default) or "quorum".
+    #[serde(default)]
+    pub strategy: Option<String>,
 }
 
 // ChannelRoutingConfig derives Default since all fields have Default implementations.
@@ -403,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_routing_config_deserialization() {
+    fn channel_routing_config_single_review() {
         let yaml = r#"
 review:
   type: terminal
@@ -420,12 +511,53 @@ escalation:
 default_agent: claude-code
 "#;
         let config: ChannelRoutingConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.review.channel_type, "terminal");
+        let review_configs = config.review.configs();
+        assert_eq!(review_configs.len(), 1);
+        assert_eq!(review_configs[0].channel_type, "terminal");
+        assert!(!config.review.is_multi());
         assert_eq!(config.notify.len(), 2);
         assert_eq!(config.notify[1].channel_type, "webhook");
         assert_eq!(config.notify[1].level, "warning");
         assert!(config.escalation.is_some());
         assert_eq!(config.default_agent.as_deref(), Some("claude-code"));
+    }
+
+    #[test]
+    fn channel_routing_config_multi_review() {
+        let yaml = r#"
+review:
+  - type: terminal
+  - type: webhook
+    endpoint: "/tmp/review"
+session:
+  type: terminal
+strategy: first_response
+"#;
+        let config: ChannelRoutingConfig = serde_yaml::from_str(yaml).unwrap();
+        let review_configs = config.review.configs();
+        assert_eq!(review_configs.len(), 2);
+        assert_eq!(review_configs[0].channel_type, "terminal");
+        assert_eq!(review_configs[1].channel_type, "webhook");
+        assert!(config.review.is_multi());
+        assert_eq!(config.strategy.as_deref(), Some("first_response"));
+    }
+
+    #[test]
+    fn channel_routing_config_multi_escalation() {
+        let yaml = r#"
+review:
+  type: terminal
+session:
+  type: terminal
+escalation:
+  - type: webhook
+    endpoint: "/tmp/esc1"
+  - type: webhook
+    endpoint: "/tmp/esc2"
+"#;
+        let config: ChannelRoutingConfig = serde_yaml::from_str(yaml).unwrap();
+        let esc = config.escalation.unwrap();
+        assert_eq!(esc.configs().len(), 2);
     }
 
     #[test]
@@ -438,14 +570,46 @@ channels:
     type: terminal
 "#;
         let config: TaConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.channels.review.channel_type, "terminal");
+        let review_configs = config.channels.review.configs();
+        assert_eq!(review_configs[0].channel_type, "terminal");
     }
 
     #[test]
     fn default_ta_config() {
         let config = TaConfig::default();
-        assert_eq!(config.channels.review.channel_type, "terminal");
+        let review_configs = config.channels.review.configs();
+        assert_eq!(review_configs[0].channel_type, "terminal");
         assert!(config.channels.notify.is_empty());
+    }
+
+    #[test]
+    fn build_multi_review_from_route_single() {
+        let registry = default_registry();
+        let route = ReviewRouteConfig::Single(ChannelRouteConfig {
+            channel_type: "terminal".into(),
+            config: serde_json::json!({}),
+        });
+        let strategy = crate::multi_channel::MultiChannelStrategy::FirstResponse;
+        let channel = registry.build_review_from_route(&route, &strategy);
+        assert!(channel.is_ok());
+    }
+
+    #[test]
+    fn build_multi_review_from_route_multiple() {
+        let registry = default_registry();
+        let route = ReviewRouteConfig::Multiple(vec![
+            ChannelRouteConfig {
+                channel_type: "auto-approve".into(),
+                config: serde_json::json!({}),
+            },
+            ChannelRouteConfig {
+                channel_type: "auto-approve".into(),
+                config: serde_json::json!({}),
+            },
+        ]);
+        let strategy = crate::multi_channel::MultiChannelStrategy::FirstResponse;
+        let channel = registry.build_review_from_route(&route, &strategy);
+        assert!(channel.is_ok());
     }
 
     #[test]
@@ -492,7 +656,7 @@ channels:
     fn load_config_missing_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let config = load_config(dir.path());
-        assert_eq!(config.channels.review.channel_type, "terminal");
+        assert_eq!(config.channels.review.configs()[0].channel_type, "terminal");
     }
 
     #[test]

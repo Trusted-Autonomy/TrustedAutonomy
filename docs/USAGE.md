@@ -36,6 +36,7 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [Access Constitutions](#access-constitutions)
    - [Configurable Summary Exemption](#configurable-summary-exemption)
    - [Plan Schema](#plan-schema-taplan-schemayaml)
+   - [Channel Setup](#channel-setup)
 5. [Advanced Features](#advanced-features)
    - [Selective Approval](#selective-approval)
    - [Behavioral Drift Detection](#behavioral-drift-detection)
@@ -56,6 +57,8 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [Unified Access Control Pattern](#unified-access-control-pattern)
    - [Resource Mediation](#resource-mediation)
    - [Channel Registry](#channel-registry)
+   - [Multi-Channel Routing](#multi-channel-routing)
+   - [Inspecting Channel Configuration](#inspecting-channel-configuration)
    - [API Mediation](#api-mediation)
    - [Project Setup](#project-setup)
    - [Project Initialization](#project-initialization)
@@ -1079,6 +1082,89 @@ statuses: [done, in_progress, pending]
 ```
 
 Generate automatically with `ta plan init`.
+
+### Channel Setup
+
+Channels control how TA communicates with you during review. When an agent finishes work and builds a draft, TA sends a review request through the configured channel and waits for your decision.
+
+Configure channels in `.ta/config.yaml`:
+
+```yaml
+channels:
+  review:
+    type: terminal        # How you review drafts (approve/reject)
+  session:
+    type: terminal        # How interactive sessions stream output
+```
+
+Without this file, TA defaults to `terminal` for everything — review prompts appear directly in your terminal.
+
+#### Available channel types
+
+| Channel | Description | When to use |
+|---------|-------------|-------------|
+| `terminal` | Interactive terminal prompts (default) | Local development |
+| `auto-approve` | Approves everything automatically | CI pipelines, batch jobs, testing |
+| `webhook` | File-based exchange with external systems | Slack bots, custom review UIs |
+
+#### Choosing a review channel
+
+For **local development**, the default `terminal` channel works out of the box — you'll see review prompts inline and can approve, reject, or discuss.
+
+For **CI/headless** environments, use `auto-approve`:
+
+```yaml
+channels:
+  review:
+    type: auto-approve
+```
+
+For **external review** (Slack bot, custom dashboard), use `webhook`:
+
+```yaml
+channels:
+  review:
+    type: webhook
+    endpoint: /tmp/ta-reviews   # Directory for file-based exchange
+```
+
+See [Webhook Review Channel](#webhook-review-channel) for the full exchange protocol.
+
+#### How approval and rejection work
+
+When a draft is ready for review, TA sends an `InteractionRequest` to the configured review channel. The channel presents the request and collects a decision:
+
+- **approve** — accept the draft; TA transitions it to `Approved` and it can be applied
+- **reject** / **deny** — reject the draft; TA records the reasoning and transitions to `Denied`
+- **discuss** — request more information; TA keeps the draft in review
+
+For terminal channels, you type your decision interactively. For webhook channels, you write a JSON response file. For auto-approve, every request is automatically approved.
+
+You can also add **policy-driven auto-approval** rules in `.ta/policy.yaml` so small, safe changes skip the review prompt entirely. See [Auto-Approval Policy](#auto-approval-policy).
+
+#### Notifications
+
+Notifications are fire-and-forget status updates (no response needed). Configure multiple notification targets:
+
+```yaml
+channels:
+  notify:
+    - type: terminal
+    - type: webhook
+      endpoint: /tmp/ta-notifications
+      level: warning    # Only deliver warnings and errors
+```
+
+Level filter values: `debug`, `info` (default), `warning`, `error`.
+
+#### Inspecting your setup
+
+```bash
+ta config channels         # Show what's configured
+ta config channels --check # Verify channels build correctly
+```
+
+For multi-channel routing (sending reviews to multiple channels simultaneously), see [Multi-Channel Routing](#multi-channel-routing).
 
 ---
 
@@ -2479,6 +2565,53 @@ channels:
 Built-in channel types: `terminal`, `auto-approve`, `webhook`. Third-party channels implement the `ChannelFactory` trait and register in the `ChannelRegistry`.
 
 Each channel declares capabilities (`supports_review`, `supports_session`, `supports_notify`, `supports_rich_media`, `supports_threads`) so TA can validate routing config at startup.
+
+#### Multi-Channel Routing
+
+Send review requests and escalations to multiple channels simultaneously. Each route (`review`, `escalation`) accepts either a single channel object or an array:
+
+```yaml
+channels:
+  review:
+    - type: terminal
+    - type: webhook
+      endpoint: .ta/channel-exchange
+  escalation:
+    - type: webhook
+      endpoint: .ta/esc-exchange-1
+    - type: webhook
+      endpoint: .ta/esc-exchange-2
+  strategy: first_response   # or "quorum"
+```
+
+Dispatch strategies:
+- **first_response** (default) — first channel to return a response wins; failures fall through to the next channel.
+- **quorum** — require N approvals before returning (default quorum size: 2).
+
+Notifications (`notify`) already support arrays and fan out to all configured channels.
+
+#### Inspecting Channel Configuration
+
+View the resolved channel setup for your project:
+
+```bash
+ta config channels           # Show active channels, types, capabilities
+ta config channels --check   # Verify each channel builds successfully
+```
+
+Example output:
+```
+Config: /path/to/project/.ta/config.yaml
+
+Review (2 channels):
+  [ok] type: terminal
+    Capabilities: review=true, session=true, notify=true, rich_media=false, threads=false
+  [ok] type: webhook
+    Capabilities: review=true, session=false, notify=true, rich_media=false, threads=false
+  Strategy: first_response
+
+Registered channel types: auto-approve, terminal, webhook
+```
 
 ### External Channel Delivery
 

@@ -17,6 +17,7 @@ pub mod error;
 pub mod explanation;
 pub mod interaction;
 pub mod interactive_session_store;
+pub mod multi_channel;
 pub mod output_adapters;
 pub mod pr_package;
 pub mod review_channel;
@@ -31,7 +32,7 @@ pub mod webhook_channel;
 pub use changeset::{ChangeKind, ChangeSet, CommitIntent};
 pub use channel_registry::{
     ChannelCapabilitySet, ChannelFactory, ChannelRegistry, ChannelRouteConfig,
-    ChannelRoutingConfig, NotifyRouteConfig, TaConfig,
+    ChannelRoutingConfig, EscalationRouteConfig, NotifyRouteConfig, ReviewRouteConfig, TaConfig,
 };
 pub use diff::DiffContent;
 pub use diff_handlers::{DiffHandlerError, DiffHandlersConfig, HandlerRule};
@@ -45,6 +46,7 @@ pub use interaction::{
     Notification, NotificationLevel, Urgency,
 };
 pub use interactive_session_store::InteractiveSessionStore;
+pub use multi_channel::{MultiChannelStrategy, MultiReviewChannel};
 pub use output_adapters::{DetailLevel, OutputAdapter, OutputFormat, RenderContext};
 pub use review_channel::{build_channel, ReviewChannel, ReviewChannelConfig, ReviewChannelError};
 pub use review_session::{
