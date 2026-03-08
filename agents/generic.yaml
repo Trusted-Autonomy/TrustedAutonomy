@@ -4,7 +4,7 @@
 #   .ta/agents/<agent-name>.yaml      (project-specific override)
 #   ~/.config/ta/agents/<agent-name>.yaml  (user-wide override)
 #
-# Then use: ta run "task" --agent <agent-name> --source .
+# Then use: ta run "task" --agent <agent-name>
 #
 # TA searches for agent configs in this order:
 #   1. .ta/agents/<agent-name>.yaml       (project override)

@@ -73,7 +73,7 @@ All outcomes must be **observable** (with details and logging) and **actionable*
 - **Current version**: `0.9.9-alpha.1`
 - See **PLAN.md** for the canonical development roadmap with per-phase status
 - `ta plan list` / `ta plan status` show current progress
-- Goals can link to plan phases: `ta run "title" --source . --phase 4b`
+- Goals can link to plan phases: `ta run "title" --phase 4b`
 - `ta draft apply` auto-updates PLAN.md when a phase completes
 
 ## Version Management
@@ -88,8 +88,8 @@ When completing a phase, you MUST update versions as part of the work:
 Version format: `MAJOR.MINOR.PATCH-alpha` (semver). See `PLAN.md` "Versioning & Release Policy" for the full mapping of phases to versions. Sub-phases use pre-release dot notation: `v0.4.1.2` → `0.4.1-alpha.2`.
 
 ### How It Works (Overlay Flow)
-1. `ta goal start "title" --source . --phase 4b` → copies project to `.ta/staging/`
-2. `ta run "title" --source . --phase 4b` → creates goal + injects CLAUDE.md (with plan context) + launches agent + builds draft on exit
+1. `ta goal start "title" --phase 4b` → copies project to `.ta/staging/`
+2. `ta run "title" --phase 4b` → creates goal + injects CLAUDE.md (with plan context) + launches agent + builds draft on exit
 3. Agent works normally in staging copy — TA is invisible to the agent
 4. `ta draft build --latest` → diffs staging vs source → creates draft package with artifacts
 5. `ta draft view/approve/deny <id>` → review workflow

@@ -35,7 +35,7 @@ TA's value proposition is not "make AI possible" -- it's **"make AI autonomous."
 # Morning: pick up where yesterday's agent left off
 ta plan next                        # "v0.8.2 -- API pagination. Suggest: ta run ..."
 ta run "Add cursor pagination" \
-  --source . --phase 0.8.2 --macro  # macro goal: agent stays in session
+  --phase 0.8.2 --macro  # macro goal: agent stays in session
 
 # Agent works in staging. I watch output stream in terminal (--interactive).
 # Agent hits a design question -- I see it in real-time, type guidance.
@@ -61,7 +61,7 @@ ta audit drift claude-code          # any unusual behavior? No drift detected.
 - `.ta/workflow.toml` for project config (git integration, enforcement level)
 - Agent YAML configs exist but defaults work -- auto-detection picks the right agent
 - Review model: every change is a "draft" you approve/reject, like a PR but richer
-- Zero-config path works: `ta run "fix the login bug" --source .` needs nothing pre-configured
+- Zero-config path works: `ta run "fix the login bug"` needs nothing pre-configured
 
 ### What you already get without TA
 

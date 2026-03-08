@@ -213,7 +213,7 @@ print_instructions() {
     echo "   ${BINARY_NAME} dev"
     echo ""
     echo "4. Or run a single mediated goal:"
-    echo "   ${BINARY_NAME} run \"Fix the auth bug\" --source ."
+    echo "   ${BINARY_NAME} run \"Fix the auth bug\""
     echo "   ${BINARY_NAME} draft view <id>"
     echo "   ${BINARY_NAME} draft approve <id>"
     echo "   ${BINARY_NAME} draft apply <id> --git-commit"

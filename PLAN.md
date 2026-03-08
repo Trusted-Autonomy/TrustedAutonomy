@@ -139,7 +139,7 @@ Workspace structure with 12 crates under `crates/` and `apps/`. Resource URIs (`
 - **Agent setup guides**: Step-by-step for Claude Code, Claude Flow (when available), Codex/similar
 - **README rewrite**: Quick-start in <5 minutes, architecture overview, what works / what doesn't
 - **`ta adapter install claude-code`** works end-to-end (already partially implemented)
-- **Smoke-tested happy path**: `ta run "task" --source .` → review → approve → apply works reliably
+- **Smoke-tested happy path**: `ta run "task"` → review → approve → apply works reliably
 - **Error messages**: Graceful failures with actionable guidance (not panics or cryptic errors)
 - **.taignore defaults** cover common project types (Rust, Node, Python, Go)
 
@@ -257,9 +257,9 @@ When a follow-up goal starts, `inject_claude_md()` includes parent context:
 - ✅ Free-text follow-up context from the objective field
 
 **Specifying detailed context**:
-- ✅ Short: `ta run "Fix CI lint failures" --source . --follow-up` (title IS the context)
-- ✅ Detailed: `ta run --source . --follow-up --objective "Fix clippy warnings in pr.rs and add missing test for edge case X. Also address the discuss item on config.toml — reviewer wanted env var override support."` (objective field scales to paragraphs)
-- ✅ From file: `ta run --source . --follow-up --objective-file review-notes.md` (for structured review notes)
+- ✅ Short: `ta run "Fix CI lint failures" --follow-up` (title IS the context)
+- ✅ Detailed: `ta run --follow-up --objective "Fix clippy warnings in pr.rs and add missing test for edge case X. Also address the discuss item on config.toml — reviewer wanted env var override support."` (objective field scales to paragraphs)
+- ✅ From file: `ta run --follow-up --objective-file review-notes.md` (for structured review notes)
 - **Phase 4d integration** (future): When discuss items have comment threads (Phase 4d), those comments auto-populate follow-up context — each discussed artifact's thread becomes a structured section in CLAUDE.md injection. The `--follow-up` flag on a goal with discuss items is the resolution path for Phase 4d's discussion workflow.
 
 ### CLI Changes
@@ -879,7 +879,7 @@ TA injects MCP tools that mirror the CLI structure — same commands, same argum
 - **Hybrid** (future): Agent marks sub-goals as blocking or non-blocking based on risk. High-risk changes block; low-risk ones proceed optimistically.
 
 #### CLI
-- ✅ `ta run "Build v0.5" --source . --macro` — starts a macro goal session
+- ✅ `ta run "Build v0.5" --macro` — starts a macro goal session
 - ✅ Agent receives MCP tools for inner-loop iteration alongside standard workspace tools
 - ✅ `ta goal status <id>` shows sub-goal tree with approval status
 

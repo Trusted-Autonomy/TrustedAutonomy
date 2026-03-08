@@ -549,7 +549,7 @@ pub fn load_history(project_root: &Path) -> anyhow::Result<Vec<serde_json::Value
 /// Build a suggested `ta run` command for the next pending phase.
 pub fn suggest_next_goal_command(phase: &PlanPhase) -> String {
     format!(
-        "ta run \"implement {}\" --source . --phase {}",
+        "ta run \"implement {}\" --phase {}",
         phase.title, phase.id
     )
 }
@@ -1575,7 +1575,7 @@ Release automation.
         let cmd = suggest_next_goal_command(&phase);
         assert_eq!(
             cmd,
-            "ta run \"implement Release Pipeline\" --source . --phase v0.3.2"
+            "ta run \"implement Release Pipeline\" --phase v0.3.2"
         );
     }
 
