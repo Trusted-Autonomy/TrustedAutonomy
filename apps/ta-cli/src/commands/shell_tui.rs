@@ -173,30 +173,40 @@ impl App {
         }
     }
 
-    /// Move cursor left.
+    /// Move cursor left by one character (char-boundary aware).
     fn cursor_left(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
+            while self.cursor > 0 && !self.input.is_char_boundary(self.cursor) {
+                self.cursor -= 1;
+            }
         }
     }
 
-    /// Move cursor right.
+    /// Move cursor right by one character (char-boundary aware).
     fn cursor_right(&mut self) {
         if self.cursor < self.input.len() {
             self.cursor += 1;
+            while self.cursor < self.input.len() && !self.input.is_char_boundary(self.cursor) {
+                self.cursor += 1;
+            }
         }
     }
 
     /// Insert a character at cursor.
     fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor, c);
-        self.cursor += 1;
+        self.cursor += c.len_utf8();
     }
 
     /// Delete character before cursor.
     fn backspace(&mut self) {
         if self.cursor > 0 {
-            self.cursor -= 1;
+            let mut new_cursor = self.cursor - 1;
+            while new_cursor > 0 && !self.input.is_char_boundary(new_cursor) {
+                new_cursor -= 1;
+            }
+            self.cursor = new_cursor;
             self.input.remove(self.cursor);
         }
     }
@@ -783,8 +793,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let paragraph = Paragraph::new(display.clone()).block(block);
     f.render_widget(paragraph, area);
 
-    // Position cursor.
-    let cursor_x = (prompt.len() + app.cursor) as u16;
+    // Position cursor (use char count, not byte offset, for display width).
+    let cursor_x = (prompt.len() + app.input[..app.cursor].chars().count()) as u16;
     // Clamp to prevent overflow on very narrow terminals.
     let x = inner.x + cursor_x.min(inner.width.saturating_sub(1));
     f.set_cursor_position((x, inner.y));
@@ -1231,6 +1241,47 @@ mod tests {
         app.delete();
         assert_eq!(app.input, "helo");
         assert_eq!(app.cursor, 2);
+    }
+
+    #[test]
+    fn app_multibyte_cursor_operations() {
+        let mut app = App::new("http://localhost".into(), None);
+        // Insert multi-byte chars (e.g., emoji, accented)
+        app.insert_char('h');
+        app.insert_char('é'); // 2-byte UTF-8
+        app.insert_char('l');
+        assert_eq!(app.input, "hél");
+        assert_eq!(app.cursor, 4); // 1 + 2 + 1 bytes
+
+        // Cursor left should land on 'l' → 'é' boundary
+        app.cursor_left();
+        assert_eq!(app.cursor, 3); // before 'l'
+        app.cursor_left();
+        assert_eq!(app.cursor, 1); // before 'é' (skip 2-byte char)
+
+        // Cursor right back to 'l'
+        app.cursor_right();
+        assert_eq!(app.cursor, 3);
+
+        // Insert at a char boundary mid-string
+        app.insert_char('x');
+        assert_eq!(app.input, "héxl");
+
+        // Backspace removes multi-byte char correctly
+        app.cursor_left(); // back to before 'x'
+        app.backspace(); // removes 'é'
+        assert_eq!(app.input, "hxl");
+        assert_eq!(app.cursor, 1);
+
+        // Paste simulation: rapid multi-byte inserts
+        app.input.clear();
+        app.cursor = 0;
+        for c in "café".chars() {
+            app.insert_char(c);
+        }
+        assert_eq!(app.input, "café");
+        assert_eq!(app.cursor, "café".len()); // 5 bytes
+        assert!(app.input.is_char_boundary(app.cursor));
     }
 
     #[test]
