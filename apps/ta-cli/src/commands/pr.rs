@@ -133,7 +133,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             format,
             color,
         } => draft::DraftCommands::View {
-            id: id.clone(),
+            id: Some(id.clone()),
             summary: *summary,
             file: file.clone(),
             open_external: *open_external,
@@ -143,7 +143,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             json: false,
         },
         PrCommands::Approve { id, reviewer } => draft::DraftCommands::Approve {
-            id: id.clone(),
+            id: Some(id.clone()),
             reviewer: reviewer.clone(),
         },
         PrCommands::Deny {
@@ -151,7 +151,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             reason,
             reviewer,
         } => draft::DraftCommands::Deny {
-            id: id.clone(),
+            id: Some(id.clone()),
             reason: reason.clone(),
             reviewer: reviewer.clone(),
         },
@@ -166,7 +166,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             reject_patterns,
             discuss_patterns,
         } => draft::DraftCommands::Apply {
-            id: id.clone(),
+            id: Some(id.clone()),
             target: target.clone(),
             git_commit: *git_commit,
             git_push: *git_push,

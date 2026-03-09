@@ -57,8 +57,8 @@ pub enum DraftCommands {
     },
     /// View draft package details and diffs.
     View {
-        /// draft package ID.
-        id: String,
+        /// Draft package ID, goal title, or phase (e.g., "v0.10.7"). Omit to auto-select if only one pending draft.
+        id: Option<String>,
         /// Show summary and file list only (skip diffs). [DEPRECATED: use --detail top]
         #[arg(long)]
         summary: bool,
@@ -88,16 +88,16 @@ pub enum DraftCommands {
     },
     /// Approve a draft package for application.
     Approve {
-        /// draft package ID.
-        id: String,
+        /// Draft package ID, goal title, or phase (e.g., "v0.10.7"). Omit to auto-select if only one pending draft.
+        id: Option<String>,
         /// Reviewer name.
         #[arg(long, default_value = "human-reviewer")]
         reviewer: String,
     },
     /// Deny a draft package with a reason.
     Deny {
-        /// draft package ID.
-        id: String,
+        /// Draft package ID, goal title, or phase (e.g., "v0.10.7"). Omit to auto-select if only one pending draft.
+        id: Option<String>,
         /// Reason for denial.
         #[arg(long)]
         reason: String,
@@ -107,8 +107,8 @@ pub enum DraftCommands {
     },
     /// Apply approved changes to the target directory.
     Apply {
-        /// draft package ID.
-        id: String,
+        /// Draft package ID, goal title, or phase (e.g., "v0.10.7"). Omit to auto-select if only one pending draft.
+        id: Option<String>,
         /// Target directory (defaults to project root).
         #[arg(long)]
         target: Option<String>,
@@ -184,8 +184,8 @@ pub enum DraftCommands {
     },
     /// Close a draft without applying (abandoned, hand-merged, or obsolete).
     Close {
-        /// Draft package ID.
-        id: String,
+        /// Draft package ID, goal title, or phase. Omit to auto-select if only one pending draft.
+        id: Option<String>,
         /// Reason for closing.
         #[arg(long)]
         reason: Option<String>,
@@ -309,12 +309,13 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             color,
             json,
         } => {
+            let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
             if *json {
-                view_package_json(config, id)
+                view_package_json(config, &resolved)
             } else {
                 view_package(
                     config,
-                    id,
+                    &resolved,
                     *summary,
                     file.as_deref(),
                     open_external,
@@ -324,12 +325,18 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 )
             }
         }
-        DraftCommands::Approve { id, reviewer } => approve_package(config, id, reviewer),
+        DraftCommands::Approve { id, reviewer } => {
+            let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+            approve_package(config, &resolved, reviewer)
+        }
         DraftCommands::Deny {
             id,
             reason,
             reviewer,
-        } => deny_package(config, id, reason, reviewer),
+        } => {
+            let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+            deny_package(config, &resolved, reason, reviewer)
+        }
         DraftCommands::Apply {
             id,
             target,
@@ -342,6 +349,8 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             discuss_patterns,
             phase,
         } => {
+            let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+
             // Load workflow config to merge auto_* settings with CLI flags.
             let workflow_config = ta_submit::WorkflowConfig::load_or_default(
                 &config.workspace_root.join(".ta/workflow.toml"),
@@ -367,7 +376,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
 
             apply_package(
                 config,
-                id,
+                &resolved,
                 target.as_deref(),
                 do_commit,
                 do_push,
@@ -416,7 +425,10 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             id,
             reason,
             closed_by,
-        } => close_package(config, id, reason.as_deref(), closed_by),
+        } => {
+            let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+            close_package(config, &resolved, reason.as_deref(), closed_by)
+        }
         DraftCommands::Gc { dry_run, archive } => gc_packages(config, *dry_run, *archive),
     }
 }
@@ -2770,6 +2782,119 @@ pub fn save_package(config: &GatewayConfig, pkg: &DraftPackage) -> anyhow::Resul
     Ok(())
 }
 
+/// Resolve a draft ID from user input.
+///
+/// Accepts:
+/// - `None` → auto-select if exactly one pending (non-terminal) draft exists
+/// - UUID or UUID prefix → match by draft package ID
+/// - Free text like "v0.10.7" → match against goal title (contains match)
+///
+/// Returns the resolved draft package ID as a string, or an error with
+/// actionable guidance.
+fn resolve_draft_id_flexible(
+    config: &GatewayConfig,
+    input: Option<&str>,
+) -> anyhow::Result<String> {
+    let packages = load_all_packages(config)?;
+
+    // Pending = non-terminal states (drafts the user likely wants to act on).
+    let pending: Vec<&DraftPackage> = packages
+        .iter()
+        .filter(|p| {
+            matches!(
+                p.status,
+                DraftStatus::Draft | DraftStatus::PendingReview | DraftStatus::Approved { .. }
+            )
+        })
+        .collect();
+
+    let input = match input {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            // No input — auto-select if exactly one pending draft.
+            match pending.len() {
+                0 => {
+                    anyhow::bail!("No pending drafts. Run `ta draft list --all` to see all drafts.")
+                }
+                1 => {
+                    let pkg = pending[0];
+                    let short_id = &pkg.package_id.to_string()[..8];
+                    println!("Auto-selecting: {} ({})", short_id, pkg.goal.title);
+                    return Ok(pkg.package_id.to_string());
+                }
+                n => {
+                    let mut msg = format!("{} pending drafts — specify which one:\n", n);
+                    for p in &pending {
+                        let short_id = &p.package_id.to_string()[..8];
+                        msg.push_str(&format!("  {}  {}\n", short_id, p.goal.title));
+                    }
+                    anyhow::bail!(msg);
+                }
+            }
+        }
+    };
+
+    // Try exact UUID parse first.
+    if let Ok(uuid) = Uuid::parse_str(input) {
+        if packages.iter().any(|p| p.package_id == uuid) {
+            return Ok(uuid.to_string());
+        }
+        anyhow::bail!("Draft {} not found", input);
+    }
+
+    // Try UUID prefix match (across all packages, not just pending).
+    let prefix_matches: Vec<&DraftPackage> = packages
+        .iter()
+        .filter(|p| p.package_id.to_string().starts_with(input))
+        .collect();
+    if prefix_matches.len() == 1 {
+        return Ok(prefix_matches[0].package_id.to_string());
+    }
+    if prefix_matches.len() > 1 {
+        let ids: Vec<String> = prefix_matches
+            .iter()
+            .map(|p| format!("{}  {}", &p.package_id.to_string()[..8], p.goal.title))
+            .collect();
+        anyhow::bail!(
+            "Ambiguous prefix \"{}\" matches {} drafts:\n  {}\nSpecify more characters.",
+            input,
+            prefix_matches.len(),
+            ids.join("\n  ")
+        );
+    }
+
+    // Try matching against goal title (case-insensitive contains).
+    let input_lower = input.to_lowercase();
+    let title_matches: Vec<&DraftPackage> = packages
+        .iter()
+        .filter(|p| p.goal.title.to_lowercase().contains(&input_lower))
+        .collect();
+    match title_matches.len() {
+        0 => anyhow::bail!(
+            "No draft matching \"{}\". Run `ta draft list` to see available drafts.",
+            input
+        ),
+        1 => {
+            let pkg = title_matches[0];
+            let short_id = &pkg.package_id.to_string()[..8];
+            println!("Matched: {} ({})", short_id, pkg.goal.title);
+            Ok(pkg.package_id.to_string())
+        }
+        n => {
+            let ids: Vec<String> = title_matches
+                .iter()
+                .map(|p| format!("{}  {}", &p.package_id.to_string()[..8], p.goal.title))
+                .collect();
+            anyhow::bail!(
+                "\"{}\" matches {} drafts:\n  {}\nSpecify the draft ID to disambiguate.",
+                input,
+                n,
+                ids.join("\n  ")
+            );
+        }
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -2789,34 +2914,12 @@ fn truncate(s: &str, max: usize) -> String {
 /// Tries exact UUID parse first. On failure, scans all draft packages for
 /// a unique prefix match. Returns an error if the prefix is ambiguous or
 /// matches nothing.
+/// Resolve a draft ID from a required string (legacy callers).
+/// Accepts UUID, UUID prefix, or goal title/phase substring.
 fn resolve_draft_id(id: &str, config: &GatewayConfig) -> anyhow::Result<Uuid> {
-    // Fast path: exact UUID.
-    if let Ok(uuid) = Uuid::parse_str(id) {
-        return Ok(uuid);
-    }
-
-    if id.len() < 8 {
-        anyhow::bail!(
-            "ID prefix '{}' is too short — use at least 8 characters (or a full UUID)",
-            id
-        );
-    }
-
-    let packages = load_all_packages(config)?;
-    let matches: Vec<_> = packages
-        .iter()
-        .filter(|p| p.package_id.to_string().starts_with(id))
-        .collect();
-
-    match matches.len() {
-        0 => anyhow::bail!("No draft found matching '{}'", id),
-        1 => Ok(matches[0].package_id),
-        n => anyhow::bail!(
-            "Ambiguous prefix '{}' matches {} drafts. Use a longer prefix.",
-            id,
-            n
-        ),
-    }
+    let resolved = resolve_draft_id_flexible(config, Some(id))?;
+    Uuid::parse_str(&resolved)
+        .map_err(|e| anyhow::anyhow!("Invalid draft ID after resolution: {} — {}", resolved, e))
 }
 
 /// Resolve a goal ID from a full UUID or an 8+ character prefix.
@@ -4799,9 +4902,13 @@ mod tests {
         let project = TempDir::new().unwrap();
         let config = GatewayConfig::for_project(project.path());
 
+        // Short strings that don't match any draft by ID or title.
         let result = resolve_draft_id("abc", &config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("too short"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No draft matching"));
     }
 
     #[test]
@@ -4811,6 +4918,9 @@ mod tests {
 
         let result = resolve_draft_id("00000000", &config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No draft found"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No draft matching"));
     }
 }
