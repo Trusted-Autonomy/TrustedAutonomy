@@ -2516,7 +2516,7 @@ The human stays in `ta shell` throughout. Release notes go through the standard 
 ---
 
 ### v0.10.8 — Pre-Draft Verification Gate
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Run configurable build/lint/test checks after the agent exits but before the draft is created. Catches CI failures locally so broken drafts never reach review.
 
 #### Problem
@@ -2643,6 +2643,67 @@ After `./install_local.sh` rebuilds and installs new `ta` and `ta-daemon` binari
 7. [ ] Status bar indicator: show `(stale)` if user declined restart
 
 #### Version: `0.10.10-alpha`
+
+---
+
+### v0.10.11 — Shell TUI UX Overhaul
+<!-- status: pending -->
+**Goal**: Make `ta shell` a fully usable interactive environment where agent output is visible, long output is navigable, and the user never has to leave the shell to understand what's happening.
+
+#### Problem
+Today `ta shell` has several UX gaps that force users to work around the TUI rather than through it:
+- Starting a goal produces no output — the agent runs blind. User must manually `:tail` and even then sees only TA lifecycle events, not the agent's actual stdout/stderr.
+- Long command output (draft list, draft view) scrolls off the top of the viewport with no way to scroll back.
+- Draft IDs are unrelated to goal IDs, requiring mental mapping or `draft list --goal` lookups.
+- No notification when a draft is ready — user must poll with `draft list`.
+- `:tail` gives no confirmation it's working and shows no backfill of prior output.
+
+#### Items
+
+**1. Agent output streaming** (critical gap)
+- [ ] Expose agent stdout/stderr via SSE endpoint: `GET /api/goal/output/:key` streaming from `GoalOutput` broadcast channels
+- [ ] Wire `:tail` (and auto-tail) to consume from this endpoint alongside TA events
+- [ ] Interleave TA events + agent stdout/stderr in one unified stream, distinguished by prefix or style
+
+**2. Auto-tail on goal start**
+- [ ] Single running goal: auto-tail immediately, no user action required
+- [ ] Multiple running goals: prompt which to tail, or tail all with prefixed labels (e.g., `[v0.10.8]` vs `[v0.10.9]`)
+- [ ] `:tail` becomes a manual override for switching focus, not the default workflow
+
+**3. Tail backfill and confirmation**
+- [ ] Print confirmation on tail start: `Tailing "v0.10.8 — Pre-Draft Verification Gate" (511e0465)...`
+- [ ] Show last N lines of buffered output (default 5, configurable as `shell.tail_backfill_lines` in daemon.toml)
+- [ ] `:tail <id> --lines <count>` override to see more history
+- [ ] Visual separator between backfill and live output
+
+**4. Draft-ready notification**
+- [ ] Emit visible event when draft build completes: `[draft ready] "v0.10.8 — ..." (draft-511e0465-01) — run: draft view 511e0465`
+- [ ] Include draft ID in the notification for immediate action
+
+**5. Draft ID derived from goal ID**
+- [ ] Generate draft IDs as `<goal-id-prefix>-NN` (e.g., `511e0465-01`, `511e0465-02` for follow-ups)
+- [ ] Flexible resolver falls back to UUID matching for legacy drafts
+- [ ] Schema change in `ta-changeset` `DraftPackage.id` generation
+
+**6. Draft list filtering, ordering, and paging**
+- [ ] Default ordering: newest last
+- [ ] Filter by status: `draft list --pending`, `draft list --applied`
+- [ ] Filter by goal: `draft list --goal <id>`
+- [ ] Compact default format showing only active/pending drafts
+- [ ] `--limit N` for paged output
+- [ ] TUI: scrollable output buffer instead of fire-and-forget rendering
+
+**7. Draft view paging / scrollable output**
+- [ ] TUI: render into scrollable buffer (content retained, not write-once)
+- [ ] Classic shell: pipe through pager or `--page` flag
+- [ ] Progressive disclosure: summary/file list first, diffs on scroll or explicit request
+
+**8. Scrollable output buffer (foundational)**
+- [ ] TUI output pane retains full history as a scrollable buffer
+- [ ] All long output (draft list, draft view, goal list, verify output) benefits from this
+- [ ] Configurable buffer size limit (e.g., `shell.output_buffer_lines` in daemon.toml)
+
+#### Version: `0.10.11-alpha`
 
 ---
 
