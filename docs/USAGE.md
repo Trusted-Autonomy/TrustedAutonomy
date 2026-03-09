@@ -1296,12 +1296,31 @@ ta release run 0.4                # becomes 0.4.0-alpha
 # Preview without executing
 ta release run 0.4.0-alpha --dry-run
 
+# Validate prerequisites without running anything
+ta release validate 0.4.0-alpha
+
+# Interactive release with human-in-the-loop review checkpoints
+ta release run 0.4.0-alpha --interactive
+
+# Skip approval gates (CI mode)
+ta release run 0.4.0-alpha --yes
+
 # Show pipeline steps
 ta release show
 
 # Create a customizable .ta/release.yaml
 ta release init
 ```
+
+From `ta shell`, the `release` shortcut launches the pipeline as a long-running command:
+
+```
+ta shell> release v0.10.6
+```
+
+The `--interactive` flag uses the `releaser` agent with `ta_ask_human` for review checkpoints. The human stays in `ta shell` throughout — the agent asks for release notes approval and publish confirmation interactively.
+
+The `ta release validate` command checks prerequisites before running: version format, git cleanliness, tag availability, pipeline configuration, and toolchain presence. Use it in CI to gate releases.
 
 Pipeline steps can be shell commands or agent goals with optional approval gates:
 
@@ -1315,7 +1334,7 @@ steps:
 
   - name: Generate release notes
     agent:
-      id: claude-code
+      id: releaser
       phase: "v0.4.0"
     objective: "Synthesize release notes for ${TAG}."
     output: .release-draft.md

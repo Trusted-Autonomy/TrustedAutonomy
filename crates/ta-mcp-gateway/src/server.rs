@@ -294,6 +294,16 @@ pub enum CallerMode {
     Unrestricted,
 }
 
+/// File patterns that orchestrator-mode agents may write without being blocked.
+/// These are release artifacts that the release pipeline agent needs to create
+/// directly, rather than delegating through a sub-goal.
+const ORCHESTRATOR_WRITE_WHITELIST: &[&str] = &[
+    ".release-draft.md",
+    "CHANGELOG.md",
+    "version.json",
+    ".press-release-draft.md",
+];
+
 impl CallerMode {
     pub fn from_env() -> Self {
         match std::env::var("TA_CALLER_MODE").as_deref() {
@@ -309,6 +319,23 @@ impl CallerMode {
             CallerMode::Orchestrator => {
                 matches!(tool_name, "ta_fs_write" | "ta_pr_build" | "ta_fs_diff")
             }
+        }
+    }
+
+    /// Check if a specific file path is whitelisted for orchestrator writes.
+    /// Release artifact files can be written even in orchestrator mode.
+    pub fn is_write_whitelisted(&self, path: &str) -> bool {
+        match self {
+            CallerMode::Orchestrator => {
+                let filename = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(path);
+                ORCHESTRATOR_WRITE_WHITELIST
+                    .iter()
+                    .any(|pattern| filename == *pattern || path == *pattern)
+            }
+            _ => true, // Non-orchestrator modes allow all writes.
         }
     }
 
@@ -1241,5 +1268,44 @@ mod tests {
             "ta_event_subscribe tool not found in: {:?}",
             names
         );
+    }
+
+    // v0.10.6: Orchestrator write whitelist tests.
+    #[test]
+    fn orchestrator_blocks_arbitrary_writes() {
+        let mode = CallerMode::Orchestrator;
+        assert!(mode.is_tool_forbidden("ta_fs_write"));
+        assert!(!mode.is_write_whitelisted("src/main.rs"));
+        assert!(!mode.is_write_whitelisted("Cargo.toml"));
+    }
+
+    #[test]
+    fn orchestrator_allows_release_artifact_writes() {
+        let mode = CallerMode::Orchestrator;
+        assert!(mode.is_write_whitelisted(".release-draft.md"));
+        assert!(mode.is_write_whitelisted("CHANGELOG.md"));
+        assert!(mode.is_write_whitelisted("version.json"));
+        assert!(mode.is_write_whitelisted(".press-release-draft.md"));
+    }
+
+    #[test]
+    fn orchestrator_whitelist_matches_filename() {
+        let mode = CallerMode::Orchestrator;
+        // Paths with directories should still match by filename.
+        assert!(mode.is_write_whitelisted("some/path/.release-draft.md"));
+        assert!(mode.is_write_whitelisted("docs/CHANGELOG.md"));
+    }
+
+    #[test]
+    fn normal_mode_allows_all_writes() {
+        let mode = CallerMode::Normal;
+        assert!(mode.is_write_whitelisted("anything.rs"));
+        assert!(mode.is_write_whitelisted("src/main.rs"));
+    }
+
+    #[test]
+    fn unrestricted_mode_allows_all_writes() {
+        let mode = CallerMode::Unrestricted;
+        assert!(mode.is_write_whitelisted("anything.rs"));
     }
 }

@@ -49,10 +49,19 @@ pub fn handle_fs_write(
         .lock()
         .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
 
-    // v0.9.3: Enforce caller mode — orchestrators cannot use ta_fs_write.
-    if state.caller_mode.is_tool_forbidden("ta_fs_write") {
+    // v0.9.3: Enforce caller mode — orchestrators cannot use ta_fs_write
+    // unless the target path is a whitelisted release artifact (v0.10.6).
+    if state.caller_mode.is_tool_forbidden("ta_fs_write")
+        && !state.caller_mode.is_write_whitelisted(&params.path)
+    {
         return Err(McpError::invalid_request(
-            "ta_fs_write is forbidden in orchestrator mode. Use ta_goal to launch an implementation agent instead.".to_string(),
+            format!(
+                "ta_fs_write is forbidden in orchestrator mode for '{}'. \
+                 Only release artifacts (.release-draft.md, CHANGELOG.md, version.json, \
+                 .press-release-draft.md) are whitelisted. Use ta_goal to launch an \
+                 implementation agent for other writes.",
+                params.path
+            ),
             None,
         ));
     }

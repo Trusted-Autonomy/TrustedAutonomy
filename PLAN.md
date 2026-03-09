@@ -4433,7 +4433,7 @@ ta workflow publish deploy-pipeline --bump minor
 ---
 
 ### v0.10.6 — Release Process Hardening & Interactive Release Flow
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix release process issues, harden the `ta release run` pipeline, and make releases an interactive-mode workflow so the human never leaves `ta shell`.
 
 #### Known Bugs
@@ -4460,15 +4460,17 @@ ta shell> release v0.10.6
 
 The human stays in `ta shell` throughout. Release notes go through the standard draft review flow. Interactive mode (v0.9.9.1–v0.9.9.2) provides the `ta_ask_human` infrastructure.
 
-#### Items
-1. [ ] Fix `ta_fs_write` permission in orchestrator mode for release artifact files (`.release-draft.md`, `CHANGELOG.md`)
-2. [ ] Add orchestrator-mode write whitelist for release-specific file patterns
-3. [ ] End-to-end test for `ta release run` pipeline without manual intervention
-4. [ ] Release dry-run mode: `ta release run --dry-run` that validates all steps without publishing
-5. [ ] **Background goal launch from shell**: `ta shell> release <version>` launches release agent as a background goal via daemon API, returns control to shell immediately
-6. [ ] **Interactive release agent**: Release agent uses `ta_ask_human` for release notes review, version confirmation, and publish approval
-7. [ ] **`agents/releaser.yaml`**: Release agent config with `ta_ask_human` enabled, write access scoped to release artifacts (`.release-draft.md`, `CHANGELOG.md`, `version.json`, `Cargo.toml`)
-8. [ ] **Release workflow definition**: Optional `.ta/workflows/release.yaml` for teams that want multi-stage release (build → test → notes review → publish → announce)
+#### Completed
+1. [x] Fix `ta_fs_write` permission in orchestrator mode for release artifact files (`.release-draft.md`, `CHANGELOG.md`) — added `ORCHESTRATOR_WRITE_WHITELIST` to `CallerMode` and updated `handle_fs_write` to check path before blocking
+2. [x] Add orchestrator-mode write whitelist for release-specific file patterns — `is_write_whitelisted()` method on `CallerMode` matches filenames against `.release-draft.md`, `CHANGELOG.md`, `version.json`, `.press-release-draft.md`
+3. [x] End-to-end test for `ta release run` pipeline without manual intervention — `e2e_pipeline_no_manual_gates` test with marker file verification
+4. [x] Release dry-run mode: `ta release run --dry-run` validates all steps without publishing — existing `--dry-run` flag + new `ta release validate` command for pre-flight checks (version format, git state, tag availability, pipeline config, toolchain)
+5. [x] **Background goal launch from shell**: `release` shortcut in shell config expands to `ta release run`, long-running command classification ensures background execution via daemon
+6. [x] **Interactive release agent**: `ta release run --interactive` launches the `releaser` agent with `ta_ask_human`-based review checkpoints
+7. [x] **`agents/releaser.yaml`**: Release agent config with `ta_ask_human` enabled, write access scoped to release artifacts via orchestrator whitelist
+8. [x] **Release workflow definition**: `templates/workflows/release.yaml` — 4-stage workflow (validate → generate-notes → build-verify → publish) with human review at notes and publish stages
+
+#### Remaining (deferred)
 9. [ ] Wire `ta sync` and `ta build` as optional pre-release steps (depends on v0.11.1, v0.11.2)
 
 #### Version: `0.10.6-alpha`
