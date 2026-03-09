@@ -40,6 +40,14 @@ pub enum ReleaseCommands {
         /// Custom pipeline file (overrides default resolution).
         #[arg(long)]
         pipeline: Option<PathBuf>,
+
+        /// Include press-release generation step.
+        #[arg(long)]
+        press_release: bool,
+
+        /// Custom prompt for press-release generation.
+        #[arg(long)]
+        prompt: Option<String>,
     },
     /// Show the pipeline that would be executed (without running it).
     Show {
@@ -49,6 +57,13 @@ pub enum ReleaseCommands {
     },
     /// Initialize a `.ta/release.yaml` in the project from the default template.
     Init,
+    /// Configure release settings.
+    Config {
+        /// Setting to configure (e.g., "press_release_template").
+        key: String,
+        /// Value to set (path or string).
+        value: String,
+    },
 }
 
 pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -59,16 +74,25 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             dry_run,
             from_step,
             pipeline,
-        } => run_pipeline(
-            config,
-            version,
-            *yes,
-            *dry_run,
-            *from_step,
-            pipeline.as_deref(),
-        ),
+            press_release,
+            prompt,
+        } => {
+            run_pipeline(
+                config,
+                version,
+                *yes,
+                *dry_run,
+                *from_step,
+                pipeline.as_deref(),
+            )?;
+            if *press_release {
+                generate_press_release(config, version, prompt.as_deref())?;
+            }
+            Ok(())
+        }
         ReleaseCommands::Show { pipeline } => show_pipeline(config, pipeline.as_deref()),
         ReleaseCommands::Init => init_pipeline(config),
+        ReleaseCommands::Config { key, value } => configure_release(config, key, value),
     }
 }
 
@@ -671,6 +695,185 @@ fn init_pipeline(config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Release configuration ───────────────────────────────────────
+
+/// Release configuration stored in `.ta/release-config.yaml`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReleaseConfig {
+    /// Path to a sample press release document for style matching.
+    #[serde(default)]
+    pub press_release_template: Option<String>,
+}
+
+impl ReleaseConfig {
+    fn load(config: &GatewayConfig) -> Self {
+        let path = config
+            .workspace_root
+            .join(".ta")
+            .join("release-config.yaml");
+        if path.exists() {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|c| serde_yaml::from_str(&c).ok())
+                .unwrap_or_default()
+        } else {
+            Self::default()
+        }
+    }
+
+    fn save(&self, config: &GatewayConfig) -> anyhow::Result<()> {
+        let ta_dir = config.workspace_root.join(".ta");
+        std::fs::create_dir_all(&ta_dir)?;
+        let path = ta_dir.join("release-config.yaml");
+        let yaml = serde_yaml::to_string(self)?;
+        std::fs::write(&path, yaml)?;
+        Ok(())
+    }
+}
+
+/// Configure a release setting.
+fn configure_release(config: &GatewayConfig, key: &str, value: &str) -> anyhow::Result<()> {
+    let mut release_config = ReleaseConfig::load(config);
+
+    match key {
+        "press_release_template" => {
+            let path = Path::new(value);
+            if !path.exists() {
+                anyhow::bail!(
+                    "Template file not found: {}\n\
+                     Provide a path to a sample press release document.",
+                    value
+                );
+            }
+            release_config.press_release_template = Some(value.to_string());
+            release_config.save(config)?;
+            println!("Set press_release_template = {}", value);
+        }
+        _ => {
+            anyhow::bail!(
+                "Unknown release config key: '{}'\n\
+                 Available keys:\n  \
+                 press_release_template — path to a sample press release for style matching",
+                key
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate a press release as part of the release pipeline.
+fn generate_press_release(
+    config: &GatewayConfig,
+    version: &str,
+    custom_prompt: Option<&str>,
+) -> anyhow::Result<()> {
+    println!();
+    println!("Generating press release for v{} ...", version);
+
+    let release_config = ReleaseConfig::load(config);
+
+    // Read the changelog/release notes if available.
+    let release_notes = {
+        let draft_path = config.workspace_root.join(".release-draft.md");
+        if draft_path.exists() {
+            std::fs::read_to_string(&draft_path).unwrap_or_default()
+        } else {
+            // Fall back to git log.
+            let (commits, _) = collect_commits_since_last_tag(&config.workspace_root)?;
+            commits
+        }
+    };
+
+    // Read style template if configured.
+    let style_template = release_config
+        .press_release_template
+        .as_ref()
+        .and_then(|p| {
+            let path = config.workspace_root.join(p);
+            if path.exists() {
+                std::fs::read_to_string(&path).ok()
+            } else {
+                None
+            }
+        });
+
+    // Build the agent objective.
+    let mut objective = format!(
+        "Generate a press release for version v{version}.\n\n\
+         Release notes:\n{release_notes}\n",
+    );
+
+    if let Some(template) = &style_template {
+        objective.push_str(&format!(
+            "\nMatch the style and tone of this sample press release:\n---\n{}\n---\n",
+            template
+        ));
+    }
+
+    if let Some(prompt) = custom_prompt {
+        objective.push_str(&format!("\nAdditional guidance: {}\n", prompt));
+    }
+
+    objective.push_str(
+        "\nWrite the press release to .press-release-draft.md.\n\
+         Focus on user-facing impact, key features, and use professional tone.",
+    );
+
+    // Write the objective for the agent.
+    let output_path = config.workspace_root.join(".press-release-draft.md");
+
+    // Try to launch as a TA goal; fall back to writing the prompt.
+    let ta_bin = std::env::current_exe()?;
+    let title = format!("release: Generate press release for v{}", version);
+    let args = vec![
+        "run".to_string(),
+        title,
+        "--agent".to_string(),
+        "claude-code".to_string(),
+        "--source".to_string(),
+        config.workspace_root.display().to_string(),
+        "--objective".to_string(),
+        objective,
+    ];
+
+    let status = Command::new(&ta_bin)
+        .args(&args)
+        .current_dir(&config.workspace_root)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("Press release draft generated.");
+            if output_path.exists() {
+                println!("  Output: {}", output_path.display());
+            }
+            println!("  Review and edit before publishing.");
+        }
+        _ => {
+            // If agent launch fails, write the prompt as a guide.
+            let guide = format!(
+                "# Press Release Draft — v{}\n\n\
+                 > This is a template. An agent would generate the full press release.\n\
+                 > Edit manually or re-run: ta release run {} --press-release\n\n\
+                 ## Release Notes\n\n{}\n",
+                version, version, release_notes
+            );
+            std::fs::write(&output_path, &guide)?;
+            println!(
+                "Agent launch failed. Wrote press release template to {}.",
+                output_path.display()
+            );
+            println!(
+                "Edit it manually or retry with: ta release run {} --press-release",
+                version
+            );
+        }
+    }
+
+    Ok(())
+}
+
 // ── Default built-in pipeline ───────────────────────────────────
 
 const DEFAULT_PIPELINE_YAML: &str = r#"# .ta/release.yaml — TA release pipeline configuration.
@@ -1111,6 +1314,60 @@ steps:
         assert_eq!(normalize_version("0.4", &p), "0.4.0");
         assert_eq!(normalize_version("1.2.3", &p), "1.2.3");
         assert_eq!(normalize_version("1.2.3.4", &p), "1.2.3.4");
+    }
+
+    #[test]
+    fn release_config_default() {
+        let config = ReleaseConfig::default();
+        assert!(config.press_release_template.is_none());
+    }
+
+    #[test]
+    fn release_config_roundtrip() {
+        let config = ReleaseConfig {
+            press_release_template: Some("samples/press-release.md".to_string()),
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let parsed: ReleaseConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            parsed.press_release_template.as_deref(),
+            Some("samples/press-release.md")
+        );
+    }
+
+    #[test]
+    fn configure_release_unknown_key() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let result = configure_release(&config, "nonexistent", "value");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Unknown"));
+    }
+
+    #[test]
+    fn configure_release_template_not_found() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let result = configure_release(&config, "press_release_template", "/nonexistent/file.md");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn configure_release_template_success() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let template = temp.path().join("sample.md");
+        std::fs::write(&template, "# Sample Press Release").unwrap();
+        configure_release(
+            &config,
+            "press_release_template",
+            template.to_str().unwrap(),
+        )
+        .unwrap();
+
+        let loaded = ReleaseConfig::load(&config);
+        assert!(loaded.press_release_template.is_some());
     }
 
     #[test]
