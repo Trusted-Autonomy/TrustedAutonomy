@@ -135,6 +135,9 @@ pub struct AgentConfig {
     pub max_sessions: usize,
     pub idle_timeout_secs: u64,
     pub default_agent: String,
+    /// Timeout for agent prompt responses (default: 300s / 5 minutes).
+    /// Agent LLM calls can take minutes — this is separate from the command timeout.
+    pub timeout_secs: u64,
 }
 
 impl Default for AgentConfig {
@@ -143,6 +146,7 @@ impl Default for AgentConfig {
             max_sessions: 3,
             idle_timeout_secs: 3600,
             default_agent: "claude-code".to_string(),
+            timeout_secs: 300,
         }
     }
 }
