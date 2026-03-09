@@ -2705,7 +2705,24 @@ print(json.dumps({
 
 Human responses flow back via `POST {callback_url}/api/interactions/{id}/respond`.
 
-**Installing plugins:**
+**Building plugins from source:**
+
+If you have Rust plugin source code in `plugins/`, build and install in one step:
+
+```bash
+# Build a specific plugin by name
+ta plugin build discord
+
+# Build multiple plugins
+ta plugin build discord,slack
+
+# Build all discoverable plugins in plugins/
+ta plugin build --all
+```
+
+This scans `plugins/` for subdirectories containing both `Cargo.toml` and `channel.toml`, runs `cargo build --release`, and copies the binary + manifest to `.ta/plugins/channels/<name>/`. You can reference plugins by their manifest name (e.g., `discord`), directory name (e.g., `ta-channel-discord`), or shorthand (e.g., `discord` resolves to `ta-channel-discord/`).
+
+**Installing pre-built plugins:**
 
 ```bash
 # Install to project (.ta/plugins/channels/)

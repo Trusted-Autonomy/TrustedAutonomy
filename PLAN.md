@@ -4226,7 +4226,7 @@ The Discord adapter already implements `ChannelDelivery` and uses only HTTP (no 
 ---
 
 ### v0.10.2.2 — `ta plugin build` Command
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Add a CLI command to build plugin binaries from source, removing the manual `cd && cargo build && cp` workflow.
 
 #### Usage
@@ -4247,14 +4247,15 @@ ta plugin build --all
 3. Copy the compiled binary + `channel.toml` to `.ta/plugins/channels/<name>/`
 4. Print summary: which plugins built, binary size, install path
 
-#### Items
-1. [ ] `PluginCommands::Build` variant in `apps/ta-cli/src/commands/plugin.rs` with `names: Vec<String>` and `--all` flag
-2. [ ] Plugin source discovery: scan `plugins/` directory for `Cargo.toml` + `channel.toml` pairs
-3. [ ] Build runner: invoke `cargo build --release` in plugin directory, capture output, report errors
-4. [ ] Install step: copy binary + manifest to `.ta/plugins/channels/<name>/`
-5. [ ] `--all` flag: discover and build every plugin in `plugins/`
-6. [ ] Output: progress per plugin, success/failure summary, binary paths
-7. [ ] Error handling: continue building remaining plugins if one fails, report all failures at end
+#### Completed
+1. [x] `PluginCommands::Build` variant in `apps/ta-cli/src/commands/plugin.rs` with `names: Vec<String>` and `--all` flag
+2. [x] Plugin source discovery: scan `plugins/` directory for `Cargo.toml` + `channel.toml` pairs
+3. [x] Build runner: invoke `cargo build --release` in plugin directory, capture output, report errors
+4. [x] Install step: copy binary + manifest to `.ta/plugins/channels/<name>/`
+5. [x] `--all` flag: discover and build every plugin in `plugins/`
+6. [x] Output: progress per plugin, success/failure summary, binary paths
+7. [x] Error handling: continue building remaining plugins if one fails, report all failures at end
+8. [x] 13 new tests: discovery, binary name extraction, name resolution, error paths, formatting
 
 #### Version: `0.10.2-alpha.2`
 
