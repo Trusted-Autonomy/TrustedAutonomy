@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.9.8-alpha.2
+**Version**: v0.10.7-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -3009,6 +3009,24 @@ Tool calls are auto-classified by name patterns:
 - **ExternalSideEffect**: `_post`, `_create`, `_update`, `_put`, `_patch`, `_upload`
 - **StateChanging**: everything else
 
+### Terms of Use
+
+TA includes a terms-of-use acceptance step on first run.
+
+```bash
+# Accept terms non-interactively (CI/scripted usage)
+ta accept-terms
+
+# View the current terms
+ta view-terms
+
+# Check acceptance status
+ta terms-status
+
+# All commands also accept --accept-terms flag
+ta run "task" --accept-terms
+```
+
 ### Project Setup
 
 Use `ta setup` to configure TA for an existing project interactively.
@@ -3789,7 +3807,7 @@ Agent configs are resolved in priority order: `.ta/agents/` (project) → `~/.co
 
 ### What's Done
 
-TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, decision observability, credential management, MCP tool call interception, web review UI, webhook review channels, persistent context memory with semantic search, session lifecycle management, unified policy configuration (6-layer cascade), resource mediation (extensible by URI scheme), pluggable channel registry, API mediation for MCP tool calls, agent-guided project setup, project template initialization, interactive developer loop (`ta dev`), extensible agent framework registry with auto-detection, daemon HTTP API with SSE events and agent session management, an interactive terminal shell (`ta shell`), and a pluggable workflow engine for multi-stage, multi-role orchestration with verdict scoring and human-in-the-loop interaction.
+TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, decision observability, credential management, MCP tool call interception, web review UI, webhook review channels, persistent context memory with semantic search, session lifecycle management, unified policy configuration (6-layer cascade), resource mediation (extensible by URI scheme), pluggable channel registry, API mediation for MCP tool calls, agent-guided project setup, project template initialization, interactive developer loop (`ta dev`), extensible agent framework registry with auto-detection, daemon HTTP API with SSE events and agent session management, an interactive terminal shell (`ta shell`), and a pluggable workflow engine for multi-stage, multi-role orchestration with verdict scoring and human-in-the-loop interaction, multi-project office management, channel plugin system (Discord, Slack, Email), external workflow and agent definitions, release pipeline hardening with interactive mode, conversational project bootstrapping via interactive mode, external channel delivery, and multi-language plugin builds.
 
 ### Phase Status
 
@@ -3864,7 +3882,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.7.6 | Interactive developer loop (`ta dev`) | Done |
 | v0.7.7 | Agent framework registry & setup integration | Done |
 
-### What's Next (v0.8+)
+### v0.8+ — Event System through Channels & Plugins
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -3887,6 +3905,23 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.9.8.2 | Pluggable workflow engine & framework integration | Done |
 | v0.9.8.3 | Full TUI shell (ratatui) | Done |
 | v0.9.8.4 | VCS adapter abstraction & plugin architecture | Done |
+| v0.9.9 | Conversational project bootstrapping (`ta new`) | Pending |
+| v0.9.9.1 | Interactive mode core plumbing | Done |
+| v0.9.9.2 | Shell TUI interactive mode | Done |
+| v0.9.9.3 | `ta plan from <doc>` wrapper | Done |
+| v0.9.9.4 | External channel delivery | Done |
+| v0.9.9.5 | Workflow & agent authoring tooling | Done |
+| v0.9.10 | Multi-project daemon & office configuration | Done |
+| v0.10.0 | Gateway channel wiring & multi-channel routing | Done |
+| v0.10.1 | Native Discord channel | Done |
+| v0.10.2 | Channel plugin loading (multi-language) | Done |
+| v0.10.2.1 | Refactor Discord channel to external plugin | Done |
+| v0.10.2.2 | `ta plugin build` command | Done |
+| v0.10.3 | Slack channel plugin | Done |
+| v0.10.4 | Email channel plugin | Done |
+| v0.10.5 | External workflow & agent definitions | Done |
+| v0.10.6 | Release process hardening & interactive release flow | Done |
+| v0.10.7 | Documentation review & consolidation | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

@@ -1,8 +1,8 @@
 # ADR: Modular Decomposition — TA Core vs. Agent Infrastructure vs. Applications
 
-> **Status**: Proposal (review after v0.5.7)
+> **Status**: Deferred — the monorepo approach remains for now. Memory and credential extraction are candidates for post-v1.0.
 > **Author**: Claude (v0.5.6 session)
-> **Context**: Discussion during v0.5.6 implementation about whether TA is trying to do too many things
+> **Context**: Discussion during v0.5.6 implementation about whether TA is trying to do too many things. As of v0.10.7, all crates remain in the workspace. The channel plugin system (v0.10.2+) validates the out-of-process plugin pattern for extensions, but core crate extraction has not been prioritized.
 
 ---
 
@@ -292,11 +292,11 @@ This doesn't need to happen all at once. A phased approach:
 
 ## Decision Needed
 
-After v0.5.7 ships:
-- [ ] Review this ADR
-- [ ] Decide whether to extract `agent-memory` as Phase A
-- [ ] Decide whether v0.7.1 domain templates should be a separate repo from the start
-- [ ] Decide whether v1.0 virtual office should be planned as a separate project
+**Post-v0.10.7 status** (reviewed during documentation consolidation):
+- [x] Review this ADR — reviewed; extraction deferred. Monorepo is manageable at current scale.
+- [ ] Decide whether to extract `agent-memory` as Phase A — deferred. ta-memory works well in-workspace.
+- [x] Decide whether v0.7.1 domain templates should be a separate repo — kept in-repo under `templates/`. External sources supported via `ta workflow add --from`.
+- [x] Decide whether v1.0 virtual office should be planned as a separate project — yes, listed as a separate project in PLAN.md ("Projects On Top").
 
 ---
 

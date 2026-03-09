@@ -97,41 +97,6 @@ pub async fn execute_command(
     let is_long = is_long_running(command_str, &state.daemon_config.commands.long_running);
 
     if is_long {
-        // Check for duplicate running goals before spawning a new one.
-        // Extract the title from args (second element for `run` commands).
-        if args.len() >= 2 && (args[0] == "run" || args[0] == "dev") {
-            let requested_title = &args[1];
-            if let Ok(store) = ta_goal::GoalRunStore::new(&state.goals_dir) {
-                if let Ok(goals) = store.list() {
-                    let already_running: Vec<_> = goals
-                        .iter()
-                        .filter(|g| {
-                            matches!(
-                                g.state,
-                                ta_goal::GoalRunState::Running | ta_goal::GoalRunState::Configured
-                            ) && g.title.contains(requested_title.as_str())
-                        })
-                        .collect();
-                    if !already_running.is_empty() {
-                        let ids: Vec<String> = already_running
-                            .iter()
-                            .map(|g| format!("{} ({})", &g.goal_run_id.to_string()[..8], g.state))
-                            .collect();
-                        return Json(CmdResponse {
-                            exit_code: 1,
-                            stdout: String::new(),
-                            stderr: format!(
-                                "A goal matching \"{}\" is already running: {}\nUse `goal list` to see active goals or `goal status <id>` for details.\n",
-                                requested_title,
-                                ids.join(", ")
-                            ),
-                        })
-                        .into_response();
-                    }
-                }
-            }
-        }
-
         let binary = ta_binary.clone();
         let working_dir = state.project_root.clone();
         let cmd_str = command_str.to_string();
@@ -144,6 +109,7 @@ pub async fn execute_command(
         let output_key = extract_goal_key(&args);
         let tx = goal_output.create_channel(&output_key).await;
         let output_key_display = output_key.clone();
+        let output_key_response = output_key.clone();
 
         tokio::spawn(async move {
             tracing::info!(
@@ -246,8 +212,8 @@ pub async fn execute_command(
         return Json(CmdResponse {
             exit_code: 0,
             stdout: format!(
-                "Started in background: {}\nOutput streams via events. Track progress: goal list\n",
-                command_str,
+                "Started in background: {}\nOutput key: {}\nTrack progress with: ta goal list\nStream output with: :tail {}\n",
+                command_str, output_key_response, &output_key_response[..8.min(output_key_response.len())]
             ),
             stderr: String::new(),
         })

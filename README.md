@@ -1,7 +1,7 @@
 # Trusted Autonomy
 
-![Latest](https://img.shields.io/badge/latest-v0.9.9-alpha.5-blue)
-![Released](https://img.shields.io/badge/released-v0.9.9-alpha.5-green)
+![Latest](https://img.shields.io/badge/latest-v0.10.7--alpha-blue)
+![Released](https://img.shields.io/badge/released-v0.10.7--alpha-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-orange)
 
 **Trusted Autonomy** is a local-first, Rust-based substrate for running autonomous AI agents **safely**, **reviewably**, and **without changing how agents behave**.
@@ -72,17 +72,16 @@ Trusted Autonomy achieves this by:
 
 ---
 
-## Current status: v0.3.2-alpha
+## Current status: v0.10.7-alpha
 
-**334 tests** across 12 crates. Under active development. See [PLAN.md](PLAN.md) for the full roadmap.
+Under active development. See [PLAN.md](PLAN.md) for the full roadmap.
 
-This is an early alpha release for feedback. Please note:
+This is an alpha release for feedback. Please note:
 
 - **Not production-ready.** Do not use for critical or irreversible operations.
-- **The security model is not yet audited.** Do not trust it with secrets or sensitive data.
-- **No sandbox isolation yet.** The agent runs with your permissions in a staging copy. Defense-in-depth (OCI/gVisor) is planned for Phase 7.
+- **The security model is not yet audited.** Sandbox isolation exists (command allowlisting, path escape detection) but has not been independently audited. Do not trust it with secrets or sensitive data without your own review.
 
-If any of these are blockers for your use case, watch the repo — each is on the [roadmap](PLAN.md).
+If any of these are blockers for your use case, watch the repo — progress is tracked on the [roadmap](PLAN.md).
 
 ---
 
@@ -778,14 +777,22 @@ claude
 | Tool | What it does |
 |------|-------------|
 | `ta_goal_start` | Create a GoalRun (allocates staging workspace + capabilities) |
+| `ta_goal_list` | List all GoalRuns |
+| `ta_goal_status` | Check GoalRun state |
+| `ta_goal_inner` | Create an inner-loop sub-goal within a macro goal |
 | `ta_fs_read` | Read a source file (snapshots the original) |
 | `ta_fs_write` | Write to staging (creates a ChangeSet with diff) |
 | `ta_fs_list` | List staged files |
 | `ta_fs_diff` | Show diff for a staged file |
-| `ta_pr_build` | Bundle staged changes into a Draft package for review |
-| `ta_pr_status` | Check Draft package status |
-| `ta_goal_status` | Check GoalRun state |
-| `ta_goal_list` | List all GoalRuns |
+| `ta_draft` | Bundle staged changes into a Draft package for review |
+| `ta_pr_build` | Alias for `ta_draft` (backward compatibility) |
+| `ta_pr_status` | Alias for draft status (backward compatibility) |
+| `ta_context` | Retrieve project context and configuration |
+| `ta_ask_human` | Request human input during agent execution |
+| `ta_plan` | Query and update plan phase status |
+| `ta_workflow` | Manage workflow definitions and execution |
+| `ta_agent_status` | Check agent health and configuration |
+| `ta_event_subscribe` | Subscribe to real-time event streams |
 
 ---
 
@@ -820,25 +827,30 @@ Multiple agents can work simultaneously. Each gets an isolated GoalRun with its 
 
 ```
 crates/
-  ta-audit/               Append-only event log + SHA-256 hash chain
-  ta-changeset/           ChangeSet + Draft Package data model + URI pattern matching
-  ta-policy/              Capability manifests + default-deny policy engine
-  ta-workspace/           Staging + overlay workspace manager + JSON change store
-  ta-goal/                GoalRun lifecycle state machine + event dispatch
-  ta-mcp-gateway/         MCP server (rmcp) — 9 tools, policy enforcement
-  ta-daemon/              MCP server binary (stdio transport)
-  ta-sandbox/             Allowlisted command execution (stub)
+  ta-audit/             Append-only event log + SHA-256 hash chain
+  ta-changeset/         Draft package model, review channels, channel registry
+  ta-policy/            Capability engine + policy document cascade
+  ta-workspace/         Staging + overlay workspace manager
+  ta-goal/              GoalRun lifecycle state machine + event dispatch
+  ta-mcp-gateway/       MCP server — tool handlers, policy enforcement
+  ta-daemon/            Daemon binary (HTTP API, SSE events, shell client)
+  ta-submit/            SubmitAdapter trait + git implementation
+  ta-memory/            Persistent context memory (file + ruvector backends)
+  ta-credentials/       Credential vault + identity broker
+  ta-sandbox/           Command allowlisting + path escape detection
+  ta-events/            Event types, schemas, channel question protocol
+  ta-workflow/          Workflow engine, stage orchestration, verdict scoring
   ta-connectors/
-    fs/                   Filesystem connector: staging + diffs + apply
-    web/                  Web fetch connector (stub)
-    mock-drive/           Mock Google Drive (stub)
-    mock-gmail/           Mock Gmail (stub)
+    fs/                 Filesystem connector: staging + diffs + apply
+    web/                Web fetch connector
+    mock-drive/         Mock Google Drive
+    mock-gmail/         Mock Gmail
 apps/
-  ta-cli/                 CLI: goals, PRs, run, plan, audit, adapters
-schema/
-  pr_package.schema.json  Draft package JSON schema
-  capability.schema.json  Capability manifest schema
-  agent_setup.schema.json Agent setup proposal schema
+  ta-cli/               CLI: goals, drafts, run, plan, shell, dev, release, plugins, workflows
+plugins/
+  ta-channel-discord/   Discord channel plugin (JSON-over-stdio)
+  ta-channel-slack/     Slack channel plugin (JSON-over-stdio)
+  ta-channel-email/     Email channel plugin (JSON-over-stdio)
 ```
 
 ---
@@ -913,12 +925,29 @@ cargo fmt --all -- --check
 - **Settings injection** — auto-configures agent permissions (replaces `--dangerously-skip-permissions`)
 - **Follow-up goals** — `--follow-up` to iterate on review feedback with full parent context injection
 - **Submit adapters** — pluggable VCS integration (git commit/push/Draft, or no-VCS file copy)
+- **Multi-stage workflow engine** — pluggable adapters, stage orchestration, verdict scoring
+- **Full TUI shell** — ratatui-based interactive shell (`ta shell`) with command routing and shortcuts
+- **Developer loop** — `ta dev` for iterative development with automatic staging and review
+- **Channel plugin system** — out-of-process review channels (Discord, Slack, Email) via JSON-over-stdio protocol
+- **Multi-project office management** — `ta office` for managing multiple projects under a single daemon
+- **External workflow and agent definitions** — install from registry, GitHub, or URL sources (`ta workflow add`, `ta agent add`)
+- **Release pipeline** — `ta release run` with validation, interactive mode, and multi-stage workflow templates
+- **Unified garbage collection** — `ta gc` for cleaning up stale staging workspaces and old drafts
+- **Project status dashboard** — `ta status` for at-a-glance project health
+- **Conversational project bootstrapping** — `ta new` for guided project setup
+- **External channel delivery** — route review questions to external services
+- **Multi-language plugin builds** — `ta plugin build` for compiling channel plugins from source
+- **Plan-from-document generation** — `ta plan from <doc>` to generate PLAN.md from requirements docs
+- **Persistent context memory** — file and ruvector backends with semantic search
+- **Credential vault and identity broker** — `ta credentials` for managing agent secrets
+- **Sandbox runner** — command allowlisting and path escape detection
+- **Event system** — subscription API with SSE streaming and event-driven hooks
 - Append-only audit log with SHA-256 hash chain
-- Default-deny capability engine with glob pattern matching
+- Default-deny capability engine with glob pattern matching and policy document cascade
 - Per-artifact review model (disposition, dependencies, rationale)
 - URI-aware pattern matching (scheme-scoped safety — `src/**` can't match `gmail://`)
-- Real MCP server (rmcp 0.14) with 9 tools and policy enforcement
-- CLI: `goal`, `draft`, `run`, `plan`, `audit`, `adapter`, `session`, `serve`
+- MCP server with policy enforcement and tool call interception
+- CLI: `goal`, `draft`, `run`, `plan`, `context`, `credentials`, `events`, `token`, `dev`, `setup`, `init`, `agent`, `adapter`, `release`, `shell`, `office`, `plugin`, `workflow`, `policy`, `config`, `gc`, `status`, `serve`
 - Plan tracking (`ta plan list/status`, auto-update on `ta draft apply`)
 
 ---

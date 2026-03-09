@@ -602,16 +602,14 @@ async fn handle_terminal_event(
                             _ => {}
                         }
 
-                        // :tail is for classic mode — in TUI, output already streams inline.
+                        // :tail is handled synchronously in classic mode but we
+                        // can't block the TUI loop. Show a hint instead.
                         if text.starts_with(":tail") {
                             app.push_output(OutputLine::info(
-                                "Output already streams inline in this window. Use PgUp/PgDn to scroll.".into(),
+                                "Tip: Agent output appears inline via SSE events. Use PgUp/PgDn to scroll.".into(),
                             ));
                             return;
                         }
-
-                        // Echo the user's input immediately so they know it was received.
-                        app.push_output(OutputLine::command(format!("> {}", text)));
 
                         // Send to daemon asynchronously.
                         let client = client.clone();

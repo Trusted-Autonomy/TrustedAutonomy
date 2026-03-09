@@ -871,10 +871,7 @@ fn render_actions_suffix(event_type: &str, json: &serde_json::Value) -> String {
         "goal_started" => {
             let goal_id = json["payload"]["goal_id"].as_str().unwrap_or("");
             if goal_id.len() >= 8 {
-                format!(
-                    "\n  Goal ID: {}\n  Output streams inline via events. Check status: goal status {}",
-                    &goal_id[..8], &goal_id[..8]
-                )
+                format!("\n  Tail: ta shell :tail {}", &goal_id[..8])
             } else {
                 String::new()
             }

@@ -497,22 +497,24 @@ Agent calls email_send via MCP
 
 | Crate | Layer | Status |
 |---|---|---|
-| `ta-policy` | L2 | Evolve: add `PolicyDocument` YAML loading, `PolicyContext` |
-| `ta-audit` | L2 | No change |
-| `ta-workspace` | L1 | No change (low-level file staging) |
-| `ta-changeset` | L3 | Stable: DraftPackage, ReviewChannel, interactions |
-| `ta-goal` | L3 | Evolve: goal stacking, multi-agent session tracking |
-| `ta-submit` | L1 | No change |
-| `ta-memory` | L4 | No change |
-| `ta-credentials` | L4 | No change |
-| `ta-mcp-gateway` | L4 | Evolve: route to `ResourceMediator` by scheme |
-| `ta-connectors/fs` | L1 | Evolve: implement `ResourceMediator` trait |
-| `ta-daemon` | L5 | Evolve: session streaming, channel plugin host |
-| `ta-sandbox` | L2 | Future: hardened isolation |
-| `ta-cli` | L5 | Evolve: human control plane commands (`ta session *`) |
-| **NEW `ta-mediation`** | L1 | Trait crate: `ResourceMediator` + shared types |
-| **NEW `ta-session`** | L3 | Session lifecycle, event streaming, goal stacking |
-| **NEW `ta-channel-*`** | L5 | Plugin crates: Slack, Discord, email |
+| `ta-policy` | L2 | Done: `PolicyDocument` YAML loading, `PolicyCascade`, `PolicyContext` |
+| `ta-audit` | L2 | Stable |
+| `ta-workspace` | L1 | Stable (low-level file staging) |
+| `ta-changeset` | L3 | Done: DraftPackage, ReviewChannel, ChannelRegistry, interactions |
+| `ta-goal` | L3 | Done: goal stacking, multi-agent session tracking |
+| `ta-submit` | L1 | Stable: SubmitAdapter trait + git implementation |
+| `ta-memory` | L4 | Done: file + ruvector backends, auto-capture, semantic search |
+| `ta-credentials` | L4 | Done: credential vault, identity broker |
+| `ta-mcp-gateway` | L4 | Done: ResourceMediator routing, tool interception |
+| `ta-connectors/fs` | L1 | Done: implements `ResourceMediator` trait |
+| `ta-daemon` | L5 | Done: HTTP API, SSE events, session streaming, channel plugin host |
+| `ta-sandbox` | L2 | Done: command allowlisting, path escape detection |
+| `ta-cli` | L5 | Done: full human control plane (session, shell, dev, office, etc.) |
+| `ta-mediation` | L1 | Done: `ResourceMediator` trait + shared types |
+| `ta-session` | L3 | Done: session lifecycle, event streaming |
+| `ta-events` | L3 | Done: event types, schemas, channel question protocol |
+| `ta-workflow` | L3 | Done: workflow engine, stage orchestration, verdict scoring |
+| Channel plugins | L5 | Done: Discord, Slack, Email (out-of-process JSON-over-stdio) |
 
 ---
 

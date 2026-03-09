@@ -269,7 +269,7 @@ Key schemas for plugin/integration authors:
 | `SessionEvent` | `ta_events::schema::SessionEvent` | Event routing, hook payloads |
 | `HumanAnswer` | `ta_daemon::question_registry::HumanAnswer` | `/api/interactions/:id/respond` request body |
 
-**Schema export** (planned — v0.10.2): `ta schema export --format json-schema` dumps all plugin-facing schemas as JSON Schema files. Plugin SDK templates include pre-generated schemas for Python (dataclasses), TypeScript (interfaces), and Go (structs).
+**Schema export** (planned): `ta schema export --format json-schema` will dump all plugin-facing schemas as JSON Schema files. Plugin SDK templates will include pre-generated schemas for Python (dataclasses), TypeScript (interfaces), and Go (structs). Currently, plugin authors reference the Rust types directly or use the example plugins as a template.
 
 ### Credential & Secret Configuration
 
