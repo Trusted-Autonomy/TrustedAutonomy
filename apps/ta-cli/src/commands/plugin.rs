@@ -226,13 +226,18 @@ struct BuildablePlugin {
     manifest: plugin::PluginManifest,
     /// Binary name from Cargo.toml [[bin]] or package name.
     binary_name: String,
+    /// Whether this is a Rust plugin (has Cargo.toml).
+    is_rust: bool,
 }
 
-/// Discover buildable Rust plugins in the `plugins/` directory.
+/// Discover buildable plugins in the `plugins/` directory.
 ///
-/// A buildable plugin is a subdirectory that contains both `Cargo.toml` and
-/// `channel.toml`. The binary name is extracted from `[[bin]]` entries or
-/// falls back to the Cargo.toml `[package].name`.
+/// A buildable plugin is a subdirectory that contains `channel.toml` and either:
+///   - `Cargo.toml` (Rust plugin — built with `cargo build --release` by default)
+///   - A `build_command` field in `channel.toml` (non-Rust: Go, Python, Node, etc.)
+///
+/// The binary name is extracted from `[[bin]]` entries for Rust plugins or
+/// falls back to the directory name.
 fn discover_buildable_plugins(project_root: &Path) -> Vec<BuildablePlugin> {
     let plugins_dir = project_root.join("plugins");
     if !plugins_dir.is_dir() {
@@ -262,7 +267,7 @@ fn discover_buildable_plugins(project_root: &Path) -> Vec<BuildablePlugin> {
         let cargo_path = path.join("Cargo.toml");
         let channel_path = path.join("channel.toml");
 
-        if !cargo_path.exists() || !channel_path.exists() {
+        if !channel_path.exists() {
             continue;
         }
 
@@ -279,9 +284,24 @@ fn discover_buildable_plugins(project_root: &Path) -> Vec<BuildablePlugin> {
             }
         };
 
-        // Extract binary name from Cargo.toml.
-        let binary_name = extract_binary_name(&cargo_path)
-            .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+        let is_rust = cargo_path.exists();
+
+        // Non-Rust plugins need a build_command in channel.toml.
+        if !is_rust && manifest.build_command.is_none() {
+            continue;
+        }
+
+        // Extract binary name: from Cargo.toml for Rust, or dir name for others.
+        let binary_name = if is_rust {
+            extract_binary_name(&cargo_path)
+                .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string())
+        } else {
+            // For non-Rust plugins, use command field or dir name.
+            manifest
+                .command
+                .clone()
+                .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string())
+        };
 
         let dir_name = entry.file_name().to_string_lossy().to_string();
 
@@ -290,6 +310,7 @@ fn discover_buildable_plugins(project_root: &Path) -> Vec<BuildablePlugin> {
             source_dir: path,
             manifest,
             binary_name,
+            is_rust,
         });
     }
 
@@ -393,29 +414,37 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
     let mut results: Vec<BuildResult> = Vec::new();
 
     for plugin in &to_build {
+        let build_kind = if plugin.is_rust { "Rust" } else { "custom" };
         println!(
-            "  Building {} ({}/)...",
-            plugin.manifest.name, plugin.dir_name
+            "  Building {} ({}/, {})...",
+            plugin.manifest.name, plugin.dir_name, build_kind
         );
 
-        // Run cargo build --release in the plugin directory.
-        let output = std::process::Command::new("cargo")
-            .args(["build", "--release"])
-            .current_dir(&plugin.source_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output();
+        // Determine build command: use channel.toml build_command, or default to cargo.
+        let build_output = if let Some(ref build_cmd) = plugin.manifest.build_command {
+            // Custom build command (non-Rust plugins).
+            println!("    Running: {}", build_cmd);
+            std::process::Command::new("sh")
+                .args(["-c", build_cmd])
+                .current_dir(&plugin.source_dir)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+        } else {
+            // Default: cargo build --release for Rust plugins.
+            std::process::Command::new("cargo")
+                .args(["build", "--release"])
+                .current_dir(&plugin.source_dir)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+        };
 
-        match output {
+        match build_output {
             Ok(out) if out.status.success() => {
-                // Find the built binary.
-                let binary_path = plugin
-                    .source_dir
-                    .join("target")
-                    .join("release")
-                    .join(&plugin.binary_name);
-
-                if !binary_path.exists() {
+                // Install: copy files to .ta/plugins/channels/<name>/.
+                let target_dir = install_base.join(&plugin.manifest.name);
+                if let Err(e) = std::fs::create_dir_all(&target_dir) {
                     results.push(BuildResult {
                         name: plugin.manifest.name.clone(),
                         dir_name: plugin.dir_name.clone(),
@@ -423,72 +452,116 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
                         binary_path: None,
                         installed_dir: None,
                         error_msg: Some(format!(
-                            "Build succeeded but binary not found at {}",
-                            binary_path.display()
+                            "Failed to create install directory {}: {}",
+                            target_dir.display(),
+                            e
                         )),
                         binary_size: None,
                     });
                     continue;
                 }
 
-                let binary_size = std::fs::metadata(&binary_path).ok().map(|m| m.len());
+                if plugin.is_rust {
+                    // Rust: find binary in target/release/.
+                    let binary_path = plugin
+                        .source_dir
+                        .join("target")
+                        .join("release")
+                        .join(&plugin.binary_name);
 
-                // Install: copy binary + channel.toml to .ta/plugins/channels/<name>/.
-                let target_dir = install_base.join(&plugin.manifest.name);
-                if let Err(e) = std::fs::create_dir_all(&target_dir) {
-                    results.push(BuildResult {
-                        name: plugin.manifest.name.clone(),
-                        dir_name: plugin.dir_name.clone(),
-                        success: false,
-                        binary_path: Some(binary_path),
-                        installed_dir: None,
-                        error_msg: Some(format!(
-                            "Failed to create install directory {}: {}",
-                            target_dir.display(),
-                            e
-                        )),
-                        binary_size,
-                    });
-                    continue;
-                }
-
-                let installed_binary = target_dir.join(&plugin.binary_name);
-                let installed_manifest = target_dir.join("channel.toml");
-
-                let copy_result = std::fs::copy(&binary_path, &installed_binary).and_then(|_| {
-                    // Ensure binary is executable on Unix.
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let perms = std::fs::Permissions::from_mode(0o755);
-                        std::fs::set_permissions(&installed_binary, perms)?;
-                    }
-                    std::fs::copy(plugin.source_dir.join("channel.toml"), &installed_manifest)
-                });
-
-                match copy_result {
-                    Ok(_) => {
-                        println!("    Installed to {}/", target_dir.display());
-                        results.push(BuildResult {
-                            name: plugin.manifest.name.clone(),
-                            dir_name: plugin.dir_name.clone(),
-                            success: true,
-                            binary_path: Some(installed_binary),
-                            installed_dir: Some(target_dir),
-                            error_msg: None,
-                            binary_size,
-                        });
-                    }
-                    Err(e) => {
+                    if !binary_path.exists() {
                         results.push(BuildResult {
                             name: plugin.manifest.name.clone(),
                             dir_name: plugin.dir_name.clone(),
                             success: false,
-                            binary_path: Some(binary_path),
+                            binary_path: None,
                             installed_dir: None,
-                            error_msg: Some(format!("Install failed: {}", e)),
-                            binary_size,
+                            error_msg: Some(format!(
+                                "Build succeeded but binary not found at {}",
+                                binary_path.display()
+                            )),
+                            binary_size: None,
                         });
+                        continue;
+                    }
+
+                    let binary_size = std::fs::metadata(&binary_path).ok().map(|m| m.len());
+                    let installed_binary = target_dir.join(&plugin.binary_name);
+                    let installed_manifest = target_dir.join("channel.toml");
+
+                    let copy_result =
+                        std::fs::copy(&binary_path, &installed_binary).and_then(|_| {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let perms = std::fs::Permissions::from_mode(0o755);
+                                std::fs::set_permissions(&installed_binary, perms)?;
+                            }
+                            std::fs::copy(
+                                plugin.source_dir.join("channel.toml"),
+                                &installed_manifest,
+                            )
+                        });
+
+                    match copy_result {
+                        Ok(_) => {
+                            println!("    Installed to {}/", target_dir.display());
+                            results.push(BuildResult {
+                                name: plugin.manifest.name.clone(),
+                                dir_name: plugin.dir_name.clone(),
+                                success: true,
+                                binary_path: Some(installed_binary),
+                                installed_dir: Some(target_dir),
+                                error_msg: None,
+                                binary_size,
+                            });
+                        }
+                        Err(e) => {
+                            results.push(BuildResult {
+                                name: plugin.manifest.name.clone(),
+                                dir_name: plugin.dir_name.clone(),
+                                success: false,
+                                binary_path: Some(binary_path),
+                                installed_dir: None,
+                                error_msg: Some(format!("Install failed: {}", e)),
+                                binary_size,
+                            });
+                        }
+                    }
+                } else {
+                    // Non-Rust: copy the entire plugin source directory.
+                    let installed_manifest = target_dir.join("channel.toml");
+                    match copy_plugin_dir(&plugin.source_dir, &target_dir) {
+                        Ok(_) => {
+                            // Ensure channel.toml is present.
+                            if !installed_manifest.exists() {
+                                let _ = std::fs::copy(
+                                    plugin.source_dir.join("channel.toml"),
+                                    &installed_manifest,
+                                );
+                            }
+                            println!("    Installed to {}/", target_dir.display());
+                            results.push(BuildResult {
+                                name: plugin.manifest.name.clone(),
+                                dir_name: plugin.dir_name.clone(),
+                                success: true,
+                                binary_path: None,
+                                installed_dir: Some(target_dir),
+                                error_msg: None,
+                                binary_size: None,
+                            });
+                        }
+                        Err(e) => {
+                            results.push(BuildResult {
+                                name: plugin.manifest.name.clone(),
+                                dir_name: plugin.dir_name.clone(),
+                                success: false,
+                                binary_path: None,
+                                installed_dir: None,
+                                error_msg: Some(format!("Install failed: {}", e)),
+                                binary_size: None,
+                            });
+                        }
                     }
                 }
             }
@@ -503,27 +576,34 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
                     .rev()
                     .collect::<Vec<_>>()
                     .join("\n");
+                let cmd_name = if plugin.manifest.build_command.is_some() {
+                    "build command"
+                } else {
+                    "cargo build"
+                };
                 results.push(BuildResult {
                     name: plugin.manifest.name.clone(),
                     dir_name: plugin.dir_name.clone(),
                     success: false,
                     binary_path: None,
                     installed_dir: None,
-                    error_msg: Some(format!("cargo build failed:\n{}", last_lines)),
+                    error_msg: Some(format!("{} failed:\n{}", cmd_name, last_lines)),
                     binary_size: None,
                 });
             }
             Err(e) => {
+                let hint = if plugin.manifest.build_command.is_some() {
+                    "Check that the build command is valid and its dependencies are installed."
+                } else {
+                    "Is cargo installed and on PATH?"
+                };
                 results.push(BuildResult {
                     name: plugin.manifest.name.clone(),
                     dir_name: plugin.dir_name.clone(),
                     success: false,
                     binary_path: None,
                     installed_dir: None,
-                    error_msg: Some(format!(
-                        "Failed to run cargo: {}. Is cargo installed and on PATH?",
-                        e
-                    )),
+                    error_msg: Some(format!("Failed to run build: {}. {}", e, hint)),
                     binary_size: None,
                 });
             }
@@ -588,6 +668,32 @@ fn format_binary_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Copy plugin directory contents (for non-Rust plugins), skipping build artifacts.
+fn copy_plugin_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // Skip common build artifact directories.
+        if matches!(
+            name.as_str(),
+            "target" | "node_modules" | "__pycache__" | ".git" | "dist" | "build"
+        ) {
+            continue;
+        }
+
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            std::fs::create_dir_all(&dst_path)?;
+            copy_plugin_dir(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Check if a program exists on PATH (simple which-like check).
@@ -675,6 +781,59 @@ protocol = "json-stdio"
         assert_eq!(buildable[0].manifest.name, "test");
         assert_eq!(buildable[0].binary_name, "ta-channel-test");
         assert_eq!(buildable[0].dir_name, "ta-channel-test");
+        assert!(buildable[0].is_rust);
+    }
+
+    #[test]
+    fn discover_buildable_finds_non_rust_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("plugins").join("ta-channel-python");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        // No Cargo.toml — this is a Python plugin with build_command.
+        std::fs::write(
+            plugin_dir.join("channel.toml"),
+            r#"
+name = "python-plugin"
+command = "python3"
+args = ["-u", "channel_plugin.py"]
+protocol = "json-stdio"
+build_command = "pip install -e ."
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(plugin_dir.join("channel_plugin.py"), "print('hello')").unwrap();
+
+        let buildable = discover_buildable_plugins(dir.path());
+        assert_eq!(buildable.len(), 1);
+        assert_eq!(buildable[0].manifest.name, "python-plugin");
+        assert!(!buildable[0].is_rust);
+        assert_eq!(
+            buildable[0].manifest.build_command.as_deref(),
+            Some("pip install -e .")
+        );
+    }
+
+    #[test]
+    fn discover_skips_non_rust_without_build_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("plugins").join("no-build");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        // No Cargo.toml AND no build_command → not buildable.
+        std::fs::write(
+            plugin_dir.join("channel.toml"),
+            r#"
+name = "no-build"
+command = "node"
+protocol = "json-stdio"
+"#,
+        )
+        .unwrap();
+
+        let buildable = discover_buildable_plugins(dir.path());
+        assert!(buildable.is_empty());
     }
 
     #[test]
@@ -690,7 +849,7 @@ protocol = "json-stdio"
         )
         .unwrap();
 
-        // Directory with channel.toml but no Cargo.toml → not buildable (not Rust).
+        // Directory with channel.toml but no Cargo.toml and no build_command → not buildable.
         let channel_only = dir.path().join("plugins").join("channel-only");
         std::fs::create_dir_all(&channel_only).unwrap();
         std::fs::write(

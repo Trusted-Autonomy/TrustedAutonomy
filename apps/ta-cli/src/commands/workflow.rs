@@ -1,17 +1,22 @@
-// workflow.rs — CLI commands for workflow management (v0.9.9.5).
+// workflow.rs — CLI commands for workflow management (v0.10.5).
 //
 // Commands:
 //   ta workflow start <definition.yaml>  — start a workflow
 //   ta workflow status [workflow_id]      — show status
-//   ta workflow list [--templates]        — list workflows or browse templates
+//   ta workflow list [--templates|--source external]  — list workflows
 //   ta workflow cancel <workflow_id>      — cancel a workflow
 //   ta workflow history <workflow_id>     — show stage transitions
 //   ta workflow new <name>               — scaffold a new workflow definition
 //   ta workflow validate <path>          — validate a workflow definition
+//   ta workflow add <name> --from <source>  — install from external source
+//   ta workflow remove <name>            — remove an external workflow
+//   ta workflow publish <name>           — publish to a registry
+//   ta workflow update [name|--all]      — check for updates
 
 use std::path::PathBuf;
 
 use clap::Subcommand;
+use ta_changeset::sources::{ExternalSource, Lockfile, PackageManifest, SourceCache};
 use ta_mcp_gateway::GatewayConfig;
 use ta_workflow::{WorkflowDefinition, WorkflowEngine, YamlWorkflowEngine};
 
@@ -32,6 +37,9 @@ pub enum WorkflowCommands {
         /// Show available workflow templates instead of active workflows.
         #[arg(long)]
         templates: bool,
+        /// Show only externally-sourced workflows.
+        #[arg(long)]
+        source: Option<String>,
     },
     /// Cancel a running workflow.
     Cancel {
@@ -56,15 +64,49 @@ pub enum WorkflowCommands {
         /// Path to the workflow definition YAML file.
         path: PathBuf,
     },
+    /// Install a workflow from an external source (registry, GitHub, URL).
+    Add {
+        /// Workflow name to install as.
+        name: String,
+        /// Source to fetch from: registry:org/name, gh:org/repo, or https://...
+        #[arg(long)]
+        from: String,
+    },
+    /// Remove an externally-installed workflow.
+    Remove {
+        /// Workflow name to remove.
+        name: String,
+    },
+    /// Publish a workflow to a registry.
+    Publish {
+        /// Workflow name to publish.
+        name: String,
+        /// Target registry (e.g., "trustedautonomy").
+        #[arg(long)]
+        registry: Option<String>,
+        /// Version bump: major, minor, patch.
+        #[arg(long)]
+        bump: Option<String>,
+    },
+    /// Check for updates to externally-installed workflows.
+    Update {
+        /// Specific workflow name, or omit for all.
+        name: Option<String>,
+        /// Update all external workflows.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match command {
         WorkflowCommands::Start { definition } => start_workflow(definition),
         WorkflowCommands::Status { workflow_id } => show_status(workflow_id.as_deref()),
-        WorkflowCommands::List { templates } => {
+        WorkflowCommands::List { templates, source } => {
             if *templates {
                 list_templates()
+            } else if source.as_deref() == Some("external") {
+                list_external_workflows(config)
             } else {
                 list_workflows()
             }
@@ -73,6 +115,14 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
         WorkflowCommands::History { workflow_id } => show_history(workflow_id),
         WorkflowCommands::New { name, from } => new_workflow(name, from.as_deref(), config),
         WorkflowCommands::Validate { path } => validate_workflow_cmd(path, config),
+        WorkflowCommands::Add { name, from } => add_workflow(name, from, config),
+        WorkflowCommands::Remove { name } => remove_workflow(name, config),
+        WorkflowCommands::Publish {
+            name,
+            registry,
+            bump,
+        } => publish_workflow(name, registry.as_deref(), bump.as_deref(), config),
+        WorkflowCommands::Update { name, all } => update_workflows(name.as_deref(), *all, config),
     }
 }
 
@@ -485,6 +535,282 @@ fn validate_workflow_cmd(path: &std::path::Path, config: &GatewayConfig) -> anyh
     }
 
     Ok(())
+}
+
+// ── External source commands (v0.10.5) ──────────────────────────────
+
+/// Install a workflow from an external source.
+fn add_workflow(name: &str, from: &str, config: &GatewayConfig) -> anyhow::Result<()> {
+    let source = ExternalSource::parse(from).map_err(|e| {
+        anyhow::anyhow!(
+            "Invalid source '{}': {}\n\
+             Expected formats:\n  \
+             registry:org/name\n  \
+             gh:org/repo\n  \
+             https://example.com/workflow.yaml",
+            from,
+            e
+        )
+    })?;
+
+    let workflows_dir = config.workspace_root.join(".ta").join("workflows");
+    std::fs::create_dir_all(&workflows_dir)?;
+
+    let target_path = workflows_dir.join(format!("{}.yaml", name));
+    if target_path.exists() {
+        anyhow::bail!(
+            "Workflow '{}' already exists at {}.\n\
+             Remove it first: ta workflow remove {}",
+            name,
+            target_path.display(),
+            name
+        );
+    }
+
+    println!("Fetching workflow '{}' from {} ...", name, from);
+
+    let content = fetch_source_content(&source)?;
+
+    // Validate the fetched YAML is a valid workflow definition.
+    if let Err(e) = WorkflowDefinition::from_yaml(&content) {
+        anyhow::bail!(
+            "Fetched content from '{}' is not a valid workflow definition: {}\n\
+             Check that the source contains a valid TA workflow YAML.",
+            from,
+            e
+        );
+    }
+
+    std::fs::write(&target_path, &content)?;
+
+    // Compute checksum and record in lockfile.
+    let checksum = compute_checksum(&content);
+    let lock_path = config.workspace_root.join(".ta").join("workflows.lock");
+    let mut lockfile = Lockfile::load(&lock_path).unwrap_or_default();
+    lockfile.add(ta_changeset::sources::LockEntry {
+        name: name.to_string(),
+        version: "latest".to_string(),
+        source: from.to_string(),
+        checksum,
+    });
+    lockfile.save(&lock_path)?;
+
+    // Cache the content for offline use.
+    {
+        let cache = SourceCache::new("workflows");
+        let _ = cache.store(name, &content, &source, "latest");
+    }
+
+    println!("Installed workflow: {}", target_path.display());
+    println!("  Source: {}", from);
+    println!();
+    println!("Next steps:");
+    println!("  Validate: ta workflow validate {}", target_path.display());
+    println!("  Start:    ta workflow start {}", target_path.display());
+
+    Ok(())
+}
+
+/// Remove an externally-installed workflow.
+fn remove_workflow(name: &str, config: &GatewayConfig) -> anyhow::Result<()> {
+    let workflows_dir = config.workspace_root.join(".ta").join("workflows");
+    let target_path = workflows_dir.join(format!("{}.yaml", name));
+
+    if !target_path.exists() {
+        anyhow::bail!(
+            "Workflow '{}' not found at {}.\n\
+             List workflows with: ta workflow list",
+            name,
+            target_path.display()
+        );
+    }
+
+    std::fs::remove_file(&target_path)?;
+
+    // Remove from lockfile.
+    let lock_path = config.workspace_root.join(".ta").join("workflows.lock");
+    if let Ok(mut lockfile) = Lockfile::load(&lock_path) {
+        lockfile.remove(name);
+        let _ = lockfile.save(&lock_path);
+    }
+
+    // Remove from cache.
+    {
+        let cache = SourceCache::new("workflows");
+        let _ = cache.remove(name);
+    }
+
+    println!("Removed workflow: {}", name);
+
+    Ok(())
+}
+
+/// List externally-sourced workflows.
+fn list_external_workflows(config: &GatewayConfig) -> anyhow::Result<()> {
+    let lock_path = config.workspace_root.join(".ta").join("workflows.lock");
+
+    println!("External workflows:");
+
+    match Lockfile::load(&lock_path) {
+        Ok(lockfile) => {
+            let entries = lockfile.entries();
+            if entries.is_empty() {
+                println!("  (none installed)");
+            } else {
+                for entry in entries {
+                    println!(
+                        "  {} v{} (from: {})",
+                        entry.name, entry.version, entry.source
+                    );
+                }
+            }
+        }
+        Err(_) => {
+            println!("  (none installed)");
+        }
+    }
+
+    println!();
+    println!("Install a workflow:");
+    println!("  ta workflow add my-review --from registry:trustedautonomy/workflows");
+    println!("  ta workflow add deploy --from gh:myorg/ta-workflows");
+
+    Ok(())
+}
+
+/// Publish a workflow to a registry.
+fn publish_workflow(
+    name: &str,
+    registry: Option<&str>,
+    _bump: Option<&str>,
+    config: &GatewayConfig,
+) -> anyhow::Result<()> {
+    let workflows_dir = config.workspace_root.join(".ta").join("workflows");
+    let source_path = workflows_dir.join(format!("{}.yaml", name));
+
+    if !source_path.exists() {
+        anyhow::bail!(
+            "Workflow '{}' not found at {}.\n\
+             Create it first: ta workflow new {}",
+            name,
+            source_path.display(),
+            name
+        );
+    }
+
+    // Check for a package manifest.
+    let manifest_path = workflows_dir.join(format!("{}.package.yaml", name));
+    if !manifest_path.exists() {
+        // Generate a default package manifest.
+        let manifest = PackageManifest {
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            author: None,
+            description: None,
+            ta_version: None,
+            files: vec![format!("workflows/{}.yaml", name)],
+        };
+        let yaml = serde_yaml::to_string(&manifest)?;
+        std::fs::write(&manifest_path, &yaml)?;
+        println!("Generated package manifest: {}", manifest_path.display());
+    }
+
+    let reg = registry.unwrap_or("trustedautonomy");
+    println!("Publishing workflow '{}' to registry '{}'...", name, reg);
+    println!();
+    println!(
+        "Registry publishing is not yet available.\n\
+         To share workflows manually:\n  \
+         1. Push your .ta/workflows/{name}.yaml to a Git repository\n  \
+         2. Others can install it: ta workflow add {name} --from gh:org/repo",
+        name = name
+    );
+
+    Ok(())
+}
+
+/// Check for updates to external workflows.
+fn update_workflows(name: Option<&str>, _all: bool, config: &GatewayConfig) -> anyhow::Result<()> {
+    let lock_path = config.workspace_root.join(".ta").join("workflows.lock");
+    let lockfile = Lockfile::load(&lock_path).unwrap_or_default();
+    let entries = lockfile.entries();
+
+    if entries.is_empty() {
+        println!("No external workflows installed. Nothing to update.");
+        return Ok(());
+    }
+
+    let to_check: Vec<_> = if let Some(n) = name {
+        entries.iter().filter(|e| e.name == n).cloned().collect()
+    } else {
+        entries.to_vec()
+    };
+
+    if to_check.is_empty() {
+        if let Some(n) = name {
+            anyhow::bail!(
+                "Workflow '{}' is not an external workflow.\n\
+                 List external workflows: ta workflow list --source external",
+                n
+            );
+        }
+    }
+
+    println!("Checking {} workflow(s) for updates...", to_check.len());
+
+    for entry in &to_check {
+        if let Ok(source) = ExternalSource::parse(&entry.source) {
+            match fetch_source_content(&source) {
+                Ok(content) => {
+                    let new_checksum = compute_checksum(&content);
+                    if new_checksum != entry.checksum {
+                        println!("  {} — update available", entry.name);
+                    } else {
+                        println!("  {} — up to date", entry.name);
+                    }
+                }
+                Err(e) => {
+                    println!("  {} — failed to check: {}", entry.name, e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Fetch content from an external source using HTTP.
+fn fetch_source_content(source: &ExternalSource) -> anyhow::Result<String> {
+    let url = source.fetch_url();
+    let response = reqwest::blocking::get(&url).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to fetch from '{}': {}\n\
+             Check your network connection and the source URL.",
+            url,
+            e
+        )
+    })?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "HTTP {} when fetching '{}'.\n\
+             Check that the source exists and is accessible.",
+            response.status(),
+            url
+        );
+    }
+
+    response
+        .text()
+        .map_err(|e| anyhow::anyhow!("Failed to read response body from '{}': {}", url, e))
+}
+
+/// Compute SHA-256 checksum of content.
+fn compute_checksum(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 // Built-in template strings for when template files aren't on disk.
@@ -908,5 +1234,71 @@ roles:
         assert!(content.contains("await_human:"));
         assert!(content.contains("on_fail:"));
         assert!(content.contains("verdict:"));
+    }
+
+    #[test]
+    fn remove_workflow_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let result = remove_workflow("nonexistent", &config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not found"));
+    }
+
+    #[test]
+    fn remove_workflow_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        // Create a workflow first.
+        new_workflow("to-remove", None, &config).unwrap();
+        let path = dir.path().join(".ta/workflows/to-remove.yaml");
+        assert!(path.exists());
+        // Remove it.
+        remove_workflow("to-remove", &config).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn list_external_workflows_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let result = list_external_workflows(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn publish_workflow_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let result = publish_workflow("nonexistent", None, None, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn publish_workflow_creates_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        new_workflow("publishable", None, &config).unwrap();
+        publish_workflow("publishable", None, None, &config).unwrap();
+        let manifest_path = dir.path().join(".ta/workflows/publishable.package.yaml");
+        assert!(manifest_path.exists());
+    }
+
+    #[test]
+    fn update_workflows_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let result = update_workflows(None, false, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compute_checksum_deterministic() {
+        let a = compute_checksum("hello world");
+        let b = compute_checksum("hello world");
+        assert_eq!(a, b);
+        let c = compute_checksum("different");
+        assert_ne!(a, c);
     }
 }

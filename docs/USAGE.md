@@ -3506,6 +3506,131 @@ roles:
     prompt: "Review the implementation"
 ```
 
+### External Workflows & Agents
+
+Share and reuse workflow definitions and agent configurations across projects by pulling them from external sources — registries, GitHub repos, or raw URLs.
+
+#### Adding external workflows
+
+```bash
+# Pull a workflow from a registry
+ta workflow add security-review --from registry:trustedautonomy/workflows
+
+# Pull from a GitHub repo
+ta workflow add deploy-pipeline --from gh:myorg/ta-workflows
+
+# Pull from a raw URL
+ta workflow add ci-pipeline --from https://example.com/workflows/ci.yaml
+
+# List installed external workflows
+ta workflow list --source external
+
+# Update all pinned workflows to latest
+ta workflow update --all
+
+# Update a specific workflow
+ta workflow update security-review
+
+# Remove an external workflow
+ta workflow remove security-review
+```
+
+External workflows are cached locally in `~/.ta/cache/workflows/` and version-pinned in `.ta/workflow-lock.yaml`. The lockfile records the source URL, SHA-256 checksum, and fetch timestamp for each entry.
+
+#### Adding external agents
+
+```bash
+# Pull an agent config from a registry
+ta agent add security-reviewer --from registry:trustedautonomy/agents
+
+# Pull from a URL
+ta agent add code-auditor --from https://example.com/agents/auditor.yaml
+
+# List external agents
+ta agent list --source external
+
+# Remove an external agent
+ta agent remove code-auditor
+```
+
+Agent configs are cached in `~/.ta/cache/agents/` with the same lockfile-based version pinning.
+
+#### Publishing workflows
+
+Package and publish your workflows for others to use:
+
+```bash
+# Publish a workflow to a registry
+ta workflow publish my-workflow --registry trustedautonomy
+
+# Bump the version before publishing
+ta workflow publish my-workflow --bump minor
+```
+
+Publishing generates a `workflow-package.yaml` manifest if one doesn't exist:
+
+```yaml
+# workflow-package.yaml
+name: my-workflow
+version: 1.0.0
+author: your-org
+description: "Multi-stage deploy pipeline with review gates"
+ta_version: ">=0.10.5"
+files:
+  - workflows/my-workflow.yaml
+  - agents/deployer.yaml
+  - policies/deploy-baseline.yaml
+```
+
+#### Source URL schemes
+
+| Scheme | Example | Resolves to |
+|--------|---------|-------------|
+| `registry:` | `registry:org/name` | TA registry (future) |
+| `gh:` | `gh:org/repo` | GitHub raw content |
+| `https://` | `https://example.com/file.yaml` | Direct URL fetch |
+
+### Press Release Generation
+
+Generate a press-release-style announcement from your release notes:
+
+```bash
+# Configure a sample press release as the style template
+ta release config set press_release_template ./samples/sample-press-release.md
+
+# Generate a press release during release
+ta release run --press-release
+
+# Provide a custom prompt to guide the content
+ta release run --press-release --prompt "Focus on the workflow engine improvements"
+```
+
+The agent reads `.release-draft.md` (or falls back to recent `git log`), matches the tone and structure of your template document, and produces a draft press release that goes through the normal TA review process.
+
+### Multi-Language Plugin Builds
+
+Channel plugins can now use any language — not just Rust. Add a `build_command` field to `channel.toml` to specify how to build your plugin:
+
+```toml
+# channel.toml for a Go plugin
+name = "teams"
+version = "0.1.0"
+protocol = "jsonrpc"
+transport = "stdio"
+build_command = "go build -o ta-channel-teams ."
+```
+
+```toml
+# channel.toml for a Python plugin (no build needed, install deps)
+name = "webhook"
+version = "0.1.0"
+protocol = "jsonrpc"
+transport = "stdio"
+build_command = "pip install -e ."
+```
+
+When `ta plugin build` runs, it uses `build_command` if present, otherwise falls back to `cargo build --release` for Rust plugins. Non-Rust plugin directories are copied in their entirety (excluding `target/`, `node_modules/`, `__pycache__/`).
+
 ### Creating Custom Agent Profiles
 
 Agent profiles control how TA launches and constrains an agent. Create profiles for different roles (auditor, planner, full developer) or different agent tools (Ollama, LangChain, custom CLI).

@@ -81,6 +81,16 @@ pub struct PluginManifest {
     /// Timeout in seconds for a single delivery attempt.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+
+    /// Custom build command for non-Rust plugins.
+    ///
+    /// Rust plugins default to `cargo build --release` when this is absent.
+    /// Non-Rust plugins specify their own build step:
+    ///   - Go: `"go build -o ta-channel-teams ."`
+    ///   - Python: `"pip install -e ."`
+    ///   - Node: `"npm run build"`
+    #[serde(default)]
+    pub build_command: Option<String>,
 }
 
 fn default_version() -> String {
@@ -584,6 +594,32 @@ protocol = "json-stdio"
 "#;
         let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
         assert_eq!(manifest.args, vec!["-u", "channel_plugin.py"]);
+    }
+
+    #[test]
+    fn manifest_with_build_command() {
+        let toml_str = r#"
+name = "go-plugin"
+command = "ta-channel-teams"
+protocol = "json-stdio"
+build_command = "go build -o ta-channel-teams ."
+"#;
+        let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            manifest.build_command.as_deref(),
+            Some("go build -o ta-channel-teams .")
+        );
+    }
+
+    #[test]
+    fn manifest_without_build_command() {
+        let toml_str = r#"
+name = "rust-plugin"
+command = "ta-channel-rust"
+protocol = "json-stdio"
+"#;
+        let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
+        assert!(manifest.build_command.is_none());
     }
 
     #[test]

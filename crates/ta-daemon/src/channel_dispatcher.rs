@@ -119,6 +119,7 @@ impl ChannelDispatcher {
             capabilities: vec!["deliver_question".to_string()],
             description: None,
             timeout_secs: entry.timeout_secs,
+            build_command: None,
         };
 
         manifest.validate().map_err(|e| e.to_string())?;

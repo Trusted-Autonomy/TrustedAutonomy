@@ -25,6 +25,7 @@ pub mod review_channel;
 pub mod review_session;
 pub mod review_session_store;
 pub mod session_channel;
+pub mod sources;
 pub mod supervisor;
 pub mod terminal_channel;
 pub mod uri_pattern;
@@ -58,6 +59,9 @@ pub use review_session_store::ReviewSessionStore;
 pub use session_channel::{
     HumanInput, InteractiveConfig, InteractiveSession, InteractiveSessionState, OutputStream,
     SessionChannel, SessionChannelError, SessionEvent, SessionMessage,
+};
+pub use sources::{
+    CachedItem, ExternalSource, LockEntry, Lockfile, PackageManifest, SourceCache, SourceError,
 };
 pub use supervisor::{
     DependencyGraph, SupervisorAgent, ValidationError, ValidationResult, ValidationWarning,

@@ -458,6 +458,7 @@ mod tests {
             capabilities: vec![],
             description: None,
             timeout_secs: 30,
+            build_command: None,
         };
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
         assert_eq!(adapter.name(), "test-plugin");
@@ -478,6 +479,7 @@ mod tests {
             capabilities: vec![],
             description: None,
             timeout_secs: 5,
+            build_command: None,
         };
         // echo doesn't actually read stdin, but the adapter should handle that.
         // However echo "..." as a command won't work well via split_whitespace.
@@ -508,6 +510,7 @@ mod tests {
             capabilities: vec![],
             description: None,
             timeout_secs: 5,
+            build_command: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -529,6 +532,7 @@ mod tests {
             capabilities: vec![],
             description: None,
             timeout_secs: 5,
+            build_command: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -555,6 +559,7 @@ mod tests {
             capabilities: vec![],
             description: None,
             timeout_secs: 5,
+            build_command: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -576,6 +581,7 @@ mod tests {
             capabilities: vec![],
             description: None,
             timeout_secs: 5,
+            build_command: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -597,6 +603,7 @@ mod tests {
             capabilities: vec![],
             description: None,
             timeout_secs: 5,
+            build_command: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -618,6 +625,7 @@ mod tests {
             capabilities: vec![],
             description: None,
             timeout_secs: 5,
+            build_command: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -638,6 +646,7 @@ mod tests {
             capabilities: vec![],
             description: None,
             timeout_secs: 5,
+            build_command: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);

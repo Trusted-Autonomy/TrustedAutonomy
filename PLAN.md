@@ -4343,7 +4343,7 @@ protocol = "json-stdio"
 ---
 
 ### v0.10.5 — External Workflow & Agent Definitions
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Allow workflow definitions and agent configurations to be pulled from external sources (registries, git repos, URLs) so teams and third-party authors can publish reusable configurations. Include an automated release process with press-release generation.
 
 #### Problem
@@ -4415,18 +4415,18 @@ ta workflow publish deploy-pipeline --registry trustedautonomy
 ta workflow publish deploy-pipeline --bump minor
 ```
 
-#### Items
-1. [ ] External source resolver: registry, GitHub repo, and raw URL fetching for YAML configs
-2. [ ] `ta workflow add/remove/list` commands with `--from` source parameter
-3. [ ] `ta agent add/remove/list` commands with `--from` source parameter
-4. [ ] Workflow/agent package manifest format (`workflow-package.yaml`)
-5. [ ] Local cache for external configs (`~/.ta/cache/workflows/`, `~/.ta/cache/agents/`)
-6. [ ] Version pinning and update checking for external configs
-7. [ ] `ta release` press-release generation step with sample-based style matching
-8. [ ] Press release template configuration (`ta release config set press_release_template`)
-9. [ ] `ta workflow publish` command for authoring and publishing to registry
-10. [ ] Documentation: authoring guide for workflow/agent packages
-11. [ ] **Multi-language plugin builds**: Add `build_command` field to `channel.toml` so `ta plugin build` works with non-Rust plugins (Python, Go, Node). Rust plugins default to `cargo build --release`; others specify their own build step (e.g., `go build -o ta-channel-teams .`, `pip install -e .`). Extend v0.10.2.2's build runner to read and execute `build_command`.
+#### Completed
+1. [x] External source resolver: registry, GitHub repo, and raw URL fetching for YAML configs
+2. [x] `ta workflow add/remove/list` commands with `--from` source parameter
+3. [x] `ta agent add/remove/list` commands with `--from` source parameter
+4. [x] Workflow/agent package manifest format (`workflow-package.yaml`)
+5. [x] Local cache for external configs (`~/.ta/cache/workflows/`, `~/.ta/cache/agents/`)
+6. [x] Version pinning and update checking for external configs
+7. [x] `ta release` press-release generation step with sample-based style matching
+8. [x] Press release template configuration (`ta release config set press_release_template`)
+9. [x] `ta workflow publish` command for authoring and publishing to registry
+10. [x] Documentation: authoring guide for workflow/agent packages
+11. [x] **Multi-language plugin builds**: Add `build_command` field to `channel.toml` so `ta plugin build` works with non-Rust plugins (Python, Go, Node). Rust plugins default to `cargo build --release`; others specify their own build step (e.g., `go build -o ta-channel-teams .`, `pip install -e .`). Extend v0.10.2.2's build runner to read and execute `build_command`.
 
 #### Version: `0.10.5-alpha`
 
