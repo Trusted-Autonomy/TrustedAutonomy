@@ -52,6 +52,7 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [Interactive Shell](#interactive-shell)
    - [Webhook Review Channel](#webhook-review-channel)
    - [Discord Channel Plugin](#discord-channel-plugin)
+   - [Slack Channel Plugin](#slack-channel-plugin)
    - [MCP Tool Call Interception](#mcp-tool-call-interception)
    - [Session Lifecycle](#session-lifecycle)
    - [Unified Policy Config](#unified-policy-config)
@@ -2314,7 +2315,7 @@ Valid `decision` values:
 | `auto-approve` | Available | Auto-approves everything (for CI/batch) |
 | `webhook` | Available | File-based exchange for external integrations |
 | `discord` | Plugin | External plugin — Discord embeds with buttons (v0.10.2.1) |
-| `slack` | Stub | Future: Slack Block Kit cards with button callbacks |
+| `slack` | Plugin | External plugin — Slack Block Kit messages with buttons (v0.10.3) |
 | `email` | Stub | Future: SMTP send with IMAP reply parsing |
 
 ### Discord Channel Plugin
@@ -2382,6 +2383,75 @@ default_channels = ["discord"]
 ```
 
 See [Discord Channel Guide](guides/discord-channel.md) for the full setup guide including bot permissions, access control, and troubleshooting.
+
+### Slack Channel Plugin
+
+Slack is available as an **external channel plugin**. It delivers agent questions as Block Kit messages with interactive buttons to a Slack channel.
+
+#### Quick setup
+
+1. **Create a Slack app** at [api.slack.com/apps](https://api.slack.com/apps):
+   - Create New App → From scratch
+   - Under **OAuth & Permissions**, add the `chat:write` bot scope
+   - Install the app to your workspace and copy the **Bot User OAuth Token** (`xoxb-...`)
+   - Invite the bot to your target channel: `/invite @YourBotName`
+
+2. **Set environment variables**:
+   ```bash
+   export TA_SLACK_BOT_TOKEN="xoxb-your-bot-token"
+   export TA_SLACK_CHANNEL_ID="C01ABC23DEF"
+   # Optional: restrict who can respond
+   export TA_SLACK_ALLOWED_USERS="U01ABC,U02DEF"
+   ```
+
+3. **Build and install the plugin**:
+   ```bash
+   # Build from source (or use ta plugin build)
+   ta plugin build slack
+
+   # Or manually:
+   cd plugins/ta-channel-slack
+   cargo build --release
+   mkdir -p .ta/plugins/channels/slack
+   cp target/release/ta-channel-slack .ta/plugins/channels/slack/
+   cp channel.toml .ta/plugins/channels/slack/
+   ```
+
+4. **Configure** `.ta/daemon.toml`:
+   ```toml
+   [channels]
+   default_channels = ["slack"]
+   ```
+
+5. **Verify**:
+   ```bash
+   ta plugin validate
+   # Should show "slack" as valid with json-stdio protocol
+   ```
+
+#### How it works
+
+1. An agent calls `ta_ask_human` or needs input
+2. The daemon builds a `ChannelQuestion` and dispatches to the Slack plugin
+3. The plugin posts a Block Kit message with buttons (Approve/Deny, choices, or freeform instructions) to the configured Slack channel
+4. For long context, detail is posted as a thread reply
+5. A human clicks a button or replies in a thread
+6. The response flows back to TA via `POST /api/interactions/{id}/respond`
+
+#### Alternative: Inline config (no plugin install needed)
+
+Instead of installing the plugin directory, configure Slack directly in `.ta/daemon.toml`:
+
+```toml
+[[channels.external]]
+name = "slack"
+command = "/path/to/ta-channel-slack"
+protocol = "json-stdio"
+timeout_secs = 30
+
+[channels]
+default_channels = ["slack"]
+```
 
 ### Project Status Dashboard
 
@@ -2795,9 +2865,13 @@ When an agent calls `ta_ask_human`, the question can be delivered to external ch
 [channels]
 default_channels = ["discord"]  # Deliver questions to these channels by default
 
-[channels.slack]
-bot_token = "xoxb-your-bot-token"
-channel_id = "C1234567890"
+# Slack is an external plugin (v0.10.3). Set TA_SLACK_BOT_TOKEN and
+# TA_SLACK_CHANNEL_ID as environment variables. The plugin is auto-discovered
+# from .ta/plugins/channels/slack/ or can be configured inline:
+# [[channels.external]]
+# name = "slack"
+# command = "ta-channel-slack"
+# protocol = "json-stdio"
 
 # Discord is an external plugin (v0.10.2.1). Set TA_DISCORD_TOKEN and
 # TA_DISCORD_CHANNEL_ID as environment variables. The plugin is auto-discovered

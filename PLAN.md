@@ -4262,22 +4262,25 @@ ta plugin build --all
 ---
 
 ### v0.10.3 — Slack Channel Plugin
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Slack channel plugin built on the v0.10.2 plugin system — validates that the plugin loading infrastructure works end-to-end with a real service.
 
 #### Approach
 
 Built as an external plugin (JSON-over-stdio or standalone Rust binary), not an in-process crate. Uses Slack Block Kit for rich review messages and Socket Mode for outbound-only connectivity.
 
-#### Items
+#### Completed
+1. ✅ **Plugin binary** (`plugins/ta-channel-slack/`): Reads `ChannelQuestion` JSON from stdin, posts Block Kit message with Approve/Deny buttons to Slack via `chat.postMessage`, writes `DeliveryResult` to stdout — 17 tests
+2. ✅ **Thread-based detail**: Posts context as thread reply when context exceeds 500 chars (best-effort, non-blocking)
+3. ✅ **`channel.toml` manifest**: Plugin discovery via standard plugin loading (v0.10.2)
+4. ✅ **Block Kit payloads**: Header, question section, context section, interactive buttons (yes/no, choice, freeform), interaction ID footer
+5. ✅ **Actionable error messages**: Missing token, missing channel ID, Slack API errors with permission hints
+6. ✅ **`allowed_users` env var**: `TA_SLACK_ALLOWED_USERS` documented for access control integration
 
-1. **Plugin binary** (`plugins/ta-channel-slack/`): Reads `ChannelQuestion` JSON from stdin, posts Block Kit message with Approve/Deny buttons to Slack, writes `DeliveryResult` to stdout.
-2. **Socket Mode**: Connects outbound (no public URL needed) — recommended for solo/small team use.
-3. **HTTP Mode**: Alternative for teams with existing Slack interactivity endpoints.
-4. **Deny modal**: Uses Slack modal (`views.open`) for denial reason input.
-5. **Thread-based detail**: Post main review as message, diff details as thread replies.
-6. **`channel.toml` manifest**: Plugin discovery via standard plugin loading (v0.10.2).
-7. **`allowed_users`**: Access control for who can approve/deny via Slack.
+#### Remaining (deferred)
+- Socket Mode (outbound-only WebSocket) — requires `connections.open` + event loop; current plugin uses REST API which is simpler and sufficient for JSON-over-stdio protocol
+- Deny modal (`views.open`) — requires Slack interactivity endpoint to receive modal submissions; can be added when HTTP mode is implemented
+- HTTP Mode alternative — plugin supports JSON-over-stdio; HTTP mode can be added as a second plugin or runtime flag
 
 #### Config
 ```toml
@@ -4287,7 +4290,8 @@ command = "ta-channel-slack"
 protocol = "json-stdio"
 
 # Plugin reads these env vars directly
-# TA_SLACK_BOT_TOKEN, TA_SLACK_APP_TOKEN, TA_SLACK_CHANNEL_ID
+# TA_SLACK_BOT_TOKEN, TA_SLACK_CHANNEL_ID
+# TA_SLACK_ALLOWED_USERS (optional, comma-separated user IDs)
 ```
 
 #### Version: `0.10.3-alpha`

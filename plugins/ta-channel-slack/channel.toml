@@ -1,0 +1,7 @@
+name = "slack"
+version = "0.1.0"
+command = "ta-channel-slack"
+protocol = "json-stdio"
+capabilities = ["deliver_question"]
+description = "Slack channel plugin for Trusted Autonomy — posts agent questions as Block Kit messages with interactive buttons"
+timeout_secs = 30
