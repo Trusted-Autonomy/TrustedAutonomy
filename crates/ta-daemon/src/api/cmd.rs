@@ -239,42 +239,114 @@ pub async fn execute_command(
     }
 }
 
+/// Run a command with activity-aware timeout.
+///
+/// The timeout resets whenever stdout or stderr produces output. This means
+/// a command that is actively producing progress output (e.g., `draft apply`
+/// logging each file) will never time out, while a command that hangs silently
+/// will time out after `idle_timeout` seconds of inactivity.
 async fn run_command(
     binary: &str,
     args: &[String],
     working_dir: &std::path::Path,
-    timeout: std::time::Duration,
+    idle_timeout: std::time::Duration,
 ) -> Result<CmdResponse, String> {
-    // Global args (--project-root, --accept-terms) must come before the subcommand.
-    let result = tokio::time::timeout(timeout, async {
-        tokio::process::Command::new(binary)
-            .arg("--project-root")
-            .arg(working_dir)
-            .arg("--accept-terms")
-            .args(args)
-            .current_dir(working_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-    })
-    .await;
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
-    match result {
-        Ok(Ok(output)) => Ok(CmdResponse {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    let mut child = tokio::process::Command::new(binary)
+        .arg("--project-root")
+        .arg(working_dir)
+        .arg("--accept-terms")
+        .args(args)
+        .current_dir(working_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "Failed to execute '{}': {}. Is the ta binary at the expected path?",
+                binary, e
+            )
+        })?;
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    // Collect output lines, using a shared "last activity" timestamp to
+    // implement activity-aware timeout.
+    let last_activity = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now()));
+
+    let stdout_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let stderr_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+
+    let la1 = last_activity.clone();
+    let sl = stdout_lines.clone();
+    let stdout_task = tokio::spawn(async move {
+        if let Some(out) = stdout_pipe {
+            let mut reader = BufReader::new(out).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                *la1.lock().await = tokio::time::Instant::now();
+                sl.lock().await.push(line);
+            }
+        }
+    });
+
+    let la2 = last_activity.clone();
+    let el = stderr_lines.clone();
+    let stderr_task = tokio::spawn(async move {
+        if let Some(err) = stderr_pipe {
+            let mut reader = BufReader::new(err).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                *la2.lock().await = tokio::time::Instant::now();
+                el.lock().await.push(line);
+            }
+        }
+    });
+
+    // Poll: wait for the child to exit, but check for idle timeout periodically.
+    let check_interval = std::time::Duration::from_secs(5);
+    let status = loop {
+        match tokio::time::timeout(check_interval, child.wait()).await {
+            Ok(result) => break result,
+            Err(_) => {
+                // Check if we've been idle too long.
+                let elapsed = last_activity.lock().await.elapsed();
+                if elapsed > idle_timeout {
+                    // Kill the child and return timeout error.
+                    let _ = child.kill().await;
+                    let _ = stdout_task.await;
+                    let _ = stderr_task.await;
+                    let stderr_text = stderr_lines.lock().await.join("\n");
+                    let mut msg = format!(
+                        "Command timed out after {}s of inactivity ({}s elapsed total). \
+                         Configure commands.timeout_secs in .ta/daemon.toml to increase.",
+                        idle_timeout.as_secs(),
+                        elapsed.as_secs()
+                    );
+                    if !stderr_text.is_empty() {
+                        // Show last few lines of output for context.
+                        let tail: Vec<&str> = stderr_text.lines().rev().take(3).collect();
+                        msg.push_str("\nLast output:");
+                        for line in tail.iter().rev() {
+                            msg.push_str(&format!("\n  {}", line));
+                        }
+                    }
+                    return Err(msg);
+                }
+            }
+        }
+    };
+
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+
+    match status {
+        Ok(s) => Ok(CmdResponse {
+            exit_code: s.code().unwrap_or(-1),
+            stdout: stdout_lines.lock().await.join("\n"),
+            stderr: stderr_lines.lock().await.join("\n"),
         }),
-        Ok(Err(e)) => Err(format!(
-            "Failed to execute '{}': {}. Is the ta binary at the expected path?",
-            binary, e
-        )),
-        Err(_) => Err(format!(
-            "Command timed out after {}s. For long-running commands like 'ta run' or 'ta dev', \
-             configure [commands].long_timeout_secs in .ta/daemon.toml or run directly outside the shell.",
-            timeout.as_secs()
-        )),
+        Err(e) => Err(format!("Command wait error: {}", e)),
     }
 }
 

@@ -211,12 +211,13 @@ pub async fn ask_agent(
         Some(s) if s.status == SessionStatus::Running => {
             state.agent_sessions.touch_session(&body.session_id).await;
 
-            // Run the agent subprocess.
+            // Run the agent subprocess with the agent-specific timeout
+            // (default 5 min, not the 30s command timeout).
             let response = run_agent_prompt(
                 &s.agent,
                 &body.prompt,
                 &state.project_root,
-                state.daemon_config.commands.timeout_secs,
+                state.daemon_config.agent.timeout_secs,
             )
             .await;
 
@@ -307,8 +308,8 @@ async fn run_agent_prompt(
             agent, binary, e
         )),
         Err(_) => Err(format!(
-            "Agent timed out after {}s. Try a simpler prompt.",
-            timeout_secs
+            "Agent timed out after {}s. Configure agent.timeout_secs in daemon.toml to increase (default: 300).",
+            timeout.as_secs()
         )),
     }
 }

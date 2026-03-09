@@ -113,7 +113,7 @@ impl Default for CommandConfig {
                 "ta init *".to_string(),
                 "ta release run *".to_string(),
             ],
-            timeout_secs: 30,
+            timeout_secs: 120,
             long_running: vec![
                 "ta run *".to_string(),
                 "run *".to_string(),
@@ -135,6 +135,9 @@ pub struct AgentConfig {
     pub max_sessions: usize,
     pub idle_timeout_secs: u64,
     pub default_agent: String,
+    /// Timeout for agent prompt responses (default: 300s / 5 minutes).
+    /// Agent LLM calls can take minutes — this is separate from the command timeout.
+    pub timeout_secs: u64,
 }
 
 impl Default for AgentConfig {
@@ -143,6 +146,7 @@ impl Default for AgentConfig {
             max_sessions: 3,
             idle_timeout_secs: 3600,
             default_agent: "claude-code".to_string(),
+            timeout_secs: 300,
         }
     }
 }
@@ -511,7 +515,7 @@ mod tests {
         assert_eq!(config.server.bind, "127.0.0.1");
         assert!(!config.auth.require_token);
         assert!(config.auth.local_bypass);
-        assert_eq!(config.commands.timeout_secs, 30);
+        assert_eq!(config.commands.timeout_secs, 120);
         assert_eq!(config.agent.max_sessions, 3);
     }
 
