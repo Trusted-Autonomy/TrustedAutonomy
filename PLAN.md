@@ -4505,6 +4505,99 @@ The human stays in `ta shell` throughout. Release notes go through the standard 
 
 ---
 
+### v0.10.8 — Pre-Draft Verification Gate
+<!-- status: pending -->
+**Goal**: Run configurable build/lint/test checks after the agent exits but before the draft is created. Catches CI failures locally so broken drafts never reach review.
+
+#### Problem
+Today `ta run` builds a draft as soon as the agent exits — even if the agent left broken code. The user reviews, approves, applies, pushes, and CI fails. That's a wasted cycle. If TA runs the same checks CI would run *before* creating the draft, failures are caught immediately.
+
+#### Design
+A `[verify]` section in `.ta/workflow.toml` defines commands to run in the staging directory after the agent exits. If any command fails, the draft is not created — the agent can be re-entered (`ta run --follow-up`) to fix the issue.
+
+```toml
+[verify]
+# Commands run in staging dir after agent exits, before draft build.
+# All must pass (exit 0) for the draft to be created.
+commands = [
+    "cargo build --workspace",
+    "cargo test --workspace",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo fmt --all -- --check",
+]
+
+# On failure: "block" (no draft, default), "warn" (create draft with warning), "agent" (re-launch agent with error context)
+on_failure = "block"
+
+# Timeout per command in seconds (default: 300)
+timeout = 300
+```
+
+#### Behavior
+1. Agent exits normally
+2. TA runs each verify command sequentially in the staging directory
+3. **All pass**: Draft is built as normal
+4. **Any fail** (`on_failure = "block"`): No draft created. Print which command failed with output. Suggest `ta run --follow-up` to fix.
+5. **Any fail** (`on_failure = "warn"`): Draft is created with a verification warning visible in `ta draft view`
+6. **Any fail** (`on_failure = "agent"`): Re-launch the agent with the failure output injected as context (uses interactive mode if available)
+
+#### Items
+1. [ ] `VerifyConfig` struct in `crates/ta-submit/src/config.rs`: `commands`, `on_failure`, `timeout`
+2. [ ] `run_verification()` in `apps/ta-cli/src/commands/run.rs`: execute commands in staging dir after agent exit
+3. [ ] Wire into `ta run` flow: after agent exit, before `ta draft build`
+4. [ ] Block mode: abort draft creation on failure, print actionable error with failed command output
+5. [ ] Warn mode: create draft with `verification_warnings` field, show in `ta draft view`
+6. [ ] Agent mode: re-launch agent with failure context (depends on interactive mode v0.9.9.x)
+7. [ ] `--skip-verify` flag on `ta run` to bypass when needed
+8. [ ] Default `[verify]` section in `ta init` template with commented-out examples
+9. [ ] `ta verify` standalone command: run verification manually against current staging
+
+#### Version: `0.10.8-alpha`
+
+---
+
+### v0.10.9 — Smart Follow-Up UX
+<!-- status: pending -->
+**Goal**: Make `ta run --follow-up` a frictionless, context-aware entry point that works across VCS backends, channels, and workflow types — without requiring the user to know branch names, draft IDs, or internal state.
+
+#### Problem
+Today `--follow-up` requires the user to know which git branch holds the prior work, pass it explicitly, and understand the staging directory layout. This is wrong friction — especially for non-technical users working through email, social media, or DB migration workflows. The user's mental model is "I want to continue working on *that thing*" — TA should resolve what "that thing" means.
+
+#### Design
+`ta run --follow-up` (with no additional arguments) enters an interactive selection flow:
+
+1. **Gather candidates**: Scan recent goals, active drafts, in-progress plan phases, and open verification failures. Each candidate carries enough context to display a one-line summary.
+2. **Present picker**: Show a numbered list (or fuzzy-searchable in shell TUI) of follow-up candidates, sorted by recency. Each entry shows: phase/goal title, status (e.g., "draft denied", "verify failed", "in progress"), and age.
+3. **User selects**: User picks by number or searches. TA resolves the selection to the correct staging directory, branch, draft, or channel context.
+4. **Context injection**: TA injects relevant follow-up context into the agent's CLAUDE.md — what was attempted, what failed, what the user or reviewer said. The agent picks up where it left off.
+
+When a specific target is known, shortcuts still work:
+- `ta run --follow-up --phase 4b` — resume work on plan phase 4b
+- `ta run --follow-up --draft <id>` — follow up on a specific draft (denied, failed verify, etc.)
+- `ta run --follow-up --goal <id>` — continue from a prior goal's staging
+
+#### VCS & Channel Agnosticism
+The follow-up resolver doesn't assume git. It works from TA's own state:
+- **Goals**: `GoalRun` records in `.ta/goals/` — each has staging path, status, plan phase
+- **Drafts**: `DraftPackage` records — status, denial reason, verification warnings
+- **Plan phases**: `PLAN.md` status markers — in_progress phases are follow-up candidates
+- **Channel context**: For non-filesystem workflows (email drafts, social media posts, DB migrations), the follow-up context comes from the draft's `PatchSet` and interaction log rather than a git branch
+
+#### Items
+1. [ ] `FollowUpCandidate` struct: `source` (goal/draft/phase/verify-failure), `title`, `status`, `age`, `staging_path`, `context_summary`
+2. [ ] `gather_follow_up_candidates()`: scan goals, drafts, plan phases; filter to actionable items; sort by recency
+3. [ ] Interactive picker in `ta run --follow-up` (no args): display candidates, accept selection
+4. [ ] `--follow-up --phase <id>` shortcut: resolve directly from plan phase
+5. [ ] `--follow-up --draft <id>` shortcut: resolve from draft (inject denial reason / verify failure as context)
+6. [ ] `--follow-up --goal <id>` shortcut: resolve from prior goal
+7. [ ] Context injection: build follow-up section for CLAUDE.md with prior attempt summary, failure output, reviewer feedback
+8. [ ] Shell TUI integration: fuzzy-searchable follow-up picker when running from `ta shell`
+9. [ ] Channel-agnostic resolution: follow-up works for non-git workflows using draft PatchSet and interaction logs
+
+#### Version: `0.10.9-alpha`
+
+---
+
 ### v0.11.0 — Event-Driven Agent Routing
 <!-- status: pending -->
 **Goal**: Allow any TA event to trigger an agent workflow instead of (or in addition to) a static response. This is intelligent, adaptive event handling — not scripted hooks or n8n-style flowcharts. An agent receives the event context and decides what to do.
