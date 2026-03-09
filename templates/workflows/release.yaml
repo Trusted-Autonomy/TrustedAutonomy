@@ -1,0 +1,83 @@
+# release.yaml — Multi-stage release workflow with human review checkpoints.
+#
+# This workflow orchestrates a full release process:
+#   1. Validate prerequisites (clean tree, tag available)
+#   2. Generate release notes using the releaser agent
+#   3. Human reviews and approves release notes
+#   4. Build and verify
+#   5. Tag and publish
+#
+# Usage:
+#   ta workflow start templates/workflows/release.yaml
+#
+# Or copy to .ta/workflows/release.yaml for project-specific customization.
+# The `ta release run --interactive` command provides a simpler single-agent
+# alternative; use this workflow for teams that need multi-stage orchestration.
+
+name: release
+
+stages:
+  - name: validate
+    roles: [validator]
+    await_human: never
+
+  - name: generate-notes
+    depends_on: [validate]
+    roles: [releaser]
+    await_human: always
+    on_fail:
+      route_to: generate-notes
+      max_retries: 3
+
+  - name: build-verify
+    depends_on: [generate-notes]
+    roles: [builder]
+    await_human: on_fail
+
+  - name: publish
+    depends_on: [build-verify]
+    roles: [publisher]
+    await_human: always
+
+roles:
+  validator:
+    agent: claude-code
+    prompt: |
+      Validate that the release can proceed:
+      1. Check that the git working tree is clean
+      2. Verify the target tag does not already exist
+      3. Confirm all tests pass
+      Report any blockers.
+
+  releaser:
+    agent: releaser
+    prompt: |
+      Generate user-facing release notes from the commits since the last tag.
+      Write the notes to .release-draft.md organized into:
+      - New Features
+      - Improvements
+      - Bug Fixes
+      Focus on user impact, not implementation details.
+      Use ta_ask_human to present the draft for review.
+
+  builder:
+    agent: claude-code
+    prompt: |
+      Run the full verification suite:
+      - cargo build --workspace
+      - cargo test --workspace
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo fmt --all -- --check
+      Report results clearly.
+
+  publisher:
+    agent: claude-code
+    prompt: |
+      Complete the release:
+      1. Commit version bumps and release notes
+      2. Create an annotated git tag
+      3. Push to origin
+      Report the tag name and any GitHub Actions status.
+
+verdict:
+  pass_threshold: 1.0

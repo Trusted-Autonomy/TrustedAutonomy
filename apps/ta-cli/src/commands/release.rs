@@ -48,6 +48,11 @@ pub enum ReleaseCommands {
         /// Custom prompt for press-release generation.
         #[arg(long)]
         prompt: Option<String>,
+
+        /// Use the interactive release agent (releaser) with ta_ask_human
+        /// for human-in-the-loop review checkpoints.
+        #[arg(long)]
+        interactive: bool,
     },
     /// Show the pipeline that would be executed (without running it).
     Show {
@@ -64,6 +69,16 @@ pub enum ReleaseCommands {
         /// Value to set (path or string).
         value: String,
     },
+    /// Validate that the release pipeline can run without issues.
+    /// Checks version format, git state, pipeline config, and all prerequisites.
+    Validate {
+        /// Target version to validate.
+        version: String,
+
+        /// Custom pipeline file.
+        #[arg(long)]
+        pipeline: Option<PathBuf>,
+    },
 }
 
 pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -76,23 +91,31 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             pipeline,
             press_release,
             prompt,
+            interactive,
         } => {
-            run_pipeline(
-                config,
-                version,
-                *yes,
-                *dry_run,
-                *from_step,
-                pipeline.as_deref(),
-            )?;
-            if *press_release {
-                generate_press_release(config, version, prompt.as_deref())?;
+            if *interactive {
+                run_interactive_release(config, version)?;
+            } else {
+                run_pipeline(
+                    config,
+                    version,
+                    *yes,
+                    *dry_run,
+                    *from_step,
+                    pipeline.as_deref(),
+                )?;
+                if *press_release {
+                    generate_press_release(config, version, prompt.as_deref())?;
+                }
             }
             Ok(())
         }
         ReleaseCommands::Show { pipeline } => show_pipeline(config, pipeline.as_deref()),
         ReleaseCommands::Init => init_pipeline(config),
         ReleaseCommands::Config { key, value } => configure_release(config, key, value),
+        ReleaseCommands::Validate { version, pipeline } => {
+            validate_release(config, version, pipeline.as_deref())
+        }
     }
 }
 
@@ -874,6 +897,206 @@ fn generate_press_release(
     Ok(())
 }
 
+// ── Interactive release mode ─────────────────────────────────────
+
+/// Launch an interactive release as a TA goal using the `releaser` agent.
+///
+/// The releaser agent uses `ta_ask_human` for review checkpoints, allowing
+/// the human to stay in `ta shell` throughout the release process.
+fn run_interactive_release(config: &GatewayConfig, version: &str) -> anyhow::Result<()> {
+    let pipeline = load_pipeline(config, None)?;
+    let version = normalize_version(version, &pipeline.version_policy);
+    let (commits, last_tag) = collect_commits_since_last_tag(&config.workspace_root)?;
+
+    let objective = format!(
+        "You are the release agent for version v{version}.\n\n\
+         Execute the following release process interactively:\n\n\
+         1. Generate release notes from commits since {last_tag}:\n\
+         {commits}\n\n\
+         2. Write the release notes to .release-draft.md.\n\
+         3. Use ta_ask_human to ask the reviewer to approve the release notes.\n\
+         4. If the reviewer requests changes, revise and ask again.\n\
+         5. Once approved, confirm the release is ready.\n\n\
+         Write all release artifacts (.release-draft.md, CHANGELOG.md) directly.\n\
+         Use ta_ask_human for every checkpoint that needs human review.",
+        last_tag = last_tag.as_deref().unwrap_or("the beginning"),
+    );
+
+    let title = format!("release: Interactive release v{}", version);
+
+    let ta_bin = std::env::current_exe()?;
+    let args = vec![
+        "run".to_string(),
+        title,
+        "--agent".to_string(),
+        "releaser".to_string(),
+        "--source".to_string(),
+        config.workspace_root.display().to_string(),
+        "--objective".to_string(),
+        objective,
+    ];
+
+    println!("Launching interactive release agent for v{} ...", version);
+    println!("The agent will use ta_ask_human for review checkpoints.");
+    println!("Stay in ta shell to interact with the release process.");
+    println!();
+
+    let status = Command::new(&ta_bin)
+        .args(&args)
+        .current_dir(&config.workspace_root)
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "Interactive release agent exited with code {:?}. \
+             Check the goal status with: ta goal list",
+            status.code()
+        );
+    }
+
+    println!("Interactive release agent completed for v{}.", version);
+    Ok(())
+}
+
+// ── Release validation ──────────────────────────────────────────
+
+/// Validate that a release can proceed without actually executing anything.
+///
+/// Checks: version format, git state, tag availability, pipeline config,
+/// and required tooling.
+fn validate_release(
+    config: &GatewayConfig,
+    version: &str,
+    pipeline_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    let pipeline = load_pipeline(config, pipeline_path)?;
+    let version = normalize_version(version, &pipeline.version_policy);
+
+    println!("Validating release v{} ...", version);
+    println!();
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 1. Version format.
+    let version_re = regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$")?;
+    if version_re.is_match(&version) {
+        println!("  [ok] Version format: {}", version);
+    } else {
+        errors.push(format!("Invalid version format: '{}'", version));
+        println!("  [FAIL] Version format: {}", version);
+    }
+
+    // 2. Git state.
+    let git_clean = Command::new("git")
+        .args(["diff", "--quiet"])
+        .current_dir(&config.workspace_root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let git_staged_clean = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(&config.workspace_root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if git_clean && git_staged_clean {
+        println!("  [ok] Working tree is clean");
+    } else {
+        warnings.push("Working tree has uncommitted changes".to_string());
+        println!("  [warn] Working tree has uncommitted changes");
+    }
+
+    // 3. Tag availability.
+    let tag = format!("v{}", version);
+    let tag_exists = Command::new("git")
+        .args(["rev-parse", &tag])
+        .current_dir(&config.workspace_root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if tag_exists {
+        errors.push(format!("Tag '{}' already exists", tag));
+        println!("  [FAIL] Tag '{}' already exists", tag);
+    } else {
+        println!("  [ok] Tag '{}' is available", tag);
+    }
+
+    // 4. Pipeline config.
+    println!(
+        "  [ok] Pipeline '{}' loaded ({} steps)",
+        pipeline.name,
+        pipeline.steps.len()
+    );
+    for (i, step) in pipeline.steps.iter().enumerate() {
+        let kind = if step.run.is_some() {
+            "shell"
+        } else if step.agent.is_some() {
+            "agent"
+        } else {
+            "unknown"
+        };
+        let approval = if step.requires_approval {
+            " [approval]"
+        } else {
+            ""
+        };
+        println!("       {}. {} ({}){}", i + 1, step.name, kind, approval);
+    }
+
+    // 5. Dev toolchain check.
+    let dev_script = config.workspace_root.join("dev");
+    if dev_script.exists() {
+        println!("  [ok] ./dev script found");
+    } else {
+        warnings.push("./dev script not found — build steps may fail".to_string());
+        println!("  [warn] ./dev script not found");
+    }
+
+    // 6. Commits since last tag.
+    match collect_commits_since_last_tag(&config.workspace_root) {
+        Ok((commits, last_tag)) => {
+            let count = commits.lines().filter(|l| !l.is_empty()).count();
+            println!(
+                "  [ok] {} commits since {}",
+                count,
+                last_tag.as_deref().unwrap_or("(no previous tag)")
+            );
+        }
+        Err(e) => {
+            warnings.push(format!("Cannot collect commits: {}", e));
+            println!("  [warn] Cannot collect commits: {}", e);
+        }
+    }
+
+    println!();
+    if errors.is_empty() && warnings.is_empty() {
+        println!("Validation passed. Ready to release v{}.", version);
+    } else if errors.is_empty() {
+        println!(
+            "Validation passed with {} warning(s). Release can proceed.",
+            warnings.len()
+        );
+    } else {
+        println!(
+            "Validation failed: {} error(s), {} warning(s).",
+            errors.len(),
+            warnings.len()
+        );
+        for e in &errors {
+            println!("  ERROR: {}", e);
+        }
+        anyhow::bail!(
+            "Release validation failed with {} error(s). Fix the issues above and retry.",
+            errors.len()
+        );
+    }
+
+    Ok(())
+}
+
 // ── Default built-in pipeline ───────────────────────────────────
 
 const DEFAULT_PIPELINE_YAML: &str = r#"# .ta/release.yaml — TA release pipeline configuration.
@@ -932,7 +1155,7 @@ steps:
 
   - name: Generate release notes
     agent:
-      id: claude-code
+      id: releaser
     objective: |
       Synthesize user-facing release notes for version ${TAG}.
       Commits since ${LAST_TAG}:
@@ -1405,5 +1628,145 @@ steps:
             normalize_version("0.5.0.1", &pipeline.version_policy),
             "0.5.0-beta.1"
         );
+    }
+
+    #[test]
+    fn default_pipeline_uses_releaser_agent() {
+        let pipeline: ReleasePipeline = serde_yaml::from_str(DEFAULT_PIPELINE_YAML).unwrap();
+        let agent_step = pipeline
+            .steps
+            .iter()
+            .find(|s| s.agent.is_some())
+            .expect("should have an agent step");
+        assert_eq!(agent_step.agent.as_ref().unwrap().id, "releaser");
+    }
+
+    #[test]
+    fn validate_release_clean_repo() {
+        let temp = TempDir::new().unwrap();
+        // Initialize a git repo with a commit so validation can run.
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let config = GatewayConfig::for_project(temp.path());
+        // Should pass validation for a clean repo with available tag.
+        validate_release(&config, "1.0.0", None).unwrap();
+    }
+
+    #[test]
+    fn validate_release_existing_tag_fails() {
+        let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        // Use the exact tag that normalize_version("1.0.0-alpha") produces: v1.0.0-alpha.
+        Command::new("git")
+            .args(["tag", "-a", "v1.0.0-alpha", "-m", "release"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let config = GatewayConfig::for_project(temp.path());
+        // Should fail: tag v1.0.0-alpha already exists (1.0.0 normalizes to 1.0.0-alpha).
+        assert!(validate_release(&config, "1.0.0-alpha", None).is_err());
+    }
+
+    #[test]
+    fn e2e_pipeline_no_manual_gates() {
+        // End-to-end test: pipeline with all-shell steps, --yes skips approvals.
+        let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let config = GatewayConfig::for_project(temp.path());
+
+        // Write a simple pipeline that creates a marker file.
+        let ta_dir = temp.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("release.yaml"),
+            r#"name: e2e-test
+steps:
+  - name: create marker
+    run: echo "released ${VERSION}" > release-marker.txt
+  - name: verify marker
+    run: test -f release-marker.txt
+  - name: gated step
+    requires_approval: true
+    run: echo "approved"
+"#,
+        )
+        .unwrap();
+
+        // Run with --yes to skip approvals.
+        run_pipeline(&config, "1.0.0", true, false, None, None).unwrap();
+
+        // Verify the marker file was created.
+        let marker = temp.path().join("release-marker.txt");
+        assert!(marker.exists());
+        let content = std::fs::read_to_string(&marker).unwrap();
+        assert!(content.contains("released 1.0.0"));
+    }
+
+    #[test]
+    fn dry_run_validates_all_steps() {
+        let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let config = GatewayConfig::for_project(temp.path());
+
+        // Write a pipeline with steps that would fail if actually executed.
+        let ta_dir = temp.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("release.yaml"),
+            r#"name: dry-run-test
+steps:
+  - name: would-fail
+    run: exit 1
+  - name: gated
+    requires_approval: true
+    run: exit 1
+"#,
+        )
+        .unwrap();
+
+        // Dry run should succeed even with failing steps and approval gates.
+        run_pipeline(&config, "1.0.0", false, true, None, None).unwrap();
+
+        // Nothing should have been executed — no files created.
+        assert!(!temp.path().join("release-marker.txt").exists());
     }
 }

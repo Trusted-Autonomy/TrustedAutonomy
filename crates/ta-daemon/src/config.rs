@@ -111,6 +111,7 @@ impl Default for CommandConfig {
                 "ta run *".to_string(),
                 "ta dev *".to_string(),
                 "ta init *".to_string(),
+                "ta release run *".to_string(),
             ],
             timeout_secs: 30,
             long_running: vec![
@@ -120,6 +121,8 @@ impl Default for CommandConfig {
                 "dev *".to_string(),
                 "ta plan from *".to_string(),
                 "plan from *".to_string(),
+                "ta release run *".to_string(),
+                "release *".to_string(),
             ],
             long_timeout_secs: 3600,
         }
@@ -223,6 +226,10 @@ impl Default for ShellConfig {
                 ShortcutEntry {
                     r#match: "drafts".to_string(),
                     expand: "ta draft list".to_string(),
+                },
+                ShortcutEntry {
+                    r#match: "release".to_string(),
+                    expand: "ta release run".to_string(),
                 },
             ],
         }

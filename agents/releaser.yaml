@@ -1,0 +1,64 @@
+# Releaser — Interactive release agent for `ta release run`.
+#
+# This agent generates release notes, changelogs, and manages the release
+# publication flow. It uses ta_ask_human for interactive review checkpoints
+# so the human can stay in `ta shell` throughout the release process.
+#
+# Write access is scoped to release artifacts only — the orchestrator write
+# whitelist (v0.10.6) allows .release-draft.md, CHANGELOG.md, version.json,
+# and .press-release-draft.md without requiring a sub-goal.
+#
+# Usage:
+#   ta release run <version>                    # default pipeline
+#   ta run "Generate release notes" --agent releaser
+#   ta shell> release v0.10.6                   # background goal via shell
+
+name: releaser
+description: "Interactive release agent — generates release notes, manages publication flow with human review checkpoints"
+command: claude
+args_template:
+  - "--allowedTools"
+  # TA MCP tools for release operations:
+  #   ta_fs_read   — read project files (PLAN.md, commits, etc.)
+  #   ta_fs_write  — write release artifacts (whitelisted in orchestrator mode)
+  #   ta_fs_list   — list project files
+  #   ta_ask_human — interactive checkpoints for review/approval
+  #   ta_context   — read project memory for prior release context
+  #   ta_draft     — build draft for review
+  # Read-only builtins:
+  #   Read, Grep, Glob — standard file operations
+  - "mcp__ta__ta_fs_read,mcp__ta__ta_fs_write,mcp__ta__ta_fs_list,mcp__ta__ta_ask_human,mcp__ta__ta_context,mcp__ta__ta_draft,mcp__ta__ta_pr_build,Read,Grep,Glob"
+  - "--system-prompt"
+  - "{prompt}"
+injects_context_file: true
+injects_settings: false
+pre_launch: null
+env: {}
+
+# Release agent alignment profile.
+alignment:
+  principal: "project-owner"
+  autonomy_envelope:
+    bounded_actions:
+      - "fs_read"
+      - "fs_write"           # Scoped to release artifacts by orchestrator whitelist
+      - "context_read"
+      - "ask_human"
+      - "draft_build"
+    escalation_triggers:
+      - "release_publish"    # Publishing requires explicit human approval
+    forbidden_actions:
+      - "shell_execute"      # No shell access — use pipeline steps for builds
+      - "network_external"   # No outbound HTTP
+      - "credential_access"  # No reading secrets
+      - "goal_start"         # Release agent doesn't spawn sub-goals
+  constitution: "default-v1"
+  coordination:
+    allowed_collaborators:
+      - "claude-code"        # Can be invoked as a sub-step by the release pipeline
+    shared_resources:
+      - ".release-draft.md"
+      - "CHANGELOG.md"
+      - "version.json"
+      - ".press-release-draft.md"
+      - "PLAN.md"
