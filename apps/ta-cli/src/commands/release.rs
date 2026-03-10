@@ -627,7 +627,8 @@ fn find_latest_draft(config: &GatewayConfig) -> anyhow::Result<Option<uuid::Uuid
                     if let Ok(contents) = std::fs::read_to_string(&path) {
                         let dominated_by_terminal = contents.contains("\"applied\"")
                             || contents.contains("\"denied\"")
-                            || contents.contains("\"superseded\"");
+                            || contents.contains("\"superseded\"")
+                            || contents.contains("\"closed\"");
                         if dominated_by_terminal {
                             continue;
                         }
