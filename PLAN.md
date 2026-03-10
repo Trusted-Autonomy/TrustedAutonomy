@@ -1506,8 +1506,10 @@ This pattern extends beyond VCS to any adapter type:
 
 ---
 
-### v0.9.9 — Conversational Project Bootstrapping (`ta new`)
+### v0.9.9 — Conversational Project Bootstrapping (`ta new`) *(design only)*
 <!-- status: deferred -->
+**Status note**: Sub-phases v0.9.9.1–v0.9.9.5 are all **done** — they built the infrastructure (interactive mode, plan-from-doc, channel delivery, authoring tooling). However, the **parent `ta new` CLI command itself was never implemented**. The end-to-end bootstrapping flow described below doesn't exist yet. Implementation moved to **v0.10.17**.
+
 **Goal**: Start a new project from any interface by describing what you want in natural language. A planner agent generates the project structure and PLAN.md through conversation, then initializes the TA workspace.
 
 #### User Flow (from any interface)
@@ -2574,7 +2576,7 @@ timeout = 300
 ---
 
 ### v0.10.9 — Smart Follow-Up UX
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make `ta run --follow-up` a frictionless, context-aware entry point that works across VCS backends, channels, and workflow types — without requiring the user to know branch names, draft IDs, or internal state.
 
 #### Problem
@@ -2691,6 +2693,170 @@ Today `ta shell` has several UX gaps that force users to work around the TUI rat
 - 4 new tests in `config.rs`: shell_config_defaults, workflow_config_default_has_shell_section, parse_toml_with_shell_section, parse_toml_without_shell_section_uses_default
 
 #### Version: `0.10.11-alpha`
+
+---
+
+### v0.10.12 — Streaming Agent Q&A & Status Bar Enhancements
+<!-- status: done -->
+**Goal**: Eliminate 60s+ latency in `ta shell` Q&A by streaming agent responses instead of blocking, and add daemon version + agent name to the TUI status bar.
+
+#### Problem
+When the user asks a question in `ta shell`, the daemon spawned `claude --print` synchronously and blocked until the entire response was ready — often 60+ seconds with no feedback. The user had no indication the system was working. Additionally, the TUI status bar showed no information about the daemon version or which agent was handling Q&A.
+
+#### Completed
+1. ✅ **Streaming agent ask**: Refactored `ask_agent()` from blocking to streaming. Now creates a `GoalOutput` broadcast channel, spawns the agent subprocess in `tokio::spawn`, and returns an immediate ack with `request_id` and `status: "processing"`. Client subscribes to `GET /api/goals/:request_id/output` SSE stream for real-time output.
+2. ✅ **`__streaming__:` protocol**: `send_input()` in shell.rs detects `status: "processing"` responses and returns a `__streaming__:<request_id>` marker. TUI intercepts this and subscribes to the SSE stream via `start_tail_stream()`.
+3. ✅ **Daemon version in status bar**: `ProjectStatus` now includes `daemon_version` field. TUI status bar shows `◉ daemon <version>` with stale detection (yellow when version doesn't match CLI).
+4. ✅ **Default agent in status bar**: `ProjectStatus` now includes `default_agent` field. TUI status bar shows the configured Q&A agent name (e.g., `claude-code`) in magenta.
+5. ✅ **Removed fake "Thinking..." indicator**: Client-side fake indicator removed. The TUI now shows "Agent is working..." only after receiving the real ack from the daemon, then streams actual output.
+
+#### Version: `0.10.12-alpha`
+
+---
+
+### v0.10.13 — `ta plan add` Command (Agent-Powered Plan Updates)
+<!-- status: pending -->
+**Goal**: Add a `ta plan add` command that uses the planner agent to intelligently update PLAN.md through interactive dialog — not just raw text insertion.
+
+#### Problem
+Today, updating PLAN.md requires manual editing or knowing the exact phase structure. There's no way to say "add a phase for status bar improvements" and have the system figure out where it goes, what version number to assign, and what items belong in it. `ta plan create` generates a plan from scratch; `ta plan add` should modify an existing plan intelligently.
+
+#### Design
+```
+ta> plan add "Update ta shell status bar to show active Q&A agent model"
+
+Agent: I'll add this to the plan. A few questions:
+  1. Should this be a standalone phase or added to an existing one?
+  2. This requires detecting the model from the agent binary — should
+     that be a separate prerequisite phase?
+
+You: Standalone phase after v0.10.12. The model detection can be
+     a future item within the same phase.
+
+Agent: Added v0.10.14 — Agent Model Discovery & Status Display
+       - Detect LLM model name from agent process (framework-specific)
+       - Display model name in TUI status bar
+       - Future: Model capabilities reporting for smart routing
+```
+
+#### Items
+1. **`ta plan add <description>` CLI command**: Launches a planner agent session with the current PLAN.md as context. The agent proposes placement, version number, and items through interactive Q&A.
+2. **Existing plan awareness**: Agent reads current PLAN.md, understands phase ordering, version numbering, status markers, and dependencies.
+3. **Diff-based output**: Agent produces a PLAN.md diff that goes through standard draft review (not direct write).
+4. **Shell integration**: `plan add` available as a shell command, runs as background goal with interactive mode.
+5. **Non-interactive mode**: `ta plan add "description" --auto` for CI/scripted use — agent makes best-guess placement without asking questions.
+
+#### Version: `0.10.13-alpha`
+
+---
+
+### v0.10.14 — Deferred Items: Shell & Agent UX
+<!-- status: pending -->
+**Goal**: Address deferred shell and agent UX items that improve daily workflow before the v0.11 architecture changes.
+
+#### Items (from deferred backlogs)
+1. [ ] **`:tail <id> --lines <count>` override** (from v0.10.11): Custom history depth on tail start
+2. [ ] **Streaming agent response rendering** (from v0.9.8): Partial line rendering, markdown via termimad for rich agent output
+3. [ ] **Ctrl+C interrupt of current agent response** (from v0.9.8): Send SIGINT to agent subprocess, clear pending output
+4. [ ] **Non-disruptive event notifications** (from v0.9.8): Redraw prompt without breaking current input line
+5. [ ] **Split pane support** (from v0.9.8.3): Ctrl-W toggle for agent/shell side-by-side
+6. [ ] **Agent model discovery**: Detect actual LLM model name (e.g., "Claude Haiku 4.5") from agent process and display in TUI status bar
+7. [ ] **Progressive disclosure for draft view**: Summary → diffs on scroll (from v0.10.11)
+8. [ ] **Shell TUI fuzzy-searchable follow-up picker** (from v0.10.9)
+9. [ ] **Agent mode for verification failures**: Re-launch agent with failure context injection (from v0.10.8)
+10. [ ] **Input line text wrap**: The current ta> prompt line does not automatically word wrap with new lines added when the user types a long query
+
+#### Version: `0.10.14-alpha`
+
+---
+
+### v0.10.15 — Deferred Items: Observability & Audit
+<!-- status: pending -->
+**Goal**: Address deferred observability and audit items that strengthen governance before v0.11.
+
+#### Items (from deferred backlogs)
+1. [ ] **Automatic `agent_id` extraction** (from v0.9.6): Extract from `TA_AGENT_ID` env var on every MCP tool call
+2. [ ] **`caller_mode` in audit log entries** (from v0.9.6): Every audit entry includes the caller mode for traceability
+3. [ ] **Full tool-call audit logging in gateway** (from v0.9.3): Per-tool-call logging (not just session start/end) via event system
+4. [ ] **Verification integration in auto-approve flow** (from v0.9.8.1): Wire `require_tests_pass` / `require_clean_clippy` results into gateway auto-approve decisions
+5. [ ] **Auto-apply flow after auto-approve** (from v0.9.8.1): `auto_apply` config option
+6. [ ] **Event store pruning** (from v0.9.8.1): Prune events linked to archived/completed goals
+7. [ ] **`ta draft submit --require-review` flag** (from v0.9.8.1): Force human review even when auto-approve is configured
+8. [ ] **Audit trail entry for auto-approved drafts** (from v0.9.8.1): Via `ta-audit` crate
+
+#### Version: `0.10.15-alpha`
+
+---
+
+### v0.10.16 — Deferred Items: Platform & Channel Hardening
+<!-- status: pending -->
+**Goal**: Address deferred platform and channel items for production readiness.
+
+#### Items (from deferred backlogs)
+
+**Platform:**
+1. [ ] **MSI installer and `winget`/`scoop` packages** (from v0.9.1): Windows distribution
+2. [ ] **`ctrlc` crate integration** (from v0.9.1): Cross-platform signal handling
+3. [ ] **Sandbox runtime integration** (from v0.9.3): Wire `ta-sandbox` as command validator for orchestrator process
+4. [ ] **Unix domain socket listener** (from v0.9.7): `.ta/daemon.sock` for local IPC
+5. [ ] **Auto-start daemon** (from v0.9.8): `ta daemon start` in background if not running
+
+**Channels:**
+6. [ ] **Slack Socket Mode** (from v0.10.3): Outbound-only WebSocket via `connections.open`
+7. [ ] **Slack deny modal** (from v0.10.3): `views.open` for denial reason input
+8. [ ] **Discord deny modal** (from v0.10.1): Modal for denial reason input
+9. [ ] **Discord thread-based discussions** (from v0.10.1): Multi-turn review in threads
+10. [ ] **Email IMAP reply polling** (from v0.10.4): Background poller for reply-based approvals
+11. [ ] **Slack/Discord/Email interaction handler webhooks** (from v0.9.9.4): Receive button clicks and reply events
+12. [ ] **Channel access control** (from v0.9.8.1.1): `denied_roles` / `denied_users` fields
+13. [ ] **Agent tool access control** (from v0.9.8.1.1): Configurable tool allow/deny per agent config
+14. [ ] **Plugin version checking and upgrade management** (from v0.10.2, v0.10.4)
+15. [ ] **Plugin marketplace / remote install from URL** (from v0.10.2)
+
+#### Version: `0.10.16-alpha`
+
+---
+
+### v0.10.17 — `ta new` — Conversational Project Bootstrapping
+<!-- status: pending -->
+**Goal**: Implement the `ta new` CLI command that starts a conversational project bootstrapping session. The infrastructure exists (interactive mode v0.9.9.1, plan generation v0.9.9.3, channel delivery v0.9.9.4, authoring tooling v0.9.9.5) but the parent command and end-to-end flow were never built.
+
+See v0.9.9 design section above for the full architecture and user flow.
+
+#### Items
+1. [ ] **`ta new` CLI command** (`apps/ta-cli/src/commands/new.rs`): Entry point for conversational project bootstrapping
+2. [ ] **Planner agent session**: Starts in temp dir, runs multi-turn Q&A with user, generates project structure
+3. [ ] **Project scaffold generation**: `ta_scaffold` MCP tool creates directory structure and language-specific files
+4. [ ] **PLAN.md generation from conversation**: Planner agent produces structured PLAN.md with phases, versions, status markers
+5. [ ] **Template integration**: `ta new --template rust-cli` uses v0.7.3 templates as starting point
+6. [ ] **`ta new --from <brief.md>`**: Seed from written description (delegates to `ta plan from`)
+7. [ ] **Daemon API endpoint** (`POST /api/project/new`): Remote bootstrapping for Discord/Slack/email interfaces
+8. [ ] **Post-creation handoff**: Summary, offer to start first goal, shell context switch
+9. [ ] **`ta plan create --version-schema`** (from v0.9.9.5): Version schema template selection during plan creation
+
+#### Depends on
+- v0.10.13 (`ta plan add` — shares planner agent infrastructure)
+- v0.9.9.1–v0.9.9.5 (all done — interactive mode, plan generation, channel delivery, authoring tooling)
+
+#### Version: `0.10.17-alpha`
+
+---
+
+### v0.10.18 — Deferred Items: Workflow & Multi-Project
+<!-- status: pending -->
+**Goal**: Address remaining deferred items from workflow engine and multi-project phases.
+
+#### Items (from deferred backlogs)
+0. [ ] **Verify gaps** Before beginning ay of this work review the code to verify exactly what is incomplete and best intergration
+1. [ ] **Goal chaining context propagation** (from v0.9.8.2): Pass context between chained goals in daemon runtime
+2. [ ] **Full async process engine I/O** (from v0.9.8.2): Daemon tokio runtime for child process management
+3. [ ] **Live scoring agent integration** (from v0.9.8.2): LLM API call from scorer agent
+4. [ ] **Full GatewayState refactor** (from v0.9.10): `HashMap<String, ProjectContext>` with per-project stores
+5. [ ] **Thread context tracking** (from v0.9.10): Session-project binding across conversations
+6. [ ] **Config hot-reload** (from v0.9.10): Live registry swap on reload
+7. [ ] **Wire `ta sync` and `ta build` as pre-release steps** (from v0.10.6): Depends on v0.11.1, v0.11.2
+
+#### Version: `0.10.18-alpha`
 
 ---
 
@@ -3070,6 +3236,12 @@ A browser-based interface to TA's daemon API, aimed at users who need to start g
 ## Future Improvements (unscheduled)
 
 > Ideas that are valuable but not yet prioritized into a release phase. Pull into a versioned phase when ready.
+
+### OCI/gVisor Container Isolation (from v0.9.2)
+Enterprise-grade sandbox using OCI containers with gVisor for kernel-level agent isolation. The `ta-sandbox` crate provides command allowlists and CWD enforcement; OCI adds true process isolation with network/filesystem namespace separation.
+
+### Enterprise State Intercept (from v0.9.2)
+See `docs/enterprise-state-intercept.md`. Allows enterprises to intercept and audit all agent state transitions for compliance.
 
 ### External Plugin System
 Process-based plugin architecture so third parties can publish TA adapters as independent packages. A Perforce vendor, JIRA integration company, or custom VCS provider can ship a `ta-submit-<name>` executable that TA discovers and communicates with via JSON-over-stdio protocol. Extends beyond VCS to any adapter type: notification channels (`ta-channel-slack`), storage backends (`ta-store-postgres`), output integrations (`ta-output-jira`). Includes `ta plugin install/list/remove` commands, a plugin manifest format, and a plugin registry (crates.io or TA-hosted). Design sketched in v0.9.8.4; implementation deferred until the in-process adapter pattern is validated.

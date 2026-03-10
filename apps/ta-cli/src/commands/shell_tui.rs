@@ -887,7 +887,13 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             let styled = if line.stream == "stderr" {
                 OutputLine::agent_stderr(line.line)
             } else {
-                OutputLine::agent_stdout(line.line)
+                // Try to parse stream-json format from `claude --output-format stream-json`.
+                // Extract human-readable text content from JSON lines.
+                match parse_stream_json_text(&line.line) {
+                    Some(text) if !text.is_empty() => OutputLine::agent_stdout(text),
+                    Some(_) => return, // Empty text chunk — skip.
+                    None => OutputLine::agent_stdout(line.line), // Not JSON — show raw.
+                }
             };
             app.push_output(styled);
         }
@@ -958,27 +964,43 @@ fn draw_output(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let visible_height = inner.height as usize;
-    let total_lines = app.output.len();
+    let wrap_width = inner.width as usize;
 
-    // Calculate which lines to show based on scroll offset.
-    let end = total_lines.saturating_sub(app.scroll_offset as usize);
-    let start = end.saturating_sub(visible_height);
+    // Count total *visual* lines (accounting for word wrap) so scrollback works
+    // correctly when lines are longer than the terminal width.
+    let visual_line_count: usize = app
+        .output
+        .iter()
+        .map(|ol| {
+            if ol.text.is_empty() || wrap_width == 0 {
+                1
+            } else {
+                // Ceiling division: chars / width, minimum 1.
+                ol.text.len().div_ceil(wrap_width)
+            }
+        })
+        .sum();
 
-    let visible_lines = &app.output[start..end];
-
-    let lines: Vec<Line> = visible_lines
+    // Build all lines for the paragraph — ratatui's `.scroll()` handles the offset.
+    let lines: Vec<Line> = app
+        .output
         .iter()
         .map(|ol| Line::styled(ol.text.clone(), ol.style))
         .collect();
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    // `scroll_offset` 0 = bottom. Convert to a top-based scroll position.
+    let max_scroll = visual_line_count.saturating_sub(visible_height);
+    let scroll_y = max_scroll.saturating_sub(app.scroll_offset as usize);
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_y as u16, 0));
     f.render_widget(paragraph, inner);
 
-    // Scrollbar (only if content exceeds visible area).
-    if total_lines > visible_height {
+    // Scrollbar.
+    if visual_line_count > visible_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-        let mut scrollbar_state =
-            ScrollbarState::new(total_lines.saturating_sub(visible_height)).position(start);
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll_y);
         f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
@@ -1495,6 +1517,77 @@ async fn stream_agent_output(
     tx: tokio::sync::mpsc::UnboundedSender<TuiMessage>,
 ) {
     start_tail_stream(client, base_url, Some(request_id), tx, 0).await;
+}
+
+/// Extract human-readable text from a `claude --output-format stream-json` line.
+///
+/// Stream-json emits one JSON object per line on stdout. Text content appears in
+/// objects with `type: "assistant"` (or `type: "content_block_delta"`) and the
+/// text lives in nested fields. We extract it so the TUI shows readable text
+/// instead of raw JSON.
+///
+/// Returns `Some(text)` if the line is recognized stream-json (text may be empty
+/// for non-text events like tool_use), `None` if the line isn't valid JSON (pass
+/// through as-is).
+fn parse_stream_json_text(line: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(line).ok()?;
+
+    // The stream-json format varies, but text content typically appears as:
+    //   {"type":"assistant","content":[{"type":"text","text":"..."}], ...}
+    //   {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}, ...}
+    //   {"type":"result","result":"final text", ...}
+    //   {"type":"message","message":{...}, ...}  (message start/end)
+
+    // Try result type (final output).
+    if json["type"].as_str() == Some("result") {
+        if let Some(text) = json["result"].as_str() {
+            return Some(text.to_string());
+        }
+        // Result may contain a sub-object; try extracting text from it.
+        if let Some(text) = json["result"]["text"].as_str() {
+            return Some(text.to_string());
+        }
+        return Some(String::new()); // Result with no text — skip.
+    }
+
+    // Try content_block_delta (streaming text chunks).
+    if json["type"].as_str() == Some("content_block_delta") {
+        if let Some(text) = json["delta"]["text"].as_str() {
+            return Some(text.to_string());
+        }
+        return Some(String::new());
+    }
+
+    // Try assistant message with content array.
+    if json["type"].as_str() == Some("assistant") {
+        if let Some(content) = json["content"].as_array() {
+            let text: String = content
+                .iter()
+                .filter_map(|c| {
+                    if c["type"].as_str() == Some("text") {
+                        c["text"].as_str().map(String::from)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Some(text);
+        }
+        // Single text field.
+        if let Some(text) = json["content"].as_str() {
+            return Some(text.to_string());
+        }
+        return Some(String::new());
+    }
+
+    // Other recognized types (message start, tool_use, etc.) — suppress.
+    if json.get("type").is_some() {
+        return Some(String::new());
+    }
+
+    // Not recognized JSON format — return None so caller shows raw line.
+    None
 }
 
 /// Parse an SSE frame for a `goal_started` event.
@@ -2087,5 +2180,36 @@ mod tests {
         assert_eq!(app.output.len(), 10);
         // Scroll offset should have been reduced.
         assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn parse_stream_json_result() {
+        let line = r#"{"type":"result","result":"Hello world"}"#;
+        assert_eq!(parse_stream_json_text(line), Some("Hello world".into()));
+    }
+
+    #[test]
+    fn parse_stream_json_content_block_delta() {
+        let line =
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial "}}"#;
+        assert_eq!(parse_stream_json_text(line), Some("partial ".into()));
+    }
+
+    #[test]
+    fn parse_stream_json_assistant_content_array() {
+        let line = r#"{"type":"assistant","content":[{"type":"text","text":"Hello"}]}"#;
+        assert_eq!(parse_stream_json_text(line), Some("Hello".into()));
+    }
+
+    #[test]
+    fn parse_stream_json_non_text_type_returns_empty() {
+        let line = r#"{"type":"message_start","message":{}}"#;
+        assert_eq!(parse_stream_json_text(line), Some(String::new()));
+    }
+
+    #[test]
+    fn parse_stream_json_plain_text_returns_none() {
+        let line = "This is not JSON";
+        assert_eq!(parse_stream_json_text(line), None);
     }
 }
