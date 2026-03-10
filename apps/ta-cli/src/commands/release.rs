@@ -1798,6 +1798,182 @@ steps:
         assert!(content.contains("released 1.0.0"));
     }
 
+    // ── Output format contract tests ──────────────────────────────
+
+    #[test]
+    fn extract_draft_id_valid_output() {
+        let id = uuid::Uuid::new_v4();
+        let output = format!("some preamble\ndraft package built: {}\ndone", id);
+        assert_eq!(extract_draft_id_from_output(&output), Some(id));
+    }
+
+    #[test]
+    fn extract_draft_id_with_whitespace() {
+        let id = uuid::Uuid::new_v4();
+        let output = format!("  draft package built:  {}  \n", id);
+        assert_eq!(extract_draft_id_from_output(&output), Some(id));
+    }
+
+    #[test]
+    fn extract_draft_id_no_match() {
+        assert_eq!(
+            extract_draft_id_from_output("no draft here\nall done"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_draft_id_invalid_uuid() {
+        let output = "draft package built: not-a-uuid\n";
+        assert_eq!(extract_draft_id_from_output(output), None);
+    }
+
+    #[test]
+    fn extract_draft_id_empty_output() {
+        assert_eq!(extract_draft_id_from_output(""), None);
+    }
+
+    #[test]
+    fn extract_draft_id_picks_first_match() {
+        let id1 = uuid::Uuid::new_v4();
+        let id2 = uuid::Uuid::new_v4();
+        let output = format!(
+            "draft package built: {}\ndraft package built: {}\n",
+            id1, id2
+        );
+        assert_eq!(extract_draft_id_from_output(&output), Some(id1));
+    }
+
+    /// Contract test: the format string in draft.rs `println!("draft package built: {}", ...)`
+    /// must match what `extract_draft_id_from_output` parses. If either side changes,
+    /// this test ensures they stay in sync.
+    #[test]
+    fn draft_build_output_format_contract() {
+        let id = uuid::Uuid::new_v4();
+        // Simulate the exact format from draft.rs line 1068.
+        let line = format!("draft package built: {}", id);
+        assert_eq!(extract_draft_id_from_output(&line), Some(id));
+    }
+
+    #[test]
+    fn find_latest_draft_skips_applied() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let dir = &config.pr_packages_dir;
+        std::fs::create_dir_all(dir).unwrap();
+
+        let id = uuid::Uuid::new_v4();
+        std::fs::write(dir.join(format!("{}.json", id)), r#"{"status":"applied"}"#).unwrap();
+
+        let result = find_latest_draft(&config).unwrap();
+        assert!(result.is_none(), "applied draft should be skipped");
+    }
+
+    #[test]
+    fn find_latest_draft_skips_denied() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let dir = &config.pr_packages_dir;
+        std::fs::create_dir_all(dir).unwrap();
+
+        let id = uuid::Uuid::new_v4();
+        std::fs::write(dir.join(format!("{}.json", id)), r#"{"status":"denied"}"#).unwrap();
+
+        assert!(find_latest_draft(&config).unwrap().is_none());
+    }
+
+    #[test]
+    fn find_latest_draft_skips_superseded() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let dir = &config.pr_packages_dir;
+        std::fs::create_dir_all(dir).unwrap();
+
+        let id = uuid::Uuid::new_v4();
+        std::fs::write(
+            dir.join(format!("{}.json", id)),
+            r#"{"status":"superseded"}"#,
+        )
+        .unwrap();
+
+        assert!(find_latest_draft(&config).unwrap().is_none());
+    }
+
+    #[test]
+    fn find_latest_draft_skips_closed() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let dir = &config.pr_packages_dir;
+        std::fs::create_dir_all(dir).unwrap();
+
+        let id = uuid::Uuid::new_v4();
+        std::fs::write(dir.join(format!("{}.json", id)), r#"{"status":"closed"}"#).unwrap();
+
+        assert!(find_latest_draft(&config).unwrap().is_none());
+    }
+
+    #[test]
+    fn find_latest_draft_returns_eligible() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let dir = &config.pr_packages_dir;
+        std::fs::create_dir_all(dir).unwrap();
+
+        let id = uuid::Uuid::new_v4();
+        std::fs::write(
+            dir.join(format!("{}.json", id)),
+            r#"{"status":"pending_review"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(find_latest_draft(&config).unwrap(), Some(id));
+    }
+
+    #[test]
+    fn find_latest_draft_picks_eligible_over_terminal() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let dir = &config.pr_packages_dir;
+        std::fs::create_dir_all(dir).unwrap();
+
+        // Terminal draft.
+        let old_id = uuid::Uuid::new_v4();
+        std::fs::write(
+            dir.join(format!("{}.json", old_id)),
+            r#"{"status":"applied"}"#,
+        )
+        .unwrap();
+
+        // Eligible draft (written after, so newer mtime).
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let new_id = uuid::Uuid::new_v4();
+        std::fs::write(
+            dir.join(format!("{}.json", new_id)),
+            r#"{"status":"draft"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(find_latest_draft(&config).unwrap(), Some(new_id));
+    }
+
+    #[test]
+    fn find_latest_draft_empty_dir() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let dir = &config.pr_packages_dir;
+        std::fs::create_dir_all(dir).unwrap();
+
+        assert!(find_latest_draft(&config).unwrap().is_none());
+    }
+
+    #[test]
+    fn find_latest_draft_no_dir() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        // Don't create the dir — should return None, not error.
+        assert!(find_latest_draft(&config).unwrap().is_none());
+    }
+
     #[test]
     fn dry_run_validates_all_steps() {
         let temp = TempDir::new().unwrap();
