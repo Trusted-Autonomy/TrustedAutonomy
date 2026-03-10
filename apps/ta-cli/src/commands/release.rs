@@ -702,13 +702,14 @@ fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_ta
 fn prompt_approval(step_name: &str) -> anyhow::Result<bool> {
     use std::io::{self, IsTerminal, Write};
 
-    // Non-interactive context (daemon subprocess, CI): auto-approve.
+    // Non-interactive context (daemon subprocess, CI): deny by default.
+    // Use `--yes` to skip approval gates in non-interactive contexts.
     if !io::stdin().is_terminal() {
         println!(
-            "Proceed with '{}'? [y/N] y (auto-approved: non-interactive)",
+            "Proceed with '{}'? [y/N] n (no TTY — use --yes to skip approval gates)",
             step_name
         );
-        return Ok(true);
+        return Ok(false);
     }
 
     print!("Proceed with '{}'? [y/N] ", step_name);
@@ -1330,6 +1331,8 @@ steps:
     requires_approval: true
     run: |
       set -e
+      # Rebase onto remote in case main advanced since the release started.
+      git pull --rebase origin main
       git push origin main
       git push origin "${TAG}"
       echo "Pushed ${TAG}. GitHub Actions will build the release."

@@ -239,7 +239,7 @@ mod tests {
     fn shortcut_release() {
         let config = default_config();
         match route_input("release v0.10.6", &config) {
-            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta release run v0.10.6"),
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta release run --yes v0.10.6"),
             _ => panic!("expected Command from release shortcut"),
         }
     }
@@ -248,7 +248,7 @@ mod tests {
     fn shortcut_release_no_version() {
         let config = default_config();
         match route_input("release", &config) {
-            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta release run"),
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta release run --yes"),
             _ => panic!("expected Command from release shortcut"),
         }
     }

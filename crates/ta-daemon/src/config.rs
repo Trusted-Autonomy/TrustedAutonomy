@@ -270,7 +270,7 @@ impl Default for ShellConfig {
                 },
                 ShortcutEntry {
                     r#match: "release".to_string(),
-                    expand: "ta release run".to_string(),
+                    expand: "ta release run --yes".to_string(),
                 },
             ],
             ta_subcommands: default_ta_subcommands(),
