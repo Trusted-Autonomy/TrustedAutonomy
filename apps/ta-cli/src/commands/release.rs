@@ -700,7 +700,17 @@ fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_ta
 }
 
 fn prompt_approval(step_name: &str) -> anyhow::Result<bool> {
-    use std::io::{self, Write};
+    use std::io::{self, IsTerminal, Write};
+
+    // Non-interactive context (daemon subprocess, CI): auto-approve.
+    if !io::stdin().is_terminal() {
+        println!(
+            "Proceed with '{}'? [y/N] y (auto-approved: non-interactive)",
+            step_name
+        );
+        return Ok(true);
+    }
+
     print!("Proceed with '{}'? [y/N] ", step_name);
     io::stdout().flush()?;
     let mut input = String::new();
