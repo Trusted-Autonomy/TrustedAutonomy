@@ -753,6 +753,10 @@ async fn handle_terminal_event(
                             return;
                         }
 
+                        // Show immediate feedback while waiting for response.
+                        app.push_output(OutputLine::event("Thinking...".into()));
+                        app.scroll_to_bottom();
+
                         // Send to daemon asynchronously.
                         let client = client.clone();
                         let base_url = app.base_url.clone();
