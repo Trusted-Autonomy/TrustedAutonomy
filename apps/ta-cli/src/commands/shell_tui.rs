@@ -999,9 +999,15 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let daemon_indicator = if !app.daemon_connected {
         Span::styled(" ◉ daemon ", Style::default().fg(Color::Red))
     } else if is_stale {
-        Span::styled(" ◉ daemon (stale) ", Style::default().fg(Color::Yellow))
+        Span::styled(
+            format!(" ◉ daemon {} (stale) ", app.status.daemon_version),
+            Style::default().fg(Color::Yellow),
+        )
     } else {
-        Span::styled(" ◉ daemon ", Style::default().fg(Color::Green))
+        Span::styled(
+            format!(" ◉ daemon {} ", app.status.daemon_version),
+            Style::default().fg(Color::Green),
+        )
     };
 
     let phase_str = app.status.next_phase.as_deref().unwrap_or("(none)");
@@ -1029,6 +1035,11 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw("│"),
         daemon_indicator,
+        Span::raw("│"),
+        Span::styled(
+            format!(" {} ", app.status.default_agent),
+            Style::default().fg(Color::Magenta),
+        ),
     ];
 
     // Unread event badge.
@@ -1196,6 +1207,7 @@ async fn background_health(
                     let status = StatusInfo {
                         project: json["project"].as_str().unwrap_or("unknown").to_string(),
                         version: json["version"].as_str().unwrap_or("?").to_string(),
+                        daemon_version: json["daemon_version"].as_str().unwrap_or("?").to_string(),
                         next_phase: json["current_phase"]["id"].as_str().map(|id| {
                             let title = json["current_phase"]["title"].as_str().unwrap_or("");
                             format!("{} -- {}", id, title)
@@ -1205,6 +1217,10 @@ async fn background_health(
                             .as_array()
                             .map(|a| a.len())
                             .unwrap_or(0),
+                        default_agent: json["default_agent"]
+                            .as_str()
+                            .unwrap_or("claude-code")
+                            .to_string(),
                     };
                     let _ = tx.send(TuiMessage::StatusUpdate(status));
                 }

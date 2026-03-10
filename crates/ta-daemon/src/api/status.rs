@@ -22,6 +22,8 @@ pub struct ProjectStatus {
     /// Explicit daemon version field for version guard checks.
     /// Always matches `version` but provides a stable API contract.
     pub daemon_version: String,
+    /// The default agent binary for shell Q&A (e.g., "claude-code").
+    pub default_agent: String,
     pub current_phase: Option<PhaseInfo>,
     pub active_agents: Vec<AgentInfo>,
     pub pending_drafts: usize,
@@ -133,6 +135,7 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         project: project_name,
         version: version.clone(),
         daemon_version: version,
+        default_agent: state.daemon_config.agent.default_agent.clone(),
         current_phase,
         active_agents,
         pending_drafts,

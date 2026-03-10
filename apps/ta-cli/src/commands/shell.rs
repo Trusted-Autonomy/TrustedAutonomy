@@ -268,9 +268,12 @@ async fn run_shell(base_url: String, attach_session: Option<String>) -> anyhow::
 pub(crate) struct StatusInfo {
     pub(crate) project: String,
     pub(crate) version: String,
+    pub(crate) daemon_version: String,
     pub(crate) next_phase: Option<String>,
     pub(crate) pending_drafts: usize,
     pub(crate) active_agents: usize,
+    /// The default agent binary name (e.g., "claude-code").
+    pub(crate) default_agent: String,
 }
 
 pub(crate) async fn fetch_status(client: &reqwest::Client, base_url: &str) -> StatusInfo {
@@ -286,6 +289,7 @@ pub(crate) async fn fetch_status(client: &reqwest::Client, base_url: &str) -> St
     StatusInfo {
         project: json["project"].as_str().unwrap_or("unknown").to_string(),
         version: json["version"].as_str().unwrap_or("?").to_string(),
+        daemon_version: json["daemon_version"].as_str().unwrap_or("?").to_string(),
         next_phase: json["current_phase"]["id"].as_str().map(|id| {
             let title = json["current_phase"]["title"].as_str().unwrap_or("");
             format!("{} -- {}", id, title)
@@ -295,6 +299,10 @@ pub(crate) async fn fetch_status(client: &reqwest::Client, base_url: &str) -> St
             .as_array()
             .map(|a| a.len())
             .unwrap_or(0),
+        default_agent: json["default_agent"]
+            .as_str()
+            .unwrap_or("claude-code")
+            .to_string(),
     }
 }
 
