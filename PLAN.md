@@ -2765,6 +2765,7 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 8. [ ] **Shell TUI fuzzy-searchable follow-up picker** (from v0.10.9)
 9. [ ] **Agent mode for verification failures**: Re-launch agent with failure context injection (from v0.10.8)
 10. [ ] **Input line text wrap**: The current ta> prompt line does not automatically word wrap with new lines added when the user types a long query
+11. [ ] **Interactive release approval via TUI**: Wire approval prompts through daemon SSE/TUI channel so `ta shell` can present `[y/N]` interactively for release pipeline gates (e.g., review release notes before commit). Add `--auto-approve` flag for CI/non-interactive use. Currently all gates auto-approve in daemon context since there is no TTY.
 
 #### Version: `0.10.14-alpha`
 
