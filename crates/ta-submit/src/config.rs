@@ -33,6 +33,10 @@ pub struct WorkflowConfig {
     /// Pre-draft verification gate configuration
     #[serde(default)]
     pub verify: VerifyConfig,
+
+    /// Shell TUI configuration
+    #[serde(default)]
+    pub shell: ShellConfig,
 }
 
 /// Submit adapter configuration
@@ -321,6 +325,45 @@ fn default_verify_timeout() -> u64 {
     300
 }
 
+/// Shell TUI configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellConfig {
+    /// Number of lines to backfill when attaching to a tail stream. Default: 5.
+    #[serde(default = "default_tail_backfill_lines")]
+    pub tail_backfill_lines: usize,
+
+    /// Maximum number of lines retained in the TUI output buffer. Default: 10000.
+    /// Older lines are dropped when this limit is exceeded.
+    #[serde(default = "default_output_buffer_lines")]
+    pub output_buffer_lines: usize,
+
+    /// Automatically tail agent output when a goal starts. Default: true.
+    #[serde(default = "default_auto_tail")]
+    pub auto_tail: bool,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            tail_backfill_lines: default_tail_backfill_lines(),
+            output_buffer_lines: default_output_buffer_lines(),
+            auto_tail: default_auto_tail(),
+        }
+    }
+}
+
+fn default_tail_backfill_lines() -> usize {
+    5
+}
+
+fn default_output_buffer_lines() -> usize {
+    10000
+}
+
+fn default_auto_tail() -> bool {
+    true
+}
+
 impl WorkflowConfig {
     /// Load workflow config from .ta/workflow.toml
     pub fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -496,5 +539,47 @@ adapter = "git"
         assert_eq!(VerifyOnFailure::Block.to_string(), "block");
         assert_eq!(VerifyOnFailure::Warn.to_string(), "warn");
         assert_eq!(VerifyOnFailure::Agent.to_string(), "agent");
+    }
+
+    #[test]
+    fn shell_config_defaults() {
+        let config = ShellConfig::default();
+        assert_eq!(config.tail_backfill_lines, 5);
+        assert_eq!(config.output_buffer_lines, 10000);
+        assert!(config.auto_tail);
+    }
+
+    #[test]
+    fn workflow_config_default_has_shell_section() {
+        let config = WorkflowConfig::default();
+        assert_eq!(config.shell.tail_backfill_lines, 5);
+        assert_eq!(config.shell.output_buffer_lines, 10000);
+        assert!(config.shell.auto_tail);
+    }
+
+    #[test]
+    fn parse_toml_with_shell_section() {
+        let toml = r#"
+[shell]
+tail_backfill_lines = 20
+output_buffer_lines = 5000
+auto_tail = false
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.shell.tail_backfill_lines, 20);
+        assert_eq!(config.shell.output_buffer_lines, 5000);
+        assert!(!config.shell.auto_tail);
+    }
+
+    #[test]
+    fn parse_toml_without_shell_section_uses_default() {
+        let toml = r#"
+[submit]
+adapter = "git"
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.shell.tail_backfill_lines, 5);
+        assert_eq!(config.shell.output_buffer_lines, 10000);
+        assert!(config.shell.auto_tail);
     }
 }

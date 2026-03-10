@@ -38,6 +38,28 @@ pub enum TuiMessage {
     DaemonUp,
     /// An agent is asking a question (from SSE `agent_needs_input` event).
     AgentQuestion(PendingQuestion),
+    /// Live agent output line from goal output stream (v0.10.11).
+    AgentOutput(AgentOutputLine),
+    /// A goal started — may trigger auto-tail (v0.10.11).
+    GoalStarted { goal_id: String, title: String },
+    /// Agent output stream ended (goal process exited).
+    AgentOutputDone(String),
+    /// A draft is ready for review (v0.10.11).
+    DraftReady {
+        #[allow(dead_code)]
+        goal_id: String,
+        #[allow(dead_code)]
+        draft_id: String,
+        display_id: String,
+        title: String,
+    },
+}
+
+/// A line of live agent output (v0.10.11).
+#[derive(Clone, Debug)]
+pub struct AgentOutputLine {
+    pub stream: String,
+    pub line: String,
 }
 
 /// A pending question from an agent that needs a human response.
@@ -89,6 +111,36 @@ impl OutputLine {
             style: Style::default().fg(Color::Cyan),
         }
     }
+
+    fn agent_stdout(text: String) -> Self {
+        Self {
+            text,
+            style: Style::default().fg(Color::White),
+        }
+    }
+
+    fn agent_stderr(text: String) -> Self {
+        Self {
+            text,
+            style: Style::default().fg(Color::Yellow),
+        }
+    }
+
+    fn notification(text: String) -> Self {
+        Self {
+            text,
+            style: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        }
+    }
+
+    fn separator(text: String) -> Self {
+        Self {
+            text,
+            style: Style::default().fg(Color::DarkGray),
+        }
+    }
 }
 
 /// The TUI application state.
@@ -125,6 +177,14 @@ struct App {
     session_id: Option<String>,
     /// Pending agent question awaiting human response.
     pending_question: Option<PendingQuestion>,
+    /// Goal ID currently being tailed for agent output (v0.10.11).
+    tailing_goal: Option<String>,
+    /// Maximum output buffer lines (configurable, v0.10.11).
+    output_buffer_limit: usize,
+    /// Whether auto-tail on goal start is enabled (v0.10.11).
+    auto_tail: bool,
+    /// Number of lines to show as backfill when attaching to tail (v0.10.11).
+    tail_backfill_lines: usize,
 }
 
 impl App {
@@ -146,11 +206,22 @@ impl App {
             completions: Vec::new(),
             session_id,
             pending_question: None,
+            tailing_goal: None,
+            output_buffer_limit: 10000,
+            auto_tail: true,
+            tail_backfill_lines: 5,
         }
     }
 
     fn push_output(&mut self, line: OutputLine) {
         self.output.push(line);
+        // Enforce buffer limit — drop oldest lines when exceeded.
+        if self.output.len() > self.output_buffer_limit {
+            let excess = self.output.len() - self.output_buffer_limit;
+            self.output.drain(..excess);
+            // Adjust scroll offset to compensate for removed lines.
+            self.scroll_offset = self.scroll_offset.saturating_sub(excess as u16);
+        }
         // If scrolled up, don't auto-scroll — increment unread.
         if self.scroll_offset > 0 {
             self.unread_events += 1;
@@ -406,11 +477,24 @@ async fn run_tui(base_url: String, attach_session: Option<String>) -> anyhow::Re
     // Fetch completions.
     let completions = super::shell::fetch_completions(&client, &base_url).await;
 
+    // Load shell config from workflow.toml (v0.10.11).
+    let shell_config = {
+        // Try to find the project root from the status endpoint or use cwd.
+        let workflow_path = std::env::current_dir()
+            .unwrap_or_default()
+            .join(".ta/workflow.toml");
+        let wf = ta_submit::WorkflowConfig::load_or_default(&workflow_path);
+        wf.shell
+    };
+
     // Create app state.
     let mut app = App::new(base_url.clone(), attach_session.clone());
     app.status = initial_status;
     app.daemon_connected = true;
     app.completions = completions;
+    app.output_buffer_limit = shell_config.output_buffer_lines;
+    app.auto_tail = shell_config.auto_tail;
+    app.tail_backfill_lines = shell_config.tail_backfill_lines;
 
     // Welcome message.
     app.push_output(OutputLine::info(format!(
@@ -516,7 +600,35 @@ async fn tui_event_loop(
             // Background messages.
             msg = rx.recv() => {
                 if let Some(msg) = msg {
+                    // Check if this is a GoalStarted that needs auto-tail.
+                    let auto_tail_goal = if let TuiMessage::GoalStarted { ref goal_id, .. } = msg {
+                        if app.auto_tail && app.tailing_goal.is_none() {
+                            Some(goal_id.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     handle_tui_message(app, msg);
+
+                    // Spawn auto-tail if triggered.
+                    if let Some(goal_id) = auto_tail_goal {
+                        let tail_client = client.clone();
+                        let tail_base = app.base_url.clone();
+                        let tail_tx = tx.clone();
+                        let backfill = app.tail_backfill_lines;
+                        tokio::spawn(async move {
+                            start_tail_stream(
+                                tail_client,
+                                &tail_base,
+                                Some(&goal_id),
+                                tail_tx,
+                                backfill,
+                            ).await;
+                        });
+                    }
                 }
             }
         }
@@ -617,12 +729,27 @@ async fn handle_terminal_event(
                             _ => {}
                         }
 
-                        // :tail is handled synchronously in classic mode but we
-                        // can't block the TUI loop. Show a hint instead.
+                        // :tail — attach to goal output stream (v0.10.11).
                         if text.starts_with(":tail") {
-                            app.push_output(OutputLine::info(
-                                "Tip: Agent output appears inline via SSE events. Use PgUp/PgDn to scroll.".into(),
-                            ));
+                            let goal_id_arg = text.strip_prefix(":tail").map(|s| s.trim());
+                            let goal_id_arg = match goal_id_arg {
+                                Some(s) if !s.is_empty() => Some(s.to_string()),
+                                _ => None,
+                            };
+                            let client = client.clone();
+                            let base_url = app.base_url.clone();
+                            let tx = tx.clone();
+                            let backfill = app.tail_backfill_lines;
+                            tokio::spawn(async move {
+                                start_tail_stream(
+                                    client,
+                                    &base_url,
+                                    goal_id_arg.as_deref(),
+                                    tx,
+                                    backfill,
+                                )
+                                .await;
+                            });
                             return;
                         }
 
@@ -738,6 +865,49 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             ));
             app.scroll_to_bottom();
             app.pending_question = Some(pq);
+        }
+        TuiMessage::AgentOutput(line) => {
+            let styled = if line.stream == "stderr" {
+                OutputLine::agent_stderr(line.line)
+            } else {
+                OutputLine::agent_stdout(line.line)
+            };
+            app.push_output(styled);
+        }
+        TuiMessage::GoalStarted { goal_id, title } => {
+            app.push_output(OutputLine::notification(format!(
+                "[goal started] \"{}\" ({})",
+                title,
+                &goal_id[..8.min(goal_id.len())]
+            )));
+            app.scroll_to_bottom();
+            // Store goal ID for auto-tail (the actual tail subscription is handled
+            // by the caller since it needs the tx channel and client).
+            if app.auto_tail && app.tailing_goal.is_none() {
+                app.tailing_goal = Some(goal_id);
+            }
+        }
+        TuiMessage::AgentOutputDone(goal_id) => {
+            let short_id = &goal_id[..8.min(goal_id.len())];
+            app.push_output(OutputLine::separator(format!(
+                "━━━ Agent output ended ({}) ━━━",
+                short_id
+            )));
+            if app.tailing_goal.as_deref() == Some(&goal_id) {
+                app.tailing_goal = None;
+            }
+        }
+        TuiMessage::DraftReady {
+            goal_id: _,
+            draft_id: _,
+            display_id,
+            title,
+        } => {
+            app.push_output(OutputLine::notification(format!(
+                "[draft ready] \"{}\" ({}) — run: draft view {}",
+                title, display_id, display_id
+            )));
+            app.scroll_to_bottom();
         }
     }
 }
@@ -881,6 +1051,19 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    // Tailing indicator (v0.10.11).
+    if let Some(ref goal_id) = app.tailing_goal {
+        let short = &goal_id[..8.min(goal_id.len())];
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            format!(" tailing {} ", short),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Workflow stage indicator.
     if let Some(ref stage) = app.workflow_prompt {
         spans.push(Span::raw("│"));
@@ -949,9 +1132,23 @@ async fn background_sse(
             while let Some(pos) = buffer.find("\n\n") {
                 let frame = buffer[..pos].to_string();
                 buffer = buffer[pos + 2..].to_string();
-                // Check if this is an agent_needs_input event before generic rendering.
+
+                // Check for structured events before generic rendering.
                 if let Some(pq) = parse_agent_question(&frame) {
                     let _ = tx.send(TuiMessage::AgentQuestion(pq));
+                } else if let Some((goal_id, title)) = parse_goal_started(&frame) {
+                    let _ = tx.send(TuiMessage::GoalStarted { goal_id, title });
+                } else if let Some(dr) = parse_draft_built(&frame) {
+                    let _ = tx.send(TuiMessage::DraftReady {
+                        goal_id: dr.0,
+                        draft_id: dr.1,
+                        display_id: dr.2,
+                        title: dr.3,
+                    });
+                    // Also render the generic SSE event for the log.
+                    if let Some(rendered) = super::shell::render_sse_event(&frame) {
+                        let _ = tx.send(TuiMessage::SseEvent(rendered));
+                    }
                 } else if let Some(rendered) = super::shell::render_sse_event(&frame) {
                     let _ = tx.send(TuiMessage::SseEvent(rendered));
                 }
@@ -1097,6 +1294,226 @@ async fn send_interaction_response(
     ))
 }
 
+/// Start streaming agent output from a goal's output endpoint (v0.10.11).
+///
+/// Resolves the goal ID (auto-selects if only one running), connects to
+/// `GET /api/goals/:id/output` SSE, and publishes lines as `AgentOutput`
+/// messages to the TUI event loop.
+async fn start_tail_stream(
+    client: reqwest::Client,
+    base_url: &str,
+    goal_id: Option<&str>,
+    tx: tokio::sync::mpsc::UnboundedSender<TuiMessage>,
+    _backfill_lines: usize,
+) {
+    // Resolve goal ID.
+    let target = match goal_id {
+        Some(id) => id.to_string(),
+        None => {
+            let url = format!("{}/api/goals/active-output", base_url);
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(TuiMessage::CommandResponse(format!(
+                        "Error fetching active goals: {}",
+                        e
+                    )));
+                    return;
+                }
+            };
+            let json: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(_) => {
+                    let _ = tx.send(TuiMessage::CommandResponse(
+                        "Error: invalid response from daemon".into(),
+                    ));
+                    return;
+                }
+            };
+            let goals: Vec<String> = json["goals"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match goals.len() {
+                0 => {
+                    let _ = tx.send(TuiMessage::CommandResponse(
+                        "No goals with active output. Start one with: ta run <phase>".into(),
+                    ));
+                    return;
+                }
+                1 => goals[0].clone(),
+                _ => {
+                    let mut msg = "Multiple goals running. Specify one:\n".to_string();
+                    for (i, g) in goals.iter().enumerate() {
+                        msg.push_str(&format!("  [{}] {}\n", i + 1, g));
+                    }
+                    msg.push_str("Usage: :tail <id>");
+                    let _ = tx.send(TuiMessage::CommandResponse(msg));
+                    return;
+                }
+            }
+        }
+    };
+
+    let short_id = &target[..8.min(target.len())];
+
+    // Print confirmation with backfill separator (v0.10.11 item 3).
+    let _ = tx.send(TuiMessage::CommandResponse(format!(
+        "Tailing \"{}\"...",
+        short_id
+    )));
+    let _ = tx.send(TuiMessage::CommandResponse(
+        "─── live output ───".to_string(),
+    ));
+
+    // Connect to goal output SSE stream.
+    let url = format!("{}/api/goals/{}/output", base_url, target);
+    let resp = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            let json: serde_json::Value = r.json().await.unwrap_or_default();
+            let err = json["error"].as_str().unwrap_or("unknown error");
+            let hint = json["hint"].as_str().unwrap_or("");
+            let mut msg = format!("Error: {}", err);
+            if !hint.is_empty() {
+                msg.push_str(&format!("\n  {}", hint));
+            }
+            let _ = tx.send(TuiMessage::CommandResponse(msg));
+            return;
+        }
+        Err(e) => {
+            let _ = tx.send(TuiMessage::CommandResponse(format!(
+                "Error: Cannot reach daemon: {}",
+                e
+            )));
+            return;
+        }
+    };
+
+    let mut stream = resp.bytes_stream();
+    use tokio_stream::StreamExt;
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+        while let Some(pos) = buffer.find("\n\n") {
+            let frame = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+
+            // Parse SSE frame.
+            let mut event_type = None;
+            let mut data = None;
+            for line in frame.lines() {
+                if let Some(rest) = line.strip_prefix("event: ") {
+                    event_type = Some(rest.trim().to_string());
+                } else if let Some(rest) = line.strip_prefix("data: ") {
+                    data = Some(rest.trim().to_string());
+                }
+            }
+
+            match event_type.as_deref() {
+                Some("output") => {
+                    if let Some(d) = &data {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(d) {
+                            let stream_name =
+                                json["stream"].as_str().unwrap_or("stdout").to_string();
+                            let line = json["line"].as_str().unwrap_or("").to_string();
+                            let _ = tx.send(TuiMessage::AgentOutput(AgentOutputLine {
+                                stream: stream_name,
+                                line,
+                            }));
+                        }
+                    }
+                }
+                Some("done") => {
+                    let _ = tx.send(TuiMessage::AgentOutputDone(target.clone()));
+                    return;
+                }
+                Some("lagged") => {
+                    let _ = tx.send(TuiMessage::CommandResponse(
+                        "[skipped some output lines — subscriber lagged]".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let _ = tx.send(TuiMessage::AgentOutputDone(target));
+}
+
+/// Parse an SSE frame for a `goal_started` event.
+/// Returns `Some((goal_id, title))` if found.
+fn parse_goal_started(frame: &str) -> Option<(String, String)> {
+    let mut event_type = None;
+    let mut data = None;
+    for line in frame.lines() {
+        if let Some(rest) = line.strip_prefix("event: ") {
+            event_type = Some(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("data: ") {
+            data = Some(rest.trim());
+        }
+    }
+
+    if event_type? != "goal_started" {
+        return None;
+    }
+
+    let json: serde_json::Value = serde_json::from_str(data?).ok()?;
+    let payload = &json["payload"];
+    let goal_id = payload["goal_id"]
+        .as_str()
+        .or_else(|| payload["id"].as_str())?
+        .to_string();
+    let title = payload["title"]
+        .as_str()
+        .unwrap_or("(untitled)")
+        .to_string();
+    Some((goal_id, title))
+}
+
+/// Parse an SSE frame for a `draft_built` event (v0.10.11 item 4).
+/// Returns `Some((goal_id, draft_id, display_id, title))`.
+fn parse_draft_built(frame: &str) -> Option<(String, String, String, String)> {
+    let mut event_type = None;
+    let mut data = None;
+    for line in frame.lines() {
+        if let Some(rest) = line.strip_prefix("event: ") {
+            event_type = Some(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("data: ") {
+            data = Some(rest.trim());
+        }
+    }
+
+    if event_type? != "draft_built" {
+        return None;
+    }
+
+    let json: serde_json::Value = serde_json::from_str(data?).ok()?;
+    let payload = &json["payload"];
+    let goal_id = payload["goal_id"].as_str().unwrap_or("").to_string();
+    let draft_id = payload["draft_id"].as_str().unwrap_or("").to_string();
+    // Use display_id if present, otherwise fall back to short draft_id.
+    let display_id = payload["display_id"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| draft_id[..8.min(draft_id.len())].to_string());
+    let title = payload["title"]
+        .as_str()
+        .unwrap_or("(untitled)")
+        .to_string();
+    Some((goal_id, draft_id, display_id, title))
+}
+
 const HELP_TEXT: &str = "\
 TA Shell -- Interactive terminal for Trusted Autonomy
 
@@ -1114,6 +1531,10 @@ Commands:
   drafts             Shortcut for: ta draft list
   <anything else>    Sent to agent session (if attached)
 
+Agent output:
+  :tail [id]         Attach to goal output stream (auto-resolves single running goal)
+  Agent output auto-streams when a goal starts (configurable: shell.auto_tail)
+
 Interactive mode:
   When an agent asks a question, the prompt changes to [agent Q1] >
   Type your response and press Enter to send it back to the agent.
@@ -1122,7 +1543,7 @@ Shell commands:
   :status            Refresh the status bar
   clear              Clear the output pane
   Ctrl-L             Clear the output pane
-  PgUp / PgDn        Scroll output
+  PgUp / PgDn        Scroll output (retained history, configurable: shell.output_buffer_lines)
   Tab                Auto-complete commands
   Ctrl-C / exit      Exit the shell";
 
@@ -1417,5 +1838,208 @@ mod tests {
             TuiMessage::SseEvent("workflow paused at 'review': Need approval".into()),
         );
         assert_eq!(app.workflow_prompt, Some("review".into()));
+    }
+
+    // -- v0.10.11 tests --
+
+    #[test]
+    fn parse_goal_started_event() {
+        let frame = concat!(
+            "event: goal_started\n",
+            "data: {",
+            "\"event_type\":\"goal_started\",",
+            "\"payload\":{",
+            "\"goal_id\":\"aaaa1111-2222-3333-4444-555555555555\",",
+            "\"title\":\"v0.10.11 — Shell TUI UX Overhaul\"",
+            "}}"
+        );
+        let (id, title) = parse_goal_started(frame).expect("should parse");
+        assert_eq!(id, "aaaa1111-2222-3333-4444-555555555555");
+        assert_eq!(title, "v0.10.11 — Shell TUI UX Overhaul");
+    }
+
+    #[test]
+    fn parse_goal_started_ignores_other_events() {
+        let frame = "event: draft_built\ndata: {\"event_type\":\"draft_built\",\"payload\":{\"goal_id\":\"abc\"}}";
+        assert!(parse_goal_started(frame).is_none());
+    }
+
+    #[test]
+    fn parse_draft_built_event() {
+        let frame = concat!(
+            "event: draft_built\n",
+            "data: {",
+            "\"event_type\":\"draft_built\",",
+            "\"payload\":{",
+            "\"goal_id\":\"aaaa1111-2222-3333-4444-555555555555\",",
+            "\"draft_id\":\"bbbb1111-2222-3333-4444-555555555555\",",
+            "\"display_id\":\"aaaa1111-01\",",
+            "\"title\":\"v0.10.11 — Shell TUI UX Overhaul\"",
+            "}}"
+        );
+        let (goal_id, draft_id, display_id, title) =
+            parse_draft_built(frame).expect("should parse");
+        assert_eq!(goal_id, "aaaa1111-2222-3333-4444-555555555555");
+        assert_eq!(draft_id, "bbbb1111-2222-3333-4444-555555555555");
+        assert_eq!(display_id, "aaaa1111-01");
+        assert_eq!(title, "v0.10.11 — Shell TUI UX Overhaul");
+    }
+
+    #[test]
+    fn parse_draft_built_fallback_display_id() {
+        let frame = concat!(
+            "event: draft_built\n",
+            "data: {",
+            "\"event_type\":\"draft_built\",",
+            "\"payload\":{",
+            "\"goal_id\":\"abc\",",
+            "\"draft_id\":\"bbbb1111-2222-3333-4444-555555555555\",",
+            "\"title\":\"test\"",
+            "}}"
+        );
+        let (_, _, display_id, _) = parse_draft_built(frame).expect("should parse");
+        assert_eq!(display_id, "bbbb1111"); // falls back to 8-char prefix
+    }
+
+    #[test]
+    fn parse_draft_built_ignores_other_events() {
+        let frame = "event: goal_started\ndata: {\"event_type\":\"goal_started\",\"payload\":{\"title\":\"test\"}}";
+        assert!(parse_draft_built(frame).is_none());
+    }
+
+    #[test]
+    fn handle_agent_output_message() {
+        let mut app = App::new("http://localhost".into(), None);
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stdout".into(),
+                line: "Building crate...".into(),
+            }),
+        );
+        assert_eq!(app.output.len(), 1);
+        assert_eq!(app.output[0].text, "Building crate...");
+        // stdout gets white styling (not yellow/red)
+        assert_eq!(app.output[0].style, Style::default().fg(Color::White));
+    }
+
+    #[test]
+    fn handle_agent_stderr_output() {
+        let mut app = App::new("http://localhost".into(), None);
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stderr".into(),
+                line: "warning: unused var".into(),
+            }),
+        );
+        assert_eq!(app.output.len(), 1);
+        assert_eq!(app.output[0].style, Style::default().fg(Color::Yellow));
+    }
+
+    #[test]
+    fn handle_goal_started_auto_tail() {
+        let mut app = App::new("http://localhost".into(), None);
+        app.auto_tail = true;
+        handle_tui_message(
+            &mut app,
+            TuiMessage::GoalStarted {
+                goal_id: "aaaa1111-2222-3333-4444-555555555555".into(),
+                title: "Test Goal".into(),
+            },
+        );
+        assert!(app.tailing_goal.is_some());
+        assert_eq!(
+            app.tailing_goal.as_deref(),
+            Some("aaaa1111-2222-3333-4444-555555555555")
+        );
+        // Should have added notification output.
+        assert!(!app.output.is_empty());
+    }
+
+    #[test]
+    fn handle_goal_started_no_auto_tail_when_already_tailing() {
+        let mut app = App::new("http://localhost".into(), None);
+        app.auto_tail = true;
+        app.tailing_goal = Some("existing-goal".into());
+        handle_tui_message(
+            &mut app,
+            TuiMessage::GoalStarted {
+                goal_id: "new-goal".into(),
+                title: "Another Goal".into(),
+            },
+        );
+        // Should not override existing tail.
+        assert_eq!(app.tailing_goal.as_deref(), Some("existing-goal"));
+    }
+
+    #[test]
+    fn handle_goal_started_no_auto_tail_when_disabled() {
+        let mut app = App::new("http://localhost".into(), None);
+        app.auto_tail = false;
+        handle_tui_message(
+            &mut app,
+            TuiMessage::GoalStarted {
+                goal_id: "goal1".into(),
+                title: "Test".into(),
+            },
+        );
+        assert!(app.tailing_goal.is_none());
+    }
+
+    #[test]
+    fn handle_agent_output_done_clears_tail() {
+        let mut app = App::new("http://localhost".into(), None);
+        app.tailing_goal = Some("goal-123".into());
+        handle_tui_message(&mut app, TuiMessage::AgentOutputDone("goal-123".into()));
+        assert!(app.tailing_goal.is_none());
+        assert!(!app.output.is_empty()); // separator line
+    }
+
+    #[test]
+    fn handle_draft_ready_notification() {
+        let mut app = App::new("http://localhost".into(), None);
+        handle_tui_message(
+            &mut app,
+            TuiMessage::DraftReady {
+                goal_id: "goal-1".into(),
+                draft_id: "draft-1".into(),
+                display_id: "aaaa1111-01".into(),
+                title: "v0.10.11 — Shell TUI UX Overhaul".into(),
+            },
+        );
+        assert!(!app.output.is_empty());
+        assert!(app.output.last().unwrap().text.contains("draft ready"));
+        assert!(app.output.last().unwrap().text.contains("aaaa1111-01"));
+    }
+
+    #[test]
+    fn output_buffer_limit_enforced() {
+        let mut app = App::new("http://localhost".into(), None);
+        app.output_buffer_limit = 10;
+        for i in 0..20 {
+            app.push_output(OutputLine::command(format!("line {}", i)));
+        }
+        assert_eq!(app.output.len(), 10);
+        // Oldest lines should have been dropped — first line should be "line 10".
+        assert_eq!(app.output[0].text, "line 10");
+    }
+
+    #[test]
+    fn output_buffer_limit_adjusts_scroll() {
+        let mut app = App::new("http://localhost".into(), None);
+        app.output_buffer_limit = 10;
+        for i in 0..10 {
+            app.push_output(OutputLine::command(format!("line {}", i)));
+        }
+        app.scroll_up(5);
+        assert_eq!(app.scroll_offset, 5);
+        // Add 5 more — 5 will be dropped.
+        for i in 10..15 {
+            app.push_output(OutputLine::command(format!("line {}", i)));
+        }
+        assert_eq!(app.output.len(), 10);
+        // Scroll offset should have been reduced.
+        assert_eq!(app.scroll_offset, 0);
     }
 }

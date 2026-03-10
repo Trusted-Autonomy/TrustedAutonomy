@@ -2659,7 +2659,7 @@ After `./install_local.sh` rebuilds and installs new `ta` and `ta-daemon` binari
 ---
 
 ### v0.10.11 — Shell TUI UX Overhaul
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make `ta shell` a fully usable interactive environment where agent output is visible, long output is navigable, and the user never has to leave the shell to understand what's happening.
 
 #### Problem
@@ -2670,50 +2670,25 @@ Today `ta shell` has several UX gaps that force users to work around the TUI rat
 - No notification when a draft is ready — user must poll with `draft list`.
 - `:tail` gives no confirmation it's working and shows no backfill of prior output.
 
-#### Items
+#### Completed
 
-**1. Agent output streaming** (critical gap)
-- [ ] Expose agent stdout/stderr via SSE endpoint: `GET /api/goal/output/:key` streaming from `GoalOutput` broadcast channels
-- [ ] Wire `:tail` (and auto-tail) to consume from this endpoint alongside TA events
-- [ ] Interleave TA events + agent stdout/stderr in one unified stream, distinguished by prefix or style
+1. ✅ **Agent output streaming**: TUI `:tail` command connects to `GET /api/goals/:id/output` SSE endpoint, streams `AgentOutput` messages as styled lines (stdout=white, stderr=yellow). Interleaves with TA events in unified output pane.
+2. ✅ **Auto-tail on goal start**: SSE parser detects `goal_started` events and auto-subscribes to agent output. Single goal auto-tails immediately. Multiple goals prompt selection via `:tail <id>`. Configurable via `shell.auto_tail` in workflow.toml.
+3. ✅ **Tail backfill and confirmation**: Prints confirmation on tail start with goal ID. Visual separator `─── live output ───` between backfill and live output. Configurable `shell.tail_backfill_lines` (default 5).
+4. ✅ **Draft-ready notification**: SSE parser detects `draft_built` events and renders `[draft ready] "title" (display_id) — run: draft view <id>` with bold green styling. Status bar shows tailing indicator.
+5. ✅ **Draft ID derived from goal ID**: New `display_id` field on `DraftPackage` in format `<goal-prefix>-NN` (e.g., `511e0465-01`). Resolver matches on `display_id` alongside UUID prefix. Legacy drafts fall back to 8-char package_id prefix. `draft list` shows display_id instead of full UUID.
+6. ✅ **Draft list filtering, ordering, and paging**: Default ordering newest-last. `--pending`, `--applied` status filters. Compact default view (active/pending only). `--all` shows everything. `--limit N` for paged output. `draft list --goal <id>` preserved from v0.10.8.
+7. ✅ **Draft view paging / scrollable output**: TUI retains all output in scrollable buffer with PgUp/PgDn. Command output (draft view, list, etc.) rendered into the same scrollable buffer.
+8. ✅ **Scrollable output buffer (foundational)**: TUI output pane retains full history with configurable buffer limit (`shell.output_buffer_lines`, default 10000). Oldest lines dropped when limit exceeded. Scroll offset adjusted when lines are pruned.
 
-**2. Auto-tail on goal start**
-- [ ] Single running goal: auto-tail immediately, no user action required
-- [ ] Multiple running goals: prompt which to tail, or tail all with prefixed labels (e.g., `[v0.10.8]` vs `[v0.10.9]`)
-- [ ] `:tail` becomes a manual override for switching focus, not the default workflow
+#### Remaining
+- `:tail <id> --lines <count>` override for history depth — deferred (current implementation uses configurable default)
+- Classic shell pager integration — deferred (TUI already provides scrollable output)
+- Progressive disclosure for draft view (summary → diffs on scroll) — deferred to future TUI enhancement
 
-**3. Tail backfill and confirmation**
-- [ ] Print confirmation on tail start: `Tailing "v0.10.8 — Pre-Draft Verification Gate" (511e0465)...`
-- [ ] Show last N lines of buffered output (default 5, configurable as `shell.tail_backfill_lines` in daemon.toml)
-- [ ] `:tail <id> --lines <count>` override to see more history
-- [ ] Visual separator between backfill and live output
-
-**4. Draft-ready notification**
-- [ ] Emit visible event when draft build completes: `[draft ready] "v0.10.8 — ..." (draft-511e0465-01) — run: draft view 511e0465`
-- [ ] Include draft ID in the notification for immediate action
-
-**5. Draft ID derived from goal ID**
-- [ ] Generate draft IDs as `<goal-id-prefix>-NN` (e.g., `511e0465-01`, `511e0465-02` for follow-ups)
-- [ ] Flexible resolver falls back to UUID matching for legacy drafts
-- [ ] Schema change in `ta-changeset` `DraftPackage.id` generation
-
-**6. Draft list filtering, ordering, and paging**
-- [ ] Default ordering: newest last
-- [ ] Filter by status: `draft list --pending`, `draft list --applied`
-- [ ] Filter by goal: `draft list --goal <id>`
-- [ ] Compact default format showing only active/pending drafts
-- [ ] `--limit N` for paged output
-- [ ] TUI: scrollable output buffer instead of fire-and-forget rendering
-
-**7. Draft view paging / scrollable output**
-- [ ] TUI: render into scrollable buffer (content retained, not write-once)
-- [ ] Classic shell: pipe through pager or `--page` flag
-- [ ] Progressive disclosure: summary/file list first, diffs on scroll or explicit request
-
-**8. Scrollable output buffer (foundational)**
-- [ ] TUI output pane retains full history as a scrollable buffer
-- [ ] All long output (draft list, draft view, goal list, verify output) benefits from this
-- [ ] Configurable buffer size limit (e.g., `shell.output_buffer_lines` in daemon.toml)
+#### Tests
+- 14 new tests in `shell_tui.rs`: parse_goal_started_event, parse_goal_started_ignores_other_events, parse_draft_built_event, parse_draft_built_fallback_display_id, parse_draft_built_ignores_other_events, handle_agent_output_message, handle_agent_stderr_output, handle_goal_started_auto_tail, handle_goal_started_no_auto_tail_when_already_tailing, handle_goal_started_no_auto_tail_when_disabled, handle_agent_output_done_clears_tail, handle_draft_ready_notification, output_buffer_limit_enforced, output_buffer_limit_adjusts_scroll
+- 4 new tests in `config.rs`: shell_config_defaults, workflow_config_default_has_shell_section, parse_toml_with_shell_section, parse_toml_without_shell_section_uses_default
 
 #### Version: `0.10.11-alpha`
 

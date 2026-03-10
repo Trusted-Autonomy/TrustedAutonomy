@@ -122,6 +122,10 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
         PrCommands::List { goal } => draft::DraftCommands::List {
             goal: goal.clone(),
             stale: false,
+            pending: false,
+            applied: false,
+            limit: None,
+            all: true,
             json: false,
         },
         PrCommands::View {

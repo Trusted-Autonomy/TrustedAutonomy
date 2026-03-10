@@ -470,6 +470,12 @@ pub struct DraftPackage {
     /// Populated when `[verify] on_failure = "warn"` and a command fails.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verification_warnings: Vec<VerificationWarning>,
+
+    /// Human-friendly display ID derived from the goal ID (v0.10.11).
+    /// Format: `<goal-id-prefix>-NN` (e.g., `511e0465-01`).
+    /// Falls back to `package_id` short prefix for legacy drafts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_id: Option<String>,
 }
 
 /// A warning from a pre-draft verification command failure (v0.10.8).
@@ -641,6 +647,7 @@ mod tests {
             },
             status: DraftStatus::Draft,
             verification_warnings: vec![],
+            display_id: None,
         }
     }
 

@@ -303,6 +303,7 @@ mod tests {
             },
             status: DraftStatus::Draft,
             verification_warnings: vec![],
+            display_id: None,
         };
         pkg.status = DraftStatus::PendingReview;
 

@@ -51,6 +51,18 @@ pub enum DraftCommands {
         /// Show only stale drafts (non-terminal states older than threshold).
         #[arg(long)]
         stale: bool,
+        /// Show only pending/active drafts (Draft, PendingReview, Approved).
+        #[arg(long)]
+        pending: bool,
+        /// Show only applied drafts.
+        #[arg(long)]
+        applied: bool,
+        /// Limit the number of results shown.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Show all drafts including terminal states (overrides default compact view).
+        #[arg(long)]
+        all: bool,
         /// Output as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -296,9 +308,24 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             summary,
             latest,
         } => build_package(config, goal_id, summary, *latest),
-        DraftCommands::List { goal, stale, json } => {
-            list_packages(config, goal.as_deref(), *stale, *json)
-        }
+        DraftCommands::List {
+            goal,
+            stale,
+            pending,
+            applied,
+            limit,
+            all,
+            json,
+        } => list_packages(
+            config,
+            goal.as_deref(),
+            *stale,
+            *pending,
+            *applied,
+            *limit,
+            *all,
+            *json,
+        ),
         DraftCommands::View {
             id,
             summary,
@@ -881,7 +908,7 @@ pub(crate) fn build_package(
 
     // Build the draft package.
     let package_id = Uuid::new_v4();
-    let pkg = DraftPackage {
+    let mut pkg = DraftPackage {
         package_version: "1.0.0".to_string(),
         package_id,
         created_at: Utc::now(),
@@ -956,6 +983,7 @@ pub(crate) fn build_package(
         },
         status: DraftStatus::PendingReview,
         verification_warnings: vec![],
+        display_id: None, // Will be set below after counting existing drafts.
     };
 
     // Handle PR supersession for follow-up goals.
@@ -998,6 +1026,19 @@ pub(crate) fn build_package(
             }
             // Different staging (standalone): do NOT auto-supersede — drafts are independent.
         }
+    }
+
+    // Generate goal-derived display ID (v0.10.11).
+    // Format: <goal-id-prefix>-NN (e.g., 511e0465-01, 511e0465-02 for follow-ups).
+    {
+        let goal_prefix = &goal_id[..8.min(goal_id.len())];
+        let existing = load_all_packages(config)
+            .unwrap_or_default()
+            .iter()
+            .filter(|p| p.goal.goal_id == goal_id)
+            .count();
+        let seq = existing + 1;
+        pkg.display_id = Some(format!("{}-{:02}", goal_prefix, seq));
     }
 
     // Save the draft package.
@@ -1054,13 +1095,21 @@ fn resolve_draft_why(goal: &GoalRun, source_dir: &std::path::Path) -> String {
     goal.objective.clone()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn list_packages(
     config: &GatewayConfig,
     goal_filter: Option<&str>,
     stale_only: bool,
+    pending_only: bool,
+    applied_only: bool,
+    limit: Option<usize>,
+    show_all: bool,
     json_output: bool,
 ) -> anyhow::Result<()> {
-    let packages = load_all_packages(config)?;
+    let mut packages = load_all_packages(config)?;
+
+    // Default ordering: newest last (chronological) for readability.
+    packages.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
     // Load GC config for stale threshold.
     let workflow_config = ta_submit::WorkflowConfig::load_or_default(
@@ -1068,6 +1117,9 @@ fn list_packages(
     );
     let stale_days = workflow_config.gc.stale_threshold_days;
     let stale_cutoff = Utc::now() - chrono::Duration::days(stale_days as i64);
+
+    // Default compact view: show only active/pending unless --all or a specific filter is used.
+    let compact = !show_all && !stale_only && !applied_only && goal_filter.is_none();
 
     let filtered: Vec<&DraftPackage> = packages
         .iter()
@@ -1078,23 +1130,45 @@ fn list_packages(
                 }
             }
             if stale_only {
-                // Stale = non-terminal state (PendingReview, Approved, Draft) older than threshold.
                 let is_non_terminal = matches!(
                     p.status,
                     DraftStatus::Draft | DraftStatus::PendingReview | DraftStatus::Approved { .. }
                 );
                 return is_non_terminal && p.created_at < stale_cutoff;
             }
+            if pending_only {
+                return matches!(
+                    p.status,
+                    DraftStatus::Draft | DraftStatus::PendingReview | DraftStatus::Approved { .. }
+                );
+            }
+            if applied_only {
+                return matches!(p.status, DraftStatus::Applied { .. });
+            }
+            // Compact mode: show only active/pending drafts by default.
+            if compact {
+                return matches!(
+                    p.status,
+                    DraftStatus::Draft | DraftStatus::PendingReview | DraftStatus::Approved { .. }
+                );
+            }
             true
         })
         .collect();
 
+    // Apply limit (take the last N items to show the most recent).
+    let display: Vec<&&DraftPackage> = match limit {
+        Some(n) if n < filtered.len() => filtered.iter().skip(filtered.len() - n).collect(),
+        _ => filtered.iter().collect(),
+    };
+
     if json_output {
-        let json_data: Vec<serde_json::Value> = filtered
+        let json_data: Vec<serde_json::Value> = display
             .iter()
             .map(|p| {
                 serde_json::json!({
                     "id": p.package_id.to_string(),
+                    "display_id": draft_display_id(p),
                     "goal_id": p.goal.goal_id,
                     "status": format!("{:?}", p.status),
                     "artifact_count": p.changes.artifacts.len(),
@@ -1107,9 +1181,15 @@ fn list_packages(
         return Ok(());
     }
 
-    if filtered.is_empty() {
+    if display.is_empty() {
         if stale_only {
             println!("No stale drafts found (threshold: {} days).", stale_days);
+        } else if pending_only {
+            println!("No pending drafts. Run `ta draft list --all` to see all drafts.");
+        } else if applied_only {
+            println!("No applied drafts found.");
+        } else if compact {
+            println!("No active drafts. Run `ta draft list --all` to see all drafts.");
         } else {
             println!("No draft packages found.");
         }
@@ -1124,15 +1204,15 @@ fn list_packages(
     }
 
     println!(
-        "{:<38} {:<30} {:<16} {:<8} AGE",
-        "PACKAGE ID", "GOAL", "STATUS", "FILES"
+        "{:<16} {:<30} {:<16} {:<8} AGE",
+        "DRAFT ID", "GOAL", "STATUS", "FILES"
     );
-    println!("{}", "-".repeat(104));
+    println!("{}", "-".repeat(82));
 
     // Load goal store for macro goal context.
     let goal_store = GoalRunStore::new(&config.goals_dir).ok();
 
-    for pkg in &filtered {
+    for pkg in &display {
         let status_display = match &pkg.status {
             DraftStatus::Superseded { superseded_by } => {
                 format!("superseded ({})", &superseded_by.to_string()[..8])
@@ -1172,16 +1252,35 @@ fn list_packages(
         };
 
         println!(
-            "{:<38} {:<30} {:<16} {:<8} {}",
-            pkg.package_id,
+            "{:<16} {:<30} {:<16} {:<8} {}",
+            draft_display_id(pkg),
             goal_display,
             status_display,
             pkg.changes.artifacts.len(),
             age_str,
         );
     }
-    println!("\n{} package(s).", filtered.len());
+
+    let total_count = packages.len();
+    let shown = display.len();
+    if shown < total_count {
+        println!(
+            "\n{} shown (of {} total). Use --all to see all drafts.",
+            shown, total_count
+        );
+    } else {
+        println!("\n{} package(s).", shown);
+    }
     Ok(())
+}
+
+/// Return the human-friendly display ID for a draft package.
+/// Uses goal-derived display_id (v0.10.11) or falls back to package_id short prefix.
+fn draft_display_id(pkg: &DraftPackage) -> String {
+    pkg.display_id
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| pkg.package_id.to_string()[..8].to_string())
 }
 
 /// Check if a file appears to be binary by looking for null bytes in the first 8KB.
@@ -2874,6 +2973,19 @@ fn resolve_draft_id_flexible(
             return Ok(uuid.to_string());
         }
         anyhow::bail!("Draft {} not found", input);
+    }
+
+    // Try display_id exact match (v0.10.11 goal-derived IDs like "511e0465-01").
+    let display_matches: Vec<&DraftPackage> = packages
+        .iter()
+        .filter(|p| {
+            p.display_id
+                .as_ref()
+                .is_some_and(|did| did == input || did.starts_with(input))
+        })
+        .collect();
+    if display_matches.len() == 1 {
+        return Ok(display_matches[0].package_id.to_string());
     }
 
     // Try UUID prefix match (across all packages, not just pending).

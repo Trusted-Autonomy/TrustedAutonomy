@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.10-alpha
+**Version**: v0.10.11-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -482,6 +482,21 @@ ta run --skip-verify
 In warn mode (`on_failure = "warn"`), the draft is created but carries verification warnings visible in `ta draft view`.
 
 `ta init` generates a pre-populated `[verify]` section for Rust projects. Other project types get commented-out examples.
+
+### Shell Configuration
+
+The `[shell]` section in `.ta/workflow.toml` controls the TUI shell behavior:
+
+```toml
+# .ta/workflow.toml
+[shell]
+# Lines to show when attaching to a tail stream. Default: 5.
+tail_backfill_lines = 5
+# Maximum lines retained in the scrollable output buffer. Default: 10000.
+output_buffer_lines = 10000
+# Auto-tail agent output when a goal starts. Default: true.
+auto_tail = true
+```
 
 ### Macro Goals (multi-draft sessions)
 
@@ -2173,9 +2188,9 @@ The TUI shell provides a three-zone layout:
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **Output pane** (top): Command responses and SSE event notifications. Events are rendered in dimmed styling. Auto-scrolls to bottom; use PgUp/PgDn to scroll back. Unread events are tracked when scrolled up.
+- **Output pane** (top): Command responses, SSE event notifications, and live agent output. Events are rendered in dimmed styling; agent stdout appears in white, stderr in yellow. Auto-scrolls to bottom; use PgUp/PgDn to scroll back. Retained as a scrollable buffer (configurable limit, default 10000 lines). Unread events are tracked when scrolled up.
 - **Input area** (middle): Text input with cursor movement, command history (up/down), and tab-completion.
-- **Status bar** (bottom): Project name, version, agent count, draft count, daemon connection indicator (green/red dot), unread event badge, and workflow stage indicator.
+- **Status bar** (bottom): Project name, version, agent count, draft count, daemon connection indicator (green/red dot), tailing indicator (green badge when streaming agent output), unread event badge, and workflow stage indicator.
 
 #### Using the shell
 
@@ -2195,6 +2210,7 @@ Built-in shell commands:
 | Command | Description |
 |---------|-------------|
 | `help` / `?` | Show help |
+| `:tail [id]` | Attach to goal output stream (auto-resolves single running goal) |
 | `:status` | Refresh the status bar |
 | `clear` / `Ctrl-L` | Clear the output pane |
 | `PgUp` / `PgDn` | Scroll output |
@@ -2202,6 +2218,35 @@ Built-in shell commands:
 | `Ctrl-A` / `Ctrl-E` | Jump to start/end of input |
 | `Ctrl-U` / `Ctrl-K` | Clear input before/after cursor |
 | `Ctrl-C` / `exit` / `quit` / `:q` | Exit the shell |
+
+#### Live Agent Output
+
+When a goal starts, the shell automatically streams the agent's stdout/stderr into the output pane. Agent output appears in real-time alongside TA events — no need to switch terminals or manually `:tail`.
+
+- **Auto-tail**: When a goal starts (detected via SSE `goal_started` event), the shell subscribes to `GET /api/goals/:id/output` and interleaves agent output with TA events. Stdout lines appear in white, stderr in yellow.
+- **Manual tail**: Use `:tail` to attach to a specific goal's output, or `:tail <id>` to target a specific goal when multiple are running.
+- **Draft-ready notification**: When a draft finishes building, a green notification appears: `[draft ready] "title" (display-id) — run: draft view <id>`.
+- **Tailing indicator**: The status bar shows a green badge while streaming agent output.
+
+#### Draft IDs
+
+Draft packages now have human-friendly IDs derived from the goal ID. Instead of opaque UUIDs, draft IDs look like `511e0465-01` (first 8 chars of goal ID + sequence number). Follow-up drafts increment the sequence: `511e0465-02`, `511e0465-03`.
+
+The resolver accepts display IDs, UUID prefixes, and goal title matches interchangeably. Legacy drafts without a display_id fall back to the 8-char package ID prefix.
+
+#### Draft Listing
+
+```bash
+ta draft list                   # Show active/pending drafts (compact view)
+ta draft list --all             # Show all drafts including terminal states
+ta draft list --pending         # Show only pending drafts
+ta draft list --applied         # Show only applied drafts
+ta draft list --goal <id>       # Filter by goal
+ta draft list --limit 5         # Show last 5 results
+ta draft list --json            # JSON output
+```
+
+Default ordering is newest-last (chronological). The compact default view shows only active/pending drafts.
 
 #### Workflow interaction mode
 
@@ -4003,6 +4048,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.8 | Pre-draft verification gate | Done |
 | v0.10.9 | Smart follow-up UX | Done |
 | v0.10.10 | Daemon version guard | Done |
+| v0.10.11 | Shell TUI UX overhaul | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 
