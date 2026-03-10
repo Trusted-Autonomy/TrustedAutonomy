@@ -542,25 +542,40 @@ fn execute_agent_step(
 
     // Resolve the `ta` binary path (same binary we're running from).
     let ta_bin = std::env::current_exe()?;
-    let status = Command::new(&ta_bin)
+
+    // Capture stdout so we can extract the draft ID from `ta run` output.
+    let output = Command::new(&ta_bin)
         .args(&args)
         .current_dir(&config.workspace_root)
-        .status()?;
+        .stderr(std::process::Stdio::inherit())
+        .output()?;
 
-    if !status.success() {
+    let stdout_text = String::from_utf8_lossy(&output.stdout);
+    // Print captured stdout for visibility.
+    for line in stdout_text.lines() {
+        println!("  {}", line);
+    }
+
+    if !output.status.success() {
         anyhow::bail!(
             "Agent step '{}' failed (exit code: {:?})",
             step.name,
-            status.code()
+            output.status.code()
         );
     }
+
+    // Extract draft ID directly from `ta run` output (prints "draft package built: <uuid>").
+    // This is more reliable than scanning all draft files on disk.
+    let draft_id = extract_draft_id_from_output(&stdout_text).or_else(|| {
+        // Fallback: find latest eligible draft on disk.
+        find_latest_draft(config).ok().flatten()
+    });
 
     // Auto-approve and apply the draft so output files land in the working
     // directory before the next pipeline step runs. Without this, agent output
     // stays in staging and subsequent shell steps can't find it.
     println!("  Auto-applying agent draft...");
-    let latest_draft = find_latest_draft(config)?;
-    if let Some(draft_id) = latest_draft {
+    if let Some(draft_id) = draft_id {
         let id_str = draft_id.to_string();
 
         // Approve.
@@ -605,8 +620,21 @@ fn execute_agent_step(
     Ok(())
 }
 
-/// Find the most recently created draft package ID.
-/// Find the most recent draft that is eligible for auto-approve (PendingReview or Draft status).
+/// Extract a draft package UUID from `ta run` stdout output.
+/// Looks for the line "draft package built: <uuid>" printed by `ta draft build`.
+fn extract_draft_id_from_output(output: &str) -> Option<uuid::Uuid> {
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("draft package built:") {
+            if let Ok(id) = uuid::Uuid::parse_str(rest.trim()) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// Fallback: find the most recent draft eligible for auto-approve (PendingReview or Draft status).
 /// Skips drafts in terminal states (Applied, Denied, Superseded, etc.) to avoid
 /// the "Cannot approve package in Applied state" error when a stale draft is the
 /// newest file on disk.
