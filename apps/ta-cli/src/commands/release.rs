@@ -606,6 +606,10 @@ fn execute_agent_step(
 }
 
 /// Find the most recently created draft package ID.
+/// Find the most recent draft that is eligible for auto-approve (PendingReview or Draft status).
+/// Skips drafts in terminal states (Applied, Denied, Superseded, etc.) to avoid
+/// the "Cannot approve package in Applied state" error when a stale draft is the
+/// newest file on disk.
 fn find_latest_draft(config: &GatewayConfig) -> anyhow::Result<Option<uuid::Uuid>> {
     let dir = &config.pr_packages_dir;
     if !dir.exists() {
@@ -619,6 +623,15 @@ fn find_latest_draft(config: &GatewayConfig) -> anyhow::Result<Option<uuid::Uuid
         if path.extension().and_then(|s| s.to_str()) == Some("json") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 if let Ok(id) = uuid::Uuid::parse_str(stem) {
+                    // Only consider drafts that can still be approved.
+                    if let Ok(contents) = std::fs::read_to_string(&path) {
+                        let dominated_by_terminal = contents.contains("\"applied\"")
+                            || contents.contains("\"denied\"")
+                            || contents.contains("\"superseded\"");
+                        if dominated_by_terminal {
+                            continue;
+                        }
+                    }
                     if let Ok(meta) = entry.metadata() {
                         if let Ok(modified) = meta.modified() {
                             if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
