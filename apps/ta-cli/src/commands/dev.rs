@@ -334,6 +334,7 @@ pub fn execute(
     project_root: &Path,
     agent: Option<&str>,
     unrestricted: bool,
+    no_version_check: bool,
 ) -> anyhow::Result<()> {
     let project_root = project_root
         .canonicalize()
@@ -341,6 +342,20 @@ pub fn execute(
 
     // Generate a session ID for audit trail.
     let session_id = uuid::Uuid::new_v4().to_string();
+
+    // Version guard check: warn if a running daemon has a different version (v0.10.10).
+    if !no_version_check {
+        let base_url = super::shell::resolve_daemon_url(&project_root);
+        let rt = tokio::runtime::Runtime::new()?;
+        let client = reqwest::Client::new();
+        let _guard = super::version_guard::check_daemon_version(
+            &client,
+            &base_url,
+            &project_root,
+            true, // interactive
+            &rt,
+        );
+    }
 
     println!("Starting interactive developer loop...");
     println!("  Project: {}", project_root.display());

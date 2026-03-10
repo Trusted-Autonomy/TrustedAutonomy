@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.9-alpha
+**Version**: v0.10.10-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -2119,6 +2119,27 @@ curl -s http://127.0.0.1:7700/api/status | head
 
 If the daemon is not running, `ta shell` will show connection errors on startup.
 
+#### Daemon Version Guard
+
+When `ta shell` or `ta dev` connects to the daemon, it checks whether the daemon version matches the CLI version. After an upgrade (e.g., `./install_local.sh`), the old daemon process may still be running with the previous version. The version guard detects this and prompts you:
+
+```
+Daemon version mismatch: daemon v0.10.6-alpha, CLI v0.10.10-alpha
+Restart daemon with the new version? [Y/n]
+```
+
+- **Yes** (default): The CLI sends a graceful shutdown request, waits for the old daemon to exit, starts the new one, and verifies it's healthy.
+- **No**: The shell proceeds but shows `daemon (stale)` in the status bar so you know you're running against a mismatched daemon.
+
+To skip the version check (useful in CI or scripts):
+
+```bash
+ta --no-version-check shell
+ta --no-version-check dev
+```
+
+The `--no-version-check` flag is global — it works with any subcommand.
+
 #### Starting the shell
 
 ```bash
@@ -3981,6 +4002,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.7 | Documentation review & consolidation | Done |
 | v0.10.8 | Pre-draft verification gate | Done |
 | v0.10.9 | Smart follow-up UX | Done |
+| v0.10.10 | Daemon version guard | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

@@ -34,6 +34,10 @@ struct Cli {
     #[arg(long, global = true)]
     accept_terms: bool,
 
+    /// Skip the daemon version guard check (for CI or scripted use).
+    #[arg(long, global = true)]
+    no_version_check: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -433,7 +437,13 @@ fn main() -> anyhow::Result<()> {
         Commands::Dev {
             agent,
             unrestricted,
-        } => commands::dev::execute(&config, &project_root, agent.as_deref(), *unrestricted),
+        } => commands::dev::execute(
+            &config,
+            &project_root,
+            agent.as_deref(),
+            *unrestricted,
+            cli.no_version_check,
+        ),
         Commands::Session { command } => commands::session::execute(command, &config),
         Commands::Plan { command } => commands::plan::execute(command, &config),
         Commands::Context { command } => commands::context::execute(command, &config),
@@ -454,6 +464,7 @@ fn main() -> anyhow::Result<()> {
             url.as_deref(),
             *init,
             *classic,
+            cli.no_version_check,
         ),
         Commands::Office { command } => commands::office::execute(command, &project_root),
         Commands::Plugin { command } => {

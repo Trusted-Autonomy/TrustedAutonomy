@@ -44,6 +44,7 @@ pub fn execute(
     daemon_url: Option<&str>,
     init: bool,
     classic: bool,
+    no_version_check: bool,
 ) -> anyhow::Result<()> {
     if init {
         return init_config(project_root);
@@ -51,7 +52,7 @@ pub fn execute(
 
     // Default to TUI mode; --classic falls back to rustyline.
     if !classic {
-        return super::shell_tui::run(project_root, attach, daemon_url, false);
+        return super::shell_tui::run(project_root, attach, daemon_url, false, no_version_check);
     }
 
     let base_url = daemon_url
@@ -59,6 +60,21 @@ pub fn execute(
         .unwrap_or_else(|| resolve_daemon_url(project_root));
 
     let rt = tokio::runtime::Runtime::new()?;
+
+    // Version guard check (v0.10.10).
+    if !no_version_check {
+        let client = reqwest::Client::new();
+        let _guard = super::version_guard::check_daemon_version(
+            &client,
+            &base_url,
+            project_root,
+            true, // interactive
+            &rt,
+        );
+        // All results (Match, Stale, Restarted, Unreachable) proceed —
+        // the function already printed warnings/prompts as needed.
+    }
+
     rt.block_on(run_shell(base_url, attach.map(|s| s.to_string())))
 }
 

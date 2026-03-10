@@ -2622,7 +2622,7 @@ The follow-up resolver doesn't assume git. It works from TA's own state:
 ---
 
 ### v0.10.10 — Daemon Version Guard
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: `ta shell` (and other CLI commands that talk to the daemon) should detect when the running daemon is an older version than the CLI and offer to restart it — rather than silently connecting to a stale daemon.
 
 #### Problem
@@ -2639,14 +2639,20 @@ After `./install_local.sh` rebuilds and installs new `ta` and `ta-daemon` binari
 4. If the user accepts, the CLI stops the old daemon (`POST /api/shutdown` or signal), waits for exit, then spawns the new one.
 5. If the user declines, proceed with a warning in the status bar (e.g., `daemon (stale)`).
 
-#### Items
-1. [ ] `GET /api/status` response includes `daemon_version` field (add if not present)
-2. [ ] `check_daemon_version()` in CLI: compare `env!("CARGO_PKG_VERSION")` to daemon's reported version
-3. [ ] Wire into `ta shell` startup: check version before entering TUI loop, prompt if mismatch
-4. [ ] Wire into `ta run` / `ta dev`: same check before launching agent
-5. [ ] Restart flow: graceful shutdown → wait for exit → spawn new daemon
-6. [ ] `--no-version-check` flag to skip (for CI or scripted use)
-7. [ ] Status bar indicator: show `(stale)` if user declined restart
+#### Completed
+1. ✅ `GET /api/status` response includes `daemon_version` field — added alongside existing `version` field in `ProjectStatus`
+2. ✅ `check_daemon_version()` in `version_guard.rs`: compares `env!("CARGO_PKG_VERSION")` to daemon's reported version, prompts interactively, returns `VersionGuardResult` enum
+3. ✅ Wired into `ta shell` startup (both classic and TUI modes): version check runs before entering the shell loop, prompts user to restart if mismatch
+4. ✅ Wired into `ta dev`: version check before launching orchestrator agent
+5. ✅ Restart flow: `POST /api/shutdown` graceful endpoint → wait for exit (5s timeout) → find daemon binary (sibling or PATH) → spawn new daemon → wait for healthy (10s) → verify version matches
+6. ✅ `--no-version-check` global CLI flag to skip (for CI or scripted use)
+7. ✅ TUI status bar: shows `◉ daemon (stale)` in yellow if daemon version doesn't match CLI version
+
+#### Remaining
+- `ta run` does not use the daemon API directly — no version check needed (it manages staging workspaces locally)
+
+#### Tests
+- 3 unit tests in `version_guard.rs`: variant construction, `find_daemon_binary` safety, stale result version extraction
 
 #### Version: `0.10.10-alpha`
 

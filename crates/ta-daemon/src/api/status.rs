@@ -19,6 +19,9 @@ use crate::api::AppState;
 pub struct ProjectStatus {
     pub project: String,
     pub version: String,
+    /// Explicit daemon version field for version guard checks.
+    /// Always matches `version` but provides a stable API contract.
+    pub daemon_version: String,
     pub current_phase: Option<PhaseInfo>,
     pub active_agents: Vec<AgentInfo>,
     pub pending_drafts: usize,
@@ -128,7 +131,8 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 
     Json(ProjectStatus {
         project: project_name,
-        version,
+        version: version.clone(),
+        daemon_version: version,
         current_phase,
         active_agents,
         pending_drafts,

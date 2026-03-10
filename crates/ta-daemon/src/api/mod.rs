@@ -238,6 +238,26 @@ async fn reload_office(
     }
 }
 
+/// `POST /api/shutdown` — Graceful daemon shutdown (v0.10.10).
+///
+/// Responds with 200 and then exits the process. Used by the CLI's
+/// version guard to restart the daemon with a matching version.
+async fn shutdown_daemon(
+    axum::extract::State(_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse {
+    tracing::info!("Shutdown requested via POST /api/shutdown");
+    // Spawn the exit on a short delay so the response is sent first.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        std::process::exit(0);
+    });
+    Json(serde_json::json!({
+        "status": "shutting_down",
+        "message": "Daemon is shutting down gracefully."
+    }))
+    .into_response()
+}
+
 /// Build the full API router with auth middleware.
 pub fn build_api_router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -277,6 +297,8 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             get(get_project).delete(remove_project),
         )
         .route("/api/office/reload", post(reload_office))
+        // Daemon lifecycle routes (v0.10.10).
+        .route("/api/shutdown", post(shutdown_daemon))
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),

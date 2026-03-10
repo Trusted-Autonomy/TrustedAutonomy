@@ -351,6 +351,7 @@ pub fn run(
     attach: Option<&str>,
     daemon_url: Option<&str>,
     init: bool,
+    no_version_check: bool,
 ) -> anyhow::Result<()> {
     if init {
         return super::shell::init_config(project_root);
@@ -361,6 +362,20 @@ pub fn run(
         .unwrap_or_else(|| resolve_daemon_url(project_root));
 
     let rt = tokio::runtime::Runtime::new()?;
+
+    // Version guard check (v0.10.10).
+    if !no_version_check {
+        let client = reqwest::Client::new();
+        let _guard = super::version_guard::check_daemon_version(
+            &client,
+            &base_url,
+            project_root,
+            true, // interactive — TUI hasn't started yet, stdin is available
+            &rt,
+        );
+        // All results proceed — the function already printed warnings/prompts.
+    }
+
     rt.block_on(run_tui(base_url, attach.map(|s| s.to_string())))
 }
 
@@ -801,10 +816,18 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let daemon_indicator = if app.daemon_connected {
-        Span::styled(" ◉ daemon ", Style::default().fg(Color::Green))
-    } else {
+    let cli_version = env!("CARGO_PKG_VERSION");
+    let is_stale = app.daemon_connected
+        && !app.status.version.is_empty()
+        && app.status.version != "?"
+        && app.status.version != cli_version;
+
+    let daemon_indicator = if !app.daemon_connected {
         Span::styled(" ◉ daemon ", Style::default().fg(Color::Red))
+    } else if is_stale {
+        Span::styled(" ◉ daemon (stale) ", Style::default().fg(Color::Yellow))
+    } else {
+        Span::styled(" ◉ daemon ", Style::default().fg(Color::Green))
     };
 
     let phase_str = app.status.next_phase.as_deref().unwrap_or("(none)");
