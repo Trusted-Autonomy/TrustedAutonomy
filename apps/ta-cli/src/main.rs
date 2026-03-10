@@ -82,9 +82,15 @@ enum Commands {
         /// Plan phase this goal implements (e.g., "4b").
         #[arg(long)]
         phase: Option<String>,
-        /// Follow up on a previous goal (ID prefix or omit for latest).
+        /// Follow up on a previous goal (ID prefix or omit for interactive picker).
         #[arg(long)]
         follow_up: Option<Option<String>>,
+        /// Follow up on a specific draft (denied, failed verify, etc.).
+        #[arg(long)]
+        follow_up_draft: Option<String>,
+        /// Follow up on a specific goal by ID prefix.
+        #[arg(long)]
+        follow_up_goal: Option<String>,
         /// Read objective from a file instead of --objective.
         #[arg(long)]
         objective_file: Option<PathBuf>,
@@ -387,6 +393,8 @@ fn main() -> anyhow::Result<()> {
             objective,
             phase,
             follow_up,
+            follow_up_draft,
+            follow_up_goal,
             objective_file,
             no_launch,
             interactive,
@@ -408,6 +416,8 @@ fn main() -> anyhow::Result<()> {
                 objective,
                 resolved_phase.as_deref(),
                 follow_up.as_ref(),
+                follow_up_draft.as_deref(),
+                follow_up_goal.as_deref(),
                 objective_file.as_deref(),
                 *no_launch,
                 *interactive,

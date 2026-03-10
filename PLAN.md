@@ -2600,16 +2600,22 @@ The follow-up resolver doesn't assume git. It works from TA's own state:
 - **Plan phases**: `PLAN.md` status markers — in_progress phases are follow-up candidates
 - **Channel context**: For non-filesystem workflows (email drafts, social media posts, DB migrations), the follow-up context comes from the draft's `PatchSet` and interaction log rather than a git branch
 
-#### Items
-1. [ ] `FollowUpCandidate` struct: `source` (goal/draft/phase/verify-failure), `title`, `status`, `age`, `staging_path`, `context_summary`
-2. [ ] `gather_follow_up_candidates()`: scan goals, drafts, plan phases; filter to actionable items; sort by recency
-3. [ ] Interactive picker in `ta run --follow-up` (no args): display candidates, accept selection
-4. [ ] `--follow-up --phase <id>` shortcut: resolve directly from plan phase
-5. [ ] `--follow-up --draft <id>` shortcut: resolve from draft (inject denial reason / verify failure as context)
-6. [ ] `--follow-up --goal <id>` shortcut: resolve from prior goal
-7. [ ] Context injection: build follow-up section for CLAUDE.md with prior attempt summary, failure output, reviewer feedback
-8. [ ] Shell TUI integration: fuzzy-searchable follow-up picker when running from `ta shell`
-9. [ ] Channel-agnostic resolution: follow-up works for non-git workflows using draft PatchSet and interaction logs
+#### Completed
+1. ✅ `FollowUpCandidate` struct in `apps/ta-cli/src/commands/follow_up.rs`: `source` (CandidateSource enum: Goal/Draft/Phase/VerifyFailure), `title`, `status`, `age`, `staging_path`, `context_summary`, `denial_reason`, `verification_warnings`
+2. ✅ `gather_follow_up_candidates()`: scans goals, drafts, plan phases; filters to actionable items (failed, running, denied, verify-warned, in-progress phases); sorts by recency
+3. ✅ Interactive picker in `ta run --follow-up` (no args): numbered candidate list with source tags, status, age, and context summaries; user selects by number
+4. ✅ `--follow-up --phase <id>` shortcut: `resolve_by_phase()` finds most recent goal for a plan phase, with phase ID normalization (v-prefix handling)
+5. ✅ `--follow-up-draft <id>` CLI flag: `resolve_by_draft()` resolves from draft prefix, injects denial reason and verify failure context
+6. ✅ `--follow-up-goal <id>` CLI flag: `resolve_by_goal()` resolves from goal prefix with rich context injection
+7. ✅ Context injection: `build_follow_up_context()` builds CLAUDE.md section with prior goal summary, draft status, verification failures (with command output), denial reasons, discuss items with review comments
+8. ✅ `resolve_smart_follow_up()` in `run.rs`: priority-based resolution (draft > goal > phase > interactive picker > existing behavior); produces title, phase, follow-up ID, and context string
+9. ✅ Channel-agnostic resolution: follow-up resolver works from TA's own state (GoalRun records, DraftPackage records, PLAN.md phases) without assuming git
+
+#### Remaining
+- Shell TUI fuzzy-searchable picker deferred — depends on v0.10.11 Shell TUI UX Overhaul
+
+#### Tests
+- 13 new tests in `follow_up.rs`: format_age (4 variants), truncate (2 variants), candidate display, candidate source display, empty picker error, goal state filtering (completed skipped, failed included, running included), phase filtering (only in-progress), basic candidate creation
 
 #### Version: `0.10.9-alpha`
 

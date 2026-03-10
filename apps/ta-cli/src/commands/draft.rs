@@ -2520,6 +2520,8 @@ fn fix_package(
         ),
         parent_goal.plan_phase.as_deref(),
         follow_up_id.as_ref(),
+        None, // follow_up_draft
+        None, // follow_up_goal
         None, // no objective file
         no_launch,
         false, // not interactive

@@ -215,6 +215,118 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
     }
 }
 
+// ── Smart Follow-Up Resolution (v0.10.9) ────────────────────────
+
+/// Resolve smart follow-up flags into concrete title, phase, follow-up ID, and context.
+///
+/// Priority:
+/// 1. `--follow-up-draft <id>` → resolve from draft
+/// 2. `--follow-up-goal <id>` → resolve from goal
+/// 3. `--follow-up --phase <id>` → resolve from plan phase
+/// 4. `--follow-up` (no arg) → interactive picker
+/// 5. `--follow-up <id>` → existing behavior (goal/draft prefix match)
+/// 6. No follow-up flags → pass through unchanged
+///
+/// Returns (title, phase, follow_up, follow_up_context) where follow_up_context
+/// is an optional rich context string for CLAUDE.md injection.
+#[allow(clippy::type_complexity)]
+fn resolve_smart_follow_up(
+    config: &GatewayConfig,
+    title: Option<&str>,
+    phase: Option<&str>,
+    follow_up: Option<&Option<String>>,
+    follow_up_draft: Option<&str>,
+    follow_up_goal: Option<&str>,
+) -> anyhow::Result<(
+    Option<String>,
+    Option<String>,
+    Option<Option<String>>,
+    Option<String>,
+)> {
+    use super::follow_up as fu;
+
+    let goal_store = GoalRunStore::new(&config.goals_dir)?;
+
+    // 1. --follow-up-draft <id>
+    if let Some(draft_prefix) = follow_up_draft {
+        let candidate = fu::resolve_by_draft(config, &goal_store, draft_prefix)?;
+        let context = fu::build_follow_up_context(&candidate, &goal_store, config);
+        let resolved_title = title
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| format!("Follow-up: {}", candidate.title));
+        let resolved_phase = phase.map(|p| p.to_string()).or(candidate.phase_id.clone());
+        let follow_up_id = candidate.goal_id.map(|id| id.to_string());
+        return Ok((
+            Some(resolved_title),
+            resolved_phase,
+            Some(follow_up_id),
+            Some(context),
+        ));
+    }
+
+    // 2. --follow-up-goal <id>
+    if let Some(goal_prefix) = follow_up_goal {
+        let candidate = fu::resolve_by_goal(&goal_store, goal_prefix)?;
+        let context = fu::build_follow_up_context(&candidate, &goal_store, config);
+        let resolved_title = title
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| format!("Follow-up: {}", candidate.title));
+        let resolved_phase = phase.map(|p| p.to_string()).or(candidate.phase_id.clone());
+        let follow_up_id = candidate.goal_id.map(|id| id.to_string());
+        return Ok((
+            Some(resolved_title),
+            resolved_phase,
+            Some(follow_up_id),
+            Some(context),
+        ));
+    }
+
+    // 3. --follow-up with no arg AND --phase → resolve by phase
+    if let Some(inner) = follow_up {
+        if let (None, Some(phase_id)) = (inner, phase) {
+            let candidate = fu::resolve_by_phase(config, &goal_store, phase_id)?;
+            let context = fu::build_follow_up_context(&candidate, &goal_store, config);
+            let resolved_title = title
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| format!("Follow-up: {}", candidate.title));
+            let follow_up_id = candidate.goal_id.map(|id| id.to_string());
+            return Ok((
+                Some(resolved_title),
+                Some(phase_id.to_string()),
+                Some(follow_up_id),
+                Some(context),
+            ));
+        }
+
+        // 4. --follow-up (no arg, no phase) → interactive picker
+        if inner.is_none() {
+            let candidates = fu::gather_follow_up_candidates(config, &goal_store)?;
+            let selected = fu::pick_candidate(&candidates)?;
+            let context = fu::build_follow_up_context(selected, &goal_store, config);
+            let resolved_title = title
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| format!("Follow-up: {}", selected.title));
+            let resolved_phase = phase.map(|p| p.to_string()).or(selected.phase_id.clone());
+            let follow_up_id = selected.goal_id.map(|id| id.to_string());
+            return Ok((
+                Some(resolved_title),
+                resolved_phase,
+                Some(follow_up_id),
+                Some(context),
+            ));
+        }
+    }
+
+    // 5/6. --follow-up <id> or no follow-up → pass through unchanged (existing behavior).
+    // The existing goal.rs find_parent_goal() handles ID prefix resolution.
+    Ok((
+        title.map(|t| t.to_string()),
+        phase.map(|p| p.to_string()),
+        follow_up.cloned(),
+        None,
+    ))
+}
+
 // ── Public API ──────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -226,6 +338,8 @@ pub fn execute(
     objective: &str,
     phase: Option<&str>,
     follow_up: Option<&Option<String>>,
+    follow_up_draft: Option<&str>,
+    follow_up_goal: Option<&str>,
     objective_file: Option<&Path>,
     no_launch: bool,
     interactive: bool,
@@ -247,6 +361,22 @@ pub fn execute(
             anyhow::bail!("Session resume requires PTY support (not available on Windows)");
         }
     }
+
+    // ── Smart Follow-Up Resolution (v0.10.9) ────────────────────
+    //
+    // Resolve --follow-up-draft, --follow-up-goal, or --follow-up (no arg)
+    // to a concrete follow-up candidate, then derive title/phase/follow-up ID.
+    let (title, phase, follow_up, follow_up_context) = resolve_smart_follow_up(
+        config,
+        title,
+        phase,
+        follow_up,
+        follow_up_draft,
+        follow_up_goal,
+    )?;
+    let title = title.as_deref();
+    let phase = phase.as_deref();
+    let follow_up = follow_up.as_ref();
 
     let title = title.ok_or_else(|| {
         anyhow::anyhow!("Title is required (use --resume to resume an existing session)")
@@ -344,6 +474,7 @@ pub fn execute(
             config,
             macro_goal,
             interactive,
+            follow_up_context.as_deref(),
         )?;
     }
     if agent_config.injects_settings {
@@ -1646,6 +1777,7 @@ fn inject_claude_md(
     config: &GatewayConfig,
     macro_goal: bool,
     interactive: bool,
+    smart_follow_up_context: Option<&str>,
 ) -> anyhow::Result<()> {
     let claude_md_path = staging_path.join("CLAUDE.md");
     let backup_path = staging_path.join(CLAUDE_MD_BACKUP);
@@ -1687,7 +1819,13 @@ fn inject_claude_md(
     let plan_section = build_plan_section(plan_phase, source_dir);
 
     // Build parent context section if this is a follow-up goal.
-    let parent_section = build_parent_context_section(parent_goal_id, goal_store, config);
+    // v0.10.9: Prefer smart follow-up context when available (richer context
+    // including verification failures, denial reasons, and reviewer feedback).
+    let parent_section = if let Some(ctx) = smart_follow_up_context {
+        ctx.to_string()
+    } else {
+        build_parent_context_section(parent_goal_id, goal_store, config)
+    };
 
     // Build macro goal section if --macro was specified.
     let macro_section = if macro_goal {
@@ -2003,6 +2141,8 @@ mod tests {
             "Test objective",
             None,
             None,
+            None, // follow_up_draft
+            None, // follow_up_goal
             None,
             true,
             false,
@@ -2052,6 +2192,7 @@ mod tests {
             &config,
             false,
             false,
+            None,
         )
         .unwrap();
 
@@ -2092,6 +2233,7 @@ mod tests {
             &config,
             false,
             false,
+            None,
         )
         .unwrap();
 
@@ -2127,6 +2269,7 @@ mod tests {
             &config,
             false,
             false,
+            None,
         )
         .unwrap();
 
@@ -2155,6 +2298,7 @@ mod tests {
             &config,
             true, // macro_goal = true
             false,
+            None,
         )
         .unwrap();
 
@@ -2184,6 +2328,7 @@ mod tests {
             &config,
             false,
             true, // interactive = true
+            None,
         )
         .unwrap();
 
@@ -2219,6 +2364,7 @@ mod tests {
             &config,
             false,
             false,
+            None,
         )
         .unwrap();
 
@@ -2704,6 +2850,7 @@ pre_launch:
             &config,
             false,
             false,
+            None,
         )
         .unwrap();
 
@@ -2724,6 +2871,7 @@ pre_launch:
             &config,
             false,
             false,
+            None,
         )
         .unwrap();
 

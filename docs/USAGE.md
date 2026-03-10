@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.8-alpha
+**Version**: v0.10.9-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -401,21 +401,44 @@ ta draft apply <draft-id> --git-commit
 
 ### Follow-Up Iterations
 
-Fix issues discovered during review without losing context:
+Fix issues discovered during review without losing context. The smart follow-up system scans your goals, drafts, plan phases, and verification failures to find what you want to resume — no need to remember branch names, draft IDs, or internal state.
 
 ```bash
-# Start a follow-up (inherits context from the most recent goal)
-ta run "Fix clippy warnings from review" --follow-up
+# Interactive picker — shows all actionable follow-up candidates
+ta run --follow-up
 
-# With a specific parent goal
+# Follow up on a specific draft (denied, failed verify, etc.)
+ta run --follow-up-draft <draft-id-prefix>
+
+# Follow up on a specific goal
+ta run --follow-up-goal <goal-id-prefix>
+
+# Resume work on a specific plan phase
+ta run --follow-up --phase v0.10.9
+
+# With a specific parent goal (legacy shortcut, still works)
 ta run "Address review feedback" --follow-up <goal-id-prefix>
 
 # With detailed instructions
 ta run --follow-up --objective "Fix the discuss items on config.toml -- add env var override support"
-
-# From a file
-ta run --follow-up --objective-file review-notes.md
 ```
+
+When you run `ta run --follow-up` with no arguments, TA presents an interactive picker:
+
+```
+Follow-up candidates:
+
+   1) [goal] v0.10.8 — Pre-Draft Verification Gate — failed: build error (2h ago)
+      Added VerifyConfig struct with block/warn/agent failure modes
+   2) [draft] v0.10.7 — Documentation Review — denied: needs more examples (1d ago)
+      Updated USAGE.md with new command documentation
+   3) [verify] v0.10.6 — Release Process — verify warnings (2) (3d ago)
+      Added release workflow template
+
+Select candidate [1-3] (or 'q' to cancel):
+```
+
+The agent receives rich follow-up context injected into CLAUDE.md — including what was attempted previously, verification failures with command output, denial reasons, and reviewer discussion comments.
 
 When the parent goal's staging directory still exists, TA prompts to reuse it. Choosing yes (the default) means work accumulates into a single unified draft.
 
@@ -3957,6 +3980,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.6 | Release process hardening & interactive release flow | Done |
 | v0.10.7 | Documentation review & consolidation | Done |
 | v0.10.8 | Pre-draft verification gate | Done |
+| v0.10.9 | Smart follow-up UX | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

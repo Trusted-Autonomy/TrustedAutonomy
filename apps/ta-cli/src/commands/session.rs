@@ -76,6 +76,8 @@ pub fn execute(cmd: &SessionCommands, config: &GatewayConfig) -> anyhow::Result<
                 "",
                 None,
                 None,
+                None, // follow_up_draft
+                None, // follow_up_goal
                 None,
                 false,
                 true,

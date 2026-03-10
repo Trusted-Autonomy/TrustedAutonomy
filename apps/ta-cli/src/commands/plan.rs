@@ -1299,6 +1299,8 @@ fn plan_from(
         &objective,
         None, // no phase — this creates a plan, not implements one
         follow_up,
+        None,  // follow_up_draft
+        None,  // follow_up_goal
         None,  // no objective file — we built the objective inline
         false, // no_launch = false
         true,  // interactive = true
