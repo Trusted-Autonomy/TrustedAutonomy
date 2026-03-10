@@ -246,6 +246,12 @@ pub async fn ask_agent(
 
                 let timeout = std::time::Duration::from_secs(timeout_secs.max(60));
 
+                // Send an immediate status line so the client sees activity.
+                let _ = tx.send(OutputLine {
+                    stream: "stderr",
+                    line: format!("Starting {} agent...", agent),
+                });
+
                 let result = tokio::process::Command::new(&binary)
                     .args(&args)
                     .current_dir(&working_dir)
@@ -349,11 +355,23 @@ pub async fn ask_agent(
 }
 
 /// Resolve agent name to binary + args.
+///
+/// For claude-code, uses `--output-format stream-json` so that stdout emits
+/// one JSON object per line as the response is generated, rather than waiting
+/// until the full response is ready (which can take 60+ seconds with no
+/// output). The daemon's stdout reader publishes each line to the broadcast
+/// channel in real time.
 fn resolve_agent_command(agent: &str, prompt: &str) -> (String, Vec<String>) {
     match agent {
         "claude-code" | "claude" => (
             "claude".to_string(),
-            vec!["--print".to_string(), "-p".to_string(), prompt.to_string()],
+            vec![
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "-p".to_string(),
+                prompt.to_string(),
+            ],
         ),
         "codex" => (
             "codex".to_string(),
@@ -473,7 +491,10 @@ mod tests {
     fn resolve_claude_code_agent() {
         let (bin, args) = resolve_agent_command("claude-code", "hello");
         assert_eq!(bin, "claude");
-        assert_eq!(args, vec!["--print", "-p", "hello"]);
+        assert_eq!(
+            args,
+            vec!["--print", "--output-format", "stream-json", "-p", "hello"]
+        );
     }
 
     #[test]
