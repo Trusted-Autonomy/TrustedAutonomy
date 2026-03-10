@@ -370,6 +370,13 @@ pub(crate) async fn send_input(
         return Ok(output);
     }
 
+    // Agent streaming response — return the request ID for the TUI to subscribe.
+    if json["status"].as_str() == Some("processing") {
+        if let Some(request_id) = json["request_id"].as_str() {
+            return Ok(format!("__streaming__:{}\n", request_id));
+        }
+    }
+
     // For command results, prefer stdout; for agent results, prefer response.
     if let Some(stdout) = json["stdout"].as_str() {
         let mut output = stdout.to_string();

@@ -753,10 +753,6 @@ async fn handle_terminal_event(
                             return;
                         }
 
-                        // Show immediate feedback while waiting for response.
-                        app.push_output(OutputLine::event("Thinking...".into()));
-                        app.scroll_to_bottom();
-
                         // Send to daemon asynchronously.
                         let client = client.clone();
                         let base_url = app.base_url.clone();
@@ -772,7 +768,24 @@ async fn handle_terminal_event(
                             .await;
                             match result {
                                 Ok(output) => {
-                                    let _ = tx.send(TuiMessage::CommandResponse(output));
+                                    // Check for streaming response from agent.
+                                    if let Some(request_id) = output.strip_prefix("__streaming__:")
+                                    {
+                                        let request_id = request_id.trim().to_string();
+                                        let _ = tx.send(TuiMessage::CommandResponse(
+                                            "Agent is working...".to_string(),
+                                        ));
+                                        // Subscribe to the agent output stream.
+                                        stream_agent_output(
+                                            client.clone(),
+                                            &base_url,
+                                            &request_id,
+                                            tx.clone(),
+                                        )
+                                        .await;
+                                    } else {
+                                        let _ = tx.send(TuiMessage::CommandResponse(output));
+                                    }
                                 }
                                 Err(e) => {
                                     let msg = e.to_string();
@@ -1469,6 +1482,19 @@ async fn start_tail_stream(
     }
 
     let _ = tx.send(TuiMessage::AgentOutputDone(target));
+}
+
+/// Stream agent Q&A output from a request ID.
+///
+/// Connects to the same `/api/goals/:id/output` SSE endpoint used by `:tail`,
+/// since agent ask responses use the GoalOutput channel system.
+async fn stream_agent_output(
+    client: reqwest::Client,
+    base_url: &str,
+    request_id: &str,
+    tx: tokio::sync::mpsc::UnboundedSender<TuiMessage>,
+) {
+    start_tail_stream(client, base_url, Some(request_id), tx, 0).await;
 }
 
 /// Parse an SSE frame for a `goal_started` event.

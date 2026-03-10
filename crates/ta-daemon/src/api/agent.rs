@@ -156,6 +156,12 @@ pub struct AskRequest {
 pub struct AskResponse {
     pub session_id: String,
     pub response: String,
+    /// Request ID for streaming output (present when status is "processing").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// "processing" if the agent is running async, absent if response is complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 // ── Handlers ────────────────────────────────────────────────────
@@ -194,9 +200,10 @@ pub async fn start_session(
 
 /// `POST /api/agent/ask` — Send a prompt to an agent session.
 ///
-/// Spawns `claude --print -p "<prompt>"` in the project root and returns
-/// the agent's response. Each call is a separate subprocess to avoid
-/// managing long-lived process I/O. The session tracks state and history.
+/// Spawns `claude --print -p "<prompt>"` in the project root and streams
+/// output via the GoalOutput channel system. Returns an immediate ack so
+/// the client knows the agent received the request. The client subscribes
+/// to `GET /api/goals/:request_id/output` for the streaming response.
 pub async fn ask_agent(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<CallerIdentity>,
@@ -211,31 +218,122 @@ pub async fn ask_agent(
         Some(s) if s.status == SessionStatus::Running => {
             state.agent_sessions.touch_session(&body.session_id).await;
 
-            // Run the agent subprocess with the agent-specific timeout
-            // (default 5 min, not the 30s command timeout).
-            let response = run_agent_prompt(
-                &s.agent,
-                &body.prompt,
-                &state.project_root,
-                state.daemon_config.agent.timeout_secs,
-            )
-            .await;
+            // Create an output channel for this request so the client can stream results.
+            let request_id = format!("ask-{}", &Uuid::new_v4().to_string()[..8]);
+            let tx = state.goal_output.create_channel(&request_id).await;
 
-            match response {
-                Ok(output) => Json(AskResponse {
-                    session_id: body.session_id,
-                    response: output,
-                })
-                .into_response(),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": format!("Agent error: {}", e),
-                        "session_id": body.session_id,
-                    })),
-                )
-                    .into_response(),
-            }
+            let agent = s.agent.clone();
+            let prompt = body.prompt.clone();
+            let working_dir = state.project_root.clone();
+            let timeout_secs = state.daemon_config.agent.timeout_secs;
+            let goal_output = state.goal_output.clone_ref();
+            let req_id = request_id.clone();
+            let session_id = body.session_id.clone();
+
+            // Spawn the agent subprocess — returns immediately.
+            tokio::spawn(async move {
+                use crate::api::goal_output::OutputLine;
+                use tokio::io::{AsyncBufReadExt, BufReader};
+
+                let (binary, args) = resolve_agent_command(&agent, &prompt);
+
+                tracing::info!(
+                    "Agent ask (streaming): agent={}, request_id={}, prompt_len={}",
+                    agent,
+                    req_id,
+                    prompt.len()
+                );
+
+                let timeout = std::time::Duration::from_secs(timeout_secs.max(60));
+
+                let result = tokio::process::Command::new(&binary)
+                    .args(&args)
+                    .current_dir(&working_dir)
+                    .env_remove("CLAUDECODE")
+                    .env_remove("CLAUDE_CODE_ENTRYPOINT")
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn();
+
+                match result {
+                    Ok(mut child) => {
+                        let stdout = child.stdout.take();
+                        let stderr = child.stderr.take();
+                        let tx2 = tx.clone();
+
+                        let stdout_task = tokio::spawn(async move {
+                            if let Some(out) = stdout {
+                                let mut reader = BufReader::new(out).lines();
+                                while let Ok(Some(line)) = reader.next_line().await {
+                                    let _ = tx.send(OutputLine {
+                                        stream: "stdout",
+                                        line,
+                                    });
+                                }
+                            }
+                        });
+
+                        let stderr_task = tokio::spawn(async move {
+                            if let Some(err) = stderr {
+                                let mut reader = BufReader::new(err).lines();
+                                while let Ok(Some(line)) = reader.next_line().await {
+                                    let _ = tx2.send(OutputLine {
+                                        stream: "stderr",
+                                        line,
+                                    });
+                                }
+                            }
+                        });
+
+                        let status = tokio::time::timeout(timeout, child.wait()).await;
+
+                        let _ = stdout_task.await;
+                        let _ = stderr_task.await;
+
+                        match status {
+                            Ok(Ok(s)) if !s.success() => {
+                                tracing::warn!(
+                                    "Agent ask failed (exit {}): session={}, request={}",
+                                    s.code().unwrap_or(-1),
+                                    session_id,
+                                    req_id,
+                                );
+                            }
+                            Ok(Err(e)) => {
+                                tracing::error!("Agent wait error: {}", e);
+                            }
+                            Err(_) => {
+                                let _ = child.kill().await;
+                                tracing::warn!(
+                                    "Agent timed out after {}s: request={}",
+                                    timeout.as_secs(),
+                                    req_id,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to start agent '{}' (binary: {}): {}",
+                            agent,
+                            binary,
+                            e
+                        );
+                    }
+                }
+
+                goal_output.remove_channel(&req_id).await;
+            });
+
+            // Return immediate ack with the request ID for streaming.
+            Json(AskResponse {
+                session_id: body.session_id,
+                response: String::new(),
+                request_id: Some(request_id),
+                status: Some("processing".to_string()),
+            })
+            .into_response()
         }
         Some(_) => (
             StatusCode::CONFLICT,
@@ -247,70 +345,6 @@ pub async fn ask_agent(
             Json(serde_json::json!({"error": "session not found"})),
         )
             .into_response(),
-    }
-}
-
-/// Run an agent subprocess and return its output.
-async fn run_agent_prompt(
-    agent: &str,
-    prompt: &str,
-    working_dir: &std::path::Path,
-    timeout_secs: u64,
-) -> Result<String, String> {
-    // Resolve agent binary. Currently supports "claude-code" (claude CLI).
-    let (binary, args) = resolve_agent_command(agent, prompt);
-
-    tracing::info!(
-        "Agent ask: agent={}, binary={}, prompt_len={}",
-        agent,
-        binary,
-        prompt.len()
-    );
-
-    let timeout = std::time::Duration::from_secs(timeout_secs.max(60));
-
-    let result = tokio::time::timeout(timeout, async {
-        tokio::process::Command::new(&binary)
-            .args(&args)
-            .current_dir(working_dir)
-            // Clear env vars that prevent nested agent sessions.
-            .env_remove("CLAUDECODE")
-            .env_remove("CLAUDE_CODE_ENTRYPOINT")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-    })
-    .await;
-
-    match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-            if output.status.success() {
-                if stdout.is_empty() && !stderr.is_empty() {
-                    Ok(stderr)
-                } else {
-                    Ok(stdout)
-                }
-            } else {
-                let code = output.status.code().unwrap_or(-1);
-                Err(format!(
-                    "Agent exited with code {} — {}",
-                    code,
-                    if stderr.is_empty() { stdout } else { stderr }
-                ))
-            }
-        }
-        Ok(Err(e)) => Err(format!(
-            "Failed to start agent '{}' (binary: {}): {}. Is it installed?",
-            agent, binary, e
-        )),
-        Err(_) => Err(format!(
-            "Agent timed out after {}s. Configure agent.timeout_secs in daemon.toml to increase (default: 300).",
-            timeout.as_secs()
-        )),
     }
 }
 
