@@ -154,16 +154,22 @@ pub async fn list_active_output(State(state): State<Arc<AppState>>) -> impl Into
 }
 
 /// Resolve a short goal ID prefix to a full ID.
-async fn resolve_goal_id(state: &AppState, prefix: &str) -> Option<String> {
+async fn resolve_goal_id(state: &AppState, query: &str) -> Option<String> {
     let active = state.goal_output.active_goals().await;
     // Exact match.
-    if active.contains(&prefix.to_string()) {
-        return Some(prefix.to_string());
+    if active.contains(&query.to_string()) {
+        return Some(query.to_string());
     }
-    // Prefix match.
-    let matches: Vec<_> = active.iter().filter(|id| id.starts_with(prefix)).collect();
-    if matches.len() == 1 {
-        return Some(matches[0].clone());
+    // Forward prefix: query is a prefix of an active key (e.g. short ID → full UUID).
+    let forward: Vec<_> = active.iter().filter(|id| id.starts_with(query)).collect();
+    if forward.len() == 1 {
+        return Some(forward[0].clone());
+    }
+    // Reverse prefix: an active key is a prefix of the query (e.g. alias "d01f0930"
+    // matches query "d01f0930-bc2f-432f-bbf3-40c75b991e15").
+    let reverse: Vec<_> = active.iter().filter(|id| query.starts_with(id.as_str())).collect();
+    if reverse.len() == 1 {
+        return Some(reverse[0].clone());
     }
     None
 }
