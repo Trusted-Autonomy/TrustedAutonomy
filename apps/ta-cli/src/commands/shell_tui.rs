@@ -1699,28 +1699,48 @@ async fn start_tail_stream(
         "─── live output ───".to_string(),
     ));
 
-    // Connect to goal output SSE stream.
+    // Connect to goal output SSE stream. Retry a few times because the output
+    // channel alias (goal UUID → output key) may not be registered yet when
+    // auto-tail fires immediately after a goal_started event.
     let url = format!("{}/api/goals/{}/output", base_url, target);
-    let resp = match client.get(&url).send().await {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
-            let json: serde_json::Value = r.json().await.unwrap_or_default();
-            let err = json["error"].as_str().unwrap_or("unknown error");
-            let hint = json["hint"].as_str().unwrap_or("");
-            let mut msg = format!("Error: {}", err);
-            if !hint.is_empty() {
-                msg.push_str(&format!("\n  {}", hint));
+    let mut resp_result = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => {
+                resp_result = Some(r);
+                break;
             }
-            let _ = tx.send(TuiMessage::CommandResponse(msg));
-            return;
+            Ok(_) if attempt < 4 => continue, // Retry on 404
+            Ok(r) => {
+                let json: serde_json::Value = r.json().await.unwrap_or_default();
+                let err = json["error"].as_str().unwrap_or("unknown error");
+                let hint = json["hint"].as_str().unwrap_or("");
+                let mut msg = format!("Error: {}", err);
+                if !hint.is_empty() {
+                    msg.push_str(&format!("\n  {}", hint));
+                }
+                let _ = tx.send(TuiMessage::CommandResponse(msg));
+                return;
+            }
+            Err(e) if attempt < 4 => continue, // Retry on network error
+            Err(e) => {
+                let _ = tx.send(TuiMessage::CommandResponse(format!(
+                    "Error: Cannot reach daemon: {}",
+                    e
+                )));
+                return;
+            }
         }
-        Err(e) => {
-            let _ = tx.send(TuiMessage::CommandResponse(format!(
-                "Error: Cannot reach daemon: {}",
-                e
-            )));
-            return;
-        }
+    }
+
+    let Some(resp) = resp_result else {
+        let _ = tx.send(TuiMessage::CommandResponse(
+            "Error: Could not connect to output stream after retries".into(),
+        ));
+        return;
     };
 
     let mut stream = resp.bytes_stream();
