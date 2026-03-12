@@ -120,6 +120,8 @@ impl ChannelDispatcher {
             description: None,
             timeout_secs: entry.timeout_secs,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
 
         manifest.validate().map_err(|e| e.to_string())?;

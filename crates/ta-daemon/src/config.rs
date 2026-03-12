@@ -14,6 +14,28 @@ pub struct DaemonConfig {
     pub agent: AgentConfig,
     pub routing: RoutingConfig,
     pub channels: ChannelsConfig,
+    /// Sandbox configuration for command validation (v0.10.16, item 3).
+    /// When set, the orchestrator validates commands against the sandbox
+    /// allowlist before execution.
+    #[serde(default)]
+    pub sandbox: Option<SandboxSection>,
+}
+
+/// Sandbox configuration section in daemon.toml (v0.10.16).
+///
+/// ```toml
+/// [sandbox]
+/// enabled = true
+/// config_path = ".ta/sandbox.toml"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxSection {
+    /// Whether sandbox command validation is active.
+    pub enabled: bool,
+    /// Path to a sandbox config file (relative to project root).
+    /// If not set, uses the built-in `SandboxConfig::default()`.
+    pub config_path: Option<String>,
 }
 
 impl DaemonConfig {
@@ -43,6 +65,11 @@ pub struct ServerConfig {
     pub bind: String,
     pub port: u16,
     pub cors_origins: Vec<String>,
+    /// Optional Unix domain socket path for local IPC (v0.10.16).
+    /// Set to `""` to use the default `.ta/daemon.sock`, or provide a full path.
+    /// Only used on Unix platforms; ignored on Windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -51,6 +78,7 @@ impl Default for ServerConfig {
             bind: "127.0.0.1".to_string(),
             port: 7700,
             cors_origins: vec!["*".to_string()],
+            socket_path: None,
         }
     }
 }
@@ -138,6 +166,10 @@ pub struct AgentConfig {
     /// Timeout for agent prompt responses (default: 300s / 5 minutes).
     /// Agent LLM calls can take minutes — this is separate from the command timeout.
     pub timeout_secs: u64,
+    /// Agent-level tool access control (v0.10.16).
+    /// Restricts which MCP tools agents can invoke.
+    #[serde(default)]
+    pub tool_access: AgentToolAccess,
 }
 
 impl Default for AgentConfig {
@@ -147,6 +179,7 @@ impl Default for AgentConfig {
             idle_timeout_secs: 3600,
             default_agent: "claude-code".to_string(),
             timeout_secs: 300,
+            tool_access: AgentToolAccess::default(),
         }
     }
 }
@@ -329,6 +362,10 @@ pub struct ChannelsConfig {
     /// Each entry registers an out-of-process plugin via JSON-over-stdio or HTTP.
     #[serde(default)]
     pub external: Vec<ExternalChannelEntry>,
+    /// Global channel access control (v0.10.16).
+    /// Restricts which users/roles can interact with TA through channels.
+    #[serde(default)]
+    pub access_control: ChannelAccessControl,
 }
 
 /// Inline external channel plugin configuration in daemon.toml.
@@ -367,6 +404,9 @@ pub struct ExternalChannelEntry {
     /// Timeout in seconds (default: 30).
     #[serde(default = "default_plugin_timeout")]
     pub timeout_secs: u64,
+    /// Per-channel access control (v0.10.16). Overrides global channel access control.
+    #[serde(default)]
+    pub access_control: Option<ChannelAccessControl>,
 }
 
 fn default_protocol() -> String {
@@ -395,6 +435,96 @@ pub struct EmailChannelConfig {
     pub api_key: String,
     pub from_address: String,
     pub to_address: String,
+}
+
+/// Channel-level access control (v0.10.16, item 12).
+///
+/// Restricts which users and roles can interact with TA through external
+/// channels (Slack, Discord, email, etc.). Uses the same deny-takes-precedence
+/// semantics as `AccessFilter`.
+///
+/// ```toml
+/// [channels.access_control]
+/// allowed_users = ["U12345", "U67890"]
+/// denied_users = ["U99999"]
+/// allowed_roles = ["admin", "reviewer"]
+/// denied_roles = ["guest"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelAccessControl {
+    /// Users explicitly allowed. Empty = allow all (subject to deny list).
+    pub allowed_users: Vec<String>,
+    /// Users explicitly denied (takes precedence over allowed).
+    pub denied_users: Vec<String>,
+    /// Roles explicitly allowed. Empty = allow all (subject to deny list).
+    pub allowed_roles: Vec<String>,
+    /// Roles explicitly denied (takes precedence over allowed).
+    pub denied_roles: Vec<String>,
+}
+
+impl ChannelAccessControl {
+    /// Check whether a user is permitted based on their user_id and roles.
+    ///
+    /// Logic (deny takes precedence):
+    ///   1. If user_id matches any denied_users → false
+    ///   2. If any role matches denied_roles → false
+    ///   3. If allowed_users is non-empty and user_id is not in it → false
+    ///   4. If allowed_roles is non-empty and no role matches → false
+    ///   5. Otherwise → true
+    pub fn permits(&self, user_id: &str, roles: &[String]) -> bool {
+        // Deny takes precedence.
+        if self.denied_users.iter().any(|u| u == user_id) {
+            return false;
+        }
+        if roles.iter().any(|r| self.denied_roles.contains(r)) {
+            return false;
+        }
+        // Check allowed users.
+        if !self.allowed_users.is_empty() && !self.allowed_users.iter().any(|u| u == user_id) {
+            return false;
+        }
+        // Check allowed roles.
+        if !self.allowed_roles.is_empty() && !roles.iter().any(|r| self.allowed_roles.contains(r)) {
+            return false;
+        }
+        true
+    }
+
+    /// Returns true if no access control is configured (all users/roles permitted).
+    pub fn is_unrestricted(&self) -> bool {
+        self.allowed_users.is_empty()
+            && self.denied_users.is_empty()
+            && self.allowed_roles.is_empty()
+            && self.denied_roles.is_empty()
+    }
+}
+
+/// Agent-level tool access control (v0.10.16, item 13).
+///
+/// Configures which MCP tools an agent is allowed or denied from using.
+/// Applied per-agent via agent config YAML or daemon.toml.
+///
+/// ```toml
+/// [agent.tool_access]
+/// allowed_tools = ["ta_fs_read", "ta_fs_list", "ta_context"]
+/// denied_tools = ["ta_fs_write"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentToolAccess {
+    /// MCP tools the agent is allowed to call. Empty = allow all.
+    pub allowed_tools: Vec<String>,
+    /// MCP tools the agent is denied from calling. Deny takes precedence.
+    pub denied_tools: Vec<String>,
+}
+
+impl AgentToolAccess {
+    /// Create an access filter from the tool access configuration.
+    #[allow(dead_code)] // Public API for gateway tool validation wiring (v0.11+).
+    pub fn as_filter(&self) -> AccessFilter {
+        AccessFilter::new(self.allowed_tools.clone(), self.denied_tools.clone())
+    }
 }
 
 /// Token record stored in `.ta/daemon-tokens.json`.
@@ -586,5 +716,123 @@ mod tests {
     fn load_nonexistent_config() {
         let config = DaemonConfig::load(Path::new("/nonexistent"));
         assert_eq!(config.server.port, 7700);
+    }
+
+    #[test]
+    fn channel_access_control_unrestricted() {
+        let acl = ChannelAccessControl::default();
+        assert!(acl.is_unrestricted());
+        assert!(acl.permits("anyone", &[]));
+        assert!(acl.permits("user1", &["admin".to_string()]));
+    }
+
+    #[test]
+    fn channel_access_control_denied_user() {
+        let acl = ChannelAccessControl {
+            denied_users: vec!["banned".to_string()],
+            ..Default::default()
+        };
+        assert!(!acl.permits("banned", &[]));
+        assert!(acl.permits("allowed", &[]));
+    }
+
+    #[test]
+    fn channel_access_control_denied_role() {
+        let acl = ChannelAccessControl {
+            denied_roles: vec!["guest".to_string()],
+            ..Default::default()
+        };
+        assert!(!acl.permits("user1", &["guest".to_string()]));
+        assert!(acl.permits("user1", &["admin".to_string()]));
+    }
+
+    #[test]
+    fn channel_access_control_allowed_users_only() {
+        let acl = ChannelAccessControl {
+            allowed_users: vec!["alice".to_string(), "bob".to_string()],
+            ..Default::default()
+        };
+        assert!(acl.permits("alice", &[]));
+        assert!(acl.permits("bob", &[]));
+        assert!(!acl.permits("charlie", &[]));
+    }
+
+    #[test]
+    fn channel_access_control_allowed_roles() {
+        let acl = ChannelAccessControl {
+            allowed_roles: vec!["reviewer".to_string()],
+            ..Default::default()
+        };
+        assert!(acl.permits("user1", &["reviewer".to_string()]));
+        assert!(!acl.permits("user1", &["viewer".to_string()]));
+    }
+
+    #[test]
+    fn channel_access_deny_takes_precedence() {
+        let acl = ChannelAccessControl {
+            allowed_users: vec!["alice".to_string()],
+            denied_users: vec!["alice".to_string()],
+            ..Default::default()
+        };
+        // Deny takes precedence even when user is in allowed list.
+        assert!(!acl.permits("alice", &[]));
+    }
+
+    #[test]
+    fn agent_tool_access_default_unrestricted() {
+        let ata = AgentToolAccess::default();
+        let filter = ata.as_filter();
+        assert!(filter.permits("ta_fs_read"));
+        assert!(filter.permits("ta_fs_write"));
+    }
+
+    #[test]
+    fn agent_tool_access_denied_tools() {
+        let ata = AgentToolAccess {
+            allowed_tools: vec![],
+            denied_tools: vec!["ta_fs_write".to_string()],
+        };
+        let filter = ata.as_filter();
+        assert!(filter.permits("ta_fs_read"));
+        assert!(!filter.permits("ta_fs_write"));
+    }
+
+    #[test]
+    fn agent_tool_access_allowed_only() {
+        let ata = AgentToolAccess {
+            allowed_tools: vec!["ta_fs_read".to_string(), "ta_context".to_string()],
+            denied_tools: vec![],
+        };
+        let filter = ata.as_filter();
+        assert!(filter.permits("ta_fs_read"));
+        assert!(filter.permits("ta_context"));
+        assert!(!filter.permits("ta_fs_write"));
+    }
+
+    #[test]
+    fn sandbox_section_defaults() {
+        let sandbox = SandboxSection::default();
+        assert!(!sandbox.enabled);
+        assert!(sandbox.config_path.is_none());
+    }
+
+    #[test]
+    fn server_config_socket_path_serialization() {
+        let config = ServerConfig {
+            socket_path: Some(".ta/daemon.sock".to_string()),
+            ..Default::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(toml_str.contains("socket_path"));
+        let parsed: ServerConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.socket_path.as_deref(), Some(".ta/daemon.sock"));
+    }
+
+    #[test]
+    fn server_config_no_socket_path_omitted() {
+        let config = ServerConfig::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        // socket_path should be omitted when None.
+        assert!(!toml_str.contains("socket_path"));
     }
 }

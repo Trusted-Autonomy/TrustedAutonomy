@@ -91,6 +91,17 @@ pub struct PluginManifest {
     ///   - Node: `"npm run build"`
     #[serde(default)]
     pub build_command: Option<String>,
+
+    /// Minimum daemon version required by this plugin (v0.10.16).
+    /// Semver string (e.g., "0.10.0-alpha"). If set and the daemon version
+    /// is lower, plugin validation warns about incompatibility.
+    #[serde(default)]
+    pub min_daemon_version: Option<String>,
+
+    /// Source URL for remote install / upgrade (v0.10.16).
+    /// Used by `ta plugin upgrade` to fetch the latest version.
+    #[serde(default)]
+    pub source_url: Option<String>,
 }
 
 fn default_version() -> String {

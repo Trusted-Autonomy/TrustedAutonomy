@@ -438,19 +438,73 @@ pub async fn serve_web_ui(pr_packages_dir: PathBuf, port: u16) -> anyhow::Result
 }
 
 /// Start the full daemon API server (v0.9.7).
+///
+/// Accepts a `shutdown` notifier (v0.10.16) for graceful termination on
+/// SIGINT/SIGTERM. When notified, the server completes in-flight requests
+/// and stops accepting new connections.
+///
+/// Writes a `.ta/daemon.pid` file so the CLI can detect a running daemon
+/// and auto-start one if needed (v0.10.16 item 5).
 pub async fn serve_daemon_api(
     project_root: std::path::PathBuf,
     daemon_config: crate::config::DaemonConfig,
+    shutdown: std::sync::Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
     let bind = format!(
         "{}:{}",
         daemon_config.server.bind, daemon_config.server.port
     );
+
+    // Write PID file for daemon discovery (v0.10.16).
+    let pid_path = project_root.join(".ta").join("daemon.pid");
+    write_pid_file(&pid_path, &daemon_config.server);
+
+    // Clean up PID file on shutdown.
+    let pid_path_clone = pid_path.clone();
+    let sd_cleanup = shutdown.clone();
+    tokio::spawn(async move {
+        sd_cleanup.notified().await;
+        let _ = std::fs::remove_file(&pid_path_clone);
+        tracing::debug!("Removed daemon PID file");
+    });
+
     let app = build_full_router(project_root, daemon_config);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("Daemon API listening on http://{}", bind);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown.notified().await;
+            tracing::info!("Daemon API shutting down gracefully");
+        })
+        .await?;
+
+    // Clean up PID file on normal exit too.
+    let _ = std::fs::remove_file(&pid_path);
+
     Ok(())
+}
+
+/// Write a PID file containing the daemon process ID and bind address.
+///
+/// Format: `pid=<PID>\nbind=<host>:<port>\n`
+fn write_pid_file(path: &std::path::Path, server: &crate::config::ServerConfig) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = format!(
+        "pid={}\nbind={}:{}\n",
+        std::process::id(),
+        server.bind,
+        server.port
+    );
+    match std::fs::write(path, &content) {
+        Ok(()) => tracing::debug!(path = %path.display(), "Wrote daemon PID file"),
+        Err(e) => tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "Failed to write daemon PID file — auto-start may not detect this instance"
+        ),
+    }
 }
 
 #[cfg(test)]

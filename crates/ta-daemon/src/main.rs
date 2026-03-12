@@ -45,6 +45,8 @@ use anyhow::Result;
 use clap::Parser;
 use rmcp::ServiceExt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Notify;
 use tracing_subscriber::EnvFilter;
 
 use ta_mcp_gateway::{GatewayConfig, TaGatewayServer};
@@ -136,6 +138,37 @@ async fn main() -> Result<()> {
     // Load daemon configuration.
     let daemon_config = config::DaemonConfig::load(&project_root);
 
+    // Set up cross-platform signal handling (v0.10.16).
+    // The shutdown notifier is shared with background tasks so they can
+    // gracefully terminate when SIGINT/SIGTERM is received.
+    let shutdown = Arc::new(Notify::new());
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = ctrl_c => {
+                        tracing::info!("Received SIGINT (Ctrl-C), initiating graceful shutdown");
+                    }
+                    _ = sigterm.recv() => {
+                        tracing::info!("Received SIGTERM, initiating graceful shutdown");
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = ctrl_c.await;
+                tracing::info!("Received Ctrl-C, initiating graceful shutdown");
+            }
+            shutdown.notify_waiters();
+        });
+    }
+
     if cli.api {
         // API server mode: start the full HTTP API.
         tracing::info!("Running in API server mode");
@@ -151,7 +184,7 @@ async fn main() -> Result<()> {
             });
         }
 
-        web::serve_daemon_api(project_root, daemon_config).await?;
+        web::serve_daemon_api(project_root, daemon_config, shutdown).await?;
     } else {
         // MCP stdio mode (default): backward-compatible with existing setup.
         let gateway_config = GatewayConfig::for_project(&project_root);
@@ -176,8 +209,9 @@ async fn main() -> Result<()> {
         {
             let root = project_root.clone();
             let dc = daemon_config.clone();
+            let sd = shutdown.clone();
             tokio::spawn(async move {
-                if let Err(e) = web::serve_daemon_api(root, dc).await {
+                if let Err(e) = web::serve_daemon_api(root, dc, sd).await {
                     tracing::error!("Daemon API error: {}", e);
                 }
             });

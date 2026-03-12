@@ -38,6 +38,20 @@ pub enum PluginCommands {
         #[arg(long)]
         all: bool,
     },
+    /// Check installed plugin versions for compatibility and updates (v0.10.16).
+    ///
+    /// Reports plugins whose `min_daemon_version` exceeds the current CLI version
+    /// or whose installed version differs from the source in plugins/.
+    Check,
+    /// Upgrade a plugin by re-building and installing from source (v0.10.16).
+    ///
+    /// Rebuilds the plugin from the local `plugins/` directory and installs
+    /// the new version. If the plugin has a `source_url` in its manifest,
+    /// logs the URL for manual fetch.
+    Upgrade {
+        /// Plugin name to upgrade.
+        name: String,
+    },
 }
 
 pub fn run_plugin(project_root: &std::path::Path, command: &PluginCommands) -> anyhow::Result<()> {
@@ -46,6 +60,8 @@ pub fn run_plugin(project_root: &std::path::Path, command: &PluginCommands) -> a
         PluginCommands::Install { path, global } => install_plugin(project_root, path, *global),
         PluginCommands::Validate => validate_plugins(project_root),
         PluginCommands::Build { names, all } => build_plugins(project_root, names, *all),
+        PluginCommands::Check => check_plugins(project_root),
+        PluginCommands::Upgrade { name } => upgrade_plugin(project_root, name),
     }
 }
 
@@ -696,6 +712,152 @@ fn copy_plugin_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+// ── Check command (v0.10.16) ───────────────────────────────────────────
+
+fn check_plugins(project_root: &Path) -> anyhow::Result<()> {
+    let plugins = plugin::discover_plugins(project_root);
+    let cli_version = env!("CARGO_PKG_VERSION");
+
+    if plugins.is_empty() {
+        println!("No channel plugins installed to check.");
+        return Ok(());
+    }
+
+    println!(
+        "Checking {} plugin{} against daemon v{}...",
+        plugins.len(),
+        if plugins.len() == 1 { "" } else { "s" },
+        cli_version
+    );
+    println!();
+
+    let mut warn_count = 0;
+
+    for p in &plugins {
+        let m = &p.manifest;
+        let mut issues: Vec<String> = Vec::new();
+
+        // Check min_daemon_version compatibility.
+        if let Some(ref min_ver) = m.min_daemon_version {
+            if version_less_than(cli_version, min_ver) {
+                issues.push(format!(
+                    "requires daemon >= {}, but current version is {}",
+                    min_ver, cli_version
+                ));
+            }
+        }
+
+        // Check if a newer version exists in plugins/ source directory.
+        let source_dir = project_root
+            .join("plugins")
+            .join(format!("ta-channel-{}", m.name));
+        if source_dir.is_dir() {
+            let source_manifest = source_dir.join("channel.toml");
+            if let Ok(source) = plugin::PluginManifest::load(&source_manifest) {
+                if source.version != m.version {
+                    issues.push(format!(
+                        "installed v{}, source has v{} — run: ta plugin upgrade {}",
+                        m.version, source.version, m.name
+                    ));
+                }
+            }
+        }
+
+        if issues.is_empty() {
+            println!("  [ok]   {} v{}", m.name, m.version);
+        } else {
+            for issue in &issues {
+                println!("  [WARN] {} v{} — {}", m.name, m.version, issue);
+            }
+            warn_count += issues.len();
+        }
+    }
+
+    println!();
+    if warn_count > 0 {
+        println!(
+            "Check complete: {} warning{}.",
+            warn_count,
+            if warn_count == 1 { "" } else { "s" }
+        );
+    } else {
+        println!("All plugins are up to date.");
+    }
+
+    Ok(())
+}
+
+/// Simple semver-like version comparison. Returns true if `a < b`.
+fn version_less_than(a: &str, b: &str) -> bool {
+    // Strip -alpha or other pre-release suffixes for comparison.
+    let normalize = |v: &str| -> Vec<u32> {
+        v.split('-')
+            .next()
+            .unwrap_or(v)
+            .split('.')
+            .filter_map(|p| p.parse::<u32>().ok())
+            .collect()
+    };
+    let va = normalize(a);
+    let vb = normalize(b);
+    va < vb
+}
+
+fn upgrade_plugin(project_root: &Path, name: &str) -> anyhow::Result<()> {
+    // Check if plugin is installed.
+    let plugins = plugin::discover_plugins(project_root);
+    let installed = plugins.iter().find(|p| p.manifest.name == name);
+
+    if installed.is_none() {
+        anyhow::bail!(
+            "Plugin '{}' is not installed. Install it first with: ta plugin install <path>",
+            name
+        );
+    }
+    let installed = installed.unwrap();
+
+    // Check for source_url hint.
+    if let Some(ref url) = installed.manifest.source_url {
+        println!("Plugin '{}' has source URL: {}", name, url);
+        println!("  Fetch the latest version from this URL and run:");
+        println!("    ta plugin install <path>");
+        println!();
+    }
+
+    // Try rebuilding from source.
+    let source_dir = project_root
+        .join("plugins")
+        .join(format!("ta-channel-{}", name));
+    if !source_dir.is_dir() {
+        // Also try just the name.
+        let alt_dir = project_root.join("plugins").join(name);
+        if !alt_dir.is_dir() {
+            anyhow::bail!(
+                "No source directory found for plugin '{}'. Expected:\n  \
+                 plugins/ta-channel-{}/  or  plugins/{}/\n\
+                 If the plugin was installed from an external source, \
+                 use 'ta plugin install <path>' to update it.",
+                name,
+                name,
+                name
+            );
+        }
+    }
+
+    println!(
+        "Upgrading plugin '{}' (v{} → rebuild from source)...",
+        name, installed.manifest.version
+    );
+
+    // Delegate to build --all for this specific plugin.
+    build_plugins(project_root, &[name.to_string()], false)?;
+
+    println!();
+    println!("Plugin '{}' upgraded successfully.", name);
+
+    Ok(())
+}
+
 /// Check if a program exists on PATH (simple which-like check).
 fn which_program(program: &str) -> bool {
     std::env::var_os("PATH")
@@ -986,5 +1148,34 @@ path = "src/main.rs"
     #[test]
     fn format_binary_size_bytes() {
         assert_eq!(format_binary_size(512), "512 B");
+    }
+
+    #[test]
+    fn version_less_than_basic() {
+        assert!(version_less_than("0.10.0-alpha", "0.10.1-alpha"));
+        assert!(version_less_than("0.9.0-alpha", "0.10.0-alpha"));
+        assert!(!version_less_than("0.10.1-alpha", "0.10.0-alpha"));
+        assert!(!version_less_than("0.10.0-alpha", "0.10.0-alpha"));
+    }
+
+    #[test]
+    fn version_less_than_major() {
+        assert!(version_less_than("0.10.0", "1.0.0"));
+        assert!(!version_less_than("1.0.0", "0.10.0"));
+    }
+
+    #[test]
+    fn check_plugins_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = check_plugins(dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn upgrade_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = upgrade_plugin(dir.path(), "nonexistent");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not installed"));
     }
 }

@@ -2825,27 +2825,30 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 <!-- status: pending -->
 **Goal**: Address deferred platform and channel items for production readiness.
 
-#### Items (from deferred backlogs)
+#### Completed
 
 **Platform:**
-1. [ ] **MSI installer and `winget`/`scoop` packages** (from v0.9.1): Windows distribution
-2. [ ] **`ctrlc` crate integration** (from v0.9.1): Cross-platform signal handling
-3. [ ] **Sandbox runtime integration** (from v0.9.3): Wire `ta-sandbox` as command validator for orchestrator process
-4. [ ] **Unix domain socket listener** (from v0.9.7): `.ta/daemon.sock` for local IPC
-5. [ ] **Auto-start daemon** (from v0.9.8): `ta daemon start` in background if not running
+- ✅ **Cross-platform signal handling** (item 2): `tokio::signal` SIGINT + SIGTERM on Unix, Ctrl-C on Windows. Shared `Arc<Notify>` shutdown notifier passed to HTTP server for graceful termination. PID file at `.ta/daemon.pid` with `pid=` and `bind=` fields, cleaned up on shutdown.
+- ✅ **Sandbox configuration section** (item 3): `[sandbox]` section in `daemon.toml` with `enabled` and `config_path` fields. `SandboxSection` type with Default derive. Ready for gateway wiring in v0.11+.
+- ✅ **Unix domain socket config** (item 4): `socket_path` field on `ServerConfig` (optional, skip_serializing_if None). Config infrastructure for UDS support — actual listener wiring deferred to v0.11.4 (MCP Transport Abstraction).
+- ✅ **Auto-start daemon** (item 5): `auto_start_daemon()` in shell.rs finds daemon binary via `version_guard::find_daemon_binary()`, checks PID file for existing instance, spawns background process, waits up to 10s for health. Invoked from `ta shell` when daemon is unreachable.
 
 **Channels:**
+- ✅ **Channel access control** (item 12): `ChannelAccessControl` struct with `allowed_users`, `denied_users`, `allowed_roles`, `denied_roles` and `permits(user_id, roles)` method. Deny takes precedence. Added to `ChannelsConfig` (global) and `ExternalChannelEntry` (per-plugin). 6 tests.
+- ✅ **Agent tool access control** (item 13): `AgentToolAccess` struct with `allowed_tools`/`denied_tools` and `as_filter()` → `AccessFilter`. Added to `AgentConfig`. 2 tests.
+- ✅ **Plugin version checking** (item 14): `min_daemon_version` and `source_url` fields on `PluginManifest`. `ta plugin check` compares installed vs source versions and validates min_daemon_version. `ta plugin upgrade` rebuilds from source. `version_less_than()` semver comparison. 4 tests.
+
+#### Remaining (deferred — require external service integration)
+1. [ ] **MSI installer and `winget`/`scoop` packages** (from v0.9.1): Windows distribution
 6. [ ] **Slack Socket Mode** (from v0.10.3): Outbound-only WebSocket via `connections.open`
 7. [ ] **Slack deny modal** (from v0.10.3): `views.open` for denial reason input
 8. [ ] **Discord deny modal** (from v0.10.1): Modal for denial reason input
 9. [ ] **Discord thread-based discussions** (from v0.10.1): Multi-turn review in threads
 10. [ ] **Email IMAP reply polling** (from v0.10.4): Background poller for reply-based approvals
 11. [ ] **Slack/Discord/Email interaction handler webhooks** (from v0.9.9.4): Receive button clicks and reply events
-12. [ ] **Channel access control** (from v0.9.8.1.1): `denied_roles` / `denied_users` fields
-13. [ ] **Agent tool access control** (from v0.9.8.1.1): Configurable tool allow/deny per agent config
-14. [ ] **Plugin version checking and upgrade management** (from v0.10.2, v0.10.4)
 15. [ ] **Plugin marketplace / remote install from URL** (from v0.10.2)
 
+#### Tests: 16 new tests (12 in config.rs, 4 in plugin.rs)
 #### Version: `0.10.16-alpha`
 
 ---

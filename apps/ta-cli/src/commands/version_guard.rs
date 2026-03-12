@@ -220,7 +220,7 @@ fn restart_daemon(
 /// Search order:
 ///   1. Same directory as the current `ta` binary
 ///   2. PATH lookup
-fn find_daemon_binary() -> anyhow::Result<std::path::PathBuf> {
+pub fn find_daemon_binary() -> anyhow::Result<std::path::PathBuf> {
     // Try sibling of the current executable.
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(dir) = current_exe.parent() {

@@ -459,6 +459,8 @@ mod tests {
             description: None,
             timeout_secs: 30,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
         assert_eq!(adapter.name(), "test-plugin");
@@ -480,6 +482,8 @@ mod tests {
             description: None,
             timeout_secs: 5,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
         // echo doesn't actually read stdin, but the adapter should handle that.
         // However echo "..." as a command won't work well via split_whitespace.
@@ -511,6 +515,8 @@ mod tests {
             description: None,
             timeout_secs: 5,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -533,6 +539,8 @@ mod tests {
             description: None,
             timeout_secs: 5,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -560,6 +568,8 @@ mod tests {
             description: None,
             timeout_secs: 5,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -582,6 +592,8 @@ mod tests {
             description: None,
             timeout_secs: 5,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -604,6 +616,8 @@ mod tests {
             description: None,
             timeout_secs: 5,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -626,6 +640,8 @@ mod tests {
             description: None,
             timeout_secs: 5,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);
@@ -647,6 +663,8 @@ mod tests {
             description: None,
             timeout_secs: 5,
             build_command: None,
+            min_daemon_version: None,
+            source_url: None,
         };
 
         let adapter = ExternalChannelAdapter::from_manifest(manifest);

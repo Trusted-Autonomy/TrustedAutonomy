@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.15-alpha
+**Version**: v0.10.16-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -1945,7 +1945,25 @@ The API listens on `127.0.0.1:7700` by default. Configure via `.ta/daemon.toml`:
 bind = "127.0.0.1"
 port = 7700
 cors_origins = ["*"]
+# socket_path = ".ta/daemon.sock"   # Optional Unix domain socket path
 ```
+
+#### Graceful Shutdown and PID File
+
+The daemon handles SIGINT (Ctrl-C) and SIGTERM for graceful shutdown on Unix, and Ctrl-C on Windows. In-flight requests complete before the server stops.
+
+A PID file is written to `.ta/daemon.pid` on startup with the process ID and bind address. It is automatically cleaned up on shutdown.
+
+#### Auto-Start Daemon
+
+When `ta shell` connects to the daemon and finds it unreachable, it automatically starts a background daemon process. The auto-start:
+
+1. Checks `.ta/daemon.pid` for an existing instance
+2. Locates the `ta-daemon` binary (same directory as the CLI, or via `ta-daemon` on PATH)
+3. Spawns the daemon in the background with `--api --project-root .`
+4. Waits up to 10 seconds for the daemon to become healthy
+
+No manual `ta-daemon &` needed — just run `ta shell`.
 
 #### Endpoints
 
@@ -2029,6 +2047,19 @@ curl -H "Authorization: Bearer ta_..." http://your-server:7700/api/status
 ```
 
 Token scopes: `read` (status, list, events), `write` (approve, deny, agent), `admin` (config, tokens).
+
+#### Sandbox Configuration
+
+Enable command validation for the orchestrator process:
+
+```toml
+# .ta/daemon.toml
+[sandbox]
+enabled = true
+config_path = ".ta/sandbox.toml"   # Optional — uses built-in defaults if omitted
+```
+
+When enabled, the daemon loads the sandbox config and validates commands against the allowlist before execution. See the `ta-sandbox` crate for the sandbox configuration format.
 
 #### Input Routing
 
@@ -3109,6 +3140,64 @@ Inline config takes priority — if a plugin name is already registered from dae
 
 **Starter templates** are provided in `templates/channel-plugins/` for Python, Node.js, and Go.
 
+**Checking and upgrading plugins:**
+
+```bash
+# Check all installed plugins for version drift and compatibility
+ta plugin check
+
+# Upgrade a specific plugin from source
+ta plugin upgrade discord
+```
+
+`ta plugin check` compares installed plugin versions against source in `plugins/`, and validates `min_daemon_version` compatibility. `ta plugin upgrade` rebuilds the named plugin from source and re-installs it.
+
+Plugins can declare a minimum daemon version in `channel.toml`:
+
+```toml
+min_daemon_version = "0.10.16"
+```
+
+If the running daemon is older than the declared minimum, `ta plugin check` warns about the incompatibility.
+
+#### Channel Access Control
+
+Restrict who can interact with channels using access control lists in `.ta/daemon.toml`:
+
+```toml
+# Global access control (applies to all channels)
+[channels.access_control]
+denied_users = ["bot-spam"]
+allowed_roles = ["reviewer", "admin"]
+
+# Per-plugin access control
+[[channels.external]]
+name = "slack"
+command = "ta-channel-slack"
+protocol = "json-stdio"
+
+[channels.external.access_control]
+allowed_users = ["alice", "bob"]
+denied_roles = ["readonly"]
+```
+
+Rules follow deny-first precedence:
+1. Denied users/roles are always blocked
+2. If allowed lists are non-empty, only matching users/roles are permitted
+3. Empty allowed lists mean "allow all" (after deny checks)
+
+#### Agent Tool Access Control
+
+Restrict which MCP tools agents can use in `.ta/daemon.toml`:
+
+```toml
+[agent]
+allowed_tools = ["ta_fs_read", "ta_fs_write", "ta_draft"]   # Only these tools
+denied_tools = ["ta_fs_write"]                                # Or deny specific tools
+```
+
+Deny takes precedence over allow. Empty `allowed_tools` means all tools are available (minus denied ones).
+
 #### Inspecting Channel Configuration
 
 View the resolved channel setup for your project:
@@ -4112,6 +4201,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.13 | `ta plan add` command (agent-powered plan updates) | Done |
 | v0.10.14 | Deferred items: shell & agent UX | Done |
 | v0.10.15 | Deferred items: observability & audit | Done |
+| v0.10.16 | Deferred items: platform & channel hardening | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 
