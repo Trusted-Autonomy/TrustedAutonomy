@@ -2822,7 +2822,7 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 ---
 
 ### v0.10.16 — Deferred Items: Platform & Channel Hardening
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Address deferred platform and channel items for production readiness.
 
 #### Completed
