@@ -1725,7 +1725,7 @@ async fn start_tail_stream(
                 let _ = tx.send(TuiMessage::CommandResponse(msg));
                 return;
             }
-            Err(e) if attempt < 4 => continue, // Retry on network error
+            Err(_) if attempt < 4 => continue, // Retry on network error
             Err(e) => {
                 let _ = tx.send(TuiMessage::CommandResponse(format!(
                     "Error: Cannot reach daemon: {}",
