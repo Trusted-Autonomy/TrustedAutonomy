@@ -152,10 +152,19 @@ pub async fn execute_command(
 
                     let stderr_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
                     let stderr_lines2 = stderr_lines.clone();
+                    let goal_output2 = goal_output.clone();
+                    let output_key2 = output_key.clone();
                     let stderr_task = tokio::spawn(async move {
                         if let Some(err) = stderr {
                             let mut reader = BufReader::new(err).lines();
                             while let Ok(Some(line)) = reader.next_line().await {
+                                // Detect [goal started] events and register the goal UUID
+                                // as an alias so :tail <uuid> resolves to this channel.
+                                if line.contains("[goal started]") {
+                                    if let Some(goal_uuid) = extract_goal_uuid_from_event(&line) {
+                                        goal_output2.add_alias(&goal_uuid, &output_key2).await;
+                                    }
+                                }
                                 let _ = tx2.send(OutputLine {
                                     stream: "stderr",
                                     line: line.clone(),
@@ -405,6 +414,23 @@ fn extract_goal_key(args: &[String]) -> String {
     }
     // Fallback to UUID.
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Extract a goal UUID from a `[goal started]` event line.
+/// Expected format: `[goal started] "title" (uuid)`
+fn extract_goal_uuid_from_event(line: &str) -> Option<String> {
+    let paren_start = line.rfind('(')?;
+    let paren_end = line.rfind(')')?;
+    if paren_end <= paren_start + 1 {
+        return None;
+    }
+    let candidate = &line[paren_start + 1..paren_end];
+    // Validate it looks like a UUID (8-4-4-4-12 or at least 8+ hex chars).
+    if candidate.len() >= 8 && candidate.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
 }
 
 /// Commands that take a free-form title as their first positional argument.
@@ -978,5 +1004,35 @@ mod tests {
     fn split_quotes_basic() {
         let tokens = split_respecting_quotes("run \"hello world\" --flag");
         assert_eq!(tokens, vec!["run", "hello world", "--flag"]);
+    }
+
+    #[test]
+    fn extract_goal_uuid_from_goal_started_event() {
+        let line =
+            r#"[goal started] "v0.10.13 — ta plan add" (492fac59-eda4-4e87-bf65-9e2edd2e70ce)"#;
+        assert_eq!(
+            extract_goal_uuid_from_event(line),
+            Some("492fac59-eda4-4e87-bf65-9e2edd2e70ce".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_goal_uuid_short_id() {
+        let line = r#"[goal started] "title" (abcd1234)"#;
+        assert_eq!(
+            extract_goal_uuid_from_event(line),
+            Some("abcd1234".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_goal_uuid_no_parens() {
+        assert_eq!(extract_goal_uuid_from_event("no parens here"), None);
+    }
+
+    #[test]
+    fn extract_goal_uuid_non_hex() {
+        let line = r#"[goal started] "title" (not-hex-zzzz)"#;
+        assert_eq!(extract_goal_uuid_from_event(line), None);
     }
 }

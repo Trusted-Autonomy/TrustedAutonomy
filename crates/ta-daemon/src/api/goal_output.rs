@@ -60,6 +60,18 @@ impl GoalOutputManager {
         channels.get(goal_id).map(|tx| tx.subscribe())
     }
 
+    /// Register an alias so that `alias` resolves to the same channel as `primary`.
+    /// Used to map goal UUIDs to the human-friendly output key (e.g., "v0.10.13").
+    pub async fn add_alias(&self, alias: &str, primary: &str) {
+        let channels = self.channels.lock().await;
+        if let Some(tx) = channels.get(primary) {
+            let tx = tx.clone();
+            drop(channels);
+            let mut channels = self.channels.lock().await;
+            channels.insert(alias.to_string(), tx);
+        }
+    }
+
     /// Remove a goal's channel (call when the goal process exits).
     pub async fn remove_channel(&self, goal_id: &str) {
         let mut channels = self.channels.lock().await;
@@ -189,5 +201,38 @@ mod tests {
     async fn subscribe_nonexistent_returns_none() {
         let mgr = GoalOutputManager::new();
         assert!(mgr.subscribe("nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn alias_resolves_to_same_channel() {
+        let mgr = GoalOutputManager::new();
+        let tx = mgr.create_channel("v0.10.13").await;
+
+        // Add alias (goal UUID → output key).
+        mgr.add_alias("492fac59-eda4-4e87-bf65-9e2edd2e70ce", "v0.10.13")
+            .await;
+
+        // Subscribe via alias.
+        let mut rx = mgr
+            .subscribe("492fac59-eda4-4e87-bf65-9e2edd2e70ce")
+            .await
+            .unwrap();
+
+        // Send via primary key's sender — alias subscriber receives it.
+        tx.send(OutputLine {
+            stream: "stdout",
+            line: "from primary".to_string(),
+        })
+        .unwrap();
+        let line = rx.recv().await.unwrap();
+        assert_eq!(line.line, "from primary");
+    }
+
+    #[tokio::test]
+    async fn alias_nonexistent_primary_is_noop() {
+        let mgr = GoalOutputManager::new();
+        // Should not panic or create a channel.
+        mgr.add_alias("alias", "nonexistent").await;
+        assert!(mgr.subscribe("alias").await.is_none());
     }
 }
