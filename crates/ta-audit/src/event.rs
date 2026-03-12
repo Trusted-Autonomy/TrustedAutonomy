@@ -26,6 +26,8 @@ pub enum AuditAction {
     Apply,
     /// An error occurred during processing.
     Error,
+    /// A draft was auto-approved by policy (v0.10.15).
+    AutoApproval,
 }
 
 // ── Decision Observability (v0.3.3) ──
@@ -105,6 +107,19 @@ pub struct AuditEvent {
     /// Optional — existing events without reasoning still deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<DecisionReasoning>,
+
+    /// Caller mode under which this action was performed (v0.10.15).
+    /// Values: "normal", "orchestrator", "unrestricted".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_mode: Option<String>,
+
+    /// MCP tool name for tool-call audit entries (v0.10.15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+
+    /// Goal run ID associated with this action (v0.10.15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_run_id: Option<Uuid>,
 }
 
 impl AuditEvent {
@@ -124,6 +139,9 @@ impl AuditEvent {
             previous_hash: None,
             metadata: serde_json::Value::Null,
             reasoning: None,
+            caller_mode: None,
+            tool_name: None,
+            goal_run_id: None,
         }
     }
 
@@ -163,6 +181,24 @@ impl AuditEvent {
     /// Set structured decision reasoning and return self (v0.3.3).
     pub fn with_reasoning(mut self, reasoning: DecisionReasoning) -> Self {
         self.reasoning = Some(reasoning);
+        self
+    }
+
+    /// Set the caller mode and return self (v0.10.15).
+    pub fn with_caller_mode(mut self, mode: impl Into<String>) -> Self {
+        self.caller_mode = Some(mode.into());
+        self
+    }
+
+    /// Set the tool name and return self (v0.10.15).
+    pub fn with_tool_name(mut self, name: impl Into<String>) -> Self {
+        self.tool_name = Some(name.into());
+        self
+    }
+
+    /// Set the goal run ID and return self (v0.10.15).
+    pub fn with_goal_run_id(mut self, id: Uuid) -> Self {
+        self.goal_run_id = Some(id);
         self
     }
 }
@@ -282,6 +318,45 @@ mod tests {
         }"#;
         let event: AuditEvent = serde_json::from_str(json).unwrap();
         assert!(event.reasoning.is_none());
+    }
+
+    #[test]
+    fn auto_approval_action_serializes_as_snake_case() {
+        let json = serde_json::to_string(&AuditAction::AutoApproval).unwrap();
+        assert_eq!(json, "\"auto_approval\"");
+    }
+
+    #[test]
+    fn caller_mode_and_tool_name_in_event() {
+        let event = AuditEvent::new("agent-1", AuditAction::ToolCall)
+            .with_caller_mode("orchestrator")
+            .with_tool_name("ta_fs_write")
+            .with_goal_run_id(Uuid::new_v4());
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"caller_mode\":\"orchestrator\""));
+        assert!(json.contains("\"tool_name\":\"ta_fs_write\""));
+        assert!(json.contains("\"goal_run_id\""));
+    }
+
+    #[test]
+    fn caller_mode_absent_backward_compatible() {
+        // Events without caller_mode/tool_name should deserialize fine.
+        let json = r#"{
+            "event_id": "550e8400-e29b-41d4-a716-446655440000",
+            "timestamp": "2026-02-25T12:00:00Z",
+            "agent_id": "agent-1",
+            "action": "tool_call",
+            "target_uri": null,
+            "input_hash": null,
+            "output_hash": null,
+            "parent_event_id": null,
+            "previous_hash": null,
+            "metadata": {}
+        }"#;
+        let event: AuditEvent = serde_json::from_str(json).unwrap();
+        assert!(event.caller_mode.is_none());
+        assert!(event.tool_name.is_none());
+        assert!(event.goal_run_id.is_none());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.14-alpha
+**Version**: v0.10.15-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -923,6 +923,18 @@ defaults:
         require_clean_clippy: false
 ```
 
+When `auto_apply: true` is set, auto-approved drafts are also applied to the source directory automatically — no manual `ta draft apply` step required. If `git_commit: true` is also set, a commit is created after auto-apply.
+
+When `require_tests_pass` or `require_clean_clippy` is enabled, TA runs verification commands (`cargo test`, `cargo clippy`) in the staging workspace before auto-approving. If any verification step fails, the draft falls through to human review instead of being auto-approved.
+
+All auto-approval decisions are recorded in the audit log with an `auto_approval` action, including which conditions were evaluated and whether verification passed.
+
+To force human review regardless of policy (e.g., for sensitive changes), pass `--require-review` on apply:
+
+```bash
+ta draft apply <draft-id> --require-review   # Bypasses auto-approve policy
+```
+
 Dry-run auto-approval evaluation:
 
 ```bash
@@ -1505,6 +1517,10 @@ TA maintains an append-only, SHA-256 hash-chained audit log of every action:
 - Policy evaluations with grant-level detail
 - Human review decisions with reasoning
 - Conflict detection and resolution
+- Per-tool-call MCP audit entries (tool name, caller mode, target URI, goal run ID)
+- Auto-approval decisions with condition evaluation details
+
+Every MCP tool invocation (`ta_fs_write`, `ta_goal_start`, `ta_pr_build`, etc.) is individually logged to the audit trail with the agent identity, caller mode (`Normal`, `Orchestrator`, or `Unrestricted`), and the tool name. Agent identity is resolved from `TA_AGENT_ID` (set by orchestrators), falling back to the dev session ID, then `"unknown"`. This gives full traceability of which agent called which tool, when, and in what security context.
 
 ### Credential Management
 
@@ -1788,6 +1804,23 @@ Hook commands receive the event JSON via the `TA_EVENT_JSON` environment variabl
 # View configured hooks
 ta events hooks
 ```
+
+#### Pruning old events
+
+Over time, daily event log files accumulate. Prune old files to reclaim disk space:
+
+```bash
+# Remove event files older than 30 days (default)
+ta events prune
+
+# Custom retention window
+ta events prune --older-than-days 7
+
+# Preview what would be removed without deleting
+ta events prune --dry-run
+```
+
+Pruning removes entire daily `.jsonl` files whose date falls before the cutoff. It does not modify recent files.
 
 #### MCP event queries
 
@@ -4078,6 +4111,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.12 | Streaming agent Q&A & status bar enhancements | Done |
 | v0.10.13 | `ta plan add` command (agent-powered plan updates) | Done |
 | v0.10.14 | Deferred items: shell & agent UX | Done |
+| v0.10.15 | Deferred items: observability & audit | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

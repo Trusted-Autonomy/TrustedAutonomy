@@ -310,8 +310,18 @@ fn handle_draft_submit(
                 .map(|p| p.changes.artifacts.len())
                 .unwrap_or(0);
 
+            // v0.10.15: --require-review bypasses auto-approve entirely.
+            let require_review = params.require_review.unwrap_or(false);
+
             // v0.9.8.1: Check auto-approval before routing to ReviewChannel.
-            let auto_approve_decision = {
+            let mut auto_approve_decision = if require_review {
+                tracing::info!(
+                    draft_id = %pkg_id,
+                    goal_id = %goal_run_id,
+                    "auto-approve skipped: require_review flag set"
+                );
+                None
+            } else {
                 let policy_path = state.config.workspace_root.join(".ta/policy.yaml");
                 if policy_path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&policy_path) {
@@ -346,51 +356,201 @@ fn handle_draft_submit(
                 }
             };
 
-            if let Some(auto_approve::AutoApproveDecision::Approved { reasons }) =
+            if let Some(auto_approve::AutoApproveDecision::Approved { ref mut reasons }) =
                 auto_approve_decision
             {
-                // Auto-approved by policy — skip ReviewChannel.
-                state.event_dispatcher.dispatch(&TaEvent::PrApproved {
-                    goal_run_id,
-                    pr_package_id: pkg_id,
-                    approved_by: "policy:auto".to_string(),
-                    timestamp: Utc::now(),
-                });
-                state
-                    .event_dispatcher
-                    .dispatch(&TaEvent::draft_auto_approved(
-                        &pkg_id.to_string(),
-                        goal_run_id,
-                        reasons.clone(),
-                        false,
-                    ));
-                tracing::info!(
-                    draft_id = %pkg_id,
-                    goal_id = %goal_run_id,
-                    "Draft auto-approved by policy: {:?}",
-                    reasons,
-                );
+                // v0.10.15 Item 4: Run verification commands before accepting auto-approve.
+                let (verify_passed, auto_apply, git_commit) = {
+                    let policy_path = state.config.workspace_root.join(".ta/policy.yaml");
+                    if let Ok(content) = std::fs::read_to_string(&policy_path) {
+                        if let Ok(doc) = serde_yaml::from_str::<ta_policy::PolicyDocument>(&content)
+                        {
+                            let cfg = &doc.defaults.auto_approve.drafts;
+                            let conditions = &cfg.conditions;
+                            let mut passed = true;
 
-                if goal.is_macro {
-                    if let Ok(Some(mut g)) = state.goal_store.get(goal_run_id) {
-                        if g.state == GoalRunState::PrReady {
-                            let _ = g.transition(GoalRunState::Running);
-                            let _ = state.goal_store.save(&g);
+                            if conditions.require_tests_pass {
+                                let staging_dir = goal.workspace_path.clone();
+                                let cmd = &conditions.test_command;
+                                let status = std::process::Command::new("sh")
+                                    .args(["-c", cmd])
+                                    .current_dir(&staging_dir)
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .status();
+                                match status {
+                                    Ok(s) if s.success() => {
+                                        reasons
+                                            .push(format!("require_tests_pass: '{}' passed", cmd));
+                                    }
+                                    _ => {
+                                        tracing::warn!(
+                                            draft_id = %pkg_id,
+                                            command = cmd,
+                                            "auto-approve verification failed: tests did not pass"
+                                        );
+                                        passed = false;
+                                    }
+                                }
+                            }
+
+                            if passed && conditions.require_clean_clippy {
+                                let staging_dir = goal.workspace_path.clone();
+                                let cmd = &conditions.lint_command;
+                                let status = std::process::Command::new("sh")
+                                    .args(["-c", cmd])
+                                    .current_dir(&staging_dir)
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .status();
+                                match status {
+                                    Ok(s) if s.success() => {
+                                        reasons.push(format!(
+                                            "require_clean_clippy: '{}' passed",
+                                            cmd
+                                        ));
+                                    }
+                                    _ => {
+                                        tracing::warn!(
+                                            draft_id = %pkg_id,
+                                            command = cmd,
+                                            "auto-approve verification failed: clippy not clean"
+                                        );
+                                        passed = false;
+                                    }
+                                }
+                            }
+
+                            (passed, cfg.auto_apply, cfg.git_commit)
+                        } else {
+                            (true, false, false)
+                        }
+                    } else {
+                        (true, false, false)
+                    }
+                };
+
+                if !verify_passed {
+                    // Verification failed — fall through to human review.
+                    tracing::info!(
+                        draft_id = %pkg_id,
+                        "auto-approve denied: verification commands failed"
+                    );
+                    // Don't return — fall through to ReviewChannel below.
+                } else {
+                    // Auto-approved by policy — skip ReviewChannel.
+                    state.event_dispatcher.dispatch(&TaEvent::PrApproved {
+                        goal_run_id,
+                        pr_package_id: pkg_id,
+                        approved_by: "policy:auto".to_string(),
+                        timestamp: Utc::now(),
+                    });
+                    state
+                        .event_dispatcher
+                        .dispatch(&TaEvent::draft_auto_approved(
+                            &pkg_id.to_string(),
+                            goal_run_id,
+                            reasons.clone(),
+                            auto_apply,
+                        ));
+
+                    // v0.10.15 Item 8: Write audit trail entry for auto-approved draft.
+                    {
+                        let agent_id = state.resolve_agent_id();
+                        let reasoning = ta_audit::DecisionReasoning {
+                            alternatives: vec![ta_audit::Alternative {
+                                description: "Route to human review".to_string(),
+                                score: None,
+                                rejected_reason: "All auto-approve conditions met".to_string(),
+                            }],
+                            rationale: format!("Auto-approved: {}", reasons.join("; ")),
+                            applied_principles: vec!["auto-approve-policy".to_string()],
+                        };
+                        let mut audit_event = ta_audit::AuditEvent::new(
+                            &agent_id,
+                            ta_audit::AuditAction::AutoApproval,
+                        )
+                        .with_target(format!("draft://{}", pkg_id))
+                        .with_caller_mode(state.caller_mode.as_str())
+                        .with_goal_run_id(goal_run_id)
+                        .with_reasoning(reasoning)
+                        .with_metadata(serde_json::json!({
+                            "draft_id": pkg_id.to_string(),
+                            "reasons": reasons,
+                            "auto_apply": auto_apply,
+                        }));
+                        if let Err(e) = state.audit_log.append(&mut audit_event) {
+                            tracing::warn!("failed to write auto-approval audit entry: {}", e);
                         }
                     }
-                }
 
-                let response = serde_json::json!({
-                    "draft_id": pkg_id.to_string(),
-                    "goal_run_id": goal_run_id.to_string(),
-                    "status": "auto_approved",
-                    "decision": "approved",
-                    "approved_by": "policy:auto",
-                    "reasons": reasons,
-                    "message": "Draft auto-approved by policy. All conditions met.",
-                });
-                return Ok(CallToolResult::success(vec![Content::json(response)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?]));
+                    tracing::info!(
+                        draft_id = %pkg_id,
+                        goal_id = %goal_run_id,
+                        "Draft auto-approved by policy: {:?}",
+                        reasons,
+                    );
+
+                    if goal.is_macro {
+                        if let Ok(Some(mut g)) = state.goal_store.get(goal_run_id) {
+                            if g.state == GoalRunState::PrReady {
+                                let _ = g.transition(GoalRunState::Running);
+                                let _ = state.goal_store.save(&g);
+                            }
+                        }
+                    }
+
+                    // v0.10.15 Item 5: Auto-apply if configured.
+                    // Copies staged files from the goal's staging directory to the source.
+                    let mut auto_applied = false;
+                    if auto_apply {
+                        let target_dir = state.config.workspace_root.clone();
+                        let staging_dir = goal.workspace_path.clone();
+                        if let Some(pkg) = state.pr_packages.get(&pkg_id) {
+                            let mut applied_count = 0;
+                            for artifact in &pkg.changes.artifacts {
+                                let bare_path = artifact
+                                    .resource_uri
+                                    .strip_prefix("fs://workspace/")
+                                    .unwrap_or(&artifact.resource_uri);
+                                let staged_path = staging_dir.join(bare_path);
+                                let target_path = target_dir.join(bare_path);
+                                if staged_path.exists() {
+                                    if let Some(parent) = target_path.parent() {
+                                        let _ = std::fs::create_dir_all(parent);
+                                    }
+                                    if std::fs::copy(&staged_path, &target_path).is_ok() {
+                                        applied_count += 1;
+                                    }
+                                }
+                            }
+                            tracing::info!(
+                                draft_id = %pkg_id,
+                                files = applied_count,
+                                git_commit = git_commit,
+                                "auto-apply: applied {} files to {}",
+                                applied_count,
+                                target_dir.display()
+                            );
+                            auto_applied = applied_count > 0;
+                        }
+                    }
+
+                    let mut response = serde_json::json!({
+                        "draft_id": pkg_id.to_string(),
+                        "goal_run_id": goal_run_id.to_string(),
+                        "status": "auto_approved",
+                        "decision": "approved",
+                        "approved_by": "policy:auto",
+                        "reasons": reasons,
+                        "message": "Draft auto-approved by policy. All conditions met.",
+                    });
+                    if auto_applied {
+                        response["auto_applied"] = serde_json::json!(true);
+                    }
+                    return Ok(CallToolResult::success(vec![Content::json(response)
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))?]));
+                }
             }
 
             // Route to ReviewChannel for human review.

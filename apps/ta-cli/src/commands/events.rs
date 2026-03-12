@@ -23,6 +23,15 @@ pub enum EventsCommands {
     Stats,
     /// Show configured event hooks.
     Hooks,
+    /// Prune old event log files (v0.10.15).
+    Prune {
+        /// Remove events older than this many days (default: 30).
+        #[arg(long, default_value = "30")]
+        older_than_days: u64,
+        /// Show what would be removed without deleting.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub fn execute(cmd: &EventsCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -34,6 +43,10 @@ pub fn execute(cmd: &EventsCommands, config: &GatewayConfig) -> anyhow::Result<(
         } => listen_events(config, filter, goal.as_deref(), *limit),
         EventsCommands::Stats => show_stats(config),
         EventsCommands::Hooks => show_hooks(config),
+        EventsCommands::Prune {
+            older_than_days,
+            dry_run,
+        } => prune_events(config, *older_than_days, *dry_run),
     }
 }
 
@@ -100,6 +113,49 @@ fn show_stats(config: &GatewayConfig) -> anyhow::Result<()> {
         types.sort_by(|a, b| b.1.cmp(a.1));
         for (t, count) in types {
             println!("    {:<24} {}", t, count);
+        }
+    }
+
+    Ok(())
+}
+
+fn prune_events(config: &GatewayConfig, older_than_days: u64, dry_run: bool) -> anyhow::Result<()> {
+    let events_dir = config.workspace_root.join(".ta").join("events");
+    let store = FsEventStore::new(&events_dir);
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(older_than_days as i64);
+    let cutoff_date = cutoff.date_naive();
+
+    if dry_run {
+        // Count files that would be removed.
+        let mut count = 0;
+        if events_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&events_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        if let Ok(file_date) = chrono::NaiveDate::parse_from_str(stem, "%Y-%m-%d") {
+                            if file_date < cutoff_date {
+                                eprintln!("  would remove: {}", path.display());
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "Dry run: {} event log file(s) older than {} days (before {}) would be removed.",
+            count, older_than_days, cutoff_date
+        );
+    } else {
+        let removed = store.prune(cutoff)?;
+        println!(
+            "Pruned {} event log file(s) older than {} days (before {}).",
+            removed, older_than_days, cutoff_date
+        );
+        if removed == 0 {
+            println!("  No event files eligible for pruning.");
         }
     }
 

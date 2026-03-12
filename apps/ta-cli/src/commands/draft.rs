@@ -153,6 +153,10 @@ pub enum DraftCommands {
         /// When omitted, uses the goal's linked plan_phase.
         #[arg(long)]
         phase: Option<String>,
+        /// Force human review even when auto-approve policy is configured (v0.10.15).
+        /// Useful for high-risk changes that should always get a human look.
+        #[arg(long)]
+        require_review: bool,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -375,8 +379,15 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             reject_patterns,
             discuss_patterns,
             phase,
+            require_review,
         } => {
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
+
+            if *require_review {
+                eprintln!(
+                    "  --require-review: auto-approve policy will be bypassed for this draft."
+                );
+            }
 
             // Load workflow config to merge auto_* settings with CLI flags.
             let workflow_config = ta_submit::WorkflowConfig::load_or_default(
@@ -387,7 +398,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             let do_commit =
                 *git_commit || *git_push || *submit || workflow_config.submit.auto_commit;
             let do_push = *git_push || *submit || workflow_config.submit.auto_push;
-            let do_review = *submit || workflow_config.submit.auto_review;
+            let do_review = *submit || workflow_config.submit.auto_review || *require_review;
 
             // Parse conflict resolution strategy.
             use ta_workspace::ConflictResolution;

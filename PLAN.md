@@ -2793,15 +2793,17 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 <!-- status: pending -->
 **Goal**: Address deferred observability and audit items that strengthen governance before v0.11.
 
-#### Items (from deferred backlogs)
-1. [ ] **Automatic `agent_id` extraction** (from v0.9.6): Extract from `TA_AGENT_ID` env var on every MCP tool call
-2. [ ] **`caller_mode` in audit log entries** (from v0.9.6): Every audit entry includes the caller mode for traceability
-3. [ ] **Full tool-call audit logging in gateway** (from v0.9.3): Per-tool-call logging (not just session start/end) via event system
-4. [ ] **Verification integration in auto-approve flow** (from v0.9.8.1): Wire `require_tests_pass` / `require_clean_clippy` results into gateway auto-approve decisions
-5. [ ] **Auto-apply flow after auto-approve** (from v0.9.8.1): `auto_apply` config option
-6. [ ] **Event store pruning** (from v0.9.8.1): Prune events linked to archived/completed goals
-7. [ ] **`ta draft submit --require-review` flag** (from v0.9.8.1): Force human review even when auto-approve is configured
-8. [ ] **Audit trail entry for auto-approved drafts** (from v0.9.8.1): Via `ta-audit` crate
+#### Completed
+1. [x] **Automatic `agent_id` extraction** (from v0.9.6): `GatewayState::resolve_agent_id()` reads `TA_AGENT_ID` env var, falls back to `dev_session_id`, then "unknown". Used by `audit_tool_call()` on every MCP tool invocation.
+2. [x] **`caller_mode` in audit log entries** (from v0.9.6): Added `caller_mode`, `tool_name`, and `goal_run_id` fields to `AuditEvent` with builder methods. All tool-call audit entries include caller mode.
+3. [x] **Full tool-call audit logging in gateway** (from v0.9.3): Every `#[tool]` method in `TaGatewayServer` now calls `self.audit()` before delegation. `GatewayState::audit_tool_call()` writes per-call entries with tool name, target URI, goal ID, and caller mode to the JSONL audit log.
+4. [x] **Verification integration in auto-approve flow** (from v0.9.8.1): `handle_draft_submit()` now runs `require_tests_pass` and `require_clean_clippy` commands in the staging directory before accepting an auto-approve decision. If either fails, the draft falls through to human review.
+5. [x] **Auto-apply flow after auto-approve** (from v0.9.8.1): When `auto_apply: true` in policy.yaml, auto-approved drafts are immediately copied from staging to the source directory. File count and git_commit flag logged.
+6. [x] **Event store pruning** (from v0.9.8.1): Added `prune()` method to `EventStore` trait and `FsEventStore`. New `ta events prune --older-than-days N [--dry-run]` CLI command removes daily NDJSON files older than the cutoff date. 2 new tests.
+7. [x] **`ta draft apply --require-review` flag** (from v0.9.8.1): Added `--require-review` to CLI `Apply` variant and `require_review` param to gateway `DraftToolParams`. When set, auto-approve evaluation is skipped entirely — draft always routes to ReviewChannel.
+8. [x] **Audit trail entry for auto-approved drafts** (from v0.9.8.1): Added `AutoApproval` variant to `AuditAction`. Auto-approved drafts emit a full audit event with `DecisionReasoning` (alternatives, rationale, applied principles) and metadata (draft_id, reasons, auto_apply flag). 3 new tests in ta-audit.
+
+**Tests**: 9 new tests (4 in ta-mcp-gateway server.rs, 3 in ta-audit event.rs, 2 in ta-events store.rs).
 
 #### Version: `0.10.15-alpha`
 
