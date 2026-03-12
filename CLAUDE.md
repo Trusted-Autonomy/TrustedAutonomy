@@ -53,9 +53,23 @@ This applies to both manual work and TA-mediated goals. When `ta pr apply --git-
 - Never commit directly to `main` — always use a feature branch + PR
 - Never disable or skip tests
 - Run tests after every code change, before committing
+- Always run `cargo fmt --all -- --check` before every `git push`
 - Commit in logical working units
 - All work stays within ~/development/TrustedAutonomy/
 - Use `tempfile::tempdir()` for all test fixtures that need filesystem access
+
+## Deferred Items Policy
+
+Completed phases must not contain open "Remaining (deferred)" lists. When finishing a phase:
+
+1. **Review every planned item** — verify each is done, partially done, or not started.
+2. **If an item is not done**, discuss it with the user before closing the phase:
+   - Is it still needed?
+   - Which future phase should own it?
+   - Should it be dropped?
+3. **Move items to their target phase** with a one-line note (e.g., `→ v0.11.4`).
+4. **Replace the "Remaining" section** with "Deferred items moved/resolved" showing where each item went or that it was completed in another phase.
+5. **Never leave unchecked `[ ]` items in a `done` phase.** Every item is either checked `[x]`, moved to a named future phase, or explicitly dropped with rationale.
 
 ## Observability Mandate
 

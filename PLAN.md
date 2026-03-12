@@ -112,9 +112,9 @@ TA's architecture maps to emerging AI governance standards. Rather than bolt-on 
 - [x] SHA256 checksum generation for Windows (.zip) in release workflow
 - [x] `install.sh` updated with Windows detection and winget/scoop guidance
 
-#### Remaining (deferred)
-- MSI installer and `winget`/`scoop` package definitions (needs release testing)
-- `ctrlc` crate integration (current signal handling works via std)
+#### Deferred items moved
+- MSI installer → v0.9.1-deferred (Windows distribution backlog)
+- `ctrlc` crate → dropped (tokio::signal in v0.10.16 supersedes this)
 
 ### v0.9.2 — Sandbox Runner (optional hardening, Layer 2)
 <!-- status: done -->
@@ -138,9 +138,9 @@ TA's architecture maps to emerging AI governance standards. Rather than bolt-on 
 - [x] Path escape detection — resolves `..` and symlinks, rejects paths outside workspace
 - [x] 12 tests: allowlist enforcement, forbidden args, path escape, invocation limits, transcript hashing, network policy
 
-#### Remaining (deferred)
-- OCI/gVisor container isolation (enterprise feature)
-- Enterprise state intercept (see `docs/enterprise-state-intercept.md`)
+#### Deferred items moved
+- OCI/gVisor container isolation → v0.11.5 (Runtime Adapter Trait)
+- Enterprise state intercept → v0.11.5 (Runtime Adapter Trait)
 
 ### v0.9.3 — Dev Loop Access Hardening
 <!-- status: done -->
@@ -156,9 +156,9 @@ TA's architecture maps to emerging AI governance standards. Rather than bolt-on 
 - ✅ 12 tests: prompt security boundaries, unrestricted warning, config loading (restricted/unrestricted), audit logging, MCP injection with session, CallerMode enforcement.
 - ✅ Version bump to 0.9.3-alpha.
 
-**Remaining (deferred):**
-- Sandbox runtime integration: wire `ta-sandbox` as command validator for orchestrator process. Currently relies on `--allowedTools` client-side + gateway-side `CallerMode` enforcement.
-- Full tool-call audit logging in gateway: currently logs session start/end; per-tool-call logging deferred to event system integration.
+**Deferred items resolved:**
+- Sandbox runtime integration → v0.11.5 (Runtime Adapter Trait)
+- Full tool-call audit logging → completed in v0.10.15 (per-tool-call audit via `audit_tool_call()`)
 
 ### v0.9.4 — Orchestrator Event Wiring & Gateway Refactor
 <!-- status: done -->
@@ -336,9 +336,9 @@ passing the cursor from the previous response returns only *new* events. Add a t
 - [x] `ta status` CLI command: project name, version, next phase, active agents, pending drafts
 - [x] Tests: agent session lifecycle, CallerMode enforcement, event serialization, status phase parsing
 
-#### Remaining (deferred)
-- [ ] Automatic agent_id extraction from TA_AGENT_ID env var on every tool call
-- [ ] Audit log entries include caller_mode field
+#### Deferred items resolved
+- Automatic agent_id extraction → completed in v0.10.15
+- Audit log entries include caller_mode → completed in v0.10.15
 
 #### Implementation scope
 - `crates/ta-mcp-gateway/src/tools/plan.rs` — optional goal_run_id, project-root fallback
@@ -570,10 +570,10 @@ passing the cursor from the previous response returns only *new* events. Add a t
 - [x] Version bumps: ta-daemon 0.9.7-alpha, ta-cli 0.9.7-alpha
 - [x] 35 tests: config roundtrip, token CRUD, session lifecycle/limits, input routing, glob matching, status parsing, auth scopes
 
-#### Remaining (deferred)
-- Unix domain socket listener (`.ta/daemon.sock`) — deferred until `ta shell` (v0.9.8) needs it
-- Full headless agent subprocess wiring in `/api/agent/ask` — deferred until `ta shell` provides client-side rendering
-- Bridge template updates (`discord-bridge-api.js`, `slack-bridge-api.js`) — deferred to channel phases (v0.10.x)
+#### Deferred items moved
+- Unix domain socket listener → v0.11.4 (MCP Transport Abstraction)
+- Headless agent subprocess → superseded by TUI shell (v0.9.8.3)
+- Bridge template updates → superseded by external plugin architecture (v0.10.2)
 
 #### Version: `0.9.7-alpha`
 
@@ -694,13 +694,13 @@ This means:
 - [x] Default routing config template (`apps/ta-cli/templates/shell.toml`)
 - [x] 8 tests (SSE rendering, completions, config init, daemon URL resolution)
 
-#### Remaining (deferred)
-- Unix domain socket connection (`.ta/daemon.sock`) — deferred until UDS listener is added to daemon
-- Auto-start daemon if not running (`ta daemon start` in background)
-- Streaming agent response rendering (partial lines, markdown via termimad)
-- Ctrl+C interrupt of current agent response
-- Non-disruptive event notifications (redraw prompt without breaking input line)
-- Periodic status header refresh from events
+#### Deferred items resolved
+- Unix domain socket connection → v0.11.4 (MCP Transport Abstraction)
+- Auto-start daemon → completed in v0.10.16
+- Streaming agent response rendering → completed in v0.10.12 (streaming Q&A)
+- Ctrl+C interrupt → completed in v0.10.14 (Ctrl-C detach)
+- Non-disruptive event notifications → completed in v0.10.11 (TUI auto-tail + notifications)
+- Periodic status header refresh → completed in v0.10.12 (status bar enhancements)
 
 #### Implementation scope
 - `apps/ta-cli/src/commands/shell.rs` — REPL core (~200 lines), daemon client, SSE rendering
@@ -957,12 +957,12 @@ agents:
 - [x] `ta goal history` subcommand with `--phase`, `--agent`, `--since`, `--json`, `--limit` filters
 - [x] Status endpoint: `active` flag on `AgentInfo` distinguishing active (updated within 10m) vs tracked agents
 
-#### Remaining (deferred)
-- Verification integration (`require_tests_pass`, `require_clean_clippy`) — runs commands but evaluation result not wired into gateway auto-approve flow yet
-- `auto_apply` flow (auto-apply after auto-approve)
-- Event store pruning of events linked to archived goals
-- `ta draft submit --require-review` CLI flag to force human review
-- Audit trail entry for auto-approved drafts via `ta-audit`
+#### Deferred items resolved
+- Verification integration in auto-approve → completed in v0.10.15
+- `auto_apply` flow → completed in v0.10.15
+- Event store pruning → completed in v0.10.15
+- `ta draft apply --require-review` flag → completed in v0.10.15
+- Audit trail for auto-approved drafts → completed in v0.10.15
 
 #### Version: `0.9.8-alpha.1`
 
@@ -1027,10 +1027,9 @@ impl AccessFilter {
 - [x] Sandbox: added `denied_commands` field to `SandboxConfig`, deny check in `execute()` and `is_allowed()` (2 new tests)
 - [x] Documentation: unified access control pattern in USAGE.md
 
-#### Remaining (deferred)
-
-- [ ] Channel access control: `denied_roles` / `denied_users` fields (requires channel registry changes)
-- [ ] Agent tool access: configurable tool allow/deny per agent config (requires alignment profile changes)
+#### Deferred items resolved
+- Channel access control → completed in v0.10.16
+- Agent tool access → completed in v0.10.16
 
 #### Version: `0.9.8-alpha.1.1`
 
@@ -1284,10 +1283,10 @@ WorkflowFailed { workflow_id, name, reason, timestamp }
 - ✅ Framework integration templates: 3 workflow definitions, 5 role definitions, 2 adapter scripts (LangGraph, CrewAI)
 - ✅ ~44 new tests across ta-workflow (31), ta-goal (3), ta-mcp-gateway (1), ta-cli (2), ta-daemon (1)
 
-#### Remaining (deferred)
-- Goal chaining context propagation (requires daemon runtime for multi-goal orchestration)
-- Full async process engine I/O (requires daemon tokio runtime for child process management)
-- Live scoring agent integration (requires LLM API call from scorer — protocol types ready)
+#### Deferred items moved
+- Goal chaining context propagation → v0.10.18
+- Full async process engine I/O → v0.10.18
+- Live scoring agent integration → v0.10.18
 
 #### Version: `0.9.8-alpha.2`
 
@@ -1341,8 +1340,8 @@ WorkflowFailed { workflow_id, name, reason, timestamp }
 - ✅ `--classic` flag preserves rustyline shell as fallback
 - ✅ 13 unit tests — input handling, cursor movement, history navigation, tab completion, scroll, daemon state, workflow mode
 
-#### Remaining (deferred)
-- Split pane support (stretch goal) — Ctrl-W toggle for agent/shell side-by-side
+#### Deferred items resolved
+- Split pane support → completed in v0.10.14
 
 #### Implementation scope
 - `apps/ta-cli/src/commands/shell_tui.rs` — new TUI module with ratatui (~500 lines + tests)
@@ -1822,11 +1821,8 @@ Human sees question in ta shell / Slack / web UI
 - ✅ `ChannelsConfig` in daemon config — `[channels]` section in `daemon.toml` with `default_channels`, `[channels.slack]`, `[channels.discord]`, `[channels.email]` sub-tables
 - ✅ Version bump to `0.9.9-alpha.4`
 
-#### Remaining (deferred)
-
-- Slack interaction handler webhook endpoint (receives button clicks, calls respond)
-- Discord interaction handler webhook endpoint (receives button interactions)
-- Email inbound webhook (parses reply emails, extracts interaction ID)
+#### Deferred items moved
+- Slack/Discord/Email interaction handler webhooks → v0.11.0 (Event-Driven Agent Routing)
 
 #### Version: `0.9.9-alpha.4`
 
@@ -1898,8 +1894,8 @@ Today, creating a custom workflow or agent config requires copying an existing f
 - [x] Agent CLI command module with 10 tests
 - [x] Workflow CLI new/validate commands with 7 tests
 
-#### Remaining (deferred)
-- [ ] `ta plan create --version-schema` command integration (requires plan create refactor)
+#### Deferred items moved
+- `ta plan create --version-schema` → v0.10.17 (item 9)
 
 #### Version: `0.9.9-alpha.5`
 
@@ -2013,11 +2009,10 @@ Each `ProjectContext` holds:
 - [x] Backward compatibility: no `office.yaml` = single-project mode, all existing behavior preserved
 - [x] Version bump to `0.9.10-alpha`
 
-#### Remaining (deferred)
-
-- [ ] Full GatewayState refactor to hold `HashMap<String, ProjectContext>` with per-project GoalRunStore/AuditLog instances (requires deep refactor of server.rs)
-- [ ] Thread context tracking across conversations (requires session-project binding)
-- [ ] Config hot-reload with live registry update (reload endpoint validates but doesn't swap yet)
+#### Deferred items moved
+- Full GatewayState refactor → v0.10.18
+- Thread context tracking → v0.10.18
+- Config hot-reload → v0.10.18
 
 #### Version: `0.9.10-alpha`
 
@@ -2056,9 +2051,9 @@ Each `ProjectContext` holds:
 - ✅ **Registry integration**: Registered in MCP gateway and CLI config
 - ✅ **30 tests** across all modules
 
-#### Remaining (deferred)
-- Deny modal: Discord modal for denial reason input (requires Discord gateway WebSocket)
-- Thread-based discussions: Use Discord threads for multi-turn review conversations
+#### Deferred items moved
+- Discord deny modal → v0.11.0 (Event-Driven Agent Routing — interactive channel responses)
+- Discord thread-based discussions → v0.11.0
 
 #### Config
 ```yaml
@@ -2207,9 +2202,9 @@ Slack (v0.10.3) and email (v0.10.4) are built as external plugins from the start
 - ✅ Plugin SDK templates: Python, Node.js, Go skeletons in `templates/channel-plugins/`
 - ✅ 29 tests: manifest parsing, discovery, installation, stdio/HTTP delivery, error paths, validation
 
-#### Remaining (deferred)
-- Plugin version checking and upgrade management
-- Plugin marketplace / remote install from URL
+#### Deferred items resolved
+- Plugin version checking → completed in v0.10.16
+- Plugin marketplace / remote install → backlog (no target phase yet)
 
 #### Version: `0.10.2-alpha`
 
@@ -2289,10 +2284,8 @@ Built as an external plugin (JSON-over-stdio or standalone Rust binary), not an 
 5. ✅ **Actionable error messages**: Missing token, missing channel ID, Slack API errors with permission hints
 6. ✅ **`allowed_users` env var**: `TA_SLACK_ALLOWED_USERS` documented for access control integration
 
-#### Remaining (deferred)
-- Socket Mode (outbound-only WebSocket) — requires `connections.open` + event loop; current plugin uses REST API which is simpler and sufficient for JSON-over-stdio protocol
-- Deny modal (`views.open`) — requires Slack interactivity endpoint to receive modal submissions; can be added when HTTP mode is implemented
-- HTTP Mode alternative — plugin supports JSON-over-stdio; HTTP mode can be added as a second plugin or runtime flag
+#### Deferred items moved
+- Slack Socket Mode + deny modal + HTTP mode → v0.11.0 (Event-Driven Agent Routing — interactive channel responses)
 
 #### Config
 ```toml
@@ -2330,10 +2323,9 @@ Built as an external plugin. Sends formatted review emails via SMTP, polls IMAP 
 - ✅ HTML body escapes user content to prevent XSS
 - ✅ 36 tests: email body builders (16), reply parsing (15), serialization/config (5)
 
-#### Remaining (deferred)
-- IMAP reply polling (background poller that watches for replies and POSTs to daemon respond endpoint)
-- Configurable timeout (default 2 hours) — currently relies on daemon-level timeout
-- Plugin version checking and upgrade management
+#### Deferred items moved
+- IMAP reply polling + configurable timeout → v0.11.0 (Event-Driven Agent Routing)
+- Plugin version checking → completed in v0.10.16
 
 #### Config
 ```toml
@@ -2482,8 +2474,8 @@ The human stays in `ta shell` throughout. Release notes go through the standard 
 7. [x] **`agents/releaser.yaml`**: Release agent config with `ta_ask_human` enabled, write access scoped to release artifacts via orchestrator whitelist
 8. [x] **Release workflow definition**: `templates/workflows/release.yaml` — 4-stage workflow (validate → generate-notes → build-verify → publish) with human review at notes and publish stages
 
-#### Remaining (deferred)
-9. [ ] Wire `ta sync` and `ta build` as optional pre-release steps (depends on v0.11.1, v0.11.2)
+#### Deferred items moved
+- Wire `ta sync`/`ta build` in release → v0.10.18 (depends on v0.11.1, v0.11.2)
 
 #### Version: `0.10.6-alpha`
 
@@ -2564,8 +2556,8 @@ timeout = 300
 8. ✅ Default `[verify]` section in `ta init` template: Rust projects get pre-populated commands; others get commented-out examples
 9. ✅ `ta verify` standalone command: resolves goal by ID/prefix or most recent active goal, loads `[verify]` from staging's workflow.toml, runs verification, exits with code 1 on failure
 
-#### Remaining
-- Agent mode full implementation (re-launch with failure context injection) deferred — depends on interactive mode maturity
+#### Deferred items moved
+- Agent mode re-launch with failure context → v0.11.0 (Event-Driven Agent Routing)
 
 #### Tests
 - 7 new config tests: defaults, TOML parsing for all modes, display formatting
@@ -2613,8 +2605,8 @@ The follow-up resolver doesn't assume git. It works from TA's own state:
 8. ✅ `resolve_smart_follow_up()` in `run.rs`: priority-based resolution (draft > goal > phase > interactive picker > existing behavior); produces title, phase, follow-up ID, and context string
 9. ✅ Channel-agnostic resolution: follow-up resolver works from TA's own state (GoalRun records, DraftPackage records, PLAN.md phases) without assuming git
 
-#### Remaining
-- Shell TUI fuzzy-searchable picker deferred — depends on v0.10.11 Shell TUI UX Overhaul
+#### Deferred items moved
+- Shell TUI fuzzy-searchable picker → backlog (TUI enhancement, no target phase)
 
 #### Tests
 - 13 new tests in `follow_up.rs`: format_age (4 variants), truncate (2 variants), candidate display, candidate source display, empty picker error, goal state filtering (completed skipped, failed included, running included), phase filtering (only in-progress), basic candidate creation
@@ -2650,9 +2642,6 @@ After `./install_local.sh` rebuilds and installs new `ta` and `ta-daemon` binari
 6. ✅ `--no-version-check` global CLI flag to skip (for CI or scripted use)
 7. ✅ TUI status bar: shows `◉ daemon (stale)` in yellow if daemon version doesn't match CLI version
 
-#### Remaining
-- `ta run` does not use the daemon API directly — no version check needed (it manages staging workspaces locally)
-
 #### Tests
 - 3 unit tests in `version_guard.rs`: variant construction, `find_daemon_binary` safety, stale result version extraction
 
@@ -2683,10 +2672,10 @@ Today `ta shell` has several UX gaps that force users to work around the TUI rat
 7. ✅ **Draft view paging / scrollable output**: TUI retains all output in scrollable buffer with PgUp/PgDn. Command output (draft view, list, etc.) rendered into the same scrollable buffer.
 8. ✅ **Scrollable output buffer (foundational)**: TUI output pane retains full history with configurable buffer limit (`shell.output_buffer_lines`, default 10000). Oldest lines dropped when limit exceeded. Scroll offset adjusted when lines are pruned.
 
-#### Remaining
-- `:tail <id> --lines <count>` override for history depth — deferred (current implementation uses configurable default)
-- Classic shell pager integration — deferred (TUI already provides scrollable output)
-- Progressive disclosure for draft view (summary → diffs on scroll) — deferred to future TUI enhancement
+#### Deferred items resolved
+- `:tail --lines` override → completed in v0.10.14
+- Classic shell pager → dropped (TUI scrollable output supersedes this)
+- Progressive disclosure for draft view → backlog (TUI enhancement, no target phase)
 
 #### Tests
 - 14 new tests in `shell_tui.rs`: parse_goal_started_event, parse_goal_started_ignores_other_events, parse_draft_built_event, parse_draft_built_fallback_display_id, parse_draft_built_ignores_other_events, handle_agent_output_message, handle_agent_stderr_output, handle_goal_started_auto_tail, handle_goal_started_no_auto_tail_when_already_tailing, handle_goal_started_no_auto_tail_when_disabled, handle_agent_output_done_clears_tail, handle_draft_ready_notification, output_buffer_limit_enforced, output_buffer_limit_adjusts_scroll
@@ -2838,15 +2827,13 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 - ✅ **Agent tool access control** (item 13): `AgentToolAccess` struct with `allowed_tools`/`denied_tools` and `as_filter()` → `AccessFilter`. Added to `AgentConfig`. 2 tests.
 - ✅ **Plugin version checking** (item 14): `min_daemon_version` and `source_url` fields on `PluginManifest`. `ta plugin check` compares installed vs source versions and validates min_daemon_version. `ta plugin upgrade` rebuilds from source. `version_less_than()` semver comparison. 4 tests.
 
-#### Remaining (deferred — require external service integration)
-1. [ ] **MSI installer and `winget`/`scoop` packages** (from v0.9.1): Windows distribution
-6. [ ] **Slack Socket Mode** (from v0.10.3): Outbound-only WebSocket via `connections.open`
-7. [ ] **Slack deny modal** (from v0.10.3): `views.open` for denial reason input
-8. [ ] **Discord deny modal** (from v0.10.1): Modal for denial reason input
-9. [ ] **Discord thread-based discussions** (from v0.10.1): Multi-turn review in threads
-10. [ ] **Email IMAP reply polling** (from v0.10.4): Background poller for reply-based approvals
-11. [ ] **Slack/Discord/Email interaction handler webhooks** (from v0.9.9.4): Receive button clicks and reply events
-15. [ ] **Plugin marketplace / remote install from URL** (from v0.10.2)
+#### Deferred items moved
+- MSI installer → backlog (Windows distribution, no target phase)
+- Slack Socket Mode + deny modal → v0.11.0 (Event-Driven Agent Routing)
+- Discord deny modal + thread discussions → v0.11.0
+- Email IMAP reply polling → v0.11.0
+- Slack/Discord/Email webhooks → v0.11.0
+- Plugin marketplace → backlog (no target phase)
 
 #### Tests: 16 new tests (12 in config.rs, 4 in plugin.rs)
 #### Version: `0.10.16-alpha`
