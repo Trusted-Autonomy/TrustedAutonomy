@@ -158,6 +158,9 @@ pub struct DraftToolParams {
     /// Draft package ID (used with "status" action).
     #[serde(default)]
     pub draft_id: Option<String>,
+    /// Force human review even when auto-approve is configured (v0.10.15).
+    #[serde(default)]
+    pub require_review: Option<bool>,
 }
 
 /// Parameters for `ta_goal` (inner-loop agent tool).
@@ -625,6 +628,43 @@ impl GatewayState {
             .ok_or(GatewayError::GoalNotFound(goal_run_id))?;
         Ok(goal.agent_id)
     }
+
+    /// Resolve the active agent_id from `TA_AGENT_ID` env var,
+    /// falling back to the dev session or "unknown" (v0.10.15).
+    pub fn resolve_agent_id(&self) -> String {
+        std::env::var("TA_AGENT_ID")
+            .ok()
+            .or_else(|| self.dev_session_id.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Record a per-tool-call audit entry with caller_mode and agent_id (v0.10.15).
+    ///
+    /// Called from each tool handler to produce a fine-grained audit trail.
+    pub fn audit_tool_call(
+        &mut self,
+        tool_name: &str,
+        target_uri: Option<&str>,
+        goal_run_id: Option<Uuid>,
+    ) {
+        let agent_id = self.resolve_agent_id();
+        let mut event = ta_audit::AuditEvent::new(&agent_id, ta_audit::AuditAction::ToolCall)
+            .with_caller_mode(self.caller_mode.as_str())
+            .with_tool_name(tool_name);
+        if let Some(uri) = target_uri {
+            event = event.with_target(uri);
+        }
+        if let Some(gid) = goal_run_id {
+            event = event.with_goal_run_id(gid);
+        }
+        if let Err(e) = self.audit_log.append(&mut event) {
+            tracing::warn!(
+                tool = tool_name,
+                error = %e,
+                "failed to write tool-call audit entry"
+            );
+        }
+    }
 }
 
 // ── MCP Server ───────────────────────────────────────────────────
@@ -659,6 +699,13 @@ impl TaGatewayServer {
 
     // ── Goal tools ───────────────────────────────────────────
 
+    /// Log a tool call to the audit log (v0.10.15).
+    fn audit(&self, tool_name: &str, target_uri: Option<&str>, goal_run_id: Option<Uuid>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.audit_tool_call(tool_name, target_uri, goal_run_id);
+        }
+    }
+
     #[tool(
         description = "Start a new goal run and launch an implementation agent. Performs the full lifecycle: creates an overlay workspace copy, injects CLAUDE.md context, spawns the agent in the background, and emits lifecycle events. The agent runs headlessly and builds a draft on exit. Track progress via ta_event_subscribe. Returns the goal_run_id."
     )]
@@ -666,6 +713,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<GoalStartParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_goal_start", None, None);
         tools::goal::handle_goal_start(&self.state, params)
     }
 
@@ -674,6 +722,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<GoalIdParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_goal_status", None, params.goal_run_id.parse().ok());
         tools::goal::handle_goal_status(&self.state, &params.goal_run_id)
     }
 
@@ -684,6 +733,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<GoalListParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_goal_list", None, None);
         tools::goal::handle_goal_list(&self.state, params)
     }
 
@@ -696,6 +746,11 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<FsReadParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_fs_read",
+            Some(&format!("fs://workspace/{}", params.path)),
+            params.goal_run_id.parse().ok(),
+        );
         tools::fs::handle_fs_read(&self.state, params)
     }
 
@@ -706,6 +761,11 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<FsWriteParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_fs_write",
+            Some(&format!("fs://workspace/{}", params.path)),
+            params.goal_run_id.parse().ok(),
+        );
         tools::fs::handle_fs_write(&self.state, params)
     }
 
@@ -714,6 +774,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<FsListParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_fs_list", None, params.goal_run_id.parse().ok());
         tools::fs::handle_fs_list(&self.state, params)
     }
 
@@ -722,6 +783,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<FsDiffParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_fs_diff", None, params.goal_run_id.parse().ok());
         tools::fs::handle_fs_diff(&self.state, params)
     }
 
@@ -734,6 +796,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<PrBuildParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_pr_build", None, params.goal_run_id.parse().ok());
         tools::draft::handle_pr_build(&self.state, params)
     }
 
@@ -742,6 +805,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<GoalIdParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_pr_status", None, params.goal_run_id.parse().ok());
         tools::draft::handle_pr_status(&self.state, params)
     }
 
@@ -754,6 +818,11 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<DraftToolParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_draft",
+            None,
+            params.goal_run_id.as_deref().and_then(|id| id.parse().ok()),
+        );
         tools::draft::handle_draft(&self.state, params)
     }
 
@@ -764,6 +833,14 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<GoalToolParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_goal_inner",
+            None,
+            params
+                .macro_goal_id
+                .as_deref()
+                .and_then(|id| id.parse().ok()),
+        );
         tools::goal::handle_goal_inner(&self.state, params)
     }
 
@@ -774,6 +851,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<PlanToolParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_plan", None, None);
         tools::plan::handle_plan(&self.state, params)
     }
 
@@ -783,6 +861,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<ContextToolParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_context", None, None);
         tools::context::handle_context(&self.state, params)
     }
 
@@ -795,6 +874,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<AgentStatusParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_agent_status", None, None);
         tools::agent::handle_agent_status(&self.state, params)
     }
 
@@ -807,6 +887,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<tools::event::EventSubscribeParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_event_subscribe", None, None);
         tools::event::handle_event_subscribe(&self.state, params)
     }
 
@@ -819,6 +900,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<tools::workflow::WorkflowToolParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_workflow", None, None);
         tools::workflow::handle_workflow(&self.state, params)
     }
 
@@ -831,6 +913,7 @@ impl TaGatewayServer {
         &self,
         Parameters(params): Parameters<tools::human::AskHumanParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_ask_human", None, None);
         tools::human::handle_ask_human(&self.state, params)
     }
 }
@@ -1307,5 +1390,54 @@ mod tests {
     fn unrestricted_mode_allows_all_writes() {
         let mode = CallerMode::Unrestricted;
         assert!(mode.is_write_whitelisted("anything.rs"));
+    }
+
+    // v0.10.15: Audit tool-call and agent_id resolution tests.
+
+    #[test]
+    fn resolve_agent_id_from_env() {
+        let (server, _dir) = test_server();
+        std::env::set_var("TA_AGENT_ID", "env-agent-42");
+        let state = server.state.lock().unwrap();
+        let agent_id = state.resolve_agent_id();
+        assert_eq!(agent_id, "env-agent-42");
+        std::env::remove_var("TA_AGENT_ID");
+    }
+
+    #[test]
+    fn resolve_agent_id_falls_back_to_dev_session() {
+        let (server, _dir) = test_server();
+        std::env::remove_var("TA_AGENT_ID");
+        let mut state = server.state.lock().unwrap();
+        state.dev_session_id = Some("dev-session-99".to_string());
+        assert_eq!(state.resolve_agent_id(), "dev-session-99");
+    }
+
+    #[test]
+    fn resolve_agent_id_falls_back_to_unknown() {
+        let (server, _dir) = test_server();
+        std::env::remove_var("TA_AGENT_ID");
+        let mut state = server.state.lock().unwrap();
+        state.dev_session_id = None;
+        assert_eq!(state.resolve_agent_id(), "unknown");
+    }
+
+    #[test]
+    fn audit_tool_call_writes_to_log() {
+        let (server, _dir) = test_server();
+        let goal_id = start_goal(&server);
+        {
+            let mut state = server.state.lock().unwrap();
+            state.audit_tool_call("ta_fs_write", Some("fs://workspace/foo.rs"), Some(goal_id));
+        }
+        let state = server.state.lock().unwrap();
+        let events = ta_audit::AuditLog::read_all(state.audit_log.path()).unwrap();
+        assert!(!events.is_empty());
+        let last = events.last().unwrap();
+        assert_eq!(last.action, ta_audit::AuditAction::ToolCall);
+        assert_eq!(last.tool_name.as_deref(), Some("ta_fs_write"));
+        assert_eq!(last.caller_mode.as_deref(), Some("normal"));
+        assert_eq!(last.goal_run_id, Some(goal_id));
+        assert_eq!(last.target_uri.as_deref(), Some("fs://workspace/foo.rs"));
     }
 }

@@ -22,6 +22,12 @@ pub trait EventStore: Send + Sync {
 
     /// Count total events in the store.
     fn count(&self) -> Result<usize, EventError>;
+
+    /// Prune events older than the given date (v0.10.15).
+    ///
+    /// Returns the number of event files removed. Only removes complete
+    /// daily log files where ALL events predate the cutoff.
+    fn prune(&self, before: chrono::DateTime<Utc>) -> Result<usize, EventError>;
 }
 
 /// Query filter for event retrieval.
@@ -179,6 +185,24 @@ impl EventStore for FsEventStore {
         }
         Ok(total)
     }
+
+    fn prune(&self, before: chrono::DateTime<Utc>) -> Result<usize, EventError> {
+        let cutoff_date = before.date_naive();
+        let files = self.log_files()?;
+        let mut removed = 0;
+
+        for path in &files {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Ok(file_date) = chrono::NaiveDate::parse_from_str(stem, "%Y-%m-%d") {
+                    if file_date < cutoff_date && fs::remove_file(path).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +348,56 @@ mod tests {
         let results = store.query(&EventQueryFilter::default()).unwrap();
         assert!(results.is_empty());
         assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_removes_old_files() {
+        let dir = tempdir().unwrap();
+        let store = FsEventStore::new(dir.path());
+
+        // Create events that will be in today's file.
+        store
+            .append(&make_envelope(SessionEvent::MemoryStored {
+                key: "k".into(),
+                category: None,
+                source: "cli".into(),
+            }))
+            .unwrap();
+
+        // Manually create an old file.
+        let old_date = "2025-01-01";
+        let old_path = dir.path().join(format!("{}.jsonl", old_date));
+        std::fs::write(&old_path, "{}\n").unwrap();
+
+        let files_before = store.log_files().unwrap();
+        assert_eq!(files_before.len(), 2);
+
+        // Prune everything before today.
+        let cutoff = chrono::Utc::now();
+        let removed = store.prune(cutoff).unwrap();
+        assert_eq!(removed, 1);
+
+        let files_after = store.log_files().unwrap();
+        assert_eq!(files_after.len(), 1);
+    }
+
+    #[test]
+    fn prune_keeps_recent_files() {
+        let dir = tempdir().unwrap();
+        let store = FsEventStore::new(dir.path());
+
+        store
+            .append(&make_envelope(SessionEvent::MemoryStored {
+                key: "k".into(),
+                category: None,
+                source: "cli".into(),
+            }))
+            .unwrap();
+
+        // Prune with cutoff in the past — nothing should be removed.
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(365);
+        let removed = store.prune(cutoff).unwrap();
+        assert_eq!(removed, 0);
     }
 
     #[test]

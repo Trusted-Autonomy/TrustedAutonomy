@@ -180,6 +180,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             reject_patterns: reject_patterns.clone(),
             discuss_patterns: discuss_patterns.clone(),
             phase: None,
+            require_review: false,
         },
     }
 }
