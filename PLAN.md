@@ -2790,7 +2790,7 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 ---
 
 ### v0.10.15 — Deferred Items: Observability & Audit
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Address deferred observability and audit items that strengthen governance before v0.11.
 
 #### Completed
@@ -2810,12 +2810,12 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 ---
 
 ### v0.10.15.1 — TUI Output & Responsiveness Fixes
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Fix two UX regressions in the TUI shell: truncated scrollback for long command output, and missing immediate acknowledgment when long-running commands are dispatched.
 
 #### Items
-1. [ ] **Full scrollback history**: Remove or significantly increase the output buffer limit so users can scroll back through the entire session history (like Claude CLI). Currently long output from `draft view` etc. is clipped at the top.
-2. [ ] **Immediate command dispatch ack**: Print an immediate acknowledgment when a command is dispatched to the daemon (e.g., "Dispatched: ta run v0.10.15 (waiting for response...)") so the user sees activity before the daemon responds.
+1. [x] **Full scrollback history**: Changed `scroll_offset` from `u16` to `usize` to prevent overflow at 65,535 visual lines. Increased default `output_buffer_limit` from 10,000 to 50,000 lines.
+2. [x] **Immediate command dispatch ack**: Added immediate "Dispatching: ..." info line before async daemon send so users see activity before the daemon responds.
 
 #### Version: `0.10.15-alpha.1`
 
