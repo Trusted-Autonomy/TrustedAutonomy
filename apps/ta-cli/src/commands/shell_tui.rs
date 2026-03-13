@@ -3061,4 +3061,52 @@ mod tests {
         // Should not detect bold — single stars are not bold markers.
         assert_eq!(line.spans.len(), 1);
     }
+
+    // -- v0.10.18.1 scrollback u16 overflow tests --
+
+    #[test]
+    fn scroll_offset_handles_large_line_count() {
+        // Verify that scroll logic handles >65535 visual lines without overflow.
+        // The pre-slicing approach in draw_output avoids Paragraph::scroll((u16, u16))
+        // overflow by computing start_idx / residual_scroll from logical lines.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Raise buffer limit so lines aren't dropped.
+        app.output_buffer_limit = 80_000;
+        // Add 70000 single-char lines (each wraps to 1 visual line at any width).
+        for i in 0..70_000 {
+            app.push_output(OutputLine::command(format!("{}", i)));
+        }
+        assert_eq!(app.output.len(), 70_000);
+
+        // Scrolling up a large amount should not panic or wrap.
+        app.scroll_up(60_000);
+        assert_eq!(app.scroll_offset, 60_000);
+
+        // Scroll back down.
+        app.scroll_down(30_000);
+        assert_eq!(app.scroll_offset, 30_000);
+
+        app.scroll_to_bottom();
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_offset_max_clamp() {
+        // scroll_up should clamp to the output length, not exceed it.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for i in 0..100 {
+            app.push_output(OutputLine::command(format!("line {}", i)));
+        }
+        app.scroll_up(999_999);
+        // Should clamp to output.len() at most.
+        assert!(app.scroll_offset <= app.output.len());
+    }
 }

@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.18-alpha
+**Version**: v0.10.18.1-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -466,7 +466,20 @@ on_failure = "block"   # "block" (no draft), "warn" (draft with warnings)
 timeout = 300          # seconds per command
 ```
 
-When a command fails in block mode, TA prints the failed command and output, then suggests next steps:
+When a command fails in block mode, TA shows the full command output (stdout + stderr) with the exit code, then offers to re-enter the agent immediately:
+
+```
+--- cargo test --workspace (exit code: 101) ---
+  running 42 tests
+  test auth::tests::token_refresh ... FAILED
+  ... (18 lines omitted) ...
+  1 test failed
+---
+
+Re-enter the agent to fix these issues? [Y/n]
+```
+
+If you confirm, the agent re-launches with the failure details injected into CLAUDE.md. After the agent exits, verification runs again automatically. In non-interactive or headless mode, TA prints instructions instead:
 
 ```bash
 # Re-enter the agent to fix issues
@@ -487,6 +500,19 @@ If pre-commit verification fails during `ta draft apply --git-commit`, the chang
 In warn mode (`on_failure = "warn"`), the draft is created but carries verification warnings visible in `ta draft view`.
 
 `ta init` generates a pre-populated `[verify]` section for Rust projects. Other project types get commented-out examples.
+
+### Desktop Notifications
+
+TA sends a system notification when a draft is ready for review, so you don't have to watch the terminal. On macOS this uses Notification Center (via `osascript`); on Linux it uses `notify-send`.
+
+```toml
+# .ta/workflow.toml
+[notify]
+enabled = true   # default: true — set false to disable
+title = "TA"     # prefix for notification titles
+```
+
+Notifications are also sent when verification fails at goal completion. Notification failures are silently ignored and never block your workflow.
 
 ### Shell Configuration
 
@@ -4282,6 +4308,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.17 | `ta new` — conversational project bootstrapping | Done |
 | v0.10.17.1 | Shell reliability & command timeout fixes | Done |
 | v0.10.18 | Deferred items: workflow & multi-project | Done |
+| v0.10.18.1 | Developer loop: verification, notifications & shell fixes | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

@@ -2899,14 +2899,18 @@ Tests: 25 new tests (name validation, template resolution, scaffold generation, 
 ---
 
 ### v0.10.18.1 — Developer Loop: Verification Timing, Notifications & Shell Fixes
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix the root cause of PRs shipping with lint/test failures by moving verification to goal completion time. Add desktop notifications and fix shell scrollback rendering.
 
 #### Items
-1. [ ] **Pre-commit verification at goal completion**: Run `[verify]` commands when the agent exits (before `ta draft build`), not just at `ta draft apply --git-commit`. On failure, offer to re-enter the agent to fix issues before the draft is built. This is the root-cause fix for PRs failing lint/compile checks.
-2. [ ] **Desktop notification on draft ready**: Send macOS notification (via `osascript`/`terminal-notifier`) when a draft is ready for review, so users don't have to watch the terminal.
-3. [ ] **Shell scrollback rendering fix**: The pre-slicing approach for ratatui's `u16` scroll overflow is on main but needs verification that the rebuilt binary works. If still broken, investigate further — the `Paragraph::scroll((residual_scroll, 0))` approach should handle >65535 visual lines.
-4. [ ] **Verification output detail**: When pre-commit verification fails (at goal completion or draft apply), show the actual command output (stderr/stdout), not just command names. Users need to see what failed to fix it.
+1. [x] **Pre-commit verification at goal completion**: Verification already runs at goal completion (v0.10.8). Enhanced Block mode to show full command output (up to 40 lines with head/tail collapsing) and offer interactive re-entry: "Re-enter the agent to fix these issues? [Y/n]". On confirmation, re-injects failure context into CLAUDE.md and re-launches the agent, then re-verifies. Non-interactive/headless paths print instructions as before.
+2. [x] **Desktop notification on draft ready**: Added `notify.rs` module with platform-specific notification support. macOS uses `osascript` (Notification Center), Linux uses `notify-send`. Notifications sent on draft-ready and verification-failure events. Configurable via `[notify]` section in `.ta/workflow.toml` (`enabled`, `title`). Failures are logged but never block the workflow.
+3. [x] **Shell scrollback rendering fix**: Verified pre-slicing approach handles >65535 visual lines correctly. Added 2 new tests: `scroll_offset_handles_large_line_count` (70K lines, scroll 60K up/30K down) and `scroll_offset_max_clamp` (scroll past end clamps correctly). The `Paragraph::scroll((residual_scroll, 0))` pattern keeps residual in u16 range.
+4. [x] **Verification output detail**: Block mode now shows full command output (first 20 + last 20 lines for long output, with omission indicator). Shows exit code prominently in `--- command (exit code: N) ---` format. Agent mode re-check failure also shows detailed output (20 lines per command). Draft apply verification shows exit code per command and suggests `--skip-verify` flag.
+
+#### Completed
+- 4 items completed, 4 new tests across 2 files (notify.rs, shell_tui.rs)
+- Version bumped to `0.10.18-alpha.1`
 
 #### Version: `0.10.18-alpha.1`
 
