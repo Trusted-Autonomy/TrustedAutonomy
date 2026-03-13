@@ -2912,6 +2912,60 @@ Tests: 25 new tests (name validation, template resolution, scaffold generation, 
 
 ---
 
+### v0.10.18.2 — Shell TUI: Scrollback & Command Output Visibility
+<!-- status: pending -->
+**Goal**: Fix the fundamental visibility problem in `ta shell` where command output that exceeds the terminal window height is lost — the user cannot scroll back to see earlier output lines.
+
+#### Problem
+When an agent or command produces output longer than the visible terminal area in `ta shell`, lines that scroll past the top of the window are gone. There is no way to scroll up to review them. This makes `ta shell` unusable for any command with substantial output (build logs, test results, long diffs). The user reported this as a recurring blocker.
+
+#### Items
+1. [ ] **Scrollback buffer for command output pane**: The shell TUI output widget must retain a scrollback buffer (minimum 10,000 lines, configurable via `[shell] scrollback_lines` in `.ta/shell.toml`). All command output appended to the buffer persists even when it scrolls past the visible area. The widget renders a sliding window over the buffer based on scroll position.
+2. [ ] **Keyboard scroll navigation**: Up/Down arrow keys (when not in input mode), PgUp/PgDn, and Home/End scroll through the output buffer. Scroll position indicator shows "line N of M" or a visual scrollbar in the right margin. When new output arrives and the user is scrolled to the bottom, auto-scroll follows new content. When the user has scrolled up, new output does NOT auto-scroll — a "new output ↓" indicator appears instead.
+3. [ ] **Test: scrollback preserves and retrieves past output**: Integration test that pushes 500+ lines into the output buffer, verifies the buffer retains all lines, scrolls to line 0, and asserts the first line content matches. Verifies scroll-to-bottom returns to the latest line.
+4. [ ] **Test: auto-scroll vs manual scroll behavior**: Test that verifies: (a) when scroll position is at bottom and new content arrives, view follows; (b) when scroll position is NOT at bottom and new content arrives, view stays put and a "new output" flag is set.
+
+#### Version: `0.10.18-alpha.2`
+
+---
+
+### v0.10.18.3 — Verification Streaming, Heartbeat & Configurable Timeout
+<!-- status: pending -->
+**Goal**: Replace the silent, fire-and-forget verification model with streaming output, explicit progress heartbeats, and per-command configurable timeouts so the user always knows what is happening and never hits an opaque timeout.
+
+#### Problem
+`run_single_command()` in `verify.rs` uses synchronous `try_wait()` polling with no output streaming. The user sees nothing until the command finishes or the 600s global timeout fires. `cargo test --workspace` legitimately exceeds 600s on this project, causing every `ta draft apply --git-commit` to fail with an opaque "Command timed out after 600s" error. There is no way to distinguish a hung process from a slow-but-progressing test suite.
+
+#### Items
+1. [ ] **Streaming stdout/stderr from verification commands**: `run_single_command()` must capture stdout and stderr as they are produced (not after process exit). Each line is printed to the terminal in real time, prefixed with the command name (e.g., `[cargo test] line content`). Output is also accumulated in the `VerifyResult` for post-run display. Implementation: spawn with `Stdio::piped()`, read lines from `BufReader` on stdout/stderr in a tokio task (or thread for sync context), forward each line to the terminal immediately.
+2. [ ] **Heartbeat for TA-internal verification commands**: For commands TA controls (the `./dev` wrapper and any built-in verification), emit a progress heartbeat every 30 seconds: `[cargo test] still running... (90s elapsed, 147 tests passed)`. Parse test runner output where possible to include counts. For external/opaque commands, emit a simpler heartbeat: `[command] still running... (90s elapsed)`. Heartbeat interval configurable via `[verify] heartbeat_interval_secs` in `.ta/workflow.toml` (default: 30).
+3. [ ] **Per-command configurable timeout**: Replace the single global `timeout_secs` with per-command timeout support in `.ta/workflow.toml`:
+   ```toml
+   [verify]
+   default_timeout_secs = 300
+
+   [[verify.commands]]
+   run = "cargo fmt --all -- --check"
+   timeout_secs = 60
+
+   [[verify.commands]]
+   run = "cargo clippy --workspace --all-targets -- -D warnings"
+   timeout_secs = 300
+
+   [[verify.commands]]
+   run = "./dev 'cargo test --workspace'"
+   timeout_secs = 900
+   ```
+   Each command gets its own timeout. If `timeout_secs` is omitted, `default_timeout_secs` applies. The old flat `timeout_secs` field is supported as a fallback for backward compatibility.
+4. [ ] **Timeout message includes elapsed output context**: When a command does time out, the error message includes: (a) the command that timed out, (b) the configured timeout value, (c) the last 20 lines of captured output so the user can see where it stalled, (d) suggestion to increase `timeout_secs` for that specific command in workflow.toml.
+5. [ ] **Test: streaming output is captured and forwarded**: Unit test that spawns a child process producing 50+ lines over 2 seconds, verifies each line appears in the accumulated output, and verifies the output is complete after process exit.
+6. [ ] **Test: per-command timeout respected**: Test with two commands — one with 2s timeout (sleeps 1s, succeeds) and one with 1s timeout (sleeps 5s, times out). Verify the first passes and the second fails with timeout error containing the last output lines.
+7. [ ] **Test: heartbeat emitted for long-running command**: Test that a command running >60s with heartbeat_interval_secs=1 produces at least 2 heartbeat messages in the captured output.
+
+#### Version: `0.10.18-alpha.3`
+
+---
+
 ### v0.11.0 — Event-Driven Agent Routing
 <!-- status: pending -->
 **Goal**: Allow any TA event to trigger an agent workflow instead of (or in addition to) a static response. This is intelligent, adaptive event handling — not scripted hooks or n8n-style flowcharts. An agent receives the event context and decides what to do.
