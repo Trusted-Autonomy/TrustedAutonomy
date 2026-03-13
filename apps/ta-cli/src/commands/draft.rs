@@ -134,6 +134,9 @@ pub enum DraftCommands {
         /// Equivalent to --git-commit --git-push with auto PR creation.
         #[arg(long)]
         submit: bool,
+        /// Skip pre-commit verification checks.
+        #[arg(long)]
+        skip_verify: bool,
         /// Conflict resolution strategy: abort (default), force-overwrite, merge.
         /// v0.2.1: Determines what happens if source files have changed since goal start.
         #[arg(long, default_value = "abort")]
@@ -374,6 +377,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             git_commit,
             git_push,
             submit,
+            skip_verify,
             conflict_resolution,
             approve_patterns,
             reject_patterns,
@@ -419,6 +423,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 do_commit,
                 do_push,
                 do_review,
+                *skip_verify,
                 resolution,
                 SelectiveReviewPatterns {
                     approve: approve_patterns,
@@ -1771,6 +1776,7 @@ fn apply_package(
     git_commit: bool,
     git_push: bool,
     git_review: bool,
+    skip_verify: bool,
     conflict_resolution: ta_workspace::ConflictResolution,
     patterns: SelectiveReviewPatterns,
     phase_override: Option<&str>,
@@ -2171,22 +2177,33 @@ fn apply_package(
         }
 
         // Pre-commit verification gate: run configured checks before committing.
-        if !workflow_config.verify.commands.is_empty() {
+        if skip_verify {
+            println!("\n  Skipping pre-commit verification (--skip-verify).");
+        } else if !workflow_config.verify.commands.is_empty() {
             println!("\nRunning pre-commit verification...");
             let verify_result =
                 super::verify::run_verification(&workflow_config.verify, &target_dir);
             if !verify_result.passed {
-                let failed: Vec<_> = verify_result
+                for w in &verify_result.warnings {
+                    eprintln!("\n--- {} (FAILED) ---", w.command);
+                    if !w.output.is_empty() {
+                        eprintln!("{}", w.output);
+                    }
+                    eprintln!("---");
+                }
+                let failed_cmds: Vec<_> = verify_result
                     .warnings
                     .iter()
                     .map(|w| format!("  - {}", w.command))
                     .collect();
                 eprintln!(
                     "\nPre-commit verification failed ({} command(s)):\n{}",
-                    failed.len(),
-                    failed.join("\n")
+                    failed_cmds.len(),
+                    failed_cmds.join("\n")
                 );
-                eprintln!("Fix the issues and re-run `ta draft apply --git-commit`.");
+                eprintln!(
+                    "\nFix the issues and re-run, or use `ta draft apply --git-commit --skip-verify` to bypass."
+                );
                 anyhow::bail!("Pre-commit verification failed");
             }
             println!("  All pre-commit checks passed.\n");
@@ -3707,6 +3724,7 @@ mod tests {
             false,
             false,
             false,
+            false, // skip_verify
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns::default(),
             None,
@@ -3796,6 +3814,7 @@ mod tests {
             true,
             false,
             false,
+            false, // skip_verify
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns::default(),
             None,
@@ -4056,6 +4075,7 @@ mod tests {
             false,
             false,
             false,
+            false, // skip_verify
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns {
                 approve: &["src/**".to_string()],
@@ -4119,6 +4139,7 @@ mod tests {
             false,
             false,
             false,
+            false, // skip_verify
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns {
                 approve: &["all".to_string()],
@@ -4179,6 +4200,7 @@ mod tests {
             false,
             false,
             false,
+            false, // skip_verify
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns {
                 approve: &["all".to_string()],
@@ -4238,6 +4260,7 @@ mod tests {
             false,
             false,
             false,
+            false, // skip_verify
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns {
                 approve: &["rest".to_string()],
@@ -4336,6 +4359,7 @@ mod tests {
             false,
             false,
             false,
+            false, // skip_verify
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns {
                 approve: &["src/main.rs".to_string()],
