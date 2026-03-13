@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.18.1-alpha
+**Version**: v0.10.18.3-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -454,7 +454,7 @@ auto_supersede = true          # auto-supersede parent draft when extending
 Run build/lint/test checks automatically after the agent exits but before the draft is created. If any check fails, the draft is blocked — no broken code reaches review.
 
 ```toml
-# .ta/workflow.toml
+# .ta/workflow.toml — flat string list (simple)
 [verify]
 commands = [
     "cargo build --workspace",
@@ -463,8 +463,31 @@ commands = [
     "cargo fmt --all -- --check",
 ]
 on_failure = "block"   # "block" (no draft), "warn" (draft with warnings)
-timeout = 300          # seconds per command
+timeout = 300          # seconds per command (legacy global timeout)
 ```
+
+For per-command timeouts, use structured commands:
+
+```toml
+# .ta/workflow.toml — per-command timeouts
+[verify]
+default_timeout_secs = 300     # default when command omits timeout_secs
+heartbeat_interval_secs = 30   # progress heartbeat interval (default: 30)
+
+[[verify.commands]]
+run = "cargo fmt --all -- --check"
+timeout_secs = 60
+
+[[verify.commands]]
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+timeout_secs = 300
+
+[[verify.commands]]
+run = "./dev 'cargo test --workspace'"
+timeout_secs = 900
+```
+
+Both formats are supported. Verification output is streamed in real time with command labels (e.g., `[cargo] Compiling...`), and a heartbeat is emitted every `heartbeat_interval_secs` so you know the process is still running. If a command times out, the error includes the last 20 lines of output and a suggestion to increase the timeout.
 
 When a command fails in block mode, TA shows the full command output (stdout + stderr) with the exit code, then offers to re-enter the agent immediately:
 
@@ -2371,6 +2394,7 @@ Built-in shell commands:
 | `clear` / `Ctrl-L` | Clear the output pane |
 | `Shift+Up` / `Shift+Down` | Scroll output 1 line |
 | `PgUp` / `PgDn` | Scroll output 10 lines |
+| Mouse wheel / touchpad scroll | Scroll output 3 lines per tick |
 | `Shift+Home` / `Shift+End` | Scroll to top/bottom of output |
 | `Tab` | Auto-complete commands |
 | `Ctrl-W` | Toggle split-pane mode (agent output on the right) |
@@ -4313,6 +4337,8 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.17.1 | Shell reliability & command timeout fixes | Done |
 | v0.10.18 | Deferred items: workflow & multi-project | Done |
 | v0.10.18.1 | Developer loop: verification, notifications & shell fixes | Done |
+| v0.10.18.2 | Shell TUI: scrollback & command output visibility | Done |
+| v0.10.18.3 | Verification streaming, heartbeat & configurable timeout | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

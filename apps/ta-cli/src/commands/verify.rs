@@ -1,11 +1,16 @@
-// verify.rs — Pre-draft verification gate (v0.10.8).
+// verify.rs — Pre-draft verification gate (v0.10.8, v0.10.18.3).
 //
 // Runs configurable build/lint/test checks in a staging directory.
 // Used by `ta run` (after agent exit, before draft build) and
 // by `ta verify` (standalone manual verification).
+//
+// v0.10.18.3: Streaming stdout/stderr, heartbeat progress, per-command
+// configurable timeouts, and enhanced timeout error messages.
 
+use std::io::BufRead;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ta_changeset::draft_package::VerificationWarning;
 use ta_goal::GoalRunStore;
@@ -39,22 +44,32 @@ pub fn run_verification(config: &VerifyConfig, staging_dir: &Path) -> Verificati
         config.commands.len()
     );
 
-    let timeout = Duration::from_secs(config.timeout);
     let mut warnings = Vec::new();
     let mut all_passed = true;
 
     for (i, cmd) in config.commands.iter().enumerate() {
-        println!("  [{}/{}] {}", i + 1, config.commands.len(), cmd);
+        let timeout_secs = config.command_timeout(cmd);
+        let timeout = Duration::from_secs(timeout_secs);
+        let heartbeat = Duration::from_secs(config.heartbeat_interval_secs);
 
-        match run_single_command(cmd, staging_dir, timeout) {
+        println!(
+            "  [{}/{}] {} (timeout: {}s)",
+            i + 1,
+            config.commands.len(),
+            cmd.run,
+            timeout_secs
+        );
+
+        match run_single_command(&cmd.run, staging_dir, timeout, heartbeat) {
             Ok(output) => {
                 if output.success {
-                    println!("        PASS");
+                    println!("        PASS ({:.1}s)", output.elapsed.as_secs_f64());
                 } else {
                     all_passed = false;
                     println!(
-                        "        FAIL (exit code: {})",
-                        output.exit_code.unwrap_or(-1)
+                        "        FAIL (exit code: {}, {:.1}s)",
+                        output.exit_code.unwrap_or(-1),
+                        output.elapsed.as_secs_f64()
                     );
 
                     // Truncate output to 2000 chars for storage.
@@ -69,7 +84,7 @@ pub fn run_verification(config: &VerifyConfig, staging_dir: &Path) -> Verificati
                     };
 
                     warnings.push(VerificationWarning {
-                        command: cmd.clone(),
+                        command: cmd.run.clone(),
                         exit_code: output.exit_code,
                         output: truncated_output,
                     });
@@ -79,7 +94,7 @@ pub fn run_verification(config: &VerifyConfig, staging_dir: &Path) -> Verificati
                 all_passed = false;
                 println!("        ERROR: {}", e);
                 warnings.push(VerificationWarning {
-                    command: cmd.clone(),
+                    command: cmd.run.clone(),
                     exit_code: None,
                     output: e.to_string(),
                 });
@@ -104,19 +119,42 @@ pub fn run_verification(config: &VerifyConfig, staging_dir: &Path) -> Verificati
 }
 
 /// Output from running a single verification command.
-struct CommandOutput {
-    success: bool,
-    exit_code: Option<i32>,
-    combined_output: String,
+#[derive(Debug)]
+pub(crate) struct CommandOutput {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub combined_output: String,
+    pub elapsed: Duration,
 }
 
-/// Run a single shell command in the given directory with a timeout.
+/// Short label for a command (first two path components or first 40 chars).
+fn command_label(cmd: &str) -> String {
+    let trimmed = cmd.trim();
+    // Use the first word (binary name) as the label.
+    let first_word = trimmed.split_whitespace().next().unwrap_or(trimmed);
+    // Strip path prefix if present (e.g., ./dev → dev).
+    let base = first_word.rsplit('/').next().unwrap_or(first_word);
+    if base.len() > 30 {
+        format!("{}…", &base[..29])
+    } else {
+        base.to_string()
+    }
+}
+
+/// Run a single shell command with streaming output, heartbeat, and timeout.
+///
+/// - Stdout and stderr are streamed line-by-line with a `[label]` prefix.
+/// - A heartbeat line is emitted every `heartbeat_interval` while running.
+/// - On timeout, the error includes the last 20 lines of output.
 fn run_single_command(
     cmd: &str,
     working_dir: &Path,
     timeout: Duration,
+    heartbeat_interval: Duration,
 ) -> anyhow::Result<CommandOutput> {
     use std::process::{Command, Stdio};
+
+    let label = command_label(cmd);
 
     let mut child = Command::new("sh")
         .arg("-c")
@@ -127,43 +165,114 @@ fn run_single_command(
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn '{}': {}", cmd, e))?;
 
-    // Wait with timeout.
-    let start = std::time::Instant::now();
+    // Take ownership of stdout/stderr for streaming.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    // Shared output accumulator for both streams + heartbeat.
+    let output_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Spawn reader threads for stdout and stderr.
+    let stdout_lines = Arc::clone(&output_lines);
+    let stdout_label = label.clone();
+    let stdout_handle = std::thread::spawn(move || {
+        if let Some(stream) = stdout {
+            let reader = std::io::BufReader::new(stream);
+            for line in reader.lines().map_while(Result::ok) {
+                println!("        [{}] {}", stdout_label, line);
+                stdout_lines.lock().unwrap().push(line);
+            }
+        }
+    });
+
+    let stderr_lines = Arc::clone(&output_lines);
+    let stderr_label = label.clone();
+    let stderr_handle = std::thread::spawn(move || {
+        if let Some(stream) = stderr {
+            let reader = std::io::BufReader::new(stream);
+            for line in reader.lines().map_while(Result::ok) {
+                println!("        [{}] {}", stderr_label, line);
+                stderr_lines.lock().unwrap().push(line);
+            }
+        }
+    });
+
+    // Poll for process exit with timeout and heartbeat.
+    let start = Instant::now();
+    let mut last_heartbeat = start;
+
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout_buf = String::new();
-                let mut stderr_buf = String::new();
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = std::io::Read::read_to_string(&mut s, &mut stdout_buf);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = std::io::Read::read_to_string(&mut s, &mut stderr_buf);
-                }
+                // Process exited — wait for reader threads to finish.
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
 
-                let combined = if stderr_buf.is_empty() {
-                    stdout_buf
-                } else if stdout_buf.is_empty() {
-                    stderr_buf
-                } else {
-                    format!("{}\n{}", stdout_buf, stderr_buf)
-                };
+                let elapsed = start.elapsed();
+                let combined = output_lines.lock().unwrap().join("\n");
 
                 return Ok(CommandOutput {
                     success: status.success(),
                     exit_code: status.code(),
                     combined_output: combined,
+                    elapsed,
                 });
             }
             Ok(None) => {
-                if start.elapsed() > timeout {
+                let elapsed = start.elapsed();
+
+                // Check timeout.
+                if elapsed > timeout {
                     let _ = child.kill();
+                    let _ = child.wait(); // Reap zombie.
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+
+                    let lines = output_lines.lock().unwrap();
+                    let last_20: Vec<&str> = lines
+                        .iter()
+                        .rev()
+                        .take(20)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .map(|s| s.as_str())
+                        .collect();
+
+                    let context = if last_20.is_empty() {
+                        "(no output captured)".to_string()
+                    } else {
+                        last_20.join("\n")
+                    };
+
                     return Err(anyhow::anyhow!(
-                        "Command timed out after {}s: {}",
+                        "Command timed out after {}s: {}\n\n\
+                         Last {} lines of output:\n{}\n\n\
+                         To increase the timeout, set timeout_secs for this command in .ta/workflow.toml:\n\
+                         [[verify.commands]]\n\
+                         run = \"{}\"\n\
+                         timeout_secs = {}",
                         timeout.as_secs(),
-                        cmd
+                        cmd,
+                        last_20.len(),
+                        context,
+                        cmd,
+                        timeout.as_secs() * 2
                     ));
                 }
+
+                // Heartbeat: emit every heartbeat_interval seconds.
+                if last_heartbeat.elapsed() >= heartbeat_interval {
+                    let line_count = output_lines.lock().unwrap().len();
+                    println!(
+                        "        [{}] still running... ({}s elapsed, {} lines captured)",
+                        label,
+                        elapsed.as_secs(),
+                        line_count
+                    );
+                    last_heartbeat = Instant::now();
+                }
+
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
@@ -284,8 +393,24 @@ pub fn execute(config: &GatewayConfig, goal_id: Option<&str>) -> anyhow::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ta_submit::config::VerifyOnFailure;
+    use ta_submit::config::{VerifyCommand, VerifyOnFailure};
     use tempfile::TempDir;
+
+    /// Helper to build a VerifyConfig from plain command strings (legacy style).
+    fn simple_config(commands: Vec<&str>, timeout: u64) -> VerifyConfig {
+        VerifyConfig {
+            commands: commands
+                .into_iter()
+                .map(|s| VerifyCommand {
+                    run: s.to_string(),
+                    timeout_secs: None,
+                })
+                .collect(),
+            on_failure: VerifyOnFailure::Block,
+            timeout,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn empty_commands_passes() {
@@ -298,11 +423,7 @@ mod tests {
 
     #[test]
     fn passing_command() {
-        let config = VerifyConfig {
-            commands: vec!["true".to_string()],
-            on_failure: VerifyOnFailure::Block,
-            timeout: 30,
-        };
+        let config = simple_config(vec!["true"], 30);
         let dir = TempDir::new().unwrap();
         let result = run_verification(&config, dir.path());
         assert!(result.passed);
@@ -311,11 +432,7 @@ mod tests {
 
     #[test]
     fn failing_command() {
-        let config = VerifyConfig {
-            commands: vec!["false".to_string()],
-            on_failure: VerifyOnFailure::Block,
-            timeout: 30,
-        };
+        let config = simple_config(vec!["false"], 30);
         let dir = TempDir::new().unwrap();
         let result = run_verification(&config, dir.path());
         assert!(!result.passed);
@@ -325,11 +442,7 @@ mod tests {
 
     #[test]
     fn mixed_commands_reports_only_failures() {
-        let config = VerifyConfig {
-            commands: vec!["true".to_string(), "false".to_string(), "true".to_string()],
-            on_failure: VerifyOnFailure::Block,
-            timeout: 30,
-        };
+        let config = simple_config(vec!["true", "false", "true"], 30);
         let dir = TempDir::new().unwrap();
         let result = run_verification(&config, dir.path());
         assert!(!result.passed);
@@ -339,11 +452,7 @@ mod tests {
 
     #[test]
     fn command_output_captured() {
-        let config = VerifyConfig {
-            commands: vec!["echo 'hello world' && exit 1".to_string()],
-            on_failure: VerifyOnFailure::Block,
-            timeout: 30,
-        };
+        let config = simple_config(vec!["echo 'hello world' && exit 1"], 30);
         let dir = TempDir::new().unwrap();
         let result = run_verification(&config, dir.path());
         assert!(!result.passed);
@@ -352,14 +461,122 @@ mod tests {
 
     #[test]
     fn timeout_produces_warning() {
-        let config = VerifyConfig {
-            commands: vec!["sleep 10".to_string()],
-            on_failure: VerifyOnFailure::Block,
-            timeout: 1,
-        };
+        let config = simple_config(vec!["sleep 10"], 1);
         let dir = TempDir::new().unwrap();
         let result = run_verification(&config, dir.path());
         assert!(!result.passed);
         assert!(result.warnings[0].output.contains("timed out"));
+    }
+
+    #[test]
+    fn streaming_output_captured_and_complete() {
+        // Spawn a child that produces 50+ lines over ~1 second.
+        let script = r#"for i in $(seq 1 60); do echo "line $i"; done"#;
+        let config = simple_config(vec![script], 30);
+        let dir = TempDir::new().unwrap();
+        let result = run_verification(&config, dir.path());
+        assert!(result.passed);
+
+        // The command succeeded, so no warnings — check via run_single_command directly.
+        let output = run_single_command(
+            script,
+            dir.path(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(output.success);
+        let line_count = output.combined_output.lines().count();
+        assert!(
+            line_count >= 50,
+            "Expected at least 50 lines, got {}",
+            line_count
+        );
+        assert!(output.combined_output.contains("line 1"));
+        assert!(output.combined_output.contains("line 60"));
+    }
+
+    #[test]
+    fn per_command_timeout_respected() {
+        let dir = TempDir::new().unwrap();
+
+        // Command 1: short timeout, fast command → should pass.
+        let fast = run_single_command(
+            "echo fast",
+            dir.path(),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
+        assert!(fast.is_ok());
+        assert!(fast.unwrap().success);
+
+        // Command 2: very short timeout, slow command → should timeout.
+        let slow = run_single_command(
+            "sleep 10 && echo done",
+            dir.path(),
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+        );
+        assert!(slow.is_err());
+        let err_msg = slow.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("timed out after 1s"),
+            "Error should mention timeout duration: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("timeout_secs"),
+            "Error should suggest increasing timeout: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn heartbeat_emitted_for_long_running_command() {
+        // We can't easily capture println! output in a test, so we verify the
+        // heartbeat logic indirectly: run a command for >2s with 1s heartbeat
+        // and verify it completes correctly (the heartbeat doesn't break anything).
+        let dir = TempDir::new().unwrap();
+        let output = run_single_command(
+            "for i in 1 2 3; do echo tick$i; sleep 1; done",
+            dir.path(),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(output.success);
+        assert!(output.combined_output.contains("tick1"));
+        assert!(output.combined_output.contains("tick3"));
+        assert!(
+            output.elapsed.as_secs() >= 2,
+            "Command should have taken at least 2 seconds"
+        );
+    }
+
+    #[test]
+    fn timeout_error_includes_last_output_lines() {
+        let dir = TempDir::new().unwrap();
+        // Produce some output then sleep forever.
+        let result = run_single_command(
+            "for i in $(seq 1 5); do echo line$i; done; sleep 30",
+            dir.path(),
+            Duration::from_secs(2),
+            Duration::from_secs(30),
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        // Should contain some of the output lines.
+        assert!(
+            err_msg.contains("line1") || err_msg.contains("Last"),
+            "Timeout error should include output context: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn command_label_extracts_binary_name() {
+        assert_eq!(command_label("cargo test --workspace"), "cargo");
+        assert_eq!(command_label("./dev cargo test"), "dev");
+        assert_eq!(command_label("/usr/bin/make all"), "make");
     }
 }

@@ -12,7 +12,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -563,6 +564,7 @@ async fn run_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
+    stdout.execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -583,6 +585,7 @@ async fn run_tui(
     // Cleanup.
     running.store(false, Ordering::Relaxed);
     disable_raw_mode()?;
+    terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     // Save history.
@@ -884,6 +887,11 @@ async fn handle_terminal_event(
                 _ => {}
             }
         }
+        Event::Mouse(mouse_event) => match mouse_event.kind {
+            MouseEventKind::ScrollUp => app.scroll_up(3),
+            MouseEventKind::ScrollDown => app.scroll_down(3),
+            _ => {}
+        },
         Event::Resize(_, _) => {
             // Terminal will re-draw on next loop iteration.
         }
@@ -3262,5 +3270,51 @@ mod tests {
         // Minimum enforced at 10,000.
         config.scrollback_lines = Some(5_000);
         assert_eq!(config.effective_scrollback(), 10_000);
+    }
+
+    // -- v0.10.18.3 mouse scroll tests --
+
+    #[test]
+    fn mouse_scroll_events_move_scroll_offset() {
+        // Simulate mouse ScrollUp and ScrollDown events and verify
+        // scroll_offset changes by 3 lines per event, clamped to bounds.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+
+        // Push enough lines to allow scrolling.
+        for i in 0..100 {
+            app.push_output(OutputLine::command(format!("line {}", i)));
+        }
+
+        // Start at bottom (scroll_offset = 0).
+        assert_eq!(app.scroll_offset, 0);
+
+        // Scroll up by 3 (mouse wheel up).
+        app.scroll_up(3);
+        assert_eq!(app.scroll_offset, 3);
+
+        // Scroll up again.
+        app.scroll_up(3);
+        assert_eq!(app.scroll_offset, 6);
+
+        // Scroll down by 3 (mouse wheel down).
+        app.scroll_down(3);
+        assert_eq!(app.scroll_offset, 3);
+
+        // Scroll down past bottom clamps to 0.
+        app.scroll_down(100);
+        assert_eq!(app.scroll_offset, 0);
+
+        // Scroll up past top clamps to max.
+        app.scroll_up(999_999);
+        assert!(app.scroll_offset <= app.output.len());
+        let max = app.scroll_offset;
+
+        // Another scroll up doesn't exceed max.
+        app.scroll_up(3);
+        assert_eq!(app.scroll_offset, max);
     }
 }

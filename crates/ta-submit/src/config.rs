@@ -296,23 +296,64 @@ impl std::fmt::Display for VerifyOnFailure {
     }
 }
 
+/// A single verification command with optional per-command timeout.
+///
+/// Used in `[[verify.commands]]` TOML arrays for per-command configuration.
+/// When only a string is needed, the flat `commands` list (backward compat) works too.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyCommand {
+    /// The shell command to run.
+    pub run: String,
+
+    /// Per-command timeout in seconds. If omitted, `default_timeout_secs` is used.
+    pub timeout_secs: Option<u64>,
+}
+
 /// Pre-draft verification gate configuration.
 ///
 /// Commands run in the staging directory after the agent exits but before
 /// the draft is created. If any command fails, behavior depends on `on_failure`.
+///
+/// Supports two command formats (backward compatible):
+/// - Flat string list: `commands = ["cmd1", "cmd2"]` (legacy)
+/// - Structured commands: `[[verify.commands]]` with `run` and optional `timeout_secs`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyConfig {
     /// Commands to run sequentially. All must exit 0 for verification to pass.
-    #[serde(default)]
-    pub commands: Vec<String>,
+    /// Accepts either plain strings or `VerifyCommand` objects.
+    #[serde(default, deserialize_with = "deserialize_verify_commands")]
+    pub commands: Vec<VerifyCommand>,
 
     /// Behavior when a command fails: "block" (default), "warn", or "agent".
     #[serde(default)]
     pub on_failure: VerifyOnFailure,
 
-    /// Timeout per command in seconds. Default: 300 (5 minutes).
+    /// Legacy: global timeout per command in seconds. Default: 300 (5 minutes).
+    /// Superseded by `default_timeout_secs`; kept for backward compat.
     #[serde(default = "default_verify_timeout")]
     pub timeout: u64,
+
+    /// Default timeout per command in seconds when not specified per-command.
+    /// If set, takes priority over `timeout`. Default: 300.
+    pub default_timeout_secs: Option<u64>,
+
+    /// Heartbeat interval in seconds for long-running verification commands.
+    /// A progress message is emitted every N seconds. Default: 30.
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval_secs: u64,
+}
+
+impl VerifyConfig {
+    /// Effective default timeout: `default_timeout_secs` if set, else legacy `timeout`.
+    pub fn effective_default_timeout(&self) -> u64 {
+        self.default_timeout_secs.unwrap_or(self.timeout)
+    }
+
+    /// Resolve the timeout for a specific command.
+    pub fn command_timeout(&self, cmd: &VerifyCommand) -> u64 {
+        cmd.timeout_secs
+            .unwrap_or_else(|| self.effective_default_timeout())
+    }
 }
 
 impl Default for VerifyConfig {
@@ -321,12 +362,43 @@ impl Default for VerifyConfig {
             commands: Vec::new(),
             on_failure: VerifyOnFailure::default(),
             timeout: default_verify_timeout(),
+            default_timeout_secs: None,
+            heartbeat_interval_secs: default_heartbeat_interval(),
         }
     }
 }
 
 fn default_verify_timeout() -> u64 {
     300
+}
+
+fn default_heartbeat_interval() -> u64 {
+    30
+}
+
+/// Deserialize commands from either a list of strings or a list of VerifyCommand objects.
+fn deserialize_verify_commands<'de, D>(deserializer: D) -> Result<Vec<VerifyCommand>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum CommandItem {
+        Simple(String),
+        Structured(VerifyCommand),
+    }
+
+    let items: Vec<CommandItem> = Vec::deserialize(deserializer)?;
+    Ok(items
+        .into_iter()
+        .map(|item| match item {
+            CommandItem::Simple(s) => VerifyCommand {
+                run: s,
+                timeout_secs: None,
+            },
+            CommandItem::Structured(c) => c,
+        })
+        .collect())
 }
 
 /// Shell TUI configuration
@@ -534,6 +606,9 @@ rebase_on_apply = false
         assert!(config.commands.is_empty());
         assert_eq!(config.on_failure, VerifyOnFailure::Block);
         assert_eq!(config.timeout, 300);
+        assert_eq!(config.heartbeat_interval_secs, 30);
+        assert!(config.default_timeout_secs.is_none());
+        assert_eq!(config.effective_default_timeout(), 300);
     }
 
     #[test]
@@ -557,7 +632,7 @@ timeout = 600
 "#;
         let config: WorkflowConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.verify.commands.len(), 2);
-        assert_eq!(config.verify.commands[0], "cargo build --workspace");
+        assert_eq!(config.verify.commands[0].run, "cargo build --workspace");
         assert_eq!(config.verify.on_failure, VerifyOnFailure::Warn);
         assert_eq!(config.verify.timeout, 600);
     }
@@ -583,6 +658,63 @@ adapter = "git"
         let config: WorkflowConfig = toml::from_str(toml).unwrap();
         assert!(config.verify.commands.is_empty());
         assert_eq!(config.verify.on_failure, VerifyOnFailure::Block);
+    }
+
+    #[test]
+    fn parse_toml_with_per_command_timeout() {
+        let toml = r#"
+[verify]
+default_timeout_secs = 300
+heartbeat_interval_secs = 15
+
+[[verify.commands]]
+run = "cargo fmt --all -- --check"
+timeout_secs = 60
+
+[[verify.commands]]
+run = "cargo test --workspace"
+timeout_secs = 900
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.verify.commands.len(), 2);
+        assert_eq!(config.verify.commands[0].run, "cargo fmt --all -- --check");
+        assert_eq!(config.verify.commands[0].timeout_secs, Some(60));
+        assert_eq!(config.verify.commands[1].run, "cargo test --workspace");
+        assert_eq!(config.verify.commands[1].timeout_secs, Some(900));
+        assert_eq!(config.verify.default_timeout_secs, Some(300));
+        assert_eq!(config.verify.heartbeat_interval_secs, 15);
+        assert_eq!(config.verify.effective_default_timeout(), 300);
+        assert_eq!(
+            config.verify.command_timeout(&config.verify.commands[0]),
+            60
+        );
+        assert_eq!(
+            config.verify.command_timeout(&config.verify.commands[1]),
+            900
+        );
+    }
+
+    #[test]
+    fn per_command_timeout_falls_back_to_default() {
+        let config = VerifyConfig {
+            commands: vec![VerifyCommand {
+                run: "test".to_string(),
+                timeout_secs: None,
+            }],
+            default_timeout_secs: Some(600),
+            ..Default::default()
+        };
+        assert_eq!(config.command_timeout(&config.commands[0]), 600);
+    }
+
+    #[test]
+    fn effective_timeout_falls_back_to_legacy() {
+        let config = VerifyConfig {
+            timeout: 900,
+            default_timeout_secs: None,
+            ..Default::default()
+        };
+        assert_eq!(config.effective_default_timeout(), 900);
     }
 
     #[test]

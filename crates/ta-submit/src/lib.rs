@@ -15,8 +15,8 @@ pub mod svn;
 
 pub use adapter::{CommitResult, PushResult, ReviewResult, SavedVcsState, SubmitAdapter};
 pub use config::{
-    BuildConfig, DiffConfig, GitConfig, ShellConfig, SubmitConfig, VerifyConfig, VerifyOnFailure,
-    WorkflowConfig,
+    BuildConfig, DiffConfig, GitConfig, ShellConfig, SubmitConfig, VerifyCommand, VerifyConfig,
+    VerifyOnFailure, WorkflowConfig,
 };
 pub use git::GitAdapter;
 pub use none::NoneAdapter;

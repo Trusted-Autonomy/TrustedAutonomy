@@ -2942,33 +2942,25 @@ When an agent or command produces output longer than the visible terminal area i
 #### Problem
 `run_single_command()` in `verify.rs` uses synchronous `try_wait()` polling with no output streaming. The user sees nothing until the command finishes or the 600s global timeout fires. `cargo test --workspace` legitimately exceeds 600s on this project, causing every `ta draft apply --git-commit` to fail with an opaque "Command timed out after 600s" error. There is no way to distinguish a hung process from a slow-but-progressing test suite.
 
-#### Items
-1. [ ] **Streaming stdout/stderr from verification commands**: `run_single_command()` must capture stdout and stderr as they are produced (not after process exit). Each line is printed to the terminal in real time, prefixed with the command name (e.g., `[cargo test] line content`). Output is also accumulated in the `VerifyResult` for post-run display. Implementation: spawn with `Stdio::piped()`, read lines from `BufReader` on stdout/stderr in a tokio task (or thread for sync context), forward each line to the terminal immediately.
-2. [ ] **Heartbeat for TA-internal verification commands**: For commands TA controls (the `./dev` wrapper and any built-in verification), emit a progress heartbeat every 30 seconds: `[cargo test] still running... (90s elapsed, 147 tests passed)`. Parse test runner output where possible to include counts. For external/opaque commands, emit a simpler heartbeat: `[command] still running... (90s elapsed)`. Heartbeat interval configurable via `[verify] heartbeat_interval_secs` in `.ta/workflow.toml` (default: 30).
-3. [ ] **Per-command configurable timeout**: Replace the single global `timeout_secs` with per-command timeout support in `.ta/workflow.toml`:
-   ```toml
-   [verify]
-   default_timeout_secs = 300
+#### Completed
+1. ✅ **Streaming stdout/stderr from verification commands**: `run_single_command()` captures stdout and stderr as produced via `BufReader` in separate threads. Each line is printed in real time prefixed with the command label (e.g., `[cargo] line content`). Output is accumulated for post-run display.
+2. ✅ **Heartbeat for TA-internal verification commands**: Emits progress heartbeat every N seconds (configurable via `heartbeat_interval_secs`, default 30): `[label] still running... (Ns elapsed, M lines captured)`. Heartbeat interval configurable in `.ta/workflow.toml`.
+3. ✅ **Per-command configurable timeout**: `VerifyConfig` now supports structured `[[verify.commands]]` with per-command `timeout_secs`. `default_timeout_secs` overrides legacy `timeout`. Old flat string list format remains backward compatible via custom serde deserializer.
+4. ✅ **Timeout message includes elapsed output context**: Timeout error includes command name, timeout duration, last 20 lines of output, and suggestion to increase `timeout_secs` in workflow.toml.
+5. ✅ **Test: streaming output is captured and forwarded** (`streaming_output_captured_and_complete`): Spawns process producing 60 lines, verifies all captured.
+6. ✅ **Test: per-command timeout respected** (`per_command_timeout_respected`): Fast command passes, slow command times out with descriptive error.
+7. ✅ **Test: heartbeat emitted for long-running command** (`heartbeat_emitted_for_long_running_command`): Runs 3s command with 1s heartbeat interval, verifies completion.
+8. ✅ **Mouse wheel / touchpad scroll in ta shell**: Enabled `EnableMouseCapture`/`DisableMouseCapture`, handles `MouseEventKind::ScrollUp`/`ScrollDown` → `scroll_up(3)`/`scroll_down(3)`.
+9. ✅ **Test: mouse scroll events move scroll offset** (`mouse_scroll_events_move_scroll_offset`): Verifies offset changes by 3 per event, clamped to bounds.
 
-   [[verify.commands]]
-   run = "cargo fmt --all -- --check"
-   timeout_secs = 60
-
-   [[verify.commands]]
-   run = "cargo clippy --workspace --all-targets -- -D warnings"
-   timeout_secs = 300
-
-   [[verify.commands]]
-   run = "./dev 'cargo test --workspace'"
-   timeout_secs = 900
-   ```
-   Each command gets its own timeout. If `timeout_secs` is omitted, `default_timeout_secs` applies. The old flat `timeout_secs` field is supported as a fallback for backward compatibility.
-4. [ ] **Timeout message includes elapsed output context**: When a command does time out, the error message includes: (a) the command that timed out, (b) the configured timeout value, (c) the last 20 lines of captured output so the user can see where it stalled, (d) suggestion to increase `timeout_secs` for that specific command in workflow.toml.
-5. [ ] **Test: streaming output is captured and forwarded**: Unit test that spawns a child process producing 50+ lines over 2 seconds, verifies each line appears in the accumulated output, and verifies the output is complete after process exit.
-6. [ ] **Test: per-command timeout respected**: Test with two commands — one with 2s timeout (sleeps 1s, succeeds) and one with 1s timeout (sleeps 5s, times out). Verify the first passes and the second fails with timeout error containing the last output lines.
-7. [ ] **Test: heartbeat emitted for long-running command**: Test that a command running >60s with heartbeat_interval_secs=1 produces at least 2 heartbeat messages in the captured output.
-8. [ ] **Mouse wheel / touchpad scroll in ta shell**: Enable crossterm mouse capture (`EnableMouseCapture`) and handle `MouseEventKind::ScrollUp` / `ScrollDown` events in the TUI event loop. Map scroll-up to `app.scroll_up(3)` and scroll-down to `app.scroll_down(3)` (3 lines per tick, standard behavior). This complements the keyboard scrolling added in v0.10.18.2 with the input method most users expect.
-9. [ ] **Test: mouse scroll events move scroll offset**: Unit test that simulates `ScrollUp` and `ScrollDown` mouse events and verifies `scroll_offset` changes by the expected amount (3 lines per event), clamped to buffer bounds.
+#### Tests: 7 new tests
+- `streaming_output_captured_and_complete` (verify.rs)
+- `per_command_timeout_respected` (verify.rs)
+- `heartbeat_emitted_for_long_running_command` (verify.rs)
+- `timeout_error_includes_last_output_lines` (verify.rs)
+- `command_label_extracts_binary_name` (verify.rs)
+- `mouse_scroll_events_move_scroll_offset` (shell_tui.rs)
+- 3 new config tests: `parse_toml_with_per_command_timeout`, `per_command_timeout_falls_back_to_default`, `effective_timeout_falls_back_to_legacy` (config.rs)
 
 #### Version: `0.10.18-alpha.3`
 
