@@ -718,6 +718,9 @@ The result goes through standard draft review, so you always see and approve the
 
 | Command | Use when | AI-powered? |
 |---|---|---|
+| `ta new run` | Starting a brand-new project from scratch with conversational planning | Yes (interactive) |
+| `ta new run --from brief.md` | Starting a new project seeded from a written description | Yes (interactive) |
+| `ta new run --template rust-cli` | Starting a new project with a language-specific scaffold | Yes (interactive) |
 | `ta init --detect` | Scaffolding a `.ta/` config for an existing project | No |
 | `ta plan create` | Starting from a generic template (greenfield/feature/bugfix) | No |
 | `ta plan from <doc>` | You have a product document and want a tailored plan | Yes (interactive) |
@@ -3318,6 +3321,38 @@ ta setup show
 The wizard detects your project type (Rust, TypeScript, Python, Go, or generic) and generates appropriate `.ta/` configuration files: `workflow.toml`, `memory.toml`, `policy.yaml`, agent YAML, and channel config.
 
 Use `ta setup refine <section>` to update one config file at a time. Available sections: `workflow`, `memory`, `policy`, `agents`, `channels`.
+
+### Conversational Project Bootstrapping (`ta new`)
+
+Create a new project through an interactive conversation with a planner agent. The agent asks about your goals, proposes a development plan, and generates a project scaffold with a PLAN.md.
+
+```bash
+# Start an interactive bootstrapping session
+ta new run --name my-project
+
+# Use a project template (rust-cli, rust-lib, ts-api, ts-app, python-cli, python-api, go-service, generic)
+ta new run --name my-project --template rust-cli
+
+# Seed from a written description (PRD, spec, brief)
+ta new run --name my-project --from docs/brief.md
+
+# Specify a version schema for the plan
+ta new run --name my-project --version-schema calver
+
+# Create in a specific directory
+ta new run --name my-project --output-dir ~/projects
+
+# Non-interactive mode (scaffold only, no agent conversation)
+ta new run --name my-project --template rust-cli --non-interactive
+
+# List available templates and version schemas
+ta new templates
+ta new version-schemas
+```
+
+The agent generates language-specific project scaffolds (Cargo.toml, package.json, pyproject.toml, etc.), initializes the `.ta/` workspace, and produces a PLAN.md with versioned development phases. After creation, it offers to start the first goal.
+
+The daemon also exposes `POST /api/project/new` for remote bootstrapping from Discord, Slack, or email channel interfaces.
 
 ### Project Initialization
 

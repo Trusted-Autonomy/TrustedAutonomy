@@ -17,6 +17,7 @@ pub mod events;
 pub mod goal_output;
 pub mod input;
 pub mod interactions;
+pub mod project_new;
 pub mod status;
 pub mod workflow;
 
@@ -47,6 +48,8 @@ pub struct AppState {
     pub question_registry: Arc<QuestionRegistry>,
     /// Multi-project registry (single-project mode has exactly one entry).
     pub project_registry: Arc<ProjectRegistry>,
+    /// Bootstrap session manager for conversational project creation (v0.10.17).
+    pub bootstrap_sessions: project_new::BootstrapSessionManager,
 }
 
 impl AppState {
@@ -67,6 +70,7 @@ impl AppState {
             goal_output: goal_output::GoalOutputManager::new(),
             question_registry: Arc::new(QuestionRegistry::new()),
             project_registry: Arc::new(registry),
+            bootstrap_sessions: project_new::BootstrapSessionManager::new(),
             project_root,
             daemon_config,
         }
@@ -297,6 +301,8 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             get(get_project).delete(remove_project),
         )
         .route("/api/office/reload", post(reload_office))
+        // Project bootstrapping routes (v0.10.17).
+        .route("/api/project/new", post(project_new::create_project))
         // Daemon lifecycle routes (v0.10.10).
         .route("/api/shutdown", post(shutdown_daemon))
         // Auth middleware on all API routes.

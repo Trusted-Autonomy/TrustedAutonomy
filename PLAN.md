@@ -2847,15 +2847,17 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 See v0.9.9 design section above for the full architecture and user flow.
 
 #### Items
-1. [ ] **`ta new` CLI command** (`apps/ta-cli/src/commands/new.rs`): Entry point for conversational project bootstrapping
-2. [ ] **Planner agent session**: Starts in temp dir, runs multi-turn Q&A with user, generates project structure
-3. [ ] **Project scaffold generation**: `ta_scaffold` MCP tool creates directory structure and language-specific files
-4. [ ] **PLAN.md generation from conversation**: Planner agent produces structured PLAN.md with phases, versions, status markers
-5. [ ] **Template integration**: `ta new --template rust-cli` uses v0.7.3 templates as starting point
-6. [ ] **`ta new --from <brief.md>`**: Seed from written description (delegates to `ta plan from`)
-7. [ ] **Daemon API endpoint** (`POST /api/project/new`): Remote bootstrapping for Discord/Slack/email interfaces
-8. [ ] **Post-creation handoff**: Summary, offer to start first goal, shell context switch
-9. [ ] **`ta plan create --version-schema`** (from v0.9.9.5): Version schema template selection during plan creation
+1. [x] **`ta new` CLI command** (`apps/ta-cli/src/commands/new.rs`): Entry point for conversational project bootstrapping with `run`, `templates`, and `version-schemas` subcommands
+2. [x] **Planner agent session**: Interactive session via `ta run --interactive` with bootstrapping prompt, multi-turn Q&A using `ta_ask_human`
+3. [x] **Project scaffold generation**: Language-specific scaffolds (Rust CLI/lib, TypeScript API/app, Python CLI/API, Go service, generic) with directory structure, config files, and .gitignore
+4. [x] **PLAN.md generation from conversation**: Planner agent produces structured PLAN.md with phases, versions, status markers through interactive prompt
+5. [x] **Template integration**: `ta new run --template rust-cli` maps to init templates and generates appropriate scaffold
+6. [x] **`ta new run --from <brief.md>`**: Seed from written description, loaded and injected into bootstrapping prompt
+7. [x] **Daemon API endpoint** (`POST /api/project/new`): Session-based bootstrapping API with `BootstrapSessionManager` for channel interfaces
+8. [x] **Post-creation handoff**: Summary with project path, plan status, and contextual next-step suggestions
+9. [x] **`ta plan create --version-schema`** (from v0.9.9.5): Version schema template selection (semver, calver, sprint, milestone) with auto-install to `.ta/version-schema.yaml`
+
+Tests: 25 new tests (name validation, template resolution, scaffold generation, version schema installation, prompt building, session management, post-creation output)
 
 #### Depends on
 - v0.10.13 (`ta plan add` — shares planner agent infrastructure)

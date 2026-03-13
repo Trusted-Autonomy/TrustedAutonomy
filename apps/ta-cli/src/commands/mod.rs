@@ -12,6 +12,7 @@ pub mod follow_up;
 pub mod gc;
 pub mod goal;
 pub mod init;
+pub mod new;
 pub mod office;
 pub mod plan;
 pub mod plugin;

@@ -66,6 +66,11 @@ pub enum PlanCommands {
         /// Project name for the plan header.
         #[arg(long)]
         name: Option<String>,
+        /// Version schema to apply: semver, calver, sprint, or milestone.
+        /// Copies the schema template to .ta/version-schema.yaml and references
+        /// it in the generated plan header.
+        #[arg(long)]
+        version_schema: Option<String>,
     },
     /// Mark one or more phases as done (comma-separated IDs).
     ///
@@ -135,7 +140,14 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             output,
             template,
             name,
-        } => plan_create(config, output, template, name.as_deref()),
+            version_schema,
+        } => plan_create(
+            config,
+            output,
+            template,
+            name.as_deref(),
+            version_schema.as_deref(),
+        ),
         PlanCommands::MarkDone { phases } => mark_done_batch(config, phases),
         PlanCommands::From {
             path,
@@ -947,6 +959,7 @@ fn plan_create(
     output: &str,
     template: &str,
     name: Option<&str>,
+    version_schema: Option<&str>,
 ) -> anyhow::Result<()> {
     let output_path = config.workspace_root.join(output);
     if output_path.exists() {
@@ -954,6 +967,18 @@ fn plan_create(
             "{} already exists. Delete it or specify a different --output path.",
             output
         );
+    }
+
+    // Validate version schema if provided.
+    if let Some(schema_name) = version_schema {
+        let known = ["semver", "calver", "sprint", "milestone"];
+        if !known.contains(&schema_name) {
+            anyhow::bail!(
+                "Unknown version schema: '{}'. Available: {}\n\nRun `ta new version-schemas` for details.",
+                schema_name,
+                known.join(", ")
+            );
+        }
     }
 
     let project_name = name.unwrap_or("My Project");
@@ -974,6 +999,37 @@ fn plan_create(
         let yaml = schema.to_yaml()?;
         std::fs::write(&schema_path, yaml)?;
         println!("Created: {}", schema_path.display());
+    }
+
+    // Install version schema if specified (v0.10.17).
+    if let Some(schema_name) = version_schema {
+        let vs_dest = config.workspace_root.join(".ta/version-schema.yaml");
+        // Try shipped template first.
+        let mut installed = false;
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(bin_dir) = exe.parent() {
+                let src = bin_dir
+                    .join("templates")
+                    .join("version-schemas")
+                    .join(format!("{}.yaml", schema_name));
+                if src.exists() {
+                    std::fs::copy(&src, &vs_dest)?;
+                    installed = true;
+                }
+            }
+        }
+        if !installed {
+            // Generate inline fallback.
+            let initial = match schema_name {
+                "calver" => "2026.01.0",
+                "sprint" => "sprint-1.0",
+                "milestone" => "milestone-1.0",
+                _ => "0.1.0-alpha",
+            };
+            let vs_content = format!("name: {}\ninitial_version: \"{}\"\n", schema_name, initial);
+            std::fs::write(&vs_dest, vs_content)?;
+        }
+        println!("Installed version schema: {}", schema_name);
     }
 
     println!("\nRun 'ta plan list' to see your phases.");

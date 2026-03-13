@@ -175,6 +175,14 @@ enum Commands {
         #[command(subcommand)]
         command: commands::init::InitCommands,
     },
+    /// Create a new project through conversational bootstrapping.
+    ///
+    /// Starts an interactive session with a planner agent that asks about your
+    /// project, generates a scaffold, and produces a PLAN.md with versioned phases.
+    New {
+        #[command(subcommand)]
+        command: commands::new::NewCommands,
+    },
     /// Author, validate, and manage agent configurations.
     Agent {
         #[command(subcommand)]
@@ -452,6 +460,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Adapter { command } => commands::adapter::execute(command, &project_root),
         Commands::Setup { command } => commands::setup::execute(command, &config),
         Commands::Init { command } => commands::init::execute(command, &config),
+        Commands::New { command } => commands::new::execute(command, &config),
         Commands::Release { command } => commands::release::execute(command, &config),
         Commands::Shell {
             init,
