@@ -37,6 +37,10 @@ pub struct WorkflowConfig {
     /// Shell TUI configuration
     #[serde(default)]
     pub shell: ShellConfig,
+
+    /// Desktop notification configuration
+    #[serde(default)]
+    pub notify: NotifyConfig,
 }
 
 /// Submit adapter configuration
@@ -362,6 +366,38 @@ fn default_output_buffer_lines() -> usize {
 
 fn default_auto_tail() -> bool {
     true
+}
+
+/// Desktop notification configuration.
+///
+/// When enabled, TA sends a system notification (macOS/Linux) when a draft
+/// is ready for review, so users don't have to watch the terminal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotifyConfig {
+    /// Enable desktop notifications. Default: true.
+    #[serde(default = "default_notify_enabled")]
+    pub enabled: bool,
+
+    /// Title prefix for notifications. Default: "TA".
+    #[serde(default = "default_notify_title")]
+    pub title: String,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_notify_enabled(),
+            title: default_notify_title(),
+        }
+    }
+}
+
+fn default_notify_enabled() -> bool {
+    true
+}
+
+fn default_notify_title() -> String {
+    "TA".to_string()
 }
 
 impl WorkflowConfig {

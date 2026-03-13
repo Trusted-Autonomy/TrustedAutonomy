@@ -2185,23 +2185,24 @@ fn apply_package(
                 super::verify::run_verification(&workflow_config.verify, &target_dir);
             if !verify_result.passed {
                 for w in &verify_result.warnings {
-                    eprintln!("\n--- {} (FAILED) ---", w.command);
+                    eprintln!(
+                        "\n--- {} (exit code: {}) ---",
+                        w.command,
+                        w.exit_code.map_or("N/A".into(), |c| c.to_string())
+                    );
                     if !w.output.is_empty() {
                         eprintln!("{}", w.output);
                     }
                     eprintln!("---");
                 }
-                let failed_cmds: Vec<_> = verify_result
-                    .warnings
-                    .iter()
-                    .map(|w| format!("  - {}", w.command))
-                    .collect();
+                let total = workflow_config.verify.commands.len();
+                let failed = verify_result.warnings.len();
                 eprintln!(
-                    "\nPre-commit verification failed ({} command(s)):\n{}",
-                    failed_cmds.len(),
-                    failed_cmds.join("\n")
+                    "\nPre-commit verification failed — {} of {} checks failed.",
+                    failed, total
                 );
                 eprintln!("\nFix the issues above and re-run `ta draft apply --git-commit`.");
+                eprintln!("To skip verification: `ta draft apply --git-commit --skip-verify`");
                 anyhow::bail!("Pre-commit verification failed");
             }
             println!("  All pre-commit checks passed.\n");

@@ -13,6 +13,7 @@ pub mod gc;
 pub mod goal;
 pub mod init;
 pub mod new;
+pub mod notify;
 pub mod office;
 pub mod plan;
 pub mod plugin;

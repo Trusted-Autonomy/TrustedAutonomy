@@ -8,6 +8,7 @@
 //
 // The user then reviews/approves/applies via `ta draft` commands.
 
+use std::io::IsTerminal;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -756,28 +757,190 @@ pub fn execute(
             if !result.passed {
                 match workflow_config.verify.on_failure {
                     ta_submit::VerifyOnFailure::Block => {
+                        let total_cmds = workflow_config.verify.commands.len();
+                        let failed_count = result.warnings.len();
+
                         println!();
-                        println!("Verification failed — draft NOT created.");
-                        println!();
+                        println!(
+                            "Verification failed — {} of {} checks failed. Draft NOT created.",
+                            failed_count, total_cmds
+                        );
+
+                        // Show full output for each failed command so the user
+                        // can see exactly what went wrong (v0.10.18.1 item 4).
                         for w in &result.warnings {
-                            println!("  FAIL: {}", w.command);
+                            println!();
+                            println!(
+                                "--- {} (exit code: {}) ---",
+                                w.command,
+                                w.exit_code.map_or("N/A".into(), |c| c.to_string())
+                            );
                             if !w.output.is_empty() {
-                                for line in w.output.lines().take(5) {
-                                    println!("        {}", line);
+                                let lines: Vec<&str> = w.output.lines().collect();
+                                let max_lines = 40;
+                                if lines.len() <= max_lines {
+                                    for line in &lines {
+                                        println!("  {}", line);
+                                    }
+                                } else {
+                                    // Show first 20 + last 20 lines with a gap indicator.
+                                    for line in &lines[..20] {
+                                        println!("  {}", line);
+                                    }
+                                    println!("  ... ({} lines omitted) ...", lines.len() - 40);
+                                    for line in &lines[lines.len() - 20..] {
+                                        println!("  {}", line);
+                                    }
                                 }
                             }
+                            println!("---");
                         }
-                        println!();
-                        println!("To fix and retry:");
-                        println!("  ta run --follow-up     — re-enter the agent to fix issues");
-                        println!(
-                            "  ta verify {}  — re-run verification manually",
-                            &goal_id[..8]
+
+                        // Send desktop notification for verification failure.
+                        super::notify::verification_failed(
+                            &workflow_config.notify,
+                            failed_count,
+                            total_cmds,
                         );
-                        println!();
-                        println!("To bypass verification:");
-                        println!("  ta run --skip-verify   — skip verification on next run");
-                        return Ok(());
+
+                        // Interactive re-entry: if stdin is a TTY and not headless,
+                        // offer to re-launch the agent immediately (v0.10.18.1 item 1).
+                        if !headless && std::io::stdin().is_terminal() {
+                            println!();
+                            println!("Re-enter the agent to fix these issues? [Y/n] ");
+                            let mut answer = String::new();
+                            if std::io::stdin().read_line(&mut answer).is_ok() {
+                                let answer = answer.trim().to_lowercase();
+                                if answer.is_empty() || answer == "y" || answer == "yes" {
+                                    println!("Re-launching agent to fix verification failures...");
+                                    println!();
+
+                                    // Build failure context for re-injection.
+                                    let mut failure_context = String::new();
+                                    failure_context
+                                        .push_str("\n## Verification Failures (auto-injected)\n\n");
+                                    failure_context.push_str(
+                                        "The following verification commands failed. Fix these issues and ensure all checks pass.\n\n",
+                                    );
+                                    for w in &result.warnings {
+                                        failure_context.push_str(&format!("### `{}`\n", w.command));
+                                        failure_context.push_str(&format!(
+                                            "Exit code: {}\n",
+                                            w.exit_code
+                                                .map_or("N/A".to_string(), |c| c.to_string())
+                                        ));
+                                        if !w.output.is_empty() {
+                                            failure_context.push_str("```\n");
+                                            // Show more output for agent context (up to 60 lines).
+                                            for line in w.output.lines().take(60) {
+                                                failure_context.push_str(line);
+                                                failure_context.push('\n');
+                                            }
+                                            failure_context.push_str("```\n");
+                                        }
+                                        failure_context.push('\n');
+                                    }
+
+                                    // Re-inject CLAUDE.md with failure context.
+                                    if agent_config.injects_context_file {
+                                        let claude_md_path = staging_path.join("CLAUDE.md");
+                                        if let Ok(existing) =
+                                            std::fs::read_to_string(&claude_md_path)
+                                        {
+                                            let updated =
+                                                format!("{}\n{}", existing, failure_context);
+                                            let _ = std::fs::write(&claude_md_path, updated);
+                                        }
+                                    }
+
+                                    let fix_prompt = "Verification checks failed after your previous changes. \
+                                         Fix the issues described in the CLAUDE.md 'Verification Failures' \
+                                         section. Run the failing commands to confirm they pass before exiting."
+                                        .to_string();
+
+                                    let relaunch_result =
+                                        launch_agent(&agent_config, &staging_path, &fix_prompt);
+                                    match relaunch_result {
+                                        Ok(exit) if exit.success() => {
+                                            println!("\nAgent fix session exited successfully.");
+                                        }
+                                        Ok(exit) => {
+                                            println!(
+                                                "\nAgent fix session exited with status {}.",
+                                                exit
+                                            );
+                                        }
+                                        Err(e) => {
+                                            println!("Failed to re-launch agent: {}", e);
+                                            println!("Draft NOT created. To fix manually: ta run --follow-up");
+                                            return Ok(());
+                                        }
+                                    }
+
+                                    // Restore CLAUDE.md after re-launch.
+                                    if agent_config.injects_context_file {
+                                        restore_claude_md(&staging_path)?;
+                                    }
+
+                                    // Re-run verification after the fix.
+                                    let recheck = super::verify::run_verification(
+                                        &workflow_config.verify,
+                                        &staging_path,
+                                    );
+                                    if !recheck.passed {
+                                        println!();
+                                        println!(
+                                            "Verification STILL failing after agent fix session."
+                                        );
+                                        println!("Draft NOT created.");
+                                        for w in &recheck.warnings {
+                                            println!();
+                                            println!(
+                                                "--- {} (exit code: {}) ---",
+                                                w.command,
+                                                w.exit_code.map_or("N/A".into(), |c| c.to_string())
+                                            );
+                                            if !w.output.is_empty() {
+                                                for line in w.output.lines().take(20) {
+                                                    println!("  {}", line);
+                                                }
+                                            }
+                                            println!("---");
+                                        }
+                                        println!();
+                                        println!("To fix: ta run --follow-up");
+                                        return Ok(());
+                                    }
+                                    println!("Verification passed after agent fix session.");
+                                    result = recheck;
+                                    // Fall through to draft build.
+                                } else {
+                                    println!();
+                                    println!("To fix and retry:");
+                                    println!("  ta run --follow-up     — re-enter the agent to fix issues");
+                                    println!(
+                                        "  ta verify {}  — re-run verification manually",
+                                        &goal_id[..8]
+                                    );
+                                    return Ok(());
+                                }
+                            } else {
+                                return Ok(());
+                            }
+                        } else {
+                            // Non-interactive: just print instructions.
+                            println!();
+                            println!("To fix and retry:");
+                            println!("  ta run --follow-up     — re-enter the agent to fix issues");
+                            println!(
+                                "  ta verify {}  — re-run verification manually",
+                                &goal_id[..8]
+                            );
+                            println!();
+                            println!("To bypass verification:");
+                            println!("  ta run --skip-verify   — skip verification on next run");
+                            return Ok(());
+                        }
                     }
                     ta_submit::VerifyOnFailure::Warn => {
                         println!();
@@ -860,9 +1023,23 @@ pub fn execute(
                             println!();
                             println!("Verification STILL failing after agent fix session.");
                             println!("Draft NOT created.");
-                            println!();
                             for w in &recheck.warnings {
-                                println!("  FAIL: {}", w.command);
+                                println!();
+                                println!(
+                                    "--- {} (exit code: {}) ---",
+                                    w.command,
+                                    w.exit_code.map_or("N/A".into(), |c| c.to_string())
+                                );
+                                if !w.output.is_empty() {
+                                    for line in w.output.lines().take(20) {
+                                        println!("  {}", line);
+                                    }
+                                    let total = w.output.lines().count();
+                                    if total > 20 {
+                                        println!("  ... ({} more lines)", total - 20);
+                                    }
+                                }
+                                println!("---");
                             }
                             println!();
                             println!("To fix: ta run --follow-up");
@@ -923,7 +1100,16 @@ pub fn execute(
         false
     };
 
-    // 7b. Auto-capture goal completion into memory (v0.5.6).
+    // 7b. Desktop notification when draft is ready (v0.10.18.1).
+    if draft_built {
+        let workflow_toml = staging_path.join(".ta/workflow.toml");
+        let notify_config = ta_submit::WorkflowConfig::load_or_default(&workflow_toml).notify;
+        let draft_display_id =
+            find_latest_draft_id(config, &goal_id).unwrap_or_else(|| goal_id[..8].to_string());
+        super::notify::draft_ready(&notify_config, title, &draft_display_id);
+    }
+
+    // 7c. Auto-capture goal completion into memory (v0.5.6).
     if draft_built {
         auto_capture_goal_completion(config, &goal, &staging_path);
     }
