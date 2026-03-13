@@ -2974,6 +2974,34 @@ When an agent or command produces output longer than the visible terminal area i
 
 ---
 
+### v0.10.18.4 — Live Agent Output in Shell & Terms Consent
+<!-- status: pending -->
+**Goal**: Fix the silent agent output problem in `ta shell` and stop silently accepting agent terms on the user's behalf.
+
+#### Problem 1: Silent Agent Output
+When `ta shell` dispatches a goal via the daemon, the daemon spawns `ta run` with `Stdio::piped()` but does not pass `--headless`. `ta run` then calls `launch_agent()` which inherits the piped fds. Claude Code detects no TTY and runs in non-interactive mode with minimal/no streaming output. The user sees "Tailing..." then silence until the agent finishes.
+
+The daemon-side capture pipeline works (cmd.rs reads stdout/stderr line-by-line and broadcasts to the SSE channel). The problem is upstream: the agent produces no output because it wasn't told to stream.
+
+#### Problem 2: Silent Terms Acceptance
+The daemon passes `--accept-terms` when spawning `ta run` (cmd.rs line 123), silently agreeing to agent terms (e.g., Claude Code's terms of service) without user knowledge or consent. Terms acceptance should be an explicit, informed user action — not something TA does automatically behind the scenes.
+
+#### Items
+1. [ ] **Daemon injects `--headless` for background goals**: When `cmd.rs` spawns `ta run` as a background process, it must include `--headless` in the args so `ta run` uses `launch_agent_headless()` with explicit piping and `[agent]` prefix output.
+2. [ ] **Agent config: `--output-format stream-json` for headless mode**: `launch_agent_headless()` must append `--output-format stream-json` (or `--print` for agents that support it) to the agent command args when the agent config indicates stream-json support. Add `headless_args` field to agent YAML config (e.g., `headless_args: ["--output-format", "stream-json"]`). Claude Code's `claude-code.yaml` gets `headless_args: ["--output-format", "stream-json"]`. Agents without `headless_args` fall back to raw piped output.
+3. [ ] **Parse stream-json in daemon output relay**: The daemon's stdout reader in `cmd.rs` must detect stream-json format (lines starting with `{`) and extract the `text`, `tool_use`, or `result` content for relay to the SSE channel. Non-JSON lines are relayed as-is. This gives `ta shell` users rich agent progress (tool calls, thinking, text output) instead of silence.
+4. [ ] **Terms consent at `ta shell` launch**: On first `ta shell` launch (or when terms version changes), display the agent's terms summary and require explicit `y/n` consent before proceeding. Store accepted terms version in `.ta/consent.json` (`{"claude-code": {"version": "2025-03-01", "accepted_at": "..."}}`). If consent is current, skip the prompt on subsequent launches.
+5. [ ] **Remove `--accept-terms` from daemon spawning**: `cmd.rs` must NOT pass `--accept-terms` when spawning agent processes. Instead, if the agent requires terms acceptance, check `.ta/consent.json` for current consent. If consent is missing or outdated, return an error to `ta shell` with a message: "Agent terms have been updated. Please run `ta terms accept claude-code` or restart `ta shell` to review and accept."
+6. [ ] **`ta terms` subcommand**: `ta terms show <agent>` displays current terms. `ta terms accept <agent>` records consent. `ta terms status` shows which agents have current consent. Terms version is derived from the agent binary's `--version` or a dedicated terms endpoint if available.
+7. [ ] **Interactive terms prompt on update**: When `ta shell` detects that the running agent's terms version differs from the stored consent version, it interrupts with an inline prompt: "Claude Code terms have been updated (v2025-03-01 → v2025-06-15). Review: `ta terms show claude-code`. Accept? [y/N]". Goal dispatch is blocked until the user accepts or the session ends.
+8. [ ] **Test: daemon passes --headless for background goals**: Unit test that verifies the args list built by `cmd.rs` for a `run` command includes `--headless`.
+9. [ ] **Test: stream-json parsing extracts content**: Unit test with sample stream-json lines (text, tool_use, result types) verifying the parser extracts displayable content correctly.
+10. [ ] **Test: terms consent gate blocks without consent**: Test that dispatching a goal when `.ta/consent.json` is missing returns an error with the consent prompt message.
+
+#### Version: `0.10.18-alpha.4`
+
+---
+
 ### v0.11.0 — Event-Driven Agent Routing
 <!-- status: pending -->
 **Goal**: Allow any TA event to trigger an agent workflow instead of (or in addition to) a static response. This is intelligent, adaptive event handling — not scripted hooks or n8n-style flowcharts. An agent receives the event context and decides what to do.
