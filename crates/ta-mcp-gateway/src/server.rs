@@ -1502,32 +1502,34 @@ mod tests {
 
     // v0.10.15: Audit tool-call and agent_id resolution tests.
 
+    /// All resolve_agent_id tests run in a single test to avoid env var races.
+    /// `set_var`/`remove_var` on `TA_AGENT_ID` is not thread-safe — parallel
+    /// tests that touch the same env var produce flaky results.
     #[test]
-    fn resolve_agent_id_from_env() {
+    fn resolve_agent_id_priority_order() {
         let (server, _dir) = test_server();
+
+        // 1. Env var takes priority.
         std::env::set_var("TA_AGENT_ID", "env-agent-42");
-        let state = server.state.lock().unwrap();
-        let agent_id = state.resolve_agent_id();
-        assert_eq!(agent_id, "env-agent-42");
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(state.resolve_agent_id(), "env-agent-42");
+        }
         std::env::remove_var("TA_AGENT_ID");
-    }
 
-    #[test]
-    fn resolve_agent_id_falls_back_to_dev_session() {
-        let (server, _dir) = test_server();
-        std::env::remove_var("TA_AGENT_ID");
-        let mut state = server.state.lock().unwrap();
-        state.dev_session_id = Some("dev-session-99".to_string());
-        assert_eq!(state.resolve_agent_id(), "dev-session-99");
-    }
+        // 2. Falls back to dev_session_id when env var is absent.
+        {
+            let mut state = server.state.lock().unwrap();
+            state.dev_session_id = Some("dev-session-99".to_string());
+            assert_eq!(state.resolve_agent_id(), "dev-session-99");
+        }
 
-    #[test]
-    fn resolve_agent_id_falls_back_to_unknown() {
-        let (server, _dir) = test_server();
-        std::env::remove_var("TA_AGENT_ID");
-        let mut state = server.state.lock().unwrap();
-        state.dev_session_id = None;
-        assert_eq!(state.resolve_agent_id(), "unknown");
+        // 3. Falls back to "unknown" when both are absent.
+        {
+            let mut state = server.state.lock().unwrap();
+            state.dev_session_id = None;
+            assert_eq!(state.resolve_agent_id(), "unknown");
+        }
     }
 
     #[test]
