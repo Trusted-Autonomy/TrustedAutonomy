@@ -151,6 +151,8 @@ impl Default for CommandConfig {
                 "plan from *".to_string(),
                 "ta release run *".to_string(),
                 "release *".to_string(),
+                "ta draft apply *".to_string(),
+                "draft apply *".to_string(),
             ],
             long_timeout_secs: 3600,
         }

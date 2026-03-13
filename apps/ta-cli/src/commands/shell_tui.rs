@@ -1776,21 +1776,36 @@ async fn start_tail_stream(
         "─── live output ───".to_string(),
     ));
 
-    // Connect to goal output SSE stream. Retry a few times because the output
-    // channel alias (goal UUID → output key) may not be registered yet when
-    // auto-tail fires immediately after a goal_started event.
-    let url = format!("{}/api/goals/{}/output", base_url, target);
+    // Connect to goal output SSE stream. Retry with escalating strategies:
+    // 1. Try the exact target (may be full UUID, short ID, or output key)
+    // 2. On 404, query active-output and do client-side prefix match
+    // 3. Retry with delays since the channel may not be registered yet
     let mut resp_result = None;
+    let mut resolved_target = target.clone();
     for attempt in 0..5 {
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
+        let url = format!("{}/api/goals/{}/output", base_url, resolved_target);
         match client.get(&url).send().await {
             Ok(r) if r.status().is_success() => {
                 resp_result = Some(r);
                 break;
             }
-            Ok(_) if attempt < 4 => continue, // Retry on 404
+            Ok(_) if attempt < 4 => {
+                // On 404, try client-side prefix resolution against active goals.
+                // The output channel uses a human-friendly key (e.g., "v0.10.17 — ...")
+                // but auto-tail passes the full UUID from the SSE event. The daemon's
+                // reverse-prefix match may not find it if the alias isn't registered yet.
+                if attempt == 1 {
+                    if let Some(matched) =
+                        resolve_via_active_output(&client, base_url, &target).await
+                    {
+                        resolved_target = matched;
+                    }
+                }
+                continue;
+            }
             Ok(r) => {
                 let json: serde_json::Value = r.json().await.unwrap_or_default();
                 let err = json["error"].as_str().unwrap_or("unknown error");
@@ -2116,6 +2131,35 @@ fn handle_follow_up_picker(app: &mut App, text: &str) {
 
 /// Parse `:tail [id] [--lines <count>]` arguments.
 ///
+/// Client-side prefix resolution: query `/api/goals/active-output` and find
+/// a goal whose key starts with the given prefix (short UUID match).
+async fn resolve_via_active_output(
+    client: &reqwest::Client,
+    base_url: &str,
+    prefix: &str,
+) -> Option<String> {
+    let url = format!("{}/api/goals/active-output", base_url);
+    let resp = client.get(&url).send().await.ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let goals: Vec<String> = json["goals"]
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    // Try: an active goal whose key starts with our prefix (short UUID).
+    let short = &prefix[..8.min(prefix.len())];
+    for g in &goals {
+        if g.starts_with(short) || g.starts_with(prefix) {
+            return Some(g.clone());
+        }
+    }
+    // Fallback: if there's exactly one active goal, use it.
+    if goals.len() == 1 {
+        return Some(goals[0].clone());
+    }
+    None
+}
+
 /// Returns `(goal_id, backfill_lines)`. If `--lines` is not specified, uses
 /// the provided `default_backfill` from config.
 pub(crate) fn parse_tail_args(text: &str, default_backfill: usize) -> (Option<String>, usize) {
