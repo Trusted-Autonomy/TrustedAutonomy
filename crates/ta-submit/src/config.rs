@@ -336,14 +336,28 @@ pub struct ShellConfig {
     #[serde(default = "default_tail_backfill_lines")]
     pub tail_backfill_lines: usize,
 
-    /// Maximum number of lines retained in the TUI output buffer. Default: 10000.
+    /// Maximum number of lines retained in the TUI output buffer. Default: 50000.
     /// Older lines are dropped when this limit is exceeded.
     #[serde(default = "default_output_buffer_lines")]
     pub output_buffer_lines: usize,
 
+    /// Alias for `output_buffer_lines` — configurable as `scrollback_lines` (v0.10.18.2).
+    /// If set, overrides `output_buffer_lines`. Minimum enforced: 10,000.
+    #[serde(default)]
+    pub scrollback_lines: Option<usize>,
+
     /// Automatically tail agent output when a goal starts. Default: true.
     #[serde(default = "default_auto_tail")]
     pub auto_tail: bool,
+}
+
+impl ShellConfig {
+    /// Effective scrollback buffer size: `scrollback_lines` if set, else `output_buffer_lines`.
+    /// Enforces a minimum of 10,000 lines.
+    pub fn effective_scrollback(&self) -> usize {
+        let raw = self.scrollback_lines.unwrap_or(self.output_buffer_lines);
+        raw.max(10_000)
+    }
 }
 
 impl Default for ShellConfig {
@@ -351,6 +365,7 @@ impl Default for ShellConfig {
         Self {
             tail_backfill_lines: default_tail_backfill_lines(),
             output_buffer_lines: default_output_buffer_lines(),
+            scrollback_lines: None,
             auto_tail: default_auto_tail(),
         }
     }
@@ -582,7 +597,9 @@ adapter = "git"
         let config = ShellConfig::default();
         assert_eq!(config.tail_backfill_lines, 5);
         assert_eq!(config.output_buffer_lines, 50000);
+        assert!(config.scrollback_lines.is_none());
         assert!(config.auto_tail);
+        assert_eq!(config.effective_scrollback(), 50000);
     }
 
     #[test]

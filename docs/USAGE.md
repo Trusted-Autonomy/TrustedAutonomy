@@ -523,8 +523,10 @@ The `[shell]` section in `.ta/workflow.toml` controls the TUI shell behavior:
 [shell]
 # Lines to show when attaching to a tail stream. Default: 5.
 tail_backfill_lines = 5
-# Maximum lines retained in the scrollable output buffer. Default: 10000.
-output_buffer_lines = 10000
+# Maximum lines retained in the scrollable output buffer. Default: 50000.
+output_buffer_lines = 50000
+# Alias for output_buffer_lines. If set, overrides it. Minimum: 10000.
+# scrollback_lines = 20000
 # Auto-tail agent output when a goal starts. Default: true.
 auto_tail = true
 ```
@@ -2341,9 +2343,9 @@ The TUI shell provides a three-zone layout:
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **Output pane** (top): Command responses, SSE event notifications, and live agent output. Events are rendered in dimmed styling; agent stdout appears in white, stderr in yellow. Auto-scrolls to bottom; use PgUp/PgDn to scroll back. Retained as a scrollable buffer (configurable limit, default 10000 lines). Unread events are tracked when scrolled up.
+- **Output pane** (top): Command responses, SSE event notifications, and live agent output. Events are rendered in dimmed styling; agent stdout appears in white, stderr in yellow. Auto-scrolls to bottom when at the end; holds position when scrolled up. Retained as a scrollable buffer (configurable limit, default 50,000 lines, minimum 10,000). Use Shift+Up/Down for line-by-line scroll, PgUp/PgDn for 10-line jumps, or Shift+Home/End to jump to top/bottom. A visual scrollbar appears in the right margin when the buffer exceeds the visible area.
 - **Input area** (middle): Text input with cursor movement, command history (up/down), and tab-completion.
-- **Status bar** (bottom): Project name, version, agent count, draft count, daemon connection indicator (green/red dot), tailing indicator (green badge when streaming agent output), unread event badge, and workflow stage indicator.
+- **Status bar** (bottom): Project name, version, agent count, draft count, daemon connection indicator (green/red dot), scroll position ("line N of M" when scrolled up), "new output" badge with count when new content arrives while scrolled up, tailing indicator (green badge when streaming agent output), and workflow stage indicator.
 
 #### Using the shell
 
@@ -2367,7 +2369,9 @@ Built-in shell commands:
 | `:follow-up [filter]` | List follow-up candidates (failed goals, denied drafts); filter by keyword |
 | `:status` | Refresh the status bar |
 | `clear` / `Ctrl-L` | Clear the output pane |
-| `PgUp` / `PgDn` | Scroll output |
+| `Shift+Up` / `Shift+Down` | Scroll output 1 line |
+| `PgUp` / `PgDn` | Scroll output 10 lines |
+| `Shift+Home` / `Shift+End` | Scroll to top/bottom of output |
 | `Tab` | Auto-complete commands |
 | `Ctrl-W` | Toggle split-pane mode (agent output on the right) |
 | `Ctrl-A` / `Ctrl-E` | Jump to start/end of input |

@@ -516,7 +516,7 @@ async fn run_tui(
     app.status = initial_status;
     app.daemon_connected = true;
     app.completions = completions;
-    app.output_buffer_limit = shell_config.output_buffer_lines;
+    app.output_buffer_limit = shell_config.effective_scrollback();
     app.auto_tail = shell_config.auto_tail;
     app.tail_backfill_lines = shell_config.tail_backfill_lines;
 
@@ -857,8 +857,22 @@ async fn handle_terminal_event(
                 (KeyCode::Delete, _) => app.delete(),
                 (KeyCode::Left, _) => app.cursor_left(),
                 (KeyCode::Right, _) => app.cursor_right(),
+                // Shift+Home/End scroll output; plain Home/End move cursor (v0.10.18.2).
+                (KeyCode::Home, m) if m.contains(KeyModifiers::SHIFT) => {
+                    app.scroll_up(app.output.len());
+                }
+                (KeyCode::End, m) if m.contains(KeyModifiers::SHIFT) => {
+                    app.scroll_to_bottom();
+                }
                 (KeyCode::Home, _) => app.home(),
                 (KeyCode::End, _) => app.end(),
+                // Shift+Up/Down scroll output 1 line; plain Up/Down navigate history (v0.10.18.2).
+                (KeyCode::Up, m) if m.contains(KeyModifiers::SHIFT) => {
+                    app.scroll_up(1);
+                }
+                (KeyCode::Down, m) if m.contains(KeyModifiers::SHIFT) => {
+                    app.scroll_down(1);
+                }
                 (KeyCode::Up, _) => app.history_up(),
                 (KeyCode::Down, _) => app.history_down(),
                 (KeyCode::Tab, _) => app.tab_complete(),
@@ -1419,11 +1433,23 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    // Unread event badge.
+    // Scroll position indicator (v0.10.18.2).
+    if app.scroll_offset > 0 {
+        // Calculate current visible line range.
+        let total_lines = app.output.len();
+        let visible_line = total_lines.saturating_sub(app.scroll_offset);
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            format!(" line {} of {} ", visible_line, total_lines),
+            Style::default().fg(Color::White),
+        ));
+    }
+
+    // Unread event badge — shows "new output" when scrolled up (v0.10.18.2).
     if app.unread_events > 0 {
         spans.push(Span::raw("│"));
         spans.push(Span::styled(
-            format!(" {} unread ", app.unread_events),
+            format!(" {} new output \u{2193} ", app.unread_events),
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
@@ -2288,10 +2314,17 @@ Shell commands:
   :status            Refresh the status bar
   clear              Clear the output pane
   Ctrl-L             Clear the output pane
-  PgUp / PgDn        Scroll output (retained history, configurable: shell.output_buffer_lines)
+  PgUp / PgDn        Scroll output 10 lines
+  Shift+Up / Down    Scroll output 1 line
+  Shift+Home / End   Scroll to top / bottom of output
   Tab                Auto-complete commands
   Ctrl-W             Toggle split pane (shell | agent side-by-side)
-  Ctrl-C / exit      Exit the shell (Ctrl-C detaches when tailing)";
+  Ctrl-C / exit      Exit the shell (Ctrl-C detaches when tailing)
+
+Scrollback:
+  Output is retained in a scrollback buffer (default: 50000 lines).
+  Configure via [shell] scrollback_lines in .ta/workflow.toml (minimum: 10000).
+  Status bar shows scroll position and new output indicator when scrolled up.";
 
 #[cfg(test)]
 mod tests {
@@ -3108,5 +3141,126 @@ mod tests {
         app.scroll_up(999_999);
         // Should clamp to output.len() at most.
         assert!(app.scroll_offset <= app.output.len());
+    }
+
+    // -- v0.10.18.2 scrollback & scroll navigation tests --
+
+    #[test]
+    fn scrollback_preserves_and_retrieves_past_output() {
+        // Item 3: Push 500+ lines, verify buffer retains all, scroll to top,
+        // verify first line, scroll to bottom, verify latest line.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Ensure buffer limit is well above 500.
+        app.output_buffer_limit = 50_000;
+
+        // Push 600 lines.
+        for i in 0..600 {
+            app.push_output(OutputLine::command(format!("output-line-{}", i)));
+        }
+
+        // Buffer retains all 600 lines.
+        assert_eq!(app.output.len(), 600);
+
+        // Verify first line content.
+        assert_eq!(app.output[0].text, "output-line-0");
+
+        // Verify last line content.
+        assert_eq!(app.output[599].text, "output-line-599");
+
+        // Scroll to top (scroll up by total line count).
+        app.scroll_up(app.output.len());
+        assert!(app.scroll_offset > 0);
+
+        // First line is still accessible in the buffer.
+        assert_eq!(app.output[0].text, "output-line-0");
+
+        // Scroll back to bottom.
+        app.scroll_to_bottom();
+        assert_eq!(app.scroll_offset, 0);
+
+        // Latest line is still there.
+        assert_eq!(app.output[app.output.len() - 1].text, "output-line-599");
+    }
+
+    #[test]
+    fn auto_scroll_follows_when_at_bottom() {
+        // Item 4a: When scroll_offset is 0 (at bottom) and new content arrives,
+        // scroll_offset stays at 0 and unread_events is not incremented.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+
+        // Start at bottom (scroll_offset = 0).
+        assert_eq!(app.scroll_offset, 0);
+
+        // Push new content.
+        app.push_output(OutputLine::command("line 1".into()));
+        app.push_output(OutputLine::command("line 2".into()));
+        app.push_output(OutputLine::command("line 3".into()));
+
+        // Should still be at bottom, no unread.
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.unread_events, 0);
+    }
+
+    #[test]
+    fn no_auto_scroll_when_scrolled_up() {
+        // Item 4b: When scroll_offset is NOT 0 (scrolled up) and new content
+        // arrives, scroll_offset stays put and unread flag is set.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+
+        // Add initial content.
+        for i in 0..50 {
+            app.push_output(OutputLine::command(format!("line {}", i)));
+        }
+
+        // Scroll up.
+        app.scroll_up(10);
+        assert_eq!(app.scroll_offset, 10);
+        assert_eq!(app.unread_events, 0);
+
+        // New content arrives while scrolled up.
+        app.push_output(OutputLine::command("new line A".into()));
+        app.push_output(OutputLine::command("new line B".into()));
+
+        // Scroll offset should NOT change (no auto-scroll).
+        assert_eq!(app.scroll_offset, 10);
+
+        // Unread events should be incremented.
+        assert_eq!(app.unread_events, 2);
+
+        // Scrolling to bottom clears unread.
+        app.scroll_to_bottom();
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.unread_events, 0);
+    }
+
+    #[test]
+    fn scrollback_lines_config_alias() {
+        // Verify that ShellConfig::effective_scrollback() uses scrollback_lines
+        // when set, and enforces the 10,000 minimum.
+        use ta_submit::ShellConfig;
+
+        let mut config = ShellConfig::default();
+        // Default: uses output_buffer_lines (50000).
+        assert_eq!(config.effective_scrollback(), 50_000);
+
+        // scrollback_lines overrides.
+        config.scrollback_lines = Some(20_000);
+        assert_eq!(config.effective_scrollback(), 20_000);
+
+        // Minimum enforced at 10,000.
+        config.scrollback_lines = Some(5_000);
+        assert_eq!(config.effective_scrollback(), 10_000);
     }
 }
