@@ -34,6 +34,7 @@
 mod api;
 pub mod channel_dispatcher;
 mod config;
+pub mod config_watcher;
 pub mod external_channel;
 pub mod office;
 pub mod project_context;

@@ -60,6 +60,18 @@ pub struct GoalStartParams {
     /// Plan phase ID to link this goal to (e.g., "v0.9.4.1").
     #[serde(default)]
     pub phase: Option<String>,
+    /// Goal IDs whose output should feed into this goal's context (v0.10.18).
+    /// The gateway will retrieve summaries from completed goals and inject them
+    /// into the new goal's context.
+    #[serde(default)]
+    pub context_from: Vec<String>,
+    /// External thread ID for cross-channel context tracking (v0.10.18).
+    /// When set, replies in this thread auto-route to the same project.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Project name to scope this goal to (v0.10.18, multi-project).
+    #[serde(default)]
+    pub project_name: Option<String>,
 }
 
 fn default_agent_id() -> String {
@@ -267,6 +279,53 @@ pub struct AgentSession {
 
 // ── Gateway state ────────────────────────────────────────────────
 
+/// Per-project isolated state for multi-project daemon support (v0.10.18).
+///
+/// Each project gets its own goal store, connectors, PR packages, event
+/// dispatcher, and memory store. This prevents cross-project leakage
+/// and allows per-project policy/review configuration.
+pub struct ProjectState {
+    /// Goal store scoped to this project.
+    pub goal_store: GoalRunStore,
+    /// Connectors for active goals within this project.
+    pub connectors: HashMap<Uuid, FsConnector<JsonFileStore>>,
+    /// PR packages for this project.
+    pub pr_packages: HashMap<Uuid, PRPackage>,
+    /// Event dispatcher for this project.
+    pub event_dispatcher: EventDispatcher,
+    /// Memory store for this project.
+    pub memory_store: FsMemoryStore,
+    /// Review channel for this project (can differ from default).
+    pub review_channel: Option<Box<dyn ReviewChannel>>,
+    /// Pending actions for this project.
+    pub pending_actions: HashMap<Uuid, Vec<PendingAction>>,
+}
+
+impl ProjectState {
+    /// Create a new per-project state from a project root path.
+    pub fn new(project_root: &std::path::Path) -> Result<Self, GatewayError> {
+        let ta_dir = project_root.join(".ta");
+        let goals_dir = ta_dir.join("goals");
+        let events_log = ta_dir.join("events.log");
+        let memory_dir = ta_dir.join("memory");
+
+        let goal_store = GoalRunStore::new(&goals_dir)?;
+        let mut event_dispatcher = EventDispatcher::new();
+        event_dispatcher.add_sink(Box::new(LogSink::new(&events_log)));
+        let memory_store = FsMemoryStore::new(memory_dir);
+
+        Ok(Self {
+            goal_store,
+            connectors: HashMap::new(),
+            pr_packages: HashMap::new(),
+            event_dispatcher,
+            memory_store,
+            review_channel: None,
+            pending_actions: HashMap::new(),
+        })
+    }
+}
+
 /// Shared mutable state for the gateway server.
 pub struct GatewayState {
     pub config: GatewayConfig,
@@ -287,6 +346,12 @@ pub struct GatewayState {
     pub dev_session_id: Option<String>,
     /// v0.9.6: Active agent sessions keyed by agent_id.
     pub active_agents: HashMap<String, AgentSession>,
+    /// v0.10.18: Per-project isolated state for multi-project support.
+    /// Keyed by project name. When empty, uses the top-level stores
+    /// (single-project backward compatibility).
+    pub projects: HashMap<String, ProjectState>,
+    /// v0.10.18: Currently active project name for this session.
+    pub active_project: Option<String>,
 }
 
 /// Caller mode determines what operations the MCP gateway allows.
@@ -400,6 +465,8 @@ impl GatewayState {
             caller_mode: CallerMode::from_env(),
             dev_session_id: std::env::var("TA_DEV_SESSION_ID").ok(),
             active_agents: HashMap::new(),
+            projects: HashMap::new(),
+            active_project: None,
         })
     }
 
@@ -441,6 +508,47 @@ impl GatewayState {
                 Box::new(ta_changeset::terminal_channel::TerminalChannel::stdio())
             }
         }
+    }
+
+    /// Register a project for multi-project support (v0.10.18).
+    ///
+    /// Creates per-project isolated state (goal store, connectors, events).
+    /// Once at least one project is registered, goal operations can be
+    /// scoped to a specific project via `active_project`.
+    pub fn register_project(
+        &mut self,
+        name: &str,
+        project_root: &std::path::Path,
+    ) -> Result<(), GatewayError> {
+        let state = ProjectState::new(project_root)?;
+        tracing::info!(
+            project = %name,
+            path = %project_root.display(),
+            "Registered project with per-project state isolation"
+        );
+        self.projects.insert(name.to_string(), state);
+        Ok(())
+    }
+
+    /// Set the active project for this session (v0.10.18).
+    pub fn set_active_project(&mut self, name: Option<String>) {
+        self.active_project = name;
+    }
+
+    /// Get the goal store for the active project, falling back to the
+    /// global store in single-project mode (v0.10.18).
+    pub fn active_goal_store(&self) -> &GoalRunStore {
+        if let Some(ref project_name) = self.active_project {
+            if let Some(project) = self.projects.get(project_name) {
+                return &project.goal_store;
+            }
+        }
+        &self.goal_store
+    }
+
+    /// List registered project names (v0.10.18).
+    pub fn project_names(&self) -> Vec<String> {
+        self.projects.keys().cloned().collect()
     }
 
     /// Start a new goal: create GoalRun, issue manifest, set up connector.

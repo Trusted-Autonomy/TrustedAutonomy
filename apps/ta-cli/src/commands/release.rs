@@ -1316,6 +1316,27 @@ steps:
       fi
       echo "Preflight OK — clean tree, tag ${TAG} is available."
 
+  # v0.10.18: Pre-release sync and build steps.
+  # These run `ta sync` and `ta build` if available, otherwise skip gracefully.
+  # Full implementation requires v0.11.1 (SourceAdapter) and v0.11.2 (BuildAdapter).
+  - name: Sync sources (if available)
+    run: |
+      if command -v ta >/dev/null 2>&1 && ta sync --help >/dev/null 2>&1; then
+        echo "Running pre-release source sync..."
+        ta sync
+      else
+        echo "Skipping: 'ta sync' not available (requires v0.11.1+)."
+      fi
+
+  - name: Pre-release build (if available)
+    run: |
+      if command -v ta >/dev/null 2>&1 && ta build --help >/dev/null 2>&1; then
+        echo "Running pre-release build..."
+        ta build
+      else
+        echo "Skipping: 'ta build' not available (requires v0.11.2+)."
+      fi
+
   - name: Version bump
     run: |
       set -e

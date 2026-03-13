@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.16-alpha
+**Version**: v0.10.18-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -475,9 +475,14 @@ ta run --follow-up
 # Re-run verification manually
 ta verify <goal-id-prefix>
 
-# Skip verification (use sparingly)
+# Skip verification on run (use sparingly)
 ta run --skip-verify
+
+# Skip pre-commit verification on apply
+ta draft apply <draft-id> --git-commit --skip-verify
 ```
+
+If pre-commit verification fails during `ta draft apply --git-commit`, the changes are already applied to your project but not committed. You can fix the issues and re-run the apply, skip verification, or revert with `git checkout -- .`.
 
 In warn mode (`on_failure = "warn"`), the draft is created but carries verification warnings visible in `ta draft view`.
 
@@ -2189,6 +2194,39 @@ tags:
 
 Existing endpoints accept an optional `?project=<name>` query parameter to scope operations to a specific project.
 
+#### Config Hot-Reload
+
+The daemon watches `.ta/daemon.toml` and `.ta/office.yaml` for changes and reloads configuration automatically without requiring a restart. When you edit either file, the daemon detects the change and applies the new settings to subsequent requests. Active connections are unaffected.
+
+#### Thread Context Tracking
+
+When a goal is started from an external channel (Discord, Slack, email), TA records the channel-specific thread identifier on the goal. Subsequent messages in the same thread automatically resolve to the correct project without requiring an `@ta <project>` prefix. This works across channels — a goal started via Discord will track the Discord thread ID, while an email-initiated goal tracks the Message-ID.
+
+Pass `thread_id` and `project_name` when starting goals via MCP to enable thread context tracking:
+
+```json
+{
+  "title": "Fix auth bug",
+  "objective": "...",
+  "thread_id": "discord:123456789",
+  "project_name": "inventory-service"
+}
+```
+
+#### Goal Chaining
+
+Goals can reference prior goals whose output feeds into their context. Pass `context_from` (a list of goal UUIDs) when starting a goal to inject summaries of those prior goals into the new goal's context:
+
+```json
+{
+  "title": "Review changes from prior goal",
+  "objective": "...",
+  "context_from": ["abc-123", "def-456"]
+}
+```
+
+The gateway will look up each referenced goal and include its title, objective, and state in the chained context summary.
+
 ### Interactive Shell
 
 The interactive shell (`ta shell`) is a full-screen TUI client for the TA daemon. It gives you a persistent terminal with three zones: scrolling output, input line, and a live status bar.
@@ -3677,7 +3715,11 @@ Configure a process-based engine in `.ta/config.yaml`:
 workflow:
   engine: process
   command: "python templates/workflows/adapters/langraph_adapter.py"
+  args: []
+  timeout_secs: 30
 ```
+
+The process engine spawns the configured command and communicates via newline-delimited JSON on stdin/stdout. The engine process stays alive for the lifetime of the workflow and receives `start`, `stage_completed`, `status`, `cancel`, and `inject_feedback` messages. See `crates/ta-workflow/src/process_engine.rs` for the full protocol specification.
 
 #### MCP tool
 
@@ -4237,6 +4279,9 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.14 | Deferred items: shell & agent UX | Done |
 | v0.10.15 | Deferred items: observability & audit | Done |
 | v0.10.16 | Deferred items: platform & channel hardening | Done |
+| v0.10.17 | `ta new` — conversational project bootstrapping | Done |
+| v0.10.17.1 | Shell reliability & command timeout fixes | Done |
+| v0.10.18 | Deferred items: workflow & multi-project | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

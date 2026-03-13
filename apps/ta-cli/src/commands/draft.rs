@@ -157,6 +157,11 @@ pub enum DraftCommands {
         /// Useful for high-risk changes that should always get a human look.
         #[arg(long)]
         require_review: bool,
+        /// Skip pre-commit verification checks (from [verify] in workflow.toml).
+        /// Useful when verification has already been run separately or when
+        /// applying a draft that failed verification and was manually fixed.
+        #[arg(long)]
+        skip_verify: bool,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -380,6 +385,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             discuss_patterns,
             phase,
             require_review,
+            skip_verify,
         } => {
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
 
@@ -426,6 +432,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                     discuss: discuss_patterns,
                 },
                 phase.as_deref(),
+                *skip_verify,
             )
         }
         DraftCommands::Amend {
@@ -1774,6 +1781,7 @@ fn apply_package(
     conflict_resolution: ta_workspace::ConflictResolution,
     patterns: SelectiveReviewPatterns,
     phase_override: Option<&str>,
+    skip_verify: bool,
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let mut pkg = load_package(config, package_id)?;
@@ -2171,7 +2179,7 @@ fn apply_package(
         }
 
         // Pre-commit verification gate: run configured checks before committing.
-        if !workflow_config.verify.commands.is_empty() {
+        if !skip_verify && !workflow_config.verify.commands.is_empty() {
             println!("\nRunning pre-commit verification...");
             let verify_result =
                 super::verify::run_verification(&workflow_config.verify, &target_dir);
@@ -2186,10 +2194,29 @@ fn apply_package(
                     failed.len(),
                     failed.join("\n")
                 );
-                eprintln!("Fix the issues and re-run `ta draft apply --git-commit`.");
+
+                // Restore VCS state (branch) so the user isn't left on a stale branch.
+                if let Err(e) = adapter.restore_state(saved_state) {
+                    tracing::warn!(error = %e, "Could not restore VCS state after verification failure");
+                }
+
+                eprintln!();
+                eprintln!(
+                    "Changes have been applied to {} but NOT committed.",
+                    target_dir.display()
+                );
+                eprintln!("To recover:");
+                eprintln!("  1. Fix the issues in {}, then:", target_dir.display());
+                eprintln!("     ta draft apply --git-commit {}", id);
+                eprintln!("  2. Or skip verification:");
+                eprintln!("     ta draft apply --git-commit --skip-verify {}", id);
+                eprintln!("  3. Or revert the applied changes:");
+                eprintln!("     git checkout -- .");
                 anyhow::bail!("Pre-commit verification failed");
             }
             println!("  All pre-commit checks passed.\n");
+        } else if skip_verify && !workflow_config.verify.commands.is_empty() {
+            println!("  Skipping pre-commit verification (--skip-verify).");
         }
 
         // Commit changes — goal title as subject, complete draft summary as body.
@@ -3710,6 +3737,7 @@ mod tests {
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns::default(),
             None,
+            false,
         )
         .unwrap();
 
@@ -3799,6 +3827,7 @@ mod tests {
             ta_workspace::ConflictResolution::Abort,
             SelectiveReviewPatterns::default(),
             None,
+            false,
         )
         .unwrap();
 
@@ -4063,6 +4092,7 @@ mod tests {
                 discuss: &[],
             },
             None,
+            false,
         )
         .unwrap();
 
@@ -4126,6 +4156,7 @@ mod tests {
                 discuss: &[],
             },
             None,
+            false,
         )
         .unwrap();
 
@@ -4186,6 +4217,7 @@ mod tests {
                 discuss: &[],
             },
             None,
+            false,
         )
         .unwrap();
 
@@ -4245,6 +4277,7 @@ mod tests {
                 discuss: &[],
             },
             None,
+            false,
         )
         .unwrap();
 
@@ -4343,6 +4376,7 @@ mod tests {
                 discuss: &[],
             },
             None,
+            false,
         );
 
         assert!(result.is_err());

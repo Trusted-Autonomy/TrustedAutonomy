@@ -181,6 +181,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             discuss_patterns: discuss_patterns.clone(),
             phase: None,
             require_review: false,
+            skip_verify: false,
         },
     }
 }

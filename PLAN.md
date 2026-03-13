@@ -2884,15 +2884,19 @@ Tests: 25 new tests (name validation, template resolution, scaffold generation, 
 <!-- status: pending -->
 **Goal**: Address remaining deferred items from workflow engine and multi-project phases.
 
-#### Items (from deferred backlogs)
-0. [ ] **Verify gaps** Before beginning ay of this work review the code to verify exactly what is incomplete and best intergration
-1. [ ] **Goal chaining context propagation** (from v0.9.8.2): Pass context between chained goals in daemon runtime
-2. [ ] **Full async process engine I/O** (from v0.9.8.2): Daemon tokio runtime for child process management
-3. [ ] **Live scoring agent integration** (from v0.9.8.2): LLM API call from scorer agent
-4. [ ] **Full GatewayState refactor** (from v0.9.10): `HashMap<String, ProjectContext>` with per-project stores
-5. [ ] **Thread context tracking** (from v0.9.10): Session-project binding across conversations
-6. [ ] **Config hot-reload** (from v0.9.10): Live registry swap on reload
-7. [ ] **Wire `ta sync` and `ta build` as pre-release steps** (from v0.10.6): Depends on v0.11.1, v0.11.2
+#### Completed
+0. [x] **Verify gaps**: Reviewed all source files to identify exactly what was incomplete and determine best integration approach
+1. [x] **Goal chaining context propagation** (from v0.9.8.2): Added `context_from` to `GoalStartParams`, wired context retrieval in `handle_goal_start` — looks up prior goals and builds chained context summaries for injection into new goals
+2. [x] **Full async process engine I/O** (from v0.9.8.2): Replaced stub `send_request()` with real `std::process::Command` child process management — spawns engine process, communicates via newline-delimited JSON on stdin/stdout, with proper lifecycle management (ensure_spawned, shutdown, Drop)
+3. [x] **Live scoring agent integration** (from v0.9.8.2): Added `try_agent_score()` that spawns the configured scoring agent, sends verdict data on stdin, reads `ScoringResult` from stdout; falls back to built-in algorithm on failure. `ScorerConfig.agent` field now fully wired.
+4. [x] **Full GatewayState refactor** (from v0.9.10): Added `ProjectState` struct with per-project goal store, connectors, PR packages, event dispatcher, and memory store. Added `projects: HashMap<String, ProjectState>` and `active_project` to `GatewayState` with `register_project()`, `set_active_project()`, `active_goal_store()` methods for multi-project isolation.
+5. [x] **Thread context tracking** (from v0.9.10): Added `thread_id` and `project_name` fields to `GoalRun`, wired into `GoalStartParams` and `handle_goal_start`. Thread ID stores channel-specific thread identifiers (Discord thread, Slack thread_ts, email Message-ID) for cross-channel auto-routing.
+6. [x] **Config hot-reload** (from v0.9.10): New `config_watcher` module in ta-daemon using `notify` crate. Watches `.ta/daemon.toml` and `.ta/office.yaml` for changes, reloads config on modify/create events, sends `ConfigEvent` through channel for atomic swap.
+7. [x] **Wire `ta sync` and `ta build` as pre-release steps** (from v0.10.6): Added "Sync sources" and "Pre-release build" steps to `DEFAULT_PIPELINE_YAML`. Steps gracefully skip when commands are unavailable (pending v0.11.1 `ta sync` and v0.11.2 `ta build`).
+- [x] Version bump to `0.10.18-alpha`
+
+#### Tests
+- ~11 new tests: 6 in process_engine.rs, 7 in scorer.rs (2 new), 4 in config_watcher.rs
 
 #### Version: `0.10.18-alpha`
 
