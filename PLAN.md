@@ -2967,6 +2967,8 @@ When an agent or command produces output longer than the visible terminal area i
 5. [ ] **Test: streaming output is captured and forwarded**: Unit test that spawns a child process producing 50+ lines over 2 seconds, verifies each line appears in the accumulated output, and verifies the output is complete after process exit.
 6. [ ] **Test: per-command timeout respected**: Test with two commands — one with 2s timeout (sleeps 1s, succeeds) and one with 1s timeout (sleeps 5s, times out). Verify the first passes and the second fails with timeout error containing the last output lines.
 7. [ ] **Test: heartbeat emitted for long-running command**: Test that a command running >60s with heartbeat_interval_secs=1 produces at least 2 heartbeat messages in the captured output.
+8. [ ] **Mouse wheel / touchpad scroll in ta shell**: Enable crossterm mouse capture (`EnableMouseCapture`) and handle `MouseEventKind::ScrollUp` / `ScrollDown` events in the TUI event loop. Map scroll-up to `app.scroll_up(3)` and scroll-down to `app.scroll_down(3)` (3 lines per tick, standard behavior). This complements the keyboard scrolling added in v0.10.18.2 with the input method most users expect.
+9. [ ] **Test: mouse scroll events move scroll offset**: Unit test that simulates `ScrollUp` and `ScrollDown` mouse events and verifies `scroll_offset` changes by the expected amount (3 lines per event), clamped to buffer bounds.
 
 #### Version: `0.10.18-alpha.3`
 
