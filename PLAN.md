@@ -2997,6 +2997,8 @@ The daemon passes `--accept-terms` when spawning `ta run` (cmd.rs line 123), sil
 8. [ ] **Test: daemon passes --headless for background goals**: Unit test that verifies the args list built by `cmd.rs` for a `run` command includes `--headless`.
 9. [ ] **Test: stream-json parsing extracts content**: Unit test with sample stream-json lines (text, tool_use, result types) verifying the parser extracts displayable content correctly.
 10. [ ] **Test: terms consent gate blocks without consent**: Test that dispatching a goal when `.ta/consent.json` is missing returns an error with the consent prompt message.
+11. [ ] **Background command completion bookend in ta shell**: When the daemon executes a long-running command (`ta draft apply`, `ta run`, etc.) and it completes, the output stream currently goes silent — no final message. The daemon must emit a bookend output line at command completion: on success, `"✓ <command> completed — <summary>"` (e.g., `"✓ draft apply completed — 8 files applied, commit abc1234"`); on failure, `"✗ <command> failed (exit N)"` followed by the last 10 lines of stderr for context. This bookend is sent as a final `OutputLine` on the SSE channel before the `done` event, so `ta shell` always shows how the command ended.
+12. [ ] **Test: background command emits completion bookend**: Test that a simulated background command produces a final success/failure output line in the SSE channel before the `done` event.
 
 #### Version: `0.10.18-alpha.4`
 
