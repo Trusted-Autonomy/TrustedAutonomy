@@ -263,6 +263,15 @@ enum Commands {
     ViewTerms,
     /// Show terms acceptance status.
     TermsStatus,
+    /// Manage per-agent terms consent (v0.10.18.4).
+    ///
+    /// Subcommands: `ta terms show <agent>`, `ta terms accept <agent>`, `ta terms status`.
+    Terms {
+        /// Action: show, accept, or status.
+        action: String,
+        /// Agent ID (required for show/accept, optional for status).
+        agent: Option<String>,
+    },
     /// Run pre-draft verification checks against a staging workspace.
     ///
     /// Runs the [verify] commands from .ta/workflow.toml in the staging
@@ -372,6 +381,35 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Commands::TermsStatus => return commands::terms::show_status(),
+        // Per-agent terms management (v0.10.18.4).
+        Commands::Terms { action, agent } => {
+            let project_root = cli
+                .project_root
+                .canonicalize()
+                .unwrap_or_else(|_| cli.project_root.clone());
+            match action.as_str() {
+                "show" => {
+                    let agent_id = agent.as_deref().unwrap_or("claude-code");
+                    commands::consent::show_agent_terms(agent_id);
+                    return Ok(());
+                }
+                "accept" => {
+                    let agent_id = agent.as_deref().unwrap_or("claude-code");
+                    return commands::consent::prompt_and_accept(&project_root, agent_id);
+                }
+                "status" => {
+                    commands::consent::show_status(&project_root);
+                    return Ok(());
+                }
+                other => {
+                    eprintln!(
+                        "Unknown terms action '{}'. Use: show, accept, or status.",
+                        other
+                    );
+                    return Err(anyhow::anyhow!("unknown terms action: {}", other));
+                }
+            }
+        }
         _ => {}
     }
 
@@ -496,6 +534,9 @@ fn main() -> anyhow::Result<()> {
             commands::conversation::execute(&config, goal_id, *json)
         }
         // Already handled above.
-        Commands::AcceptTerms | Commands::ViewTerms | Commands::TermsStatus => unreachable!(),
+        Commands::AcceptTerms
+        | Commands::ViewTerms
+        | Commands::TermsStatus
+        | Commands::Terms { .. } => unreachable!(),
     }
 }

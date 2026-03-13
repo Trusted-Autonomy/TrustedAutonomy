@@ -463,6 +463,36 @@ pub fn run(
         // All results proceed — the function already printed warnings/prompts.
     }
 
+    // Agent terms consent check (v0.10.18.4 item 4 & 7).
+    // Before entering TUI mode (while stdin is still available), check if the
+    // default agent (claude-code) has current consent. If not, prompt the user.
+    {
+        let default_agent = "claude-code";
+        let current_version = super::consent::detect_agent_version(default_agent);
+        if let Err(_msg) =
+            super::consent::check_agent_consent(project_root, default_agent, &current_version)
+        {
+            // Show inline consent prompt before TUI takes over stdin.
+            println!();
+            println!(
+                "Agent '{}' requires terms acceptance before goals can be dispatched.",
+                default_agent
+            );
+            if let Err(e) = super::consent::prompt_and_accept(project_root, default_agent) {
+                eprintln!("Warning: {}", e);
+                eprintln!(
+                    "Goals using '{}' will fail until terms are accepted.",
+                    default_agent
+                );
+                eprintln!(
+                    "You can accept later with: ta terms accept {}",
+                    default_agent
+                );
+                // Continue to shell anyway — the user can still use other commands.
+            }
+        }
+    }
+
     let project_root = project_root.to_path_buf();
     rt.block_on(run_tui(
         base_url,
@@ -804,6 +834,32 @@ async fn handle_terminal_event(
                         if text.starts_with(":follow-up") || text.starts_with(":followup") {
                             handle_follow_up_picker(app, &text);
                             return;
+                        }
+
+                        // Agent consent check for goal-dispatching commands (v0.10.18.4 item 7).
+                        // If the command is `run` or `dev`, verify that agent consent is current
+                        // before dispatching. If consent is missing or outdated, block the
+                        // dispatch with an actionable error message.
+                        if text.starts_with("run ")
+                            || text.starts_with("dev ")
+                            || text == "run"
+                            || text == "dev"
+                        {
+                            let default_agent = "claude-code";
+                            let current_version =
+                                super::consent::detect_agent_version(default_agent);
+                            if let Err(msg) = super::consent::check_agent_consent(
+                                &app.project_root,
+                                default_agent,
+                                &current_version,
+                            ) {
+                                app.push_output(OutputLine::error(msg));
+                                app.push_output(OutputLine::info(
+                                    "Exit the shell and run: ta terms accept claude-code"
+                                        .to_string(),
+                                ));
+                                return;
+                            }
                         }
 
                         // Immediate ack so the user sees activity before the

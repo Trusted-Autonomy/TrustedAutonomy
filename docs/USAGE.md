@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.18.3-alpha
+**Version**: v0.10.18.4-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -3380,17 +3380,51 @@ Tool calls are auto-classified by name patterns:
 TA includes a terms-of-use acceptance step on first run.
 
 ```bash
-# Accept terms non-interactively (CI/scripted usage)
+# Accept TA terms non-interactively (CI/scripted usage)
 ta accept-terms
 
-# View the current terms
+# View the current TA terms
 ta view-terms
 
-# Check acceptance status
+# Check TA acceptance status
 ta terms-status
 
 # All commands also accept --accept-terms flag
 ta run "task" --accept-terms
+```
+
+### Agent Terms Consent
+
+When using AI agents (like Claude Code or Codex), TA requires explicit consent for each agent's terms of service. This replaces the previous behavior where the daemon silently passed `--accept-terms` on the user's behalf.
+
+```bash
+# View an agent's terms summary
+ta terms show claude-code
+
+# Accept an agent's terms (interactive prompt)
+ta terms accept claude-code
+
+# Check consent status for all agents
+ta terms status
+```
+
+Consent is stored per-project in `.ta/consent.json` and tracked per-agent and per-version. When an agent's terms version changes, `ta shell` will prompt you to re-accept before dispatching goals.
+
+### Live Agent Output in Shell
+
+When `ta shell` dispatches a goal, the daemon now runs the agent in headless mode with streaming output. For Claude Code, this uses `--output-format stream-json` to stream rich progress (text output, tool calls, results) to the shell TUI in real time.
+
+Background commands emit a completion bookend when they finish:
+- Success: `✓ <command> completed`
+- Failure: `✗ <command> failed (exit N)` with the last 10 lines of stderr
+
+Agent-specific streaming arguments can be configured in YAML agent configs using the `headless_args` field:
+
+```yaml
+# .ta/agents/claude-code.yaml
+command: claude
+args_template: ["{prompt}"]
+headless_args: ["--output-format", "stream-json"]
 ```
 
 ### Project Setup
@@ -4339,6 +4373,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.18.1 | Developer loop: verification, notifications & shell fixes | Done |
 | v0.10.18.2 | Shell TUI: scrollback & command output visibility | Done |
 | v0.10.18.3 | Verification streaming, heartbeat & configurable timeout | Done |
+| v0.10.18.4 | Live agent output in shell & terms consent | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

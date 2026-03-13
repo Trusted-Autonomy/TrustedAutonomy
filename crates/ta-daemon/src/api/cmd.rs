@@ -117,11 +117,43 @@ pub async fn execute_command(
                 cmd_str,
                 output_key_display
             );
-            let result = tokio::process::Command::new(&binary)
-                .arg("--project-root")
-                .arg(&working_dir)
-                .arg("--accept-terms")
-                .args(&args)
+            // Check agent consent before spawning (v0.10.18.4).
+            // If consent is missing, emit an error event instead of silently accepting terms.
+            let consent_path = working_dir.join(".ta/consent.json");
+            let has_consent = consent_path.exists();
+
+            // Build the command args. Inject --headless for background goals so the
+            // agent produces streaming output instead of running silent with piped fds.
+            // Pass --accept-terms only if the user has previously given consent via
+            // `ta terms accept` (stored in .ta/consent.json).
+            let mut cmd_builder = tokio::process::Command::new(&binary);
+            cmd_builder.arg("--project-root").arg(&working_dir);
+
+            if has_consent {
+                cmd_builder.arg("--accept-terms");
+            }
+
+            // Inject --headless so ta run uses launch_agent_headless() with
+            // explicit piping and [agent] prefix output (v0.10.18.4 item 1).
+            let needs_headless = args
+                .first()
+                .map(|a| a == "run" || a == "dev")
+                .unwrap_or(false)
+                && !args.iter().any(|a| a == "--headless");
+            if needs_headless {
+                // Insert --headless after the subcommand (first arg).
+                if let Some(subcmd) = args.first() {
+                    cmd_builder.arg(subcmd);
+                    cmd_builder.arg("--headless");
+                    cmd_builder.args(&args[1..]);
+                } else {
+                    cmd_builder.args(&args);
+                }
+            } else {
+                cmd_builder.args(&args);
+            }
+
+            let result = cmd_builder
                 .current_dir(&working_dir)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -137,15 +169,25 @@ pub async fn execute_command(
                     let stdout = child.stdout.take();
                     let stderr = child.stderr.take();
                     let tx2 = tx.clone();
+                    let tx_bookend = tx.clone();
 
                     let stdout_task = tokio::spawn(async move {
                         if let Some(out) = stdout {
                             let mut reader = BufReader::new(out).lines();
                             while let Ok(Some(line)) = reader.next_line().await {
-                                let _ = tx.send(OutputLine {
-                                    stream: "stdout",
-                                    line,
-                                });
+                                // Parse stream-json format (v0.10.18.4 item 3).
+                                // Lines starting with '{' may be JSON events from agents
+                                // using --output-format stream-json. Extract displayable
+                                // content; relay non-JSON lines as-is.
+                                let display_line = parse_stream_json_line(&line);
+                                if let Some(text) = display_line {
+                                    let _ = tx.send(OutputLine {
+                                        stream: "stdout",
+                                        line: text,
+                                    });
+                                }
+                                // Silently skip JSON lines that produce no displayable content
+                                // (e.g., internal status updates, empty content blocks).
                             }
                         }
                     });
@@ -186,6 +228,11 @@ pub async fn execute_command(
                     match status {
                         Ok(s) if s.success() => {
                             tracing::info!("Background command completed: {}", cmd_str);
+                            // Emit completion bookend (v0.10.18.4 item 11).
+                            let _ = tx_bookend.send(OutputLine {
+                                stream: "stdout",
+                                line: format!("\u{2713} {} completed", cmd_str),
+                            });
                         }
                         Ok(s) => {
                             let code = s.code().unwrap_or(-1);
@@ -195,10 +242,27 @@ pub async fn execute_command(
                                 code,
                                 cmd_str
                             );
+                            // Emit failure bookend with context (v0.10.18.4 item 11).
+                            let mut bookend =
+                                format!("\u{2717} {} failed (exit {})", cmd_str, code);
+                            // Append last 10 lines of stderr for context.
+                            let tail_lines = stderr_lines.lock().await;
+                            let start = tail_lines.len().saturating_sub(10);
+                            for stderr_line in &tail_lines[start..] {
+                                bookend.push_str(&format!("\n  {}", stderr_line));
+                            }
+                            let _ = tx_bookend.send(OutputLine {
+                                stream: "stderr",
+                                line: bookend,
+                            });
                             emit_command_failed_event(&events_dir, &cmd_str, code, &stderr_tail);
                         }
                         Err(e) => {
                             tracing::error!("Background command wait error: {} — {}", cmd_str, e);
+                            let _ = tx_bookend.send(OutputLine {
+                                stream: "stderr",
+                                line: format!("\u{2717} {} failed: {}", cmd_str, e),
+                            });
                             emit_command_failed_event(&events_dir, &cmd_str, -1, &e.to_string());
                         }
                     }
@@ -262,10 +326,14 @@ async fn run_command(
 ) -> Result<CmdResponse, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    let mut child = tokio::process::Command::new(binary)
-        .arg("--project-root")
-        .arg(working_dir)
-        .arg("--accept-terms")
+    // Check agent consent (v0.10.18.4). Only pass --accept-terms if consent exists.
+    let consent_path = working_dir.join(".ta/consent.json");
+    let mut cmd_builder = tokio::process::Command::new(binary);
+    cmd_builder.arg("--project-root").arg(working_dir);
+    if consent_path.exists() {
+        cmd_builder.arg("--accept-terms");
+    }
+    let mut child = cmd_builder
         .args(args)
         .current_dir(working_dir)
         .stdout(std::process::Stdio::piped())
@@ -786,6 +854,113 @@ fn glob_match(pattern: &str, input: &str) -> bool {
     }
 }
 
+/// Parse a line that may be stream-json format from an agent (v0.10.18.4 item 3).
+///
+/// Claude Code's `--output-format stream-json` emits one JSON object per line with
+/// a `type` field. We extract displayable content from:
+///   - `assistant` / `text` type: text content from the assistant
+///   - `tool_use` type: tool name and input summary
+///   - `result` type: final result text
+///
+/// Non-JSON lines are returned as-is. JSON lines with no displayable content
+/// return `None` (silently dropped).
+pub(crate) fn parse_stream_json_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        // Not JSON — relay as-is (e.g., [agent] prefix lines).
+        return Some(line.to_string());
+    }
+
+    // Try to parse as JSON.
+    let obj: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return Some(line.to_string()), // Malformed JSON — relay raw.
+    };
+
+    let event_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    match event_type {
+        "assistant" | "text" | "content_block_delta" => {
+            // Extract text content. Claude stream-json nests content in various places.
+            if let Some(text) = obj.get("content").and_then(extract_text_content) {
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+            // content_block_delta: text is in delta.text
+            if let Some(delta) = obj.get("delta") {
+                if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+            // Check top-level text field.
+            if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                if !text.is_empty() {
+                    return Some(text.to_string());
+                }
+            }
+            None
+        }
+        "tool_use" | "content_block_start" => {
+            // Show tool invocation summary.
+            let name = obj
+                .get("name")
+                .or_else(|| obj.get("content_block").and_then(|cb| cb.get("name")))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let block_type = obj
+                .get("content_block")
+                .and_then(|cb| cb.get("type"))
+                .and_then(|v| v.as_str());
+            if block_type == Some("tool_use") || event_type == "tool_use" {
+                Some(format!("[tool] {}", name))
+            } else {
+                None // text block start or other — content comes in deltas
+            }
+        }
+        "result" => obj
+            .get("result")
+            .or_else(|| obj.get("text"))
+            .and_then(|v| v.as_str())
+            .map(|text| format!("[result] {}", text)),
+        "message_start" | "message_stop" | "message_delta" | "content_block_stop" | "ping" => {
+            // Internal protocol events — no displayable content.
+            None
+        }
+        _ => {
+            // Unknown type — check for a text or message field as fallback.
+            obj.get("message")
+                .and_then(|v| v.as_str())
+                .map(|text| text.to_string())
+        }
+    }
+}
+
+/// Extract text content from a JSON value that may be a string or array of content blocks.
+fn extract_text_content(value: &serde_json::Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(arr) = value.as_array() {
+        let texts: Vec<&str> = arr
+            .iter()
+            .filter_map(|item| {
+                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    item.get("text").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !texts.is_empty() {
+            return Some(texts.join(""));
+        }
+    }
+    None
+}
+
 /// Emit a `command_failed` event so the failure is visible to agents and the SSE stream.
 fn emit_command_failed_event(
     events_dir: &std::path::Path,
@@ -1034,5 +1209,92 @@ mod tests {
     fn extract_goal_uuid_non_hex() {
         let line = r#"[goal started] "title" (not-hex-zzzz)"#;
         assert_eq!(extract_goal_uuid_from_event(line), None);
+    }
+
+    // ── v0.10.18.4 tests ──────────────────────────────────────
+
+    #[test]
+    fn stream_json_text_content() {
+        // assistant type with text content
+        let line = r#"{"type":"assistant","content":"Hello world"}"#;
+        assert_eq!(
+            parse_stream_json_line(line),
+            Some("Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_json_content_block_delta() {
+        let line = r#"{"type":"content_block_delta","delta":{"text":"incremental text"}}"#;
+        assert_eq!(
+            parse_stream_json_line(line),
+            Some("incremental text".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_json_tool_use() {
+        let line = r#"{"type":"tool_use","name":"Read"}"#;
+        assert_eq!(
+            parse_stream_json_line(line),
+            Some("[tool] Read".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_json_content_block_start_tool() {
+        let line =
+            r#"{"type":"content_block_start","content_block":{"type":"tool_use","name":"Edit"}}"#;
+        assert_eq!(
+            parse_stream_json_line(line),
+            Some("[tool] Edit".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_json_result() {
+        let line = r#"{"type":"result","result":"Task completed"}"#;
+        assert_eq!(
+            parse_stream_json_line(line),
+            Some("[result] Task completed".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_json_internal_events_skipped() {
+        assert_eq!(parse_stream_json_line(r#"{"type":"message_start"}"#), None);
+        assert_eq!(parse_stream_json_line(r#"{"type":"message_stop"}"#), None);
+        assert_eq!(parse_stream_json_line(r#"{"type":"ping"}"#), None);
+        assert_eq!(
+            parse_stream_json_line(r#"{"type":"content_block_stop"}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn stream_json_non_json_passthrough() {
+        let line = "[agent] some output text";
+        assert_eq!(
+            parse_stream_json_line(line),
+            Some("[agent] some output text".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_json_malformed_json_passthrough() {
+        let line = "{not valid json";
+        assert_eq!(
+            parse_stream_json_line(line),
+            Some("{not valid json".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_json_content_array() {
+        let line = r#"{"type":"assistant","content":[{"type":"text","text":"Hello"},{"type":"text","text":" World"}]}"#;
+        assert_eq!(
+            parse_stream_json_line(line),
+            Some("Hello World".to_string())
+        );
     }
 }

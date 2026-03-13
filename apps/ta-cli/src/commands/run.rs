@@ -72,6 +72,11 @@ struct AgentLaunchConfig {
     #[serde(default)]
     #[allow(dead_code)]
     alignment: Option<ta_policy::AlignmentProfile>,
+    /// Extra args appended in headless mode (v0.10.18.4).
+    /// E.g., `["--output-format", "stream-json"]` for Claude Code.
+    /// Agents without `headless_args` fall back to raw piped output.
+    #[serde(default)]
+    headless_args: Vec<String>,
 }
 
 /// Pre-launch command configuration (deserialized from YAML).
@@ -156,6 +161,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             description: Some("Anthropic's Claude Code CLI".to_string()),
             interactive: None,
             alignment: Some(ta_policy::AlignmentProfile::default_developer()),
+            headless_args: vec!["--output-format".to_string(), "stream-json".to_string()],
         },
         "codex" => AgentLaunchConfig {
             command: "codex".to_string(),
@@ -173,6 +179,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             description: Some("OpenAI's Codex CLI".to_string()),
             interactive: None,
             alignment: Some(ta_policy::AlignmentProfile::default_developer()),
+            headless_args: Vec::new(),
         },
         "claude-flow" => AgentLaunchConfig {
             command: "npx".to_string(),
@@ -199,6 +206,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             description: Some("Claude Flow multi-agent orchestration".to_string()),
             interactive: None,
             alignment: Some(ta_policy::AlignmentProfile::default_developer()),
+            headless_args: Vec::new(),
         },
         _ => AgentLaunchConfig {
             command: agent_id.to_string(),
@@ -212,6 +220,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             description: None,
             interactive: None,
             alignment: None,
+            headless_args: Vec::new(),
         },
     }
 }
@@ -1292,6 +1301,7 @@ fn execute_resume(
             description: None,
             interactive: None,
             alignment: None,
+            headless_args: Vec::new(),
         };
 
         launch_agent_interactive(&resume_config, staging_path, "", &mut session_store)
@@ -1400,6 +1410,12 @@ fn launch_agent_headless(
 
     for arg_template in &config.args_template {
         let arg = arg_template.replace("{prompt}", prompt);
+        cmd.arg(arg);
+    }
+
+    // Append agent-specific headless args (v0.10.18.4 item 2).
+    // E.g., Claude Code gets --output-format stream-json for rich streaming output.
+    for arg in &config.headless_args {
         cmd.arg(arg);
     }
 
