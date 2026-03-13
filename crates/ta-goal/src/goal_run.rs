@@ -195,6 +195,18 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_from: Vec<Uuid>,
 
+    /// External thread identifier for cross-channel tracking (v0.10.18).
+    /// Stores the channel-specific thread/conversation ID (e.g., Discord thread ID,
+    /// Slack thread_ts, email Message-ID) so replies auto-route to the same project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+
+    /// Project name this goal belongs to (v0.10.18).
+    /// Used for multi-project routing: replies in a goal's thread auto-resolve
+    /// to this project without requiring explicit `@ta <project>` prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+
     /// The PR package ID, if one has been built.
     pub pr_package_id: Option<Uuid>,
 
@@ -235,6 +247,8 @@ impl GoalRun {
             stage: None,
             role: None,
             context_from: Vec::new(),
+            thread_id: None,
+            project_name: None,
             pr_package_id: None,
             created_at: now,
             updated_at: now,

@@ -2881,20 +2881,34 @@ Tests: 25 new tests (name validation, template resolution, scaffold generation, 
 ---
 
 ### v0.10.18 — Deferred Items: Workflow & Multi-Project
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Address remaining deferred items from workflow engine and multi-project phases.
 
-#### Items (from deferred backlogs)
-0. [ ] **Verify gaps** Before beginning ay of this work review the code to verify exactly what is incomplete and best intergration
-1. [ ] **Goal chaining context propagation** (from v0.9.8.2): Pass context between chained goals in daemon runtime
-2. [ ] **Full async process engine I/O** (from v0.9.8.2): Daemon tokio runtime for child process management
-3. [ ] **Live scoring agent integration** (from v0.9.8.2): LLM API call from scorer agent
-4. [ ] **Full GatewayState refactor** (from v0.9.10): `HashMap<String, ProjectContext>` with per-project stores
-5. [ ] **Thread context tracking** (from v0.9.10): Session-project binding across conversations
-6. [ ] **Config hot-reload** (from v0.9.10): Live registry swap on reload
-7. [ ] **Wire `ta sync` and `ta build` as pre-release steps** (from v0.10.6): Depends on v0.11.1, v0.11.2
+#### Completed
+- [x] **Verify gaps**: Reviewed code to verify incomplete items and best integration points
+- [x] **Goal chaining context propagation** (from v0.9.8.2): `context_from: Vec<Uuid>` on GoalRun, gateway resolves prior goal metadata and injects "Prior Goal Context" markdown into new goals
+- [x] **Full async process engine I/O** (from v0.9.8.2): `ProcessWorkflowEngine` with long-lived child process, JSON-over-stdio protocol, lazy spawn, graceful shutdown, timeout support, 4 tests
+- [x] **Live scoring agent integration** (from v0.9.8.2): `score_verdicts()` with agent-first logic — tries external scorer binary, falls back to built-in numeric averaging. `ScorerConfig` in VerdictConfig
+- [x] **Full GatewayState refactor** (from v0.9.10): `ProjectState` struct with per-project isolation (goal store, connectors, packages, events, memory, review channel). `register_project()`, `set_active_project()`, `active_goal_store()` methods. Backward-compatible single-project fallback
+- [x] **Thread context tracking** (from v0.9.10): `thread_id: Option<String>` on GoalRun for Discord/Slack/email thread binding
+- [x] **Config hot-reload** (from v0.9.10): `ConfigWatcher` using `notify` crate, watches `.ta/daemon.toml` and `.ta/office.yaml`, `ConfigEvent` enum, background thread with mpsc channel, 3 tests
+- [x] **Wire `ta sync` and `ta build` as pre-release steps** (from v0.10.6): CI workflow scaffold with graceful degradation when commands unavailable (requires v0.11.1+/v0.11.2+)
 
 #### Version: `0.10.18-alpha`
+
+---
+
+### v0.10.18.1 — Developer Loop: Verification Timing, Notifications & Shell Fixes
+<!-- status: pending -->
+**Goal**: Fix the root cause of PRs shipping with lint/test failures by moving verification to goal completion time. Add desktop notifications and fix shell scrollback rendering.
+
+#### Items
+1. [ ] **Pre-commit verification at goal completion**: Run `[verify]` commands when the agent exits (before `ta draft build`), not just at `ta draft apply --git-commit`. On failure, offer to re-enter the agent to fix issues before the draft is built. This is the root-cause fix for PRs failing lint/compile checks.
+2. [ ] **Desktop notification on draft ready**: Send macOS notification (via `osascript`/`terminal-notifier`) when a draft is ready for review, so users don't have to watch the terminal.
+3. [ ] **Shell scrollback rendering fix**: The pre-slicing approach for ratatui's `u16` scroll overflow is on main but needs verification that the rebuilt binary works. If still broken, investigate further — the `Paragraph::scroll((residual_scroll, 0))` approach should handle >65535 visual lines.
+4. [ ] **Verification output detail**: When pre-commit verification fails (at goal completion or draft apply), show the actual command output (stderr/stdout), not just command names. Users need to see what failed to fix it.
+
+#### Version: `0.10.18-alpha.1`
 
 ---
 

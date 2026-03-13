@@ -42,7 +42,9 @@ pub fn handle_goal_start(
 
     let goal_id = goal_run.goal_run_id;
 
-    // Set source_dir (defaults to workspace root) and plan_phase on the goal.
+    // Set source_dir (defaults to workspace root), plan_phase, and context_from on the goal.
+    // v0.10.18: Parse context_from UUIDs and build chained context summary.
+    let mut chained_context: Option<String> = None;
     if let Ok(Some(mut g)) = state.goal_store.get(goal_id) {
         g.source_dir = Some(
             params
@@ -52,6 +54,38 @@ pub fn handle_goal_start(
                 .unwrap_or_else(|| state.config.workspace_root.clone()),
         );
         g.plan_phase = params.phase.clone();
+
+        // v0.10.18: Resolve context_from goal IDs and build context summary.
+        let mut context_ids = Vec::new();
+        let mut context_parts = Vec::new();
+        for id_str in &params.context_from {
+            if let Ok(uid) = uuid::Uuid::parse_str(id_str) {
+                context_ids.push(uid);
+                if let Ok(Some(prior)) = state.goal_store.get(uid) {
+                    let state_str = prior.state.to_string();
+                    context_parts.push(format!(
+                        "- Goal \"{}\" ({}): {} [{}]",
+                        prior.title, uid, prior.objective, state_str
+                    ));
+                }
+            } else {
+                tracing::warn!(
+                    goal_id = %goal_id,
+                    invalid_uuid = %id_str,
+                    "Ignoring invalid context_from UUID"
+                );
+            }
+        }
+        g.context_from = context_ids;
+        g.thread_id = params.thread_id.clone();
+        g.project_name = params.project_name.clone();
+
+        if !context_parts.is_empty() {
+            chained_context = Some(format!(
+                "## Prior Goal Context\n\nThis goal builds on output from:\n{}",
+                context_parts.join("\n")
+            ));
+        }
         let _ = state.goal_store.save(&g);
     }
 
@@ -97,6 +131,7 @@ pub fn handle_goal_start(
         "manifest_id": goal_run.manifest_id.to_string(),
         "launched": launched,
         "phase": params.phase,
+        "chained_context": chained_context,
     });
     Ok(CallToolResult::success(vec![Content::json(response)
         .map_err(|e| {
