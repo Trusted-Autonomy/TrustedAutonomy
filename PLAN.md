@@ -2917,17 +2917,19 @@ Tests: 25 new tests (name validation, template resolution, scaffold generation, 
 ---
 
 ### v0.10.18.2 — Shell TUI: Scrollback & Command Output Visibility
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix the fundamental visibility problem in `ta shell` where command output that exceeds the terminal window height is lost — the user cannot scroll back to see earlier output lines.
 
 #### Problem
 When an agent or command produces output longer than the visible terminal area in `ta shell`, lines that scroll past the top of the window are gone. There is no way to scroll up to review them. This makes `ta shell` unusable for any command with substantial output (build logs, test results, long diffs). The user reported this as a recurring blocker.
 
-#### Items
-1. [ ] **Scrollback buffer for command output pane**: The shell TUI output widget must retain a scrollback buffer (minimum 10,000 lines, configurable via `[shell] scrollback_lines` in `.ta/shell.toml`). All command output appended to the buffer persists even when it scrolls past the visible area. The widget renders a sliding window over the buffer based on scroll position.
-2. [ ] **Keyboard scroll navigation**: Up/Down arrow keys (when not in input mode), PgUp/PgDn, and Home/End scroll through the output buffer. Scroll position indicator shows "line N of M" or a visual scrollbar in the right margin. When new output arrives and the user is scrolled to the bottom, auto-scroll follows new content. When the user has scrolled up, new output does NOT auto-scroll — a "new output ↓" indicator appears instead.
-3. [ ] **Test: scrollback preserves and retrieves past output**: Integration test that pushes 500+ lines into the output buffer, verifies the buffer retains all lines, scrolls to line 0, and asserts the first line content matches. Verifies scroll-to-bottom returns to the latest line.
-4. [ ] **Test: auto-scroll vs manual scroll behavior**: Test that verifies: (a) when scroll position is at bottom and new content arrives, view follows; (b) when scroll position is NOT at bottom and new content arrives, view stays put and a "new output" flag is set.
+#### Completed
+1. [x] **Scrollback buffer for command output pane**: TUI output widget retains a scrollback buffer (default 50,000 lines, minimum 10,000 enforced). Configurable via `[shell] scrollback_lines` in `.ta/workflow.toml` — overrides `output_buffer_lines` when set. Added `ShellConfig::effective_scrollback()` method with minimum enforcement. Buffer renders a sliding window over stored lines based on scroll position.
+2. [x] **Keyboard scroll navigation**: Shift+Up/Down scroll output 1 line, PgUp/PgDn scroll 10 lines, Shift+Home/End scroll to top/bottom. Status bar shows "line N of M" scroll position indicator when scrolled up. "New output" badge with down-arrow appears when new content arrives while scrolled up. Auto-scroll follows new content when at bottom; holds position when scrolled up. Visual scrollbar in right margin already present from prior work.
+3. [x] **Test: scrollback preserves and retrieves past output**: `scrollback_preserves_and_retrieves_past_output` — pushes 600 lines, verifies all retained, verifies first/last line content, scrolls to top, verifies first line accessible, scrolls to bottom, verifies latest line.
+4. [x] **Test: auto-scroll vs manual scroll behavior**: `auto_scroll_follows_when_at_bottom` — verifies scroll_offset stays 0 and no unread when at bottom. `no_auto_scroll_when_scrolled_up` — verifies scroll_offset unchanged and unread_events incremented when scrolled up. Plus `scrollback_lines_config_alias` verifying the config alias and minimum enforcement.
+
+4 new tests. Version bumped to `0.10.18-alpha.2`.
 
 #### Version: `0.10.18-alpha.2`
 
