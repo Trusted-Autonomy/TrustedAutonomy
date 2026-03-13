@@ -2201,9 +2201,7 @@ fn apply_package(
                     failed_cmds.len(),
                     failed_cmds.join("\n")
                 );
-                eprintln!(
-                    "\nFix the issues and re-run, or use `ta draft apply --git-commit --skip-verify` to bypass."
-                );
+                eprintln!("\nFix the issues above and re-run `ta draft apply --git-commit`.");
                 anyhow::bail!("Pre-commit verification failed");
             }
             println!("  All pre-commit checks passed.\n");
