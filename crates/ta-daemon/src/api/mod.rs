@@ -45,6 +45,8 @@ pub struct AppState {
     pub token_store: TokenStore,
     pub agent_sessions: agent::AgentSessionManager,
     pub goal_output: goal_output::GoalOutputManager,
+    /// Stdin handles for background agent processes (v0.10.18.5).
+    pub goal_input: goal_output::GoalInputManager,
     pub question_registry: Arc<QuestionRegistry>,
     /// Multi-project registry (single-project mode has exactly one entry).
     pub project_registry: Arc<ProjectRegistry>,
@@ -68,6 +70,7 @@ impl AppState {
             shell_config,
             agent_sessions: agent::AgentSessionManager::new(max_sessions),
             goal_output: goal_output::GoalOutputManager::new(),
+            goal_input: goal_output::GoalInputManager::new(),
             question_registry: Arc::new(QuestionRegistry::new()),
             project_registry: Arc::new(registry),
             bootstrap_sessions: project_new::BootstrapSessionManager::new(),
@@ -284,6 +287,11 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/goals/{id}/output",
             get(goal_output::goal_output_stream),
+        )
+        // Stdin relay for background agent processes (v0.10.18.5).
+        .route(
+            "/api/goals/{id}/input",
+            post(goal_output::goal_input_handler),
         )
         // Workflow routes (v0.9.8.2).
         .route("/api/workflows", get(workflow::list_workflows))

@@ -153,10 +153,15 @@ pub async fn execute_command(
                 cmd_builder.args(&args);
             }
 
+            // Pipe stdin for interactive prompt relay (v0.10.18.5 item 3).
+            let goal_input = state.goal_input.clone();
+            let output_key_stdin = output_key.clone();
+
             let result = cmd_builder
                 .current_dir(&working_dir)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
+                .stdin(std::process::Stdio::piped())
                 .spawn();
 
             match result {
@@ -168,6 +173,12 @@ pub async fn execute_command(
 
                     let stdout = child.stdout.take();
                     let stderr = child.stderr.take();
+
+                    // Store stdin handle for interactive relay (v0.10.18.5 item 3).
+                    if let Some(stdin) = child.stdin.take() {
+                        goal_input.register(&output_key_stdin, stdin).await;
+                    }
+
                     let tx2 = tx.clone();
                     let tx_bookend = tx.clone();
 
@@ -181,10 +192,13 @@ pub async fn execute_command(
                                 // content; relay non-JSON lines as-is.
                                 let display_line = parse_stream_json_line(&line);
                                 if let Some(text) = display_line {
-                                    let _ = tx.send(OutputLine {
-                                        stream: "stdout",
-                                        line: text,
-                                    });
+                                    // Check if this looks like an interactive prompt (v0.10.18.5 item 4).
+                                    let stream = if is_interactive_prompt(&text) {
+                                        "prompt"
+                                    } else {
+                                        "stdout"
+                                    };
+                                    let _ = tx.send(OutputLine { stream, line: text });
                                 }
                                 // Silently skip JSON lines that produce no displayable content
                                 // (e.g., internal status updates, empty content blocks).
@@ -195,16 +209,18 @@ pub async fn execute_command(
                     let stderr_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
                     let stderr_lines2 = stderr_lines.clone();
                     let goal_output2 = goal_output.clone();
+                    let goal_input2 = goal_input.clone();
                     let output_key2 = output_key.clone();
                     let stderr_task = tokio::spawn(async move {
                         if let Some(err) = stderr {
                             let mut reader = BufReader::new(err).lines();
                             while let Ok(Some(line)) = reader.next_line().await {
                                 // Detect [goal started] events and register the goal UUID
-                                // as an alias so :tail <uuid> resolves to this channel.
+                                // as an alias so :tail <uuid> and stdin relay resolve correctly.
                                 if line.contains("[goal started]") {
                                     if let Some(goal_uuid) = extract_goal_uuid_from_event(&line) {
                                         goal_output2.add_alias(&goal_uuid, &output_key2).await;
+                                        goal_input2.add_alias(&goal_uuid, &output_key2).await;
                                     }
                                 }
                                 let _ = tx2.send(OutputLine {
@@ -278,8 +294,9 @@ pub async fn execute_command(
                 }
             }
 
-            // Clean up the output channel.
+            // Clean up output channel and stdin handle.
             goal_output.remove_channel(&output_key).await;
+            goal_input.remove(&output_key).await;
         });
 
         return Json(CmdResponse {
@@ -984,6 +1001,46 @@ fn emit_command_failed_event(
     }
 }
 
+/// Detect whether a line of agent output looks like an interactive prompt (v0.10.18.5 item 4).
+///
+/// Conservative heuristics — it's better to relay a normal line than to miss a real prompt.
+/// We look for common interactive prompt patterns:
+///   - Lines ending with `?` (questions)
+///   - Lines containing `[y/N]`, `[Y/n]`, `[yes/no]` choice indicators
+///   - Lines containing numbered choices like `[1]`, `[1/2/3]`
+///   - Lines ending with `: ` (input prompts)
+fn is_interactive_prompt(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Common interactive choice patterns.
+    if trimmed.contains("[y/N]")
+        || trimmed.contains("[Y/n]")
+        || trimmed.contains("[yes/no]")
+        || trimmed.contains("[Y/N]")
+    {
+        return true;
+    }
+    // Numbered choice indicators (e.g., "[1] mesh [2] hierarchical").
+    if trimmed.contains("[1]") && trimmed.contains("[2]") {
+        return true;
+    }
+    // Lines ending with "? " or "?" followed by optional whitespace.
+    if trimmed.ends_with('?') {
+        return true;
+    }
+    // Lines ending with ": " (input prompt for a value).
+    if trimmed.ends_with(": ") || trimmed.ends_with(":") {
+        // Avoid false positives on log lines like "INFO: message".
+        // Only match if short enough to be a prompt (not a long log message).
+        if trimmed.len() < 120 {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1296,5 +1353,106 @@ mod tests {
             parse_stream_json_line(line),
             Some("Hello World".to_string())
         );
+    }
+
+    // ── v0.10.18.5 tests ──────────────────────────────────────
+
+    #[test]
+    fn prompt_detection_yes_no() {
+        assert!(is_interactive_prompt("Continue? [y/N]"));
+        assert!(is_interactive_prompt("Proceed? [Y/n]"));
+        assert!(is_interactive_prompt("Are you sure? [yes/no]"));
+        assert!(is_interactive_prompt("Delete all files? [Y/N]"));
+    }
+
+    #[test]
+    fn prompt_detection_numbered_choices() {
+        assert!(is_interactive_prompt(
+            "Select topology: [1] mesh [2] hierarchical"
+        ));
+        assert!(is_interactive_prompt(
+            "[1] option A [2] option B [3] option C"
+        ));
+    }
+
+    #[test]
+    fn prompt_detection_question_mark() {
+        assert!(is_interactive_prompt("Which database?"));
+        assert!(is_interactive_prompt("Enter your name?"));
+    }
+
+    #[test]
+    fn prompt_detection_colon_suffix() {
+        assert!(is_interactive_prompt("Enter cluster name:"));
+        assert!(is_interactive_prompt("Username: "));
+        assert!(is_interactive_prompt("Password:"));
+    }
+
+    #[test]
+    fn prompt_detection_not_log_lines() {
+        // Regular output lines should NOT be detected as prompts.
+        assert!(!is_interactive_prompt("Building project..."));
+        assert!(!is_interactive_prompt(
+            "INFO: Starting server on port 8080 and listening for connections"
+        ));
+        assert!(!is_interactive_prompt("Compiling ta-daemon v0.10.18"));
+        assert!(!is_interactive_prompt(""));
+        // Long log line ending with colon — should be excluded by length heuristic.
+        let long_log = format!("INFO: {}: message", "a]".repeat(100));
+        assert!(!is_interactive_prompt(&long_log));
+    }
+
+    #[tokio::test]
+    async fn goal_input_manager_lifecycle() {
+        use crate::api::goal_output::GoalInputManager;
+
+        let mgr = GoalInputManager::new();
+
+        // Create a mock child process with piped stdin.
+        let mut child = tokio::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+
+        // Register and send input.
+        mgr.register("goal-1", stdin).await;
+        let result = mgr.send_input("goal-1", "hello").await;
+        assert!(result.is_ok());
+
+        // Sending to nonexistent goal fails.
+        let result = mgr.send_input("nonexistent", "test").await;
+        assert!(result.is_err());
+
+        // Clean up.
+        mgr.remove("goal-1").await;
+        let result = mgr.send_input("goal-1", "after remove").await;
+        assert!(result.is_err());
+
+        // Kill the child process.
+        let _ = child.kill().await;
+    }
+
+    #[tokio::test]
+    async fn goal_input_manager_alias() {
+        use crate::api::goal_output::GoalInputManager;
+
+        let mgr = GoalInputManager::new();
+        let mut child = tokio::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+
+        mgr.register("primary-key", stdin).await;
+        mgr.add_alias("alias-key", "primary-key").await;
+
+        // Can send via alias.
+        let result = mgr.send_input("alias-key", "via alias").await;
+        assert!(result.is_ok());
+
+        let _ = child.kill().await;
     }
 }

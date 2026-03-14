@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: v0.10.18.4-alpha
+**Version**: v0.10.18.5-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -1160,8 +1160,45 @@ Config fields:
 | `injects_settings` | bool | Inject `.claude/settings.local.json` with permissions |
 | `pre_launch` | object | Command to run before agent launch |
 | `env` | map | Environment variables for the agent process |
+| `headless_args` | string[] | Extra args appended in headless (daemon-spawned) mode |
+| `non_interactive_env` | map | Env vars set ONLY in headless mode to suppress interactive prompts |
+| `auto_answers` | list | Regex→response mappings for auto-answering known prompts |
 | `interactive` | object | Interactive session config (PTY capture, resume) |
 | `alignment` | object | Alignment profile (see below) |
+
+#### Handling Agent Stdin Prompts
+
+When the daemon spawns an agent as a background process, stdin is normally unavailable. TA provides three layers to handle agents that require interactive input:
+
+**Layer 1: Non-interactive env vars** — Suppress prompts entirely by setting environment variables in headless mode:
+
+```yaml
+# .ta/agents/claude-flow.yaml
+non_interactive_env:
+  CLAUDE_FLOW_NON_INTERACTIVE: "true"
+  CLAUDE_FLOW_TOPOLOGY: "mesh"
+```
+
+These are only set for daemon-spawned (headless) runs, not for direct CLI usage where the user has a terminal.
+
+**Layer 2: Auto-answer map** — Pre-configure responses to known prompts using regex patterns:
+
+```yaml
+auto_answers:
+  - prompt: "Select.*topology.*\\[1\\]"
+    response: "1"
+  - prompt: "Continue\\?.*\\[y/N\\]"
+    response: "y"
+  - prompt: "Enter.*name:"
+    response: "{goal_title}"
+    fallback: true    # use as default for unmatched prompts at timeout
+```
+
+Template variables: `{goal_title}`, `{goal_id}`, `{project_name}`.
+
+**Layer 3: Live stdin relay** — Unmatched prompts are forwarded to `ta shell` as interactive questions. The prompt appears in the output pane, the input area switches to response mode, and your typed response is sent to the agent's stdin via `POST /api/goals/:id/input`.
+
+Auto-answered prompts appear as dimmed lines: `[auto] Select topology: → 1 (mesh)`.
 
 ### Alignment Profiles
 
@@ -2368,7 +2405,7 @@ The TUI shell provides a three-zone layout:
 
 - **Output pane** (top): Command responses, SSE event notifications, and live agent output. Events are rendered in dimmed styling; agent stdout appears in white, stderr in yellow. Auto-scrolls to bottom when at the end; holds position when scrolled up. Retained as a scrollable buffer (configurable limit, default 50,000 lines, minimum 10,000). Use Shift+Up/Down for line-by-line scroll, PgUp/PgDn for 10-line jumps, or Shift+Home/End to jump to top/bottom. A visual scrollbar appears in the right margin when the buffer exceeds the visible area.
 - **Input area** (middle): Text input with cursor movement, command history (up/down), and tab-completion.
-- **Status bar** (bottom): Project name, version, agent count, draft count, daemon connection indicator (green/red dot), scroll position ("line N of M" when scrolled up), "new output" badge with count when new content arrives while scrolled up, tailing indicator (green badge when streaming agent output), and workflow stage indicator.
+- **Status bar** (bottom): Project name, version, agent count, draft count, daemon connection indicator (green/red dot), scroll position ("line N of M" when scrolled up), "new output" badge with count when new content arrives while scrolled up, tailing indicator (green badge when streaming agent output), stdin prompt indicator (magenta badge when an agent is waiting for input), and workflow stage indicator.
 
 #### Using the shell
 
@@ -4374,6 +4411,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.18.2 | Shell TUI: scrollback & command output visibility | Done |
 | v0.10.18.3 | Verification streaming, heartbeat & configurable timeout | Done |
 | v0.10.18.4 | Live agent output in shell & terms consent | Done |
+| v0.10.18.5 | Agent stdin relay & interactive prompt handling | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

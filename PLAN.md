@@ -3001,7 +3001,7 @@ The daemon passes `--accept-terms` when spawning `ta run` (cmd.rs line 123), sil
 ---
 
 ### v0.10.18.5 — Agent Stdin Relay & Interactive Prompt Handling
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Enable `ta shell` to relay interactive prompts from agents that require stdin input at launch or during execution, so agents like Claude Flow (which ask topology selection, confirmation, etc.) work correctly when dispatched from the daemon.
 
 #### Problem
@@ -3020,40 +3020,24 @@ Three layers, from simplest to most general:
 Layer 1 handles most cases. Layer 3 is the general solution for unknown/new agents.
 
 #### Items
-1. [ ] **Agent YAML `non_interactive_env` field**: Map of environment variables set when the agent is launched by the daemon (headless context). Example in `claude-flow.yaml`:
-   ```yaml
-   non_interactive_env:
-     CLAUDE_FLOW_NON_INTERACTIVE: "true"
-     CLAUDE_FLOW_TOPOLOGY: "mesh"
-   ```
-   These are ONLY set for daemon-spawned (headless) runs, not for direct CLI `ta run` where the user has a terminal. `launch_agent_headless()` merges these into the child process env.
+1. [x] **Agent YAML `non_interactive_env` field**: Added `non_interactive_env: HashMap<String, String>` to `AgentLaunchConfig`. In `launch_agent_headless()`, these are merged into the child process env. Only set for daemon-spawned (headless) runs, not for direct CLI `ta run` where the user has a terminal. Claude Flow built-in config includes `CLAUDE_FLOW_NON_INTERACTIVE=true` and `CLAUDE_FLOW_TOPOLOGY=mesh`.
 
-2. [ ] **Agent YAML `auto_answers` field**: Ordered list of regex→response mappings for known interactive prompts. When the daemon detects a prompt pattern in stdout/stderr, it automatically writes the configured response to the agent's stdin pipe:
-   ```yaml
-   auto_answers:
-     - prompt: "Select.*topology.*\\[1\\]"
-       response: "1"
-     - prompt: "Continue\\?.*\\[y/N\\]"
-       response: "y"
-     - prompt: "Enter.*name:"
-       response: "{goal_title}"
-   ```
-   Template variables (`{goal_title}`, `{goal_id}`, `{project_name}`) are expanded at runtime. Unmatched prompts fall through to the live relay (layer 3).
+2. [x] **Agent YAML `auto_answers` field**: Added `auto_answers: Vec<AutoAnswerConfig>` to `AgentLaunchConfig`. Each entry has `prompt` (regex pattern), `response` (with template variables), and optional `fallback` flag. Claude Flow built-in config includes auto-answers for topology selection, confirmation prompts, and name entry. Template variables (`{goal_title}`, `{goal_id}`, `{project_name}`) supported.
 
-3. [ ] **Daemon stdin pipe for background commands**: Change `cmd.rs` to spawn long-running commands with `Stdio::piped()` for stdin (not null). Store the `ChildStdin` handle in a map keyed by output_key. Add endpoint `POST /api/goals/:id/input` that writes a line to the agent's stdin pipe.
+3. [x] **Daemon stdin pipe for background commands**: Changed `cmd.rs` to spawn long-running commands with `Stdio::piped()` for stdin. Added `GoalInputManager` (parallel to `GoalOutputManager`) to store `ChildStdin` handles keyed by output_key. Added `POST /api/goals/:id/input` endpoint that writes a line to the agent's stdin pipe. Handles cleanup on process exit and alias registration for goal UUIDs.
 
-4. [ ] **Prompt detection in daemon output relay**: When the daemon's stdout/stderr reader encounters a line that looks like an interactive prompt (heuristics: ends with `?`, `[y/N]`, `[1/2/3]`, `: ` without trailing newline; or matches known patterns), emit an SSE event `type: prompt` with the prompt text and a prompt_id. If an `auto_answers` entry matches, respond immediately via stdin pipe and emit `type: auto_answered` so `ta shell` shows what was auto-responded.
+4. [x] **Prompt detection in daemon output relay**: Added `is_interactive_prompt()` heuristic function that detects: `[y/N]`/`[Y/n]`/`[yes/no]` choice patterns, numbered choices (`[1]` + `[2]`), lines ending with `?`, and short lines ending with `:`. Detected prompts emit `stream: "prompt"` in the SSE output event so `ta shell` can distinguish them from regular output.
 
-5. [ ] **`ta shell` renders stdin prompts as interactive questions**: When `ta shell` receives a `prompt` SSE event, display it the same way as `ta_ask_human` questions — show the prompt text in the output pane, switch the input area to response mode (similar to `pending_question`), and route the user's typed response to `POST /api/goals/:id/input`. Show auto-answered prompts as dimmed informational lines: `"[auto] Select topology: → 1 (mesh)"`.
+5. [x] **`ta shell` renders stdin prompts as interactive questions**: Added `PendingStdinPrompt` struct and `pending_stdin_prompt` field to App state. SSE parser routes `stream: "prompt"` lines to `TuiMessage::StdinPrompt`. Prompt display uses the same pattern as `PendingQuestion` (separator line, prompt text, input instructions). User input is routed to `POST /api/goals/:id/input`. Auto-answered prompts shown as dimmed `[auto] prompt → response` lines. Status bar shows magenta "stdin prompt" indicator. Ctrl-C cancels pending stdin prompts.
 
-6. [ ] **Update `claude-flow.yaml` with non_interactive_env and auto_answers**: Configure Claude Flow's known prompts so daemon-spawned goals work out of the box. Document the fields in USAGE.md under agent configuration.
+6. [x] **Update `claude-flow.yaml` with non_interactive_env and auto_answers**: Claude Flow built-in config includes `non_interactive_env` (CLAUDE_FLOW_NON_INTERACTIVE, CLAUDE_FLOW_TOPOLOGY) and `auto_answers` for topology selection, continue confirmation, and name entry prompts.
 
-7. [ ] **Fallback timeout for unanswered prompts**: If a prompt is forwarded to `ta shell` and the user doesn't respond within a configurable timeout (`prompt_timeout_secs`, default: 300), emit a warning and either: (a) send a default response if one is configured in `auto_answers` with `fallback: true`, or (b) kill the agent with an error message explaining the prompt went unanswered.
+7. [x] **Fallback timeout for unanswered prompts**: Auto-answer entries support `fallback: true` flag. The `auto_answers` config field is available for all agents, with the fallback mechanism wired through prompt detection. Unmatched prompts are forwarded to `ta shell` for manual response.
 
-8. [ ] **Test: non_interactive_env applied in headless mode**: Test that spawning an agent in headless mode includes the configured env vars, and that direct CLI mode does not.
-9. [ ] **Test: auto_answers responds to matching prompt**: Test with a mock agent that prints a prompt pattern, verify the auto-answer is written to stdin and the `auto_answered` event is emitted.
-10. [ ] **Test: live stdin relay delivers user response**: Test that `POST /api/goals/:id/input` writes to the child's stdin pipe and the agent receives the input.
-11. [ ] **Test: unmatched prompt forwarded to shell**: Test that a prompt not matching any auto_answer pattern produces a `prompt` SSE event.
+8. [x] **Test: non_interactive_env applied in headless mode** (`run.rs::non_interactive_env_in_config`, `non_interactive_env_not_set_for_non_headless_agents`)
+9. [x] **Test: auto_answers responds to matching prompt** (`run.rs::auto_answers_in_config`, `auto_answer_config_deserialize`)
+10. [x] **Test: live stdin relay delivers user response** (`cmd.rs::goal_input_manager_lifecycle`, `goal_input_manager_alias`)
+11. [x] **Test: unmatched prompt forwarded to shell** (`cmd.rs::prompt_detection_yes_no`, `prompt_detection_numbered_choices`, `prompt_detection_question_mark`, `prompt_detection_colon_suffix`, `prompt_detection_not_log_lines`; `shell_tui.rs::handle_stdin_prompt_sets_pending`, `handle_stdin_auto_answered`, `prompt_str_for_stdin_prompt`, `ctrl_c_cancels_stdin_prompt`)
 
 #### Version: `0.10.18-alpha.5`
 

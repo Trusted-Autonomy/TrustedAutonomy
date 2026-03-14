@@ -41,6 +41,10 @@ pub enum TuiMessage {
     AgentQuestion(PendingQuestion),
     /// Live agent output line from goal output stream (v0.10.11).
     AgentOutput(AgentOutputLine),
+    /// An agent is requesting stdin input via a detected prompt (v0.10.18.5).
+    StdinPrompt(PendingStdinPrompt),
+    /// An agent prompt was auto-answered (v0.10.18.5).
+    StdinAutoAnswered { prompt: String, response: String },
     /// A goal started — may trigger auto-tail (v0.10.11).
     GoalStarted { goal_id: String, title: String },
     /// Agent output stream ended (goal process exited).
@@ -75,6 +79,13 @@ pub struct PendingQuestion {
     pub response_hint: String,
     pub choices: Vec<String>,
     pub turn: u32,
+}
+
+/// A pending stdin prompt from an agent process that needs a human response (v0.10.18.5).
+#[derive(Clone, Debug)]
+pub struct PendingStdinPrompt {
+    pub goal_id: String,
+    pub prompt_text: String,
 }
 
 /// A line in the output pane, with optional styling.
@@ -178,6 +189,8 @@ struct App {
     session_id: Option<String>,
     /// Pending agent question awaiting human response.
     pending_question: Option<PendingQuestion>,
+    /// Pending stdin prompt from agent process awaiting user input (v0.10.18.5).
+    pending_stdin_prompt: Option<PendingStdinPrompt>,
     /// Goal ID currently being tailed for agent output (v0.10.11).
     tailing_goal: Option<String>,
     /// Maximum output buffer lines (configurable, v0.10.11).
@@ -215,6 +228,7 @@ impl App {
             completions: Vec::new(),
             session_id,
             pending_question: None,
+            pending_stdin_prompt: None,
             tailing_goal: None,
             output_buffer_limit: 50000,
             auto_tail: true,
@@ -248,7 +262,9 @@ impl App {
     }
 
     fn prompt_str(&self) -> String {
-        if let Some(ref q) = self.pending_question {
+        if let Some(ref _sp) = self.pending_stdin_prompt {
+            "[stdin] > ".to_string()
+        } else if let Some(ref q) = self.pending_question {
             format!("[agent Q{}] > ", q.turn)
         } else if self.workflow_prompt.is_some() {
             "workflow> ".to_string()
@@ -713,6 +729,10 @@ async fn handle_terminal_event(
                             "Detached from {} (Ctrl-C)",
                             short
                         )));
+                    } else if app.pending_stdin_prompt.is_some() {
+                        // Cancel pending stdin prompt (v0.10.18.5).
+                        app.pending_stdin_prompt = None;
+                        app.push_output(OutputLine::info("Stdin prompt cancelled.".to_string()));
                     } else if app.pending_question.is_some() {
                         // Cancel pending question prompt.
                         app.pending_question = None;
@@ -755,6 +775,43 @@ async fn handle_terminal_event(
                         let prompt = app.prompt_str();
                         app.push_output(OutputLine::command(format!("{}{}", prompt, text)));
                         app.scroll_to_bottom();
+
+                        // If there's a pending stdin prompt, route to goal input endpoint (v0.10.18.5).
+                        if let Some(sp) = app.pending_stdin_prompt.take() {
+                            let client = client.clone();
+                            let base_url = app.base_url.clone();
+                            let tx = tx.clone();
+                            tokio::spawn(async move {
+                                let url = format!("{}/api/goals/{}/input", base_url, sp.goal_id);
+                                let result = client
+                                    .post(&url)
+                                    .json(&serde_json::json!({ "input": text }))
+                                    .send()
+                                    .await;
+                                match result {
+                                    Ok(resp) if resp.status().is_success() => {
+                                        let _ = tx.send(TuiMessage::CommandResponse(format!(
+                                            "Sent input to agent: {}",
+                                            text
+                                        )));
+                                    }
+                                    Ok(resp) => {
+                                        let body = resp.text().await.unwrap_or_default();
+                                        let _ = tx.send(TuiMessage::CommandResponse(format!(
+                                            "Error sending input: {}",
+                                            body
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(TuiMessage::CommandResponse(format!(
+                                            "Error sending stdin input: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            });
+                            return;
+                        }
 
                         // If there's a pending agent question, route to interaction endpoint.
                         if let Some(pq) = app.pending_question.take() {
@@ -1014,6 +1071,23 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             ));
             app.scroll_to_bottom();
             app.pending_question = Some(pq);
+        }
+        TuiMessage::StdinPrompt(sp) => {
+            // Display the stdin prompt and switch to input mode (v0.10.18.5 item 5).
+            app.push_output(OutputLine::info("\n━━━ Agent Stdin Prompt ━━━".to_string()));
+            app.push_output(OutputLine::info(sp.prompt_text.clone()));
+            app.push_output(OutputLine::info(
+                "Type your response and press Enter:".to_string(),
+            ));
+            app.scroll_to_bottom();
+            app.pending_stdin_prompt = Some(sp);
+        }
+        TuiMessage::StdinAutoAnswered { prompt, response } => {
+            // Show auto-answered prompt as dimmed informational line (v0.10.18.5 item 5).
+            app.push_output(OutputLine::event(format!(
+                "[auto] {} → {}",
+                prompt, response
+            )));
         }
         TuiMessage::AgentOutput(line) => {
             let styled = if line.stream == "stderr" {
@@ -1533,6 +1607,18 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    // Stdin prompt indicator (v0.10.18.5).
+    if app.pending_stdin_prompt.is_some() {
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            " stdin prompt ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Tailing indicator (v0.10.11).
     if let Some(ref goal_id) = app.tailing_goal {
         let short = &goal_id[..8.min(goal_id.len())];
@@ -1958,10 +2044,31 @@ async fn start_tail_stream(
                             let stream_name =
                                 json["stream"].as_str().unwrap_or("stdout").to_string();
                             let line = json["line"].as_str().unwrap_or("").to_string();
-                            let _ = tx.send(TuiMessage::AgentOutput(AgentOutputLine {
-                                stream: stream_name,
-                                line,
-                            }));
+                            // Route prompt-typed lines to the stdin prompt handler (v0.10.18.5).
+                            if stream_name == "prompt" {
+                                let _ = tx.send(TuiMessage::StdinPrompt(PendingStdinPrompt {
+                                    goal_id: target.clone(),
+                                    prompt_text: line,
+                                }));
+                            } else if stream_name == "auto_answered" {
+                                // Parse "[auto] prompt → response" format.
+                                if let Some(arrow_pos) = line.find(" → ") {
+                                    let prompt = line[7..arrow_pos].to_string(); // skip "[auto] "
+                                    let response = line[arrow_pos + 5..].to_string(); // skip " → "
+                                    let _ =
+                                        tx.send(TuiMessage::StdinAutoAnswered { prompt, response });
+                                } else {
+                                    let _ = tx.send(TuiMessage::AgentOutput(AgentOutputLine {
+                                        stream: stream_name,
+                                        line,
+                                    }));
+                                }
+                            } else {
+                                let _ = tx.send(TuiMessage::AgentOutput(AgentOutputLine {
+                                    stream: stream_name,
+                                    line,
+                                }));
+                            }
                         }
                     }
                 }
@@ -3372,5 +3479,79 @@ mod tests {
         // Another scroll up doesn't exceed max.
         app.scroll_up(3);
         assert_eq!(app.scroll_offset, max);
+    }
+
+    // ── v0.10.18.5 tests ──────────────────────────────────────
+
+    #[test]
+    fn handle_stdin_prompt_sets_pending() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        let sp = PendingStdinPrompt {
+            goal_id: "goal-1".into(),
+            prompt_text: "Select topology:".into(),
+        };
+        handle_tui_message(&mut app, TuiMessage::StdinPrompt(sp));
+        assert!(app.pending_stdin_prompt.is_some());
+        assert_eq!(
+            app.pending_stdin_prompt.as_ref().unwrap().prompt_text,
+            "Select topology:"
+        );
+        // Should have added output lines for the prompt display.
+        assert!(!app.output.is_empty());
+        assert!(app.output.iter().any(|l| l.text.contains("Stdin Prompt")));
+    }
+
+    #[test]
+    fn handle_stdin_auto_answered() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        handle_tui_message(
+            &mut app,
+            TuiMessage::StdinAutoAnswered {
+                prompt: "Continue?".into(),
+                response: "y".into(),
+            },
+        );
+        assert!(!app.output.is_empty());
+        assert!(app.output.last().unwrap().text.contains("[auto]"));
+        assert!(app.output.last().unwrap().text.contains("Continue?"));
+    }
+
+    #[test]
+    fn prompt_str_for_stdin_prompt() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        assert_eq!(app.prompt_str(), "ta> ");
+        app.pending_stdin_prompt = Some(PendingStdinPrompt {
+            goal_id: "goal-1".into(),
+            prompt_text: "Enter name:".into(),
+        });
+        assert_eq!(app.prompt_str(), "[stdin] > ");
+    }
+
+    #[test]
+    fn ctrl_c_cancels_stdin_prompt() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.pending_stdin_prompt = Some(PendingStdinPrompt {
+            goal_id: "goal-1".into(),
+            prompt_text: "Enter name:".into(),
+        });
+        // Simulate Ctrl-C by directly clearing the prompt.
+        app.pending_stdin_prompt = None;
+        assert!(app.pending_stdin_prompt.is_none());
     }
 }

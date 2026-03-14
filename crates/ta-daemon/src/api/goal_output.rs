@@ -85,6 +85,147 @@ impl GoalOutputManager {
     }
 }
 
+// ── Stdin relay for background agent processes (v0.10.18.5) ──────
+
+use serde::Deserialize;
+use tokio::io::AsyncWriteExt;
+use tokio::process::ChildStdin;
+
+/// Manages per-goal stdin handles for interactive prompt relay.
+///
+/// When a background command is spawned with piped stdin, the handle is
+/// stored here so that `POST /api/goals/:id/input` can write to it.
+#[derive(Clone)]
+pub struct GoalInputManager {
+    handles: Arc<Mutex<HashMap<String, Arc<Mutex<ChildStdin>>>>>,
+}
+
+impl GoalInputManager {
+    pub fn new() -> Self {
+        Self {
+            handles: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Store a stdin handle for a goal output key.
+    pub async fn register(&self, goal_id: &str, stdin: ChildStdin) {
+        let mut handles = self.handles.lock().await;
+        handles.insert(goal_id.to_string(), Arc::new(Mutex::new(stdin)));
+    }
+
+    /// Write a line to the agent's stdin pipe. Returns an error if the goal
+    /// has no registered stdin handle or the write fails.
+    pub async fn send_input(&self, goal_id: &str, input: &str) -> Result<(), String> {
+        let handle = {
+            let handles = self.handles.lock().await;
+            handles.get(goal_id).cloned()
+        };
+
+        let Some(handle) = handle else {
+            // Try prefix match (same resolution logic as output).
+            let handles = self.handles.lock().await;
+            let forward: Vec<_> = handles
+                .keys()
+                .filter(|id| id.starts_with(goal_id))
+                .cloned()
+                .collect();
+            if forward.len() == 1 {
+                let h = handles.get(&forward[0]).cloned().unwrap();
+                drop(handles);
+                let mut stdin = h.lock().await;
+                stdin
+                    .write_all(format!("{}\n", input).as_bytes())
+                    .await
+                    .map_err(|e| {
+                        format!("Failed to write to agent stdin for '{}': {}", goal_id, e)
+                    })?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|e| format!("Failed to flush agent stdin for '{}': {}", goal_id, e))?;
+                return Ok(());
+            }
+            return Err(format!(
+                "No stdin handle for goal '{}'. The goal may have already exited or was not \
+                 started with stdin relay enabled.",
+                goal_id,
+            ));
+        };
+
+        let mut stdin = handle.lock().await;
+        stdin
+            .write_all(format!("{}\n", input).as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write to agent stdin for '{}': {}", goal_id, e))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| format!("Failed to flush agent stdin for '{}': {}", goal_id, e))?;
+        Ok(())
+    }
+
+    /// Remove a goal's stdin handle (call when the goal process exits).
+    pub async fn remove(&self, goal_id: &str) {
+        let mut handles = self.handles.lock().await;
+        handles.remove(goal_id);
+    }
+
+    /// Register an alias for stdin (mirrors GoalOutputManager::add_alias).
+    pub async fn add_alias(&self, alias: &str, primary: &str) {
+        let handles = self.handles.lock().await;
+        if let Some(handle) = handles.get(primary) {
+            let handle = handle.clone();
+            drop(handles);
+            let mut handles = self.handles.lock().await;
+            handles.insert(alias.to_string(), handle);
+        }
+    }
+}
+
+/// Request body for `POST /api/goals/:id/input`.
+#[derive(Deserialize)]
+pub struct GoalInputRequest {
+    /// The text to send to the agent's stdin.
+    pub input: String,
+}
+
+/// `POST /api/goals/:id/input` — Write a line to the agent's stdin pipe (v0.10.18.5).
+pub async fn goal_input_handler(
+    State(state): State<Arc<AppState>>,
+    Path(goal_id): Path<String>,
+    Json(body): Json<GoalInputRequest>,
+) -> impl IntoResponse {
+    let resolved_id = resolve_goal_id(&state, &goal_id).await;
+    let target_id = resolved_id.as_deref().unwrap_or(&goal_id);
+
+    match state.goal_input.send_input(target_id, &body.input).await {
+        Ok(()) => {
+            tracing::info!(
+                goal_id = target_id,
+                input_len = body.input.len(),
+                "Stdin input delivered to agent"
+            );
+            Json(serde_json::json!({
+                "status": "delivered",
+                "goal_id": target_id,
+                "input_length": body.input.len(),
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            tracing::warn!(goal_id = target_id, error = %e, "Failed to deliver stdin input");
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": e,
+                    "hint": "Check that the goal is still running with: ta goal list"
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// `GET /api/goals/:id/output` — SSE stream of live agent output.
 pub async fn goal_output_stream(
     State(state): State<Arc<AppState>>,

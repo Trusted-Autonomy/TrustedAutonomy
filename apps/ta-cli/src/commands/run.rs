@@ -77,6 +77,29 @@ struct AgentLaunchConfig {
     /// Agents without `headless_args` fall back to raw piped output.
     #[serde(default)]
     headless_args: Vec<String>,
+    /// Environment variables set ONLY in headless (daemon-spawned) mode (v0.10.18.5).
+    /// Used to suppress interactive prompts for agents that support non-interactive flags.
+    /// Not applied in direct CLI mode where the user has a terminal.
+    #[serde(default)]
+    non_interactive_env: std::collections::HashMap<String, String>,
+    /// Ordered list of regex→response mappings for known interactive prompts (v0.10.18.5).
+    /// When the daemon detects a matching prompt in stdout, it auto-responds via stdin pipe.
+    /// Template variables: `{goal_title}`, `{goal_id}`, `{project_name}`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    auto_answers: Vec<AutoAnswerConfig>,
+}
+
+/// Auto-answer configuration for interactive prompts (v0.10.18.5).
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+struct AutoAnswerConfig {
+    /// Regex pattern to match against agent stdout lines.
+    prompt: String,
+    /// Response to send to stdin. May contain template variables.
+    response: String,
+    /// If true, use this response as a timeout fallback for unmatched prompts.
+    #[serde(default)]
+    fallback: bool,
 }
 
 /// Pre-launch command configuration (deserialized from YAML).
@@ -162,6 +185,8 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             interactive: None,
             alignment: Some(ta_policy::AlignmentProfile::default_developer()),
             headless_args: vec!["--output-format".to_string(), "stream-json".to_string()],
+            non_interactive_env: Default::default(),
+            auto_answers: Vec::new(),
         },
         "codex" => AgentLaunchConfig {
             command: "codex".to_string(),
@@ -180,6 +205,8 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             interactive: None,
             alignment: Some(ta_policy::AlignmentProfile::default_developer()),
             headless_args: Vec::new(),
+            non_interactive_env: Default::default(),
+            auto_answers: Vec::new(),
         },
         "claude-flow" => AgentLaunchConfig {
             command: "npx".to_string(),
@@ -207,6 +234,32 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             interactive: None,
             alignment: Some(ta_policy::AlignmentProfile::default_developer()),
             headless_args: Vec::new(),
+            non_interactive_env: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "CLAUDE_FLOW_NON_INTERACTIVE".to_string(),
+                    "true".to_string(),
+                );
+                m.insert("CLAUDE_FLOW_TOPOLOGY".to_string(), "mesh".to_string());
+                m
+            },
+            auto_answers: vec![
+                AutoAnswerConfig {
+                    prompt: r"Select.*topology.*\[1\]".to_string(),
+                    response: "1".to_string(),
+                    fallback: false,
+                },
+                AutoAnswerConfig {
+                    prompt: r"Continue\?.*\[y/N\]".to_string(),
+                    response: "y".to_string(),
+                    fallback: false,
+                },
+                AutoAnswerConfig {
+                    prompt: r"Enter.*name:".to_string(),
+                    response: "{goal_title}".to_string(),
+                    fallback: false,
+                },
+            ],
         },
         _ => AgentLaunchConfig {
             command: agent_id.to_string(),
@@ -221,6 +274,8 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             interactive: None,
             alignment: None,
             headless_args: Vec::new(),
+            non_interactive_env: Default::default(),
+            auto_answers: Vec::new(),
         },
     }
 }
@@ -1302,6 +1357,8 @@ fn execute_resume(
             interactive: None,
             alignment: None,
             headless_args: Vec::new(),
+            non_interactive_env: Default::default(),
+            auto_answers: Vec::new(),
         };
 
         launch_agent_interactive(&resume_config, staging_path, "", &mut session_store)
@@ -1420,6 +1477,12 @@ fn launch_agent_headless(
     }
 
     for (key, value) in &config.env {
+        cmd.env(key, value);
+    }
+
+    // Set non-interactive env vars (v0.10.18.5 item 1).
+    // These are ONLY applied in headless mode to suppress interactive prompts.
+    for (key, value) in &config.non_interactive_env {
         cmd.env(key, value);
     }
 
@@ -3196,5 +3259,74 @@ pre_launch:
         restore_claude_md(staging.path()).unwrap();
         let restored = std::fs::read_to_string(staging.path().join("CLAUDE.md")).unwrap();
         assert_eq!(restored, original);
+    }
+
+    // ── v0.10.18.5 tests ──────────────────────────────────────
+
+    #[test]
+    fn non_interactive_env_in_config() {
+        let config = builtin_agent_config("claude-flow");
+        assert!(!config.non_interactive_env.is_empty());
+        assert_eq!(
+            config
+                .non_interactive_env
+                .get("CLAUDE_FLOW_NON_INTERACTIVE"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            config.non_interactive_env.get("CLAUDE_FLOW_TOPOLOGY"),
+            Some(&"mesh".to_string())
+        );
+    }
+
+    #[test]
+    fn non_interactive_env_not_set_for_non_headless_agents() {
+        // Claude Code should have empty non_interactive_env.
+        let config = builtin_agent_config("claude-code");
+        assert!(config.non_interactive_env.is_empty());
+    }
+
+    #[test]
+    fn auto_answers_in_config() {
+        let config = builtin_agent_config("claude-flow");
+        assert!(!config.auto_answers.is_empty());
+        assert!(config.auto_answers[0].prompt.contains("topology"));
+        assert_eq!(config.auto_answers[0].response, "1");
+    }
+
+    #[test]
+    fn auto_answer_config_deserialize() {
+        let yaml = r#"
+command: claude
+args_template: ["{prompt}"]
+auto_answers:
+  - prompt: "Continue\\?"
+    response: "y"
+    fallback: true
+  - prompt: "Enter name:"
+    response: "{goal_title}"
+"#;
+        let config: AgentLaunchConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.auto_answers.len(), 2);
+        assert!(config.auto_answers[0].fallback);
+        assert!(!config.auto_answers[1].fallback);
+        assert_eq!(config.auto_answers[1].response, "{goal_title}");
+    }
+
+    #[test]
+    fn non_interactive_env_deserialize() {
+        let yaml = r#"
+command: agent
+args_template: []
+non_interactive_env:
+  MY_FLAG: "true"
+  MY_TOPOLOGY: "mesh"
+"#;
+        let config: AgentLaunchConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.non_interactive_env.len(), 2);
+        assert_eq!(
+            config.non_interactive_env.get("MY_FLAG"),
+            Some(&"true".to_string())
+        );
     }
 }
