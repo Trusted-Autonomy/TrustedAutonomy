@@ -3564,6 +3564,19 @@ The current `--listen` mode on `ta-channel-discord` is a quick integration that 
 20. [ ] **PID guard for listener**: (done in v0.10.18) Prevent duplicate listener instances via `.ta/discord-listener.pid`. Verify guard works correctly when daemon manages listener lifecycle.
 21. [ ] **`ta run --quiet`**: Suppress streaming agent output but still print completion/failure summary. Default for daemon-dispatched and channel-dispatched goals. Inverse: `ta run --verbose` (current default behavior when run interactively). Completion and failure messages always print regardless of verbosity.
 
+#### Goal process monitoring & diagnostics
+Known issue from v0.10.18: Discord-dispatched `ta run` created a goal record (state: `running`) but the agent process never actually started. The goal became a zombie — no agent log, no draft, no error, no timeout. Root causes:
+- The daemon's `POST /api/cmd` spawns `ta run` as a detached child with piped stdio. If the child fails to launch (e.g., binary not found, macOS code signature block, missing env vars), the error is captured in stderr but the goal state is never updated to `failed`.
+- No heartbeat or liveness check: once a goal enters `running`, nothing verifies the agent process is still alive. A crashed or never-started agent leaves the goal stuck forever.
+- `ta goal list` shows `running` with no way to distinguish "actively working" from "zombie".
+
+22. [ ] **Goal process liveness monitor**: Daemon periodically checks that the agent PID for each `running` goal is still alive. If the process has exited, transition the goal to `completed` (exit 0) or `failed` (non-zero/missing) and emit the appropriate event. Check interval: configurable, default 30s.
+23. [ ] **Goal launch failure capture**: If `ta run` fails to start (spawn error, immediate crash, missing binary), update the goal state to `failed` with the error message before returning the HTTP response. The Discord listener (or any caller) should see the failure in the command output.
+24. [ ] **`ta goal status` shows process health**: Include PID, whether the process is alive, elapsed time, last agent log line, and last event timestamp. Flag goals where the process is dead but state is still `running`.
+25. [ ] **`ta goal gc` detects zombies**: Extend `goal gc` to find goals in `running` state whose agent process is no longer alive. Offer to transition them to `failed` with a "process exited without updating state" reason.
+26. [ ] **Goal timeout**: Configurable maximum goal duration (default: none for interactive, 4h for daemon-dispatched). Goal transitions to `timed_out` if exceeded. Daemon kills the agent process if still alive.
+27. [ ] **macOS code signing in plugin install**: When copying plugin binaries to `.ta/plugins/`, re-sign with `codesign --force --sign -` on macOS to prevent AppleSystemPolicy from blocking execution. This caused the v0.10.18 Discord listener to be SIGKILL'd immediately on launch from `.ta/plugins/`.
+
 #### Version: `0.12.1-alpha`
 
 ---
