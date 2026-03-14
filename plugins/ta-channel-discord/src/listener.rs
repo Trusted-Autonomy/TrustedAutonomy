@@ -10,6 +10,8 @@
 //! - Hardcoded intents (GUILD_MESSAGES + MESSAGE_CONTENT)
 //! - No rate limiting on command forwarding
 
+use std::path::PathBuf;
+
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio_tungstenite::tungstenite::Message;
@@ -21,8 +23,103 @@ const OP_DISPATCH: u64 = 0;
 const OP_HELLO: u64 = 10;
 const OP_HEARTBEAT_ACK: u64 = 11;
 
+/// PID file path for the listener (prevents duplicate instances).
+fn pid_file_path() -> PathBuf {
+    // Use .ta/ if it exists (running from project root), otherwise /tmp.
+    let ta_dir = std::env::current_dir()
+        .ok()
+        .map(|d| d.join(".ta"))
+        .filter(|d| d.is_dir());
+    match ta_dir {
+        Some(dir) => dir.join("discord-listener.pid"),
+        None => std::env::temp_dir().join("ta-discord-listener.pid"),
+    }
+}
+
+/// Check if another listener is already running. Returns Ok(()) if clear to proceed.
+fn acquire_pid_lock() -> Result<(), String> {
+    let pid_path = pid_file_path();
+    if pid_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                // Check if the process is still alive.
+                #[cfg(unix)]
+                {
+                    use std::process::Command;
+                    if Command::new("kill")
+                        .args(["-0", &pid.to_string()])
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                    {
+                        return Err(format!(
+                            "Another Discord listener is already running (PID {}). \
+                             Stop it first, or remove {}",
+                            pid,
+                            pid_path.display()
+                        ));
+                    }
+                }
+                #[cfg(windows)]
+                {
+                    use std::process::Command;
+                    if Command::new("tasklist")
+                        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                        .output()
+                        .map(|o| {
+                            let stdout = String::from_utf8_lossy(&o.stdout);
+                            stdout.contains(&pid.to_string()) && !stdout.contains("No tasks")
+                        })
+                        .unwrap_or(false)
+                    {
+                        return Err(format!(
+                            "Another Discord listener is already running (PID {}). \
+                             Stop it first, or remove {}",
+                            pid,
+                            pid_path.display()
+                        ));
+                    }
+                }
+            }
+        }
+        // Stale PID file — remove it.
+        eprintln!(
+            "[discord-listener] Removing stale PID file: {}",
+            pid_path.display()
+        );
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    // Write our PID.
+    let pid = std::process::id();
+    if let Err(e) = std::fs::write(&pid_path, pid.to_string()) {
+        return Err(format!(
+            "Cannot write PID file {}: {}",
+            pid_path.display(),
+            e
+        ));
+    }
+    eprintln!(
+        "[discord-listener] PID file: {} ({})",
+        pid_path.display(),
+        pid
+    );
+    Ok(())
+}
+
+/// Remove PID file on shutdown.
+fn release_pid_lock() {
+    let pid_path = pid_file_path();
+    let _ = std::fs::remove_file(&pid_path);
+}
+
 /// Run the persistent listener loop.
 pub async fn run(token: &str, channel_id: &str, daemon_url: &str, prefix: &str) {
+    if let Err(e) = acquire_pid_lock() {
+        eprintln!("[discord-listener] {}", e);
+        std::process::exit(1);
+    }
+
     eprintln!("[discord-listener] Connecting to Discord Gateway...");
     eprintln!(
         "[discord-listener] Watching channel {} for prefix {:?}",
@@ -33,20 +130,27 @@ pub async fn run(token: &str, channel_id: &str, daemon_url: &str, prefix: &str) 
         daemon_url
     );
 
-    loop {
-        match run_session(token, channel_id, daemon_url, prefix).await {
-            Ok(()) => {
-                eprintln!("[discord-listener] Session ended cleanly. Reconnecting in 5s...");
+    // Ensure PID file is cleaned up on exit.
+    let result = async {
+        loop {
+            match run_session(token, channel_id, daemon_url, prefix).await {
+                Ok(()) => {
+                    eprintln!("[discord-listener] Session ended cleanly. Reconnecting in 5s...");
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[discord-listener] Session error: {}. Reconnecting in 5s...",
+                        e
+                    );
+                }
             }
-            Err(e) => {
-                eprintln!(
-                    "[discord-listener] Session error: {}. Reconnecting in 5s...",
-                    e
-                );
-            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
+    .await;
+
+    release_pid_lock();
+    result
 }
 
 async fn run_session(
@@ -213,6 +317,7 @@ async fn run_session(
             }
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("[discord-listener] Shutting down...");
+                release_pid_lock();
                 let close = Message::Close(None);
                 let _ = write.send(close).await;
                 return Ok(());
