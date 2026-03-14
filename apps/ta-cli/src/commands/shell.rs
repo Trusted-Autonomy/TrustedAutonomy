@@ -83,105 +83,10 @@ pub fn execute(
 }
 
 /// Resolve the daemon URL from `.ta/daemon.toml` or default.
-pub(crate) fn resolve_daemon_url(project_root: &Path) -> String {
-    let config_path = project_root.join(".ta").join("daemon.toml");
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        if let Ok(config) = content.parse::<toml::Table>() {
-            let bind = config
-                .get("server")
-                .and_then(|s| s.get("bind"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("127.0.0.1");
-            let port = config
-                .get("server")
-                .and_then(|s| s.get("port"))
-                .and_then(|v| v.as_integer())
-                .unwrap_or(7700);
-            return format!("http://{}:{}", bind, port);
-        }
-    }
-    "http://127.0.0.1:7700".to_string()
-}
-
-/// Auto-start the daemon in the background if not running (v0.10.16, item 5).
 ///
-/// Checks for an existing `.ta/daemon.pid` file to avoid double-starting.
-/// Spawns `ta-daemon --api` as a detached background process with output
-/// redirected to `.ta/daemon.log`.
-fn auto_start_daemon(project_root: &Path) -> anyhow::Result<()> {
-    // Check for stale PID file.
-    let pid_path = project_root.join(".ta").join("daemon.pid");
-    if pid_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&pid_path) {
-            if let Some(pid_str) = content
-                .lines()
-                .find(|l| l.starts_with("pid="))
-                .and_then(|l| l.strip_prefix("pid="))
-            {
-                if let Ok(pid) = pid_str.parse::<u32>() {
-                    // Check if the process is still alive.
-                    #[cfg(unix)]
-                    {
-                        use std::process::Command;
-                        let alive = Command::new("kill")
-                            .args(["-0", &pid.to_string()])
-                            .output()
-                            .map(|o| o.status.success())
-                            .unwrap_or(false);
-                        if alive {
-                            return Err(anyhow::anyhow!(
-                                "Daemon process {} appears to be running but not responding. \
-                                 Kill it with: kill {} ; rm {}",
-                                pid,
-                                pid,
-                                pid_path.display()
-                            ));
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    let _ = pid;
-                    // Stale PID file — remove it.
-                    let _ = std::fs::remove_file(&pid_path);
-                }
-            }
-        }
-    }
-
-    // Find the daemon binary (reuse version_guard logic).
-    let daemon_bin = super::version_guard::find_daemon_binary()?;
-
-    // Ensure .ta directory exists for log file.
-    let ta_dir = project_root.join(".ta");
-    std::fs::create_dir_all(&ta_dir)?;
-
-    let log_path = ta_dir.join("daemon.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| anyhow::anyhow!("Cannot open daemon log {}: {}", log_path.display(), e))?;
-
-    let stderr_log = log_file
-        .try_clone()
-        .map_err(|e| anyhow::anyhow!("Cannot clone log file handle: {}", e))?;
-
-    let child = std::process::Command::new(&daemon_bin)
-        .arg("--api")
-        .arg("--project-root")
-        .arg(project_root)
-        .stdout(log_file)
-        .stderr(stderr_log)
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", daemon_bin.display(), e))?;
-
-    eprintln!(
-        "  Started {} (pid {}), log: {}",
-        daemon_bin.display(),
-        child.id(),
-        log_path.display()
-    );
-
-    Ok(())
+/// Delegates to `daemon::resolve_daemon_url()` for the shared implementation.
+pub(crate) fn resolve_daemon_url(project_root: &Path) -> String {
+    super::daemon::resolve_daemon_url(project_root, None)
 }
 
 async fn run_shell(
@@ -195,27 +100,14 @@ async fn run_shell(
     let mut status = fetch_status(&client, &base_url).await;
 
     if status.version.is_empty() || status.version == "?" {
-        // Try auto-start if daemon is not running (v0.10.16, item 5).
-        eprintln!(
-            "Daemon not reachable at {} — attempting auto-start...",
-            base_url
-        );
-        match auto_start_daemon(project_root) {
+        // Auto-start the daemon using the shared lifecycle helper (v0.10.18.6).
+        match super::daemon::ensure_running(project_root) {
             Ok(()) => {
-                // Wait for daemon to become healthy.
-                let mut healthy = false;
-                for _ in 0..20 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    let s = fetch_status(&client, &base_url).await;
-                    if !s.version.is_empty() && s.version != "?" {
-                        status = s;
-                        healthy = true;
-                        break;
-                    }
-                }
-                if !healthy {
-                    eprintln!("Error: Daemon started but did not become healthy within 10s.");
-                    eprintln!("  Check logs: .ta/daemon.log");
+                // Re-fetch status now that daemon is running.
+                status = fetch_status(&client, &base_url).await;
+                if status.version.is_empty() || status.version == "?" {
+                    eprintln!("Error: Daemon started but status fetch still failed.");
+                    eprintln!("  Check logs: ta daemon log");
                     return Err(anyhow::anyhow!("daemon not reachable at {}", base_url));
                 }
                 eprintln!("Daemon auto-started successfully (v{}).", status.version);
@@ -225,8 +117,8 @@ async fn run_shell(
                 eprintln!("  Auto-start failed: {}", e);
                 eprintln!();
                 eprintln!("Start the daemon manually with:");
-                eprintln!("  ta serve                       # starts daemon API in foreground");
-                eprintln!("  ta-daemon --api --project-root .");
+                eprintln!("  ta daemon start                # start in background");
+                eprintln!("  ta daemon start --foreground   # start in foreground");
                 return Err(anyhow::anyhow!("daemon not reachable at {}", base_url));
             }
         }
@@ -240,9 +132,8 @@ async fn run_shell(
             status.version, cli_version
         );
         eprintln!("  The daemon may behave differently than expected.");
-        eprintln!("  To fix: kill the old daemon and restart with the matching version:");
-        eprintln!("    pkill -f 'ta-daemon' && ta-daemon --api --project-root .");
-        eprintln!("  Or use: ./scripts/ta-shell.sh (auto-restarts stale daemons)");
+        eprintln!("  To fix: restart the daemon with the matching version:");
+        eprintln!("    ta daemon restart");
         eprintln!();
     }
 
@@ -332,7 +223,7 @@ async fn run_shell(
                 // Send input to daemon.
                 if daemon_down.load(Ordering::Relaxed) {
                     eprintln!("Warning: daemon is disconnected. Waiting for reconnect...");
-                    eprintln!("  (Restart with: ./scripts/ta-shell.sh)");
+                    eprintln!("  (Restart with: ta daemon restart)");
                 }
                 let result = send_input(&client, &base_url, trimmed, session_id.as_deref()).await;
                 match result {

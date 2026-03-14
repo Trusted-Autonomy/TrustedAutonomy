@@ -6,6 +6,7 @@ pub mod consent;
 pub mod context;
 pub mod conversation;
 pub mod credentials;
+pub mod daemon;
 pub mod dev;
 pub mod draft;
 pub mod events;

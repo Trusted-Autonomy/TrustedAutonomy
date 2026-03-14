@@ -179,17 +179,16 @@ There are three ways to work with TA, depending on how much control you want:
 
 **Option A -- Interactive shell** (recommended for getting started):
 
-Use the convenience script (starts the daemon automatically):
+Start the shell (auto-starts the daemon if needed):
 
 ```bash
-./scripts/ta-shell.sh           # macOS / Linux
-.\scripts\ta-shell.ps1          # Windows PowerShell
+ta shell                        # Starts daemon if needed, opens interactive shell
 ```
 
-Or start manually:
+Or manage the daemon explicitly:
 
 ```bash
-ta-daemon --project-root . &    # Start the daemon in the background
+ta daemon start                 # Start the daemon in the background
 ta shell                        # Open the interactive shell
 ```
 
@@ -266,10 +265,10 @@ cd my-project
 ta init --detect                        # Auto-detect toolchain, generate config
 
 # 2. Start daemon + open shell (one command)
-./scripts/ta-shell.sh                   # Starts daemon if needed, opens shell
+ta shell                                # Starts daemon if needed, opens shell
 
-# Or do it manually:
-# ta-daemon --project-root . &          # Background daemon on port 7700
+# Or manage daemon explicitly:
+# ta daemon start                       # Background daemon on port 7700
 # ta shell                              # Open the shell
 ```
 
@@ -2022,19 +2021,74 @@ You can also set the port in your gateway config so it starts automatically:
 web_ui_port = 7676
 ```
 
+### Daemon Lifecycle Management
+
+The `ta daemon` subcommand provides first-class control over the TA daemon process. You can start, stop, restart, inspect, and tail logs without needing wrapper scripts or the `ta-daemon` binary directly.
+
+#### Starting the daemon
+
+```bash
+# Start in the background (default)
+ta daemon start
+
+# Start on a custom port
+ta daemon start --port 9900
+
+# Start in the foreground (for debugging or containers)
+ta daemon start --foreground
+```
+
+The daemon writes its PID to `.ta/daemon.pid` and logs to `.ta/daemon.log`. On success, the command prints the PID, port, and log path.
+
+#### Stopping the daemon
+
+```bash
+ta daemon stop
+```
+
+Sends a graceful shutdown request via `POST /api/shutdown`, waits up to 5 seconds for the process to exit, and cleans up the PID file. If the HTTP endpoint is unreachable, falls back to sending SIGTERM by PID.
+
+#### Restarting the daemon
+
+```bash
+ta daemon restart
+
+# Restart on a different port
+ta daemon restart --port 8800
+```
+
+Stops the running daemon (if any), then starts a fresh one. Useful after upgrades or when the daemon version doesn't match the CLI version.
+
+#### Checking status
+
+```bash
+ta daemon status
+```
+
+Shows whether the daemon is running, its PID, port, version, project root, active agent count, and pending draft count. If the daemon is not running, it suggests `ta daemon start`.
+
+#### Tailing logs
+
+```bash
+# Show the last 50 lines (default)
+ta daemon log
+
+# Show the last 200 lines
+ta daemon log 200
+
+# Follow in real time (like tail -f)
+ta daemon log --follow
+```
+
+#### Auto-start
+
+Commands that need the daemon (`ta shell`, `ta run`, `ta dev`) automatically start it if it's not running. You don't need to run `ta daemon start` manually in normal workflows — it's there for explicit lifecycle control, debugging, and headless/server deployments.
+
 ### Daemon API
 
 The TA daemon exposes a full HTTP API that any interface (terminal, web, Discord, Slack, email) can connect to for commands, agent conversations, and event streams.
 
-#### Starting the API
-
-```bash
-# API mode (standalone HTTP server)
-ta-daemon --api --project-root .
-
-# MCP mode also starts the API server on port 7700
-ta-daemon --project-root .
-```
+#### Configuration
 
 The API listens on `127.0.0.1:7700` by default. Configure via `.ta/daemon.toml`:
 
@@ -2050,18 +2104,7 @@ cors_origins = ["*"]
 
 The daemon handles SIGINT (Ctrl-C) and SIGTERM for graceful shutdown on Unix, and Ctrl-C on Windows. In-flight requests complete before the server stops.
 
-A PID file is written to `.ta/daemon.pid` on startup with the process ID and bind address. It is automatically cleaned up on shutdown.
-
-#### Auto-Start Daemon
-
-When `ta shell` connects to the daemon and finds it unreachable, it automatically starts a background daemon process. The auto-start:
-
-1. Checks `.ta/daemon.pid` for an existing instance
-2. Locates the `ta-daemon` binary (same directory as the CLI, or via `ta-daemon` on PATH)
-3. Spawns the daemon in the background with `--api --project-root .`
-4. Waits up to 10 seconds for the daemon to become healthy
-
-No manual `ta-daemon &` needed — just run `ta shell`.
+A PID file is written to `.ta/daemon.pid` on startup with the process ID, port, and log path. It is automatically cleaned up on shutdown.
 
 #### Endpoints
 
@@ -2323,20 +2366,14 @@ The interactive shell (`ta shell`) is a full-screen TUI client for the TA daemon
 
 #### Prerequisites
 
-The shell connects to a running TA daemon. The easiest way is the convenience script that handles everything:
+The shell connects to a running TA daemon. The simplest approach — `ta shell` auto-starts the daemon if needed:
 
 ```bash
-# macOS / Linux -- starts daemon if needed, then opens the shell
-./scripts/ta-shell.sh
-
-# Windows PowerShell
-.\scripts\ta-shell.ps1
-
-# With options
-./scripts/ta-shell.sh --port 8080 --project-root /path/to/project
+ta shell                                  # Starts daemon if needed, opens shell
+ta shell --url http://127.0.0.1:8080      # Connect to a specific daemon URL
 ```
 
-Or manage the daemon manually:
+Or manage the daemon explicitly:
 
 ```bash
 # Start the daemon (runs on http://127.0.0.1:7700 by default)
@@ -4416,8 +4453,9 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.18.1 | Developer loop: verification, notifications & shell fixes | Done |
 | v0.10.18.2 | Shell TUI: scrollback & command output visibility | In Progress |
 | v0.10.18.3 | Verification streaming, heartbeat & configurable timeout | In Progress |
-| v0.10.18.4 | Live agent output in shell & terms consent | Pending |
-| v0.10.18.5 | Agent stdin relay & interactive prompt handling | Pending |
+| v0.10.18.4 | Live agent output in shell & terms consent | Done |
+| v0.10.18.5 | Agent stdin relay & interactive prompt handling | Done |
+| v0.10.18.6 | `ta daemon` subcommand (start/stop/restart/status/log) | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

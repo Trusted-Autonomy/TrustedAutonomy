@@ -213,6 +213,11 @@ enum Commands {
         #[arg(long)]
         url: Option<String>,
     },
+    /// Manage the TA daemon lifecycle (start, stop, restart, status, log).
+    Daemon {
+        #[command(subcommand)]
+        command: commands::daemon::DaemonCommands,
+    },
     /// Multi-project office daemon management.
     Office {
         #[command(subcommand)]
@@ -513,6 +518,7 @@ fn main() -> anyhow::Result<()> {
             *classic,
             cli.no_version_check,
         ),
+        Commands::Daemon { command } => commands::daemon::execute(command, &project_root),
         Commands::Office { command } => commands::office::execute(command, &project_root),
         Commands::Plugin { command } => {
             commands::plugin::run_plugin(&project_root, command)?;

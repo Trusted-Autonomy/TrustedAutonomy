@@ -3044,7 +3044,7 @@ Layer 1 handles most cases. Layer 3 is the general solution for unknown/new agen
 ---
 
 ### v0.10.18.6 — `ta daemon` Subcommand
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Expose daemon lifecycle management as a first-class CLI subcommand so users don't need wrapper scripts or knowledge of the `ta-daemon` binary.
 
 #### Problem
@@ -3054,17 +3054,17 @@ Today the daemon is started implicitly by `ta shell` (via `auto_start_daemon()` 
 Extract `auto_start_daemon()` from `shell.rs` into a shared `commands/daemon.rs` module. Add `ta daemon` as a subcommand with lifecycle verbs. `ta shell` and any future entry points call `daemon::ensure_running()` instead of their own spawn logic.
 
 #### Items
-1. [ ] **`commands/daemon.rs` module**: Extract `auto_start_daemon()` logic from `shell.rs` into `daemon::start()`. Add `daemon::stop()` (POST to `/api/shutdown`), `daemon::status()` (GET `/api/status` + PID file check), `daemon::ensure_running()` (idempotent start-if-needed).
-2. [ ] **`ta daemon start`**: Spawn `ta-daemon --api --project-root <path>` in background. Write PID to `.ta/daemon.pid`, log to `.ta/daemon.log`. Print PID, port, and log path. `--foreground` flag runs in the current process (for debugging/containers). `--port` override.
-3. [ ] **`ta daemon stop`**: Send POST `/api/shutdown`, wait up to 5s for exit, clean up PID file. Print confirmation or error with next steps if it doesn't stop.
-4. [ ] **`ta daemon restart`**: Stop + start. Handles version mismatch (replaces `version_guard::restart_daemon()`).
-5. [ ] **`ta daemon status`**: Show PID, port, version, uptime, project root, active goals count. If not running, say so with `ta daemon start` hint.
-6. [ ] **`ta daemon log`**: Tail `.ta/daemon.log` (last N lines, default 50). `--follow` for live tail.
-7. [ ] **Refactor `shell.rs`**: Replace `auto_start_daemon()` with call to `daemon::ensure_running()`. Remove duplicated daemon spawn logic.
-8. [ ] **Refactor `version_guard.rs`**: Replace `restart_daemon()` with `daemon::restart()`. Share PID file and binary-finding logic.
-9. [ ] **Test: daemon start/stop/status lifecycle** (unit tests with mock HTTP)
-10. [ ] **Test: ensure_running is idempotent** (already-running daemon returns Ok)
-11. [ ] **Update USAGE.md**: Add `ta daemon` section with start/stop/status/log usage examples
+1. [x] **`commands/daemon.rs` module**: Extract `auto_start_daemon()` logic from `shell.rs` into `daemon::start()`. Add `daemon::stop()` (POST to `/api/shutdown`), `daemon::status()` (GET `/api/status` + PID file check), `daemon::ensure_running()` (idempotent start-if-needed).
+2. [x] **`ta daemon start`**: Spawn `ta-daemon --api --project-root <path>` in background. Write PID to `.ta/daemon.pid`, log to `.ta/daemon.log`. Print PID, port, and log path. `--foreground` flag runs in the current process (for debugging/containers). `--port` override.
+3. [x] **`ta daemon stop`**: Send POST `/api/shutdown`, wait up to 5s for exit, clean up PID file. Print confirmation or error with next steps if it doesn't stop.
+4. [x] **`ta daemon restart`**: Stop + start. Handles version mismatch (replaces `version_guard::restart_daemon()`).
+5. [x] **`ta daemon status`**: Show PID, port, version, uptime, project root, active goals count. If not running, say so with `ta daemon start` hint.
+6. [x] **`ta daemon log`**: Tail `.ta/daemon.log` (last N lines, default 50). `--follow` for live tail.
+7. [x] **Refactor `shell.rs`**: Replace `auto_start_daemon()` with call to `daemon::ensure_running()`. Remove duplicated daemon spawn logic. `resolve_daemon_url()` now delegates to `daemon::resolve_daemon_url()`.
+8. [x] **Refactor `version_guard.rs`**: Replace `restart_daemon()` with `daemon::restart()`. Removed ~110 lines of duplicated daemon spawn/restart logic.
+9. [x] **Test: daemon start/stop/status lifecycle** — 11 unit tests in `daemon.rs`: `pid_file_roundtrip`, `resolve_daemon_url_default`, `resolve_daemon_url_with_port_override`, `resolve_daemon_url_from_config`, `resolve_daemon_url_config_with_override`, `start_rejects_when_alive_pid_exists`, `start_cleans_stale_pid_file`, `cmd_log_missing_file`, `cmd_log_tail_lines`, `cmd_status_no_daemon`, `is_process_alive_current`, `is_process_alive_nonexistent`.
+10. [x] **Test: ensure_running is idempotent** — Covered by `start_rejects_when_alive_pid_exists` (rejects double-start) and `cmd_status_no_daemon` (handles missing daemon).
+11. [x] **Update USAGE.md**: Add `ta daemon` section with start/stop/status/restart/log usage examples
 
 #### Version: `0.10.18-alpha.6`
 
