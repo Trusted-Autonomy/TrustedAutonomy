@@ -3581,6 +3581,50 @@ Known issue from v0.10.18: Discord-dispatched `ta run` created a goal record (st
 
 ---
 
+### v0.12.2 — Compliance-Ready Audit Ledger
+<!-- status: pending -->
+**Goal**: Replace the lightweight goal history index with a compliance-ready audit ledger that captures full decision context, covers all goal lifecycle paths, and supports pluggable storage backends.
+
+#### Problem
+The current `.ta/goal-history.jsonl` is a compact index written only on the happy path (`ta draft apply`). It records *what* happened but not *why*. Multiple lifecycle paths produce no audit record at all:
+- `ta goal delete` — data vanishes with no trace
+- `ta goal gc` — transitions zombies to `failed` but writes no history entry
+- `ta draft deny` / `ta draft close` — no record of the denial or reason
+- Agent crash / timeout — goal silently moves to `failed` with a gc reason string
+
+Even on the happy path, the `GoalHistoryEntry` lacks:
+- **Intent**: What was the user trying to accomplish (objective, prompt)
+- **Summary**: AI-generated summary of what changed and why
+- **Decision rationale**: Why this approach was chosen over alternatives
+- **Reviewer identity**: Who approved/denied and when
+- **Denial reason**: Why a draft was rejected
+- **Artifact manifest**: Which files were created/modified/deleted (URIs)
+- **Policy evaluation**: Which policies were checked and their pass/fail status
+
+#### Items
+1. [ ] **`AuditEntry` data model**: Rich audit record capturing: goal ID, title, objective/intent, final state, phase, agent, timestamps, duration, draft ID, AI summary, reviewer/approver, denial reason, artifact URIs with change types, policy evaluation results, parent goal (for chained goals). Serialized as JSONL.
+2. [ ] **Emit audit entry on all terminal transitions**: Every path that ends a goal's lifecycle must write an `AuditEntry`: apply, deny, close, delete, gc, timeout, agent crash. No goal data should be removed without an audit record.
+3. [ ] **Separate ledger for deleted incomplete goals**: Goals deleted before producing a draft get a distinct `disposition: "abandoned"` entry with whatever context is available (objective, agent, duration, reason for deletion if provided).
+4. [ ] **`ta goal delete --reason`**: Require or prompt for a reason when manually deleting goals. Stored in the audit entry.
+5. [ ] **`ta goal gc` writes audit entries**: Before transitioning or removing any goal data, append an audit entry with `disposition: "gc"` and the gc reason.
+6. [ ] **Populate artifact count and lines changed**: The existing `GoalHistoryEntry` fields `artifact_count` and `lines_changed` are always 0. Wire them to the draft's actual artifact data.
+7. [ ] **`ta audit export`**: Export audit ledger in structured formats (JSONL, CSV, or compliance-specific formats). Filterable by date range, phase, agent, disposition.
+8. [ ] **Pluggable audit storage backend**: Use the existing data write plugin architecture to support configurable storage destinations. Config in `daemon.toml`:
+   ```toml
+   [audit]
+   backend = "file"  # default: .ta/audit-ledger.jsonl
+   # backend = "database"
+   # backend = "s3"
+   # connection = "postgres://..."
+   # bucket = "my-audit-bucket"
+   ```
+   Built-in: local JSONL file. Plugin interface for database, shared filesystem, cloud storage.
+9. [ ] **Audit ledger integrity**: Append-only with hash chaining (each entry includes hash of previous entry). `ta audit verify` validates the chain. Tampering is detectable.
+10. [ ] **Retention policy**: Configurable retention period for audit entries. `ta audit gc --older-than 1y` removes entries beyond retention while preserving chain integrity (tombstone markers).
+11. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new audit ledger format on first run.
+
+#### Version: `0.12.2-alpha`
+
 ---
 
 ## Projects On Top (separate repos, built on TA)
