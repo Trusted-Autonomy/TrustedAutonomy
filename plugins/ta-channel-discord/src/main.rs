@@ -3,7 +3,13 @@
 //! External JSON-over-stdio plugin that posts agent questions as rich embeds
 //! with button components to a Discord channel.
 //!
-//! ## Protocol
+//! ## Modes
+//!
+//! **Deliver mode** (default): reads one JSON line from stdin, posts to Discord, exits.
+//! **Listen mode** (`--listen`): persistent bot that watches for commands in Discord
+//! and forwards them to the TA daemon HTTP API.
+//!
+//! ## Protocol (deliver mode)
 //!
 //! - Reads one JSON line from stdin: a `ChannelQuestion` object
 //! - Posts the question as a Discord embed with buttons to the configured channel
@@ -13,6 +19,8 @@
 //!
 //! - `TA_DISCORD_TOKEN` (or custom via `token_env`): Discord bot token
 //! - `TA_DISCORD_CHANNEL_ID`: Discord channel snowflake ID
+//! - `TA_DAEMON_URL` (listen mode): daemon URL (default: `http://127.0.0.1:7700`)
+//! - `TA_DISCORD_PREFIX` (listen mode): command prefix (default: `ta `)
 //!
 //! ## Installation
 //!
@@ -24,6 +32,7 @@ use std::io::{self, BufRead, Write};
 
 use serde::{Deserialize, Serialize};
 
+mod listener;
 mod payload;
 
 /// Input: question from TA daemon via stdin.
@@ -90,15 +99,27 @@ fn write_result(result: &DeliveryResult) {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    // Check for --listen mode.
+    let args: Vec<String> = std::env::args().collect();
+    let listen_mode = args.iter().any(|a| a == "--listen");
+
     // Read config from environment.
-    let token_env = std::env::var("TA_DISCORD_TOKEN_ENV").unwrap_or_else(|_| "TA_DISCORD_TOKEN".into());
+    let token_env =
+        std::env::var("TA_DISCORD_TOKEN_ENV").unwrap_or_else(|_| "TA_DISCORD_TOKEN".into());
     let token = match std::env::var(&token_env) {
         Ok(t) if !t.is_empty() => t,
         _ => {
-            write_result(&DeliveryResult::error(format!(
-                "Environment variable '{}' not set. Set it to your Discord bot token.",
-                token_env
-            )));
+            if listen_mode {
+                eprintln!(
+                    "Error: Environment variable '{}' not set. Set it to your Discord bot token.",
+                    token_env
+                );
+            } else {
+                write_result(&DeliveryResult::error(format!(
+                    "Environment variable '{}' not set. Set it to your Discord bot token.",
+                    token_env
+                )));
+            }
             std::process::exit(1);
         }
     };
@@ -106,16 +127,32 @@ async fn main() {
     let channel_id = match std::env::var("TA_DISCORD_CHANNEL_ID") {
         Ok(id) if !id.is_empty() => id,
         _ => {
-            write_result(&DeliveryResult::error(
-                "Environment variable 'TA_DISCORD_CHANNEL_ID' not set. \
-                 Set it to the Discord channel snowflake ID."
-                    .into(),
-            ));
+            if listen_mode {
+                eprintln!(
+                    "Error: Environment variable 'TA_DISCORD_CHANNEL_ID' not set. \
+                     Set it to the Discord channel snowflake ID."
+                );
+            } else {
+                write_result(&DeliveryResult::error(
+                    "Environment variable 'TA_DISCORD_CHANNEL_ID' not set. \
+                     Set it to the Discord channel snowflake ID."
+                        .into(),
+                ));
+            }
             std::process::exit(1);
         }
     };
 
-    // Read question from stdin.
+    // Listen mode: persistent bot that watches for commands.
+    if listen_mode {
+        let daemon_url =
+            std::env::var("TA_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:7700".into());
+        let prefix = std::env::var("TA_DISCORD_PREFIX").unwrap_or_else(|_| "ta ".into());
+        listener::run(&token, &channel_id, &daemon_url, &prefix).await;
+        return;
+    }
+
+    // Deliver mode: read question from stdin.
     let stdin = io::stdin();
     let line = match stdin.lock().lines().next() {
         Some(Ok(line)) if !line.trim().is_empty() => line,
@@ -133,7 +170,11 @@ async fn main() {
             write_result(&DeliveryResult::error(format!(
                 "Invalid JSON input: {}. Got: '{}'",
                 e,
-                if line.len() > 200 { &line[..200] } else { &line }
+                if line.len() > 200 {
+                    &line[..200]
+                } else {
+                    &line
+                }
             )));
             std::process::exit(1);
         }

@@ -3535,7 +3535,7 @@ Alternative sources (no registry needed):
 
 ### v0.12.1 — Template Projects & Bootstrap Flow
 <!-- status: pending -->
-**Goal**: `ta new` generates projects with `project.toml` plugin declarations so downstream users get a complete, working setup from `ta setup` alone. Template projects in the Trusted-Autonomy org serve as reference implementations.
+**Goal**: `ta new` generates projects with `project.toml` plugin declarations so downstream users get a complete, working setup from `ta setup` alone. Template projects in the Trusted-Autonomy org serve as reference implementations. Also: replace the quick-fix Discord command listener with a proper slash-command-based bidirectional integration.
 
 #### Items
 1. [ ] **`ta new --plugins` flag**: Declare required plugins at project creation. `ta new --name my-bot --plugins discord,slack --vcs git` generates a `project.toml` with those declarations pre-filled.
@@ -3546,6 +3546,18 @@ Alternative sources (no registry needed):
 6. [ ] **Reference template: ta-perforce-template**: Demonstrates Perforce VCS adapter for game studios / enterprise environments.
 7. [ ] **Template listing**: `ta new --list-templates` shows available templates from both built-in and registry sources.
 8. [ ] **Test: end-to-end bootstrap flow**: Test that `ta new --plugins discord --vcs git` → `ta setup` → `ta-daemon` starts with the Discord plugin loaded and VCS configured.
+
+#### Discord command listener tech debt (from quick-fix in v0.10.18)
+The current `--listen` mode on `ta-channel-discord` is a quick integration that works but has several limitations. These should be addressed here alongside the Discord template project:
+
+9. [ ] **Discord slash commands**: Register `/ta` slash command via Discord Application Commands API instead of message-prefix matching. Benefits: auto-complete, built-in help, no MESSAGE_CONTENT intent required, works in servers with strict permissions.
+10. [ ] **Interaction callback handler**: Handle button clicks from `deliver_question` embeds. Currently button `custom_id` values (e.g., `ta_{interaction_id}_yes`) are sent to Discord but no handler receives them. Add an HTTP endpoint or Gateway handler that receives interaction callbacks and POSTs answers to the daemon's `/api/interactions/:id/respond`.
+11. [ ] **Gateway reconnect with resume**: Current listener reconnects from scratch on disconnect. Implement Discord's resume protocol (session_id + last sequence number) for seamless reconnection without missed events.
+12. [ ] **Daemon auto-launches listener**: The daemon should auto-start `ta-channel-discord --listen` when `default_channels` includes `"discord"` in `daemon.toml`, instead of requiring a separate manual process. Lifecycle: daemon starts → spawns listener → monitors health → restarts on crash.
+13. [ ] **Rate limiting**: Add rate limiting on command forwarding to prevent Discord abuse from flooding the daemon API.
+14. [ ] **Response threading**: Post command responses as thread replies to the original message instead of top-level messages, to keep the channel clean.
+15. [ ] **Long-running command status**: For commands that take >5s (e.g., `ta run`), post an initial "Running..." message, then edit it with the result when done. Use Discord message editing API.
+16. [ ] **Remove `--listen` flag**: Once the daemon manages the listener lifecycle (item 12), the standalone `--listen` mode becomes internal. The user-facing entry point is `ta daemon start` with Discord configured in `daemon.toml`.
 
 #### Version: `0.12.1-alpha`
 

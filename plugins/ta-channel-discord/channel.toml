@@ -1,7 +1,11 @@
 name = "discord"
-version = "0.1.0"
+version = "0.2.0"
 command = "ta-channel-discord"
 protocol = "json-stdio"
-capabilities = ["deliver_question"]
-description = "Discord channel plugin for Trusted Autonomy — posts agent questions as rich embeds with button components"
+capabilities = ["deliver_question", "receive_commands"]
+description = "Discord channel plugin — posts agent questions as rich embeds, listens for commands"
 timeout_secs = 30
+
+# Listen mode: `ta-channel-discord --listen`
+# Persistent bot that watches for messages prefixed with "ta " and forwards
+# them to the daemon HTTP API. Env vars: TA_DAEMON_URL, TA_DISCORD_PREFIX.
