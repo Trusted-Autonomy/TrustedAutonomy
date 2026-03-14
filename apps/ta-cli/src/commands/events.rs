@@ -1,6 +1,7 @@
-// events.rs -- Event system CLI: listen, hooks, tokens.
+// events.rs -- Event system CLI: listen, hooks, tokens, routing.
 
 use clap::Subcommand;
+use ta_events::router::{EventRouter, ResponseStrategy, RoutingConfig};
 use ta_events::store::{EventQueryFilter, FsEventStore};
 use ta_events::{EventStore, HookConfig, HookRunner};
 use ta_mcp_gateway::GatewayConfig;
@@ -32,6 +33,29 @@ pub enum EventsCommands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Manage event routing configuration.
+    Routing {
+        #[command(subcommand)]
+        command: RoutingCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RoutingCommands {
+    /// List active event responders and their strategies.
+    List,
+    /// Dry-run: show what would happen for a given event type.
+    Test {
+        /// Event type to test (e.g., "goal_failed", "draft_denied").
+        event_type: String,
+    },
+    /// Quick override: set the strategy for an event type.
+    Set {
+        /// Event type to configure (e.g., "goal_failed").
+        event_type: String,
+        /// Strategy to use: notify, block, agent, workflow, ignore.
+        strategy: String,
+    },
 }
 
 pub fn execute(cmd: &EventsCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -47,6 +71,7 @@ pub fn execute(cmd: &EventsCommands, config: &GatewayConfig) -> anyhow::Result<(
             older_than_days,
             dry_run,
         } => prune_events(config, *older_than_days, *dry_run),
+        EventsCommands::Routing { command } => handle_routing(command, config),
     }
 }
 
@@ -188,6 +213,207 @@ fn show_hooks(config: &GatewayConfig) -> anyhow::Result<()> {
         println!("    event = \"draft_approved\"");
         println!("    command = \"echo 'Draft approved!'\"");
     }
+
+    Ok(())
+}
+
+fn handle_routing(cmd: &RoutingCommands, config: &GatewayConfig) -> anyhow::Result<()> {
+    match cmd {
+        RoutingCommands::List => routing_list(config),
+        RoutingCommands::Test { event_type } => routing_test(config, event_type),
+        RoutingCommands::Set {
+            event_type,
+            strategy,
+        } => routing_set(config, event_type, strategy),
+    }
+}
+
+fn routing_list(config: &GatewayConfig) -> anyhow::Result<()> {
+    let config_path = config.workspace_root.join(".ta").join("event-routing.yaml");
+    let router = EventRouter::from_project(&config.workspace_root)?;
+
+    let responders = router.responders();
+    let defaults = router.defaults();
+
+    println!("Event Routing Configuration");
+    println!("{}", "=".repeat(56));
+    println!("  Config: {}", config_path.display());
+    if !config_path.exists() {
+        println!("  (using built-in defaults — no config file found)");
+    }
+    println!("  Responders: {}", responders.len());
+    println!();
+
+    if responders.is_empty() {
+        println!("  No responders configured. All events use the default strategy.");
+        println!();
+        println!("  To create a config file:");
+        println!("    cp templates/event-routing.yaml .ta/event-routing.yaml");
+    } else {
+        let header_event = "EVENT TYPE";
+        let header_strategy = "STRATEGY";
+        println!("  {:<24} {:<12} FILTER", header_event, header_strategy);
+        println!("  {}", "-".repeat(52));
+        for r in responders {
+            let filter_desc = match &r.filter {
+                Some(f) => {
+                    let mut parts = Vec::new();
+                    if let Some(p) = &f.phase {
+                        parts.push(format!("phase={}", p));
+                    }
+                    if let Some(a) = &f.agent_id {
+                        parts.push(format!("agent={}", a));
+                    }
+                    if let Some(s) = &f.severity {
+                        parts.push(format!("severity={}", s));
+                    }
+                    if parts.is_empty() {
+                        "-".to_string()
+                    } else {
+                        parts.join(", ")
+                    }
+                }
+                None => "-".to_string(),
+            };
+            println!(
+                "  {:<24} {:<12} {}",
+                r.event,
+                r.strategy.to_string(),
+                filter_desc
+            );
+        }
+    }
+
+    println!();
+    println!(
+        "  Defaults: strategy={}, max_attempts={}, escalate_after={}",
+        defaults.default_strategy, defaults.max_attempts, defaults.escalate_after
+    );
+
+    Ok(())
+}
+
+fn routing_test(config: &GatewayConfig, event_type: &str) -> anyhow::Result<()> {
+    let router = EventRouter::from_project(&config.workspace_root)?;
+    let decision = router.test_route(event_type);
+
+    println!("Routing Test: {}", event_type);
+    println!("{}", "=".repeat(40));
+
+    // Check if there was a matching responder.
+    let matched = router.responders().iter().any(|r| r.event == event_type);
+
+    if matched {
+        println!(
+            "  Matched responder: {} -> {}",
+            event_type, decision.strategy
+        );
+    } else {
+        println!("  No responder matched — using default strategy");
+    }
+
+    println!("  Strategy:    {}", decision.strategy);
+
+    match decision.strategy {
+        ResponseStrategy::Agent => {
+            if let Some(agent) = &decision.agent {
+                println!("  Agent:       {}", agent);
+            }
+            if let Some(prompt) = &decision.prompt {
+                let preview: String = prompt.chars().take(60).collect();
+                println!("  Prompt:      {}...", preview.trim());
+            }
+            println!(
+                "  Approval:    {}",
+                if decision.require_approval {
+                    "required"
+                } else {
+                    "auto"
+                }
+            );
+        }
+        ResponseStrategy::Workflow => {
+            if let Some(wf) = &decision.workflow {
+                println!("  Workflow:    {}", wf);
+            }
+        }
+        ResponseStrategy::Notify => {
+            if !decision.channels.is_empty() {
+                println!("  Channels:    {}", decision.channels.join(", "));
+            } else {
+                println!("  Channels:    (daemon defaults)");
+            }
+        }
+        ResponseStrategy::Block => {
+            println!("  Action:      halt pipeline, require human intervention");
+        }
+        ResponseStrategy::Ignore => {
+            println!("  Action:      event suppressed");
+        }
+    }
+
+    println!("  Max attempts: {}", decision.max_attempts);
+    println!();
+    println!(
+        "  To change: ta events routing set {} <strategy>",
+        event_type
+    );
+
+    Ok(())
+}
+
+fn routing_set(config: &GatewayConfig, event_type: &str, strategy_str: &str) -> anyhow::Result<()> {
+    let strategy: ResponseStrategy = strategy_str
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!("{}", e))?;
+
+    let config_path = config.workspace_root.join(".ta").join("event-routing.yaml");
+
+    // Load existing config or create default.
+    let mut routing_config = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_yaml::from_str::<RoutingConfig>(&content)
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", config_path.display(), e))?
+    } else {
+        RoutingConfig::default()
+    };
+
+    // Find existing responder or create a new one.
+    let mut found = false;
+    for r in &mut routing_config.responders {
+        if r.event == event_type && r.filter.is_none() {
+            r.strategy = strategy.clone();
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        routing_config.responders.push(ta_events::Responder {
+            event: event_type.to_string(),
+            strategy: strategy.clone(),
+            filter: None,
+            agent: None,
+            prompt: None,
+            require_approval: None,
+            escalate_after: None,
+            max_attempts: None,
+            workflow: None,
+            channels: vec![],
+        });
+    }
+
+    // Validate before writing.
+    EventRouter::new(routing_config.clone())?;
+
+    // Write back.
+    std::fs::create_dir_all(config_path.parent().unwrap())?;
+    let yaml = serde_yaml::to_string(&routing_config)?;
+    std::fs::write(&config_path, yaml)?;
+
+    println!("Updated event routing: {} -> {}", event_type, strategy);
+    println!("  Config written to {}", config_path.display());
+    println!("  Run 'ta events routing test {}' to verify.", event_type);
 
     Ok(())
 }

@@ -24,4 +24,17 @@ pub enum EventError {
 
     #[error("bus error: {0}")]
     BusError(String),
+
+    #[error("routing config error: {0}")]
+    RoutingConfig(String),
+
+    #[error("routing config parse error at {path}: {detail}")]
+    RoutingParse { path: String, detail: String },
+
+    #[error("protected event '{event_type}' cannot use strategy '{strategy}': {reason}")]
+    ProtectedEvent {
+        event_type: String,
+        strategy: String,
+        reason: String,
+    },
 }

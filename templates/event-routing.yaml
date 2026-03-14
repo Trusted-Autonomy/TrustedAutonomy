@@ -1,0 +1,90 @@
+# event-routing.yaml — Event routing configuration for Trusted Autonomy.
+#
+# Each responder maps an event type to a response strategy. When TA emits
+# an event, the router finds the first matching responder and executes
+# its strategy.
+#
+# Strategies:
+#   notify   - Deliver event to configured channels (default)
+#   block    - Halt the pipeline, require human intervention
+#   agent    - Launch an agent goal with event context injected
+#   workflow - Start a named workflow with event data as input
+#   ignore   - Suppress the event (no notification, no action)
+#
+# Place this file at .ta/event-routing.yaml to customize per-project.
+# Manage with: ta events routing list | test | set
+#
+# Agent strategy example:
+#   - event: goal_failed
+#     strategy: agent
+#     agent: claude-code
+#     prompt: |
+#       A goal failed. Review the error and suggest a fix or retry.
+#     require_approval: true
+#     escalate_after: 2
+#     max_attempts: 3
+
+defaults:
+  max_attempts: 3
+  escalate_after: 2
+  default_strategy: notify
+
+responders:
+  - event: goal_started
+    strategy: notify
+
+  - event: goal_completed
+    strategy: notify
+
+  - event: goal_failed
+    strategy: notify
+    # To auto-diagnose failures with an agent, change to:
+    # strategy: agent
+    # agent: claude-code
+    # prompt: |
+    #   A goal failed. Review the error and suggest a fix or retry.
+    # require_approval: true
+
+  - event: draft_built
+    strategy: notify
+
+  - event: draft_submitted
+    strategy: notify
+
+  - event: draft_approved
+    strategy: notify
+
+  - event: draft_denied
+    strategy: notify
+
+  - event: draft_applied
+    strategy: notify
+
+  - event: policy_violation
+    strategy: block
+
+  - event: review_requested
+    strategy: notify
+
+  - event: command_failed
+    strategy: notify
+    # To auto-fix build errors with an agent, change to:
+    # strategy: agent
+    # agent: claude-code
+    # prompt: |
+    #   A command failed. Diagnose the error and propose a fix.
+
+  - event: agent_needs_input
+    strategy: notify
+
+  - event: plan_phase_completed
+    strategy: notify
+
+  - event: memory_stored
+    strategy: ignore
+
+  - event: session_paused
+    strategy: ignore
+
+  - event: session_resumed
+    strategy: ignore

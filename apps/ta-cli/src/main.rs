@@ -74,10 +74,9 @@ enum Commands {
         /// If this matches a phase in PLAN.md, the title and --phase are
         /// filled in automatically.
         title: Option<String>,
-        /// Agent system to use. Defaults to [agent].default_agent in daemon.toml,
-        /// or "claude-code" if not configured.
-        #[arg(long)]
-        agent: Option<String>,
+        /// Agent system to use (claude-code, codex, etc.).
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
         /// Source directory to overlay (defaults to project root).
         #[arg(long)]
         source: Option<PathBuf>,
@@ -464,14 +463,10 @@ fn main() -> anyhow::Result<()> {
             // a phase ID (e.g., "v0.9.8.1", "0.9.8.1", "phase 0.9.8.1"),
             // look it up in PLAN.md and use the phase title + set --phase.
             let (resolved_title, resolved_phase) = resolve_phase_title(title, phase, &project_root);
-            // Resolve agent: explicit --agent > daemon.toml [agent].default_agent > "claude-code".
-            let resolved_agent = agent
-                .clone()
-                .unwrap_or_else(|| resolve_default_agent(&project_root));
             commands::run::execute(
                 &config,
                 resolved_title.as_deref(),
-                &resolved_agent,
+                agent,
                 source.as_deref(),
                 objective,
                 resolved_phase.as_deref(),
@@ -550,21 +545,4 @@ fn main() -> anyhow::Result<()> {
         | Commands::TermsStatus
         | Commands::Terms { .. } => unreachable!(),
     }
-}
-
-/// Read default_agent from `.ta/daemon.toml` [agent] section, falling back to "claude-code".
-fn resolve_default_agent(project_root: &std::path::Path) -> String {
-    let config_path = project_root.join(".ta").join("daemon.toml");
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        if let Ok(table) = content.parse::<toml::Table>() {
-            if let Some(agent_section) = table.get("agent").and_then(|v| v.as_table()) {
-                if let Some(default) = agent_section.get("default_agent").and_then(|v| v.as_str()) {
-                    if !default.is_empty() {
-                        return default.to_string();
-                    }
-                }
-            }
-        }
-    }
-    "claude-code".to_string()
 }

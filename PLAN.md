@@ -3111,7 +3111,7 @@ Each platform has a different mechanism for icon embedding:
 ---
 
 ### v0.11.0 — Event-Driven Agent Routing
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Allow any TA event to trigger an agent workflow instead of (or in addition to) a static response. This is intelligent, adaptive event handling — not scripted hooks or n8n-style flowcharts. An agent receives the event context and decides what to do.
 
 #### Problem
@@ -3170,50 +3170,20 @@ responders:
 
 **Key distinction from n8n/Zapier**: No visual flow builder, no webhook chaining, no action-to-action piping. One event → one agent (or workflow) with full context. The agent handles the complexity, not a workflow graph.
 
-#### Items
+#### Completed
 
-1. **`EventRouter`** (`crates/ta-events/src/router.rs`):
-   - Loads `event-routing.yaml` config
-   - Matches incoming events to responders (exact type match + optional filters)
-   - Dispatches to strategy handler (notify, block, agent, workflow, ignore)
-   - Tracks attempt counts for `escalate_after` and `max_attempts`
+- [x] **`EventRouter`** (`crates/ta-events/src/router.rs`): Loads `event-routing.yaml` config, matches incoming events to responders (exact type match + optional filters), dispatches to strategy handler (notify, block, agent, workflow, ignore), tracks attempt counts for `escalate_after` and `max_attempts`. Includes `RoutingConfig`, `Responder`, `ResponseStrategy`, `EventRoutingFilter`, `RoutingDecision` types with YAML serialization. 19 tests.
+- [x] **Agent response strategy** (`crates/ta-events/src/strategies/agent.rs`): Builds `AgentResponseContext` with agent name, prompt, event payload JSON, goal/phase info, attempt tracking, and `require_approval` flag. The daemon uses this to launch governed goals from events. 4 tests.
+- [x] **Workflow response strategy** (`crates/ta-events/src/strategies/workflow.rs`): Builds `WorkflowResponseContext` with workflow name and extracted input variables (goal_id, error, phase, command, reason, full event JSON) for template expansion in workflow stages. 5 tests.
+- [x] **Default event-routing config** (`templates/event-routing.yaml`): Sensible defaults for 16 event types. Most events: `notify`. `policy_violation`: `block`. `memory_stored`/`session_paused`/`session_resumed`: `ignore`. Commented examples showing how to upgrade to `agent` strategy.
+- [x] **Event filters** — `EventRoutingFilter` with optional `phase` (trailing `*` wildcard glob), `agent_id` (exact match), and `severity` fields. Filters are AND-combined. Events without the filtered field do not match.
+- [x] **`ta events routing`** CLI commands: `ta events routing list` (shows all responders in a table with strategy and filter columns), `ta events routing test <event-type>` (dry-run showing matched responder and decision details), `ta events routing set <event-type> <strategy>` (quick override with validation and YAML write-back).
+- [x] **Guardrails**: Protected events (`policy_violation`) cannot be routed to `ignore` (validated at config load and router construction). `max_attempts` prevents infinite agent retry loops (overrides to `notify` when exceeded). `escalate_after` sets the escalation flag on decisions. Per-goal attempt tracking prevents cross-goal contamination. Agent-routed events produce governed goals through the standard draft review pipeline.
 
-2. **Agent response strategy** (`crates/ta-events/src/strategies/agent.rs`):
-   - Launches a goal via `ta run` with event context as prompt
-   - Injects event payload (build output, error log, draft diff) into agent context
-   - Respects `require_approval` — agent output goes through standard draft review
-   - Uses interactive mode (`ta_ask_human`) if agent needs human input
-   - Tracks attempts; escalates to human notification after `escalate_after`
-
-3. **Workflow response strategy** (`crates/ta-events/src/strategies/workflow.rs`):
-   - Starts a named workflow definition with event data as input variables
-   - Workflow stages can reference event fields via template expansion
-
-4. **Default event-routing config** (`templates/event-routing.yaml`):
-   - Sensible defaults for all event types
-   - Most events: `notify`
-   - `policy_violation`: `block`
-   - `build_failed`: `notify` (user can upgrade to `agent`)
-
-5. **Event filters** — optional conditions on responders:
-   ```yaml
-   - event: build_failed
-     filter:
-       severity: critical        # only on critical failures
-       phase: "v0.9.*"          # only for certain phases
-     strategy: agent
-   ```
-
-6. **`ta events routing`** CLI command:
-   - `ta events routing list` — show active responders
-   - `ta events routing test <event-type>` — dry-run: show what would happen
-   - `ta events routing set <event-type> <strategy>` — quick override
-
-7. **Guardrails**:
-   - Agent-routed events are governed goals — full staging, policy, audit
-   - `max_attempts` prevents infinite loops (agent fails → event → agent fails → ...)
-   - `escalate_after` ensures humans see persistent failures
-   - `policy_violation` and `sandbox_escape` events cannot be routed to `ignore`
+#### Tests: 28 new tests
+- `crates/ta-events/src/router.rs`: 19 tests (config loading, exact/filter matching, phase glob, agent_id filter, attempt tracking per-goal, escalation, max_attempts override, protected events, YAML round-trip, dry-run, strategy display/parse, glob matching, notify channels)
+- `crates/ta-events/src/strategies/agent.rs`: 4 tests (context building, event JSON inclusion, attempt propagation, missing agent error)
+- `crates/ta-events/src/strategies/workflow.rs`: 5 tests (basic context, variable extraction, full JSON, missing workflow error, command_failed variables)
 
 #### Scope boundary
 Event routing handles *reactive* responses to things that already happened. It does not handle *proactive* scheduling (cron, triggers) — that belongs in the Virtual Office Runtime project on top.

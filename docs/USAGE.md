@@ -1945,6 +1945,79 @@ ta events prune --dry-run
 
 Pruning removes entire daily `.jsonl` files whose date falls before the cutoff. It does not modify recent files.
 
+#### Event routing
+
+Event routing lets any TA event trigger an intelligent response — launch an agent to fix a build failure, start a workflow on draft denial, or escalate persistent errors to a human. Configure routing in `.ta/event-routing.yaml`:
+
+```yaml
+# .ta/event-routing.yaml
+defaults:
+  max_attempts: 3
+  escalate_after: 2
+  default_strategy: notify
+
+responders:
+  - event: goal_failed
+    strategy: agent
+    agent: claude-code
+    prompt: |
+      A goal failed. Review the error and suggest a fix or retry.
+    require_approval: true
+    escalate_after: 2
+    max_attempts: 3
+
+  - event: policy_violation
+    strategy: block
+
+  - event: draft_denied
+    strategy: notify
+    channels: [shell, slack]
+
+  - event: memory_stored
+    strategy: ignore
+```
+
+**Strategies:**
+
+| Strategy | Behavior |
+|----------|----------|
+| `notify` | Deliver event to configured channels (default) |
+| `block` | Halt the pipeline, require human intervention |
+| `agent` | Launch a governed agent goal with event context |
+| `workflow` | Start a named workflow with event data as input |
+| `ignore` | Suppress the event entirely |
+
+**Manage routing from the CLI:**
+
+```bash
+# List all configured responders
+ta events routing list
+
+# Dry-run: see what would happen for an event type
+ta events routing test goal_failed
+
+# Quick override a strategy
+ta events routing set goal_failed agent
+```
+
+**Filters** narrow when a responder fires:
+
+```yaml
+- event: goal_started
+  strategy: block
+  filter:
+    phase: "v0.9.*"        # only for v0.9.x phases
+    agent_id: codex         # only for this agent
+```
+
+**Guardrails** prevent runaway automation:
+- `max_attempts` stops agent retries after N failures (overrides to `notify`)
+- `escalate_after` flags decisions for human attention after N attempts
+- `policy_violation` events cannot be routed to `ignore`
+- Agent-routed events produce governed goals with full staging and draft review
+
+A default config ships at `templates/event-routing.yaml`. Copy it to `.ta/event-routing.yaml` to customize.
+
 #### MCP event queries
 
 MCP-connected agents (orchestrators, macro goal agents) can query events programmatically via the `ta_event_subscribe` tool:
@@ -4494,6 +4567,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.18.5 | Agent stdin relay & interactive prompt handling | Done |
 | v0.10.18.6 | `ta daemon` subcommand (start/stop/restart/status/log) | Done |
 | v0.10.18.7 | Per-platform icon packaging | Done |
+| v0.11.0 | Event-driven agent routing | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 
