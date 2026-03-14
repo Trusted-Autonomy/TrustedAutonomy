@@ -173,8 +173,8 @@ pub fn resolve_daemon_url(project_root: &Path, port_override: Option<u16>) -> St
 
 /// Start the daemon in the background. Returns the child PID on success.
 ///
-/// If a daemon is already running (live PID), returns an error. Stale PID files
-/// are cleaned up automatically.
+/// If a daemon is already running (live PID or port responding), returns an error.
+/// Stale PID files are cleaned up automatically.
 pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<u32> {
     // Check for existing PID file.
     if let Some(pid) = read_pid(project_root) {
@@ -187,6 +187,23 @@ pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<
         }
         // Stale PID file — remove it.
         remove_pid_file(project_root);
+    }
+
+    // Check if the port is already responding (daemon started externally without
+    // a PID file, e.g., by ta shell or a previous manual invocation).
+    let base_url = resolve_daemon_url(project_root, port_override);
+    let status_url = format!("{}/api/status", base_url);
+    if let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(1))
+        .build()
+    {
+        if client.get(&status_url).send().is_ok() {
+            return Err(anyhow::anyhow!(
+                "A daemon is already responding at {} (started externally, no PID file).\n  \
+                 Use `ta daemon stop` to shut it down, or `ta daemon restart` to replace it.",
+                base_url
+            ));
+        }
     }
 
     let daemon_bin = super::version_guard::find_daemon_binary()?;
@@ -217,7 +234,7 @@ pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<
         cmd.arg("--web-port").arg(port.to_string());
     }
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", daemon_bin.display(), e))?;
 
@@ -232,6 +249,17 @@ pub fn start(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<
     });
 
     write_pid_file(project_root, pid, port)?;
+
+    // Wait briefly to confirm the daemon didn't crash immediately (e.g., port in use).
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    if let Some(exit_status) = child.try_wait().unwrap_or(None) {
+        remove_pid_file(project_root);
+        return Err(anyhow::anyhow!(
+            "Daemon exited immediately (exit code: {}). Check the log:\n  {}",
+            exit_status.code().unwrap_or(-1),
+            log_path(project_root).display()
+        ));
+    }
 
     Ok(pid)
 }

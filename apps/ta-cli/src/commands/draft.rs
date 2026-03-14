@@ -2163,6 +2163,8 @@ fn apply_package(
         println!("\nUsing submit adapter: {}", adapter.name());
 
         // Save VCS state so we can restore after apply operations.
+        // Uses a closure to ensure restore_state() always runs, even on
+        // early bail!() errors from verification, commit, or push.
         let saved_state = match adapter.save_state() {
             Ok(state) => state,
             Err(e) => {
@@ -2171,96 +2173,104 @@ fn apply_package(
             }
         };
 
-        // Prepare (create branch if needed).
-        if let Err(e) = adapter.prepare(goal, &workflow_config.submit) {
-            eprintln!("Warning: adapter prepare failed: {}", e);
-        }
+        let submit_result = (|| -> anyhow::Result<()> {
+            // Prepare (create branch if needed).
+            if let Err(e) = adapter.prepare(goal, &workflow_config.submit) {
+                eprintln!("Warning: adapter prepare failed: {}", e);
+            }
 
-        // Pre-commit verification gate: run configured checks before committing.
-        if skip_verify {
-            println!("\n  Skipping pre-commit verification (--skip-verify).");
-        } else if !workflow_config.verify.commands.is_empty() {
-            println!("\nRunning pre-commit verification...");
-            let verify_result =
-                super::verify::run_verification(&workflow_config.verify, &target_dir);
-            if !verify_result.passed {
-                for w in &verify_result.warnings {
+            // Pre-commit verification gate: run configured checks before committing.
+            if skip_verify {
+                println!("\n  Skipping pre-commit verification (--skip-verify).");
+            } else if !workflow_config.verify.commands.is_empty() {
+                println!("\nRunning pre-commit verification...");
+                let verify_result =
+                    super::verify::run_verification(&workflow_config.verify, &target_dir);
+                if !verify_result.passed {
+                    for w in &verify_result.warnings {
+                        eprintln!(
+                            "\n--- {} (exit code: {}) ---",
+                            w.command,
+                            w.exit_code.map_or("N/A".into(), |c| c.to_string())
+                        );
+                        if !w.output.is_empty() {
+                            eprintln!("{}", w.output);
+                        }
+                        eprintln!("---");
+                    }
+                    let total = workflow_config.verify.commands.len();
+                    let failed = verify_result.warnings.len();
                     eprintln!(
-                        "\n--- {} (exit code: {}) ---",
-                        w.command,
-                        w.exit_code.map_or("N/A".into(), |c| c.to_string())
+                        "\nPre-commit verification failed — {} of {} checks failed.",
+                        failed, total
                     );
-                    if !w.output.is_empty() {
-                        eprintln!("{}", w.output);
-                    }
-                    eprintln!("---");
+                    eprintln!("\nFix the issues above and re-run `ta draft apply --git-commit`.");
+                    eprintln!("To skip verification: `ta draft apply --git-commit --skip-verify`");
+                    anyhow::bail!("Pre-commit verification failed");
                 }
-                let total = workflow_config.verify.commands.len();
-                let failed = verify_result.warnings.len();
-                eprintln!(
-                    "\nPre-commit verification failed — {} of {} checks failed.",
-                    failed, total
-                );
-                eprintln!("\nFix the issues above and re-run `ta draft apply --git-commit`.");
-                eprintln!("To skip verification: `ta draft apply --git-commit --skip-verify`");
-                anyhow::bail!("Pre-commit verification failed");
+                println!("  All pre-commit checks passed.\n");
             }
-            println!("  All pre-commit checks passed.\n");
-        }
 
-        // Commit changes — goal title as subject, complete draft summary as body.
-        println!("Committing changes...");
-        let commit_msg = build_commit_message(goal, &pkg);
+            // Commit changes — goal title as subject, complete draft summary as body.
+            println!("Committing changes...");
+            let commit_msg = build_commit_message(goal, &pkg);
 
-        match adapter.commit(goal, &pkg, &commit_msg) {
-            Ok(result) => {
-                println!("[ok] {}", result.message);
-            }
-            Err(e) => {
-                eprintln!("Commit failed: {}", e);
-                // Continue anyway if this is a "none" adapter
-                if adapter.name() != "none" {
-                    anyhow::bail!("Failed to commit changes: {}", e);
-                }
-            }
-        }
-
-        // Push to remote if requested.
-        if git_push {
-            println!("Pushing to remote...");
-            match adapter.push(goal) {
+            match adapter.commit(goal, &pkg, &commit_msg) {
                 Ok(result) => {
                     println!("[ok] {}", result.message);
                 }
                 Err(e) => {
+                    eprintln!("Commit failed: {}", e);
+                    // Continue anyway if this is a "none" adapter
                     if adapter.name() != "none" {
-                        anyhow::bail!("Failed to push: {}", e);
+                        anyhow::bail!("Failed to commit changes: {}", e);
                     }
                 }
             }
-        }
 
-        // Open review (PR) if requested.
-        if git_review {
-            println!("Creating pull request...");
-            match adapter.open_review(goal, &pkg) {
-                Ok(result) => {
-                    println!("[ok] {}", result.message);
-                    if !result.review_url.starts_with("none://") {
-                        println!("  PR URL: {}", result.review_url);
+            // Push to remote if requested.
+            if git_push {
+                println!("Pushing to remote...");
+                match adapter.push(goal) {
+                    Ok(result) => {
+                        println!("[ok] {}", result.message);
+                    }
+                    Err(e) => {
+                        if adapter.name() != "none" {
+                            anyhow::bail!("Failed to push: {}", e);
+                        }
                     }
                 }
-                Err(e) => {
-                    eprintln!("Warning: PR creation failed: {}", e);
-                    eprintln!("  You can manually create a PR from the pushed branch.");
+            }
+
+            // Open review (PR) if requested.
+            if git_review {
+                println!("Creating pull request...");
+                match adapter.open_review(goal, &pkg) {
+                    Ok(result) => {
+                        println!("[ok] {}", result.message);
+                        if !result.review_url.starts_with("none://") {
+                            println!("  PR URL: {}", result.review_url);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: PR creation failed: {}", e);
+                        eprintln!("  You can manually create a PR from the pushed branch.");
+                    }
                 }
             }
-        }
 
-        // Restore VCS state (e.g., switch back to original branch for Git).
+            Ok(())
+        })();
+
+        // Always restore VCS state (e.g., switch back to original branch for Git),
+        // regardless of whether the submit operations succeeded or failed.
         if let Err(e) = adapter.restore_state(saved_state) {
             eprintln!("Warning: could not restore VCS state after apply: {}", e);
         }
+
+        // Now propagate any error from the submit operations.
+        submit_result?;
     }
 
     // Transition goal to Applied. The pre-flight check validated the state
