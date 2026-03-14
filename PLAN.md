@@ -3043,6 +3043,62 @@ Layer 1 handles most cases. Layer 3 is the general solution for unknown/new agen
 
 ---
 
+### v0.10.18.6 — `ta daemon` Subcommand
+<!-- status: pending -->
+**Goal**: Expose daemon lifecycle management as a first-class CLI subcommand so users don't need wrapper scripts or knowledge of the `ta-daemon` binary.
+
+#### Problem
+Today the daemon is started implicitly by `ta shell` (via `auto_start_daemon()` in `shell.rs`) or manually with `cargo run -p ta-daemon -- --api`. There's no way to explicitly start, stop, restart, or inspect the daemon from the CLI. The `ta_shell.sh` wrapper script exists only because this gap forces users to manage the daemon out-of-band. Users who want to run just the daemon (e.g., for Discord bot integration without the TUI shell) have no clean path.
+
+#### Design
+Extract `auto_start_daemon()` from `shell.rs` into a shared `commands/daemon.rs` module. Add `ta daemon` as a subcommand with lifecycle verbs. `ta shell` and any future entry points call `daemon::ensure_running()` instead of their own spawn logic.
+
+#### Items
+1. [ ] **`commands/daemon.rs` module**: Extract `auto_start_daemon()` logic from `shell.rs` into `daemon::start()`. Add `daemon::stop()` (POST to `/api/shutdown`), `daemon::status()` (GET `/api/status` + PID file check), `daemon::ensure_running()` (idempotent start-if-needed).
+2. [ ] **`ta daemon start`**: Spawn `ta-daemon --api --project-root <path>` in background. Write PID to `.ta/daemon.pid`, log to `.ta/daemon.log`. Print PID, port, and log path. `--foreground` flag runs in the current process (for debugging/containers). `--port` override.
+3. [ ] **`ta daemon stop`**: Send POST `/api/shutdown`, wait up to 5s for exit, clean up PID file. Print confirmation or error with next steps if it doesn't stop.
+4. [ ] **`ta daemon restart`**: Stop + start. Handles version mismatch (replaces `version_guard::restart_daemon()`).
+5. [ ] **`ta daemon status`**: Show PID, port, version, uptime, project root, active goals count. If not running, say so with `ta daemon start` hint.
+6. [ ] **`ta daemon log`**: Tail `.ta/daemon.log` (last N lines, default 50). `--follow` for live tail.
+7. [ ] **Refactor `shell.rs`**: Replace `auto_start_daemon()` with call to `daemon::ensure_running()`. Remove duplicated daemon spawn logic.
+8. [ ] **Refactor `version_guard.rs`**: Replace `restart_daemon()` with `daemon::restart()`. Share PID file and binary-finding logic.
+9. [ ] **Test: daemon start/stop/status lifecycle** (unit tests with mock HTTP)
+10. [ ] **Test: ensure_running is idempotent** (already-running daemon returns Ok)
+11. [ ] **Update USAGE.md**: Add `ta daemon` section with start/stop/status/log usage examples
+
+#### Version: `0.10.18-alpha.6`
+
+---
+
+### v0.10.18.7 — Per-Platform Icon Packaging
+<!-- status: pending -->
+**Goal**: Wire the project icons into platform-specific packaging so built artifacts include proper app icons on macOS, Windows, and Linux.
+
+#### Problem
+Icons exist in `images/icons/` (multi-size PNGs, macOS `.icns`) but aren't embedded in any build output. The `ta` and `ta-daemon` binaries are plain executables with no associated icon. Platform packaging (`.app` bundles, Windows `.exe` with embedded icon, Linux `.desktop` entries) requires build-time integration.
+
+#### Design
+Each platform has a different mechanism for icon embedding:
+- **macOS**: `.app` bundle with `Info.plist` → `CFBundleIconFile` pointing to `.icns`
+- **Windows**: `build.rs` using `winres` crate to embed `.ico` into the PE binary
+- **Linux**: `.desktop` file referencing icon PNGs in XDG icon dirs
+- **Favicon**: For future web UI (`ta-daemon --web-port`)
+
+#### Items
+1. [ ] **Generate Windows `.ico`**: Add `imagemagick` to Nix flake devShell, add `just icons` recipe that generates `.ico` from master 1024px PNG. Check in generated `.ico` alongside `.icns`.
+2. [ ] **macOS `.app` bundle recipe**: `just package-macos` creates `TrustedAutonomy.app/` with `Info.plist`, binary symlink, and `.icns` in `Resources/`. No code signing yet (deferred to v0.9.0).
+3. [ ] **Windows icon embedding**: Add `winres` as a build dependency for `ta-cli` (cfg windows only). `build.rs` embeds `ta.ico` into the binary. Windows Explorer shows the TA icon on `ta.exe`.
+4. [ ] **Linux `.desktop` file**: Add `ta.desktop` template with `Icon=ta` entry. `just package-linux` copies icon PNGs to `share/icons/hicolor/{size}x{size}/apps/ta.png` and installs the `.desktop` file.
+5. [ ] **Favicon for web UI**: Copy `icon_32x32.png` and `icon_16x16.png` as favicons for `ta-daemon --web-port` serving. Wire into web.rs static file handler.
+6. [ ] **Discord bot avatar**: Document in USAGE.md how to upload `images/Trusted Autonomy Icon Small.png` as the bot avatar in Discord Developer Portal.
+7. [ ] **`just icons` recipe**: Single command to regenerate all icon formats from the master 1024px PNG. Requires `sips` (macOS), `iconutil` (macOS), `imagemagick` (cross-platform).
+8. [ ] **Test: Windows build.rs embeds icon** (CI matrix — Windows runner only)
+9. [ ] **Test: macOS .app bundle structure valid** (`just package-macos` + verify plist + icon exists)
+
+#### Version: `0.10.18-alpha.7`
+
+---
+
 ### v0.11.0 — Event-Driven Agent Routing
 <!-- status: pending -->
 **Goal**: Allow any TA event to trigger an agent workflow instead of (or in addition to) a static response. This is intelligent, adaptive event handling — not scripted hooks or n8n-style flowcharts. An agent receives the event context and decides what to do.

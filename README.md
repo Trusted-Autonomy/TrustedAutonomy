@@ -1,8 +1,14 @@
-# Trusted Autonomy
+<p align="center">
+  <img src="images/Trusted Autonomy Icon Small.png" alt="Trusted Autonomy" width="180">
+</p>
 
-![Latest](https://img.shields.io/badge/latest-v0.10.12-alpha-blue)
-![Released](https://img.shields.io/badge/released-v0.10.12-alpha-green)
-![License](https://img.shields.io/badge/license-Apache--2.0-orange)
+<h1 align="center">Trusted Autonomy</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/latest-v0.10.18--alpha-blue" alt="Latest">
+  <img src="https://img.shields.io/badge/released-v0.10.18--alpha-green" alt="Released">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-orange" alt="License">
+</p>
 
 **Trusted Autonomy** is a local-first, Rust-based substrate for running autonomous AI agents **safely**, **reviewably**, and **without changing how agents behave**.
 
@@ -72,7 +78,7 @@ Trusted Autonomy achieves this by:
 
 ---
 
-## Current status: v0.10.7-alpha
+## Current status: v0.10.18-alpha
 
 Under active development. See [PLAN.md](PLAN.md) for the full roadmap.
 
@@ -332,8 +338,8 @@ These are additive — not architectural rewrites.
 
 ```bash
 # Clone the repo
-git clone https://github.com/trustedautonomy/ta.git
-cd ta
+git clone https://github.com/Trusted-Autonomy/TrustedAutonomy.git
+cd TrustedAutonomy
 
 # Build (pick one):
 

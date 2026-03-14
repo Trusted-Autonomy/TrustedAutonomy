@@ -3,3 +3,7 @@ use flake
 # Uncomment and set your API keys:
 # export ANTHROPIC_API_KEY="sk-ant-..."
 # export OPENAI_API_KEY="sk-..."
+
+# Discord channel integration
+# export TA_DISCORD_TOKEN="your-new-token"                                                                                                                                                                                                                        
+# export TA_DISCORD_CHANNEL_ID="your-ta-dev-channel-id"
