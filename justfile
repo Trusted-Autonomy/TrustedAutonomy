@@ -32,7 +32,7 @@ verify: check build test
 # Build and launch the TA shell (starts daemon automatically)
 shell *ARGS:
     cargo build --bin ta-daemon --bin ta
-    ./scripts/ta-shell.sh --no-build {{ARGS}}
+    cargo run --bin ta -- shell {{ARGS}}
 
 # Start the daemon in API mode (no shell)
 daemon *ARGS:

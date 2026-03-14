@@ -530,8 +530,8 @@ async fn run_tui(
         eprintln!("Error: Cannot reach daemon at {}", base_url);
         eprintln!();
         eprintln!("Start the daemon with:");
-        eprintln!("  ./scripts/ta-shell.sh          # builds + starts daemon + opens shell");
-        eprintln!("  ta-daemon --api --project-root .");
+        eprintln!("  ta daemon start                # start in background");
+        eprintln!("  ta daemon start --foreground   # start in foreground (for debugging)");
         return Err(anyhow::anyhow!("daemon not reachable at {}", base_url));
     }
 

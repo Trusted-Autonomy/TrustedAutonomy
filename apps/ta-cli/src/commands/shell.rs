@@ -132,9 +132,8 @@ async fn run_shell(
             status.version, cli_version
         );
         eprintln!("  The daemon may behave differently than expected.");
-        eprintln!("  To fix: kill the old daemon and restart with the matching version:");
-        eprintln!("    pkill -f 'ta-daemon' && ta-daemon --api --project-root .");
-        eprintln!("  Or use: ./scripts/ta-shell.sh (auto-restarts stale daemons)");
+        eprintln!("  To fix: restart the daemon with the matching version:");
+        eprintln!("    ta daemon restart");
         eprintln!();
     }
 
@@ -224,7 +223,7 @@ async fn run_shell(
                 // Send input to daemon.
                 if daemon_down.load(Ordering::Relaxed) {
                     eprintln!("Warning: daemon is disconnected. Waiting for reconnect...");
-                    eprintln!("  (Restart with: ./scripts/ta-shell.sh)");
+                    eprintln!("  (Restart with: ta daemon restart)");
                 }
                 let result = send_input(&client, &base_url, trimmed, session_id.as_deref()).await;
                 match result {

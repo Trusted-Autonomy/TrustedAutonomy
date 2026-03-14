@@ -179,17 +179,16 @@ There are three ways to work with TA, depending on how much control you want:
 
 **Option A -- Interactive shell** (recommended for getting started):
 
-Use the convenience script (starts the daemon automatically):
+Start the shell (auto-starts the daemon if needed):
 
 ```bash
-./scripts/ta-shell.sh           # macOS / Linux
-.\scripts\ta-shell.ps1          # Windows PowerShell
+ta shell                        # Starts daemon if needed, opens interactive shell
 ```
 
-Or start manually:
+Or manage the daemon explicitly:
 
 ```bash
-ta-daemon --project-root . &    # Start the daemon in the background
+ta daemon start                 # Start the daemon in the background
 ta shell                        # Open the interactive shell
 ```
 
@@ -266,10 +265,10 @@ cd my-project
 ta init --detect                        # Auto-detect toolchain, generate config
 
 # 2. Start daemon + open shell (one command)
-./scripts/ta-shell.sh                   # Starts daemon if needed, opens shell
+ta shell                                # Starts daemon if needed, opens shell
 
-# Or do it manually:
-# ta-daemon --project-root . &          # Background daemon on port 7700
+# Or manage daemon explicitly:
+# ta daemon start                       # Background daemon on port 7700
 # ta shell                              # Open the shell
 ```
 
@@ -2367,20 +2366,14 @@ The interactive shell (`ta shell`) is a full-screen TUI client for the TA daemon
 
 #### Prerequisites
 
-The shell connects to a running TA daemon. The easiest way is the convenience script that handles everything:
+The shell connects to a running TA daemon. The simplest approach — `ta shell` auto-starts the daemon if needed:
 
 ```bash
-# macOS / Linux -- starts daemon if needed, then opens the shell
-./scripts/ta-shell.sh
-
-# Windows PowerShell
-.\scripts\ta-shell.ps1
-
-# With options
-./scripts/ta-shell.sh --port 8080 --project-root /path/to/project
+ta shell                                  # Starts daemon if needed, opens shell
+ta shell --url http://127.0.0.1:8080      # Connect to a specific daemon URL
 ```
 
-Or manage the daemon manually:
+Or manage the daemon explicitly:
 
 ```bash
 # Start the daemon (runs on http://127.0.0.1:7700 by default)

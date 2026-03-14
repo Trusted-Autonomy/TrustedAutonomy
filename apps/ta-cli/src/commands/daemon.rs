@@ -116,12 +116,25 @@ fn is_process_alive(pid: u32) -> bool {
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // On Windows, we assume alive if PID file exists.
-        // A more robust check would use the Windows API.
+        // Use `tasklist /FI "PID eq <pid>"` to check if the process exists.
+        // The output contains the PID number if the process is alive.
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output()
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                // tasklist prints "INFO: No tasks are running..." when not found,
+                // or the process line containing the PID when found.
+                stdout.contains(&pid.to_string()) && !stdout.contains("No tasks")
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
         let _ = pid;
-        true
+        false
     }
 }
 
