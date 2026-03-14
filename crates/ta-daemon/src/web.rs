@@ -148,6 +148,38 @@ async fn manifest() -> (
     )
 }
 
+/// Serve favicon.ico (32x32 PNG served as ICO content-type) (v0.10.18.7).
+async fn favicon() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static [u8],
+) {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/x-icon")],
+        include_bytes!("../assets/favicon.ico"),
+    )
+}
+
+/// Serve a PNG icon at the given size (v0.10.18.7).
+async fn icon_192() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static [u8],
+) {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../assets/icon-192.png"),
+    )
+}
+
+async fn icon_512() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static [u8],
+) {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../assets/icon-512.png"),
+    )
+}
+
 async fn list_drafts(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     match load_all_drafts(&state.pr_packages_dir) {
         Ok(drafts) => {
@@ -394,6 +426,10 @@ fn build_web_routes(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/manifest.json", get(manifest))
+        // Favicon and icon routes (v0.10.18.7)
+        .route("/favicon.ico", get(favicon))
+        .route("/icon-192.png", get(icon_192))
+        .route("/icon-512.png", get(icon_512))
         // Draft routes
         .route("/api/drafts", get(list_drafts))
         .route("/api/drafts/{id}", get(get_draft))
@@ -620,6 +656,69 @@ mod tests {
             .unwrap();
         let stats: ta_memory::MemoryStats = serde_json::from_slice(&body).unwrap();
         assert_eq!(stats.total_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn favicon_serves_icon() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_router(dir.path().to_path_buf());
+        let resp = app
+            .oneshot(Request::get("/favicon.ico").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(ct, "image/x-icon");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty(), "favicon body should not be empty");
+    }
+
+    #[tokio::test]
+    async fn icon_192_serves_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_router(dir.path().to_path_buf());
+        let resp = app
+            .oneshot(Request::get("/icon-192.png").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(ct, "image/png");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        // PNG magic bytes
+        assert_eq!(&body[..4], b"\x89PNG");
+    }
+
+    #[tokio::test]
+    async fn icon_512_serves_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_router(dir.path().to_path_buf());
+        let resp = app
+            .oneshot(Request::get("/icon-512.png").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(ct, "image/png");
     }
 
     #[tokio::test]

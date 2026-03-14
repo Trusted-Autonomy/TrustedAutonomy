@@ -92,6 +92,7 @@
             # Dev tools
             cargo-nextest  # faster test runner with better output
             just           # command runner (like make, but simpler)
+            imagemagick    # icon generation (convert PNG → ICO, resize)
           ];
 
           shellHook = ''

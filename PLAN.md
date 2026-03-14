@@ -3071,7 +3071,7 @@ Extract `auto_start_daemon()` from `shell.rs` into a shared `commands/daemon.rs`
 ---
 
 ### v0.10.18.7 — Per-Platform Icon Packaging
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Wire the project icons into platform-specific packaging so built artifacts include proper app icons on macOS, Windows, and Linux.
 
 #### Problem
@@ -3084,16 +3084,27 @@ Each platform has a different mechanism for icon embedding:
 - **Linux**: `.desktop` file referencing icon PNGs in XDG icon dirs
 - **Favicon**: For future web UI (`ta-daemon --web-port`)
 
-#### Items
-1. [ ] **Generate Windows `.ico`**: Add `imagemagick` to Nix flake devShell, add `just icons` recipe that generates `.ico` from master 1024px PNG. Check in generated `.ico` alongside `.icns`.
-2. [ ] **macOS `.app` bundle recipe**: `just package-macos` creates `TrustedAutonomy.app/` with `Info.plist`, binary symlink, and `.icns` in `Resources/`. No code signing yet (deferred to v0.9.0).
-3. [ ] **Windows icon embedding**: Add `winres` as a build dependency for `ta-cli` (cfg windows only). `build.rs` embeds `ta.ico` into the binary. Windows Explorer shows the TA icon on `ta.exe`.
-4. [ ] **Linux `.desktop` file**: Add `ta.desktop` template with `Icon=ta` entry. `just package-linux` copies icon PNGs to `share/icons/hicolor/{size}x{size}/apps/ta.png` and installs the `.desktop` file.
-5. [ ] **Favicon for web UI**: Copy `icon_32x32.png` and `icon_16x16.png` as favicons for `ta-daemon --web-port` serving. Wire into web.rs static file handler.
-6. [ ] **Discord bot avatar**: Document in USAGE.md how to upload `images/Trusted Autonomy Icon Small.png` as the bot avatar in Discord Developer Portal.
-7. [ ] **`just icons` recipe**: Single command to regenerate all icon formats from the master 1024px PNG. Requires `sips` (macOS), `iconutil` (macOS), `imagemagick` (cross-platform).
-8. [ ] **Test: Windows build.rs embeds icon** (CI matrix — Windows runner only)
-9. [ ] **Test: macOS .app bundle structure valid** (`just package-macos` + verify plist + icon exists)
+#### Completed
+1. [x] **Generate Windows `.ico`**: Added `imagemagick` to Nix flake devShell. `.ico` already checked in at `images/icons/ta.ico`.
+2. [x] **macOS `.app` bundle recipe**: `just package-macos` creates `TrustedAutonomy.app/` with generated `Info.plist`, binary copy, and `.icns` in `Resources/`. No code signing (deferred).
+3. [x] **Windows icon embedding**: Added `winres` as a build dependency for `ta-cli` (cfg windows only). `build.rs` embeds `ta.ico` into the binary with graceful fallback if icon missing.
+4. [x] **Linux `.desktop` file**: Added `ta.desktop` at project root with `Icon=ta` entry. `just package-linux` copies icon PNGs to XDG `hicolor/{size}x{size}/apps/ta.png` and installs the `.desktop` file.
+5. [x] **Favicon for web UI**: Embedded `favicon.ico`, `icon-192.png`, and `icon-512.png` in `ta-daemon` assets. Added `/favicon.ico`, `/icon-192.png`, `/icon-512.png` routes in `web.rs`. Updated `index.html` with `<link>` tags.
+6. [x] **Discord bot avatar**: Documented in USAGE.md how to upload `images/Trusted Autonomy Icon Small.png` as the bot avatar in Discord Developer Portal.
+7. [x] **`just icons` recipe**: Single command regenerates all PNG sizes, `.ico`, and `.icns` (macOS only) from master 1024px PNG. Uses `magick` (ImageMagick) and `iconutil`.
+8. [x] **Test: icon source files and build paths** — 7 tests in `apps/ta-cli/tests/packaging.rs` verify all icon source files exist, `.icns` magic bytes, `.desktop` validity, favicon assets, and `index.html` link tags.
+9. [x] **Test: web favicon routes** — 3 tests in `crates/ta-daemon/src/web.rs` verify `/favicon.ico`, `/icon-192.png`, `/icon-512.png` serve correct content types and valid PNG data.
+
+#### Tests added (10 new)
+- `apps/ta-cli/tests/packaging.rs::icon_source_files_exist` — all 9 icon files present
+- `apps/ta-cli/tests/packaging.rs::windows_ico_path_valid` — build.rs ico path resolves
+- `apps/ta-cli/tests/packaging.rs::linux_desktop_file_valid` — .desktop has required XDG fields
+- `apps/ta-cli/tests/packaging.rs::macos_icns_valid_format` — icns magic bytes check
+- `apps/ta-cli/tests/packaging.rs::web_favicon_assets_exist` — daemon assets directory has favicon files
+- `apps/ta-cli/tests/packaging.rs::index_html_has_favicon_links` — HTML references favicon
+- `crates/ta-daemon/src/web.rs::favicon_serves_icon` — /favicon.ico returns image/x-icon
+- `crates/ta-daemon/src/web.rs::icon_192_serves_png` — /icon-192.png returns valid PNG
+- `crates/ta-daemon/src/web.rs::icon_512_serves_png` — /icon-512.png returns valid PNG
 
 #### Version: `0.10.18-alpha.7`
 

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Trusted Autonomy
+GenericName=AI Agent Review System
+Comment=Local-first agent substrate for goals, PR review, and approvals
+Exec=ta shell
+Icon=ta
+Type=Application
+Categories=Development;Utility;
+Keywords=ai;agent;autonomy;review;staging;
+Terminal=true
+StartupNotify=false
