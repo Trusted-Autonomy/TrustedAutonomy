@@ -4,6 +4,9 @@
 //   TA_GIT_HASH     — short VCS revision (e.g., "abc1234", "r1234"), or "unknown"
 //   TA_BUILD_DATE   — build date in YYYY-MM-DD format
 //
+// On Windows, also embeds the application icon into the PE binary via winres
+// so that Explorer and the taskbar show the TA icon on ta.exe.
+//
 // Resolution order for revision ID:
 //   1. TA_REVISION env var (set by CI or adapter)
 //   2. git rev-parse --short HEAD (if in a git repo)
@@ -12,6 +15,29 @@
 use std::process::Command;
 
 fn main() {
+    // Windows icon embedding (v0.10.18.7).
+    #[cfg(windows)]
+    {
+        let ico_path = "../../images/icons/ta.ico";
+        if std::path::Path::new(ico_path).exists() {
+            let mut res = winres::WindowsResource::new();
+            res.set_icon(ico_path);
+            if let Err(e) = res.compile() {
+                println!(
+                    "cargo:warning=Failed to embed Windows icon: {}. \
+                     The binary will build without an icon.",
+                    e
+                );
+            }
+        } else {
+            println!(
+                "cargo:warning=Windows icon not found at {}. \
+                 Run 'just icons' to generate it.",
+                ico_path
+            );
+        }
+        println!("cargo:rerun-if-changed={}", ico_path);
+    }
     // Get the VCS revision. Check for an explicit override first (adapter-agnostic),
     // then fall back to git detection.
     let revision = std::env::var("TA_REVISION")

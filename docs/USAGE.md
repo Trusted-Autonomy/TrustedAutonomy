@@ -138,6 +138,32 @@ cd TrustedAutonomy
 # Binary is at target/release/ta
 ```
 
+#### Platform packaging
+
+After building from source, create platform-native packages with icons:
+
+```bash
+# macOS — creates TrustedAutonomy.app with icon
+just build
+just package-macos
+# Output: target/TrustedAutonomy.app/
+
+# Linux — install desktop entry and icons
+just build
+just package-linux
+# Installs to ~/.local/bin, ~/.local/share/icons, ~/.local/share/applications
+
+# Linux — install to system prefix
+just package-linux PREFIX=/usr/local
+```
+
+To regenerate all icon formats from the master 1024px PNG:
+
+```bash
+just icons
+# Generates: PNG sizes (16-512), ta.ico (Windows), ta.icns (macOS)
+```
+
 ### Set up your project
 
 **New project** -- generate TA config from a template:
@@ -2788,6 +2814,17 @@ default_channels = ["discord"]
 
 See [Discord Channel Guide](guides/discord-channel.md) for the full setup guide including bot permissions, access control, and troubleshooting.
 
+#### Discord bot avatar
+
+To set a custom icon for your TA Discord bot:
+
+1. Open [Discord Developer Portal](https://discord.com/developers/applications) and select your TA bot application
+2. Click **General Information**
+3. Under **App Icon**, upload `images/Trusted Autonomy Icon Small.png` from the TA repository
+4. Click **Save Changes**
+
+The icon appears on all bot messages and in the server member list.
+
 ### Slack Channel Plugin
 
 Slack is available as an **external channel plugin**. It delivers agent questions as Block Kit messages with interactive buttons to a Slack channel.
@@ -4456,6 +4493,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.10.18.4 | Live agent output in shell & terms consent | Done |
 | v0.10.18.5 | Agent stdin relay & interactive prompt handling | Done |
 | v0.10.18.6 | `ta daemon` subcommand (start/stop/restart/status/log) | Done |
+| v0.10.18.7 | Per-platform icon packaging | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

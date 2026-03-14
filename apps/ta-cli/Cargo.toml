@@ -56,5 +56,8 @@ ta-workspace = { path = "../../crates/ta-workspace" }
 ta-workflow = { path = "../../crates/ta-workflow" }
 
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
 [dev-dependencies]
 tempfile = { workspace = true }
