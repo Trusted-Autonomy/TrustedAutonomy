@@ -3488,6 +3488,12 @@ example: shell-routing-01, fix-auth-03, v0.11.2.1-01
 10. [ ] **Shell status bar shows goal tag**: Replace UUID prefix with tag in the TUI status bar: `goal: shell-routing-01 (running)` instead of `goal: 511e0465 (running)`.
 11. [ ] **Backward compatibility**: Existing goals without tags get auto-tagged on first access (derived from title). UUID prefix resolution continues to work. Migration is transparent.
 12. [ ] **`ta status` summary includes VCS tracking**: The daemon's `/api/status` endpoint includes VCS state for active/recent goals so the shell and `ta status` can show PR status without extra queries.
+13. [ ] **Git adapter `auto_merge` config**: Add `auto_merge: bool` to `GitConfig` (default: false). When true, after `gh pr create`, run `gh pr merge --auto --squash` to enable GitHub's auto-merge. Configurable in `.ta/workflow.toml`:
+    ```toml
+    [submit.git]
+    auto_merge = true
+    ```
+14. [ ] **Daemon command heartbeat for streamed commands**: Long-running commands dispatched via `/api/cmd` (draft apply, run, dev) emit a periodic heartbeat line (`[heartbeat] still running... Ns elapsed`) to the output stream when no stdout/stderr activity for N seconds (configurable, default 10s). Prevents the shell from appearing frozen during silent phases (e.g., git push to slow remote). The daemon's background task already tracks `last_activity` — this adds an output heartbeat when the gap exceeds the threshold. User-facing processes can opt into the same heartbeat via a future `--heartbeat` flag or `daemon.toml` config.
 
 #### Version: `0.11.2-alpha.3`
 
