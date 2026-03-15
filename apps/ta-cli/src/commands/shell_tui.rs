@@ -3188,7 +3188,8 @@ mod tests {
 
     #[test]
     fn parse_stream_json_system_hook() {
-        let line = r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}"#;
+        let line =
+            r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}"#;
         assert_eq!(
             parse_stream_json_text(line),
             Some("[hook] SessionStart:startup...".into())

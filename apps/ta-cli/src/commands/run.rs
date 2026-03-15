@@ -184,7 +184,11 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             description: Some("Anthropic's Claude Code CLI".to_string()),
             interactive: None,
             alignment: Some(ta_policy::AlignmentProfile::default_developer()),
-            headless_args: vec!["--verbose".to_string(), "--output-format".to_string(), "stream-json".to_string()],
+            headless_args: vec![
+                "--verbose".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ],
             non_interactive_env: Default::default(),
             auto_answers: Vec::new(),
         },

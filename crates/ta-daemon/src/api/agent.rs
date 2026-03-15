@@ -529,7 +529,14 @@ mod tests {
         assert_eq!(bin, "claude");
         assert_eq!(
             args,
-            vec!["--print", "--verbose", "--output-format", "stream-json", "-p", "hello"]
+            vec![
+                "--print",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "-p",
+                "hello"
+            ]
         );
     }
 

@@ -1365,10 +1365,7 @@ mod tests {
     fn stream_json_nested_message_content() {
         // Current format: content nested under message.
         let line = r#"{"type":"assistant","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"Nested"}]}}"#;
-        assert_eq!(
-            parse_stream_json_line(line),
-            Some("Nested".to_string())
-        );
+        assert_eq!(parse_stream_json_line(line), Some("Nested".to_string()));
     }
 
     // ── v0.10.18.5 tests ──────────────────────────────────────
