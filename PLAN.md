@@ -3550,6 +3550,41 @@ This pulls forward the zero-dependency items from v0.12.2 (Autonomous Operations
 
 ---
 
+### v0.11.2.5 — Prompt Detection Hardening & Version Housekeeping
+<!-- status: pending -->
+**Goal**: Fix false-positive stdin prompt detection that makes `ta shell` unusable during goal runs, and update stale version tracking.
+
+#### Problem
+1. **False stdin prompts**: `is_interactive_prompt()` in `cmd.rs:955` matches any line under 120 chars ending with `:` or `?`. Agent output like `**API** (crates/ta-daemon/src/api/status.rs):` triggers a `━━━ Agent Stdin Prompt ━━━` that never gets dismissed, locking the shell into `stdin>` mode.
+2. **Shell stuck in stdin> after goal run**: When a false-positive prompt is the last thing detected, `pending_stdin_prompt` is never cleared. The shell stays in `stdin>` mode after the goal finishes. The user has to Ctrl-C to recover.
+3. **`version.json` stale**: Still reads `0.10.12-alpha` from March 10. Workspace `Cargo.toml` is `0.11.2-alpha.4`. `ta status` and shell status bar may show wrong version depending on which source they read.
+
+#### Prompt Detection Hardening
+
+The core insight: a real prompt means the agent is **waiting** — it stops producing output. A false positive is followed by more output. Two defense layers:
+
+**Layer 1 — Heuristic rejection (synchronous, in `is_interactive_prompt()`)**:
+4. [ ] **Reject lines containing code/markdown patterns**: Lines with `**`, backtick pairs, path separators (`/src/`, `.rs`, `.ts`), or bracket-prefixed output (`[agent]`, `[apply]`, `[info]`) are not prompts. These are agent progress output.
+5. [ ] **Require positive signal**: Only match `:` endings if the line looks conversational — no parentheses, no code formatting, not prefixed with `[`. Keep `?`, `[y/N]`, `[Y/n]`, numbered choice patterns as strong positive signals.
+6. [ ] **Add test cases**: Test that `**API** (path/to/file.rs):`, `[agent] Config loaded:`, and `Building crate ta-daemon:` are NOT detected as prompts. Test that `Do you want to continue? [y/N]`, `Enter your name:`, and `Choose [1] or [2]:` ARE detected.
+
+**Layer 2 — Continuation cancellation (async, in shell output handler)**:
+7. [ ] **Auto-dismiss on continued output**: When `pending_stdin_prompt` is set and the shell receives additional agent output lines (non-prompt) within a configurable window (default 2s), automatically dismiss the prompt: clear `pending_stdin_prompt`, append a `[info] Prompt dismissed — agent continued output` line, return to `ta>` mode. The agent wasn't waiting.
+8. [ ] **Clear prompt on stream end**: When the goal/output stream ends (SSE connection closes, goal state transitions to terminal), clear `pending_stdin_prompt` and return to `ta>` mode. A completed goal cannot be waiting for input.
+
+**Layer 3 — Q&A agent second opinion (async, parallel to user prompt)**:
+9. [ ] **Agent-verified prompt detection**: When `is_interactive_prompt()` triggers and sets `pending_stdin_prompt`, simultaneously dispatch the suspected prompt line (plus the last ~5 lines of context) to the Q&A agent (`/api/agent/ask`) with a system prompt: "Is this agent output a prompt waiting for user input, or is it just informational output? Respond with only 'prompt' or 'not_prompt'." Fire-and-forget — if the agent responds `not_prompt` before the user types anything, auto-dismiss the stdin prompt and return to `ta>` mode.
+10. [ ] **Q&A agent timeout**: If the Q&A agent doesn't respond within 5s, keep the prompt visible (fail-open — assume it might be real). The user can always Ctrl-C to dismiss.
+11. [ ] **Confidence display**: While the Q&A verification is in flight, show a subtle indicator: `stdin> (verifying...)`. If dismissed by the agent, show `[info] Not a prompt — resumed normal mode`.
+
+#### Version Housekeeping
+12. [ ] **Update `version.json`**: Set `committed` and `deployed` to `0.11.2-alpha.4`, update timestamps. This should have been done during v0.11.2.x phases.
+13. [ ] **Verify version sources**: Confirm what `ta status` and the shell status bar read — `version.json`, `Cargo.toml`, or build-time `TA_GIT_HASH`. Document the canonical source and ensure consistency.
+
+#### Version: `0.11.2-alpha.5`
+
+---
+
 ### v0.11.3 — Self-Service Operations, Draft Amend & Plan Intelligence
 <!-- status: pending -->
 **Goal**: Make `ta shell` (and Discord after v0.12.1) the 99% interface for TA work. Today, deep inspection of goals, drafts, git PRs, and zombie processes requires an external agent with filesystem access. This phase moves that capability into TA itself, adds lightweight draft amendment for PR iteration, and gives the agent read-only introspection tools so it can diagnose issues and recommend actions — with the daemon mediating all writes through user approval.
