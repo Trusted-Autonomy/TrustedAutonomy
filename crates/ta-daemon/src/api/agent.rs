@@ -238,7 +238,18 @@ pub async fn ask_agent(
                 use crate::api::goal_output::OutputLine;
                 use tokio::io::{AsyncBufReadExt, BufReader};
 
-                let (binary, args) = resolve_agent_command(&agent, &prompt);
+                let (binary, args) = match resolve_agent_command(&agent, &prompt) {
+                    Ok(cmd) => cmd,
+                    Err(e) => {
+                        tracing::warn!("Agent '{}' rejected for Q&A: {}", agent, e,);
+                        let _ = tx.send(OutputLine {
+                            stream: "stderr",
+                            line: format!("[agent error] {}", e),
+                        });
+                        goal_output.remove_channel(&req_id).await;
+                        return;
+                    }
+                };
 
                 tracing::info!(
                     "Agent ask (streaming): agent={}, request_id={}, prompt_len={}",
@@ -389,16 +400,21 @@ pub async fn ask_agent(
     }
 }
 
-/// Resolve agent name to binary + args.
+/// Resolve agent name to binary + args for Q&A (interactive prompt) sessions.
 ///
 /// For claude-code, uses `--output-format stream-json` so that stdout emits
 /// one JSON object per line as the response is generated, rather than waiting
 /// until the full response is ready (which can take 60+ seconds with no
 /// output). The daemon's stdout reader publishes each line to the broadcast
 /// channel in real time.
-fn resolve_agent_command(agent: &str, prompt: &str) -> (String, Vec<String>) {
+///
+/// Returns `Err` for framework agents (claude-flow, etc.) that don't accept
+/// bare prompts — these are designed for goal execution (`ta run`), not Q&A.
+/// Configure `qa_agent` in `[agent]` section of `daemon.toml` to route Q&A
+/// to a prompt-capable agent.
+fn resolve_agent_command(agent: &str, prompt: &str) -> Result<(String, Vec<String>), String> {
     match agent {
-        "claude-code" | "claude" => (
+        "claude-code" | "claude" => Ok((
             "claude".to_string(),
             vec![
                 "--print".to_string(),
@@ -408,17 +424,27 @@ fn resolve_agent_command(agent: &str, prompt: &str) -> (String, Vec<String>) {
                 "-p".to_string(),
                 prompt.to_string(),
             ],
-        ),
-        "codex" => (
+        )),
+        "codex" => Ok((
             "codex".to_string(),
             vec![
                 "--quiet".to_string(),
                 "--prompt".to_string(),
                 prompt.to_string(),
             ],
+        )),
+        // Framework agents: designed for goal execution (ta run), not direct
+        // prompts. They require orchestration setup (hive-mind init, topology
+        // selection, etc.) that doesn't fit the Q&A pattern.
+        "claude-flow" => Err(
+            "'claude-flow' is a framework agent for goal execution (ta run), \
+             not interactive Q&A. Set qa_agent = \"claude-code\" in the [agent] \
+             section of .ta/daemon.toml to route shell questions to a \
+             prompt-capable agent."
+                .to_string(),
         ),
         // Generic fallback: assume binary name matches agent name.
-        other => (other.to_string(), vec![prompt.to_string()]),
+        other => Ok((other.to_string(), vec![prompt.to_string()])),
     }
 }
 
@@ -525,7 +551,7 @@ mod tests {
 
     #[test]
     fn resolve_claude_code_agent() {
-        let (bin, args) = resolve_agent_command("claude-code", "hello");
+        let (bin, args) = resolve_agent_command("claude-code", "hello").unwrap();
         assert_eq!(bin, "claude");
         assert_eq!(
             args,
@@ -541,9 +567,57 @@ mod tests {
     }
 
     #[test]
+    fn resolve_claude_alias() {
+        let (bin, _args) = resolve_agent_command("claude", "hi").unwrap();
+        assert_eq!(bin, "claude");
+    }
+
+    #[test]
+    fn resolve_codex_agent() {
+        let (bin, args) = resolve_agent_command("codex", "fix bug").unwrap();
+        assert_eq!(bin, "codex");
+        assert_eq!(args, vec!["--quiet", "--prompt", "fix bug"]);
+    }
+
+    #[test]
+    fn resolve_claude_flow_rejected() {
+        let result = resolve_agent_command("claude-flow", "What is this project?");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("framework agent"),
+            "Error should mention framework agent: {}",
+            err
+        );
+        assert!(
+            err.contains("qa_agent"),
+            "Error should mention qa_agent config: {}",
+            err
+        );
+    }
+
+    #[test]
     fn resolve_unknown_agent() {
-        let (bin, args) = resolve_agent_command("my-agent", "test");
+        let (bin, args) = resolve_agent_command("my-agent", "test").unwrap();
         assert_eq!(bin, "my-agent");
         assert_eq!(args, vec!["test"]);
+    }
+
+    #[test]
+    fn get_or_create_default_separates_agent_types() {
+        // Verifies that Q&A sessions (claude-code) and goal sessions (claude-flow)
+        // don't share sessions — each agent type gets its own session.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mgr = AgentSessionManager::new(5);
+            let qa = mgr.get_or_create_default("claude-code").await.unwrap();
+            let goal = mgr.get_or_create_default("claude-flow").await.unwrap();
+            assert_ne!(qa.session_id, goal.session_id);
+            assert_eq!(qa.agent, "claude-code");
+            assert_eq!(goal.agent, "claude-flow");
+        });
     }
 }
