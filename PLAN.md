@@ -3373,6 +3373,23 @@ When the agent process fails to start, crashes, or exits with an error, the outp
 
 ---
 
+### v0.11.2.2 — Agent Output Schema Engine
+<!-- status: pending -->
+**Goal**: Replace hardcoded stream-json parsers with a schema-driven extraction engine. Each agent defines its output format in a YAML schema file. The parser loads schemas at runtime, so format changes don't require recompilation.
+
+#### Items
+1. [ ] **Schema format definition**: YAML schema with `agent`, `schema_version`, `format`, and `extractors` sections. Extractors define `type_match` → `paths[]` mappings for text content, tool use, model name, progress indicators, and suppressed event types.
+2. [ ] **Schema files for built-in agents**: `agents/output-schemas/claude-code-v2.yaml` (current nested format), `claude-code-v1.yaml` (legacy top-level format), `codex.yaml`. Schemas ship with the binary (embedded via `include_str!` or loaded from `~/.ta/schemas/`).
+3. [ ] **Runtime schema loader**: Load schema by agent name, try project-local `agents/output-schemas/` first, then `~/.ta/schemas/`, then embedded defaults. Version negotiation: if agent reports a version, select matching schema.
+4. [ ] **Generic path extractor**: Given a JSON value and a dotted path like `message.content[].text`, extract the value. Supports object traversal, array iteration, and optional fields.
+5. [ ] **Replace hardcoded parsers**: Replace `parse_stream_json_text()` in `shell_tui.rs` and `parse_stream_json_line()` in `cmd.rs` with schema-driven extraction. Fallback to raw passthrough if no schema matches.
+6. [ ] **Schema validation**: On load, validate schema structure. Warn if schema references unknown extractor types. Test suite with sample agent output against each schema.
+7. [ ] **User-extensible schemas**: Users can add schemas for custom agents in project-local or global directories. Document the schema format in USAGE.md.
+
+#### Version: `0.11.2-alpha.2`
+
+---
+
 ### v0.11.3 — Reflink/COW Overlay Optimization
 <!-- status: pending -->
 **Goal**: Replace full-copy staging with copy-on-write to eliminate filesystem bloat. Detect APFS/Btrfs and use native reflinks; fall back to FUSE overlay on unsupported filesystems.
