@@ -899,7 +899,13 @@ pub(crate) fn parse_stream_json_line(line: &str) -> Option<String> {
     match event_type {
         "assistant" | "text" | "content_block_delta" => {
             // Extract text content. Claude stream-json nests content in various places.
-            if let Some(text) = obj.get("content").and_then(extract_text_content) {
+            // Current format: {"type":"assistant","message":{"content":[...]}}
+            // Legacy format: {"type":"assistant","content":[...]}
+            let content = obj
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .or_else(|| obj.get("content"));
+            if let Some(text) = content.and_then(extract_text_content) {
                 if !text.is_empty() {
                     return Some(text);
                 }
@@ -1352,6 +1358,16 @@ mod tests {
         assert_eq!(
             parse_stream_json_line(line),
             Some("Hello World".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_json_nested_message_content() {
+        // Current format: content nested under message.
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"Nested"}]}}"#;
+        assert_eq!(
+            parse_stream_json_line(line),
+            Some("Nested".to_string())
         );
     }
 

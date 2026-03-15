@@ -2170,8 +2170,14 @@ fn parse_stream_json_text(line: &str) -> Option<String> {
     }
 
     // Try assistant message with content array.
+    // Current format nests content under "message": {"type":"assistant","message":{"content":[...]}}
+    // Legacy format had content at top level: {"type":"assistant","content":[...]}
     if json["type"].as_str() == Some("assistant") {
-        if let Some(content) = json["content"].as_array() {
+        // Try nested message.content first (current format).
+        let content_source = json["message"]["content"]
+            .as_array()
+            .or_else(|| json["content"].as_array());
+        if let Some(content) = content_source {
             let text: String = content
                 .iter()
                 .filter_map(|c| {
@@ -2185,11 +2191,34 @@ fn parse_stream_json_text(line: &str) -> Option<String> {
                 .join("\n");
             return Some(text);
         }
-        // Single text field.
-        if let Some(text) = json["content"].as_str() {
+        // Single text field (nested or top-level).
+        if let Some(text) = json["message"]["content"]
+            .as_str()
+            .or_else(|| json["content"].as_str())
+        {
             return Some(text.to_string());
         }
         return Some(String::new());
+    }
+
+    // System events — show progress for hooks and init.
+    if json["type"].as_str() == Some("system") {
+        let subtype = json["subtype"].as_str().unwrap_or("");
+        match subtype {
+            "init" => {
+                if let Some(model) = json["model"].as_str() {
+                    return Some(format!("[init] model: {}", model));
+                }
+                return Some("[init] Agent initialized".to_string());
+            }
+            "hook_started" => {
+                if let Some(name) = json["hook_name"].as_str() {
+                    return Some(format!("[hook] {}...", name));
+                }
+                return Some(String::new());
+            }
+            _ => return Some(String::new()),
+        }
     }
 
     // Other recognized types (message start, tool_use, etc.) — suppress.
@@ -2210,13 +2239,11 @@ fn extract_model_from_stream_json(line: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(line).ok()?;
 
     // message_start has the model in message.model
-    if json["type"].as_str() == Some("message_start") {
-        if let Some(model) = json["message"]["model"].as_str() {
-            return Some(humanize_model_name(model));
-        }
+    if let Some(model) = json["message"]["model"].as_str() {
+        return Some(humanize_model_name(model));
     }
 
-    // Some formats put model at top level
+    // Some formats put model at top level (e.g., system/init events)
     if let Some(model) = json["model"].as_str() {
         return Some(humanize_model_name(model));
     }
@@ -3138,8 +3165,34 @@ mod tests {
 
     #[test]
     fn parse_stream_json_assistant_content_array() {
+        // Legacy format: content at top level.
         let line = r#"{"type":"assistant","content":[{"type":"text","text":"Hello"}]}"#;
         assert_eq!(parse_stream_json_text(line), Some("Hello".into()));
+    }
+
+    #[test]
+    fn parse_stream_json_assistant_nested_message() {
+        // Current format: content nested under message.
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"Nested hello"}]}}"#;
+        assert_eq!(parse_stream_json_text(line), Some("Nested hello".into()));
+    }
+
+    #[test]
+    fn parse_stream_json_system_init() {
+        let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
+        assert_eq!(
+            parse_stream_json_text(line),
+            Some("[init] model: claude-opus-4-6".into())
+        );
+    }
+
+    #[test]
+    fn parse_stream_json_system_hook() {
+        let line = r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}"#;
+        assert_eq!(
+            parse_stream_json_text(line),
+            Some("[hook] SessionStart:startup...".into())
+        );
     }
 
     #[test]
