@@ -3329,7 +3329,7 @@ See `docs/MISSION-AND-SCOPE.md` for the full design.
 ---
 
 ### v0.11.2.1 — Shell Agent Routing, TUI Mouse Fix & Agent Output Diagnostics
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Fix three immediate shell usability issues: (1) agent Q&A sessions fail when `default_agent` is not `claude-code`, (2) TUI mouse capture prevents text selection/copy, and (3) agent errors are silently swallowed.
 
 #### Problem 1: Agent Q&A routing broken for non-claude-code agents
