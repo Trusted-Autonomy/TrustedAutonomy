@@ -3431,6 +3431,68 @@ When the agent process fails to start, crashes, or exits with an error, the outp
 
 ---
 
+### v0.11.2.3 — Goal & Draft Unified UX
+<!-- status: pending -->
+**Goal**: Make goals and drafts feel like one thing to the human. Today they have separate UUIDs, separate `list` commands, disconnected status, and no VCS tracking after apply. The human shouldn't have to cross-reference IDs or hunt through 40 drafts to find the one that matters.
+
+#### Problem
+1. **Goals and drafts have separate UUIDs** — `goal_run_id` (UUID) and `package_id` (UUID) are unrelated strings. The human sees `511e0465-...` in one place and `34b31e89-...` in another and has to mentally link them.
+2. **Goal status doesn't reflect draft lifecycle** — `ta goal list` shows `applied` but doesn't indicate whether the PR was merged, still open, or failed CI. The human has to check GitHub manually.
+3. **Draft list default filter misses "in progress" drafts** — After `ta draft apply --git-commit --push --review`, the draft transitions to `Applied` status, but the PR is still open. `ta draft list` (compact mode) hides it because `Applied` is terminal. The human is told "no active drafts, use --all" and then has to scan 40+ entries.
+4. **No human-friendly names** — Everything is UUIDs or UUID prefixes. Hard to say "check on the shell-routing goal" — you have to find the UUID first.
+5. **No VCS post-apply tracking** — Once applied, TA doesn't know whether the PR was merged, closed, or has failing checks. The lifecycle ends at `Applied` from TA's perspective, but from the human's perspective the work isn't done until the PR merges.
+
+#### Design: Unified Goal Tag
+
+A **goal tag** is the single human-friendly identifier for a unit of work:
+
+```
+format: <slug>-<seq>
+example: shell-routing-01, fix-auth-03, v0.11.2.1-01
+```
+
+- **slug**: Auto-derived from goal title (lowercase, hyphens, max 30 chars). Overridable: `ta run "title" --tag fix-auth`.
+- **seq**: Auto-incrementing per slug (handles multiple goals with similar names).
+- The tag is the **primary display ID everywhere**: goal list, draft list, shell status bar, events, audit log.
+- Goals and their draft(s) share the tag. A follow-up draft becomes `shell-routing-01.2` (iteration suffix).
+- UUIDs remain the internal key. Tags are stored on both `GoalRun.tag` and `DraftPackage.tag` and are resolvable in all commands: `ta goal status shell-routing-01`, `ta draft view shell-routing-01`.
+
+#### Items
+
+1. [ ] **`GoalRun.tag` field**: Add `tag: String` to GoalRun. Auto-generate from title on creation. Store in goal JSON. Add `GoalRunStore::resolve_tag(tag) -> Option<GoalRun>` for lookup.
+2. [ ] **`DraftPackage.tag` field**: Add `tag: String` to DraftPackage. Inherit from parent goal on `ta draft build`. Replace `display_id` with `tag` in all display contexts.
+3. [ ] **Tag resolution in all commands**: `ta goal status <tag>`, `ta draft view <tag>`, `ta draft apply <tag>`, `ta draft approve <tag>`. Fall back to UUID prefix match if tag doesn't match.
+4. [ ] **`ta goal list` shows draft/VCS status**: Add columns showing draft state and VCS state inline:
+   ```
+   TAG                TITLE                     STATE        DRAFT      VCS
+   shell-routing-01   Shell agent routing...    applied      Applied    PR #166 (open)
+   fix-auth-03        Fix OAuth token...        running      —          —
+   v0.11.2.2-01       Agent output schema...    completed    Applied    PR #165 (merged)
+   ```
+5. [ ] **`ta draft list` "recently applied" filter**: Default compact view includes `Applied` drafts younger than 7 days (configurable). Drafts with open PRs are always shown regardless of age. Removes the "no active drafts" false negative.
+6. [ ] **VCS status tracking on DraftPackage**: Add `vcs_status: Option<VcsTrackingInfo>` to DraftPackage:
+   ```rust
+   pub struct VcsTrackingInfo {
+       pub branch: String,
+       pub review_url: Option<String>,  // PR URL
+       pub review_id: Option<String>,   // PR number
+       pub review_state: Option<String>, // open, merged, closed
+       pub commit_sha: Option<String>,
+       pub last_checked: DateTime<Utc>,
+   }
+   ```
+   Populated by the VCS adapter on `commit()`, `push()`, `open_review()`. Updated on `ta draft list` or `ta goal status` via adapter query.
+7. [ ] **`ta draft list` shows VCS column**: Display PR state inline. Open PRs highlighted. Merged PRs shown as completed.
+8. [ ] **VCS adapter `check_review()` method**: New trait method on `SourceAdapter` that queries the VCS provider for PR/review status. Git adapter uses `gh pr view --json state`. Cached with TTL to avoid rate limiting.
+9. [ ] **`ta goal status <tag>` unified view**: Single command shows everything about a unit of work — goal state, draft state, VCS state, artifact summary, timeline. Replaces the need to cross-reference `ta goal list` + `ta draft list` + `gh pr view`.
+10. [ ] **Shell status bar shows goal tag**: Replace UUID prefix with tag in the TUI status bar: `goal: shell-routing-01 (running)` instead of `goal: 511e0465 (running)`.
+11. [ ] **Backward compatibility**: Existing goals without tags get auto-tagged on first access (derived from title). UUID prefix resolution continues to work. Migration is transparent.
+12. [ ] **`ta status` summary includes VCS tracking**: The daemon's `/api/status` endpoint includes VCS state for active/recent goals so the shell and `ta status` can show PR status without extra queries.
+
+#### Version: `0.11.2-alpha.3`
+
+---
+
 ### v0.11.3 — Reflink/COW Overlay Optimization
 <!-- status: pending -->
 **Goal**: Replace full-copy staging with copy-on-write to eliminate filesystem bloat. Detect APFS/Btrfs and use native reflinks; fall back to FUSE overlay on unsupported filesystems.
