@@ -3110,49 +3110,6 @@ Each platform has a different mechanism for icon embedding:
 
 ---
 
-### v0.11.2.1 — Shell Agent Routing, TUI Mouse Fix & Agent Output Diagnostics
-<!-- status: in_progress -->
-**Goal**: Fix three immediate shell usability issues: (1) agent Q&A sessions fail when `default_agent` is not `claude-code`, (2) TUI mouse capture prevents text selection/copy, and (3) agent errors are silently swallowed.
-
-#### Problem 1: Agent Q&A routing broken for non-claude-code agents
-When `default_agent = "claude-flow"` in `daemon.toml`, natural language questions in `ta shell` hit the generic fallback in `resolve_agent_command()` (`agent.rs:384`): `claude-flow "prompt"`. Claude-flow is a framework/MCP server — it doesn't accept bare prompts as CLI arguments. The process exits immediately with no useful output, showing "agent output ended" in the shell.
-
-The root issue is that `default_agent` serves two different purposes:
-- **Goal execution** (`ta run`): which agent framework to spawn for goals — claude-flow is correct here
-- **Shell Q&A** (`ask_agent`): which LLM to answer ad-hoc questions — needs a prompt-capable agent (claude-code)
-
-Ultimately each workflow should be able to specify which agent framework to use, with per-agent override options. The workflow and agent might have a recommendation but it should be stored at the project level.
-
-#### Problem 2: TUI mouse capture blocks text selection/copy
-The shell TUI (`shell_tui.rs`) calls `EnableMouseCapture` to support scroll-via-mouse (`MouseEventKind::ScrollUp/Down`). This steals the mouse from the terminal emulator, blocking native text selection. Claude Code's terminal handles this correctly — scroll and text selection both work because it doesn't capture the mouse. We already have keyboard scrolling (Shift+Up/Down, PageUp/PageDown) so mouse capture adds no value. Remove it.
-
-#### Problem 3: Agent errors silently swallowed
-When the agent process fails to start, crashes, or exits with an error, the output may be lost — especially if the stream-json parser doesn't recognize the output format. The shell should always surface what the agent said, even if it's an error or unrecognized format. Never silently ignore agent output.
-
-#### Items
-1. [ ] **Per-workflow agent config at project level**: Add `[agent.workflows]` in `daemon.toml` (or `project.toml`) mapping workflow types to agents:
-   ```toml
-   [agent]
-   default_agent = "claude-flow"   # fallback for goal execution
-   qa_agent = "claude-code"        # shell Q&A, diagnostic, interactive
-
-   [agent.workflows]
-   goal = "claude-flow"            # ta run
-   qa = "claude-code"              # shell natural language
-   diagnostic = "claude-code"      # daemon-spawned diagnostics (v0.12.4)
-   dev = "claude-code"             # ta dev
-   # Per-agent overrides possible per workflow
-   ```
-   `ask_agent()` uses `qa_agent`; `ta run` uses `goal` workflow agent. Each is independently configurable with project-level storage. **Done (basic)**: `qa_agent` field added to `AgentConfig`, `input.rs` routes Q&A to `qa_agent`, session lookup filters by agent type. Full `[agent.workflows]` table deferred.
-2. [ ] **Add `claude-flow` match arm to `resolve_agent_command()`**: Invoke claude-flow correctly for goal execution, and ensure Q&A routing never sends prompts to a framework agent.
-3. [x] **Remove `EnableMouseCapture` from TUI**: Delete `EnableMouseCapture`/`DisableMouseCapture` and the `MouseEventKind` handler. Terminal-native mouse scroll and text selection both work. Keyboard scrolling (Shift+Up/Down, PageUp/PageDown) remains.
-4. [x] **Surface all agent output on error**: When the agent process exits with non-zero status, send diagnostic message to shell output stream with exit code and agent name. Includes non-zero exit, process wait error, and timeout cases.
-5. [x] **Agent launch failure surfacing**: If `resolve_agent_command()` produces a binary that doesn't exist or fails to spawn, error is sent to shell output stream with binary name and spawn error — not just daemon logs.
-
-#### Version: `0.11.2-alpha.1`
-
----
-
 ### v0.11.0 — Event-Driven Agent Routing
 <!-- status: done -->
 **Goal**: Allow any TA event to trigger an agent workflow instead of (or in addition to) a static response. This is intelligent, adaptive event handling — not scripted hooks or n8n-style flowcharts. An agent receives the event context and decides what to do.
@@ -3368,6 +3325,51 @@ See `docs/MISSION-AND-SCOPE.md` for the full design.
 - `apps/ta-cli/src/commands/build.rs`: 5 tests (select cargo/npm/empty, script build/test)
 
 #### Version: `0.11.2-alpha`
+
+---
+
+### v0.11.2.1 — Shell Agent Routing, TUI Mouse Fix & Agent Output Diagnostics
+<!-- status: in_progress -->
+**Goal**: Fix three immediate shell usability issues: (1) agent Q&A sessions fail when `default_agent` is not `claude-code`, (2) TUI mouse capture prevents text selection/copy, and (3) agent errors are silently swallowed.
+
+#### Problem 1: Agent Q&A routing broken for non-claude-code agents
+When `default_agent = "claude-flow"` in `daemon.toml`, natural language questions in `ta shell` hit the generic fallback in `resolve_agent_command()` (`agent.rs:384`): `claude-flow "prompt"`. Claude-flow is a framework/MCP server — it doesn't accept bare prompts as CLI arguments. The process exits immediately with no useful output, showing "agent output ended" in the shell.
+
+The root issue is that `default_agent` serves two different purposes:
+- **Goal execution** (`ta run`): which agent framework to spawn for goals — claude-flow is correct here
+- **Shell Q&A** (`ask_agent`): which LLM to answer ad-hoc questions — needs a prompt-capable agent (claude-code)
+
+Ultimately each workflow should be able to specify which agent framework to use, with per-agent override options. The workflow and agent might have a recommendation but it should be stored at the project level.
+
+#### Problem 2: TUI mouse capture blocks text selection/copy
+The shell TUI (`shell_tui.rs`) calls `EnableMouseCapture` to support scroll-via-mouse (`MouseEventKind::ScrollUp/Down`). This steals the mouse from the terminal emulator, blocking native text selection. Claude Code's terminal handles this correctly — scroll and text selection both work because it doesn't capture the mouse. We already have keyboard scrolling (Shift+Up/Down, PageUp/PageDown) so mouse capture adds no value. Remove it.
+
+#### Problem 3: Agent errors silently swallowed
+When the agent process fails to start, crashes, or exits with an error, the output may be lost — especially if the stream-json parser doesn't recognize the output format. The shell should always surface what the agent said, even if it's an error or unrecognized format. Never silently ignore agent output.
+
+#### Items
+1. [ ] **Per-workflow agent config at project level**: Add `[agent.workflows]` in `daemon.toml` (or `project.toml`) mapping workflow types to agents:
+   ```toml
+   [agent]
+   default_agent = "claude-flow"   # fallback for goal execution
+   qa_agent = "claude-code"        # shell Q&A, diagnostic, interactive
+
+   [agent.workflows]
+   goal = "claude-flow"            # ta run
+   qa = "claude-code"              # shell natural language
+   diagnostic = "claude-code"      # daemon-spawned diagnostics (v0.12.4)
+   dev = "claude-code"             # ta dev
+   # Per-agent overrides possible per workflow
+   ```
+   `ask_agent()` uses `qa_agent`; `ta run` uses `goal` workflow agent. Each is independently configurable with project-level storage. **Done (basic)**: `qa_agent` field added to `AgentConfig`, `input.rs` routes Q&A to `qa_agent`, session lookup filters by agent type. Full `[agent.workflows]` table deferred.
+2. [ ] **Add `claude-flow` match arm to `resolve_agent_command()`**: Invoke claude-flow correctly for goal execution, and ensure Q&A routing never sends prompts to a framework agent.
+3. [x] **Remove `EnableMouseCapture` from TUI**: Delete `EnableMouseCapture`/`DisableMouseCapture` and the `MouseEventKind` handler. Terminal-native mouse scroll and text selection both work. Keyboard scrolling (Shift+Up/Down, PageUp/PageDown) remains.
+4. [x] **Surface all agent output on error**: When the agent process exits with non-zero status, send diagnostic message to shell output stream with exit code and agent name. Includes non-zero exit, process wait error, and timeout cases.
+5. [x] **Agent launch failure surfacing**: If `resolve_agent_command()` produces a binary that doesn't exist or fails to spawn, error is sent to shell output stream with binary name and spawn error — not just daemon logs.
+6. [x] **Fix `--verbose` flag for stream-json**: Claude CLI now requires `--verbose` with `--output-format=stream-json` and `--print`. Added to `resolve_agent_command()`.
+7. [x] **Fix stream-json parser for nested format**: Claude CLI changed format — `assistant` events now nest content under `message.content` instead of top-level `content`. Updated both parsers with fallback to legacy format. Added `system` event progress indicators (init, hook_started).
+
+#### Version: `0.11.2-alpha.1`
 
 ---
 
