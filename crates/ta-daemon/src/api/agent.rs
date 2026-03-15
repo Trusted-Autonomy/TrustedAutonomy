@@ -402,11 +402,10 @@ pub async fn ask_agent(
 
 /// Resolve agent name to binary + args for Q&A (interactive prompt) sessions.
 ///
-/// For claude-code, uses `--output-format stream-json` so that stdout emits
-/// one JSON object per line as the response is generated, rather than waiting
-/// until the full response is ready (which can take 60+ seconds with no
-/// output). The daemon's stdout reader publishes each line to the broadcast
-/// channel in real time.
+/// Uses `--print -p "<prompt>"` for plain text stdout/stderr output — the same
+/// human-readable format you see when running `claude` directly in the terminal.
+/// The daemon's stdout/stderr readers publish each line to the broadcast channel
+/// in real time.
 ///
 /// Returns `Err` for framework agents (claude-flow, etc.) that don't accept
 /// bare prompts — these are designed for goal execution (`ta run`), not Q&A.
@@ -416,14 +415,7 @@ fn resolve_agent_command(agent: &str, prompt: &str) -> Result<(String, Vec<Strin
     match agent {
         "claude-code" | "claude" => Ok((
             "claude".to_string(),
-            vec![
-                "--print".to_string(),
-                "--verbose".to_string(),
-                "--output-format".to_string(),
-                "stream-json".to_string(),
-                "-p".to_string(),
-                prompt.to_string(),
-            ],
+            vec!["--print".to_string(), "-p".to_string(), prompt.to_string()],
         )),
         "codex" => Ok((
             "codex".to_string(),
@@ -553,17 +545,7 @@ mod tests {
     fn resolve_claude_code_agent() {
         let (bin, args) = resolve_agent_command("claude-code", "hello").unwrap();
         assert_eq!(bin, "claude");
-        assert_eq!(
-            args,
-            vec![
-                "--print",
-                "--verbose",
-                "--output-format",
-                "stream-json",
-                "-p",
-                "hello"
-            ]
-        );
+        assert_eq!(args, vec!["--print", "-p", "hello"]);
     }
 
     #[test]

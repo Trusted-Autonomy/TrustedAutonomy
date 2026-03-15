@@ -3762,6 +3762,7 @@ Even on the happy path, the `GoalHistoryEntry` lacks:
    Built-in: local JSONL file. Plugin interface for database, shared filesystem, cloud storage.
 9. [ ] **Audit ledger integrity**: Append-only with hash chaining (each entry includes hash of previous entry). `ta audit verify` validates the chain. Tampering is detectable.
 10. [ ] **Retention policy**: Configurable retention period for audit entries. `ta audit gc --older-than 1y` removes entries beyond retention while preserving chain integrity (tombstone markers).
+11. [ ] **Structured agent output logging for compliance**: Optional mode (`[agent].output_log = "structured"` in daemon.toml) that captures full JSON agent output to the audit ledger alongside the human-readable text shown in the shell. Default remains plain text stdout/stderr for the interactive shell; this mode adds a parallel structured log sink for compliance, reproducibility, and post-hoc analysis. The output schema engine (v0.11.2.2) already defines per-agent output formats — this item wires those schemas to the audit pipeline.
 11. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new audit ledger format on first run.
 
 #### Version: `0.12.2-alpha`

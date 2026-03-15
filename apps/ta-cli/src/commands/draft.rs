@@ -1829,7 +1829,13 @@ fn apply_package(
     phase_override: Option<&str>,
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
+    eprintln!("[apply] Loading draft package {}...", package_id);
     let mut pkg = load_package(config, package_id)?;
+    eprintln!(
+        "[apply] Draft: \"{}\" ({} artifact(s))",
+        pkg.goal.title,
+        pkg.changes.artifacts.len()
+    );
 
     // Check if selective review is enabled.
     let selective_review = patterns.is_enabled();
@@ -2002,8 +2008,10 @@ fn apply_package(
     };
 
     // Apply changes — use overlay path for overlay-based goals, legacy path otherwise.
+    eprintln!("[apply] Applying changes to {}...", target_dir.display());
     let applied_files: Vec<String> = if let Some(ref source_dir) = goal.source_dir {
         // Overlay-based goal: diff staging vs source, copy changed files.
+        eprintln!("[apply] Opening overlay workspace...");
         // V1 TEMPORARY: Load exclude patterns for diff filtering.
         let excludes = ExcludePatterns::load(source_dir);
         let mut overlay = OverlayWorkspace::open(
@@ -2083,6 +2091,7 @@ fn apply_package(
                 .collect()
         };
 
+        eprintln!("[apply] Diffing staging vs source and copying changes...");
         let applied = overlay
             .apply_with_conflict_check(&target_dir, conflict_resolution, &artifact_uris)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -2290,7 +2299,7 @@ fn apply_package(
                 }
 
                 // Commit changes — goal title as subject, complete draft summary as body.
-                println!("Staging changes...");
+                eprintln!("[apply] Staging changes for VCS commit...");
                 let commit_msg = build_commit_message(goal, &pkg);
 
                 match adapter.commit(goal, &pkg, &commit_msg) {
@@ -2383,6 +2392,7 @@ fn apply_package(
     // Transition goal to Applied. The pre-flight check validated the state
     // machine transition; this call persists it. Use warning (not bail) for
     // the disk write since files are already applied at this point.
+    eprintln!("[apply] Updating goal state -> Applied...");
     if let Err(e) = goal_store.transition(goal.goal_run_id, GoalRunState::Applied) {
         eprintln!(
             "Warning: could not persist goal state transition to Applied: {}",
