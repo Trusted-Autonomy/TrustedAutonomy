@@ -1,0 +1,67 @@
+# Output schema for Claude Code (legacy format, v1).
+#
+# Older versions of Claude Code put content at the top level:
+#   {"type":"assistant","content":[{"type":"text","text":"..."}]}
+# instead of nesting under "message".
+#
+# Use this schema if you're running an older Claude Code version.
+
+agent: claude-code-v1
+schema_version: 1
+format: stream-json
+
+model_paths:
+  - model
+
+suppress:
+  - message_start
+  - message_stop
+  - message_delta
+  - content_block_stop
+  - ping
+
+extractors:
+  # Assistant message — content at top level (legacy format).
+  - type_match: [assistant]
+    output: text
+    paths:
+      - content
+    content_type_filter: text
+
+  # Streaming text chunk.
+  - type_match: [content_block_delta]
+    output: text
+    paths:
+      - delta.text
+
+  # Final result.
+  - type_match: [result]
+    output: text
+    paths:
+      - result
+      - result.text
+    prefix: "[result] "
+
+  # Tool invocation.
+  - type_match: [tool_use]
+    output: tool_use
+    paths:
+      - name
+
+  # Tool invocation from content_block_start.
+  - type_match: [content_block_start]
+    output: tool_use
+    paths:
+      - content_block.name
+
+  # System events.
+  - type_match: [system]
+    output: text
+    paths: []
+    subtype_formats:
+      init:
+        template: "[init] model: {model}"
+        fields: [model]
+      hook_started:
+        template: "[hook] {hook_name}..."
+        fields: [hook_name]

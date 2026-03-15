@@ -3701,6 +3701,61 @@ args_template: ["{prompt}"]
 headless_args: ["--output-format", "stream-json"]
 ```
 
+### Agent Output Schemas
+
+TA uses YAML schema files to parse agent output. Each agent can define its own output format — what JSON fields contain text, tool use, model names, and which events to suppress. This replaces hardcoded parsers with a configurable, extensible system.
+
+**Schema resolution order** (first match wins):
+
+1. **Project-local**: `.ta/agents/output-schemas/<agent-name>.yaml`
+2. **User-global**: `~/.config/ta/agents/output-schemas/<agent-name>.yaml`
+3. **Embedded defaults**: Ships with the `ta` binary (claude-code, claude-code-v1, codex)
+4. **Passthrough**: If no schema matches, raw output is shown as-is
+
+**Built-in schemas**: `claude-code` (current Claude Code format), `claude-code-v1` (legacy format), `codex` (OpenAI Codex CLI).
+
+**Creating a custom schema** for a new agent:
+
+```yaml
+# .ta/agents/output-schemas/my-agent.yaml
+agent: my-agent
+schema_version: 1
+format: stream-json
+
+# Paths to extract model name from any JSON event.
+model_paths:
+  - message.model
+  - model
+
+# Events to suppress (no display).
+suppress:
+  - ping
+  - heartbeat
+
+extractors:
+  # Extract text from assistant messages.
+  - type_match: [assistant]
+    output: text
+    paths:
+      - message.content
+      - content
+    content_type_filter: text   # Only collect items with "type":"text"
+
+  # Extract streaming text chunks.
+  - type_match: [content_block_delta]
+    output: text
+    paths:
+      - delta.text
+
+  # Show tool invocations.
+  - type_match: [tool_use]
+    output: tool_use
+    paths:
+      - name
+```
+
+**Path syntax**: Dotted paths navigate JSON objects (`message.model`). Array iteration uses `[]` suffix (`content[].text` iterates an array and extracts `text` from each item). The first non-null match in the `paths` list is used.
+
 ### Project Setup
 
 Use `ta setup` to configure TA for an existing project interactively.
@@ -4655,6 +4710,8 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.0.1 | Draft apply defaults & CLI flag cleanup | Done |
 | v0.11.1 | `SourceAdapter` unification & `ta sync` | Done |
 | v0.11.2 | `BuildAdapter` & `ta build` | Done |
+| v0.11.2.1 | Shell agent routing, TUI mouse fix & agent output diagnostics | Done |
+| v0.11.2.2 | Agent output schema engine | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

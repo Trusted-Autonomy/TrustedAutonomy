@@ -34,6 +34,7 @@ ta-policy = { path = "../ta-policy" }
 ta-connector-slack = { path = "../ta-connectors/slack" }
 ta-connector-email = { path = "../ta-connectors/email" }
 reqwest = { workspace = true }
+ta-output-schema = { path = "../ta-output-schema" }
 which = "7"
 async-trait = "0.1"
 notify = { workspace = true }

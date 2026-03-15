@@ -1,0 +1,18 @@
+[package]
+name = "ta-output-schema"
+version.workspace = true
+edition = "2021"
+description = "Schema-driven agent output parsing for Trusted Autonomy"
+license = "Apache-2.0"
+repository = "https://github.com/trustedautonomy/ta"
+homepage = "https://github.com/trustedautonomy/ta"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

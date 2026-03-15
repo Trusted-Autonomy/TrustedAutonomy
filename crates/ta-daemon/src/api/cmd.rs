@@ -182,26 +182,47 @@ pub async fn execute_command(
                     let tx2 = tx.clone();
                     let tx_bookend = tx.clone();
 
+                    // Load output schema for parsing stream-json (v0.11.2.2).
+                    let output_schema = {
+                        let loader = ta_output_schema::SchemaLoader::new(&working_dir);
+                        loader
+                            .load("claude-code")
+                            .unwrap_or_else(|_| ta_output_schema::OutputSchema::passthrough())
+                    };
                     let stdout_task = tokio::spawn(async move {
                         if let Some(out) = stdout {
                             let mut reader = BufReader::new(out).lines();
                             while let Ok(Some(line)) = reader.next_line().await {
-                                // Parse stream-json format (v0.10.18.4 item 3).
-                                // Lines starting with '{' may be JSON events from agents
-                                // using --output-format stream-json. Extract displayable
-                                // content; relay non-JSON lines as-is.
-                                let display_line = parse_stream_json_line(&line);
-                                if let Some(text) = display_line {
-                                    // Check if this looks like an interactive prompt (v0.10.18.5 item 4).
-                                    let stream = if is_interactive_prompt(&text) {
-                                        "prompt"
-                                    } else {
-                                        "stdout"
-                                    };
-                                    let _ = tx.send(OutputLine { stream, line: text });
+                                // Schema-driven stream-json parsing (v0.11.2.2).
+                                match ta_output_schema::parse_line(&output_schema, &line) {
+                                    ta_output_schema::ParseResult::Text(text) => {
+                                        let stream = if is_interactive_prompt(&text) {
+                                            "prompt"
+                                        } else {
+                                            "stdout"
+                                        };
+                                        let _ = tx.send(OutputLine { stream, line: text });
+                                    }
+                                    ta_output_schema::ParseResult::ToolUse(name) => {
+                                        let _ = tx.send(OutputLine {
+                                            stream: "stdout",
+                                            line: format!("[tool] {}", name),
+                                        });
+                                    }
+                                    ta_output_schema::ParseResult::NotJson => {
+                                        // Non-JSON lines: relay as-is.
+                                        let stream = if is_interactive_prompt(&line) {
+                                            "prompt"
+                                        } else {
+                                            "stdout"
+                                        };
+                                        let _ = tx.send(OutputLine { stream, line });
+                                    }
+                                    ta_output_schema::ParseResult::Model(_)
+                                    | ta_output_schema::ParseResult::Suppress => {
+                                        // Internal protocol events — skip.
+                                    }
                                 }
-                                // Silently skip JSON lines that produce no displayable content
-                                // (e.g., internal status updates, empty content blocks).
                             }
                         }
                     });
@@ -871,118 +892,8 @@ fn glob_match(pattern: &str, input: &str) -> bool {
     }
 }
 
-/// Parse a line that may be stream-json format from an agent (v0.10.18.4 item 3).
-///
-/// Claude Code's `--output-format stream-json` emits one JSON object per line with
-/// a `type` field. We extract displayable content from:
-///   - `assistant` / `text` type: text content from the assistant
-///   - `tool_use` type: tool name and input summary
-///   - `result` type: final result text
-///
-/// Non-JSON lines are returned as-is. JSON lines with no displayable content
-/// return `None` (silently dropped).
-pub(crate) fn parse_stream_json_line(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with('{') {
-        // Not JSON — relay as-is (e.g., [agent] prefix lines).
-        return Some(line.to_string());
-    }
-
-    // Try to parse as JSON.
-    let obj: serde_json::Value = match serde_json::from_str(trimmed) {
-        Ok(v) => v,
-        Err(_) => return Some(line.to_string()), // Malformed JSON — relay raw.
-    };
-
-    let event_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-    match event_type {
-        "assistant" | "text" | "content_block_delta" => {
-            // Extract text content. Claude stream-json nests content in various places.
-            // Current format: {"type":"assistant","message":{"content":[...]}}
-            // Legacy format: {"type":"assistant","content":[...]}
-            let content = obj
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .or_else(|| obj.get("content"));
-            if let Some(text) = content.and_then(extract_text_content) {
-                if !text.is_empty() {
-                    return Some(text);
-                }
-            }
-            // content_block_delta: text is in delta.text
-            if let Some(delta) = obj.get("delta") {
-                if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                    if !text.is_empty() {
-                        return Some(text.to_string());
-                    }
-                }
-            }
-            // Check top-level text field.
-            if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
-                if !text.is_empty() {
-                    return Some(text.to_string());
-                }
-            }
-            None
-        }
-        "tool_use" | "content_block_start" => {
-            // Show tool invocation summary.
-            let name = obj
-                .get("name")
-                .or_else(|| obj.get("content_block").and_then(|cb| cb.get("name")))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let block_type = obj
-                .get("content_block")
-                .and_then(|cb| cb.get("type"))
-                .and_then(|v| v.as_str());
-            if block_type == Some("tool_use") || event_type == "tool_use" {
-                Some(format!("[tool] {}", name))
-            } else {
-                None // text block start or other — content comes in deltas
-            }
-        }
-        "result" => obj
-            .get("result")
-            .or_else(|| obj.get("text"))
-            .and_then(|v| v.as_str())
-            .map(|text| format!("[result] {}", text)),
-        "message_start" | "message_stop" | "message_delta" | "content_block_stop" | "ping" => {
-            // Internal protocol events — no displayable content.
-            None
-        }
-        _ => {
-            // Unknown type — check for a text or message field as fallback.
-            obj.get("message")
-                .and_then(|v| v.as_str())
-                .map(|text| text.to_string())
-        }
-    }
-}
-
-/// Extract text content from a JSON value that may be a string or array of content blocks.
-fn extract_text_content(value: &serde_json::Value) -> Option<String> {
-    if let Some(s) = value.as_str() {
-        return Some(s.to_string());
-    }
-    if let Some(arr) = value.as_array() {
-        let texts: Vec<&str> = arr
-            .iter()
-            .filter_map(|item| {
-                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    item.get("text").and_then(|v| v.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if !texts.is_empty() {
-            return Some(texts.join(""));
-        }
-    }
-    None
-}
+// NOTE: parse_stream_json_line() and extract_text_content() removed in v0.11.2.2.
+// Replaced by schema-driven ta_output_schema::parse_line(). See agents/output-schemas/*.yaml.
 
 /// Emit a `command_failed` event so the failure is visible to agents and the SSE stream.
 fn emit_command_failed_event(
@@ -1274,98 +1185,113 @@ mod tests {
         assert_eq!(extract_goal_uuid_from_event(line), None);
     }
 
-    // ── v0.10.18.4 tests ──────────────────────────────────────
+    // ── v0.11.2.2 schema-driven parsing tests ──────────────────
 
-    #[test]
-    fn stream_json_text_content() {
-        // assistant type with text content
-        let line = r#"{"type":"assistant","content":"Hello world"}"#;
-        assert_eq!(
-            parse_stream_json_line(line),
-            Some("Hello world".to_string())
-        );
+    fn test_schema() -> ta_output_schema::OutputSchema {
+        let loader = ta_output_schema::SchemaLoader::embedded_only();
+        loader.load("claude-code").unwrap()
     }
 
     #[test]
-    fn stream_json_content_block_delta() {
+    fn schema_parse_content_block_delta() {
+        let schema = test_schema();
         let line = r#"{"type":"content_block_delta","delta":{"text":"incremental text"}}"#;
         assert_eq!(
-            parse_stream_json_line(line),
-            Some("incremental text".to_string())
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Text("incremental text".into())
         );
     }
 
     #[test]
-    fn stream_json_tool_use() {
+    fn schema_parse_tool_use() {
+        let schema = test_schema();
         let line = r#"{"type":"tool_use","name":"Read"}"#;
         assert_eq!(
-            parse_stream_json_line(line),
-            Some("[tool] Read".to_string())
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::ToolUse("Read".into())
         );
     }
 
     #[test]
-    fn stream_json_content_block_start_tool() {
+    fn schema_parse_content_block_start_tool() {
+        let schema = test_schema();
         let line =
             r#"{"type":"content_block_start","content_block":{"type":"tool_use","name":"Edit"}}"#;
         assert_eq!(
-            parse_stream_json_line(line),
-            Some("[tool] Edit".to_string())
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::ToolUse("Edit".into())
         );
     }
 
     #[test]
-    fn stream_json_result() {
+    fn schema_parse_result() {
+        let schema = test_schema();
         let line = r#"{"type":"result","result":"Task completed"}"#;
         assert_eq!(
-            parse_stream_json_line(line),
-            Some("[result] Task completed".to_string())
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Text("[result] Task completed".into())
         );
     }
 
     #[test]
-    fn stream_json_internal_events_skipped() {
-        assert_eq!(parse_stream_json_line(r#"{"type":"message_start"}"#), None);
-        assert_eq!(parse_stream_json_line(r#"{"type":"message_stop"}"#), None);
-        assert_eq!(parse_stream_json_line(r#"{"type":"ping"}"#), None);
+    fn schema_parse_suppressed_events() {
+        let schema = test_schema();
         assert_eq!(
-            parse_stream_json_line(r#"{"type":"content_block_stop"}"#),
-            None
+            ta_output_schema::parse_line(&schema, r#"{"type":"message_start"}"#),
+            ta_output_schema::ParseResult::Suppress
+        );
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, r#"{"type":"message_stop"}"#),
+            ta_output_schema::ParseResult::Suppress
+        );
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, r#"{"type":"ping"}"#),
+            ta_output_schema::ParseResult::Suppress
+        );
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, r#"{"type":"content_block_stop"}"#),
+            ta_output_schema::ParseResult::Suppress
         );
     }
 
     #[test]
-    fn stream_json_non_json_passthrough() {
+    fn schema_parse_non_json_passthrough() {
+        let schema = test_schema();
         let line = "[agent] some output text";
         assert_eq!(
-            parse_stream_json_line(line),
-            Some("[agent] some output text".to_string())
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::NotJson
         );
     }
 
     #[test]
-    fn stream_json_malformed_json_passthrough() {
+    fn schema_parse_malformed_json() {
+        let schema = test_schema();
         let line = "{not valid json";
         assert_eq!(
-            parse_stream_json_line(line),
-            Some("{not valid json".to_string())
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::NotJson
         );
     }
 
     #[test]
-    fn stream_json_content_array() {
+    fn schema_parse_content_array() {
+        let schema = test_schema();
         let line = r#"{"type":"assistant","content":[{"type":"text","text":"Hello"},{"type":"text","text":" World"}]}"#;
         assert_eq!(
-            parse_stream_json_line(line),
-            Some("Hello World".to_string())
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Text("Hello World".into())
         );
     }
 
     #[test]
-    fn stream_json_nested_message_content() {
-        // Current format: content nested under message.
+    fn schema_parse_nested_message_content() {
+        let schema = test_schema();
         let line = r#"{"type":"assistant","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"Nested"}]}}"#;
-        assert_eq!(parse_stream_json_line(line), Some("Nested".to_string()));
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Text("Nested".into())
+        );
     }
 
     // ── v0.10.18.5 tests ──────────────────────────────────────

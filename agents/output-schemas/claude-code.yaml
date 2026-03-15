@@ -1,0 +1,72 @@
+# Output schema for Claude Code (current format, v2).
+#
+# Claude Code with `--output-format stream-json` emits JSON lines with a "type"
+# field. Text content is nested under message.content[].text (current format)
+# or content[].text (legacy — see claude-code-v1.yaml).
+#
+# Override per-project: .ta/agents/output-schemas/claude-code.yaml
+# Override per-user:    ~/.config/ta/agents/output-schemas/claude-code.yaml
+
+agent: claude-code
+schema_version: 2
+format: stream-json
+
+# Paths to check for model name in any JSON event.
+model_paths:
+  - message.model
+  - model
+
+# Event types that produce no displayable content.
+suppress:
+  - message_start
+  - message_stop
+  - message_delta
+  - content_block_stop
+  - ping
+
+extractors:
+  # Assistant message — text content nested under message.content[].
+  - type_match: [assistant]
+    output: text
+    paths:
+      - message.content
+      - content
+    content_type_filter: text
+
+  # Streaming text chunk.
+  - type_match: [content_block_delta]
+    output: text
+    paths:
+      - delta.text
+
+  # Final result.
+  - type_match: [result]
+    output: text
+    paths:
+      - result
+      - result.text
+    prefix: "[result] "
+
+  # Tool invocation from explicit tool_use event.
+  - type_match: [tool_use]
+    output: tool_use
+    paths:
+      - name
+
+  # Tool invocation from content_block_start.
+  - type_match: [content_block_start]
+    output: tool_use
+    paths:
+      - content_block.name
+
+  # System events with subtype-specific formatting.
+  - type_match: [system]
+    output: text
+    paths: []
+    subtype_formats:
+      init:
+        template: "[init] model: {model}"
+        fields: [model]
+      hook_started:
+        template: "[hook] {hook_name}..."
+        fields: [hook_name]

@@ -206,6 +206,8 @@ struct App {
     agent_scroll_offset: usize,
     /// Project root path for local commands like follow-up picker (v0.10.14).
     project_root: std::path::PathBuf,
+    /// Schema-driven agent output parser (v0.11.2.2).
+    output_schema: ta_output_schema::OutputSchema,
 }
 
 impl App {
@@ -235,6 +237,13 @@ impl App {
             split_pane: false,
             agent_output: Vec::new(),
             agent_scroll_offset: 0,
+            output_schema: {
+                let loader = ta_output_schema::SchemaLoader::new(&project_root);
+                // Default to claude-code schema; the active agent may change at runtime.
+                loader
+                    .load("claude-code")
+                    .unwrap_or_else(|_| ta_output_schema::OutputSchema::passthrough())
+            },
             project_root,
         }
     }
@@ -1125,18 +1134,28 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             let styled = if line.stream == "stderr" {
                 OutputLine::agent_stderr(line.line)
             } else {
-                // Try to parse stream-json format from `claude --output-format stream-json`.
-                // Extract human-readable text content from JSON lines.
-                // Also detect model name from message_start events (v0.10.14).
+                // Schema-driven stream-json parsing (v0.11.2.2).
+                // Extract model name from any line if not yet known.
                 if app.status.agent_model.is_none() {
-                    if let Some(model) = extract_model_from_stream_json(&line.line) {
-                        app.status.agent_model = Some(model);
+                    if let Some(model) = app.output_schema.extract_model(&line.line) {
+                        app.status.agent_model = Some(humanize_model_name(&model));
                     }
                 }
-                match parse_stream_json_text(&line.line) {
-                    Some(text) if !text.is_empty() => OutputLine::agent_stdout(text),
-                    Some(_) => return, // Empty text chunk — skip.
-                    None => OutputLine::agent_stdout(line.line), // Not JSON — show raw.
+                match ta_output_schema::parse_line(&app.output_schema, &line.line) {
+                    ta_output_schema::ParseResult::Text(text) => OutputLine::agent_stdout(text),
+                    ta_output_schema::ParseResult::ToolUse(name) => {
+                        OutputLine::agent_stdout(format!("[tool] {}", name))
+                    }
+                    ta_output_schema::ParseResult::Model(model) => {
+                        if app.status.agent_model.is_none() {
+                            app.status.agent_model = Some(humanize_model_name(&model));
+                        }
+                        return; // Model-only event — no display.
+                    }
+                    ta_output_schema::ParseResult::Suppress => return,
+                    ta_output_schema::ParseResult::NotJson => {
+                        OutputLine::agent_stdout(line.line) // Not JSON — show raw.
+                    }
                 }
             };
             // In split-pane mode, route agent output to the agent pane (v0.10.14).
@@ -2154,126 +2173,8 @@ async fn stream_agent_output(
     start_tail_stream(client, base_url, Some(request_id), tx, 0).await;
 }
 
-/// Extract human-readable text from a `claude --output-format stream-json` line.
-///
-/// Stream-json emits one JSON object per line on stdout. Text content appears in
-/// objects with `type: "assistant"` (or `type: "content_block_delta"`) and the
-/// text lives in nested fields. We extract it so the TUI shows readable text
-/// instead of raw JSON.
-///
-/// Returns `Some(text)` if the line is recognized stream-json (text may be empty
-/// for non-text events like tool_use), `None` if the line isn't valid JSON (pass
-/// through as-is).
-fn parse_stream_json_text(line: &str) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(line).ok()?;
-
-    // The stream-json format varies, but text content typically appears as:
-    //   {"type":"assistant","content":[{"type":"text","text":"..."}], ...}
-    //   {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}, ...}
-    //   {"type":"result","result":"final text", ...}
-    //   {"type":"message","message":{...}, ...}  (message start/end)
-
-    // Try result type (final output).
-    if json["type"].as_str() == Some("result") {
-        if let Some(text) = json["result"].as_str() {
-            return Some(text.to_string());
-        }
-        // Result may contain a sub-object; try extracting text from it.
-        if let Some(text) = json["result"]["text"].as_str() {
-            return Some(text.to_string());
-        }
-        return Some(String::new()); // Result with no text — skip.
-    }
-
-    // Try content_block_delta (streaming text chunks).
-    if json["type"].as_str() == Some("content_block_delta") {
-        if let Some(text) = json["delta"]["text"].as_str() {
-            return Some(text.to_string());
-        }
-        return Some(String::new());
-    }
-
-    // Try assistant message with content array.
-    // Current format nests content under "message": {"type":"assistant","message":{"content":[...]}}
-    // Legacy format had content at top level: {"type":"assistant","content":[...]}
-    if json["type"].as_str() == Some("assistant") {
-        // Try nested message.content first (current format).
-        let content_source = json["message"]["content"]
-            .as_array()
-            .or_else(|| json["content"].as_array());
-        if let Some(content) = content_source {
-            let text: String = content
-                .iter()
-                .filter_map(|c| {
-                    if c["type"].as_str() == Some("text") {
-                        c["text"].as_str().map(String::from)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Some(text);
-        }
-        // Single text field (nested or top-level).
-        if let Some(text) = json["message"]["content"]
-            .as_str()
-            .or_else(|| json["content"].as_str())
-        {
-            return Some(text.to_string());
-        }
-        return Some(String::new());
-    }
-
-    // System events — show progress for hooks and init.
-    if json["type"].as_str() == Some("system") {
-        let subtype = json["subtype"].as_str().unwrap_or("");
-        match subtype {
-            "init" => {
-                if let Some(model) = json["model"].as_str() {
-                    return Some(format!("[init] model: {}", model));
-                }
-                return Some("[init] Agent initialized".to_string());
-            }
-            "hook_started" => {
-                if let Some(name) = json["hook_name"].as_str() {
-                    return Some(format!("[hook] {}...", name));
-                }
-                return Some(String::new());
-            }
-            _ => return Some(String::new()),
-        }
-    }
-
-    // Other recognized types (message start, tool_use, etc.) — suppress.
-    if json.get("type").is_some() {
-        return Some(String::new());
-    }
-
-    // Not recognized JSON format — return None so caller shows raw line.
-    None
-}
-
-/// Extract LLM model name from a stream-json line (v0.10.14).
-///
-/// Claude's stream-json format includes the model in `message_start` events:
-///   `{"type":"message_start","message":{"model":"claude-sonnet-4-20250514",...}}`
-/// Also checks `system` events which may contain a model field.
-fn extract_model_from_stream_json(line: &str) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(line).ok()?;
-
-    // message_start has the model in message.model
-    if let Some(model) = json["message"]["model"].as_str() {
-        return Some(humanize_model_name(model));
-    }
-
-    // Some formats put model at top level (e.g., system/init events)
-    if let Some(model) = json["model"].as_str() {
-        return Some(humanize_model_name(model));
-    }
-
-    None
-}
+// NOTE: parse_stream_json_text() and extract_model_from_stream_json() removed in v0.11.2.2.
+// Replaced by schema-driven ta_output_schema::parse_line(). See agents/output-schemas/*.yaml.
 
 /// Convert API model IDs to human-readable names.
 fn humanize_model_name(model_id: &str) -> String {
@@ -3174,62 +3075,93 @@ mod tests {
         assert_eq!(app.scroll_offset, 0);
     }
 
+    // -- v0.11.2.2 schema-driven parsing tests --
+
+    fn test_schema() -> ta_output_schema::OutputSchema {
+        let loader = ta_output_schema::SchemaLoader::embedded_only();
+        loader.load("claude-code").unwrap()
+    }
+
     #[test]
-    fn parse_stream_json_result() {
+    fn schema_parse_result() {
+        let schema = test_schema();
         let line = r#"{"type":"result","result":"Hello world"}"#;
-        assert_eq!(parse_stream_json_text(line), Some("Hello world".into()));
-    }
-
-    #[test]
-    fn parse_stream_json_content_block_delta() {
-        let line =
-            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial "}}"#;
-        assert_eq!(parse_stream_json_text(line), Some("partial ".into()));
-    }
-
-    #[test]
-    fn parse_stream_json_assistant_content_array() {
-        // Legacy format: content at top level.
-        let line = r#"{"type":"assistant","content":[{"type":"text","text":"Hello"}]}"#;
-        assert_eq!(parse_stream_json_text(line), Some("Hello".into()));
-    }
-
-    #[test]
-    fn parse_stream_json_assistant_nested_message() {
-        // Current format: content nested under message.
-        let line = r#"{"type":"assistant","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"Nested hello"}]}}"#;
-        assert_eq!(parse_stream_json_text(line), Some("Nested hello".into()));
-    }
-
-    #[test]
-    fn parse_stream_json_system_init() {
-        let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
         assert_eq!(
-            parse_stream_json_text(line),
-            Some("[init] model: claude-opus-4-6".into())
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Text("[result] Hello world".into())
         );
     }
 
     #[test]
-    fn parse_stream_json_system_hook() {
+    fn schema_parse_content_block_delta() {
+        let schema = test_schema();
+        let line =
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial "}}"#;
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Text("partial ".into())
+        );
+    }
+
+    #[test]
+    fn schema_parse_assistant_nested_message() {
+        let schema = test_schema();
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-4-6","content":[{"type":"text","text":"Nested hello"}]}}"#;
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Text("Nested hello".into())
+        );
+    }
+
+    #[test]
+    fn schema_parse_system_init() {
+        let schema = test_schema();
+        let line = r#"{"type":"system","subtype":"init","model":"claude-opus-4-6"}"#;
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Text("[init] model: claude-opus-4-6".into())
+        );
+    }
+
+    #[test]
+    fn schema_parse_system_hook() {
+        let schema = test_schema();
         let line =
             r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}"#;
         assert_eq!(
-            parse_stream_json_text(line),
-            Some("[hook] SessionStart:startup...".into())
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Text("[hook] SessionStart:startup...".into())
         );
     }
 
     #[test]
-    fn parse_stream_json_non_text_type_returns_empty() {
+    fn schema_parse_suppressed_events() {
+        let schema = test_schema();
         let line = r#"{"type":"message_start","message":{}}"#;
-        assert_eq!(parse_stream_json_text(line), Some(String::new()));
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::Suppress
+        );
     }
 
     #[test]
-    fn parse_stream_json_plain_text_returns_none() {
+    fn schema_parse_plain_text_returns_not_json() {
+        let schema = test_schema();
         let line = "This is not JSON";
-        assert_eq!(parse_stream_json_text(line), None);
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::NotJson
+        );
+    }
+
+    #[test]
+    fn schema_parse_tool_use() {
+        let schema = test_schema();
+        let line = r#"{"type":"tool_use","name":"Read"}"#;
+        assert_eq!(
+            ta_output_schema::parse_line(&schema, line),
+            ta_output_schema::ParseResult::ToolUse("Read".into())
+        );
     }
 
     // -- v0.10.14 tests --
@@ -3277,33 +3209,33 @@ mod tests {
     }
 
     #[test]
-    fn extract_model_from_message_start() {
+    fn schema_extract_model_from_message_start() {
+        let schema = test_schema();
         let line = r#"{"type":"message_start","message":{"model":"claude-sonnet-4-20250514","role":"assistant"}}"#;
+        let model = schema.extract_model(line);
+        assert_eq!(model, Some("claude-sonnet-4-20250514".into()));
+        // humanize_model_name is applied at the call site.
         assert_eq!(
-            extract_model_from_stream_json(line),
-            Some("Claude Sonnet 4".into())
+            humanize_model_name("claude-sonnet-4-20250514"),
+            "Claude Sonnet 4"
         );
     }
 
     #[test]
-    fn extract_model_from_top_level() {
+    fn schema_extract_model_from_top_level() {
+        let schema = test_schema();
         let line = r#"{"model":"claude-haiku-4-20250101","type":"system"}"#;
         assert_eq!(
-            extract_model_from_stream_json(line),
-            Some("Claude Haiku 4".into())
+            schema.extract_model(line),
+            Some("claude-haiku-4-20250101".into())
         );
     }
 
     #[test]
-    fn extract_model_unknown_id() {
-        let line = r#"{"type":"message_start","message":{"model":"gpt-4o"}}"#;
-        assert_eq!(extract_model_from_stream_json(line), Some("gpt-4o".into()));
-    }
-
-    #[test]
-    fn extract_model_no_model_field() {
+    fn schema_extract_model_no_model_field() {
+        let schema = test_schema();
         let line = r#"{"type":"content_block_delta","delta":{"text":"hello"}}"#;
-        assert!(extract_model_from_stream_json(line).is_none());
+        assert!(schema.extract_model(line).is_none());
     }
 
     #[test]

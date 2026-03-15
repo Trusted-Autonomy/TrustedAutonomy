@@ -3374,23 +3374,58 @@ When the agent process fails to start, crashes, or exits with an error, the outp
 ---
 
 ### v0.11.2.2 — Agent Output Schema Engine
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Replace hardcoded stream-json parsers with a schema-driven extraction engine. Each agent defines its output format in a YAML schema file. The parser loads schemas at runtime, so format changes don't require recompilation.
 
-#### Items
-1. [ ] **Schema format definition**: YAML schema with `agent`, `schema_version`, `format`, and `extractors` sections. Extractors define `type_match` → `paths[]` mappings for text content, tool use, model name, progress indicators, and suppressed event types.
-2. [ ] **Schema files for built-in agents**: `agents/output-schemas/claude-code-v2.yaml` (current nested format), `claude-code-v1.yaml` (legacy top-level format), `codex.yaml`. Schemas ship with the binary (embedded via `include_str!` or loaded from `~/.ta/schemas/`).
-3. [ ] **Runtime schema loader**: Load schema by agent name, try project-local `agents/output-schemas/` first, then `~/.ta/schemas/`, then embedded defaults. Version negotiation: if agent reports a version, select matching schema.
-4. [ ] **Generic path extractor**: Given a JSON value and a dotted path like `message.content[].text`, extract the value. Supports object traversal, array iteration, and optional fields.
-5. [ ] **Replace hardcoded parsers**: Replace `parse_stream_json_text()` in `shell_tui.rs` and `parse_stream_json_line()` in `cmd.rs` with schema-driven extraction. Fallback to raw passthrough if no schema matches.
-6. [ ] **Schema validation**: On load, validate schema structure. Warn if schema references unknown extractor types. Test suite with sample agent output against each schema.
-7. [ ] **User-extensible schemas**: Users can add schemas for custom agents in project-local or global directories. Document the schema format in USAGE.md.
-8. [ ] **Build SHA version guard**: Version guard compares git commit hash (TA_GIT_HASH) instead of semver string, catching rebuilds within the same version. Daemon reports `build_sha` in `/api/status`. Both shells auto-restart on SHA mismatch. (PR #162 ready.)
-9. [ ] **Fix false-positive stdin prompt detection**: `is_interactive_prompt()` triggers on agent output that looks like a prompt (e.g., `[y/N]`) even in `--print` mode where stdin relay is impossible. Shell switches to `stdin>` prompt with no way back until user types something and gets an error. Fix: don't switch to stdin mode for `--print` goals; auto-revert to `ta>` when goal exits.
-10. [ ] **Draft apply branch safety**: `ta draft apply` must verify it's on the expected base branch before creating the feature branch. If the user (or another process) switched branches, draft apply should either refuse with a clear error or save/restore branch state per Constitution rule 2.2. Currently it silently applies on whatever branch is checked out.
-11. [ ] **Multi-line paste protection**: Detect multi-line paste events in TUI input (e.g., drag-and-drop or terminal paste) and confirm before dispatching. Currently each pasted line is interpreted as a separate command, potentially spawning many agents simultaneously.
+#### Completed
+1. [x] **Schema format definition**: YAML schema with `agent`, `schema_version`, `format`, and `extractors` sections. Extractors define `type_match` → `paths[]` mappings for text content, tool use, model name, progress indicators, and suppressed event types. See `crates/ta-output-schema/src/schema.rs`.
+2. [x] **Schema files for built-in agents**: `agents/output-schemas/claude-code.yaml` (current nested format), `claude-code-v1.yaml` (legacy top-level format), `codex.yaml`. Schemas ship embedded via `include_str!` and can be overridden from filesystem.
+3. [x] **Runtime schema loader**: `SchemaLoader` tries project-local `.ta/agents/output-schemas/` first, then `~/.config/ta/agents/output-schemas/`, then embedded defaults, then passthrough fallback. Version negotiation via `schema_version` field.
+4. [x] **Generic path extractor**: `extract_path()` handles dotted paths like `message.content[].text` with object traversal, array iteration, and optional fields. See `crates/ta-output-schema/src/extractor.rs`.
+5. [x] **Replace hardcoded parsers**: Replaced `parse_stream_json_text()` in `shell_tui.rs` and `parse_stream_json_line()` in `cmd.rs` with `ta_output_schema::parse_line()`. Passthrough for non-JSON, suppress for internal events.
+6. [x] **Schema validation**: `OutputSchema::validate()` checks agent name, version, extractor structure. 33 tests in `ta-output-schema` crate covering all schema variants and edge cases.
+7. [x] **User-extensible schemas**: Users add `.yaml` files to `.ta/agents/output-schemas/` (project-local) or `~/.config/ta/agents/output-schemas/` (global). Documented in USAGE.md.
+8. [x] **Build SHA version guard**: Version guard compares `TA_GIT_HASH` instead of semver string. Daemon reports `build_sha` in `/api/status`. Both shells auto-restart on SHA mismatch. (PR #162.)
+9. [x] **Fix false-positive stdin prompt detection**: `--print` mode no longer switches to stdin mode. Auto-reverts to `ta>` prompt when goal exits.
+10. [x] **Draft apply branch safety**: `ta draft apply` verifies base branch before creating feature branch, refusing with actionable error on mismatch.
+11. [x] **Multi-line paste protection**: TUI detects multi-line paste events and confirms before dispatching.
+12. [x] **QA agent project context injection**: Daemon-spawned QA agent receives project memory, CLAUDE.md context, and plan phase via `build_memory_context_section_for_inject()`.
 
-12. [ ] **QA agent project context injection**: The daemon-spawned QA agent (`ask_agent()`) currently runs stateless with no project context. Prepend project memory, CLAUDE.md context, and current plan phase to the prompt (or use `--system-prompt`) so the agent can answer project-aware questions. Reuse `build_memory_context_section_for_inject()` from `run.rs`.
+#### Tests (33 new in ta-output-schema + updated tests in shell_tui.rs and cmd.rs)
+- `extractor::tests::simple_field` — basic field extraction
+- `extractor::tests::nested_field` — dotted path navigation
+- `extractor::tests::array_iteration` — `content[].text` array traversal
+- `extractor::tests::array_iteration_single_item` — single-item array unwrapping
+- `extractor::tests::deeply_nested_array` — `message.content[].text`
+- `extractor::tests::null_field_returns_none` — null handling
+- `extractor::tests::content_block_name` — tool block name extraction
+- `extractor::tests::delta_text` — streaming delta extraction
+- `extractor::tests::top_level_result_string` — top-level result field
+- `extractor::tests::missing_field_returns_none` — missing field handling
+- `schema::tests::passthrough_schema_is_valid` — passthrough schema
+- `schema::tests::validation_catches_empty_agent` — validation error
+- `schema::tests::validation_catches_zero_version` — validation error
+- `schema::tests::validation_catches_empty_type_match` — validation error
+- `schema::tests::subtype_format_renders_template` — template rendering
+- `schema::tests::content_type_filter_extracts_text_blocks` — array filtering
+- `schema::tests::extractor_wildcard_matches_any_type` — wildcard matching
+- `loader::tests::embedded_schemas_parse_and_validate` — all 3 embedded schemas
+- `loader::tests::unknown_agent_returns_passthrough` — graceful fallback
+- `loader::tests::project_local_schema_takes_priority` — filesystem override
+- `loader::tests::cached_schemas_are_reused` — cache correctness
+- `loader::tests::available_schemas_includes_builtins` — schema listing
+- `loader::tests::invalid_yaml_returns_parse_error` — malformed YAML handling
+- `loader::tests::invalid_schema_returns_validation_error` — bad schema handling
+- `tests::parse_non_json_returns_not_json` — non-JSON passthrough
+- `tests::parse_with_embedded_claude_code_v2` — full v2 schema integration
+- `tests::parse_with_legacy_claude_code_v1` — legacy v1 format
+- `tests::parse_system_init_event` — system init formatting
+- `tests::parse_system_hook_event` — hook progress display
+- `tests::model_extraction_from_message_start` — model name extraction
+- `tests::passthrough_schema_shows_everything` — passthrough behavior
+- `tests::codex_schema_parses_output` — Codex schema integration
+- `shell_tui: schema_parse_*` — 9 schema-driven tests replacing hardcoded parser tests
+- `cmd: schema_parse_*` — 8 schema-driven tests replacing hardcoded parser tests
 
 #### Version: `0.11.2-alpha.2`
 

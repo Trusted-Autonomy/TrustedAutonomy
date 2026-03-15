@@ -1,0 +1,54 @@
+# Output schema for OpenAI Codex CLI.
+#
+# Codex outputs JSON lines with a simpler structure than Claude Code.
+# Text content is typically in a "content" or "message" field.
+
+agent: codex
+schema_version: 1
+format: stream-json
+
+model_paths:
+  - model
+  - message.model
+
+suppress:
+  - ping
+  - heartbeat
+
+extractors:
+  # Message with content field (primary Codex output).
+  - type_match: [message]
+    output: text
+    paths:
+      - content
+      - message
+
+  # Assistant response.
+  - type_match: [assistant]
+    output: text
+    paths:
+      - content
+      - message.content
+    content_type_filter: text
+
+  # Streaming delta.
+  - type_match: [content_block_delta, delta]
+    output: text
+    paths:
+      - delta.text
+      - delta.content
+
+  # Result.
+  - type_match: [result]
+    output: text
+    paths:
+      - result
+      - text
+    prefix: "[result] "
+
+  # Tool use.
+  - type_match: [tool_use, function_call]
+    output: tool_use
+    paths:
+      - name
+      - function.name

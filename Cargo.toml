@@ -22,6 +22,7 @@ members = [
     "crates/ta-events",
     "crates/ta-workflow",
     "crates/ta-build",
+    "crates/ta-output-schema",
     "crates/ta-connectors/fs",
     "crates/ta-connectors/web",
     "crates/ta-connectors/mock-drive",
@@ -35,7 +36,7 @@ members = [
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.11.2-alpha.1"
+version = "0.11.2-alpha.2"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
