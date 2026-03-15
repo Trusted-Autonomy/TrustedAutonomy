@@ -129,6 +129,11 @@ pub struct GoalRun {
     /// Unique identifier for this goal run.
     pub goal_run_id: Uuid,
 
+    /// Human-friendly tag for this goal (e.g., "shell-routing-01").
+    /// Auto-generated from title on creation. The primary display ID everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+
     /// Human-readable title (e.g., "Fix authentication bug").
     pub title: String,
 
@@ -217,6 +222,42 @@ pub struct GoalRun {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Generate a slug from a title: lowercase, hyphens, max 30 chars.
+pub fn slugify_title(title: &str) -> String {
+    let slug: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    // Collapse consecutive hyphens and trim leading/trailing hyphens.
+    let mut collapsed = String::with_capacity(slug.len());
+    let mut prev_hyphen = true; // treat start as hyphen to skip leading
+    for c in slug.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                collapsed.push(c);
+            }
+            prev_hyphen = true;
+        } else {
+            collapsed.push(c);
+            prev_hyphen = false;
+        }
+    }
+    // Trim trailing hyphen.
+    let trimmed = collapsed.trim_end_matches('-');
+    if trimmed.len() > 30 {
+        // Don't cut mid-word: find last hyphen before 30 chars.
+        let cut = &trimmed[..30];
+        if let Some(idx) = cut.rfind('-') {
+            cut[..idx].to_string()
+        } else {
+            cut.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl GoalRun {
     /// Create a new GoalRun in the Created state.
     pub fn new(
@@ -227,9 +268,11 @@ impl GoalRun {
         store_path: PathBuf,
     ) -> Self {
         let now = Utc::now();
+        let title = title.into();
         Self {
             goal_run_id: Uuid::new_v4(),
-            title: title.into(),
+            tag: None, // Set by GoalRunStore::save_with_tag() or manually
+            title,
             objective: objective.into(),
             agent_id: agent_id.into(),
             state: GoalRunState::Created,
@@ -252,6 +295,21 @@ impl GoalRun {
             pr_package_id: None,
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    /// Return the display tag, auto-deriving from title + UUID prefix if not set.
+    pub fn display_tag(&self) -> String {
+        if let Some(ref tag) = self.tag {
+            return tag.clone();
+        }
+        // Fallback: slug from title + first 4 chars of UUID for uniqueness.
+        let slug = slugify_title(&self.title);
+        let prefix = &self.goal_run_id.to_string()[..4];
+        if slug.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{}-{}", slug, prefix)
         }
     }
 
@@ -512,5 +570,64 @@ mod tests {
         // Deserializing JSON without parent_goal_id should produce None (backward compat).
         let restored: GoalRun = serde_json::from_str(&json).unwrap();
         assert!(restored.parent_goal_id.is_none());
+    }
+
+    #[test]
+    fn slugify_title_basic() {
+        assert_eq!(
+            slugify_title("Fix Authentication Bug"),
+            "fix-authentication-bug"
+        );
+    }
+
+    #[test]
+    fn slugify_title_special_chars() {
+        assert_eq!(
+            slugify_title("Add JWT (v2) & OAuth support!"),
+            "add-jwt-v2-oauth-support"
+        );
+    }
+
+    #[test]
+    fn slugify_title_truncates_long_names() {
+        let long = "implement-the-very-long-feature-that-needs-many-words";
+        let slug = slugify_title(long);
+        assert!(slug.len() <= 30, "slug len {} > 30: {}", slug.len(), slug);
+    }
+
+    #[test]
+    fn display_tag_with_explicit_tag() {
+        let mut gr = test_goal_run();
+        gr.tag = Some("fix-auth-03".to_string());
+        assert_eq!(gr.display_tag(), "fix-auth-03");
+    }
+
+    #[test]
+    fn display_tag_auto_generated() {
+        let gr = test_goal_run();
+        let tag = gr.display_tag();
+        assert!(tag.starts_with("test-goal-"), "tag: {}", tag);
+        assert!(tag.len() > 4); // slug + UUID prefix
+    }
+
+    #[test]
+    fn tag_field_backward_compat_deserialization() {
+        // JSON without tag field should deserialize to None.
+        let gr = test_goal_run();
+        assert!(gr.tag.is_none());
+        let json = serde_json::to_string_pretty(&gr).unwrap();
+        assert!(!json.contains("\"tag\""));
+        let restored: GoalRun = serde_json::from_str(&json).unwrap();
+        assert!(restored.tag.is_none());
+    }
+
+    #[test]
+    fn tag_field_serialization_round_trip() {
+        let mut gr = test_goal_run();
+        gr.tag = Some("my-goal-01".to_string());
+        let json = serde_json::to_string_pretty(&gr).unwrap();
+        assert!(json.contains("\"tag\""));
+        let restored: GoalRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.tag, Some("my-goal-01".to_string()));
     }
 }

@@ -303,6 +303,8 @@ impl<S: ChangeStore> FsConnector<S> {
             status: PRStatus::PendingReview,
             verification_warnings: vec![],
             display_id: None,
+            tag: None,
+            vcs_status: None,
         };
 
         Ok(package)

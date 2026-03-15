@@ -107,6 +107,8 @@ mod tests {
             status: PRStatus::Draft,
             verification_warnings: vec![],
             display_id: None,
+            tag: None,
+            vcs_status: None,
         };
 
         let adapter = JsonAdapter::new();

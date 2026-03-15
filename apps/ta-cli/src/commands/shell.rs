@@ -296,6 +296,8 @@ pub(crate) struct StatusInfo {
     pub(crate) default_agent: String,
     /// The LLM model name detected from the active agent (e.g., "Claude Haiku 4.5").
     pub(crate) agent_model: Option<String>,
+    /// Active goal tag for status bar display (v0.11.2.3).
+    pub(crate) active_goal_tag: Option<String>,
 }
 
 pub(crate) async fn fetch_status(client: &reqwest::Client, base_url: &str) -> StatusInfo {
@@ -337,6 +339,11 @@ pub(crate) async fn fetch_status(client: &reqwest::Client, base_url: &str) -> St
                         .find_map(|a| a["model"].as_str().map(String::from))
                 })
             }),
+        active_goal_tag: json["active_agents"].as_array().and_then(|agents| {
+            agents
+                .first()
+                .and_then(|a| a["tag"].as_str().map(String::from))
+        }),
     }
 }
 

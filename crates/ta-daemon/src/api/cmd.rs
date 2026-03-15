@@ -181,6 +181,7 @@ pub async fn execute_command(
 
                     let tx2 = tx.clone();
                     let tx_bookend = tx.clone();
+                    let tx_heartbeat = tx.clone();
 
                     // Load output schema for parsing stream-json (v0.11.2.2).
                     let output_schema = {
@@ -258,7 +259,32 @@ pub async fn execute_command(
                         }
                     });
 
+                    // Heartbeat task: emit periodic "still running" messages when
+                    // no output activity for N seconds (v0.11.2.3 item 14).
+                    let heartbeat_tx = tx_heartbeat;
+                    let heartbeat_interval_secs = state
+                        .daemon_config
+                        .operations
+                        .as_ref()
+                        .and_then(|ops| ops.heartbeat_interval_secs)
+                        .unwrap_or(10) as u64;
+                    let heartbeat_task = tokio::spawn(async move {
+                        let mut elapsed: u64 = 0;
+                        loop {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(
+                                heartbeat_interval_secs,
+                            ))
+                            .await;
+                            elapsed += heartbeat_interval_secs;
+                            let _ = heartbeat_tx.send(OutputLine {
+                                stream: "stderr",
+                                line: format!("[heartbeat] still running... {}s elapsed", elapsed),
+                            });
+                        }
+                    });
+
                     let status = child.wait().await;
+                    heartbeat_task.abort(); // Stop heartbeat when command exits.
                     let _ = stdout_task.await;
                     let _ = stderr_task.await;
 

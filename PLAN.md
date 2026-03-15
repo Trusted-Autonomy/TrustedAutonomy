@@ -3432,7 +3432,7 @@ When the agent process fails to start, crashes, or exits with an error, the outp
 ---
 
 ### v0.11.2.3 — Goal & Draft Unified UX
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make goals and drafts feel like one thing to the human. Today they have separate UUIDs, separate `list` commands, disconnected status, and no VCS tracking after apply. The human shouldn't have to cross-reference IDs or hunt through 40 drafts to find the one that matters.
 
 #### Problem
@@ -3457,43 +3457,42 @@ example: shell-routing-01, fix-auth-03, v0.11.2.1-01
 - Goals and their draft(s) share the tag. A follow-up draft becomes `shell-routing-01.2` (iteration suffix).
 - UUIDs remain the internal key. Tags are stored on both `GoalRun.tag` and `DraftPackage.tag` and are resolvable in all commands: `ta goal status shell-routing-01`, `ta draft view shell-routing-01`.
 
-#### Items
+#### Completed
 
-1. [ ] **`GoalRun.tag` field**: Add `tag: String` to GoalRun. Auto-generate from title on creation. Store in goal JSON. Add `GoalRunStore::resolve_tag(tag) -> Option<GoalRun>` for lookup.
-2. [ ] **`DraftPackage.tag` field**: Add `tag: String` to DraftPackage. Inherit from parent goal on `ta draft build`. Replace `display_id` with `tag` in all display contexts.
-3. [ ] **Tag resolution in all commands**: `ta goal status <tag>`, `ta draft view <tag>`, `ta draft apply <tag>`, `ta draft approve <tag>`. Fall back to UUID prefix match if tag doesn't match.
-4. [ ] **`ta goal list` shows draft/VCS status**: Add columns showing draft state and VCS state inline:
-   ```
-   TAG                TITLE                     STATE        DRAFT      VCS
-   shell-routing-01   Shell agent routing...    applied      Applied    PR #166 (open)
-   fix-auth-03        Fix OAuth token...        running      —          —
-   v0.11.2.2-01       Agent output schema...    completed    Applied    PR #165 (merged)
-   ```
-5. [ ] **`ta draft list` "recently applied" filter**: Default compact view includes `Applied` drafts younger than 7 days (configurable). Drafts with open PRs are always shown regardless of age. Removes the "no active drafts" false negative.
-6. [ ] **VCS status tracking on DraftPackage**: Add `vcs_status: Option<VcsTrackingInfo>` to DraftPackage:
-   ```rust
-   pub struct VcsTrackingInfo {
-       pub branch: String,
-       pub review_url: Option<String>,  // PR URL
-       pub review_id: Option<String>,   // PR number
-       pub review_state: Option<String>, // open, merged, closed
-       pub commit_sha: Option<String>,
-       pub last_checked: DateTime<Utc>,
-   }
-   ```
-   Populated by the VCS adapter on `commit()`, `push()`, `open_review()`. Updated on `ta draft list` or `ta goal status` via adapter query.
-7. [ ] **`ta draft list` shows VCS column**: Display PR state inline. Open PRs highlighted. Merged PRs shown as completed.
-8. [ ] **VCS adapter `check_review()` method**: New trait method on `SourceAdapter` that queries the VCS provider for PR/review status. Git adapter uses `gh pr view --json state`. Cached with TTL to avoid rate limiting.
-9. [ ] **`ta goal status <tag>` unified view**: Single command shows everything about a unit of work — goal state, draft state, VCS state, artifact summary, timeline. Replaces the need to cross-reference `ta goal list` + `ta draft list` + `gh pr view`.
-10. [ ] **Shell status bar shows goal tag**: Replace UUID prefix with tag in the TUI status bar: `goal: shell-routing-01 (running)` instead of `goal: 511e0465 (running)`.
-11. [ ] **Backward compatibility**: Existing goals without tags get auto-tagged on first access (derived from title). UUID prefix resolution continues to work. Migration is transparent.
-12. [ ] **`ta status` summary includes VCS tracking**: The daemon's `/api/status` endpoint includes VCS state for active/recent goals so the shell and `ta status` can show PR status without extra queries.
-13. [ ] **Git adapter `auto_merge` config**: Add `auto_merge: bool` to `GitConfig` (default: false). When true, after `gh pr create`, run `gh pr merge --auto --squash` to enable GitHub's auto-merge. Configurable in `.ta/workflow.toml`:
-    ```toml
-    [submit.git]
-    auto_merge = true
-    ```
-14. [ ] **Daemon command heartbeat for streamed commands**: Long-running commands dispatched via `/api/cmd` (draft apply, run, dev) emit a periodic heartbeat line (`[heartbeat] still running... Ns elapsed`) to the output stream when no stdout/stderr activity for N seconds (configurable, default 10s). Prevents the shell from appearing frozen during silent phases (e.g., git push to slow remote). The daemon's background task already tracks `last_activity` — this adds an output heartbeat when the gap exceeds the threshold. User-facing processes can opt into the same heartbeat via a future `--heartbeat` flag or `daemon.toml` config.
+1. [x] **`GoalRun.tag` field**: Added `tag: Option<String>` to GoalRun with `slugify_title()` auto-generation, `display_tag()` fallback, and `GoalRunStore::save_with_tag()` for auto-sequencing. `GoalRunStore::resolve_tag()` and `resolve_tag_or_id()` for lookup.
+2. [x] **`DraftPackage.tag` field**: Added `tag: Option<String>` to DraftPackage. Inherited from parent goal on `ta draft build`. Displayed in draft list alongside display_id.
+3. [x] **Tag resolution in all commands**: `ta goal status <tag>`, `ta draft view <tag>`, `ta draft apply <tag>`, `ta draft approve <tag>`. Falls back to UUID prefix match if tag doesn't match. Both `goal.rs` and `draft.rs` resolve functions updated.
+4. [x] **`ta goal list` shows draft/VCS status**: New TAG, DRAFT, VCS columns in goal list output with inline draft state and PR status.
+5. [x] **`ta draft list` "recently applied" filter**: Default compact view includes `Applied` drafts younger than 7 days and drafts with open PRs regardless of age.
+6. [x] **VCS status tracking on DraftPackage**: Added `vcs_status: Option<VcsTrackingInfo>` with branch, review_url, review_id, review_state, commit_sha, last_checked. Populated during `ta draft apply --git-commit --push --review`.
+7. [x] **`ta draft list` shows VCS column**: TAG and VCS columns added to draft list output with PR state inline.
+8. [x] **VCS adapter `check_review()` method**: New default method on `SourceAdapter`. Git adapter implementation uses `gh pr view --json state,statusCheckRollup`.
+9. [x] **`ta goal status <tag>` unified view**: Shows goal + draft + VCS sections in one output. Loads draft package for status/file count and VCS tracking info.
+10. [x] **Shell status bar shows goal tag**: Added `active_goal_tag` to StatusInfo, parsed from daemon `/api/status` active_agents. Displayed as `goal: <tag>` in TUI status bar.
+11. [x] **Backward compatibility**: Goals without tags get auto-derived display_tag() from title + UUID prefix. UUID prefix resolution continues to work. All fields use `serde(default)` for transparent migration.
+12. [x] **`ta status` summary includes VCS tracking**: AgentInfo in `/api/status` now includes `tag` and `vcs_state` fields.
+13. [x] **Git adapter `auto_merge` config**: Added `auto_merge: bool` to `GitConfig` (default: false). After `gh pr create`, runs `gh pr merge --auto --<strategy>`.
+14. [x] **Daemon command heartbeat for streamed commands**: Heartbeat task emits `[heartbeat] still running... Ns elapsed` every N seconds (configurable via `[operations].heartbeat_interval_secs` in daemon.toml, default 10s).
+
+#### Tests (17 new)
+- `slugify_title_basic` — basic slug generation (ta-goal)
+- `slugify_title_special_chars` — special character handling (ta-goal)
+- `slugify_title_truncates_long_names` — 30-char limit (ta-goal)
+- `display_tag_with_explicit_tag` — explicit tag passthrough (ta-goal)
+- `display_tag_auto_generated` — auto-derived tag fallback (ta-goal)
+- `tag_field_backward_compat_deserialization` — JSON without tag (ta-goal)
+- `tag_field_serialization_round_trip` — tag serde (ta-goal)
+- `save_with_tag_auto_generates_tag` — auto-seq tag generation (ta-goal store)
+- `save_with_tag_preserves_explicit_tag` — explicit tag preserved (ta-goal store)
+- `resolve_tag_finds_exact_match` — tag resolution (ta-goal store)
+- `resolve_tag_returns_none_for_unknown` — miss returns None (ta-goal store)
+- `resolve_tag_or_id_works_with_tag` — tag-or-id resolution (ta-goal store)
+- `resolve_tag_or_id_works_with_uuid` — UUID resolution (ta-goal store)
+- `vcs_tracking_info_serialization_round_trip` — VcsTrackingInfo serde (ta-changeset)
+- `draft_package_tag_backward_compat` — backward compat (ta-changeset)
+- `draft_package_with_tag_and_vcs` — full tag+VCS serde (ta-changeset)
+- `git_config_auto_merge_default_false` — default false (ta-submit)
+- `git_config_auto_merge_from_toml` — TOML parsing (ta-submit)
 
 #### Version: `0.11.2-alpha.3`
 

@@ -476,6 +476,37 @@ pub struct DraftPackage {
     /// Falls back to `package_id` short prefix for legacy drafts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_id: Option<String>,
+
+    /// Human-friendly goal tag inherited from the parent GoalRun (v0.11.2.3).
+    /// The primary display identifier in all draft listing contexts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+
+    /// VCS tracking information populated during commit/push/open_review (v0.11.2.3).
+    /// Tracks the PR lifecycle after apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_status: Option<VcsTrackingInfo>,
+}
+
+/// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcsTrackingInfo {
+    /// Branch name the changes were committed to.
+    pub branch: String,
+    /// PR/review URL (e.g., GitHub PR URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_url: Option<String>,
+    /// PR/review identifier (e.g., PR number).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
+    /// PR/review state: "open", "merged", "closed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_state: Option<String>,
+    /// Commit SHA of the applied changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+    /// When VCS status was last checked/updated.
+    pub last_checked: DateTime<Utc>,
 }
 
 /// A warning from a pre-draft verification command failure (v0.10.8).
@@ -648,6 +679,8 @@ mod tests {
             status: DraftStatus::Draft,
             verification_warnings: vec![],
             display_id: None,
+            tag: None,
+            vcs_status: None,
         }
     }
 
@@ -1132,5 +1165,57 @@ mod tests {
         }"#;
         let summary: Summary = serde_json::from_str(json).unwrap();
         assert!(summary.alternatives_considered.is_empty());
+    }
+
+    #[test]
+    fn vcs_tracking_info_serialization_round_trip() {
+        let vcs = VcsTrackingInfo {
+            branch: "ta/fix-auth".to_string(),
+            review_url: Some("https://github.com/org/repo/pull/42".to_string()),
+            review_id: Some("42".to_string()),
+            review_state: Some("open".to_string()),
+            commit_sha: Some("abc1234".to_string()),
+            last_checked: Utc::now(),
+        };
+        let json = serde_json::to_string(&vcs).unwrap();
+        assert!(json.contains("\"branch\""));
+        assert!(json.contains("\"review_url\""));
+        let restored: VcsTrackingInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.branch, "ta/fix-auth");
+        assert_eq!(restored.review_id, Some("42".to_string()));
+    }
+
+    #[test]
+    fn draft_package_tag_backward_compat() {
+        // JSON without tag/vcs_status should deserialize fine (backward compat).
+        let pkg = test_package();
+        assert!(pkg.tag.is_none());
+        assert!(pkg.vcs_status.is_none());
+        let json = serde_json::to_string(&pkg).unwrap();
+        assert!(!json.contains("\"vcs_status\""));
+        let restored: DraftPackage = serde_json::from_str(&json).unwrap();
+        assert!(restored.tag.is_none());
+        assert!(restored.vcs_status.is_none());
+    }
+
+    #[test]
+    fn draft_package_with_tag_and_vcs() {
+        let mut pkg = test_package();
+        pkg.tag = Some("fix-auth-01".to_string());
+        pkg.vcs_status = Some(VcsTrackingInfo {
+            branch: "ta/fix-auth".to_string(),
+            review_url: None,
+            review_id: None,
+            review_state: None,
+            commit_sha: Some("def5678".to_string()),
+            last_checked: Utc::now(),
+        });
+        let json = serde_json::to_string(&pkg).unwrap();
+        assert!(json.contains("\"tag\""));
+        assert!(json.contains("fix-auth-01"));
+        assert!(json.contains("\"vcs_status\""));
+        let restored: DraftPackage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.tag, Some("fix-auth-01".to_string()));
+        assert!(restored.vcs_status.is_some());
     }
 }

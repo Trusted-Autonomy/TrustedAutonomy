@@ -16,7 +16,7 @@ pub mod svn;
 
 // Primary exports (v0.11.1+)
 pub use adapter::{
-    CommitResult, PushResult, ReviewResult, SavedVcsState, SourceAdapter, SyncResult,
+    CommitResult, PushResult, ReviewResult, ReviewStatus, SavedVcsState, SourceAdapter, SyncResult,
 };
 
 // Backward-compatible re-export: SubmitAdapter is a type alias for SourceAdapter.

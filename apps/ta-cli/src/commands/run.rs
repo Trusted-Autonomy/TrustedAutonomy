@@ -3008,6 +3008,8 @@ pre_launch:
             status: DraftStatus::PendingReview,
             verification_warnings: vec![],
             display_id: None,
+            tag: None,
+            vcs_status: None,
         };
 
         // Save the draft package.
@@ -3160,6 +3162,8 @@ pre_launch:
             status: DraftStatus::PendingReview,
             verification_warnings: vec![],
             display_id: None,
+            tag: None,
+            vcs_status: None,
         };
 
         super::super::draft::save_package(&config, &parent_draft).unwrap();
