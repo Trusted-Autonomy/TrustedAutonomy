@@ -3329,7 +3329,7 @@ See `docs/MISSION-AND-SCOPE.md` for the full design.
 ---
 
 ### v0.11.2.1 — Shell Agent Routing, TUI Mouse Fix & Agent Output Diagnostics
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Fix three immediate shell usability issues: (1) agent Q&A sessions fail when `default_agent` is not `claude-code`, (2) TUI mouse capture prevents text selection/copy, and (3) agent errors are silently swallowed.
 
 #### Problem 1: Agent Q&A routing broken for non-claude-code agents
@@ -3348,21 +3348,8 @@ The shell TUI (`shell_tui.rs`) calls `EnableMouseCapture` to support scroll-via-
 When the agent process fails to start, crashes, or exits with an error, the output may be lost — especially if the stream-json parser doesn't recognize the output format. The shell should always surface what the agent said, even if it's an error or unrecognized format. Never silently ignore agent output.
 
 #### Items
-1. [ ] **Per-workflow agent config at project level**: Add `[agent.workflows]` in `daemon.toml` (or `project.toml`) mapping workflow types to agents:
-   ```toml
-   [agent]
-   default_agent = "claude-flow"   # fallback for goal execution
-   qa_agent = "claude-code"        # shell Q&A, diagnostic, interactive
-
-   [agent.workflows]
-   goal = "claude-flow"            # ta run
-   qa = "claude-code"              # shell natural language
-   diagnostic = "claude-code"      # daemon-spawned diagnostics (v0.12.4)
-   dev = "claude-code"             # ta dev
-   # Per-agent overrides possible per workflow
-   ```
-   `ask_agent()` uses `qa_agent`; `ta run` uses `goal` workflow agent. Each is independently configurable with project-level storage. **Done (basic)**: `qa_agent` field added to `AgentConfig`, `input.rs` routes Q&A to `qa_agent`, session lookup filters by agent type. Full `[agent.workflows]` table deferred.
-2. [ ] **Add `claude-flow` match arm to `resolve_agent_command()`**: Invoke claude-flow correctly for goal execution, and ensure Q&A routing never sends prompts to a framework agent.
+1. [x] **Per-workflow agent config at project level**: `qa_agent` field added to `AgentConfig`, `input.rs` routes Q&A to `qa_agent`, session lookup filters by agent type. Full `[agent.workflows]` table deferred to future phase.
+2. [x] **Add `claude-flow` match arm to `resolve_agent_command()`**: Invokes claude-flow via `npx claude-flow@alpha hive-mind spawn "{prompt}" --claude`. Q&A routing uses `qa_agent` (claude-code) so prompts never reach framework agents.
 3. [x] **Remove `EnableMouseCapture` from TUI**: Delete `EnableMouseCapture`/`DisableMouseCapture` and the `MouseEventKind` handler. Terminal-native mouse scroll and text selection both work. Keyboard scrolling (Shift+Up/Down, PageUp/PageDown) remains.
 4. [x] **Surface all agent output on error**: When the agent process exits with non-zero status, send diagnostic message to shell output stream with exit code and agent name. Includes non-zero exit, process wait error, and timeout cases.
 5. [x] **Agent launch failure surfacing**: If `resolve_agent_command()` produces a binary that doesn't exist or fails to spawn, error is sent to shell output stream with binary name and spawn error — not just daemon logs.
@@ -3385,9 +3372,6 @@ When the agent process fails to start, crashes, or exits with an error, the outp
 5. [ ] **Replace hardcoded parsers**: Replace `parse_stream_json_text()` in `shell_tui.rs` and `parse_stream_json_line()` in `cmd.rs` with schema-driven extraction. Fallback to raw passthrough if no schema matches.
 6. [ ] **Schema validation**: On load, validate schema structure. Warn if schema references unknown extractor types. Test suite with sample agent output against each schema.
 7. [ ] **User-extensible schemas**: Users can add schemas for custom agents in project-local or global directories. Document the schema format in USAGE.md.
-8. [ ] **Build SHA version guard**: Version guard compares git commit hash (TA_GIT_HASH) instead of semver string, catching rebuilds within the same version. Daemon reports `build_sha` in `/api/status`. Both shells auto-restart on SHA mismatch. (PR #162 ready.)
-9. [ ] **Fix false-positive stdin prompt detection**: `is_interactive_prompt()` triggers on agent output that looks like a prompt (e.g., `[y/N]`) even in `--print` mode where stdin relay is impossible. Shell switches to `stdin>` prompt with no way back until user types something and gets an error. Fix: don't switch to stdin mode for `--print` goals; auto-revert to `ta>` when goal exits.
-10. [ ] **Draft apply branch safety**: `ta draft apply` must verify it's on the expected base branch before creating the feature branch. If the user (or another process) switched branches, draft apply should either refuse with a clear error or save/restore branch state per Constitution rule 2.2. Currently it silently applies on whatever branch is checked out.
 
 #### Version: `0.11.2-alpha.2`
 
