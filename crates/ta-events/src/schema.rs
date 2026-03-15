@@ -236,6 +236,23 @@ pub enum SessionEvent {
         conflicts: Vec<String>,
         message: String,
     },
+
+    /// A project build completed successfully (v0.11.2).
+    BuildCompleted {
+        adapter: String,
+        operation: String,
+        duration_secs: f64,
+        message: String,
+    },
+
+    /// A project build or test failed (v0.11.2).
+    BuildFailed {
+        adapter: String,
+        operation: String,
+        exit_code: i32,
+        duration_secs: f64,
+        message: String,
+    },
 }
 
 fn default_response_hint() -> String {
@@ -268,6 +285,8 @@ impl SessionEvent {
             Self::CommandFailed { .. } => "command_failed",
             Self::SyncCompleted { .. } => "sync_completed",
             Self::SyncConflict { .. } => "sync_conflict",
+            Self::BuildCompleted { .. } => "build_completed",
+            Self::BuildFailed { .. } => "build_failed",
         }
     }
 
@@ -354,6 +373,16 @@ impl SessionEvent {
                     "retry",
                     command.clone(),
                     format!("Retry: {}", command),
+                )]
+            }
+            Self::BuildFailed { operation, .. } => {
+                vec![EventAction::new(
+                    "retry",
+                    format!(
+                        "ta build{}",
+                        if operation == "test" { " --test" } else { "" }
+                    ),
+                    format!("Retry {} build", operation),
                 )]
             }
             // All other events have no suggested actions.
@@ -604,11 +633,24 @@ mod tests {
                 conflicts: vec!["a.rs".into()],
                 message: "conflict".into(),
             },
+            SessionEvent::BuildCompleted {
+                adapter: "cargo".into(),
+                operation: "build".into(),
+                duration_secs: 5.0,
+                message: "ok".into(),
+            },
+            SessionEvent::BuildFailed {
+                adapter: "cargo".into(),
+                operation: "test".into(),
+                exit_code: 1,
+                duration_secs: 3.0,
+                message: "failed".into(),
+            },
         ];
         for e in &events {
             assert!(!e.event_type().is_empty());
         }
-        assert_eq!(events.len(), 21);
+        assert_eq!(events.len(), 23);
     }
 
     #[test]

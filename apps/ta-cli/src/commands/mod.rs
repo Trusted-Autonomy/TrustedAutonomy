@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod agent;
 pub mod audit;
+pub mod build;
 pub mod config;
 pub mod consent;
 pub mod context;

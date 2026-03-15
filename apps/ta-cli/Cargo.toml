@@ -54,6 +54,7 @@ ta-events = { path = "../../crates/ta-events" }
 ta-submit = { path = "../../crates/ta-submit" }
 ta-workspace = { path = "../../crates/ta-workspace" }
 ta-workflow = { path = "../../crates/ta-workflow" }
+ta-build = { path = "../../crates/ta-build" }
 
 
 [target.'cfg(windows)'.build-dependencies]

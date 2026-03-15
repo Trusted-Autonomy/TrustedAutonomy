@@ -2462,6 +2462,8 @@ Commands:
   deny <id>          Shortcut for: ta draft deny <id>
   view <id>          Shortcut for: ta draft view <id>
   apply <id>         Shortcut for: ta draft apply <id>
+  build              Shortcut for: ta build
+  test               Shortcut for: ta build --test
   status             Shortcut for: ta status
   plan               Shortcut for: ta plan list
   plan add <desc>    Add a phase to the plan via agent session

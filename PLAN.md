@@ -3290,45 +3290,39 @@ See `docs/MISSION-AND-SCOPE.md` for the full `SourceAdapter` trait design and pe
 ---
 
 ### v0.11.2 — `BuildAdapter` & `ta build`
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Add `ta build` as a governed event wrapper around project build tools. The build result flows through TA's event system so workflows, channels, event-routing agents, and audit logs all see it.
 
 See `docs/MISSION-AND-SCOPE.md` for the full design.
 
-#### Items
+#### Completed
 
-1. **`BuildAdapter` trait** (`crates/ta-build/src/adapter.rs` — new crate):
-   - `fn build(&self) -> Result<BuildResult>`
-   - `fn test(&self) -> Result<BuildResult>`
-   - `BuildResult`: `{ success: bool, exit_code: i32, stdout: String, stderr: String, duration: Duration }`
-   - Auto-detection from framework registry (cargo, npm, make, etc.)
+1. ✅ **`BuildAdapter` trait** (`crates/ta-build/src/adapter.rs` — new crate): `fn build(&self) -> Result<BuildResult>`, `fn test(&self) -> Result<BuildResult>`, `fn name(&self) -> &str`, `fn detect(project_root: &Path) -> bool`. `BuildResult` struct with `success`, `exit_code`, `stdout`, `stderr`, `duration_secs`. `BuildError` enum with NotConfigured, CommandFailed, IoError, ConfigError, Timeout, WebhookError variants.
 
-2. **Built-in adapters**:
-   - `CargoAdapter`: `cargo build --workspace`, `cargo test --workspace`
-   - `NpmAdapter`: `npm run build`, `npm test`
-   - `ScriptAdapter`: user-defined command from config
-   - `WebhookAdapter`: POST to external CI, poll for result
+2. ✅ **Built-in adapters**: `CargoAdapter` (Cargo.toml auto-detection, `cargo build/test --workspace`), `NpmAdapter` (package.json auto-detection, `npm run build`/`npm test`), `ScriptAdapter` (arbitrary shell commands, Makefile auto-detection), `WebhookAdapter` (stub — returns descriptive "not yet implemented" error with guidance).
 
-3. **`ta build` CLI command** (`apps/ta-cli/src/commands/build.rs`):
-   - Calls `BuildAdapter::build()` (and optionally `test()`)
-   - Emits `build_completed` or `build_failed` event with full output
-   - Exit code reflects build result
+3. ✅ **`ta build` CLI command** (`apps/ta-cli/src/commands/build.rs`): Loads `[build]` from `.ta/workflow.toml`, selects adapter via auto-detection or explicit config, runs `build()` and optionally `test()` via `--test` flag. Emits `build_completed` / `build_failed` events. Exit code reflects build result. Long stderr output collapsed (first 20 + last 20 lines).
 
-4. **Config** (`.ta/workflow.toml`):
-   ```toml
-   [build]
-   adapter = "cargo"                      # or "npm", "script", "webhook", auto-detected
-   command = "cargo build --workspace"    # override for script adapter
-   test_command = "cargo test --workspace"
-   on_fail = "notify"                     # notify | block_release | block_next_phase | agent
-   ```
+4. ✅ **Config** (`.ta/workflow.toml`): Extended `BuildConfig` with `adapter` (auto/cargo/npm/script/webhook/none), `command`, `test_command`, `webhook_url`, `on_fail` (notify/block_release/block_next_phase/agent), `timeout_secs` (default 600). Full serde deserialization with defaults.
 
-5. **Wire into `ta release run`**:
-   - Optional `pre_steps = ["sync", "build", "test"]` in `[release]` config
-   - Release blocked if build/test fails
+5. ✅ **Event types** (`crates/ta-events/src/schema.rs`): `BuildCompleted` (adapter, operation, duration_secs, message) and `BuildFailed` (adapter, operation, exit_code, duration_secs, message). `BuildFailed` has retry action suggesting `ta build` / `ta build --test`.
 
-6. **`ta shell` integration**:
-   - `ta> build` and `ta> test` as shell shortcuts
+6. ✅ **Registry** (`crates/ta-build/src/registry.rs`): `detect_build_adapter()` (Cargo→npm→Make→None), `select_build_adapter()` (named + auto-detect fallback), `known_build_adapters()`. Command overrides applied when using "auto" with custom commands.
+
+7. ✅ **Wire into `ta release run`**: Already scaffolded in v0.10.18 release script with graceful degradation (`ta build` step runs if available, skips with message if not).
+
+8. ✅ **`ta shell` integration**: `build` and `test` added to shell help text as shortcuts, dispatched to daemon like other commands.
+
+#### Tests: 49 new tests
+- `crates/ta-build/src/adapter.rs`: 3 tests (success/failure constructors, serialization roundtrip)
+- `crates/ta-build/src/cargo.rs`: 6 tests (detect, name, custom commands, output capture, failure capture)
+- `crates/ta-build/src/npm.rs`: 4 tests (detect, name, custom commands)
+- `crates/ta-build/src/script.rs`: 5 tests (detect, name, custom command, failure, make constructor)
+- `crates/ta-build/src/webhook.rs`: 4 tests (name, build/test not-implemented, never auto-detected)
+- `crates/ta-build/src/registry.rs`: 13 tests (detect all project types, priority, select by name, auto/none, webhook with/without URL)
+- `crates/ta-submit/src/config.rs`: 4 new tests (build_config_defaults, parse with adapter, parse script adapter, on_fail display)
+- `crates/ta-events/src/schema.rs`: 2 new events added to all_event_types test (count 21→23)
+- `apps/ta-cli/src/commands/build.rs`: 5 tests (select cargo/npm/empty, script build/test)
 
 #### Version: `0.11.2-alpha`
 
