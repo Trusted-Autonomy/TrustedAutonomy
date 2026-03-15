@@ -145,16 +145,29 @@ mod tests {
     }
 
     #[test]
-    fn cargo_adapter_test_captures_failure() {
+    #[cfg(unix)]
+    fn cargo_adapter_test_captures_failure_unix() {
         let dir = tempdir().unwrap();
-        // Create a script that exits with failure
         let script_path = dir.path().join("fail.sh");
         std::fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let adapter = CargoAdapter::with_commands(
+            dir.path(),
+            None,
+            Some(script_path.to_string_lossy().to_string()),
+        );
+        let result = adapter.test().unwrap();
+        assert!(!result.success);
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cargo_adapter_test_captures_failure_windows() {
+        let dir = tempdir().unwrap();
+        let script_path = dir.path().join("fail.cmd");
+        std::fs::write(&script_path, "@echo off\nexit /b 1\n").unwrap();
         let adapter = CargoAdapter::with_commands(
             dir.path(),
             None,
