@@ -3348,21 +3348,8 @@ The shell TUI (`shell_tui.rs`) calls `EnableMouseCapture` to support scroll-via-
 When the agent process fails to start, crashes, or exits with an error, the output may be lost — especially if the stream-json parser doesn't recognize the output format. The shell should always surface what the agent said, even if it's an error or unrecognized format. Never silently ignore agent output.
 
 #### Items
-1. [ ] **Per-workflow agent config at project level**: Add `[agent.workflows]` in `daemon.toml` (or `project.toml`) mapping workflow types to agents:
-   ```toml
-   [agent]
-   default_agent = "claude-flow"   # fallback for goal execution
-   qa_agent = "claude-code"        # shell Q&A, diagnostic, interactive
-
-   [agent.workflows]
-   goal = "claude-flow"            # ta run
-   qa = "claude-code"              # shell natural language
-   diagnostic = "claude-code"      # daemon-spawned diagnostics (v0.12.4)
-   dev = "claude-code"             # ta dev
-   # Per-agent overrides possible per workflow
-   ```
-   `ask_agent()` uses `qa_agent`; `ta run` uses `goal` workflow agent. Each is independently configurable with project-level storage. **Done (basic)**: `qa_agent` field added to `AgentConfig`, `input.rs` routes Q&A to `qa_agent`, session lookup filters by agent type. Full `[agent.workflows]` table deferred.
-2. [ ] **Add `claude-flow` match arm to `resolve_agent_command()`**: Invoke claude-flow correctly for goal execution, and ensure Q&A routing never sends prompts to a framework agent.
+1. [x] **Per-workflow agent config at project level**: `qa_agent` field added to `AgentConfig`, `input.rs` routes Q&A to `qa_agent`, session lookup filters by agent type. Full `[agent.workflows]` table deferred to future phase.
+2. [x] **Add `claude-flow` match arm to `resolve_agent_command()`**: Invokes claude-flow via `npx claude-flow@alpha hive-mind spawn "{prompt}" --claude`. Q&A routing uses `qa_agent` (claude-code) so prompts never reach framework agents.
 3. [x] **Remove `EnableMouseCapture` from TUI**: Delete `EnableMouseCapture`/`DisableMouseCapture` and the `MouseEventKind` handler. Terminal-native mouse scroll and text selection both work. Keyboard scrolling (Shift+Up/Down, PageUp/PageDown) remains.
 4. [x] **Surface all agent output on error**: When the agent process exits with non-zero status, send diagnostic message to shell output stream with exit code and agent name. Includes non-zero exit, process wait error, and timeout cases.
 5. [x] **Agent launch failure surfacing**: If `resolve_agent_command()` produces a binary that doesn't exist or fails to spawn, error is sent to shell output stream with binary name and spawn error — not just daemon logs.

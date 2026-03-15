@@ -417,6 +417,18 @@ fn resolve_agent_command(agent: &str, prompt: &str) -> (String, Vec<String>) {
                 prompt.to_string(),
             ],
         ),
+        // Claude Flow: multi-agent orchestration framework.
+        // Invoked via npx — not a bare CLI that accepts prompts directly.
+        "claude-flow" => (
+            "npx".to_string(),
+            vec![
+                "claude-flow@alpha".to_string(),
+                "hive-mind".to_string(),
+                "spawn".to_string(),
+                prompt.to_string(),
+                "--claude".to_string(),
+            ],
+        ),
         // Generic fallback: assume binary name matches agent name.
         other => (other.to_string(), vec![prompt.to_string()]),
     }
@@ -530,6 +542,22 @@ mod tests {
         assert_eq!(
             args,
             vec!["--print", "--verbose", "--output-format", "stream-json", "-p", "hello"]
+        );
+    }
+
+    #[test]
+    fn resolve_claude_flow_agent() {
+        let (bin, args) = resolve_agent_command("claude-flow", "build the feature");
+        assert_eq!(bin, "npx");
+        assert_eq!(
+            args,
+            vec![
+                "claude-flow@alpha",
+                "hive-mind",
+                "spawn",
+                "build the feature",
+                "--claude"
+            ]
         );
     }
 
