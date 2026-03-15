@@ -301,6 +301,32 @@ fn default_open_external() -> bool {
     true
 }
 
+/// Failure handling strategy for build commands.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildOnFail {
+    /// Notify the user but continue (default).
+    #[default]
+    Notify,
+    /// Block release pipeline if build/test fails.
+    BlockRelease,
+    /// Block advancement to the next plan phase.
+    BlockNextPhase,
+    /// Re-launch an agent to fix the issue.
+    Agent,
+}
+
+impl std::fmt::Display for BuildOnFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Notify => write!(f, "notify"),
+            Self::BlockRelease => write!(f, "block_release"),
+            Self::BlockNextPhase => write!(f, "block_next_phase"),
+            Self::Agent => write!(f, "agent"),
+        }
+    }
+}
+
 /// Build pipeline configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildConfig {
@@ -312,18 +338,56 @@ pub struct BuildConfig {
     /// Exempt files (lockfiles, config manifests, docs) always get auto-summaries.
     #[serde(default = "default_summary_enforcement")]
     pub summary_enforcement: String,
+
+    /// Build adapter: "cargo", "npm", "script", "webhook", "auto" (default), or "none".
+    #[serde(default = "default_build_adapter")]
+    pub adapter: String,
+
+    /// Custom build command override (used by script adapter, or overrides cargo/npm default).
+    #[serde(default)]
+    pub command: Option<String>,
+
+    /// Custom test command override.
+    #[serde(default)]
+    pub test_command: Option<String>,
+
+    /// Webhook URL for the webhook adapter.
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+
+    /// Behavior on build/test failure.
+    #[serde(default)]
+    pub on_fail: BuildOnFail,
+
+    /// Timeout per build/test command in seconds. Default: 600 (10 minutes).
+    #[serde(default = "default_build_timeout")]
+    pub timeout_secs: u64,
 }
 
 impl Default for BuildConfig {
     fn default() -> Self {
         Self {
             summary_enforcement: default_summary_enforcement(),
+            adapter: default_build_adapter(),
+            command: None,
+            test_command: None,
+            webhook_url: None,
+            on_fail: BuildOnFail::default(),
+            timeout_secs: default_build_timeout(),
         }
     }
 }
 
 fn default_summary_enforcement() -> String {
     "warning".to_string()
+}
+
+fn default_build_adapter() -> String {
+    "auto".to_string()
+}
+
+fn default_build_timeout() -> u64 {
+    600
 }
 
 /// Display / output configuration
@@ -642,9 +706,21 @@ mod tests {
     }
 
     #[test]
+    fn build_config_defaults() {
+        let config = BuildConfig::default();
+        assert_eq!(config.adapter, "auto");
+        assert!(config.command.is_none());
+        assert!(config.test_command.is_none());
+        assert!(config.webhook_url.is_none());
+        assert_eq!(config.on_fail, BuildOnFail::Notify);
+        assert_eq!(config.timeout_secs, 600);
+    }
+
+    #[test]
     fn workflow_config_default_has_build_section() {
         let config = WorkflowConfig::default();
         assert_eq!(config.build.summary_enforcement, "warning");
+        assert_eq!(config.build.adapter, "auto");
     }
 
     #[test]
@@ -658,6 +734,45 @@ summary_enforcement = "error"
     }
 
     #[test]
+    fn parse_toml_with_build_adapter_config() {
+        let toml = r#"
+[build]
+adapter = "cargo"
+command = "cargo build --release"
+test_command = "cargo test --release"
+on_fail = "block_release"
+timeout_secs = 1200
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.build.adapter, "cargo");
+        assert_eq!(
+            config.build.command.as_deref(),
+            Some("cargo build --release")
+        );
+        assert_eq!(
+            config.build.test_command.as_deref(),
+            Some("cargo test --release")
+        );
+        assert_eq!(config.build.on_fail, BuildOnFail::BlockRelease);
+        assert_eq!(config.build.timeout_secs, 1200);
+    }
+
+    #[test]
+    fn parse_toml_with_build_script_adapter() {
+        let toml = r#"
+[build]
+adapter = "script"
+command = "make all"
+test_command = "make test"
+on_fail = "agent"
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.build.adapter, "script");
+        assert_eq!(config.build.command.as_deref(), Some("make all"));
+        assert_eq!(config.build.on_fail, BuildOnFail::Agent);
+    }
+
+    #[test]
     fn parse_toml_without_build_section_uses_default() {
         let toml = r#"
 [submit]
@@ -665,6 +780,15 @@ adapter = "git"
 "#;
         let config: WorkflowConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.build.summary_enforcement, "warning");
+        assert_eq!(config.build.adapter, "auto");
+    }
+
+    #[test]
+    fn build_on_fail_display() {
+        assert_eq!(BuildOnFail::Notify.to_string(), "notify");
+        assert_eq!(BuildOnFail::BlockRelease.to_string(), "block_release");
+        assert_eq!(BuildOnFail::BlockNextPhase.to_string(), "block_next_phase");
+        assert_eq!(BuildOnFail::Agent.to_string(), "agent");
     }
 
     #[test]

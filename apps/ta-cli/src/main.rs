@@ -277,6 +277,16 @@ enum Commands {
         /// Agent ID (required for show/accept, optional for status).
         agent: Option<String>,
     },
+    /// Build the project using the configured build adapter.
+    ///
+    /// Auto-detects the build system (Cargo, npm, Make) or uses the adapter
+    /// configured in `[build]` in `.ta/workflow.toml`. Emits `build_completed`
+    /// or `build_failed` events.
+    Build {
+        /// Also run the test suite after building.
+        #[arg(long)]
+        test: bool,
+    },
     /// Sync the local workspace with upstream changes.
     ///
     /// Calls the configured VCS adapter's sync operation (e.g., git fetch + merge/rebase).
@@ -541,6 +551,7 @@ fn main() -> anyhow::Result<()> {
         } => commands::gc::execute(&config, *dry_run, *threshold_days, *all, *archive),
         Commands::Status => commands::status::execute(&config),
         Commands::Serve => commands::serve::execute(&project_root),
+        Commands::Build { test } => commands::build::execute(&config, *test),
         Commands::Sync => commands::sync::execute(&config),
         Commands::Verify { goal_id } => commands::verify::execute(&config, goal_id.as_deref()),
         Commands::Conversation { goal_id, json } => {

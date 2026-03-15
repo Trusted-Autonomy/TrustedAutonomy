@@ -1180,6 +1180,44 @@ branch = "main"      # branch to sync from (default: "main")
 
 **Events**: `ta sync` emits `sync_completed` or `sync_conflict` events, which flow through channels and event routing like all other TA events.
 
+### Building and Testing (`ta build`)
+
+Run your project's build and test suite through TA's build adapter system:
+
+```bash
+# Build the project
+ta build
+
+# Build and run tests
+ta build --test
+```
+
+TA auto-detects the build system by looking for `Cargo.toml` (Rust/Cargo), `package.json` (Node.js/npm), or `Makefile`. You can also configure a specific adapter or custom commands in `.ta/workflow.toml`:
+
+```toml
+[build]
+adapter = "cargo"                      # "cargo", "npm", "script", "webhook", "auto" (default), "none"
+command = "cargo build --release"      # override the default build command
+test_command = "cargo test --release"  # override the default test command
+on_fail = "notify"                     # "notify" (default), "block_release", "block_next_phase", "agent"
+timeout_secs = 600                     # per-command timeout (default: 600s)
+```
+
+For arbitrary build systems, use the `script` adapter with custom commands:
+
+```toml
+[build]
+adapter = "script"
+command = "make all"
+test_command = "make test"
+```
+
+**Events**: `ta build` emits `build_completed` or `build_failed` events, which flow through channels and event routing like all other TA events. Failed builds include the exit code and stderr output.
+
+**Shell shortcuts**: In `ta shell`, type `build` or `test` to run `ta build` / `ta build --test` directly.
+
+**Release integration**: The release pipeline scaffold (from v0.10.6) runs `ta build` as a pre-release step when available. If the build fails, the release is blocked.
+
 ### Agent Configuration
 
 TA searches for agent configs in priority order:
@@ -4616,6 +4654,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.0 | Event-driven agent routing | Done |
 | v0.11.0.1 | Draft apply defaults & CLI flag cleanup | Done |
 | v0.11.1 | `SourceAdapter` unification & `ta sync` | Done |
+| v0.11.2 | `BuildAdapter` & `ta build` | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 
