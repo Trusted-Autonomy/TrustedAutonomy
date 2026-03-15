@@ -545,39 +545,43 @@ fn list_goals(
     let packages = load_all_packages_silent(config);
 
     println!(
-        "{:<22} {:<26} {:<14} {:<12} {:<14}",
-        "TAG", "TITLE", "STATE", "DRAFT", "VCS"
+        "{:<22} {:<22} {:<12} {:<10} {:<10} {:<14}",
+        "TAG", "TITLE", "STATE", "HEALTH", "DRAFT", "VCS"
     );
-    println!("{}", "-".repeat(88));
+    println!("{}", "-".repeat(90));
 
     for g in &goals {
         let tag = g.display_tag();
         let title_display = if g.is_macro {
-            format!("[M] {}", truncate(&g.title, 20))
+            format!("[M] {}", truncate(&g.title, 18))
         } else if let Some(ref macro_id) = g.parent_macro_id {
             format!(
                 "  +- {} (<- {})",
-                truncate(&g.title, 12),
+                truncate(&g.title, 10),
                 &macro_id.to_string()[..8]
             )
         } else if let Some(parent_id) = g.parent_goal_id {
             format!(
                 "{} (-> {})",
-                truncate(&g.title, 16),
+                truncate(&g.title, 14),
                 &parent_id.to_string()[..8]
             )
         } else {
-            truncate(&g.title, 24)
+            truncate(&g.title, 20)
         };
+
+        // Process health check (v0.11.2.4).
+        let health = process_health_label(g);
 
         // Find the latest draft for this goal.
         let (draft_col, vcs_col) = goal_draft_vcs_columns(g, &packages);
 
         println!(
-            "{:<22} {:<26} {:<14} {:<12} {:<14}",
+            "{:<22} {:<22} {:<12} {:<10} {:<10} {:<14}",
             truncate(&tag, 20),
             title_display,
             g.state.to_string(),
+            health,
             draft_col,
             vcs_col,
         );
@@ -1148,6 +1152,57 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}...", &s[..max - 3])
     } else {
         s.to_string()
+    }
+}
+
+/// Check if a process with the given PID is alive (v0.11.2.4).
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output()
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.contains(&pid.to_string()) && !stdout.contains("No tasks")
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Compute process health label for a goal's agent (v0.11.2.4).
+///
+/// Returns a short label for the HEALTH column in `ta goal list`:
+///   "alive"   — PID is running
+///   "dead"    — PID has exited
+///   "unknown" — no PID stored (legacy goal or spawn failure)
+///   "—"       — terminal state (no process to check)
+fn process_health_label(goal: &ta_goal::GoalRun) -> &'static str {
+    match &goal.state {
+        GoalRunState::Running | GoalRunState::AwaitingInput { .. } => match goal.agent_pid {
+            Some(pid) => {
+                if is_process_alive(pid) {
+                    "alive"
+                } else {
+                    "dead"
+                }
+            }
+            None => "unknown",
+        },
+        _ => "—",
     }
 }
 

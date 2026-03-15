@@ -253,6 +253,38 @@ pub enum SessionEvent {
         duration_secs: f64,
         message: String,
     },
+
+    /// An agent process exited unexpectedly while the goal was still running (v0.11.2.4).
+    GoalProcessExited {
+        goal_id: Uuid,
+        pid: u32,
+        exit_code: Option<i32>,
+        elapsed_secs: u64,
+        detail: String,
+    },
+
+    /// A daemon health check found issues (v0.11.2.4).
+    /// Only emitted when issues are detected — silent when healthy.
+    HealthCheck {
+        goals_checked: usize,
+        issues: Vec<HealthIssue>,
+    },
+
+    /// An agent question has been pending too long (v0.11.2.4).
+    QuestionStale {
+        goal_id: Uuid,
+        interaction_id: Uuid,
+        question_preview: String,
+        pending_secs: u64,
+    },
+}
+
+/// A single issue found during a watchdog health check (v0.11.2.4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthIssue {
+    pub kind: String,
+    pub goal_id: Option<Uuid>,
+    pub detail: String,
 }
 
 fn default_response_hint() -> String {
@@ -287,6 +319,9 @@ impl SessionEvent {
             Self::SyncConflict { .. } => "sync_conflict",
             Self::BuildCompleted { .. } => "build_completed",
             Self::BuildFailed { .. } => "build_failed",
+            Self::GoalProcessExited { .. } => "goal_process_exited",
+            Self::HealthCheck { .. } => "health_check",
+            Self::QuestionStale { .. } => "question_stale",
         }
     }
 
@@ -305,7 +340,9 @@ impl SessionEvent {
             | Self::AgentNeedsInput { goal_id, .. }
             | Self::AgentQuestionAnswered { goal_id, .. }
             | Self::InteractiveSessionStarted { goal_id, .. }
-            | Self::InteractiveSessionCompleted { goal_id, .. } => Some(*goal_id),
+            | Self::InteractiveSessionCompleted { goal_id, .. }
+            | Self::GoalProcessExited { goal_id, .. }
+            | Self::QuestionStale { goal_id, .. } => Some(*goal_id),
             Self::PolicyViolation { goal_id, .. } => *goal_id,
             _ => None,
         }
@@ -383,6 +420,29 @@ impl SessionEvent {
                         if operation == "test" { " --test" } else { "" }
                     ),
                     format!("Retry {} build", operation),
+                )]
+            }
+            Self::GoalProcessExited { goal_id, .. } => {
+                let short_id = &goal_id.to_string()[..8];
+                vec![
+                    EventAction::new(
+                        "inspect",
+                        format!("ta goal status {}", short_id),
+                        format!("Inspect goal {}", short_id),
+                    ),
+                    EventAction::new(
+                        "list",
+                        "ta goal list --all".to_string(),
+                        "List all goals".to_string(),
+                    ),
+                ]
+            }
+            Self::QuestionStale { interaction_id, .. } => {
+                let iid = interaction_id.to_string();
+                vec![EventAction::new(
+                    "respond",
+                    format!("ta interact respond {}", iid),
+                    "Respond to stale question".to_string(),
                 )]
             }
             // All other events have no suggested actions.
@@ -646,11 +706,32 @@ mod tests {
                 duration_secs: 3.0,
                 message: "failed".into(),
             },
+            SessionEvent::GoalProcessExited {
+                goal_id: gid,
+                pid: 12345,
+                exit_code: Some(1),
+                elapsed_secs: 300,
+                detail: "process exited".into(),
+            },
+            SessionEvent::HealthCheck {
+                goals_checked: 2,
+                issues: vec![HealthIssue {
+                    kind: "zombie_goal".into(),
+                    goal_id: Some(gid),
+                    detail: "process exited 5m ago".into(),
+                }],
+            },
+            SessionEvent::QuestionStale {
+                goal_id: gid,
+                interaction_id: Uuid::new_v4(),
+                question_preview: "Which DB?".into(),
+                pending_secs: 7200,
+            },
         ];
         for e in &events {
             assert!(!e.event_type().is_empty());
         }
-        assert_eq!(events.len(), 23);
+        assert_eq!(events.len(), 26);
     }
 
     #[test]

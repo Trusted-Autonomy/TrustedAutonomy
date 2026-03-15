@@ -24,17 +24,57 @@ pub struct DaemonConfig {
     pub operations: Option<OperationsConfig>,
 }
 
-/// Operations configuration section (v0.11.2.3).
+/// Operations configuration section (v0.11.2.3+).
 ///
 /// ```toml
 /// [operations]
 /// heartbeat_interval_secs = 10
+/// watchdog_interval_secs = 30
+/// zombie_transition_delay_secs = 60
+/// stale_question_threshold_secs = 3600
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationsConfig {
     /// Heartbeat interval in seconds for long-running commands (default: 10).
     #[serde(default)]
     pub heartbeat_interval_secs: Option<u32>,
+
+    /// Watchdog check cycle in seconds (default: 30). Set to 0 to disable.
+    #[serde(default = "default_watchdog_interval")]
+    pub watchdog_interval_secs: u32,
+
+    /// Seconds to wait after detecting a dead process before transitioning
+    /// the goal state (default: 60). Prevents false positives from brief
+    /// process restarts.
+    #[serde(default = "default_zombie_delay")]
+    pub zombie_transition_delay_secs: u64,
+
+    /// Seconds a question can be pending before it's flagged as stale (default: 3600 = 1h).
+    #[serde(default = "default_stale_question_threshold")]
+    pub stale_question_threshold_secs: u64,
+}
+
+fn default_watchdog_interval() -> u32 {
+    30
+}
+
+fn default_zombie_delay() -> u64 {
+    60
+}
+
+fn default_stale_question_threshold() -> u64 {
+    3600
+}
+
+impl Default for OperationsConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_secs: None,
+            watchdog_interval_secs: default_watchdog_interval(),
+            zombie_transition_delay_secs: default_zombie_delay(),
+            stale_question_threshold_secs: default_stale_question_threshold(),
+        }
+    }
 }
 
 /// Sandbox configuration section in daemon.toml (v0.10.16).

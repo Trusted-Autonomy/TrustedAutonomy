@@ -212,6 +212,12 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
 
+    /// Agent process ID for liveness checking (v0.11.2.4).
+    /// Populated when `ta run` spawns the agent subprocess. The daemon watchdog
+    /// reads this to verify the agent process is still alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_pid: Option<u32>,
+
     /// The PR package ID, if one has been built.
     pub pr_package_id: Option<Uuid>,
 
@@ -292,6 +298,7 @@ impl GoalRun {
             context_from: Vec::new(),
             thread_id: None,
             project_name: None,
+            agent_pid: None,
             pr_package_id: None,
             created_at: now,
             updated_at: now,
@@ -619,6 +626,27 @@ mod tests {
         assert!(!json.contains("\"tag\""));
         let restored: GoalRun = serde_json::from_str(&json).unwrap();
         assert!(restored.tag.is_none());
+    }
+
+    #[test]
+    fn agent_pid_backward_compat_deserialization() {
+        // JSON without agent_pid field should deserialize to None.
+        let gr = test_goal_run();
+        assert!(gr.agent_pid.is_none());
+        let json = serde_json::to_string_pretty(&gr).unwrap();
+        assert!(!json.contains("agent_pid"));
+        let restored: GoalRun = serde_json::from_str(&json).unwrap();
+        assert!(restored.agent_pid.is_none());
+    }
+
+    #[test]
+    fn agent_pid_serialization_round_trip() {
+        let mut gr = test_goal_run();
+        gr.agent_pid = Some(12345);
+        let json = serde_json::to_string_pretty(&gr).unwrap();
+        assert!(json.contains("\"agent_pid\""));
+        let restored: GoalRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.agent_pid, Some(12345));
     }
 
     #[test]

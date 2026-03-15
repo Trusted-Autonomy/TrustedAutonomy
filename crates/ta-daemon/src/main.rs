@@ -40,6 +40,7 @@ pub mod office;
 pub mod project_context;
 pub mod question_registry;
 pub mod router;
+pub mod watchdog;
 mod web;
 
 use anyhow::Result;
@@ -174,6 +175,19 @@ async fn main() -> Result<()> {
         // API server mode: start the full HTTP API.
         tracing::info!("Running in API server mode");
 
+        // Start the watchdog loop (v0.11.2.4).
+        {
+            let wd_config = match &daemon_config.operations {
+                Some(ops) => watchdog::WatchdogConfig::from_operations(ops),
+                None => watchdog::WatchdogConfig::default(),
+            };
+            let wd_root = project_root.clone();
+            let wd_shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                watchdog::run_watchdog(wd_root, wd_config, wd_shutdown).await;
+            });
+        }
+
         // Optionally also serve the legacy web UI on a separate port.
         if let Some(web_port) = cli.web_port {
             let gateway_config = GatewayConfig::for_project(&project_root);
@@ -215,6 +229,19 @@ async fn main() -> Result<()> {
                 if let Err(e) = web::serve_daemon_api(root, dc, sd).await {
                     tracing::error!("Daemon API error: {}", e);
                 }
+            });
+        }
+
+        // Start the watchdog loop in MCP mode too (v0.11.2.4).
+        {
+            let wd_config = match &daemon_config.operations {
+                Some(ops) => watchdog::WatchdogConfig::from_operations(ops),
+                None => watchdog::WatchdogConfig::default(),
+            };
+            let wd_root = project_root.clone();
+            let wd_shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                watchdog::run_watchdog(wd_root, wd_config, wd_shutdown).await;
             });
         }
 

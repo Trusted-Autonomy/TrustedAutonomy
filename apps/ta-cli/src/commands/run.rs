@@ -668,12 +668,27 @@ pub fn execute(
     // Track the start time BEFORE agent launch to compute accurate duration (v0.9.5.1).
     let agent_start = std::time::Instant::now();
 
+    // PID persistence callback (v0.11.2.4): saves agent PID to goal record
+    // immediately after spawn so the daemon watchdog can check liveness.
+    let goal_run_id = goal.goal_run_id;
+    let goals_dir_for_pid = config.goals_dir.clone();
+    let save_pid = move |pid: u32| {
+        if let Ok(store) = GoalRunStore::new(&goals_dir_for_pid) {
+            if let Ok(Some(mut g)) = store.get(goal_run_id) {
+                g.agent_pid = Some(pid);
+                let _ = store.save(&g);
+                tracing::info!(goal_id = %goal_run_id, pid = pid, "Stored agent PID for watchdog");
+            }
+        }
+    };
+
     // Choose launch mode: headless (piped), PTY-interactive, or simple.
     // Type alias for the guidance log — on Unix this contains captured human inputs
     // from PTY sessions; on Windows the Vec is always empty.
     type GuidanceLog = Vec<(String, String)>;
     let launch_result: std::io::Result<(std::process::ExitStatus, GuidanceLog)> = if headless {
-        launch_agent_headless(&agent_config, &staging_path, &prompt).map(|exit| (exit, Vec::new()))
+        launch_agent_headless(&agent_config, &staging_path, &prompt, Some(&save_pid))
+            .map(|exit| (exit, Vec::new()))
     } else if interactive {
         #[cfg(unix)]
         {
@@ -691,14 +706,24 @@ pub fn execute(
         #[cfg(not(unix))]
         {
             eprintln!("Warning: interactive PTY mode is not available on Windows. Falling back to simple mode.");
-            launch_agent(&agent_config, &staging_path, &prompt).map(|exit| (exit, Vec::new()))
+            launch_agent(&agent_config, &staging_path, &prompt, Some(&save_pid))
+                .map(|exit| (exit, Vec::new()))
         }
     } else {
-        launch_agent(&agent_config, &staging_path, &prompt).map(|exit| (exit, Vec::new()))
+        launch_agent(&agent_config, &staging_path, &prompt, Some(&save_pid))
+            .map(|exit| (exit, Vec::new()))
     };
 
     match launch_result {
         Ok((exit, guidance_log)) => {
+            // Clear agent PID now that the process has exited (v0.11.2.4).
+            if let Ok(store) = GoalRunStore::new(&config.goals_dir) {
+                if let Ok(Some(mut g)) = store.get(goal.goal_run_id) {
+                    g.agent_pid = None;
+                    let _ = store.save(&g);
+                }
+            }
+
             if exit.success() {
                 println!("\nAgent exited. Building draft...");
             } else {
@@ -922,8 +947,12 @@ pub fn execute(
                                          section. Run the failing commands to confirm they pass before exiting."
                                         .to_string();
 
-                                    let relaunch_result =
-                                        launch_agent(&agent_config, &staging_path, &fix_prompt);
+                                    let relaunch_result = launch_agent(
+                                        &agent_config,
+                                        &staging_path,
+                                        &fix_prompt,
+                                        None,
+                                    );
                                     match relaunch_result {
                                         Ok(exit) if exit.success() => {
                                             println!("\nAgent fix session exited successfully.");
@@ -1060,7 +1089,7 @@ pub fn execute(
                             agent_config.command
                         );
                         let relaunch_result =
-                            launch_agent(&agent_config, &staging_path, &fix_prompt);
+                            launch_agent(&agent_config, &staging_path, &fix_prompt, None);
                         match relaunch_result {
                             Ok(exit) if exit.success() => {
                                 println!("\nAgent fix session exited successfully.");
@@ -1430,10 +1459,15 @@ fn find_session_by_prefix(
 // ── Agent launch ────────────────────────────────────────────────
 
 /// Launch an agent process with template-substituted arguments.
+///
+/// If `pid_callback` is provided, it is called with the child PID immediately
+/// after spawning (before waiting for exit). This allows the caller to persist
+/// the PID for watchdog liveness checks (v0.11.2.4).
 fn launch_agent(
     config: &AgentLaunchConfig,
     staging_path: &Path,
     prompt: &str,
+    pid_callback: Option<&dyn Fn(u32)>,
 ) -> std::io::Result<std::process::ExitStatus> {
     let mut cmd = std::process::Command::new(&config.command);
     cmd.current_dir(staging_path);
@@ -1448,17 +1482,25 @@ fn launch_agent(
         cmd.env(key, value);
     }
 
-    cmd.status()
+    let mut child = cmd.spawn()?;
+    if let Some(cb) = pid_callback {
+        cb(child.id());
+    }
+    child.wait()
 }
 
 /// Launch an agent in headless (non-interactive) mode.
 ///
 /// Stdout/stderr are piped and streamed to the parent process, but no PTY is allocated.
 /// Suitable for orchestrator-driven goals where no human interaction is expected.
+///
+/// If `pid_callback` is provided, it is called with the child PID immediately
+/// after spawning (before waiting for exit) for watchdog liveness checks (v0.11.2.4).
 fn launch_agent_headless(
     config: &AgentLaunchConfig,
     staging_path: &Path,
     prompt: &str,
+    pid_callback: Option<&dyn Fn(u32)>,
 ) -> std::io::Result<std::process::ExitStatus> {
     use std::io::{BufRead, BufReader};
 
@@ -1493,6 +1535,11 @@ fn launch_agent_headless(
     cmd.stdin(std::process::Stdio::null());
 
     let mut child = cmd.spawn()?;
+
+    // Report PID for watchdog liveness tracking (v0.11.2.4).
+    if let Some(cb) = pid_callback {
+        cb(child.id());
+    }
 
     // Stream stdout lines to the parent's stdout with a [agent] prefix.
     if let Some(stdout) = child.stdout.take() {

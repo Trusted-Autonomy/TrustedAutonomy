@@ -2340,6 +2340,64 @@ ta daemon log --follow
 
 Commands that need the daemon (`ta shell`, `ta run`, `ta dev`) automatically start it if it's not running. You don't need to run `ta daemon start` manually in normal workflows — it's there for explicit lifecycle control, debugging, and headless/server deployments.
 
+### Daemon Watchdog & Process Liveness
+
+The daemon includes a background watchdog that monitors goal process health. It detects zombie goals (agent process exited but goal still shows "running"), stale questions (awaiting input for too long), and reports findings via the event system.
+
+#### How it works
+
+The watchdog runs every 30 seconds and checks:
+- **Running goals**: Verifies the agent PID is still alive. If the process has exited and enough time has passed (configurable delay to avoid false positives), the goal transitions to `failed` automatically.
+- **Stale questions**: Goals in `awaiting_input` state for longer than the threshold (default: 1 hour) emit a `question.stale` event as a reminder.
+
+When issues are found, a `health.check` event is emitted via the SSE stream. No events are emitted when everything is healthy.
+
+#### Configuration
+
+Add to `.ta/daemon.toml`:
+
+```toml
+[operations]
+watchdog_interval_secs = 30        # check cycle (default: 30, 0 to disable)
+zombie_transition_delay_secs = 60  # wait before transitioning dead process (default: 60)
+stale_question_threshold_secs = 3600  # re-notify after this (default: 1h)
+```
+
+#### Goal health in CLI output
+
+`ta goal list` includes a HEALTH column showing the agent process state:
+
+```
+TAG                    TITLE                  STATE        HEALTH     DRAFT      VCS
+------------------------------------------------------------------------------------------
+shell-routing-01       Shell agent routing    running      alive      —          —
+fix-auth-03            Fix OAuth token        running      dead       —          —
+v0.11.2.2-01           Agent output schema    applied      —          approved   merged
+```
+
+- `alive` — agent PID is running
+- `dead` — agent PID has exited (watchdog will auto-transition to failed)
+- `unknown` — no PID stored (legacy goal or spawn failure)
+- `—` — terminal state (no active process)
+
+#### Process health in the API
+
+The `/api/status` endpoint includes `process_health` and `agent_pid` fields in the `active_agents` array:
+
+```json
+{
+  "active_agents": [
+    {
+      "goal_id": "abc123...",
+      "tag": "fix-auth-01",
+      "state": "running",
+      "process_health": "alive",
+      "agent_pid": 45678
+    }
+  ]
+}
+```
+
 ### Daemon API
 
 The TA daemon exposes a full HTTP API that any interface (terminal, web, Discord, Slack, email) can connect to for commands, agent conversations, and event streams.
@@ -4786,6 +4844,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.2.1 | Shell agent routing, TUI mouse fix & agent output diagnostics | Done |
 | v0.11.2.2 | Agent output schema engine | Done |
 | v0.11.2.3 | Goal & draft unified UX (tags, VCS tracking, auto-merge, heartbeat) | Done |
+| v0.11.2.4 | Daemon watchdog & process liveness (zombie detection, stale questions, health events) | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

@@ -36,6 +36,7 @@ ta-connector-email = { path = "../ta-connectors/email" }
 reqwest = { workspace = true }
 ta-output-schema = { path = "../ta-output-schema" }
 which = "7"
+libc = { workspace = true }
 async-trait = "0.1"
 notify = { workspace = true }
 

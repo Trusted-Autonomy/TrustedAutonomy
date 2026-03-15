@@ -56,6 +56,12 @@ pub struct AgentInfo {
     /// VCS review state (e.g., "open", "merged") if a PR exists (v0.11.2.3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vcs_state: Option<String>,
+    /// Agent process health: "alive", "dead", "unknown", or null for terminal states (v0.11.2.4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_health: Option<String>,
+    /// Agent process ID, if tracked (v0.11.2.4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_pid: Option<u32>,
 }
 
 /// `GET /api/status` — Project dashboard as JSON.
@@ -103,6 +109,12 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
                     .map(|g| {
                         let elapsed = now.signed_duration_since(g.created_at).num_seconds();
                         let is_active = (now - g.updated_at) < idle_threshold;
+                        let health = crate::watchdog::process_health_label(g);
+                        let health_opt = if health == "—" {
+                            None
+                        } else {
+                            Some(health.to_string())
+                        };
                         AgentInfo {
                             agent_id: g.agent_id.clone(),
                             goal_id: g.goal_run_id.to_string(),
@@ -112,6 +124,8 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
                             running_secs: elapsed,
                             active: is_active,
                             vcs_state: None, // Populated by VCS check if configured
+                            process_health: health_opt,
+                            agent_pid: g.agent_pid,
                         }
                     })
                     .collect();
