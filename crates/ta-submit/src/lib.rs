@@ -23,8 +23,8 @@ pub use adapter::{
 pub use adapter::SubmitAdapter;
 
 pub use config::{
-    BuildConfig, DiffConfig, GitConfig, PerforceConfig, ShellConfig, SubmitConfig, SvnConfig,
-    SyncConfig, VerifyCommand, VerifyConfig, VerifyOnFailure, WorkflowConfig,
+    BuildConfig, BuildOnFail, DiffConfig, GitConfig, PerforceConfig, ShellConfig, SubmitConfig,
+    SvnConfig, SyncConfig, VerifyCommand, VerifyConfig, VerifyOnFailure, WorkflowConfig,
 };
 pub use git::GitAdapter;
 pub use none::NoneAdapter;
