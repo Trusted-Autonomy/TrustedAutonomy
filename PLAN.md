@@ -3385,6 +3385,10 @@ When the agent process fails to start, crashes, or exits with an error, the outp
 5. [ ] **Replace hardcoded parsers**: Replace `parse_stream_json_text()` in `shell_tui.rs` and `parse_stream_json_line()` in `cmd.rs` with schema-driven extraction. Fallback to raw passthrough if no schema matches.
 6. [ ] **Schema validation**: On load, validate schema structure. Warn if schema references unknown extractor types. Test suite with sample agent output against each schema.
 7. [ ] **User-extensible schemas**: Users can add schemas for custom agents in project-local or global directories. Document the schema format in USAGE.md.
+8. [ ] **Build SHA version guard**: Version guard compares git commit hash (TA_GIT_HASH) instead of semver string, catching rebuilds within the same version. Daemon reports `build_sha` in `/api/status`. Both shells auto-restart on SHA mismatch. (PR #162 ready.)
+9. [ ] **Fix false-positive stdin prompt detection**: `is_interactive_prompt()` triggers on agent output that looks like a prompt (e.g., `[y/N]`) even in `--print` mode where stdin relay is impossible. Shell switches to `stdin>` prompt with no way back until user types something and gets an error. Fix: don't switch to stdin mode for `--print` goals; auto-revert to `ta>` when goal exits.
+10. [ ] **Draft apply branch safety**: `ta draft apply` must verify it's on the expected base branch before creating the feature branch. If the user (or another process) switched branches, draft apply should either refuse with a clear error or save/restore branch state per Constitution rule 2.2. Currently it silently applies on whatever branch is checked out.
+11. [ ] **Multi-line paste protection**: Detect multi-line paste events in TUI input (e.g., drag-and-drop or terminal paste) and confirm before dispatching. Currently each pasted line is interpreted as a separate command, potentially spawning many agents simultaneously.
 
 #### Version: `0.11.2-alpha.2`
 
