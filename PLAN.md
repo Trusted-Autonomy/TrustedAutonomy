@@ -3110,7 +3110,7 @@ Each platform has a different mechanism for icon embedding:
 
 ---
 
-### v0.10.19 — Shell Agent Routing, TUI Mouse Fix & Agent Output Diagnostics
+### v0.11.2.1 — Shell Agent Routing, TUI Mouse Fix & Agent Output Diagnostics
 <!-- status: in_progress -->
 **Goal**: Fix three immediate shell usability issues: (1) agent Q&A sessions fail when `default_agent` is not `claude-code`, (2) TUI mouse capture prevents text selection/copy, and (3) agent errors are silently swallowed.
 
@@ -3143,13 +3143,13 @@ When the agent process fails to start, crashes, or exits with an error, the outp
    dev = "claude-code"             # ta dev
    # Per-agent overrides possible per workflow
    ```
-   `ask_agent()` uses `qa_agent`; `ta run` uses `goal` workflow agent. Each is independently configurable with project-level storage.
+   `ask_agent()` uses `qa_agent`; `ta run` uses `goal` workflow agent. Each is independently configurable with project-level storage. **Done (basic)**: `qa_agent` field added to `AgentConfig`, `input.rs` routes Q&A to `qa_agent`, session lookup filters by agent type. Full `[agent.workflows]` table deferred.
 2. [ ] **Add `claude-flow` match arm to `resolve_agent_command()`**: Invoke claude-flow correctly for goal execution, and ensure Q&A routing never sends prompts to a framework agent.
-3. [ ] **Remove `EnableMouseCapture` from TUI**: Delete `EnableMouseCapture`/`DisableMouseCapture` and the `MouseEventKind` handler. Terminal-native mouse scroll and text selection both work. Keyboard scrolling (Shift+Up/Down, PageUp/PageDown) remains.
-4. [ ] **Surface all agent output on error**: When the agent process exits with non-zero status, or when `parse_stream_json_text()` returns `None` (unrecognized format), display the raw output to the user instead of silently dropping it. Include exit code, stderr, and any stdout that wasn't parsed.
-5. [ ] **Agent launch failure surfacing**: If `resolve_agent_command()` produces a binary that doesn't exist or fails to spawn, show the error in the shell output stream immediately — not just in daemon logs. Include the binary name, args, and spawn error.
+3. [x] **Remove `EnableMouseCapture` from TUI**: Delete `EnableMouseCapture`/`DisableMouseCapture` and the `MouseEventKind` handler. Terminal-native mouse scroll and text selection both work. Keyboard scrolling (Shift+Up/Down, PageUp/PageDown) remains.
+4. [x] **Surface all agent output on error**: When the agent process exits with non-zero status, send diagnostic message to shell output stream with exit code and agent name. Includes non-zero exit, process wait error, and timeout cases.
+5. [x] **Agent launch failure surfacing**: If `resolve_agent_command()` produces a binary that doesn't exist or fails to spawn, error is sent to shell output stream with binary name and spawn error — not just daemon logs.
 
-#### Version: `0.10.19-alpha`
+#### Version: `0.11.2-alpha.1`
 
 ---
 

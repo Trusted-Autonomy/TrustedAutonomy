@@ -90,20 +90,23 @@ impl AgentSessionManager {
         self.sessions.lock().await.get(session_id).cloned()
     }
 
-    /// Get or create a default session for implicit agent access.
+    /// Get or create a default session for the given agent.
+    ///
+    /// Only reuses a session if it matches the requested agent type. This ensures
+    /// Q&A sessions (claude-code) and goal sessions (claude-flow) stay separate.
     pub async fn get_or_create_default(&self, default_agent: &str) -> Result<AgentSession, String> {
         let sessions = self.sessions.lock().await;
 
-        // Find first running session.
+        // Find first running session for this specific agent.
         if let Some(session) = sessions
             .values()
-            .find(|s| s.status == SessionStatus::Running)
+            .find(|s| s.status == SessionStatus::Running && s.agent == default_agent)
         {
             return Ok(session.clone());
         }
         drop(sessions);
 
-        // No running session — create one.
+        // No matching session — create one.
         self.create_session(default_agent.to_string()).await
     }
 
