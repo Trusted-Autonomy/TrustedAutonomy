@@ -19,6 +19,22 @@ pub struct DaemonConfig {
     /// allowlist before execution.
     #[serde(default)]
     pub sandbox: Option<SandboxSection>,
+    /// Operations configuration (v0.11.2.3): heartbeat, watchdog, etc.
+    #[serde(default)]
+    pub operations: Option<OperationsConfig>,
+}
+
+/// Operations configuration section (v0.11.2.3).
+///
+/// ```toml
+/// [operations]
+/// heartbeat_interval_secs = 10
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationsConfig {
+    /// Heartbeat interval in seconds for long-running commands (default: 10).
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<u32>,
 }
 
 /// Sandbox configuration section in daemon.toml (v0.10.16).

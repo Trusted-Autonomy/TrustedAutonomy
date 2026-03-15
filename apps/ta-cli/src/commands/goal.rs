@@ -341,7 +341,7 @@ pub fn execute(cmd: &GoalCommands, config: &GatewayConfig) -> anyhow::Result<()>
             objective_file.as_deref(),
         ),
         GoalCommands::List { state, active, all } => {
-            list_goals(&store, state.as_deref(), *active, *all)
+            list_goals(&store, config, state.as_deref(), *active, *all)
         }
         GoalCommands::History {
             phase,
@@ -357,7 +357,7 @@ pub fn execute(cmd: &GoalCommands, config: &GatewayConfig) -> anyhow::Result<()>
             *json,
             *limit,
         ),
-        GoalCommands::Status { id, json } => show_status(&store, id, *json),
+        GoalCommands::Status { id, json } => show_status(&store, config, id, *json),
         GoalCommands::Delete { id } => delete_goal(&store, id),
         GoalCommands::Constitution { command } => execute_constitution(command, config, &store),
         GoalCommands::Gc {
@@ -478,15 +478,20 @@ fn start_goal(
     Ok(())
 }
 
-/// Resolve a goal ID from a full UUID or an 8+ character prefix.
+/// Resolve a goal ID from a tag, full UUID, or an 8+ character prefix.
 fn resolve_goal_id(id: &str, store: &GoalRunStore) -> anyhow::Result<Uuid> {
+    // Try tag resolution first (v0.11.2.3).
+    if let Ok(Some(g)) = store.resolve_tag(id) {
+        return Ok(g.goal_run_id);
+    }
+
     if let Ok(uuid) = Uuid::parse_str(id) {
         return Ok(uuid);
     }
 
     if id.len() < 8 {
         anyhow::bail!(
-            "ID prefix '{}' is too short -- use at least 8 characters (or a full UUID)",
+            "No goal found matching '{}' (not a tag and too short for UUID prefix -- use at least 8 characters)",
             id
         );
     }
@@ -501,7 +506,7 @@ fn resolve_goal_id(id: &str, store: &GoalRunStore) -> anyhow::Result<Uuid> {
         0 => anyhow::bail!("No goal found matching '{}'", id),
         1 => Ok(matches[0].goal_run_id),
         n => anyhow::bail!(
-            "Ambiguous prefix '{}' matches {} goals. Use a longer prefix.",
+            "Ambiguous prefix '{}' matches {} goals. Use a longer prefix or a goal tag.",
             id,
             n
         ),
@@ -510,6 +515,7 @@ fn resolve_goal_id(id: &str, store: &GoalRunStore) -> anyhow::Result<Uuid> {
 
 fn list_goals(
     store: &GoalRunStore,
+    config: &GatewayConfig,
     state: Option<&str>,
     active: bool,
     all: bool,
@@ -535,42 +541,111 @@ fn list_goals(
         return Ok(());
     }
 
+    // Load draft packages to show inline draft/VCS status.
+    let packages = load_all_packages_silent(config);
+
     println!(
-        "{:<38} {:<30} {:<14} {:<12}",
-        "ID", "TITLE", "STATE", "AGENT"
+        "{:<22} {:<26} {:<14} {:<12} {:<14}",
+        "TAG", "TITLE", "STATE", "DRAFT", "VCS"
     );
-    println!("{}", "-".repeat(94));
+    println!("{}", "-".repeat(88));
 
     for g in &goals {
-        let title_with_chain = if g.is_macro {
-            format!("[M] {}", truncate(&g.title, 24))
+        let tag = g.display_tag();
+        let title_display = if g.is_macro {
+            format!("[M] {}", truncate(&g.title, 20))
         } else if let Some(ref macro_id) = g.parent_macro_id {
             format!(
                 "  +- {} (<- {})",
-                truncate(&g.title, 16),
+                truncate(&g.title, 12),
                 &macro_id.to_string()[..8]
             )
         } else if let Some(parent_id) = g.parent_goal_id {
             format!(
                 "{} (-> {})",
-                truncate(&g.title, 20),
+                truncate(&g.title, 16),
                 &parent_id.to_string()[..8]
             )
         } else {
-            truncate(&g.title, 28)
+            truncate(&g.title, 24)
         };
 
+        // Find the latest draft for this goal.
+        let (draft_col, vcs_col) = goal_draft_vcs_columns(g, &packages);
+
         println!(
-            "{:<38} {:<30} {:<14} {:<12}",
-            g.goal_run_id,
-            title_with_chain,
+            "{:<22} {:<26} {:<14} {:<12} {:<14}",
+            truncate(&tag, 20),
+            title_display,
             g.state.to_string(),
-            g.agent_id,
+            draft_col,
+            vcs_col,
         );
     }
     println!("\n{} goal(s) total.", goals.len());
 
     Ok(())
+}
+
+/// Load all draft packages silently (errors become empty vec).
+fn load_all_packages_silent(
+    config: &ta_mcp_gateway::GatewayConfig,
+) -> Vec<ta_changeset::DraftPackage> {
+    let dir = &config.pr_packages_dir;
+    if !dir.exists() {
+        return vec![];
+    }
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+                .filter_map(|e| {
+                    std::fs::read_to_string(e.path())
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<ta_changeset::DraftPackage>(&s).ok())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Get (draft_status, vcs_status) display columns for a goal.
+fn goal_draft_vcs_columns(
+    goal: &ta_goal::GoalRun,
+    packages: &[ta_changeset::DraftPackage],
+) -> (String, String) {
+    // Find draft matching this goal.
+    let goal_id_str = goal.goal_run_id.to_string();
+    let draft = packages
+        .iter()
+        .filter(|p| p.goal.goal_id == goal_id_str)
+        .max_by_key(|p| p.created_at);
+
+    let draft_col = match draft {
+        Some(d) => format!("{}", d.status),
+        None => "\u{2014}".to_string(),
+    };
+
+    let vcs_col = match draft.and_then(|d| d.vcs_status.as_ref()) {
+        Some(vcs) => {
+            let pr_id = vcs
+                .review_id
+                .as_ref()
+                .map(|id| format!("PR #{}", id))
+                .unwrap_or_default();
+            let state = vcs.review_state.as_deref().unwrap_or("?");
+            if pr_id.is_empty() {
+                vcs.branch.clone()
+            } else {
+                format!("{} ({})", pr_id, state)
+            }
+        }
+        None => "\u{2014}".to_string(),
+    };
+
+    (draft_col, vcs_col)
 }
 
 fn goal_history(
@@ -643,7 +718,12 @@ fn goal_history(
     Ok(())
 }
 
-fn show_status(store: &GoalRunStore, id: &str, json_output: bool) -> anyhow::Result<()> {
+fn show_status(
+    store: &GoalRunStore,
+    config: &GatewayConfig,
+    id: &str,
+    json_output: bool,
+) -> anyhow::Result<()> {
     let goal_run_id = resolve_goal_id(id, store)?;
     match store.get(goal_run_id)? {
         Some(g) => {
@@ -652,6 +732,9 @@ fn show_status(store: &GoalRunStore, id: &str, json_output: bool) -> anyhow::Res
                 println!("{}", json);
                 return Ok(());
             }
+
+            // Unified view: goal + draft + VCS in one output (v0.11.2.3).
+            println!("Tag:      {}", g.display_tag());
             println!("Goal Run: {}", g.goal_run_id);
             println!("Title:    {}", g.title);
             println!("Objective: {}", g.objective);
@@ -675,8 +758,40 @@ fn show_status(store: &GoalRunStore, id: &str, json_output: bool) -> anyhow::Res
                 println!("Mode:     macro goal (inner-loop iteration)");
             }
             println!("Staging:  {}", g.workspace_path.display());
+
+            // Draft status section (v0.11.2.3).
             if let Some(pr_id) = g.pr_package_id {
-                println!("Draft:    {}", pr_id);
+                println!("\n--- Draft ---");
+                println!("Draft ID: {}", pr_id);
+                // Try to load the draft package for detailed status.
+                {
+                    let packages = load_all_packages_silent(config);
+                    let goal_id_str = g.goal_run_id.to_string();
+                    if let Some(draft) = packages.iter().find(|p| p.goal.goal_id == goal_id_str) {
+                        println!("Status:   {}", draft.status);
+                        println!("Files:    {}", draft.changes.artifacts.len());
+                        if let Some(ref vcs) = draft.vcs_status {
+                            println!("\n--- VCS ---");
+                            println!("Branch:   {}", vcs.branch);
+                            if let Some(ref url) = vcs.review_url {
+                                println!("PR URL:   {}", url);
+                            }
+                            if let Some(ref id) = vcs.review_id {
+                                if let Some(ref state) = vcs.review_state {
+                                    println!("PR:       #{} ({})", id, state);
+                                } else {
+                                    println!("PR:       #{}", id);
+                                }
+                            }
+                            if let Some(ref sha) = vcs.commit_sha {
+                                println!("Commit:   {}", sha);
+                            }
+                            println!("Checked:  {}", vcs.last_checked.to_rfc3339());
+                        }
+                    }
+                }
+            } else {
+                println!("Draft:    (none)");
             }
 
             // Show sub-goal tree for macro goals.

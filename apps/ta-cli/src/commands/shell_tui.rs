@@ -1641,6 +1641,15 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    // Active goal tag indicator (v0.11.2.3).
+    if let Some(ref tag) = app.status.active_goal_tag {
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            format!(" goal: {} ", tag),
+            Style::default().fg(Color::Green),
+        ));
+    }
+
     // Scroll position indicator (v0.10.18.2).
     if app.scroll_offset > 0 {
         // Calculate current visible line range.
@@ -1854,6 +1863,11 @@ async fn background_health(
                                 })
                             },
                         ),
+                        active_goal_tag: json["active_agents"].as_array().and_then(|agents| {
+                            agents
+                                .first()
+                                .and_then(|a| a["tag"].as_str().map(String::from))
+                        }),
                     };
                     let _ = tx.send(TuiMessage::StatusUpdate(status));
                 }

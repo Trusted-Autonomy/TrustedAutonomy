@@ -1046,6 +1046,8 @@ pub(crate) fn build_package(
         status: DraftStatus::PendingReview,
         verification_warnings: vec![],
         display_id: None, // Will be set below after counting existing drafts.
+        tag: goal.tag.clone().or_else(|| Some(goal.display_tag())), // Inherit from goal (v0.11.2.3).
+        vcs_status: None,
     };
 
     // Handle PR supersession for follow-up goals.
@@ -1207,12 +1209,29 @@ fn list_packages(
             if applied_only {
                 return matches!(p.status, DraftStatus::Applied { .. });
             }
-            // Compact mode: show only active/pending drafts by default.
+            // Compact mode: show active/pending + recently applied (v0.11.2.3).
             if compact {
-                return matches!(
+                // Always show non-terminal.
+                if matches!(
                     p.status,
                     DraftStatus::Draft | DraftStatus::PendingReview | DraftStatus::Approved { .. }
-                );
+                ) {
+                    return true;
+                }
+                // Show Applied drafts younger than 7 days or with open PRs.
+                if let DraftStatus::Applied { applied_at } = &p.status {
+                    let age = Utc::now() - *applied_at;
+                    if age.num_days() < 7 {
+                        return true;
+                    }
+                    // Show if VCS has an open PR.
+                    if let Some(ref vcs) = p.vcs_status {
+                        if vcs.review_state.as_deref() == Some("open") {
+                            return true;
+                        }
+                    }
+                }
+                return false;
             }
             true
         })
@@ -1266,10 +1285,10 @@ fn list_packages(
     }
 
     println!(
-        "{:<16} {:<30} {:<16} {:<8} AGE",
-        "DRAFT ID", "GOAL", "STATUS", "FILES"
+        "{:<20} {:<16} {:<26} {:<16} {:<8} {:<14} AGE",
+        "TAG", "DRAFT ID", "GOAL", "STATUS", "FILES", "VCS"
     );
-    println!("{}", "-".repeat(82));
+    println!("{}", "-".repeat(110));
 
     // Load goal store for macro goal context.
     let goal_store = GoalRunStore::new(&config.goals_dir).ok();
@@ -1313,12 +1332,33 @@ fn list_packages(
             truncate(&pkg.goal.title, 28)
         };
 
+        let tag_display = pkg.tag.as_deref().unwrap_or("\u{2014}").to_string();
+
+        let vcs_display = match &pkg.vcs_status {
+            Some(vcs) => {
+                let pr = vcs
+                    .review_id
+                    .as_ref()
+                    .map(|id| format!("PR #{}", id))
+                    .unwrap_or_default();
+                let state = vcs.review_state.as_deref().unwrap_or("?");
+                if pr.is_empty() {
+                    truncate(&vcs.branch, 12)
+                } else {
+                    format!("{} ({})", pr, state)
+                }
+            }
+            None => "\u{2014}".to_string(),
+        };
+
         println!(
-            "{:<16} {:<30} {:<16} {:<8} {}",
+            "{:<20} {:<16} {:<26} {:<16} {:<8} {:<14} {}",
+            truncate(&tag_display, 18),
             draft_display_id(pkg),
             goal_display,
             status_display,
             pkg.changes.artifacts.len(),
+            vcs_display,
             age_str,
         );
     }
@@ -2302,9 +2342,20 @@ fn apply_package(
                 eprintln!("[apply] Staging changes for VCS commit...");
                 let commit_msg = build_commit_message(goal, &pkg);
 
+                // Track VCS state for draft package (v0.11.2.3).
+                let mut vcs_branch = String::new();
+                let mut vcs_commit_sha = None;
+                let mut vcs_review_url = None;
+                let mut vcs_review_id = None;
+
                 match adapter.commit(goal, &pkg, &commit_msg) {
                     Ok(result) => {
                         println!("[ok] {}", result.message);
+                        vcs_commit_sha = result
+                            .metadata
+                            .get("full_hash")
+                            .cloned()
+                            .or(Some(result.commit_id.clone()));
                     }
                     Err(e) => {
                         eprintln!("Stage/commit failed: {}", e);
@@ -2321,6 +2372,9 @@ fn apply_package(
                     match adapter.push(goal) {
                         Ok(result) => {
                             println!("[ok] {}", result.message);
+                            if let Some(b) = result.metadata.get("branch") {
+                                vcs_branch = b.clone();
+                            }
                         }
                         Err(e) => {
                             if adapter.name() != "none" {
@@ -2339,6 +2393,8 @@ fn apply_package(
                             if !result.review_url.starts_with("none://") {
                                 println!("  Review URL: {}", result.review_url);
                             }
+                            vcs_review_url = Some(result.review_url);
+                            vcs_review_id = Some(result.review_id);
                         }
                         Err(e) => {
                             eprintln!("Warning: review creation failed: {}", e);
@@ -2346,6 +2402,31 @@ fn apply_package(
                                 "  You can manually create a review from the submitted branch."
                             );
                         }
+                    }
+                }
+
+                // Save VCS tracking info on the draft package (v0.11.2.3).
+                if !vcs_branch.is_empty() || vcs_commit_sha.is_some() || vcs_review_url.is_some() {
+                    use ta_changeset::VcsTrackingInfo;
+                    let vcs_info = VcsTrackingInfo {
+                        branch: if vcs_branch.is_empty() {
+                            "unknown".to_string()
+                        } else {
+                            vcs_branch
+                        },
+                        review_url: vcs_review_url,
+                        review_id: vcs_review_id,
+                        review_state: Some("open".to_string()),
+                        commit_sha: vcs_commit_sha,
+                        last_checked: Utc::now(),
+                    };
+                    pkg.vcs_status = Some(vcs_info);
+                    // Re-save the draft package with VCS info.
+                    let pkg_path = config
+                        .pr_packages_dir
+                        .join(format!("{}.json", pkg.package_id));
+                    if let Ok(json) = serde_json::to_string_pretty(&pkg) {
+                        let _ = std::fs::write(&pkg_path, json);
                     }
                 }
 
@@ -3227,6 +3308,19 @@ fn resolve_draft_id_flexible(
         anyhow::bail!("Draft {} not found", input);
     }
 
+    // Try tag match (v0.11.2.3).
+    let tag_matches: Vec<&DraftPackage> = packages
+        .iter()
+        .filter(|p| {
+            p.tag
+                .as_ref()
+                .is_some_and(|t| t == input || t.starts_with(input))
+        })
+        .collect();
+    if tag_matches.len() == 1 {
+        return Ok(tag_matches[0].package_id.to_string());
+    }
+
     // Try display_id exact match (v0.10.11 goal-derived IDs like "511e0465-01").
     let display_matches: Vec<&DraftPackage> = packages
         .iter()
@@ -3320,15 +3414,20 @@ fn resolve_draft_id(id: &str, config: &GatewayConfig) -> anyhow::Result<Uuid> {
         .map_err(|e| anyhow::anyhow!("Invalid draft ID after resolution: {} — {}", resolved, e))
 }
 
-/// Resolve a goal ID from a full UUID or an 8+ character prefix.
+/// Resolve a goal ID from a tag, full UUID, or an 8+ character prefix.
 fn resolve_goal_id_from_store(id: &str, store: &GoalRunStore) -> anyhow::Result<Uuid> {
+    // Try tag resolution first (v0.11.2.3).
+    if let Ok(Some(g)) = store.resolve_tag(id) {
+        return Ok(g.goal_run_id);
+    }
+
     if let Ok(uuid) = Uuid::parse_str(id) {
         return Ok(uuid);
     }
 
     if id.len() < 8 {
         anyhow::bail!(
-            "ID prefix '{}' is too short — use at least 8 characters (or a full UUID)",
+            "No goal found matching '{}' (not a tag and too short for UUID prefix — use at least 8 characters)",
             id
         );
     }
@@ -3343,7 +3442,7 @@ fn resolve_goal_id_from_store(id: &str, store: &GoalRunStore) -> anyhow::Result<
         0 => anyhow::bail!("No goal found matching '{}'", id),
         1 => Ok(matches[0].goal_run_id),
         n => anyhow::bail!(
-            "Ambiguous prefix '{}' matches {} goals. Use a longer prefix.",
+            "Ambiguous prefix '{}' matches {} goals. Use a longer prefix or a goal tag.",
             id,
             n
         ),

@@ -6,8 +6,8 @@ use ta_changeset::DraftPackage;
 use ta_goal::GoalRun;
 
 use crate::adapter::{
-    CommitResult, PushResult, Result, ReviewResult, SavedVcsState, SourceAdapter, SubmitError,
-    SyncResult,
+    CommitResult, PushResult, Result, ReviewResult, ReviewStatus, SavedVcsState, SourceAdapter,
+    SubmitError, SyncResult,
 };
 use crate::config::SubmitConfig;
 use crate::config::SyncConfig;
@@ -255,6 +255,40 @@ impl SourceAdapter for GitAdapter {
             .unwrap_or("unknown")
             .to_string();
 
+        // Enable auto-merge if configured (v0.11.2.3).
+        if self.config.git.auto_merge && self.has_gh_cli() {
+            let merge_strategy = &self.config.git.merge_strategy;
+            let merge_flag = match merge_strategy.as_str() {
+                "rebase" => "--rebase",
+                "merge" => "--merge",
+                _ => "--squash",
+            };
+            let auto_merge_output = Command::new("gh")
+                .args(["pr", "merge", "--auto", merge_flag, &pr_number])
+                .current_dir(&self.work_dir)
+                .output();
+            match auto_merge_output {
+                Ok(o) if o.status.success() => {
+                    tracing::info!("GitAdapter: auto-merge enabled for PR #{}", pr_number);
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    tracing::warn!(
+                        "GitAdapter: auto-merge failed for PR #{}: {}",
+                        pr_number,
+                        stderr
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "GitAdapter: could not enable auto-merge for PR #{}: {}",
+                        pr_number,
+                        e
+                    );
+                }
+            }
+        }
+
         Ok(ReviewResult {
             review_url: pr_url.clone(),
             review_id: pr_number,
@@ -436,6 +470,46 @@ impl SourceAdapter for GitAdapter {
             Ok(hash)
         } else {
             Ok(format!("{}-dirty", hash))
+        }
+    }
+
+    fn check_review(&self, review_id: &str) -> Result<Option<ReviewStatus>> {
+        if !self.has_gh_cli() {
+            return Ok(None);
+        }
+
+        let output = Command::new("gh")
+            .args(["pr", "view", review_id, "--json", "state,statusCheckRollup"])
+            .current_dir(&self.work_dir)
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let json: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
+                    SubmitError::VcsError(format!("Failed to parse gh pr view output: {}", e))
+                })?;
+
+                let state = json
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_lowercase();
+
+                let checks_passing = json.get("statusCheckRollup").and_then(|v| {
+                    v.as_array().map(|checks| {
+                        checks.iter().all(|c| {
+                            c.get("conclusion").and_then(|v| v.as_str()) == Some("SUCCESS")
+                        })
+                    })
+                });
+
+                Ok(Some(ReviewStatus {
+                    state,
+                    checks_passing,
+                }))
+            }
+            _ => Ok(None),
         }
     }
 }

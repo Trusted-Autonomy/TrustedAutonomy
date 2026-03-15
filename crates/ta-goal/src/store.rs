@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::GoalError;
-use crate::goal_run::{GoalRun, GoalRunState};
+use crate::goal_run::{slugify_title, GoalRun, GoalRunState};
 
 /// Persistent store for GoalRun records.
 ///
@@ -111,6 +111,83 @@ impl GoalRunStore {
         goal_run.transition(new_state)?;
         self.save(&goal_run)?;
         Ok(goal_run)
+    }
+
+    /// Save a GoalRun, auto-generating a tag if it doesn't have one.
+    ///
+    /// The tag format is `<slug>-<seq>` where slug is derived from the title
+    /// and seq is auto-incrementing per slug to handle duplicates.
+    pub fn save_with_tag(&self, goal_run: &mut GoalRun) -> Result<(), GoalError> {
+        if goal_run.tag.is_none() {
+            let slug = slugify_title(&goal_run.title);
+            let slug = if slug.is_empty() {
+                "goal".to_string()
+            } else {
+                slug
+            };
+
+            // Find the next sequence number for this slug.
+            let existing = self.list().unwrap_or_default();
+            let mut max_seq: u32 = 0;
+            for g in &existing {
+                if let Some(ref tag) = g.tag {
+                    if let Some(rest) = tag.strip_prefix(&slug) {
+                        if let Some(num_str) = rest.strip_prefix('-') {
+                            if let Ok(n) = num_str.parse::<u32>() {
+                                max_seq = max_seq.max(n);
+                            }
+                        }
+                    }
+                }
+            }
+
+            goal_run.tag = Some(format!("{}-{:02}", slug, max_seq + 1));
+        }
+        self.save(goal_run)
+    }
+
+    /// Resolve a tag to a GoalRun. Returns None if no match.
+    pub fn resolve_tag(&self, tag: &str) -> Result<Option<GoalRun>, GoalError> {
+        let goals = self.list()?;
+        // Exact tag match first.
+        for g in &goals {
+            if let Some(ref t) = g.tag {
+                if t == tag {
+                    return Ok(Some(g.clone()));
+                }
+            }
+        }
+        // Prefix match on display_tag for backward compat.
+        for g in &goals {
+            if g.display_tag() == tag {
+                return Ok(Some(g.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Resolve a tag or UUID prefix to a GoalRun.
+    /// Tries tag match first, then UUID prefix match.
+    pub fn resolve_tag_or_id(&self, input: &str) -> Result<Option<GoalRun>, GoalError> {
+        // Try tag first.
+        if let Some(g) = self.resolve_tag(input)? {
+            return Ok(Some(g));
+        }
+        // Try full UUID.
+        if let Ok(uuid) = Uuid::parse_str(input) {
+            return self.get(uuid);
+        }
+        // Try UUID prefix match.
+        let goals = self.list()?;
+        let matches: Vec<_> = goals
+            .into_iter()
+            .filter(|g| g.goal_run_id.to_string().starts_with(input))
+            .collect();
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(Some(matches.into_iter().next().unwrap())),
+            _ => Ok(None), // Ambiguous — caller should handle
+        }
     }
 
     /// Delete a GoalRun from the store.
@@ -282,5 +359,83 @@ mod tests {
             let found = store.get(id).unwrap().unwrap();
             assert_eq!(found.title, "Persistent");
         }
+    }
+
+    #[test]
+    fn save_with_tag_auto_generates_tag() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+
+        let mut gr = make_goal_run("Fix Authentication Bug");
+        assert!(gr.tag.is_none());
+        store.save_with_tag(&mut gr).unwrap();
+        assert_eq!(gr.tag, Some("fix-authentication-bug-01".to_string()));
+
+        // Second goal with same title gets sequence 02.
+        let mut gr2 = make_goal_run("Fix Authentication Bug");
+        store.save_with_tag(&mut gr2).unwrap();
+        assert_eq!(gr2.tag, Some("fix-authentication-bug-02".to_string()));
+    }
+
+    #[test]
+    fn save_with_tag_preserves_explicit_tag() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+
+        let mut gr = make_goal_run("Test");
+        gr.tag = Some("custom-tag-01".to_string());
+        store.save_with_tag(&mut gr).unwrap();
+        assert_eq!(gr.tag, Some("custom-tag-01".to_string()));
+    }
+
+    #[test]
+    fn resolve_tag_finds_exact_match() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+
+        let mut gr = make_goal_run("Shell Routing");
+        store.save_with_tag(&mut gr).unwrap();
+        let tag = gr.tag.as_ref().unwrap().clone();
+
+        let found = store.resolve_tag(&tag).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().goal_run_id, gr.goal_run_id);
+    }
+
+    #[test]
+    fn resolve_tag_returns_none_for_unknown() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+
+        let found = store.resolve_tag("nonexistent-tag").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn resolve_tag_or_id_works_with_tag() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+
+        let mut gr = make_goal_run("My Feature");
+        store.save_with_tag(&mut gr).unwrap();
+        let tag = gr.tag.as_ref().unwrap().clone();
+
+        let found = store.resolve_tag_or_id(&tag).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().goal_run_id, gr.goal_run_id);
+    }
+
+    #[test]
+    fn resolve_tag_or_id_works_with_uuid() {
+        let dir = tempdir().unwrap();
+        let store = GoalRunStore::new(dir.path().join("goals")).unwrap();
+
+        let mut gr = make_goal_run("UUID Test");
+        store.save_with_tag(&mut gr).unwrap();
+        let id = gr.goal_run_id.to_string();
+
+        let found = store.resolve_tag_or_id(&id).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().goal_run_id, gr.goal_run_id);
     }
 }

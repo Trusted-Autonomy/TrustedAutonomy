@@ -224,6 +224,15 @@ pub trait SourceAdapter: Send + Sync {
         Ok("unknown".to_string())
     }
 
+    /// Check the status of a review/PR by its review ID (e.g., PR number).
+    ///
+    /// Git: uses `gh pr view --json state` to check PR status.
+    /// Returns the current state as a string: "open", "merged", "closed".
+    /// Default: returns None (not supported).
+    fn check_review(&self, _review_id: &str) -> Result<Option<ReviewStatus>> {
+        Ok(None)
+    }
+
     /// Auto-detect whether this adapter applies to the given project root.
     ///
     /// Git: checks for .git/ directory
@@ -236,6 +245,15 @@ pub trait SourceAdapter: Send + Sync {
         let _ = project_root;
         false
     }
+}
+
+/// Status of a VCS review/PR (v0.11.2.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewStatus {
+    /// Current state: "open", "merged", "closed", "draft".
+    pub state: String,
+    /// Whether CI checks are passing.
+    pub checks_passing: Option<bool>,
 }
 
 /// Backward-compatible alias: `SubmitAdapter` is the old name for `SourceAdapter`.

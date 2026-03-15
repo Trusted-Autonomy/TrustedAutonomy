@@ -46,11 +46,16 @@ pub struct PhaseInfo {
 pub struct AgentInfo {
     pub agent_id: String,
     pub goal_id: String,
+    /// Human-friendly goal tag (v0.11.2.3).
+    pub tag: String,
     pub title: String,
     pub state: String,
     pub running_secs: i64,
     /// Whether the agent is considered actively running (updated within the idle threshold).
     pub active: bool,
+    /// VCS review state (e.g., "open", "merged") if a PR exists (v0.11.2.3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vcs_state: Option<String>,
 }
 
 /// `GET /api/status` — Project dashboard as JSON.
@@ -101,10 +106,12 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
                         AgentInfo {
                             agent_id: g.agent_id.clone(),
                             goal_id: g.goal_run_id.to_string(),
+                            tag: g.display_tag(),
                             title: g.title.clone(),
                             state: g.state.to_string(),
                             running_secs: elapsed,
                             active: is_active,
+                            vcs_state: None, // Populated by VCS check if configured
                         }
                     })
                     .collect();

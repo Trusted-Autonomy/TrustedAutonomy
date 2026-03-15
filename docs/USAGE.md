@@ -985,6 +985,79 @@ ta goal list --all
 ta goal list --state running
 ```
 
+### Goal Tags
+
+Every goal has a human-friendly tag (e.g., `fix-auth-01`, `shell-routing-02`) that replaces UUIDs in all display contexts. Tags are auto-generated from the goal title with an auto-incrementing sequence number:
+
+```bash
+# View goal status by tag instead of UUID
+ta goal status fix-auth-01
+
+# Draft commands also accept tags
+ta draft view fix-auth-01
+ta draft apply fix-auth-01
+
+# Goal list now shows TAG, DRAFT, and VCS columns
+ta goal list
+#  TAG                    TITLE                     STATE          DRAFT        VCS
+#  shell-routing-01       Shell agent routing...    applied        applied      PR #166 (open)
+#  fix-auth-01            Fix OAuth token...        running        —            —
+```
+
+Override the auto-generated tag with `--tag`:
+
+```bash
+ta run "Fix the auth bug" --tag fix-auth
+```
+
+### VCS Post-Apply Tracking
+
+After `ta draft apply --git-commit --push --review`, TA tracks the PR lifecycle:
+
+```bash
+ta goal status fix-auth-01
+#  Tag:      fix-auth-01
+#  ...
+#  --- Draft ---
+#  Draft ID: 34b31e89-...
+#  Status:   applied
+#  Files:    8
+#  --- VCS ---
+#  Branch:   ta/fix-the-auth-bug
+#  PR URL:   https://github.com/org/repo/pull/42
+#  PR:       #42 (open)
+```
+
+The `ta draft list` default view now includes recently-applied drafts (< 7 days) and any draft with an open PR. This prevents the "no active drafts" false negative that previously hid in-progress PRs.
+
+### Auto-Merge
+
+Enable GitHub auto-merge after PR creation:
+
+```toml
+# .ta/workflow.toml
+[submit.git]
+auto_merge = true
+```
+
+When enabled, `gh pr merge --auto --squash` runs automatically after `gh pr create`.
+
+### Daemon Command Heartbeat
+
+Long-running commands dispatched through the daemon emit periodic heartbeat messages to prevent the shell from appearing frozen:
+
+```
+[heartbeat] still running... 10s elapsed
+[heartbeat] still running... 20s elapsed
+```
+
+Configure the interval in `.ta/daemon.toml`:
+
+```toml
+[operations]
+heartbeat_interval_secs = 10   # default: 10
+```
+
 ### Auto-Approval Policy
 
 Configure policy-driven draft auto-approval in `.ta/policy.yaml`:
@@ -4712,6 +4785,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.2 | `BuildAdapter` & `ta build` | Done |
 | v0.11.2.1 | Shell agent routing, TUI mouse fix & agent output diagnostics | Done |
 | v0.11.2.2 | Agent output schema engine | Done |
+| v0.11.2.3 | Goal & draft unified UX (tags, VCS tracking, auto-merge, heartbeat) | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

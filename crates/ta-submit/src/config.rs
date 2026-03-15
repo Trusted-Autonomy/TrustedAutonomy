@@ -238,6 +238,11 @@ pub struct GitConfig {
     /// Git remote name
     #[serde(default = "default_remote")]
     pub remote: String,
+
+    /// Enable GitHub auto-merge after PR creation (v0.11.2.3).
+    /// When true, runs `gh pr merge --auto --squash` after `gh pr create`.
+    #[serde(default)]
+    pub auto_merge: bool,
 }
 
 impl Default for GitConfig {
@@ -248,6 +253,7 @@ impl Default for GitConfig {
             merge_strategy: default_merge_strategy(),
             pr_template: None,
             remote: default_remote(),
+            auto_merge: false,
         }
     }
 }
@@ -1192,5 +1198,21 @@ repo_url = "svn://example.com/trunk"
             config.submit.svn.repo_url.as_deref(),
             Some("svn://example.com/trunk")
         );
+    }
+
+    #[test]
+    fn git_config_auto_merge_default_false() {
+        let config = GitConfig::default();
+        assert!(!config.auto_merge);
+    }
+
+    #[test]
+    fn git_config_auto_merge_from_toml() {
+        let toml = r#"
+[submit.git]
+auto_merge = true
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert!(config.submit.git.auto_merge);
     }
 }
