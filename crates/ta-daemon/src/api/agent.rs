@@ -266,6 +266,7 @@ pub async fn ask_agent(
                         let stdout = child.stdout.take();
                         let stderr = child.stderr.take();
                         let tx2 = tx.clone();
+                        let tx_err = tx.clone();
 
                         let stdout_task = tokio::spawn(async move {
                             if let Some(out) = stdout {
@@ -298,15 +299,29 @@ pub async fn ask_agent(
 
                         match status {
                             Ok(Ok(s)) if !s.success() => {
+                                let exit_code = s.code().unwrap_or(-1);
                                 tracing::warn!(
                                     "Agent ask failed (exit {}): session={}, request={}",
-                                    s.code().unwrap_or(-1),
+                                    exit_code,
                                     session_id,
                                     req_id,
                                 );
+                                // Surface error to the shell output stream (v0.10.19 item 4).
+                                let _ = tx_err.send(OutputLine {
+                                    stream: "stderr",
+                                    line: format!(
+                                        "[agent error] {} exited with code {}. \
+                                         Check agent binary and args.",
+                                        agent, exit_code
+                                    ),
+                                });
                             }
                             Ok(Err(e)) => {
                                 tracing::error!("Agent wait error: {}", e);
+                                let _ = tx_err.send(OutputLine {
+                                    stream: "stderr",
+                                    line: format!("[agent error] Process wait failed: {}", e),
+                                });
                             }
                             Err(_) => {
                                 let _ = child.kill().await;
@@ -315,6 +330,14 @@ pub async fn ask_agent(
                                     timeout.as_secs(),
                                     req_id,
                                 );
+                                let _ = tx_err.send(OutputLine {
+                                    stream: "stderr",
+                                    line: format!(
+                                        "[agent error] Timed out after {}s. \
+                                         Configure timeout in daemon.toml [agent].timeout_secs.",
+                                        timeout.as_secs()
+                                    ),
+                                });
                             }
                             _ => {}
                         }
@@ -326,6 +349,15 @@ pub async fn ask_agent(
                             binary,
                             e
                         );
+                        // Surface launch failure to the shell output stream.
+                        let _ = tx.send(OutputLine {
+                            stream: "stderr",
+                            line: format!(
+                                "[agent error] Failed to start '{}' (binary: '{}'): {}. \
+                                 Check that the agent is installed and in PATH.",
+                                agent, binary, e
+                            ),
+                        });
                     }
                 }
 

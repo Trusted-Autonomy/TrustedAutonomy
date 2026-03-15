@@ -76,10 +76,12 @@ pub async fn handle_input(
             let session_id = if let Some(id) = body.session_id.filter(|s| !s.is_empty()) {
                 id
             } else {
-                // Get or create a default session.
+                // Get or create a Q&A session using the qa_agent (not default_agent).
+                // qa_agent is for interactive prompts (claude-code); default_agent is
+                // for goal execution frameworks (claude-flow). See v0.10.19 item 1.
                 match state
                     .agent_sessions
-                    .get_or_create_default(&state.daemon_config.agent.default_agent)
+                    .get_or_create_default(&state.daemon_config.agent.qa_agent)
                     .await
                 {
                     Ok(session) => session.session_id,

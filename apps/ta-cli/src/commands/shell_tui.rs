@@ -12,8 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -610,7 +609,9 @@ async fn run_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    stdout.execute(EnableMouseCapture)?;
+    // NOTE: Mouse capture intentionally NOT enabled. Terminal-native mouse
+    // handles both scroll and text selection. Keyboard scrolling works via
+    // Shift+Up/Down and PageUp/PageDown. See v0.10.19 item 3.
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -631,7 +632,7 @@ async fn run_tui(
     // Cleanup.
     running.store(false, Ordering::Relaxed);
     disable_raw_mode()?;
-    terminal.backend_mut().execute(DisableMouseCapture)?;
+    // Mouse capture was never enabled — no need to disable.
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     // Save history.
@@ -1000,11 +1001,9 @@ async fn handle_terminal_event(
                 _ => {}
             }
         }
-        Event::Mouse(mouse_event) => match mouse_event.kind {
-            MouseEventKind::ScrollUp => app.scroll_up(3),
-            MouseEventKind::ScrollDown => app.scroll_down(3),
-            _ => {}
-        },
+        Event::Mouse(_) => {
+            // Mouse events not captured — terminal handles natively.
+        }
         Event::Resize(_, _) => {
             // Terminal will re-draw on next loop iteration.
         }

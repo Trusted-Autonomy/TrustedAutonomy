@@ -165,6 +165,11 @@ pub struct AgentConfig {
     pub max_sessions: usize,
     pub idle_timeout_secs: u64,
     pub default_agent: String,
+    /// Agent for shell Q&A sessions (natural language questions in `ta shell`).
+    /// Defaults to `"claude-code"` — must be a prompt-capable agent, not a framework.
+    /// Separate from `default_agent` which is used for goal execution (`ta run`).
+    #[serde(default = "default_qa_agent")]
+    pub qa_agent: String,
     /// Timeout for agent prompt responses (default: 300s / 5 minutes).
     /// Agent LLM calls can take minutes — this is separate from the command timeout.
     pub timeout_secs: u64,
@@ -174,12 +179,17 @@ pub struct AgentConfig {
     pub tool_access: AgentToolAccess,
 }
 
+fn default_qa_agent() -> String {
+    "claude-code".to_string()
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_sessions: 3,
             idle_timeout_secs: 3600,
             default_agent: "claude-code".to_string(),
+            qa_agent: "claude-code".to_string(),
             timeout_secs: 300,
             tool_access: AgentToolAccess::default(),
         }
