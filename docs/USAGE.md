@@ -2908,14 +2908,15 @@ Built-in shell commands:
 
 | Command | Description |
 |---------|-------------|
-| `help` / `?` | Show help |
+| `help` / `?` | Show shell help and CLI command summary |
 | `:tail [id] [--lines N]` | Attach to goal output stream (`--lines` overrides backfill count) |
 | `:follow-up [filter]` | List follow-up candidates (failed goals, denied drafts); filter by keyword |
 | `:status` | Refresh the status bar |
 | `clear` / `Ctrl-L` | Clear the output pane |
 | `Shift+Up` / `Shift+Down` | Scroll output 1 line |
-| `PgUp` / `PgDn` | Scroll output 10 lines |
+| `PgUp` / `PgDn` | Scroll output one full page (with 4-line overlap) |
 | Mouse wheel / touchpad scroll | Scroll output 3 lines per tick |
+| `Shift+click-drag` | Select text for copy (mouse capture is active) |
 | `Shift+Home` / `Shift+End` | Scroll to top/bottom of output |
 | `Tab` | Auto-complete commands |
 | `Ctrl-W` | Toggle split-pane mode (agent output on the right) |

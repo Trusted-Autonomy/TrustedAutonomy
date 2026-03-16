@@ -3689,6 +3689,18 @@ The core insight: a real prompt means the agent is **waiting** — it stops prod
 
 ---
 
+### v0.11.3.1 — Shell Scroll & Help
+<!-- status: done -->
+**Goal**: Fix trackpad/mouse wheel scrolling in `ta shell` and improve command discoverability.
+
+1. [x] **Mouse scroll capture**: Enable `EnableMouseCapture` so trackpad two-finger scroll and mouse wheel events are handled by the TUI instead of scrolling the terminal's main buffer. Scroll events move 3 lines per tick.
+2. [x] **Full-page PageUp/PageDown**: PageUp/PageDown now scroll `terminal_height - 4` lines (with 4-line overlap) instead of the previous fixed 10 lines.
+3. [x] **Text selection via Shift+click-drag**: With mouse capture enabled, native click-drag is captured. Users can select text with Shift+click-drag (standard behavior in terminals with mouse capture).
+4. [x] **`help` shows CLI commands**: The shell `help` command now shows both shell-specific help and a summary of all `ta` CLI commands, so users can discover available commands without leaving the shell.
+5. [x] **Help text updated**: Scroll instructions updated to reflect trackpad scroll, full-page PageUp/PageDown, and Shift+click-drag for text selection.
+
+---
+
 ### v0.11.4 — Plugin Registry & Project Manifest
 <!-- status: pending -->
 **Goal**: Unified plugin distribution system so any TA project can declare its plugin requirements and `ta setup` resolves them automatically — downloading platform-specific binaries, falling back to source builds, and verifying version compatibility. Users who clone a TA project run `ta setup` and everything works.
