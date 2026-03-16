@@ -1132,6 +1132,15 @@ mod tests {
     }
 
     #[test]
+    fn render_sse_event_suppresses_health_check() {
+        let frame = "event: health_check\ndata: {\"event_type\":\"health_check\",\"payload\":{\"goals_checked\":2,\"issues\":[]}}";
+        assert!(
+            render_sse_event(frame).is_none(),
+            "health_check events should be suppressed"
+        );
+    }
+
+    #[test]
     fn default_completions_includes_shortcuts() {
         let comps = default_completions();
         assert!(comps.contains(&"approve".to_string()));
