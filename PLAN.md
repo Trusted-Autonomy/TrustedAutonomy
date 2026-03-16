@@ -4109,6 +4109,100 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 
 ---
 
+### v0.14.0 — Goal Workflows: Serial Chains, Parallel Swarms & Office Routing
+<!-- status: pending -->
+**Goal**: Connect goals to workflows so that *how* a goal executes is configurable per-project, per-department, or per-invocation — not hardcoded into `ta run`. Today every goal is a single agent in a single staging directory. This phase introduces workflow-driven execution: serial phase chains, parallel agent swarms, and a routing layer that maps goals to the right workflow based on project config, department, or explicit flag.
+
+#### Problem
+1. **Multi-phase work is manual**: Building v0.11.3 requires `ta run` → review draft → `ta run --follow-up` → review → repeat. Each cycle is a manual step. There's no way to say "execute phases 11.3 through 11.5 in sequence, building/testing each, with one PR at the end."
+2. **No parallelism**: A plan with 5 independent items runs them one at a time. There's no way to decompose a goal into concurrent sub-goals, have agents work in parallel, then merge.
+3. **Workflow selection is implicit**: Every `ta run` uses the same execution model. A coding project wants build→test→review cycles. A content project wants draft→edit→publish. A legal review wants sequential approval chains. There's no way to attach different execution patterns to different kinds of work.
+4. **Office structure has no workflow routing**: The `ta office` concept manages multiple projects, but there's no way to say "engineering goals use the serial-phase workflow, marketing goals use the content pipeline, compliance goals use the approval chain."
+
+#### Architecture: Goal → Workflow Routing
+
+The core abstraction is a **workflow router** that sits between `ta run` and execution:
+
+```
+ta run "goal" --workflow <name>     # explicit
+ta run "goal"                       # uses project/department default
+```
+
+**Routing resolution order:**
+1. `--workflow <name>` flag on `ta run` (explicit override)
+2. Goal's plan phase → phase metadata → workflow (phase-level default)
+3. Project config `.ta/config.yaml` → `default_workflow` (project-level default)
+4. Office department config → department → workflow mapping (office-level default)
+5. Built-in `single-agent` workflow (backwards-compatible default)
+
+**Workflow definition** (`.ta/workflows/<name>.yaml`):
+```yaml
+name: serial-phases
+description: Execute plan phases in sequence with build/test gates
+steps:
+  - type: goal-run          # run agent in staging
+    gate: build-and-test    # must pass before next step
+  - type: follow-up         # reuse staging, next phase
+    gate: build-and-test
+  - type: draft-build       # single PR for all phases
+    gate: human-review
+```
+
+#### Track 1: Serial Phase Chains (`serial-phases` workflow)
+
+Chain multiple phases into one execution. Each phase runs → builds → tests → if green, the next phase starts as a follow-up in the same staging. One draft/PR at the end.
+
+**Planning items** (detailed design deferred to implementation):
+1. [ ] **Workflow engine integration with `ta run`**: `ta run` accepts `--workflow` and delegates to the workflow engine (v0.10.5 `ta-workflow` crate) instead of directly spawning an agent. The workflow engine manages step sequencing, gate evaluation, and error handling.
+2. [ ] **`serial-phases` built-in workflow**: Workflow definition that takes a list of phases (or a range), runs each as a follow-up goal in the same staging, with configurable gates between steps (build, test, clippy, custom command).
+3. [ ] **Gate evaluation**: After each phase, run the gate command(s). If a gate fails, the workflow pauses and surfaces the failure to the user (via shell notification + SSE event). User can fix and resume, or abort.
+4. [ ] **Automatic follow-up chaining**: The workflow engine manages the `--follow-up-goal` chain automatically. Each step reuses the previous step's staging. No manual intervention between phases.
+5. [ ] **Single-PR output**: When all phases complete, the workflow builds one draft covering all changes. The draft summary aggregates per-phase summaries.
+6. [ ] **Resume/retry on failure**: If a phase fails, `ta run --resume` picks up from the failed step. The workflow engine persists step state.
+
+#### Track 2: Parallel Agent Swarms (`swarm` workflow)
+
+Decompose a goal into independent sub-goals, run them in parallel (separate staging dirs), then an integrator agent merges the results.
+
+**Planning items** (detailed design deferred to implementation):
+7. [ ] **Goal decomposition**: The swarm workflow accepts a macro goal and a decomposition strategy (manual list of sub-goals, or agent-generated decomposition from a plan phase).
+8. [ ] **Parallel staging**: Each sub-goal gets its own staging directory (standard overlay). Agents work concurrently without conflicts.
+9. [ ] **Per-agent validation**: Each agent runs its own build/test gate on completion. Failed sub-goals are flagged but don't block others.
+10. [ ] **Integration agent**: After all sub-goals complete (or a quorum), an integration agent receives all sub-goal drafts and merges them into the main staging. It resolves conflicts, runs the full test suite, and builds the final draft.
+11. [ ] **Dependency graph**: Sub-goals can declare dependencies (e.g., "sub-goal B needs sub-goal A's output"). The swarm scheduler respects ordering constraints while maximizing parallelism.
+12. [ ] **Progress dashboard**: `ta shell` shows swarm status: which sub-goals are running, completed, failed. Visual progress in the status bar.
+
+#### Track 3: Office Workflow Routing
+
+Map departments, project types, or goal categories to default workflows.
+
+**Planning items** (detailed design deferred to implementation):
+13. [ ] **Department → workflow mapping in office config**: `.ta/office.yaml` gains a `departments` section that maps department names to default workflows:
+    ```yaml
+    departments:
+      engineering:
+        default_workflow: serial-phases
+        projects: [api-server, web-client]
+      content:
+        default_workflow: editorial-pipeline
+        projects: [docs, blog]
+    ```
+14. [ ] **Project-level workflow default**: `.ta/config.yaml` gains `default_workflow: <name>`. Used when no explicit `--workflow` and no department mapping applies.
+15. [ ] **Workflow library**: Ship built-in workflows (`single-agent`, `serial-phases`, `swarm`, `approval-chain`). Users can create custom workflows in `.ta/workflows/` using the same YAML schema.
+16. [ ] **`ta workflow list`**: Show available workflows (built-in + custom) with descriptions.
+17. [ ] **`ta run` routing integration**: Wire the routing resolution order into `ta run`. Log which workflow was selected and why.
+
+#### Open Questions (resolve during implementation)
+- **Agent coordination protocol**: How do swarm agents communicate? Shared memory store? File-based? Event bus?
+- **Conflict resolution strategy**: When the integration agent merges parallel work, what happens with conflicts? Auto-resolve? Human intervention? Agent negotiation?
+- **Workflow versioning**: Do workflows need versioning for reproducibility?
+- **Cross-project workflows**: Can an office workflow span multiple projects (e.g., "update API + update client")?
+- **Cost/resource limits**: Parallel swarms can be expensive. Should there be concurrency limits per project/office?
+
+#### Version: `0.14.0-alpha`
+
+---
+
 ## Projects On Top (separate repos, built on TA)
 
 > These are NOT part of TA core. They are independent projects that consume TA's extension points.
