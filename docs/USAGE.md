@@ -2959,8 +2959,7 @@ Built-in shell commands:
 | `Shift+Up` / `Shift+Down` | Scroll output 1 line |
 | `PgUp` / `PgDn` | Scroll output one full page (with 4-line overlap) |
 | Mouse wheel / touchpad scroll | Scroll output 3 lines per tick |
-| `Shift+click-drag` | Select text for copy (mouse capture is active) |
-| `Ctrl-M` | Toggle mouse capture off/on (off = native text selection, on = trackpad scroll) |
+| Click-drag | Select text for copy (native selection always works) |
 | `Shift+Home` / `Shift+End` | Scroll to top/bottom of output |
 | `Tab` | Auto-complete commands |
 | `Ctrl-W` | Toggle split-pane mode (agent output on the right) |
@@ -2979,7 +2978,7 @@ When a goal starts, the shell automatically streams the agent's stdout/stderr in
 - **Split pane**: Press `Ctrl-W` to toggle a side-by-side view with agent output in the right pane. Agent output is rendered with markdown styling — bold, inline code, headers, and fenced code blocks are syntax-highlighted.
 - **Agent model**: The status bar shows the detected LLM model name (e.g., "Claude Opus 4") when streaming agent output.
 - **Heartbeat coalescing**: During long-running operations, heartbeat lines (`[heartbeat] still running... Ns elapsed`) update in-place instead of flooding the output. When real output arrives, the heartbeat line is pushed down naturally.
-- **Text selection**: Mouse capture enables trackpad/wheel scrolling but blocks native text selection. Press `Ctrl-M` to toggle mouse capture off for copy-paste (the status bar shows `mouse: select` when capture is off). Alternatively, `Shift+click-drag` works in terminals that support it (iTerm2, kitty, alacritty).
+- **Text selection**: Both mouse scroll and native text selection work simultaneously. The shell uses selective ANSI mouse escapes (`?1000h` + `?1006h`) that capture scroll wheel events without intercepting click-drag, so you can select and copy text normally while still scrolling with the trackpad/mouse wheel.
 
 #### Draft IDs
 
@@ -3151,6 +3150,14 @@ timeout_secs = 30           # Command execution timeout
 max_sessions = 3            # Maximum concurrent agent sessions
 idle_timeout_secs = 3600    # Idle session cleanup
 default_agent = "claude-code"
+
+[shell.qa_agent]
+auto_start = true           # Start agent on shell launch (default: true)
+agent = "claude-code"       # Which agent binary to use
+idle_timeout_secs = 300     # Kill after 5min idle, restart on next question
+inject_memory = true        # Inject project memory context on start
+max_restarts = 3            # Max crash restarts per session
+shutdown_timeout_secs = 5   # Graceful shutdown wait
 
 [routing]
 use_shell_config = true     # Load routes from .ta/shell.toml
@@ -5039,6 +5046,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.3.1 | Shell scroll & help | Done |
 | v0.11.4 | Plugin registry & project manifest (`ta setup resolve`, daemon enforcement) | Done |
 | v0.11.4.1 | Shell reliability: command output, text selection & heartbeat polish | Done |
+| v0.11.4.2 | Shell mouse & agent session fix (scroll+selection, persistent QA, input threading) | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

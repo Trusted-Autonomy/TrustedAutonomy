@@ -52,6 +52,8 @@ pub struct AppState {
     pub project_registry: Arc<ProjectRegistry>,
     /// Bootstrap session manager for conversational project creation (v0.10.17).
     pub bootstrap_sessions: project_new::BootstrapSessionManager,
+    /// Persistent QA agent for shell sessions (v0.11.4.2).
+    pub persistent_qa: Arc<agent::PersistentQaAgent>,
 }
 
 impl AppState {
@@ -60,6 +62,11 @@ impl AppState {
         let shell_config = ShellConfig::load(&project_root);
         let max_sessions = daemon_config.agent.max_sessions;
         let registry = ProjectRegistry::single_project(project_root.clone());
+        let qa_config = daemon_config.shell.qa_agent.clone();
+        let persistent_qa = Arc::new(agent::PersistentQaAgent::new(
+            qa_config,
+            project_root.clone(),
+        ));
 
         Self {
             pr_packages_dir: ta_dir.join("pr_packages"),
@@ -74,6 +81,7 @@ impl AppState {
             question_registry: Arc::new(QuestionRegistry::new()),
             project_registry: Arc::new(registry),
             bootstrap_sessions: project_new::BootstrapSessionManager::new(),
+            persistent_qa,
             project_root,
             daemon_config,
         }

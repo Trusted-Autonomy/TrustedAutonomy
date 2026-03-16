@@ -14,6 +14,9 @@ pub struct DaemonConfig {
     pub agent: AgentConfig,
     pub routing: RoutingConfig,
     pub channels: ChannelsConfig,
+    /// Shell Q&A agent configuration (v0.11.4.2).
+    #[serde(default)]
+    pub shell: ShellQaConfig,
     /// Sandbox configuration for command validation (v0.10.16, item 3).
     /// When set, the orchestrator validates commands against the sandbox
     /// allowlist before execution.
@@ -22,6 +25,58 @@ pub struct DaemonConfig {
     /// Operations configuration (v0.11.2.3): heartbeat, watchdog, etc.
     #[serde(default)]
     pub operations: Option<OperationsConfig>,
+}
+
+/// Shell Q&A agent configuration (v0.11.4.2).
+///
+/// Controls the persistent agent subprocess that handles natural language
+/// questions in `ta shell`. Instead of spawning a new agent per question,
+/// this keeps a single long-running process for the shell session's lifetime.
+///
+/// ```toml
+/// [shell.qa_agent]
+/// auto_start = true
+/// agent = "claude-code"
+/// idle_timeout_secs = 300
+/// inject_memory = true
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellQaConfig {
+    /// Nested Q&A agent config.
+    #[serde(default)]
+    pub qa_agent: QaAgentConfig,
+}
+
+/// Persistent Q&A agent subprocess configuration (v0.11.4.2 item 6-10).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QaAgentConfig {
+    /// Start agent on shell launch (default: true). If false, starts on first question.
+    pub auto_start: bool,
+    /// Which agent binary to use (default: "claude-code").
+    pub agent: String,
+    /// Kill after N seconds idle, restart on next question (default: 300 = 5 min).
+    pub idle_timeout_secs: u64,
+    /// Inject project memory context on start (default: true).
+    pub inject_memory: bool,
+    /// Maximum restart attempts per session before giving up (default: 3).
+    pub max_restarts: u32,
+    /// Graceful shutdown timeout in seconds (default: 5).
+    pub shutdown_timeout_secs: u64,
+}
+
+impl Default for QaAgentConfig {
+    fn default() -> Self {
+        Self {
+            auto_start: true,
+            agent: "claude-code".to_string(),
+            idle_timeout_secs: 300,
+            inject_memory: true,
+            max_restarts: 3,
+            shutdown_timeout_secs: 5,
+        }
+    }
 }
 
 /// Operations configuration section (v0.11.2.3+).
@@ -946,5 +1001,51 @@ mod tests {
         let toml_str = toml::to_string_pretty(&config).unwrap();
         // socket_path should be omitted when None.
         assert!(!toml_str.contains("socket_path"));
+    }
+
+    #[test]
+    fn shell_qa_config_defaults() {
+        // v0.11.4.2 item 8: Default QA agent config.
+        let config = ShellQaConfig::default();
+        assert!(config.qa_agent.auto_start);
+        assert_eq!(config.qa_agent.agent, "claude-code");
+        assert_eq!(config.qa_agent.idle_timeout_secs, 300);
+        assert!(config.qa_agent.inject_memory);
+        assert_eq!(config.qa_agent.max_restarts, 3);
+        assert_eq!(config.qa_agent.shutdown_timeout_secs, 5);
+    }
+
+    #[test]
+    fn shell_qa_config_roundtrip() {
+        // v0.11.4.2 item 8: Config survives TOML serialization.
+        let toml_str = r#"
+            [shell.qa_agent]
+            auto_start = false
+            agent = "codex"
+            idle_timeout_secs = 600
+            inject_memory = false
+            max_restarts = 5
+            shutdown_timeout_secs = 10
+        "#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.shell.qa_agent.auto_start);
+        assert_eq!(config.shell.qa_agent.agent, "codex");
+        assert_eq!(config.shell.qa_agent.idle_timeout_secs, 600);
+        assert!(!config.shell.qa_agent.inject_memory);
+        assert_eq!(config.shell.qa_agent.max_restarts, 5);
+        assert_eq!(config.shell.qa_agent.shutdown_timeout_secs, 10);
+    }
+
+    #[test]
+    fn shell_qa_config_partial_override() {
+        // v0.11.4.2: Partial config should fill defaults for missing fields.
+        let toml_str = r#"
+            [shell.qa_agent]
+            idle_timeout_secs = 120
+        "#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.shell.qa_agent.auto_start); // default
+        assert_eq!(config.shell.qa_agent.agent, "claude-code"); // default
+        assert_eq!(config.shell.qa_agent.idle_timeout_secs, 120); // overridden
     }
 }

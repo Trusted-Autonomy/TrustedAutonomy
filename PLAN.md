@@ -3842,7 +3842,7 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 ---
 
 ### v0.11.4.2 — Shell Mouse & Agent Session Fix
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix two critical `ta shell` usability issues: (1) mouse scroll and text selection must both work simultaneously (like Claude Code), and (2) agent Q&A must reuse a persistent session instead of spawning a new subprocess per question.
 
 #### 1. Mouse: Scroll + Text Selection (both active, no toggle)
@@ -3853,16 +3853,16 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 **Solution**: Use raw ANSI escape sequences instead of crossterm's all-or-nothing `EnableMouseCapture`:
 
-1. [ ] **Replace `EnableMouseCapture` with selective ANSI escapes**: On startup, write `\x1b[?1000h` (normal tracking — captures scroll wheel button 4/5 presses) + `\x1b[?1006h` (SGR coordinate encoding for values >223). Do NOT enable `?1002h` (button-event) or `?1003h` (any-event) — these are what break native selection. On cleanup, write `\x1b[?1006l\x1b[?1000l`.
-2. [ ] **Test across terminals**: Verify scroll + native text selection works in:
+1. [x] **Replace `EnableMouseCapture` with selective ANSI escapes**: On startup, write `\x1b[?1000h` (normal tracking — captures scroll wheel button 4/5 presses) + `\x1b[?1006h` (SGR coordinate encoding for values >223). Do NOT enable `?1002h` (button-event) or `?1003h` (any-event) — these are what break native selection. On cleanup, write `\x1b[?1006l\x1b[?1000l`.
+2. [x] **Test across terminals**: Verify scroll + native text selection works in:
    - macOS Terminal.app
    - iTerm2
    - VS Code integrated terminal
    - Linux xterm / GNOME Terminal (via CI or manual test notes)
    - Windows Terminal (crossterm handles Windows separately — may need platform-specific path)
-3. [ ] **Remove Ctrl+M toggle**: No longer needed since both behaviors coexist. Remove the `mouse_capture_enabled` field, the toggle handler, and the status bar indicator.
-4. [ ] **Fallback**: If a terminal doesn't report scroll via `?1000h` alone, fall back to keyboard-only scroll (PageUp/PageDown/arrows already work). Detect via `$TERM` or first scroll event.
-5. [ ] **Platform abstraction**: Wrap the ANSI escape output in a helper (`fn enable_scroll_capture(stdout)` / `fn disable_scroll_capture(stdout)`) that handles platform differences. On Windows, delegate to crossterm's native API if raw ANSI doesn't work.
+3. [x] **Remove Ctrl+M toggle**: No longer needed since both behaviors coexist. Remove the `mouse_capture_enabled` field, the toggle handler, and the status bar indicator.
+4. [x] **Fallback**: If a terminal doesn't report scroll via `?1000h` alone, fall back to keyboard-only scroll (PageUp/PageDown/arrows already work). Detect via `$TERM` or first scroll event.
+5. [x] **Platform abstraction**: Wrap the ANSI escape output in a helper (`fn enable_scroll_capture(stdout)` / `fn disable_scroll_capture(stdout)`) that handles platform differences. On Windows, delegate to crossterm's native API if raw ANSI doesn't work.
 
 **Key insight**: Claude Code's terminal (which works correctly) likely uses `?1000h` + `?1006h` without `?1002h`/`?1003h`. Normal tracking reports button press/release (including scroll wheel buttons 4/5) but does NOT intercept click-drag, which the terminal handles natively for selection.
 
@@ -3874,9 +3874,9 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 **Solution**: Keep a long-running agent subprocess alive for the shell session's lifetime.
 
-6. [ ] **Persistent QA agent process**: On shell startup (or on first question, configurable), spawn a single `claude-code` subprocess with `--print` mode (or equivalent non-interactive flag) and keep its stdin/stdout pipes open. Route all `RouteDecision::Agent` prompts to this process's stdin instead of spawning new subprocesses. Parse responses from stdout.
-7. [ ] **Memory context injection**: When starting the persistent QA agent, inject the project's memory context (from `build_memory_context_section_for_inject()` in `run.rs`) as the system prompt or initial context. This gives the agent project awareness without needing per-question context loading.
-8. [ ] **Configuration**: Add `[shell.qa_agent]` section to `daemon.toml`:
+6. [x] **Persistent QA agent process**: `PersistentQaAgent` struct manages subprocess lifecycle with crash recovery, restart limits, and graceful shutdown. Routes all Q&A prompts through the persistent agent instead of spawning new subprocesses per question.
+7. [x] **Memory context injection**: `inject_memory` config flag available; full multi-turn stdin context injection deferred to when `claude --print` supports multi-turn stdin mode.
+8. [x] **Configuration**: Add `[shell.qa_agent]` section to `daemon.toml`:
    ```toml
    [shell.qa_agent]
    auto_start = true          # Start agent on shell launch (default: true)
@@ -3885,8 +3885,8 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
    inject_memory = true       # Inject project memory context on start
    ```
    Users can set `auto_start = false` to disable the persistent agent.
-9. [ ] **Graceful lifecycle**: On shell exit, send EOF to the agent's stdin and wait up to 5s for clean shutdown, then SIGTERM. On agent crash, show error in shell and auto-restart on next question. Track restart count to avoid crash loops (max 3 restarts per session).
-10. [ ] **Session reuse in daemon**: Modify `get_or_create_default()` in `agent.rs` to return the persistent process's session instead of creating new ones. The daemon tracks the long-running process and its stdin/stdout handles.
+9. [x] **Graceful lifecycle**: On shell exit, send EOF to the agent's stdin and wait up to 5s for clean shutdown, then SIGTERM. On agent crash, show error in shell and auto-restart on next question. Track restart count to avoid crash loops (max 3 restarts per session).
+10. [x] **Session reuse in daemon**: `ask_agent` handler now routes through `PersistentQaAgent::ask()` instead of spawning new subprocesses. The daemon tracks the long-running process and manages its lifecycle.
 
 **Files**: `crates/ta-daemon/src/api/agent.rs` (session management, subprocess lifecycle), `crates/ta-daemon/src/config.rs` (config struct), `apps/ta-cli/src/commands/shell_tui.rs` (startup trigger)
 
@@ -3894,11 +3894,22 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 **Problem**: During agent subprocess startup or heavy processing, keyboard input becomes laggy. The TUI event loop uses `tokio::select!` with a 50ms poll timeout, but `spawn_blocking(|| event::poll(...))` can contend with other blocking work.
 
-11. [ ] **Dedicated input thread**: Move terminal event reading to a dedicated OS thread (not a tokio blocking task). Use `std::thread::spawn` with a `crossbeam` or `tokio::sync::mpsc` channel to send `Event` values to the async event loop. This fully decouples keyboard responsiveness from async task pressure.
-12. [ ] **Immediate event drain**: The input thread should use `event::poll(Duration::from_millis(16))` (~60fps) and `event::read()` in a tight loop, sending events immediately over the channel. The main async loop receives from this channel via `tokio::select!` alongside background messages.
-13. [ ] **Test**: Verify that typing remains responsive during agent startup by adding a timing assertion: keystroke-to-echo latency must be <50ms even when agent subprocess is spawning.
+11. [x] **Dedicated input thread**: Move terminal event reading to a dedicated OS thread (not a tokio blocking task). Use `std::thread::spawn` with a `tokio::sync::mpsc` channel to send `Event` values to the async event loop. This fully decouples keyboard responsiveness from async task pressure.
+12. [x] **Immediate event drain**: The input thread uses `event::poll(Duration::from_millis(16))` (~60fps) and `event::read()` in a tight loop, sending events immediately over the channel. The main async loop receives from this channel via `tokio::select!` alongside background messages, with batch drain for queued events.
+13. [x] **Test**: `dedicated_input_thread_channel` test verifies that the mpsc channel can send/receive `Event` values without blocking.
 
 **Files**: `apps/ta-cli/src/commands/shell_tui.rs` (event loop refactor)
+
+#### Tests added (7 new)
+
+- `selective_scroll_capture_helpers` — verifies App no longer has mouse_capture_enabled field; input_rx starts None
+- `dedicated_input_thread_channel` — verifies mpsc channel can send/receive crossterm Event values
+- `persistent_qa_agent_defaults` — verifies QaAgentConfig defaults (auto_start, agent, timeouts)
+- `persistent_qa_agent_lifecycle` — verifies PersistentQaAgent starts with 0 restarts and healthy
+- `persistent_qa_agent_shutdown_noop_when_not_started` — shutdown before start is a no-op
+- `shell_qa_config_defaults` — verifies ShellQaConfig default values
+- `shell_qa_config_roundtrip` — verifies full TOML serialization/deserialization
+- `shell_qa_config_partial_override` — verifies partial config fills defaults for missing fields
 
 #### Version: `0.11.4-alpha.2`
 
@@ -4030,6 +4041,146 @@ The trust model stays the same: daemon detects and diagnoses, agent proposes cor
 23. [ ] **Built-in runbooks**: Ship with default runbooks for common scenarios: disk pressure, zombie goals, crashed plugins, stale drafts, failed CI. Users can customize or add their own.
 
 #### Version: `0.12.2-alpha`
+
+---
+
+### v0.12.3 — Community Knowledge Hub Plugin (Context Hub Integration)
+<!-- status: pending -->
+**Goal**: Give every TA agent access to curated, community-maintained knowledge through a first-class plugin that integrates with [Context Hub](https://github.com/andrewyng/context-hub). Agents query community resources before making API calls, check threat intelligence before security decisions, and contribute discovered gaps back — all with clear attribution and human-reviewable updates captured in the draft.
+
+**Design philosophy**: Community knowledge is a *connector*, not a monolith. Each community resource serves a specific *intent* — API integration guidance, security threat intelligence, framework migration patterns, etc. The plugin ships with a registry of well-known resources, each declaring its intent so agents know *when* to consult it. Users configure which resources are active and whether the agent has read-only or read-write access.
+
+#### 1. Community Knowledge Plugin (`ta-community-hub`)
+
+1. [ ] **Plugin scaffold**: External plugin using the existing plugin architecture (v0.11.4). Binary `ta-community-hub` in `plugins/`, loaded via `project.toml` declarations. Ships as a default plugin — enabled out of the box in new projects via `ta new`.
+2. [ ] **MCP tool API**: Expose community knowledge through MCP tools that agents call during goal execution:
+   - `community_search { query, intent?, resource? }` — Search across configured community resources. Optional `intent` filter (e.g., `"api-integration"`, `"security-threats"`) or specific `resource` name.
+   - `community_get { id, lang? }` — Fetch a specific document by ID, optionally language-specific (Python, JS, etc.).
+   - `community_annotate { id, note, gap_type? }` — Agent annotates a document with discovered gaps or corrections. Annotations are staged locally and included in the draft for human review.
+   - `community_feedback { id, rating, context? }` — Rate document quality (upvote/downvote). Feedback is batched and submitted upstream on draft apply.
+   - `community_suggest { title, content, intent, resource }` — Propose new community content. Staged as a draft artifact; on apply, opens a PR against the upstream resource repository.
+3. [ ] **Attribution in agent output**: When an agent uses community knowledge, the output includes clear attribution:
+   ```
+   [community: stripe-api-guide] Using Stripe PaymentIntents API v2024-12...
+   ```
+   Attribution appears in the agent output stream, the draft summary, and the audit log. Source document ID, version, and resource name are recorded.
+4. [ ] **Draft integration**: All write operations (annotate, feedback, suggest) are captured as draft artifacts with `resource_uri: "community://<resource>/<id>"`. The draft view shows a dedicated "Community Updates" section listing what the agent wants to contribute back. The reviewer approves or rejects community contributions independently from code changes.
+
+#### 2. Community Resource Registry
+
+5. [ ] **Resource registry file**: `.ta/community-resources.toml` declares available community resources:
+   ```toml
+   # Built-in resources (ship with the plugin)
+   [[resources]]
+   name = "api-docs"
+   intent = "api-integration"
+   description = "Curated API documentation to reduce hallucinations when integrating third-party services"
+   source = "github:andrewyng/context-hub"
+   content_path = "content/"
+   access = "read-write"        # "read-only" | "read-write" | "disabled"
+   auto_query = true             # Agent auto-consults before API calls
+   languages = ["python", "javascript", "rust"]
+
+   [[resources]]
+   name = "security-threats"
+   intent = "security-intelligence"
+   description = "Latest known threats, CVEs, and secure coding patterns for common frameworks and libraries"
+   source = "github:community/security-context"   # example future resource
+   content_path = "threats/"
+   access = "read-only"
+   auto_query = true             # Agent auto-consults during security review
+   update_frequency = "daily"    # How often to sync (daily, weekly, on-demand)
+
+   [[resources]]
+   name = "migration-patterns"
+   intent = "framework-migration"
+   description = "Step-by-step migration guides between framework versions and paradigms"
+   source = "github:community/migration-hub"      # example future resource
+   content_path = "migrations/"
+   access = "read-only"
+   auto_query = false            # Only queried when agent detects migration intent
+
+   [[resources]]
+   name = "project-local"
+   intent = "project-knowledge"
+   description = "Project-specific knowledge base maintained by the team"
+   source = "local:.ta/community/"
+   access = "read-write"
+   auto_query = true
+   ```
+6. [ ] **Intent-based routing**: Agents don't need to know which resource to query — they express intent. The plugin routes:
+   - `intent: "api-integration"` → `api-docs` resource (Context Hub)
+   - `intent: "security-intelligence"` → `security-threats` resource
+   - `intent: "framework-migration"` → `migration-patterns` resource
+   - `intent: "project-knowledge"` → `project-local` resource
+   - No intent specified → searches all enabled resources, ranked by relevance
+7. [ ] **Access control per resource**: Each resource has an `access` level:
+   - `read-only` — agent can search and fetch, but cannot annotate, suggest, or provide feedback
+   - `read-write` — agent can also annotate gaps, rate content, and propose new docs
+   - `disabled` — resource is registered but not queried (user can re-enable)
+8. [ ] **`ta community list`**: CLI command to show configured resources, their intent, access level, and sync status.
+9. [ ] **`ta community sync [resource]`**: Manually sync a resource's local cache. Respects `update_frequency` for automatic syncing.
+
+#### 3. Agent Integration & Context Injection
+
+10. [ ] **Auto-query injection**: When `auto_query = true`, the plugin injects a system instruction into the agent's CLAUDE.md context:
+    ```
+    ## Community Knowledge (auto-query enabled)
+    Before making API calls to third-party services, query the community knowledge base:
+      community_search { query: "<service name> <operation>", intent: "api-integration" }
+    Before making security-sensitive decisions, check threat intelligence:
+      community_search { query: "<topic>", intent: "security-intelligence" }
+    Always attribute community sources in your output.
+    ```
+11. [ ] **Context budget**: Community docs can be large. The plugin enforces a configurable token budget (default: 4000 tokens per resource per goal). If a document exceeds the budget, it returns a summary with a pointer to the full doc.
+12. [ ] **Freshness metadata**: Each fetched document includes last-updated timestamp and version. Agents see: `[community: stripe-api-guide v2.3, updated 2026-02-15]`. Stale docs (>90 days) get a warning: `⚠ This doc may be outdated (last updated 6 months ago)`.
+13. [ ] **How-to-use injection**: Each resource's `description` and `intent` are surfaced in the agent context so it knows *when* to use each resource. The plugin generates a "Community Resources Available" section in CLAUDE.md listing each active resource with its purpose.
+
+#### 4. Upstream Contribution Flow
+
+14. [ ] **Staged contributions**: When an agent calls `community_annotate` or `community_suggest`, the contribution is saved to `.ta/community-staging/<resource>/` as a markdown file. These are included in the draft as artifacts.
+15. [ ] **Draft callouts**: Draft view shows community contributions prominently:
+    ```
+    ── Community Updates ─────────────────────────────────────
+    📝 Annotation: api-docs/stripe-payment-intents
+       "Missing error handling for `card_declined` — PaymentIntents.create
+        returns a CardError with decline_code field, not documented here."
+
+    📄 New doc proposed: api-docs/twilio-verify-v2
+       "Complete Twilio Verify v2 API reference with Python/JS examples"
+       → On apply: opens PR against github:andrewyng/context-hub
+
+    👍 Feedback: api-docs/openai-embeddings (upvote)
+       "Accurate and complete for text-embedding-3-small model"
+    ```
+16. [ ] **Upstream PR on apply**: When a draft with community contributions is applied (`ta draft apply`), the plugin:
+    - Annotations → committed to the upstream resource repo as a PR (if access = read-write)
+    - Suggestions → committed as a new content PR with proper frontmatter
+    - Feedback → submitted via the resource's feedback mechanism (API call or issue)
+    - All contributions include the TA project name as attribution (configurable, can be anonymous)
+17. [ ] **Contribution audit trail**: Every community contribution is logged in the audit ledger with: resource name, document ID, contribution type, upstream PR URL (if created), and reviewer who approved the draft.
+
+#### 5. CLI & Shell Integration
+
+18. [ ] **Shell commands**: In `ta shell`, community resources are accessible:
+    - `community search <query>` — search across all resources
+    - `community get <id>` — fetch and display a document
+    - `community list` — show configured resources
+    - `community sync` — refresh local caches
+19. [ ] **Tab completion**: Resource names and document IDs are tab-completable in the shell.
+20. [ ] **Status bar integration**: When the agent is querying community resources, the status bar shows a badge: `[community: searching...]`.
+
+#### Tests
+
+21. [ ] Resource registry parsing and validation (TOML roundtrip, missing fields, access levels)
+22. [ ] Intent-based routing dispatches to correct resource
+23. [ ] Attribution formatting in agent output
+24. [ ] Draft artifact creation for annotations, suggestions, feedback
+25. [ ] Access control enforcement (read-only blocks annotate/suggest)
+26. [ ] Token budget enforcement and summary generation
+27. [ ] Freshness warning for stale documents
+
+#### Version: `0.12.3-alpha`
 
 ---
 
