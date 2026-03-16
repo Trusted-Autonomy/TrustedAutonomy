@@ -12,7 +12,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseEventKind,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -672,9 +675,10 @@ async fn run_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    // NOTE: Mouse capture intentionally NOT enabled. Terminal-native mouse
-    // handles both scroll and text selection. Keyboard scrolling works via
-    // Shift+Up/Down and PageUp/PageDown. See v0.10.19 item 3.
+    // Enable mouse capture so scroll wheel events go to the TUI instead of
+    // scrolling the terminal's main buffer (which shows pre-shell content).
+    // Text selection still works via Shift+click in most terminals.
+    stdout.execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -695,7 +699,7 @@ async fn run_tui(
     // Cleanup.
     running.store(false, Ordering::Relaxed);
     disable_raw_mode()?;
-    // Mouse capture was never enabled — no need to disable.
+    terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     // Save history.
@@ -1056,17 +1060,29 @@ async fn handle_terminal_event(
                 (KeyCode::Up, _) => app.history_up(),
                 (KeyCode::Down, _) => app.history_down(),
                 (KeyCode::Tab, _) => app.tab_complete(),
-                (KeyCode::PageUp, _) => app.scroll_up(10),
-                (KeyCode::PageDown, _) => app.scroll_down(10),
+                (KeyCode::PageUp, _) => {
+                    let page = crossterm::terminal::size()
+                        .map(|(_, h)| h as usize)
+                        .unwrap_or(40);
+                    app.scroll_up(page.saturating_sub(4)); // leave 4 lines overlap
+                }
+                (KeyCode::PageDown, _) => {
+                    let page = crossterm::terminal::size()
+                        .map(|(_, h)| h as usize)
+                        .unwrap_or(40);
+                    app.scroll_down(page.saturating_sub(4));
+                }
                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                     app.insert_char(c);
                 }
                 _ => {}
             }
         }
-        Event::Mouse(_) => {
-            // Mouse events not captured — terminal handles natively.
-        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => app.scroll_up(3),
+            MouseEventKind::ScrollDown => app.scroll_down(3),
+            _ => {} // Click/drag events ignored — let terminal handle selection.
+        },
         Event::Resize(_, _) => {
             // Terminal will re-draw on next loop iteration.
         }
