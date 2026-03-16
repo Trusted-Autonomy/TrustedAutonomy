@@ -86,6 +86,37 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
 }
 
 fn deep_status(config: &GatewayConfig) -> anyhow::Result<()> {
+    // Platform info
+    println!(
+        "Platform: {}",
+        ta_changeset::registry_client::detect_platform()
+    );
+    println!();
+
+    // Plugin requirements
+    if ta_changeset::project_manifest::ProjectManifest::exists(&config.workspace_root) {
+        println!("Plugin requirements:");
+        match ta_changeset::project_manifest::ProjectManifest::load(&config.workspace_root) {
+            Ok(manifest) => {
+                let issues = ta_changeset::plugin_resolver::check_requirements(
+                    &manifest,
+                    &config.workspace_root,
+                );
+                if issues.is_empty() {
+                    println!("  All required plugins satisfied");
+                } else {
+                    for (name, issue) in &issues {
+                        println!("  [!] {}: {}", name, issue);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  Error loading project.toml: {}", e);
+            }
+        }
+        println!();
+    }
+
     // Daemon health
     println!("Daemon:");
     let daemon_url = super::daemon::resolve_daemon_url(&config.workspace_root, None);

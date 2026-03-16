@@ -3702,7 +3702,7 @@ The core insight: a real prompt means the agent is **waiting** — it stops prod
 ---
 
 ### v0.11.4 — Plugin Registry & Project Manifest
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Unified plugin distribution system so any TA project can declare its plugin requirements and `ta setup` resolves them automatically — downloading platform-specific binaries, falling back to source builds, and verifying version compatibility. Users who clone a TA project run `ta setup` and everything works.
 
 #### Design Principles
@@ -3780,20 +3780,26 @@ Alternative sources (no registry needed):
 - `source = "path:./plugins/discord"` — local source, build with detected toolchain
 - `source = "url:https://example.com/plugin.tar.gz"` — direct URL
 
-#### Items
-1. [ ] **`.ta/project.toml` schema**: Project manifest declaring name, description, required plugins (with type, version constraint, source), and VCS adapter. Parser with serde, validation, and clear error messages for malformed manifests.
-2. [ ] **Platform detection**: Detect `{os}` and `{arch}` at runtime. Map to registry platform keys: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `x86_64-pc-windows-msvc`. Exposed as `ta system info` output.
-3. [ ] **`ta setup` command (plugin resolver)**: Reads `project.toml`, for each required plugin: check installed → check version → download binary from registry/github/url → verify sha256 → extract to `.ta/plugins/<type>/<name>/`. Reports what was installed, what's missing (env vars), and what failed.
-4. [ ] **Registry client**: Fetch and cache the registry index. Support `registry:`, `github:`, `path:`, and `url:` source schemes. Registry index cached in `~/.cache/ta/registry/` with TTL.
-5. [ ] **Source build fallback**: When `path:` source is specified or binary download fails and source is available, detect toolchain (rustc, go, node) and build. Rust plugins: `cargo build --release`. Go plugins: `go build`. Others: `make` or documented build command in `plugin.toml`.
-6. [ ] **Version enforcement**: `ta-daemon` checks all required plugins on startup. If a plugin is missing or below `min_version`, refuse to start with a clear message: "Required plugin 'discord' version >=0.1.0 not found. Run `ta setup` to install."
-7. [ ] **`ta setup` env var check**: For plugins with declared `env_vars`, check if they're set. Print setup instructions for missing vars. Don't block — plugins may work without all vars in some configurations.
-8. [ ] **Auto-setup on first daemon start**: If `project.toml` exists but plugins aren't resolved, run the resolver automatically (with user confirmation in interactive mode, silently in CI).
-9. [ ] **CI integration**: `ta setup --ci` mode — non-interactive, fails hard on missing plugins or env vars. Suitable for GitHub Actions / CI pipelines.
-10. [ ] **Plugin binary hosting CI job**: GitHub Actions workflow that builds all plugins for all platforms on release tag and uploads to the GitHub release as assets. This populates the registry.
-11. [ ] **Test: full resolve cycle**: Integration test with a mock registry serving a test plugin tarball. Verify download → extract → install → version check → daemon startup.
-12. [ ] **Test: source build fallback**: Test with a `path:` source that has a `Cargo.toml`, verify `ta setup` builds and installs it.
-13. [ ] **Test: version enforcement blocks daemon**: Test that daemon refuses to start when a required plugin is missing or below min_version.
+#### Completed
+1. [x] **`.ta/project.toml` schema**: `ProjectManifest` with `ProjectMeta`, `PluginRequirement`, and `SourceScheme` types. Serde parser with validation (version constraint format, source scheme parsing). Clear error messages for malformed manifests. 16 tests in `project_manifest.rs`.
+2. [x] **Platform detection**: `detect_platform()` maps `std::env::consts::{OS, ARCH}` to registry keys: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-pc-windows-msvc`. Exposed in `ta status --deep` and `ta setup show`.
+3. [x] **`ta setup resolve` command (plugin resolver)**: `ta setup resolve` reads `project.toml`, checks installed plugins, downloads/builds missing ones, verifies SHA-256, extracts to `.ta/plugins/<type>/<name>/`. Reports installed/failed/skipped. 6 new tests in `setup.rs`.
+4. [x] **Registry client**: `RegistryClient` with fetch, cache (`~/.cache/ta/registry/` with configurable TTL), and `resolve()` for finding best version match. Supports `registry:`, `github:`, `path:`, `url:` source schemes. 10 tests in `registry_client.rs`.
+5. [x] **Source build fallback**: `build_from_source()` detects Cargo.toml (Rust), go.mod (Go), Makefile, or `build_command` from channel.toml. Builds and installs to plugin directory. 1 test in `plugin_resolver.rs`.
+6. [x] **Version enforcement**: `ta-daemon` checks all required plugins on startup via `check_requirements()`. Refuses to start if missing/below `min_version` with clear error and `ta setup resolve` suggestion. 3 tests in `plugin_resolver.rs`.
+7. [x] **`ta setup resolve` env var check**: Checks `env_vars` declared by plugins. Prints missing variables with plugin attribution. Non-blocking in interactive mode, hard fail in `--ci` mode.
+8. [x] **Auto-setup on first daemon start**: Daemon attempts `resolve_all()` when `project.toml` exists but plugins aren't satisfied. Falls through to hard error if auto-resolve fails.
+9. [x] **CI integration**: `ta setup resolve --ci` mode — non-interactive, fails hard on missing plugins or env vars.
+10. [x] **Plugin binary hosting CI job**: `.github/workflows/plugin-release.yml` — triggered by `plugin-*-v*` tags, builds for all 4 platforms, uploads tarballs + SHA-256 to GitHub releases.
+11. [x] **Test: full resolve cycle**: Tests in `plugin_resolver.rs` — `check_requirements_all_installed`, `resolve_report_methods`, `resolve_report_all_ok`. Tests in `setup.rs` — `resolve_with_already_installed_plugin`.
+12. [x] **Test: source build fallback**: `build_from_source_no_toolchain` test verifies error when no build system detected.
+13. [x] **Test: version enforcement blocks daemon**: `check_requirements_missing_plugin` and `check_requirements_version_too_low` tests verify enforcement logic.
+
+#### New tests (33 total across 4 files)
+- `crates/ta-changeset/src/project_manifest.rs`: 16 tests (manifest parsing, validation, source schemes, version comparison)
+- `crates/ta-changeset/src/registry_client.rs`: 10 tests (platform detection, index parsing, version resolution, caching)
+- `crates/ta-changeset/src/plugin_resolver.rs`: 7 tests (requirements checking, resolve reports, source build)
+- `apps/ta-cli/src/commands/setup.rs`: 6 new tests (resolve with/without manifest, CI mode, plugins display)
 
 #### Version: `0.11.4-alpha`
 

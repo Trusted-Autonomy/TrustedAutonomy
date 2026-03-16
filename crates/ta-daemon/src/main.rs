@@ -140,6 +140,58 @@ async fn main() -> Result<()> {
     // Load daemon configuration.
     let daemon_config = config::DaemonConfig::load(&project_root);
 
+    // Plugin version enforcement with auto-setup (v0.11.4).
+    // If a project.toml exists, check that all required plugins are installed
+    // and meet minimum version requirements. If not, attempt auto-resolve
+    // in non-interactive contexts (CI/daemon), or fail with instructions.
+    if ta_changeset::project_manifest::ProjectManifest::exists(&project_root) {
+        match ta_changeset::project_manifest::ProjectManifest::load(&project_root) {
+            Ok(manifest) => {
+                let issues =
+                    ta_changeset::plugin_resolver::check_requirements(&manifest, &project_root);
+                if !issues.is_empty() {
+                    tracing::info!(
+                        missing = issues.len(),
+                        "Required plugins not satisfied — attempting auto-setup"
+                    );
+                    // Attempt auto-resolve.
+                    let report =
+                        ta_changeset::plugin_resolver::resolve_all(&manifest, &project_root, false);
+                    if report.all_ok() {
+                        tracing::info!("Auto-setup resolved all plugin requirements");
+                    } else {
+                        // Re-check after auto-resolve attempt.
+                        let remaining = ta_changeset::plugin_resolver::check_requirements(
+                            &manifest,
+                            &project_root,
+                        );
+                        if !remaining.is_empty() {
+                            for (name, issue) in &remaining {
+                                tracing::error!(plugin = %name, "{}", issue);
+                            }
+                            anyhow::bail!(
+                                "Cannot start daemon: {} required plugin(s) missing or incompatible. \
+                                 Run `ta setup resolve` to install them.",
+                                remaining.len()
+                            );
+                        }
+                    }
+                } else {
+                    tracing::info!(
+                        plugins = manifest.plugins.len(),
+                        "All required plugins satisfied"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to load project.toml — skipping plugin version check"
+                );
+            }
+        }
+    }
+
     // Set up cross-platform signal handling (v0.10.16).
     // The shutdown notifier is shared with background tasks so they can
     // gracefully terminate when SIGINT/SIGTERM is received.

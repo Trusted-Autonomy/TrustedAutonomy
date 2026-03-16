@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 glob = { workspace = true }
 toml = "0.8"
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

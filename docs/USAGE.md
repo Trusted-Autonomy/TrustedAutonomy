@@ -1075,6 +1075,49 @@ ta plugin logs discord
 ta plugin logs discord --follow
 ```
 
+### Project Manifest & Plugin Registry
+
+Declare your project's plugin requirements in `.ta/project.toml` so that `ta setup resolve` installs everything automatically:
+
+```toml
+[project]
+name = "my-project"
+description = "My TA-managed project"
+
+[plugins.discord]
+type = "channel"
+version = ">=0.1.0"
+source = "registry:ta-channel-discord"
+env_vars = ["DISCORD_BOT_TOKEN"]
+
+[plugins.custom-webhook]
+type = "channel"
+version = ">=0.2.0"
+source = "path:./plugins/custom-webhook"
+required = false
+```
+
+Resolve and install all declared plugins:
+
+```bash
+# Interactive mode — installs missing plugins, warns about env vars
+ta setup resolve
+
+# CI mode — fails hard on missing plugins or env vars
+ta setup resolve --ci
+
+# Show plugin status (installed vs required)
+ta setup show --section plugins
+```
+
+Plugin source schemes:
+- `registry:<name>` — download from the TA plugin registry (cached in `~/.cache/ta/registry/`)
+- `github:<owner/repo>` — download from GitHub releases
+- `path:<local-path>` — build from local source (auto-detects Rust, Go, Make)
+- `url:<download-url>` — direct tarball download with SHA-256 verification
+
+The daemon enforces plugin requirements on startup. If a required plugin is missing or below `min_version`, the daemon attempts auto-setup. If that fails, it refuses to start with a clear error pointing to `ta setup resolve`.
+
 ### Goal List Filtering
 
 By default, `ta goal list` shows only active (non-terminal) goals:
@@ -4040,6 +4083,17 @@ The wizard detects your project type (Rust, TypeScript, Python, Go, or generic) 
 
 Use `ta setup refine <section>` to update one config file at a time. Available sections: `workflow`, `memory`, `policy`, `agents`, `channels`.
 
+```bash
+# Resolve and install plugins from .ta/project.toml
+ta setup resolve
+
+# CI mode — fails hard on any missing plugin or env var
+ta setup resolve --ci
+
+# Show plugins section (installed vs required)
+ta setup show --section plugins
+```
+
 ### Conversational Project Bootstrapping (`ta new`)
 
 Create a new project through an interactive conversation with a planner agent. The agent asks about your goals, proposes a development plan, and generates a project scaffold with a PLAN.md.
@@ -4979,6 +5033,8 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.2.4 | Daemon watchdog & process liveness (zombie detection, stale questions, health events) | Done |
 | v0.11.2.5 | Prompt detection hardening & version housekeeping | Done |
 | v0.11.3 | Self-service operations, draft amend & plan intelligence | Done |
+| v0.11.3.1 | Shell scroll & help | Done |
+| v0.11.4 | Plugin registry & project manifest (`ta setup resolve`, daemon enforcement) | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

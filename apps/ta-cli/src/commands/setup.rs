@@ -1,4 +1,4 @@
-// setup.rs — Agent-guided setup command (v0.7.2).
+// setup.rs — Agent-guided setup command (v0.7.2, extended v0.11.4).
 //
 // `ta setup` launches a conversational flow where a TA agent helps configure
 // workflows. The resulting config is a TA draft the user reviews.
@@ -6,6 +6,7 @@
 // - `ta setup wizard` — full interactive setup, generates .ta/ config files
 // - `ta setup refine <topic>` — refine a specific aspect of config
 // - `ta setup show` — display current resolved configuration
+// - `ta setup resolve` — resolve plugins from project.toml (v0.11.4)
 
 use std::path::Path;
 
@@ -27,9 +28,19 @@ pub enum SetupCommands {
     },
     /// Show the current resolved configuration for this project.
     Show {
-        /// Which section to show: all, workflow, memory, policy, channels.
+        /// Which section to show: all, workflow, memory, policy, channels, plugins.
         #[arg(long, default_value = "all")]
         section: String,
+    },
+    /// Resolve and install plugins declared in .ta/project.toml.
+    ///
+    /// Reads the project manifest, checks which plugins are installed,
+    /// downloads or builds missing ones, verifies integrity, and reports
+    /// environment variable requirements.
+    Resolve {
+        /// CI mode: non-interactive, fail hard on missing plugins or env vars.
+        #[arg(long)]
+        ci: bool,
     },
 }
 
@@ -38,6 +49,7 @@ pub fn execute(command: &SetupCommands, config: &GatewayConfig) -> anyhow::Resul
         SetupCommands::Wizard { template } => run_wizard(config, template),
         SetupCommands::Refine { topic } => run_refine(config, topic),
         SetupCommands::Show { section } => show_config(config, section),
+        SetupCommands::Resolve { ci } => resolve_plugins(config, *ci),
     }
 }
 
@@ -127,7 +139,9 @@ fn show_config(config: &GatewayConfig, section: &str) -> anyhow::Result<()> {
     let ta_dir = project_root.join(".ta");
 
     let sections: Vec<&str> = if section == "all" {
-        vec!["project", "workflow", "memory", "policy", "channels"]
+        vec![
+            "project", "workflow", "memory", "policy", "channels", "plugins",
+        ]
     } else {
         vec![section]
     };
@@ -157,6 +171,9 @@ fn show_config(config: &GatewayConfig, section: &str) -> anyhow::Result<()> {
             }
             "channels" => {
                 show_file_if_exists(&ta_dir.join("config.yaml"), "Channels")?;
+            }
+            "plugins" => {
+                show_plugins(project_root)?;
             }
             other => {
                 eprintln!("Unknown section: {}", other);
@@ -387,6 +404,190 @@ channels:
     Ok(())
 }
 
+/// Show plugin status: manifest requirements vs installed plugins.
+fn show_plugins(project_root: &Path) -> anyhow::Result<()> {
+    use ta_changeset::project_manifest::ProjectManifest;
+    use ta_changeset::registry_client::detect_platform;
+
+    println!("=== Plugins ===");
+    println!("  Platform: {}", detect_platform());
+
+    if !ProjectManifest::exists(project_root) {
+        println!("  (no .ta/project.toml — run `ta setup resolve` after creating one)");
+        println!();
+        return Ok(());
+    }
+
+    match ProjectManifest::load(project_root) {
+        Ok(manifest) => {
+            println!("  Project: {}", manifest.project.name);
+            if manifest.plugins.is_empty() {
+                println!("  No plugins declared.");
+            } else {
+                let installed = ta_changeset::plugin::discover_plugins(project_root);
+                println!("  Declared plugins:");
+                for (name, req) in &manifest.plugins {
+                    let status = match installed.iter().find(|p| p.manifest.name == *name) {
+                        Some(p) => {
+                            if ta_changeset::project_manifest::version_satisfies(
+                                &p.manifest.version,
+                                &req.version,
+                            ) {
+                                format!("installed (v{})", p.manifest.version)
+                            } else {
+                                format!("outdated (v{}, needs {})", p.manifest.version, req.version)
+                            }
+                        }
+                        None => "missing".to_string(),
+                    };
+                    let req_label = if req.required { "" } else { " (optional)" };
+                    println!(
+                        "    {} [{}] {} — {}{}",
+                        name, req.plugin_type, req.version, status, req_label
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            println!("  Error loading project.toml: {}", e);
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Resolve and install plugins from .ta/project.toml.
+fn resolve_plugins(config: &GatewayConfig, ci_mode: bool) -> anyhow::Result<()> {
+    use ta_changeset::plugin_resolver::{resolve_all, PluginResolveResult};
+    use ta_changeset::project_manifest::ProjectManifest;
+    use ta_changeset::registry_client::detect_platform;
+
+    let project_root = &config.workspace_root;
+
+    println!("Platform: {}", detect_platform());
+
+    let manifest = match ProjectManifest::load(project_root) {
+        Ok(m) => m,
+        Err(ta_changeset::project_manifest::ManifestError::NotFound { path }) => {
+            if ci_mode {
+                anyhow::bail!(
+                    "No project manifest found at {}. \
+                     Create .ta/project.toml to declare plugin requirements.",
+                    path.display()
+                );
+            }
+            println!("No .ta/project.toml found.");
+            println!();
+            println!("Create one to declare plugin requirements:");
+            println!();
+            println!("  [project]");
+            println!("  name = \"my-project\"");
+            println!();
+            println!("  [plugins.discord]");
+            println!("  type = \"channel\"");
+            println!("  version = \">=0.1.0\"");
+            println!("  source = \"registry:ta-channel-discord\"");
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    println!("Project: {}", manifest.project.name);
+    if manifest.plugins.is_empty() {
+        println!("No plugins declared in project.toml.");
+        return Ok(());
+    }
+
+    println!("Resolving {} plugin(s)...", manifest.plugins.len());
+    println!();
+
+    let report = resolve_all(&manifest, project_root, ci_mode);
+
+    // Print results.
+    for result in &report.results {
+        match result {
+            PluginResolveResult::AlreadyInstalled {
+                name,
+                installed_version,
+            } => {
+                println!(
+                    "  [ok]      {} v{} — already installed",
+                    name, installed_version
+                );
+            }
+            PluginResolveResult::Installed {
+                name,
+                version,
+                source,
+            } => {
+                println!("  [install] {} v{} — from {}", name, version, source);
+            }
+            PluginResolveResult::BuiltFromSource { name, source_path } => {
+                println!(
+                    "  [build]   {} — built from {}",
+                    name,
+                    source_path.display()
+                );
+            }
+            PluginResolveResult::Failed { name, reason } => {
+                println!("  [FAIL]    {} — {}", name, reason);
+            }
+            PluginResolveResult::Skipped { name, reason } => {
+                println!("  [skip]    {} — {} (optional)", name, reason);
+            }
+        }
+    }
+
+    // Print environment variable warnings.
+    if !report.missing_env_vars.is_empty() {
+        println!();
+        println!("Missing environment variables:");
+        for (plugin, vars) in &report.missing_env_vars {
+            for var in vars {
+                println!("  {} needs ${}", plugin, var);
+            }
+        }
+        if ci_mode {
+            anyhow::bail!(
+                "Missing required environment variables. Set them and re-run `ta setup resolve --ci`."
+            );
+        } else {
+            println!();
+            println!("Set these variables before starting the daemon.");
+            println!("Plugins may still work partially without them.");
+        }
+    }
+
+    // Summary.
+    println!();
+    println!(
+        "Resolved: {} ok, {} failed, {} skipped",
+        report.success_count(),
+        report.failure_count(),
+        report
+            .results
+            .iter()
+            .filter(|r| matches!(r, PluginResolveResult::Skipped { .. }))
+            .count()
+    );
+
+    if !report.all_ok() {
+        if ci_mode {
+            anyhow::bail!(
+                "Plugin resolution failed. {} plugin(s) could not be installed.",
+                report.failure_count()
+            );
+        } else {
+            println!();
+            println!("Some plugins failed to install. Check the errors above.");
+            println!("You can re-run `ta setup resolve` after fixing the issues.");
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +654,102 @@ mod tests {
         let config = test_config(&dir);
         let result = run_refine(&config, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_no_manifest_interactive() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        // Should not error in interactive mode when no manifest exists.
+        let result = resolve_plugins(&config, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_no_manifest_ci_errors() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        // CI mode should error when no manifest exists.
+        let result = resolve_plugins(&config, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_empty_manifest() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(ta_dir.join("project.toml"), "[project]\nname = \"test\"\n").unwrap();
+
+        let config = test_config(&dir);
+        let result = resolve_plugins(&config, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_with_already_installed_plugin() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+
+        // Create project.toml.
+        std::fs::write(
+            ta_dir.join("project.toml"),
+            r#"[project]
+name = "test"
+
+[plugins.test-plug]
+type = "channel"
+version = ">=0.1.0"
+source = "path:./nonexistent"
+"#,
+        )
+        .unwrap();
+
+        // Install the plugin manually.
+        let plugin_dir = ta_dir.join("plugins").join("channels").join("test-plug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("channel.toml"),
+            r#"
+name = "test-plug"
+version = "0.2.0"
+command = "test"
+protocol = "json-stdio"
+"#,
+        )
+        .unwrap();
+
+        let config = test_config(&dir);
+        let result = resolve_plugins(&config, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn show_plugins_no_manifest() {
+        let dir = TempDir::new().unwrap();
+        // Should not panic.
+        show_plugins(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn show_plugins_with_manifest() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("project.toml"),
+            r#"[project]
+name = "test"
+
+[plugins.slack]
+type = "channel"
+version = ">=0.1.0"
+source = "registry:ta-channel-slack"
+"#,
+        )
+        .unwrap();
+
+        show_plugins(dir.path()).unwrap();
     }
 }

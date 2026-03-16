@@ -339,6 +339,11 @@ pub fn install_plugin(
     })
 }
 
+/// Recursively copy directory contents (public wrapper for plugin_resolver).
+pub fn copy_dir_contents_public(src: &Path, dst: &Path) -> Result<(), PluginError> {
+    copy_dir_contents(src, dst)
+}
+
 /// Recursively copy directory contents.
 fn copy_dir_contents(src: &Path, dst: &Path) -> Result<(), PluginError> {
     for entry in std::fs::read_dir(src)? {
