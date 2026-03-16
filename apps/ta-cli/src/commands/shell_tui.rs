@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -29,7 +29,10 @@ use super::shell::{resolve_daemon_url, StatusInfo};
 
 // ── TUI mouse handling (v0.11.4.2) ──────────────────────────────────
 //
-// Mouse capture is enabled via crossterm's `EnableMouseCapture`.
+// Mouse: selective ANSI modes — ?1000h (normal tracking: scroll + click)
+// + ?1006h (SGR encoding). We intentionally omit ?1002h (button-event) and
+// ?1003h (any-event) so the terminal keeps native click-drag text selection.
+// This means Command+C/Ctrl+C copies natively without a chime.
 // All mouse events (scroll, click, drag) are handled by the TUI:
 //   - Scroll wheel → scroll output pane
 //   - Left click-drag → text selection (highlighted in TUI)
@@ -752,9 +755,14 @@ async fn run_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    // Enable mouse capture — TUI handles scroll, selection, and clipboard
-    // copy internally. Native selection is replaced by TUI selection.
-    stdout.execute(EnableMouseCapture)?;
+    // Enable selective mouse tracking: scroll wheel + click events only.
+    // ?1000h = normal tracking (button press/release, scroll wheel)
+    // ?1006h = SGR encoding (supports coordinates >223)
+    // We do NOT enable ?1002h/?1003h — those capture drag/motion and break
+    // native text selection + Command+C copy.
+    use std::io::Write;
+    stdout.write_all(b"\x1b[?1000h\x1b[?1006h")?;
+    stdout.flush()?;
     // Bracketed paste: pasted text arrives as Event::Paste(String) instead of
     // individual key events, so we can insert without executing on newlines.
     stdout.execute(EnableBracketedPaste)?;
@@ -798,7 +806,12 @@ async fn run_tui(
     running.store(false, Ordering::Relaxed);
     disable_raw_mode()?;
     terminal.backend_mut().execute(DisableBracketedPaste)?;
-    terminal.backend_mut().execute(DisableMouseCapture)?;
+    // Disable selective mouse tracking (reverse of startup).
+    {
+        let backend = terminal.backend_mut();
+        std::io::Write::write_all(backend, b"\x1b[?1006l\x1b[?1000l")?;
+        std::io::Write::flush(backend)?;
+    }
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     // Save history.
@@ -1379,14 +1392,10 @@ async fn handle_terminal_event(
                         });
                     }
                 }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    // Extend selection as user drags.
-                    if let Some(ref mut sel) = app.selection {
-                        sel.extent = pos;
-                    }
-                }
                 MouseEventKind::Up(MouseButton::Left) => {
-                    // Finalize selection — copy to clipboard if non-empty.
+                    // Click-up without shift: if we have a shift-click selection,
+                    // finalize and copy. Otherwise this is just a plain click — ignore.
+                    // (Drag selection is handled natively by the terminal now.)
                     if let Some(ref sel) = app.selection {
                         if sel.anchor != sel.extent {
                             let text = extract_selection_text(app, sel);
@@ -1394,7 +1403,7 @@ async fn handle_terminal_event(
                                 copy_to_clipboard(&text);
                             }
                         } else {
-                            // Click without drag — clear selection.
+                            // Click without shift-extend — clear selection.
                             app.selection = None;
                         }
                     }
