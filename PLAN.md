@@ -4036,6 +4036,30 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 ---
 
+### v0.11.5.0 — Shell Mouse Scroll & TUI-Managed Selection (revisit)
+<!-- status: pending -->
+**Goal**: Re-examine mouse scroll and TUI-managed text selection with a working, tested solution. v0.11.4.2 attempted mouse capture but it broke native selection and caused Command+C chime. The current solution (no mouse capture) sacrifices scroll wheel for native selection. This phase finds a way to have both.
+
+#### Research & approach
+
+1. [ ] **Survey Rust TUI apps**: Study how `helix`, `zellij`, `gitui`, `bottom`, `lazygit` handle mouse scroll + text selection simultaneously. Document which ANSI modes each uses and test native selection in each.
+
+2. [ ] **Test `?1000h` alone across terminals**: `?1000h` (normal tracking) captures button press/release including scroll wheel. Does it break native selection in Terminal.app, iTerm2, Windows Terminal, GNOME Terminal, Alacritty, Kitty, WezTerm? Document per-terminal behavior.
+
+3. [ ] **Test `?1007h` (alternate scroll mode)**: Does it reliably convert scroll wheel to Up/Down arrow keys in all target terminals? Can we distinguish scroll-generated arrows from real arrow presses (e.g., via timing heuristics)?
+
+4. [ ] **Evaluate hybrid approach**: Enable `?1000h` + `?1002h` (button-event tracking) for TUI-managed selection + scroll. Implement complete TUI selection with click-drag, shift+click extend, auto-copy on mouse-up via `pbcopy`/`xclip`/`clip.exe`. Test that this is a complete replacement for native selection (renders highlight, copies to system clipboard, works cross-platform).
+
+5. [ ] **Mouse mode toggle**: If no single mode works everywhere, implement a user-configurable toggle (e.g., `[shell] mouse_mode = "native" | "tui"`) with `native` as default. Status bar shows current mode.
+
+6. [ ] **Scroll wheel without capture**: Investigate whether SIGWINCH or terminal-specific protocols can report scroll without full mouse capture.
+
+**Files**: `apps/ta-cli/src/commands/shell_tui.rs`
+
+#### Version: `0.11.5-alpha.0`
+
+---
+
 ### v0.12.0 — Template Projects & Bootstrap Flow
 <!-- status: pending -->
 **Goal**: `ta new` generates projects with `project.toml` plugin declarations so downstream users get a complete, working setup from `ta setup` alone. Template projects in the Trusted-Autonomy org serve as reference implementations. Also: replace the quick-fix Discord command listener with a proper slash-command-based bidirectional integration.

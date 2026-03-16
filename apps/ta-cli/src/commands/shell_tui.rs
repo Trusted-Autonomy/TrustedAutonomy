@@ -284,6 +284,7 @@ struct App {
     #[allow(dead_code)]
     selection: Option<Selection>,
     /// Cached output pane area from the last draw (for mouse coordinate mapping).
+    #[allow(dead_code)]
     output_area: ratatui::layout::Rect,
 }
 
@@ -848,9 +849,8 @@ async fn tui_event_loop(
     use std::time::{Duration, Instant};
 
     // Frame rate limiter: draw at most every 16ms (~60fps).
-    // Input events always trigger an immediate redraw.
     let frame_interval = Duration::from_millis(16);
-    let mut last_draw = Instant::now() - frame_interval; // draw immediately on first loop
+    let mut last_draw = Instant::now() - frame_interval;
     let mut needs_draw = true;
 
     loop {
@@ -875,132 +875,54 @@ async fn tui_event_loop(
             terminal.draw(|f| draw_ui(f, app))?;
             last_draw = Instant::now();
             needs_draw = false;
-
-            // Cache the output pane area for mouse coordinate mapping.
-            let size = terminal.size()?;
-            let prompt = app.prompt_str();
-            let display = format!("{}{}", prompt, app.input);
-            let inner_width = size.width.max(1) as usize;
-            let content_lines = {
-                let mut lines = 0u16;
-                let mut col = 0usize;
-                for ch in display.chars() {
-                    if ch == '\n' {
-                        lines += 1;
-                        col = 0;
-                    } else {
-                        col += 1;
-                        if col >= inner_width {
-                            lines += 1;
-                            col = 0;
-                        }
-                    }
-                }
-                lines + 1
-            };
-            let input_height = (content_lines + 2).min(size.height / 2).max(3);
-            let output_height = size.height.saturating_sub(input_height + 1);
-            app.output_area = ratatui::layout::Rect {
-                x: 0,
-                y: 0,
-                width: size.width,
-                height: output_height,
-            };
         }
 
         if !app.running {
             break;
         }
 
-        // ── Input-first event processing ───────────────────────────
+        // ── Poll-based event processing ────────────────────────────
         //
-        // 1. Always drain ALL pending input events first (non-blocking).
-        // 2. Process a small batch of background messages (non-blocking).
-        // 3. If nothing was available, wait for either with biased select.
+        // Pure non-blocking poll loop: check input, then bg, then sleep.
+        // Never uses tokio::select! or .await on channels — this isolates
+        // the event loop from tokio scheduler pressure caused by spawned
+        // background tasks (SSE streams, agent output, health checks).
         //
-        // This ensures keystrokes are never starved by background traffic.
+        // Worst-case input latency: 1ms (the sleep duration when idle).
 
-        // Step 1: Drain all pending input events.
-        let mut input_count = 0;
+        let mut did_work = false;
+
+        // 1. Drain ALL pending input events (always first priority).
         let mut pending_inputs = Vec::new();
         if let Some(ref mut input_rx) = app.input_rx {
             while let Ok(ev) = input_rx.try_recv() {
                 pending_inputs.push(ev);
             }
         }
-        for ev in pending_inputs {
-            handle_terminal_event(app, ev, client, &tx).await;
-            input_count += 1;
+        if !pending_inputs.is_empty() {
+            for ev in pending_inputs {
+                handle_terminal_event(app, ev, client, &tx).await;
+            }
+            did_work = true;
         }
 
-        // Step 2: Process ONE background message (non-blocking).
-        // Only one per cycle ensures input is never starved by heavy SSE traffic.
-        // With 60fps draw rate, this still processes ~60 bg messages/second.
-        let mut bg_count = 0;
+        // 2. Process ONE background message (non-blocking).
         if let Ok(msg) = rx.try_recv() {
             process_background_message(app, msg, client, &tx).await;
-            bg_count = 1;
+            did_work = true;
         }
 
-        if input_count > 0 || bg_count > 0 {
-            // We processed something — mark for redraw and loop immediately.
+        if did_work {
             needs_draw = true;
+            // Loop immediately to check for more input before drawing.
+            // This ensures rapid keystrokes are batched into one frame.
             continue;
         }
 
-        // Step 3: Nothing pending — wait for either input or background message.
-        // Compute remaining time until next frame to avoid busy-waiting.
-        let elapsed = last_draw.elapsed();
-        let sleep_dur = if needs_draw {
-            // A draw is pending but we're within the frame interval — wait it out.
-            frame_interval.saturating_sub(elapsed)
-        } else {
-            // Nothing to draw — sleep up to 100ms to keep health checks responsive.
-            Duration::from_millis(100)
-        };
-
-        let wait_input = async {
-            if let Some(ref mut input_rx) = app.input_rx {
-                input_rx.recv().await
-            } else {
-                std::future::pending().await
-            }
-        };
-
-        tokio::select! {
-            biased;  // Always check input first.
-            ev = wait_input => {
-                if let Some(ev) = ev {
-                    handle_terminal_event(app, ev, client, &tx).await;
-                    // Drain any additional queued input.
-                    let mut more = Vec::new();
-                    if let Some(ref mut input_rx) = app.input_rx {
-                        while let Ok(ev) = input_rx.try_recv() {
-                            more.push(ev);
-                        }
-                    }
-                    for ev in more {
-                        handle_terminal_event(app, ev, client, &tx).await;
-                    }
-                    needs_draw = true;
-                }
-            }
-            msg = rx.recv() => {
-                if let Some(msg) = msg {
-                    process_background_message(app, msg, client, &tx).await;
-                    needs_draw = true;
-                }
-            }
-            _ = tokio::time::sleep(sleep_dur) => {
-                // Timer expired — if needs_draw was set, loop will draw.
-                // Otherwise this just keeps the loop alive for health checks.
-                if needs_draw {
-                    // Will draw on next iteration.
-                } else {
-                    // Nothing happened — loop back without drawing.
-                }
-            }
-        }
+        // 3. Nothing pending — sleep 1ms to avoid busy-wait.
+        // This is a real OS sleep, not a tokio timer, so it doesn't
+        // depend on the tokio scheduler being responsive.
+        std::thread::sleep(Duration::from_millis(1));
     }
     Ok(())
 }
