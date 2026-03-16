@@ -1,7 +1,7 @@
 {
-  "committed": "0.11.3-alpha",
-  "deployed": "0.11.3-alpha",
+  "committed": "0.11.3-alpha.1",
+  "deployed": "0.11.3-alpha.1",
   "committed_at": "2026-03-15",
   "deployed_at": "2026-03-15",
-  "deployed_tag": "v0.11.3-alpha"
+  "deployed_tag": "v0.11.3.1-alpha"
 }

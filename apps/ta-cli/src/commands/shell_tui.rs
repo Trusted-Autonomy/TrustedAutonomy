@@ -12,7 +12,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseEventKind,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -672,9 +675,10 @@ async fn run_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    // Mouse capture intentionally NOT enabled — preserves native text selection
-    // (click-drag to copy). Scrolling uses PageUp/PageDown (full page) or
-    // Shift+Up/Down (1 line). Mouse wheel scrolls terminal scrollback natively.
+    // Enable mouse capture so trackpad/wheel scroll events reach the TUI.
+    // Without this, scroll events go to the terminal's main buffer and show
+    // pre-shell content. Text selection works via Shift+click-drag.
+    stdout.execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -695,6 +699,7 @@ async fn run_tui(
     // Cleanup.
     running.store(false, Ordering::Relaxed);
     disable_raw_mode()?;
+    terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     // Save history.
@@ -912,6 +917,8 @@ async fn handle_terminal_event(
                             }
                             "help" | ":help" | "?" => {
                                 app.push_lines(HELP_TEXT, OutputLine::info);
+                                // Also show CLI commands for discoverability.
+                                app.push_lines(CLI_HELP_TEXT, OutputLine::info);
                                 return;
                             }
                             ":status" => {
@@ -1059,7 +1066,7 @@ async fn handle_terminal_event(
                     let page = crossterm::terminal::size()
                         .map(|(_, h)| h as usize)
                         .unwrap_or(40);
-                    app.scroll_up(page.saturating_sub(4)); // leave 4 lines overlap
+                    app.scroll_up(page.saturating_sub(4));
                 }
                 (KeyCode::PageDown, _) => {
                     let page = crossterm::terminal::size()
@@ -1073,9 +1080,11 @@ async fn handle_terminal_event(
                 _ => {}
             }
         }
-        Event::Mouse(_) => {
-            // Mouse capture not enabled — terminal handles natively.
-        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => app.scroll_up(3),
+            MouseEventKind::ScrollDown => app.scroll_down(3),
+            _ => {} // Click/drag ignored — Shift+click-drag for text selection.
+        },
         Event::Resize(_, _) => {
             // Terminal will re-draw on next loop iteration.
         }
@@ -2601,9 +2610,11 @@ Shell commands:
   :status            Refresh the status bar
   clear              Clear the output pane
   Ctrl-L             Clear the output pane
-  PgUp / PgDn        Scroll output 10 lines
+  Scroll (trackpad)  Scroll output 3 lines per tick
+  PgUp / PgDn        Scroll output one full page
   Shift+Up / Down    Scroll output 1 line
   Shift+Home / End   Scroll to top / bottom of output
+  Shift+click-drag   Select text for copy (mouse capture is active)
   Tab                Auto-complete commands
   Ctrl-W             Toggle split pane (shell | agent side-by-side)
   Ctrl-C / exit      Exit the shell (Ctrl-C detaches when tailing)
@@ -2612,6 +2623,29 @@ Scrollback:
   Output is retained in a scrollback buffer (default: 50000 lines).
   Configure via [shell] scrollback_lines in .ta/workflow.toml (minimum: 10000).
   Status bar shows scroll position and new output indicator when scrolled up.";
+
+const CLI_HELP_TEXT: &str = "\
+CLI Commands (prefix with 'ta' or use directly):
+  goal <cmd>         Manage goal runs (start, list, status, delete, inspect, doctor, gc)
+  draft <cmd>        Review and manage draft packages (view, approve, deny, apply, list)
+  run <title>        Run an agent in a TA-mediated staging workspace
+  dev                Interactive developer loop
+  plan <cmd>         View and track the development plan (list, status, add)
+  status             Project-wide dashboard: agents, drafts, next phase
+  build              Build the project using the configured adapter
+  doctor             System-wide health check
+  daemon <cmd>       Manage daemon lifecycle (start, stop, restart, status, log)
+  plugin <cmd>       Manage channel plugins (list, install, validate)
+  workflow <cmd>     Manage multi-stage workflows
+  gc                 Unified garbage collection
+  context <cmd>      Manage persistent context memory
+  audit <cmd>        Inspect the audit trail
+  release <cmd>      Run the configurable release pipeline
+  setup              Interactive setup wizard
+  verify             Pre-draft verification checks
+  config <cmd>       Inspect and validate configuration
+
+Run 'ta <command> --help' for details on any command.";
 
 #[cfg(test)]
 mod tests {
