@@ -357,6 +357,11 @@ pub fn execute(
         );
     }
 
+    // Ensure the daemon is running before starting the dev loop (v0.11.2.6).
+    // The daemon relays agent output to ta shell via SSE — without it, output
+    // is silently lost when a user has ta shell open alongside ta dev.
+    super::daemon::ensure_running(&project_root)?;
+
     println!("Starting interactive developer loop...");
     println!("  Project: {}", project_root.display());
     println!("  Session: {}", &session_id[..8]);
