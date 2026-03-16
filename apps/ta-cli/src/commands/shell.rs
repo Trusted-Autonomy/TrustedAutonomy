@@ -754,6 +754,11 @@ pub(crate) fn render_sse_event(frame: &str) -> Option<String> {
     let event_type = event_type?;
     let data = data?;
 
+    // Internal diagnostic events — suppress from user-facing output.
+    if event_type == "health_check" {
+        return None;
+    }
+
     // Parse JSON data for a human-readable one-liner.
     let json: serde_json::Value = serde_json::from_str(data).ok()?;
     let payload = &json["payload"];
@@ -1124,6 +1129,15 @@ mod tests {
     fn render_sse_event_malformed_returns_none() {
         assert!(render_sse_event("just text").is_none());
         assert!(render_sse_event("event: x").is_none());
+    }
+
+    #[test]
+    fn render_sse_event_suppresses_health_check() {
+        let frame = "event: health_check\ndata: {\"event_type\":\"health_check\",\"payload\":{\"goals_checked\":2,\"issues\":[]}}";
+        assert!(
+            render_sse_event(frame).is_none(),
+            "health_check events should be suppressed"
+        );
     }
 
     #[test]
