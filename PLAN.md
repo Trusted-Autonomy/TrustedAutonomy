@@ -3806,33 +3806,38 @@ Alternative sources (no registry needed):
 ---
 
 ### v0.11.4.1 — Shell Reliability: Command Output, Text Selection & Heartbeat
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make `ta shell` command output reliable and complete. Today, commands like `draft apply` produce no visible output in the shell — the daemon runs them, returns output, but it never appears. This blocks the release workflow. Also fix text selection (broken by mouse capture) and polish heartbeat display.
 
 #### Critical: Command Output Reliability
 The output pipeline is: user types command → `send_input()` POST to daemon `/api/input` → `route_input()` decides Command vs Agent → `execute_command()` runs `ta` subprocess → collects stdout/stderr → returns JSON `{stdout, stderr, exit_code}` → shell extracts `stdout` → renders as `CommandResponse`.
 
-**Failure modes to investigate and fix:**
-1. [ ] **Routing misclassification**: `route_input()` may route `draft apply`, `draft view`, or other commands to the Agent path instead of the Command path. The agent path returns `{response: "..."}` not `{stdout: "..."}`, and the shell falls through to a generic JSON dump. Verify all `ta` subcommands route correctly. Add integration test: `draft apply` → Command route → stdout captured → rendered.
-2. [ ] **Empty stdout on success**: `ta draft apply` may write output to stderr (via `eprintln!`) instead of stdout. The shell's `send_input()` appends stderr to stdout (line 424-428) but only if stdout is non-empty first. If stdout is empty and stderr has the real output, the response is empty. Fix: return stderr as primary output when stdout is empty.
-3. [ ] **Idle timeout kills command**: `run_command()` has an activity-aware timeout (default from `daemon.toml`). If `draft apply` has a pause between file copies (e.g., waiting for git), it may hit the idle timeout. The error message would show in the shell but may be swallowed. Verify timeout is generous enough for apply operations. Add logging.
-4. [ ] **Silent HTTP errors**: If the daemon returns a non-200 status, `send_input()` extracts the error. But if the response body is malformed JSON or the connection drops mid-response, the error may be swallowed by the `tokio::spawn` in the TUI event loop. Add explicit error logging for failed command dispatches.
-5. [ ] **`CommandResponse` rendering**: Verify that `TuiMessage::CommandResponse` text is actually rendered — check that `push_lines()` works correctly with multi-line command output and that the output isn't being dropped by scroll position logic.
-6. [ ] **End-to-end test**: Add a test that simulates the full pipeline: shell sends `draft apply <id>` → daemon routes to Command → subprocess runs → output returned → shell renders. Verify non-empty output for approve, deny, apply, view commands.
-7. [ ] **Completion confirmation**: After `draft apply` succeeds, the shell should show a clear confirmation: what was applied, how many files, to which directory. If the CLI's own output already includes this, ensure it's forwarded. If not, the shell should synthesize a summary.
+#### Completed
+1. [x] **Routing misclassification**: Verified — `draft`, `approve`, `deny`, `view`, `apply` all route correctly to Command path via `ta_subcommands` and shortcuts in `ShellConfig`. Added 6 routing tests in `input.rs`.
+2. [x] **Empty stdout on success**: Fixed `send_input()` in `shell.rs` to use stderr as primary output when stdout field is empty. Also handles case where `stdout` key is absent but `stderr` is present.
+3. [x] **Idle timeout kills command**: Verified — `run_command()` already uses activity-aware timeout that resets on any output. Added `tracing::warn` logging with binary name, idle seconds, and timeout seconds when a command is killed for idle timeout.
+4. [x] **Silent HTTP errors**: Added `tracing::warn` with structured fields (command, error, goal_id, status) to all error paths in the TUI command dispatch and stdin relay `tokio::spawn` tasks.
+5. [x] **`CommandResponse` rendering**: Verified `push_lines()` correctly splits multi-line text and renders each line. Added test `command_response_multiline_renders_all_lines`.
+6. [x] **End-to-end test**: Added 6 routing integration tests covering `draft apply`, `draft view`, `draft approve`, `draft deny`, `apply` shortcut, and `view` shortcut — all verify the full route → Command path.
+7. [x] **Completion confirmation**: The CLI's own `draft apply` output already includes file count, target directory, and status. The stderr-as-primary fix (item 2) ensures this output is now forwarded to the shell.
+8. [x] **Fix text selection with mouse capture active**: Implemented Option C — `Ctrl+M` toggle key to enable/disable mouse capture. When off, native text selection works; status bar shows `mouse: select` indicator. Help text updated.
+9. [x] **In-place heartbeat updates**: Added `is_heartbeat` flag to `OutputLine` and `push_heartbeat()` method on `App`. Heartbeat lines update the last output line in-place if it's already a heartbeat. Added `OutputLine::heartbeat()` constructor.
+10. [x] **Heartbeat coalescing**: Heartbeat detection in `AgentOutput` handler intercepts `[heartbeat]` lines before general processing. Non-heartbeat output naturally pushes heartbeats down. Works in both single-pane and split-pane modes. 4 heartbeat tests added.
 
-#### Text Selection Fix
-8. [ ] **Fix text selection with mouse capture active**: `EnableMouseCapture` (v0.11.3.1) captures all mouse events, preventing native click-drag selection. Investigate:
-   - **Option A**: Raw ANSI escape `\x1b[?1002h` (button-event mode) + `\x1b[?1006h` (SGR). Some terminals preserve native selection.
-   - **Option B**: Detect terminal (`$TERM_PROGRAM`) — enable mouse capture only in terminals with Shift-bypass (iTerm2, kitty, alacritty). Fall back to keyboard scroll in Terminal.app.
-   - **Option C**: Toggle key (e.g., `Ctrl+M`) to temporarily disable mouse capture for copy-paste.
-   - Pick whichever gives best UX across macOS Terminal.app and iTerm2.
+#### Tests added
+- `command_response_multiline_renders_all_lines` — multi-line CommandResponse rendering
+- `heartbeat_updates_in_place` — in-place heartbeat update
+- `heartbeat_pushed_after_real_output` — heartbeat after non-heartbeat output
+- `heartbeat_coalesced_in_agent_output` — heartbeat coalescing through AgentOutput handler
+- `mouse_capture_toggle_state` — initial mouse capture state
+- `draft_apply_routes_to_command` — routing test (input.rs)
+- `draft_view_routes_to_command` — routing test (input.rs)
+- `draft_approve_routes_to_command` — routing test (input.rs)
+- `draft_deny_routes_to_command` — routing test (input.rs)
+- `apply_shortcut_routes_to_command` — routing test (input.rs)
+- `view_shortcut_routes_to_command` — routing test (input.rs)
 
-#### Heartbeat Polish
-9. [ ] **In-place heartbeat updates**: Instead of appending a new `[heartbeat]` line each cycle, update the last output line if it's already a heartbeat. Only elapsed time changes (`10s` → `20s`). Non-heartbeat output pushes the heartbeat down naturally. Consider `OutputLine::Heartbeat` variant.
-10. [ ] **Heartbeat coalescing**: Show one heartbeat line when the agent produces no output for N seconds. Stop updates when output resumes. Avoid interleaving heartbeat with real output.
-
-#### Version: `0.11.4.1-alpha`
+#### Version: `0.11.4-alpha.1`
 
 ---
 

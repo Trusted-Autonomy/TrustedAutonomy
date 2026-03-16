@@ -101,6 +101,8 @@ pub struct PendingStdinPrompt {
 struct OutputLine {
     text: String,
     style: Style,
+    /// Whether this line is a heartbeat that should be updated in-place (v0.11.4.1 item 9).
+    is_heartbeat: bool,
 }
 
 impl OutputLine {
@@ -108,6 +110,7 @@ impl OutputLine {
         Self {
             text,
             style: Style::default(),
+            is_heartbeat: false,
         }
     }
 
@@ -115,6 +118,7 @@ impl OutputLine {
         Self {
             text,
             style: Style::default().fg(Color::DarkGray),
+            is_heartbeat: false,
         }
     }
 
@@ -122,6 +126,7 @@ impl OutputLine {
         Self {
             text,
             style: Style::default().fg(Color::Red),
+            is_heartbeat: false,
         }
     }
 
@@ -129,6 +134,7 @@ impl OutputLine {
         Self {
             text,
             style: Style::default().fg(Color::Cyan),
+            is_heartbeat: false,
         }
     }
 
@@ -136,6 +142,7 @@ impl OutputLine {
         Self {
             text,
             style: Style::default().fg(Color::White),
+            is_heartbeat: false,
         }
     }
 
@@ -143,6 +150,7 @@ impl OutputLine {
         Self {
             text,
             style: Style::default().fg(Color::Yellow),
+            is_heartbeat: false,
         }
     }
 
@@ -152,6 +160,7 @@ impl OutputLine {
             style: Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
+            is_heartbeat: false,
         }
     }
 
@@ -159,6 +168,16 @@ impl OutputLine {
         Self {
             text,
             style: Style::default().fg(Color::DarkGray),
+            is_heartbeat: false,
+        }
+    }
+
+    /// Heartbeat line — updated in-place instead of appending (v0.11.4.1 item 9).
+    fn heartbeat(text: String) -> Self {
+        Self {
+            text,
+            style: Style::default().fg(Color::DarkGray),
+            is_heartbeat: true,
         }
     }
 }
@@ -221,6 +240,9 @@ struct App {
     prompt_dismiss_after_output_secs: u64,
     /// Seconds to wait for Q&A agent prompt verification (v0.11.2.5).
     prompt_verify_timeout_secs: u64,
+    /// Whether mouse capture is currently active (v0.11.4.1 item 8).
+    /// Ctrl+M toggles this off to allow native text selection.
+    mouse_capture_enabled: bool,
 }
 
 impl App {
@@ -260,6 +282,7 @@ impl App {
             project_root,
             prompt_dismiss_after_output_secs: 5,
             prompt_verify_timeout_secs: 10,
+            mouse_capture_enabled: true,
         }
     }
 
@@ -282,6 +305,20 @@ impl App {
         for line in text.lines() {
             self.push_output(style_fn(line.to_string()));
         }
+    }
+
+    /// Push a heartbeat line, updating the last line in-place if it's already
+    /// a heartbeat (v0.11.4.1 item 9). This avoids flooding the output with
+    /// repeated heartbeat lines — only the elapsed time changes.
+    fn push_heartbeat(&mut self, text: String) {
+        if let Some(last) = self.output.last_mut() {
+            if last.is_heartbeat {
+                // Update in-place — don't append a new line.
+                last.text = text;
+                return;
+            }
+        }
+        self.push_output(OutputLine::heartbeat(text));
     }
 
     fn prompt_str(&self) -> String {
@@ -837,6 +874,26 @@ async fn handle_terminal_event(
                     app.scroll_offset = 0;
                     app.unread_events = 0;
                 }
+                (KeyCode::Char('m'), KeyModifiers::CONTROL) => {
+                    // Toggle mouse capture for text selection (v0.11.4.1 item 8).
+                    // When mouse capture is off, native click-drag selection works
+                    // but trackpad/wheel scroll is handled by the terminal, not TUI.
+                    app.mouse_capture_enabled = !app.mouse_capture_enabled;
+                    let mut stdout = io::stdout();
+                    if app.mouse_capture_enabled {
+                        let _ = stdout.execute(EnableMouseCapture);
+                        app.push_output(OutputLine::info(
+                            "Mouse capture: on (trackpad scroll works, Shift+drag to select text)"
+                                .to_string(),
+                        ));
+                    } else {
+                        let _ = stdout.execute(DisableMouseCapture);
+                        app.push_output(OutputLine::info(
+                            "Mouse capture: off (native text selection works, use keyboard to scroll)"
+                                .to_string(),
+                        ));
+                    }
+                }
                 (KeyCode::Enter, _) => {
                     if let Some(text) = app.submit() {
                         // Echo the command.
@@ -864,13 +921,25 @@ async fn handle_terminal_event(
                                         )));
                                     }
                                     Ok(resp) => {
+                                        let status = resp.status();
                                         let body = resp.text().await.unwrap_or_default();
+                                        tracing::warn!(
+                                            goal_id = %sp.goal_id,
+                                            status = %status,
+                                            body = %body,
+                                            "Stdin relay failed"
+                                        );
                                         let _ = tx.send(TuiMessage::CommandResponse(format!(
-                                            "Error sending input: {}",
-                                            body
+                                            "Error sending input (HTTP {}): {}",
+                                            status, body
                                         )));
                                     }
                                     Err(e) => {
+                                        tracing::warn!(
+                                            goal_id = %sp.goal_id,
+                                            error = %e,
+                                            "Stdin relay connection error"
+                                        );
                                         let _ = tx.send(TuiMessage::CommandResponse(format!(
                                             "Error sending stdin input: {}",
                                             e
@@ -1029,6 +1098,13 @@ async fn handle_terminal_event(
                                 }
                                 Err(e) => {
                                     let msg = e.to_string();
+                                    // Log explicitly so errors aren't silently swallowed
+                                    // by the tokio::spawn boundary (v0.11.4.1 item 4).
+                                    tracing::warn!(
+                                        command = %text,
+                                        error = %e,
+                                        "Command dispatch failed"
+                                    );
                                     if msg.contains("Cannot reach daemon") {
                                         let _ = tx.send(TuiMessage::DaemonDown);
                                     }
@@ -1191,6 +1267,25 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                         "[info] Prompt dismissed — agent continued output".to_string(),
                     ));
                 }
+            }
+
+            // Heartbeat coalescing: detect [heartbeat] lines and update in-place
+            // instead of appending (v0.11.4.1 items 9-10).
+            if line.line.starts_with("[heartbeat]") {
+                let heartbeat_text = line.line.clone();
+                if app.split_pane {
+                    // Update last line in agent pane if it's a heartbeat.
+                    if let Some(last) = app.agent_output.last_mut() {
+                        if last.is_heartbeat {
+                            last.text = heartbeat_text;
+                            return;
+                        }
+                    }
+                    app.agent_output.push(OutputLine::heartbeat(heartbeat_text));
+                } else {
+                    app.push_heartbeat(heartbeat_text);
+                }
+                return;
             }
 
             let styled = if line.stream == "stderr" {
@@ -1779,6 +1874,19 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Mouse capture indicator (v0.11.4.1 item 8).
+    // Only show when mouse capture is off (the noteworthy state).
+    if !app.mouse_capture_enabled {
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            " mouse: select ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -2441,7 +2549,11 @@ fn handle_follow_up_picker(app: &mut App, text: &str) {
             super::follow_up::CandidateSource::Draft => Style::default().fg(Color::Yellow),
             _ => Style::default().fg(Color::White),
         };
-        app.push_output(OutputLine { text: line, style });
+        app.push_output(OutputLine {
+            text: line,
+            style,
+            is_heartbeat: false,
+        });
     }
 
     app.push_output(OutputLine::info(
@@ -2615,6 +2727,7 @@ Shell commands:
   Shift+Up / Down    Scroll output 1 line
   Shift+Home / End   Scroll to top / bottom of output
   Shift+click-drag   Select text for copy (mouse capture is active)
+  Ctrl-M             Toggle mouse capture (off = native text selection, on = scroll)
   Tab                Auto-complete commands
   Ctrl-W             Toggle split pane (shell | agent side-by-side)
   Ctrl-C / exit      Exit the shell (Ctrl-C detaches when tailing)
@@ -3889,5 +4002,131 @@ mod tests {
         // (In test context, cwd is usually the project root or /tmp.)
         assert!(dismiss > 0);
         assert!(verify > 0);
+    }
+
+    // -- v0.11.4.1 tests --
+
+    #[test]
+    fn command_response_multiline_renders_all_lines() {
+        // Item 5: Verify CommandResponse renders multi-line text correctly.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        let multi = "Applied 3 files to /project\nDraft aaaa1111-01 marked as applied\nDone.";
+        handle_tui_message(&mut app, TuiMessage::CommandResponse(multi.to_string()));
+        assert_eq!(app.output.len(), 3);
+        assert_eq!(app.output[0].text, "Applied 3 files to /project");
+        assert_eq!(app.output[1].text, "Draft aaaa1111-01 marked as applied");
+        assert_eq!(app.output[2].text, "Done.");
+    }
+
+    #[test]
+    fn heartbeat_updates_in_place() {
+        // Item 9: Heartbeat lines update the last line instead of appending.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.push_output(OutputLine::info("Agent started".into()));
+        app.push_heartbeat("[heartbeat] still running... 10s elapsed".into());
+        assert_eq!(app.output.len(), 2);
+        assert!(app.output[1].is_heartbeat);
+
+        // Second heartbeat should update in-place, not append.
+        app.push_heartbeat("[heartbeat] still running... 20s elapsed".into());
+        assert_eq!(app.output.len(), 2);
+        assert_eq!(
+            app.output[1].text,
+            "[heartbeat] still running... 20s elapsed"
+        );
+    }
+
+    #[test]
+    fn heartbeat_pushed_after_real_output() {
+        // Item 10: Non-heartbeat output pushes the heartbeat down.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.push_heartbeat("[heartbeat] still running... 10s elapsed".into());
+        assert_eq!(app.output.len(), 1);
+
+        // Real output should push after the heartbeat.
+        app.push_output(OutputLine::agent_stdout("Building...".into()));
+        assert_eq!(app.output.len(), 2);
+        assert_eq!(app.output[1].text, "Building...");
+
+        // Next heartbeat appends (last line is not heartbeat).
+        app.push_heartbeat("[heartbeat] still running... 30s elapsed".into());
+        assert_eq!(app.output.len(), 3);
+        assert!(app.output[2].is_heartbeat);
+    }
+
+    #[test]
+    fn heartbeat_coalesced_in_agent_output() {
+        // Items 9-10: Heartbeat lines from AgentOutput are coalesced.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stderr".into(),
+                line: "[heartbeat] still running... 10s elapsed".into(),
+            }),
+        );
+        assert_eq!(app.output.len(), 1);
+        assert!(app.output[0].is_heartbeat);
+
+        // Second heartbeat updates in-place.
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stderr".into(),
+                line: "[heartbeat] still running... 20s elapsed".into(),
+            }),
+        );
+        assert_eq!(app.output.len(), 1);
+        assert_eq!(
+            app.output[0].text,
+            "[heartbeat] still running... 20s elapsed"
+        );
+
+        // Non-heartbeat output comes in — next heartbeat appends.
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stdout".into(),
+                line: "Compiling crate...".into(),
+            }),
+        );
+        assert_eq!(app.output.len(), 2);
+
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stderr".into(),
+                line: "[heartbeat] still running... 30s elapsed".into(),
+            }),
+        );
+        assert_eq!(app.output.len(), 3);
+        assert!(app.output[2].is_heartbeat);
+    }
+
+    #[test]
+    fn mouse_capture_toggle_state() {
+        // Item 8: Verify mouse_capture_enabled starts true.
+        let app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        assert!(app.mouse_capture_enabled);
     }
 }

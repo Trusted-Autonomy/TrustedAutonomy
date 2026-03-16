@@ -296,4 +296,62 @@ mod tests {
             _ => panic!("expected Agent"),
         }
     }
+
+    // -- v0.11.4.1 tests: routing reliability --
+
+    #[test]
+    fn draft_apply_routes_to_command() {
+        // Item 1: Verify `draft apply <id>` routes to Command, not Agent.
+        let config = default_config();
+        match route_input("draft apply abc123", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta draft apply abc123"),
+            _ => panic!("expected Command for 'draft apply'"),
+        }
+    }
+
+    #[test]
+    fn draft_view_routes_to_command() {
+        let config = default_config();
+        match route_input("draft view abc123", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta draft view abc123"),
+            _ => panic!("expected Command for 'draft view'"),
+        }
+    }
+
+    #[test]
+    fn draft_approve_routes_to_command() {
+        let config = default_config();
+        match route_input("draft approve abc123", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta draft approve abc123"),
+            _ => panic!("expected Command for 'draft approve'"),
+        }
+    }
+
+    #[test]
+    fn draft_deny_routes_to_command() {
+        let config = default_config();
+        match route_input("draft deny abc123", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta draft deny abc123"),
+            _ => panic!("expected Command for 'draft deny'"),
+        }
+    }
+
+    #[test]
+    fn apply_shortcut_routes_to_command() {
+        // Item 1: The "apply" shortcut expands to "ta draft apply".
+        let config = default_config();
+        match route_input("apply abc123", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta draft apply abc123"),
+            _ => panic!("expected Command from 'apply' shortcut"),
+        }
+    }
+
+    #[test]
+    fn view_shortcut_routes_to_command() {
+        let config = default_config();
+        match route_input("view abc123", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta draft view abc123"),
+            _ => panic!("expected Command from 'view' shortcut"),
+        }
+    }
 }

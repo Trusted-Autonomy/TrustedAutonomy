@@ -2960,6 +2960,7 @@ Built-in shell commands:
 | `PgUp` / `PgDn` | Scroll output one full page (with 4-line overlap) |
 | Mouse wheel / touchpad scroll | Scroll output 3 lines per tick |
 | `Shift+click-drag` | Select text for copy (mouse capture is active) |
+| `Ctrl-M` | Toggle mouse capture off/on (off = native text selection, on = trackpad scroll) |
 | `Shift+Home` / `Shift+End` | Scroll to top/bottom of output |
 | `Tab` | Auto-complete commands |
 | `Ctrl-W` | Toggle split-pane mode (agent output on the right) |
@@ -2977,6 +2978,8 @@ When a goal starts, the shell automatically streams the agent's stdout/stderr in
 - **Tailing indicator**: The status bar shows a green badge while streaming agent output.
 - **Split pane**: Press `Ctrl-W` to toggle a side-by-side view with agent output in the right pane. Agent output is rendered with markdown styling — bold, inline code, headers, and fenced code blocks are syntax-highlighted.
 - **Agent model**: The status bar shows the detected LLM model name (e.g., "Claude Opus 4") when streaming agent output.
+- **Heartbeat coalescing**: During long-running operations, heartbeat lines (`[heartbeat] still running... Ns elapsed`) update in-place instead of flooding the output. When real output arrives, the heartbeat line is pushed down naturally.
+- **Text selection**: Mouse capture enables trackpad/wheel scrolling but blocks native text selection. Press `Ctrl-M` to toggle mouse capture off for copy-paste (the status bar shows `mouse: select` when capture is off). Alternatively, `Shift+click-drag` works in terminals that support it (iTerm2, kitty, alacritty).
 
 #### Draft IDs
 
@@ -5035,6 +5038,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.3 | Self-service operations, draft amend & plan intelligence | Done |
 | v0.11.3.1 | Shell scroll & help | Done |
 | v0.11.4 | Plugin registry & project manifest (`ta setup resolve`, daemon enforcement) | Done |
+| v0.11.4.1 | Shell reliability: command output, text selection & heartbeat polish | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 
