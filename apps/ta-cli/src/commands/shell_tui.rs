@@ -1781,8 +1781,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let right_width = right_text.len() as u16;
 
     // Render left-aligned status.
-    let bar =
-        Paragraph::new(left_line).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let bar = Paragraph::new(left_line).style(Style::default().fg(Color::White));
     f.render_widget(bar, area);
 
     // Render right-aligned phase info (if there's room).
@@ -1793,8 +1792,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             width: right_width,
             height: 1,
         };
-        let right = Paragraph::new(right_text)
-            .style(Style::default().bg(Color::DarkGray).fg(Color::DarkGray));
+        let right = Paragraph::new(right_text).style(Style::default().fg(Color::DarkGray));
         f.render_widget(right, right_area);
     }
 }
