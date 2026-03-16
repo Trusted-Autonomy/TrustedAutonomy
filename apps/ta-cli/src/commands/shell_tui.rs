@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-    MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -755,6 +755,9 @@ async fn run_tui(
     // Enable mouse capture — TUI handles scroll, selection, and clipboard
     // copy internally. Native selection is replaced by TUI selection.
     stdout.execute(EnableMouseCapture)?;
+    // Bracketed paste: pasted text arrives as Event::Paste(String) instead of
+    // individual key events, so we can insert without executing on newlines.
+    stdout.execute(EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -794,6 +797,7 @@ async fn run_tui(
     // Cleanup.
     running.store(false, Ordering::Relaxed);
     disable_raw_mode()?;
+    terminal.backend_mut().execute(DisableBracketedPaste)?;
     terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
@@ -918,19 +922,6 @@ async fn handle_terminal_event(
             if code == KeyCode::Esc {
                 app.selection = None;
                 return;
-            }
-            // Ctrl+C with active selection → copy and clear, don't exit.
-            if code == KeyCode::Char('c') && modifiers == KeyModifiers::CONTROL {
-                if let Some(ref sel) = app.selection {
-                    if sel.anchor != sel.extent {
-                        let text = extract_selection_text(app, sel);
-                        if !text.is_empty() {
-                            copy_to_clipboard_osc52(&text);
-                        }
-                        app.selection = None;
-                        return;
-                    }
-                }
             }
             // Any non-modifier key clears the selection (typing replaces it).
             if !matches!(
@@ -1303,7 +1294,7 @@ async fn handle_terminal_event(
                         if sel.anchor != sel.extent {
                             let text = extract_selection_text(app, sel);
                             if !text.is_empty() {
-                                copy_to_clipboard_osc52(&text);
+                                copy_to_clipboard(&text);
                             }
                         } else {
                             // Click without drag — clear selection.
@@ -1312,6 +1303,15 @@ async fn handle_terminal_event(
                     }
                 }
                 _ => {}
+            }
+        }
+        Event::Paste(data) => {
+            // Bracketed paste: insert text into input without executing.
+            // Replace newlines/CR with spaces so pasting multi-line text
+            // doesn't accidentally submit commands.
+            let safe = data.replace(['\r', '\n'], " ").replace('\t', "    ");
+            for ch in safe.chars() {
+                app.insert_char(ch);
             }
         }
         Event::Resize(_, _) => {
@@ -2241,45 +2241,57 @@ fn extract_selection_text(app: &App, sel: &Selection) -> String {
     result
 }
 
-/// Copy text to the system clipboard using the OSC 52 escape sequence.
+/// Copy text to the system clipboard using platform-native commands.
 ///
-/// This works across platforms and terminals: iTerm2, Terminal.app, kitty,
-/// alacritty, Windows Terminal, xterm, GNOME Terminal, and most modern
-/// terminal emulators that support OSC 52.
-fn copy_to_clipboard_osc52(text: &str) {
+/// - macOS: `pbcopy`
+/// - Linux/BSD: `xclip -selection clipboard` (fallback: `xsel --clipboard`)
+/// - Windows: `clip.exe`
+fn copy_to_clipboard(text: &str) {
     use std::io::Write;
+    use std::process::{Command, Stdio};
 
-    let encoded = base64_encode(text.as_bytes());
-    // OSC 52: Set clipboard. 'c' = system clipboard.
-    let osc = format!("\x1b]52;c;{}\x07", encoded);
-    let mut stdout = io::stdout();
-    let _ = stdout.write_all(osc.as_bytes());
-    let _ = stdout.flush();
-}
+    #[cfg(target_os = "macos")]
+    let (prog, args): (&str, &[&str]) = ("pbcopy", &[]);
 
-/// Minimal base64 encoder (no external dependency needed).
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
+    #[cfg(target_os = "windows")]
+    let (prog, args): (&str, &[&str]) = ("clip.exe", &[]);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let (prog, args): (&str, &[&str]) = ("xclip", &["-selection", "clipboard"]);
+
+    let result = Command::new(prog)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    match result {
+        Ok(mut child) => {
+            if let Some(ref mut stdin) = child.stdin {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
         }
-        if chunk.len() > 2 {
-            result.push(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        Err(_) => {
+            // Fallback for Linux: try xsel if xclip is not available.
+            if let Ok(mut child) = Command::new("xsel")
+                .args(["--clipboard", "--input"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                if let Some(ref mut stdin) = child.stdin {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                let _ = child.wait();
+            }
         }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        Err(_) => {}
     }
-    result
 }
 
 // -- Background tasks --------------------------------------------------------
@@ -3085,10 +3097,10 @@ Shell commands:
   Shift+Up / Down    Scroll output 1 line
   PgUp / PgDn        Scroll output one full page
   Shift+Home / End   Scroll to top / bottom of output
-  Click-drag         Select text (highlighted, auto-copied to clipboard)
+  Click-drag         Select text (highlighted, copied on release via Cmd+V)
   Shift+Click        Extend selection to click position
-  Ctrl-C (w/ sel)    Copy selection to clipboard
   Escape             Clear selection
+  Cmd+V / Ctrl+V     Paste (newlines stripped, won't execute commands)
   Tab                Auto-complete commands
   Ctrl-W             Toggle split pane (shell | agent side-by-side)
   Ctrl-C / exit      Exit the shell (Ctrl-C detaches when tailing)
@@ -4508,12 +4520,19 @@ mod tests {
     }
 
     #[test]
-    fn base64_encode_known_values() {
-        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
-        assert_eq!(base64_encode(b"Hello, World!"), "SGVsbG8sIFdvcmxkIQ==");
-        assert_eq!(base64_encode(b"ab"), "YWI=");
-        assert_eq!(base64_encode(b"abc"), "YWJj");
-        assert_eq!(base64_encode(b""), "");
+    fn paste_strips_newlines() {
+        // Pasted text with newlines should not trigger command submission.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        let pasted = "line one\nline two\r\nline three";
+        let safe = pasted.replace(['\r', '\n'], " ").replace('\t', "    ");
+        for ch in safe.chars() {
+            app.insert_char(ch);
+        }
+        assert_eq!(app.input, "line one line two  line three");
     }
 
     #[test]

@@ -110,7 +110,7 @@ rustyline = "15"
 
 # TUI — full terminal UI for `ta shell` (v0.9.8.3).
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["bracketed-paste"] }
 
 # File system notifications — config hot-reload (v0.10.18).
 notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
