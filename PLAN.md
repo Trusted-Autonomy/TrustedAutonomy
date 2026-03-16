@@ -3799,6 +3799,22 @@ Alternative sources (no registry needed):
 
 ---
 
+### v0.11.4.1 — Shell UX: Text Selection & Heartbeat Polish
+<!-- status: pending -->
+**Goal**: Fix mouse text selection in `ta shell` (broken by v0.11.3.1 mouse capture) and make heartbeat messages less noisy.
+
+1. [ ] **Fix text selection with mouse capture active**: `EnableMouseCapture` captures all mouse events, preventing native click-drag selection. Investigate terminal-aware approaches:
+   - **Option A**: Use raw ANSI escape `\x1b[?1002h` (button-event mode) + `\x1b[?1006h` (SGR coordinates) instead of crossterm's `EnableMouseCapture`. Some terminals preserve native selection in this mode.
+   - **Option B**: Detect terminal emulator (`$TERM_PROGRAM`) and only enable mouse capture in terminals that support Shift-bypass for selection (iTerm2, kitty, alacritty). Fall back to keyboard-only scroll in Terminal.app.
+   - **Option C**: Add a toggle key (e.g., `Ctrl+M`) that temporarily disables mouse capture for copy-paste, then re-enables.
+   - Pick whichever approach gives the best UX across macOS Terminal.app and iTerm2.
+2. [ ] **In-place heartbeat updates**: Instead of appending a new `[heartbeat]` line every cycle, update the last output line in place if it's already a heartbeat. Only the elapsed time changes (e.g., `[heartbeat] still running... 10s` → `20s` → `30s`). When non-heartbeat output arrives, the heartbeat line stays and new output appends below it normally. Consider an `OutputLine::Heartbeat` variant to distinguish from regular info lines.
+3. [ ] **Heartbeat coalescing**: If the agent produces no output for N seconds, show one heartbeat line. If output resumes, stop heartbeat updates. Avoid interleaving heartbeat with real output.
+
+#### Version: `0.11.4.1-alpha`
+
+---
+
 ### v0.12.0 — Template Projects & Bootstrap Flow
 <!-- status: pending -->
 **Goal**: `ta new` generates projects with `project.toml` plugin declarations so downstream users get a complete, working setup from `ta setup` alone. Template projects in the Trusted-Autonomy org serve as reference implementations. Also: replace the quick-fix Discord command listener with a proper slash-command-based bidirectional integration.
