@@ -3551,7 +3551,7 @@ This pulls forward the zero-dependency items from v0.12.2 (Autonomous Operations
 ---
 
 ### v0.11.2.5 — Prompt Detection Hardening & Version Housekeeping
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix false-positive stdin prompt detection that makes `ta shell` unusable during goal runs, and update stale version tracking.
 
 #### Problem
@@ -3564,22 +3564,38 @@ This pulls forward the zero-dependency items from v0.12.2 (Autonomous Operations
 The core insight: a real prompt means the agent is **waiting** — it stops producing output. A false positive is followed by more output. Two defense layers:
 
 **Layer 1 — Heuristic rejection (synchronous, in `is_interactive_prompt()`)**:
-4. [ ] **Reject lines containing code/markdown patterns**: Lines with `**`, backtick pairs, path separators (`/src/`, `.rs`, `.ts`), or bracket-prefixed output (`[agent]`, `[apply]`, `[info]`) are not prompts. These are agent progress output.
-5. [ ] **Require positive signal**: Only match `:` endings if the line looks conversational — no parentheses, no code formatting, not prefixed with `[`. Keep `?`, `[y/N]`, `[Y/n]`, numbered choice patterns as strong positive signals.
-6. [ ] **Add test cases**: Test that `**API** (path/to/file.rs):`, `[agent] Config loaded:`, and `Building crate ta-daemon:` are NOT detected as prompts. Test that `Do you want to continue? [y/N]`, `Enter your name:`, and `Choose [1] or [2]:` ARE detected.
+4. [x] **Reject lines containing code/markdown patterns**: Lines with `**`, backtick pairs, path separators (`/src/`, `.rs`, `.ts`), or bracket-prefixed output (`[agent]`, `[apply]`, `[info]`) are not prompts. These are agent progress output.
+5. [x] **Require positive signal**: Only match `:` endings if the line looks conversational — no parentheses, no code formatting, not prefixed with `[`. Keep `?`, `[y/N]`, `[Y/n]`, numbered choice patterns as strong positive signals.
+6. [x] **Add test cases**: Test that `**API** (path/to/file.rs):`, `[agent] Config loaded:`, and `Building crate ta-daemon:` are NOT detected as prompts. Test that `Do you want to continue? [y/N]`, `Enter your name:`, and `Choose [1] or [2]:` ARE detected.
 
 **Layer 2 — Continuation cancellation (async, in shell output handler)**:
-7. [ ] **Auto-dismiss on continued output**: When `pending_stdin_prompt` is set and the shell receives additional agent output lines (non-prompt) within a configurable window, automatically dismiss the prompt: clear `pending_stdin_prompt`, append a `[info] Prompt dismissed — agent continued output` line, return to `ta>` mode. The agent wasn't waiting. Window duration configurable in `daemon.toml`: `[shell].prompt_dismiss_after_output_secs` (default 5s — intentionally generous to avoid dismissing real prompts where the agent emits a trailing blank line or status update before truly waiting).
-8. [ ] **Clear prompt on stream end**: When the goal/output stream ends (SSE connection closes, goal state transitions to terminal), clear `pending_stdin_prompt` and return to `ta>` mode. A completed goal cannot be waiting for input.
+7. [x] **Auto-dismiss on continued output**: When `pending_stdin_prompt` is set and the shell receives additional agent output lines (non-prompt) within a configurable window, automatically dismiss the prompt: clear `pending_stdin_prompt`, append a `[info] Prompt dismissed — agent continued output` line, return to `ta>` mode. The agent wasn't waiting. Window duration configurable in `daemon.toml`: `[operations].prompt_dismiss_after_output_secs` (default 5s — intentionally generous to avoid dismissing real prompts where the agent emits a trailing blank line or status update before truly waiting).
+8. [x] **Clear prompt on stream end**: When the goal/output stream ends (SSE connection closes, goal state transitions to terminal), clear `pending_stdin_prompt` and return to `ta>` mode. A completed goal cannot be waiting for input.
 
 **Layer 3 — Q&A agent second opinion (async, parallel to user prompt)**:
-9. [ ] **Agent-verified prompt detection**: When `is_interactive_prompt()` triggers and sets `pending_stdin_prompt`, simultaneously dispatch the suspected prompt line (plus the last ~5 lines of context) to the Q&A agent (`/api/agent/ask`) with a system prompt: "Is this agent output a prompt waiting for user input, or is it just informational output? Respond with only 'prompt' or 'not_prompt'." Fire-and-forget — if the agent responds `not_prompt` before the user types anything, auto-dismiss the stdin prompt and return to `ta>` mode.
-10. [ ] **Q&A agent timeout**: If the Q&A agent doesn't respond within the configured timeout, keep the prompt visible (fail-open — assume it might be real). The user can always Ctrl-C to dismiss. Timeout configurable in `daemon.toml`: `[shell].prompt_verify_timeout_secs` (default 10s — Q&A agent latency varies with model and load; too short = never verifies).
-11. [ ] **Confidence display**: While the Q&A verification is in flight, show a subtle indicator: `stdin> (verifying...)`. If dismissed by the agent, show `[info] Not a prompt — resumed normal mode`.
+9. [x] **Agent-verified prompt detection**: When `is_interactive_prompt()` triggers and sets `pending_stdin_prompt`, simultaneously dispatch the suspected prompt line (plus the last ~5 lines of context) to the Q&A agent (`/api/agent/ask`) with a system prompt: "Is this agent output a prompt waiting for user input, or is it just informational output? Respond with only 'prompt' or 'not_prompt'." Fire-and-forget — if the agent responds `not_prompt` before the user types anything, auto-dismiss the stdin prompt and return to `ta>` mode.
+10. [x] **Q&A agent timeout**: If the Q&A agent doesn't respond within the configured timeout, keep the prompt visible (fail-open — assume it might be real). The user can always Ctrl-C to dismiss. Timeout configurable in `daemon.toml`: `[operations].prompt_verify_timeout_secs` (default 10s — Q&A agent latency varies with model and load; too short = never verifies).
+11. [x] **Confidence display**: While the Q&A verification is in flight, show a subtle indicator: `stdin> (verifying...)`. If dismissed by the agent, show `[info] Not a prompt — resumed normal mode`.
 
 #### Version Housekeeping
-12. [ ] **Update `version.json`**: Set `committed` and `deployed` to `0.11.2-alpha.4`, update timestamps. This should have been done during v0.11.2.x phases.
-13. [ ] **Verify version sources**: Confirm what `ta status` and the shell status bar read — `version.json`, `Cargo.toml`, or build-time `TA_GIT_HASH`. Document the canonical source and ensure consistency.
+12. [x] **Update `version.json`**: Set `committed` and `deployed` to `0.11.2-alpha.5`, update timestamps.
+13. [x] **Verify version sources**: `ta status` and the shell status bar read `CARGO_PKG_VERSION` (compile-time from workspace `Cargo.toml`). The daemon API (`/api/status`) also reads `CARGO_PKG_VERSION`. `version.json` is only used by the release script. All sources are now consistent at `0.11.2-alpha.5`.
+
+#### Tests added
+- `prompt_detection_rejects_markdown_bold` — `**API** (path):` NOT detected
+- `prompt_detection_rejects_code_backticks` — backtick-quoted code NOT detected
+- `prompt_detection_rejects_file_paths` — `.rs`, `.ts`, `/src/` NOT detected
+- `prompt_detection_rejects_bracket_prefixed` — `[agent]`, `[info]` NOT detected
+- `prompt_detection_rejects_parenthesized_code_refs` — `fn main():` NOT detected
+- `prompt_detection_still_matches_real_prompts` — regression guard
+- `operations_config_prompt_detection_defaults` — default 5s/10s
+- `operations_config_prompt_detection_roundtrip` — TOML parsing
+- `prompt_dismissed_on_continued_output` — Layer 2 auto-dismiss
+- `prompt_cleared_on_stream_end` — Layer 2 stream end
+- `prompt_not_cleared_on_different_goal_end` — only same goal
+- `prompt_verified_not_prompt_dismisses` — Layer 3 Q&A dismiss
+- `prompt_str_shows_verifying` — Layer 3 confidence display
+- `load_prompt_detection_config_defaults` — config fallback
 
 #### Version: `0.11.2-alpha.5`
 

@@ -44,6 +44,8 @@ pub enum TuiMessage {
     StdinPrompt(PendingStdinPrompt),
     /// An agent prompt was auto-answered (v0.10.18.5).
     StdinAutoAnswered { prompt: String, response: String },
+    /// Q&A agent determined this is not a real prompt (v0.11.2.5 Layer 3).
+    PromptVerifiedNotPrompt,
     /// A goal started — may trigger auto-tail (v0.10.11).
     GoalStarted { goal_id: String, title: String },
     /// Agent output stream ended (goal process exited).
@@ -85,6 +87,10 @@ pub struct PendingQuestion {
 pub struct PendingStdinPrompt {
     pub goal_id: String,
     pub prompt_text: String,
+    /// When this prompt was detected (v0.11.2.5 Layer 2: continuation cancellation).
+    pub detected_at: std::time::Instant,
+    /// Whether Q&A agent verification is in flight (v0.11.2.5 Layer 3).
+    pub verifying: bool,
 }
 
 /// A line in the output pane, with optional styling.
@@ -208,6 +214,10 @@ struct App {
     project_root: std::path::PathBuf,
     /// Schema-driven agent output parser (v0.11.2.2).
     output_schema: ta_output_schema::OutputSchema,
+    /// Seconds after which a prompt is auto-dismissed if agent continues output (v0.11.2.5).
+    prompt_dismiss_after_output_secs: u64,
+    /// Seconds to wait for Q&A agent prompt verification (v0.11.2.5).
+    prompt_verify_timeout_secs: u64,
 }
 
 impl App {
@@ -245,6 +255,8 @@ impl App {
                     .unwrap_or_else(|_| ta_output_schema::OutputSchema::passthrough())
             },
             project_root,
+            prompt_dismiss_after_output_secs: 5,
+            prompt_verify_timeout_secs: 10,
         }
     }
 
@@ -270,8 +282,12 @@ impl App {
     }
 
     fn prompt_str(&self) -> String {
-        if let Some(ref _sp) = self.pending_stdin_prompt {
-            "[stdin] > ".to_string()
+        if let Some(ref sp) = self.pending_stdin_prompt {
+            if sp.verifying {
+                "[stdin] > (verifying...) ".to_string()
+            } else {
+                "[stdin] > ".to_string()
+            }
         } else if let Some(ref q) = self.pending_question {
             format!("[agent Q{}] > ", q.turn)
         } else if self.workflow_prompt.is_some() {
@@ -599,6 +615,9 @@ async fn run_tui(
         wf.shell
     };
 
+    // Load prompt detection config from daemon.toml (v0.11.2.5).
+    let (prompt_dismiss_secs, prompt_verify_secs) = load_prompt_detection_config();
+
     // Create app state.
     let mut app = App::new(base_url.clone(), attach_session.clone(), project_root);
     app.status = initial_status;
@@ -607,6 +626,8 @@ async fn run_tui(
     app.output_buffer_limit = shell_config.effective_scrollback();
     app.auto_tail = shell_config.auto_tail;
     app.tail_backfill_lines = shell_config.tail_backfill_lines;
+    app.prompt_dismiss_after_output_secs = prompt_dismiss_secs;
+    app.prompt_verify_timeout_secs = prompt_verify_secs;
 
     // Welcome message.
     app.push_output(OutputLine::info(format!(
@@ -1113,8 +1134,10 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             app.scroll_to_bottom();
             app.pending_question = Some(pq);
         }
-        TuiMessage::StdinPrompt(sp) => {
+        TuiMessage::StdinPrompt(mut sp) => {
             // Display the stdin prompt and switch to input mode (v0.10.18.5 item 5).
+            sp.detected_at = std::time::Instant::now();
+            sp.verifying = true; // Q&A verification in flight (v0.11.2.5 Layer 3).
             app.push_output(OutputLine::info("\n━━━ Agent Stdin Prompt ━━━".to_string()));
             app.push_output(OutputLine::info(sp.prompt_text.clone()));
             app.push_output(OutputLine::info(
@@ -1130,7 +1153,28 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                 prompt, response
             )));
         }
+        TuiMessage::PromptVerifiedNotPrompt => {
+            // Q&A agent says this is NOT a real prompt — auto-dismiss (v0.11.2.5 Layer 3).
+            if app.pending_stdin_prompt.is_some() {
+                app.pending_stdin_prompt = None;
+                app.push_output(OutputLine::info(
+                    "[info] Not a prompt — resumed normal mode".to_string(),
+                ));
+            }
+        }
         TuiMessage::AgentOutput(line) => {
+            // Layer 2: Auto-dismiss pending prompt on continued output (v0.11.2.5).
+            if let Some(ref sp) = app.pending_stdin_prompt {
+                let elapsed = sp.detected_at.elapsed().as_secs();
+                if elapsed < app.prompt_dismiss_after_output_secs && line.stream != "stderr" {
+                    // Still within the window — output arrived, dismiss the prompt.
+                    app.pending_stdin_prompt = None;
+                    app.push_output(OutputLine::info(
+                        "[info] Prompt dismissed — agent continued output".to_string(),
+                    ));
+                }
+            }
+
             let styled = if line.stream == "stderr" {
                 OutputLine::agent_stderr(line.line)
             } else {
@@ -1191,6 +1235,16 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             )));
             if app.tailing_goal.as_deref() == Some(&goal_id) {
                 app.tailing_goal = None;
+            }
+            // Layer 2, item 8: Clear pending stdin prompt on stream end (v0.11.2.5).
+            // A completed goal cannot be waiting for input.
+            if let Some(ref sp) = app.pending_stdin_prompt {
+                if sp.goal_id == goal_id {
+                    app.pending_stdin_prompt = None;
+                    app.push_output(OutputLine::info(
+                        "[info] Prompt cleared — goal output ended".to_string(),
+                    ));
+                }
             }
         }
         TuiMessage::DraftReady {
@@ -1923,6 +1977,32 @@ fn parse_agent_question(frame: &str) -> Option<PendingQuestion> {
     })
 }
 
+/// Load prompt detection timeouts from `.ta/daemon.toml` (v0.11.2.5).
+///
+/// Returns `(prompt_dismiss_after_output_secs, prompt_verify_timeout_secs)`.
+/// Falls back to defaults (5s, 10s) if the config is missing or malformed.
+fn load_prompt_detection_config() -> (u64, u64) {
+    let config_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join(".ta/daemon.toml");
+    if let Ok(content) = std::fs::read_to_string(&config_path) {
+        if let Ok(table) = content.parse::<toml::Table>() {
+            if let Some(ops) = table.get("operations").and_then(|v| v.as_table()) {
+                let dismiss = ops
+                    .get("prompt_dismiss_after_output_secs")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(5) as u64;
+                let verify = ops
+                    .get("prompt_verify_timeout_secs")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(10) as u64;
+                return (dismiss, verify);
+            }
+        }
+    }
+    (5, 10)
+}
+
 /// Send a human response to a pending agent question via the daemon API.
 async fn send_interaction_response(
     client: &reqwest::Client,
@@ -2131,10 +2211,43 @@ async fn start_tail_stream(
                             let line = json["line"].as_str().unwrap_or("").to_string();
                             // Route prompt-typed lines to the stdin prompt handler (v0.10.18.5).
                             if stream_name == "prompt" {
+                                let prompt_line = line.clone();
                                 let _ = tx.send(TuiMessage::StdinPrompt(PendingStdinPrompt {
                                     goal_id: target.clone(),
                                     prompt_text: line,
+                                    detected_at: std::time::Instant::now(),
+                                    verifying: true,
                                 }));
+
+                                // Layer 3: Dispatch Q&A agent verification (v0.11.2.5).
+                                let verify_tx = tx.clone();
+                                let verify_base = base_url.to_string();
+                                let verify_client = client.clone();
+                                tokio::spawn(async move {
+                                    let ask_url = format!("{}/api/agent/ask", verify_base);
+                                    let payload = serde_json::json!({
+                                        "prompt": format!(
+                                            "Is this agent output a prompt waiting for user input, \
+                                             or is it just informational output? The line is: \"{}\". \
+                                             Respond with only 'prompt' or 'not_prompt'.",
+                                            prompt_line
+                                        )
+                                    });
+                                    let result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(10),
+                                        verify_client.post(&ask_url).json(&payload).send(),
+                                    )
+                                    .await;
+                                    if let Ok(Ok(resp)) = result {
+                                        if let Ok(body) = resp.text().await {
+                                            if body.to_lowercase().contains("not_prompt") {
+                                                let _ = verify_tx
+                                                    .send(TuiMessage::PromptVerifiedNotPrompt);
+                                            }
+                                        }
+                                    }
+                                    // On timeout or error, fail-open — keep the prompt visible.
+                                });
                             } else if stream_name == "auto_answered" {
                                 // Parse "[auto] prompt → response" format.
                                 if let Some(arrow_pos) = line.find(" → ") {
@@ -3547,6 +3660,8 @@ mod tests {
         let sp = PendingStdinPrompt {
             goal_id: "goal-1".into(),
             prompt_text: "Select topology:".into(),
+            detected_at: std::time::Instant::now(),
+            verifying: false,
         };
         handle_tui_message(&mut app, TuiMessage::StdinPrompt(sp));
         assert!(app.pending_stdin_prompt.is_some());
@@ -3589,6 +3704,8 @@ mod tests {
         app.pending_stdin_prompt = Some(PendingStdinPrompt {
             goal_id: "goal-1".into(),
             prompt_text: "Enter name:".into(),
+            detected_at: std::time::Instant::now(),
+            verifying: false,
         });
         assert_eq!(app.prompt_str(), "[stdin] > ");
     }
@@ -3603,9 +3720,133 @@ mod tests {
         app.pending_stdin_prompt = Some(PendingStdinPrompt {
             goal_id: "goal-1".into(),
             prompt_text: "Enter name:".into(),
+            detected_at: std::time::Instant::now(),
+            verifying: false,
         });
         // Simulate Ctrl-C by directly clearing the prompt.
         app.pending_stdin_prompt = None;
         assert!(app.pending_stdin_prompt.is_none());
+    }
+
+    // ── v0.11.2.5 prompt detection hardening tests ───────────
+
+    #[test]
+    fn prompt_dismissed_on_continued_output() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.prompt_dismiss_after_output_secs = 5;
+
+        // Set a pending prompt (just created, so within the dismiss window).
+        app.pending_stdin_prompt = Some(PendingStdinPrompt {
+            goal_id: "goal-1".into(),
+            prompt_text: "Enter name:".into(),
+            detected_at: std::time::Instant::now(),
+            verifying: false,
+        });
+
+        // Agent output arrives while prompt is pending.
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stdout".into(),
+                line: "More output from the agent".into(),
+            }),
+        );
+
+        // Prompt should have been auto-dismissed.
+        assert!(app.pending_stdin_prompt.is_none());
+        assert!(app
+            .output
+            .iter()
+            .any(|l| l.text.contains("Prompt dismissed")));
+    }
+
+    #[test]
+    fn prompt_cleared_on_stream_end() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.pending_stdin_prompt = Some(PendingStdinPrompt {
+            goal_id: "goal-1".into(),
+            prompt_text: "Enter name:".into(),
+            detected_at: std::time::Instant::now(),
+            verifying: false,
+        });
+
+        // Stream ends for the same goal.
+        handle_tui_message(&mut app, TuiMessage::AgentOutputDone("goal-1".into()));
+
+        // Prompt should be cleared.
+        assert!(app.pending_stdin_prompt.is_none());
+        assert!(app.output.iter().any(|l| l.text.contains("Prompt cleared")));
+    }
+
+    #[test]
+    fn prompt_not_cleared_on_different_goal_end() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.pending_stdin_prompt = Some(PendingStdinPrompt {
+            goal_id: "goal-1".into(),
+            prompt_text: "Enter name:".into(),
+            detected_at: std::time::Instant::now(),
+            verifying: false,
+        });
+
+        // Different goal ends — prompt should remain.
+        handle_tui_message(&mut app, TuiMessage::AgentOutputDone("goal-2".into()));
+        assert!(app.pending_stdin_prompt.is_some());
+    }
+
+    #[test]
+    fn prompt_verified_not_prompt_dismisses() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.pending_stdin_prompt = Some(PendingStdinPrompt {
+            goal_id: "goal-1".into(),
+            prompt_text: "**API** (path):".into(),
+            detected_at: std::time::Instant::now(),
+            verifying: true,
+        });
+
+        // Q&A agent responds: not a prompt.
+        handle_tui_message(&mut app, TuiMessage::PromptVerifiedNotPrompt);
+        assert!(app.pending_stdin_prompt.is_none());
+        assert!(app.output.iter().any(|l| l.text.contains("Not a prompt")));
+    }
+
+    #[test]
+    fn prompt_str_shows_verifying() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.pending_stdin_prompt = Some(PendingStdinPrompt {
+            goal_id: "goal-1".into(),
+            prompt_text: "Prompt?".into(),
+            detected_at: std::time::Instant::now(),
+            verifying: true,
+        });
+        assert!(app.prompt_str().contains("verifying"));
+    }
+
+    #[test]
+    fn load_prompt_detection_config_defaults() {
+        let (dismiss, verify) = load_prompt_detection_config();
+        // If no daemon.toml exists in cwd, defaults should apply.
+        // (In test context, cwd is usually the project root or /tmp.)
+        assert!(dismiss > 0);
+        assert!(verify > 0);
     }
 }

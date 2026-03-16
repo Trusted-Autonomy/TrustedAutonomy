@@ -1374,6 +1374,32 @@ Template variables: `{goal_title}`, `{goal_id}`, `{project_name}`.
 
 Auto-answered prompts appear as dimmed lines: `[auto] Select topology: → 1 (mesh)`.
 
+#### Prompt Detection Hardening
+
+The shell uses heuristics to detect when an agent is waiting for stdin input. Three layers prevent false positives from locking the shell into `stdin>` mode:
+
+**Layer 1 — Heuristic rejection**: Lines containing markdown bold (`**word**`), backtick-quoted code, file paths (`.rs`, `.ts`, `/src/`), or bracket-prefixed output (`[agent]`, `[info]`) are never classified as prompts. Strong positive signals like `[y/N]`, `[Y/n]`, and numbered choices `[1] [2]` always match.
+
+**Layer 2 — Continuation cancellation**: If a prompt is detected but the agent keeps producing output, the prompt is automatically dismissed. A real prompt means the agent has stopped. The dismiss window is configurable:
+
+```toml
+# .ta/daemon.toml
+[operations]
+prompt_dismiss_after_output_secs = 5   # default: 5 seconds
+```
+
+When the agent output stream ends (goal completes), any pending prompt is also cleared.
+
+**Layer 3 — Q&A agent verification**: When a prompt is detected, the shell also dispatches the suspected line to the Q&A agent (`/api/agent/ask`) for a second opinion. If the agent responds "not a prompt" before the user types anything, the prompt is auto-dismissed. The prompt shows `(verifying...)` while the check is in flight:
+
+```toml
+# .ta/daemon.toml
+[operations]
+prompt_verify_timeout_secs = 10   # default: 10 seconds (fail-open on timeout)
+```
+
+You can always dismiss a false-positive prompt manually with Ctrl-C.
+
 ### Alignment Profiles
 
 Alignment profiles declare what an agent can do, must escalate, and must never touch. TA compiles these into enforceable capability grants -- the agent cannot exceed them.
@@ -4845,6 +4871,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.2.2 | Agent output schema engine | Done |
 | v0.11.2.3 | Goal & draft unified UX (tags, VCS tracking, auto-merge, heartbeat) | Done |
 | v0.11.2.4 | Daemon watchdog & process liveness (zombie detection, stale questions, health events) | Done |
+| v0.11.2.5 | Prompt detection hardening & version housekeeping | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

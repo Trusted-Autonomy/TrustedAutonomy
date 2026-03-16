@@ -946,18 +946,18 @@ fn emit_command_failed_event(
 
 /// Detect whether a line of agent output looks like an interactive prompt (v0.10.18.5 item 4).
 ///
-/// Conservative heuristics — it's better to relay a normal line than to miss a real prompt.
-/// We look for common interactive prompt patterns:
-///   - Lines ending with `?` (questions)
-///   - Lines containing `[y/N]`, `[Y/n]`, `[yes/no]` choice indicators
-///   - Lines containing numbered choices like `[1]`, `[1/2/3]`
-///   - Lines ending with `: ` (input prompts)
+/// Two-layer heuristic (v0.11.2.5):
+///   1. Strong positive signals always match: `[y/N]`, `[Y/n]`, `[yes/no]`, numbered choices.
+///   2. Weak signals (`:` suffix, `?` suffix) are rejected if the line looks like code,
+///      markdown, or agent progress output rather than a genuine prompt.
 fn is_interactive_prompt(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return false;
     }
-    // Common interactive choice patterns.
+
+    // ── Layer 1: Strong positive signals (always match) ────────────
+    // These patterns are unambiguous interactive prompts.
     if trimmed.contains("[y/N]")
         || trimmed.contains("[Y/n]")
         || trimmed.contains("[yes/no]")
@@ -969,14 +969,46 @@ fn is_interactive_prompt(line: &str) -> bool {
     if trimmed.contains("[1]") && trimmed.contains("[2]") {
         return true;
     }
-    // Lines ending with "? " or "?" followed by optional whitespace.
+
+    // ── Rejection filters (v0.11.2.5 Layer 1) ─────────────────────
+    // Lines containing these patterns are agent progress/code output, not prompts.
+
+    // Markdown bold (`**word**`).
+    if trimmed.contains("**") {
+        return false;
+    }
+    // Backtick-quoted code (`` `word` ``).
+    if trimmed.matches('`').count() >= 2 {
+        return false;
+    }
+    // File path separators — agent listing source files.
+    if trimmed.contains("/src/")
+        || trimmed.contains(".rs")
+        || trimmed.contains(".ts")
+        || trimmed.contains(".js")
+        || trimmed.contains(".py")
+    {
+        return false;
+    }
+    // Bracket-prefixed progress lines: [agent], [apply], [info], [tool], etc.
+    if trimmed.starts_with('[') && trimmed.contains(']') {
+        // Exception: lines that are ONLY a numbered choice like "[1] or [2]:" are allowed.
+        // We already matched those above, so reject everything else bracket-prefixed.
+        return false;
+    }
+    // Lines with parentheses followed by colon — code references like `fn foo(bar):`.
+    if trimmed.contains('(') && trimmed.contains(')') {
+        return false;
+    }
+
+    // ── Layer 1: Weak positive signals (with rejection guard) ──────
+    // Lines ending with "?" (questions).
     if trimmed.ends_with('?') {
         return true;
     }
-    // Lines ending with ": " (input prompt for a value).
-    if trimmed.ends_with(": ") || trimmed.ends_with(":") {
-        // Avoid false positives on log lines like "INFO: message".
-        // Only match if short enough to be a prompt (not a long log message).
+    // Lines ending with ":" or ": " (input prompts).
+    if trimmed.ends_with(": ") || trimmed.ends_with(':') {
+        // Only match short, conversational lines — not log output.
         if trimmed.len() < 120 {
             return true;
         }
@@ -1365,6 +1397,65 @@ mod tests {
         // Long log line ending with colon — should be excluded by length heuristic.
         let long_log = format!("INFO: {}: message", "a]".repeat(100));
         assert!(!is_interactive_prompt(&long_log));
+    }
+
+    // ── v0.11.2.5 hardened rejection tests ───────────────────────
+
+    #[test]
+    fn prompt_detection_rejects_markdown_bold() {
+        // Markdown bold — agent listing code locations.
+        assert!(!is_interactive_prompt(
+            "**API** (crates/ta-daemon/src/api/status.rs):"
+        ));
+        assert!(!is_interactive_prompt("**Config loaded**:"));
+        assert!(!is_interactive_prompt("**Step 2**: Run the migration"));
+    }
+
+    #[test]
+    fn prompt_detection_rejects_code_backticks() {
+        assert!(!is_interactive_prompt("Running `cargo build`:"));
+        assert!(!is_interactive_prompt("The `status` field:"));
+    }
+
+    #[test]
+    fn prompt_detection_rejects_file_paths() {
+        assert!(!is_interactive_prompt(
+            "Modified crates/ta-daemon/src/api/status.rs:"
+        ));
+        assert!(!is_interactive_prompt("Checking file.ts:"));
+        assert!(!is_interactive_prompt("Error in main.py:"));
+        assert!(!is_interactive_prompt("Editing src/lib.rs:"));
+    }
+
+    #[test]
+    fn prompt_detection_rejects_bracket_prefixed() {
+        // Agent progress lines.
+        assert!(!is_interactive_prompt("[agent] Config loaded:"));
+        assert!(!is_interactive_prompt("[apply] Applying changes:"));
+        assert!(!is_interactive_prompt("[info] Processing:"));
+        assert!(!is_interactive_prompt("[tool] Read file:"));
+    }
+
+    #[test]
+    fn prompt_detection_rejects_parenthesized_code_refs() {
+        // Code references with parentheses.
+        assert!(!is_interactive_prompt("fn main():"));
+        assert!(!is_interactive_prompt("execute_command(state):"));
+    }
+
+    #[test]
+    fn prompt_detection_still_matches_real_prompts() {
+        // Ensure hardening didn't break real prompt detection.
+        assert!(is_interactive_prompt("Do you want to continue? [y/N]"));
+        assert!(is_interactive_prompt("Enter your name:"));
+        assert!(is_interactive_prompt("Choose [1] or [2]:"));
+        assert!(is_interactive_prompt("Password:"));
+        assert!(is_interactive_prompt("Username: "));
+        assert!(is_interactive_prompt("Which database?"));
+        assert!(is_interactive_prompt("Are you sure?"));
+        assert!(is_interactive_prompt(
+            "Select topology: [1] mesh [2] hierarchical"
+        ));
     }
 
     #[tokio::test]

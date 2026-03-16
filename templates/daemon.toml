@@ -24,3 +24,7 @@ default_agent = "claude-code"
 
 [routing]
 use_shell_config = true    # Use .ta/shell.toml for command vs agent routing
+
+[operations]
+# prompt_dismiss_after_output_secs = 5   # Auto-dismiss stdin prompts after continued output (v0.11.2.5)
+# prompt_verify_timeout_secs = 10        # Q&A agent prompt verification timeout (v0.11.2.5)

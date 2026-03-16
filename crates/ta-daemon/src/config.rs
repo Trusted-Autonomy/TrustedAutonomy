@@ -32,6 +32,8 @@ pub struct DaemonConfig {
 /// watchdog_interval_secs = 30
 /// zombie_transition_delay_secs = 60
 /// stale_question_threshold_secs = 3600
+/// prompt_dismiss_after_output_secs = 5
+/// prompt_verify_timeout_secs = 10
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationsConfig {
@@ -52,6 +54,18 @@ pub struct OperationsConfig {
     /// Seconds a question can be pending before it's flagged as stale (default: 3600 = 1h).
     #[serde(default = "default_stale_question_threshold")]
     pub stale_question_threshold_secs: u64,
+
+    /// Seconds to wait after a detected prompt before auto-dismissing it if
+    /// the agent continues producing output (default: 5). A real prompt means
+    /// the agent stopped — continued output means false positive.
+    #[serde(default = "default_prompt_dismiss_after_output")]
+    pub prompt_dismiss_after_output_secs: u64,
+
+    /// Seconds to wait for Q&A agent prompt verification before giving up
+    /// (default: 10). If the Q&A agent doesn't respond in time, the prompt
+    /// stays visible (fail-open).
+    #[serde(default = "default_prompt_verify_timeout")]
+    pub prompt_verify_timeout_secs: u64,
 }
 
 fn default_watchdog_interval() -> u32 {
@@ -66,6 +80,14 @@ fn default_stale_question_threshold() -> u64 {
     3600
 }
 
+fn default_prompt_dismiss_after_output() -> u64 {
+    5
+}
+
+fn default_prompt_verify_timeout() -> u64 {
+    10
+}
+
 impl Default for OperationsConfig {
     fn default() -> Self {
         Self {
@@ -73,6 +95,8 @@ impl Default for OperationsConfig {
             watchdog_interval_secs: default_watchdog_interval(),
             zombie_transition_delay_secs: default_zombie_delay(),
             stale_question_threshold_secs: default_stale_question_threshold(),
+            prompt_dismiss_after_output_secs: default_prompt_dismiss_after_output(),
+            prompt_verify_timeout_secs: default_prompt_verify_timeout(),
         }
     }
 }
@@ -786,6 +810,24 @@ mod tests {
     fn load_nonexistent_config() {
         let config = DaemonConfig::load(Path::new("/nonexistent"));
         assert_eq!(config.server.port, 7700);
+    }
+
+    #[test]
+    fn operations_config_prompt_detection_defaults() {
+        let config = OperationsConfig::default();
+        assert_eq!(config.prompt_dismiss_after_output_secs, 5);
+        assert_eq!(config.prompt_verify_timeout_secs, 10);
+    }
+
+    #[test]
+    fn operations_config_prompt_detection_roundtrip() {
+        let toml_str = r#"
+            prompt_dismiss_after_output_secs = 3
+            prompt_verify_timeout_secs = 15
+        "#;
+        let config: OperationsConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.prompt_dismiss_after_output_secs, 3);
+        assert_eq!(config.prompt_verify_timeout_secs, 15);
     }
 
     #[test]
