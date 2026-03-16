@@ -818,22 +818,44 @@ async fn tui_event_loop(
     client: &reqwest::Client,
     tx: tokio::sync::mpsc::UnboundedSender<TuiMessage>,
 ) -> anyhow::Result<()> {
-    loop {
-        // Draw UI.
-        terminal.draw(|f| draw_ui(f, app))?;
+    use std::time::{Duration, Instant};
 
-        // Cache the output pane area for mouse coordinate mapping.
-        {
+    // Frame rate limiter: draw at most every 16ms (~60fps).
+    // Input events always trigger an immediate redraw.
+    let frame_interval = Duration::from_millis(16);
+    let mut last_draw = Instant::now() - frame_interval; // draw immediately on first loop
+    let mut needs_draw = true;
+
+    loop {
+        // ── Draw (rate-limited) ────────────────────────────────────
+        if needs_draw && last_draw.elapsed() >= frame_interval {
+            terminal.draw(|f| draw_ui(f, app))?;
+            last_draw = Instant::now();
+            needs_draw = false;
+
+            // Cache the output pane area for mouse coordinate mapping.
             let size = terminal.size()?;
             let prompt = app.prompt_str();
-            let display_len = prompt.len() + app.input.chars().count();
-            let inner_width = size.width as usize;
-            let content_lines = if inner_width == 0 {
-                1
-            } else {
-                display_len.div_ceil(inner_width).max(1)
+            let display = format!("{}{}", prompt, app.input);
+            let inner_width = size.width.max(1) as usize;
+            let content_lines = {
+                let mut lines = 0u16;
+                let mut col = 0usize;
+                for ch in display.chars() {
+                    if ch == '\n' {
+                        lines += 1;
+                        col = 0;
+                    } else {
+                        col += 1;
+                        if col >= inner_width {
+                            lines += 1;
+                            col = 0;
+                        }
+                    }
+                }
+                lines + 1
             };
-            let input_height = (content_lines as u16 + 2).min(size.height / 2).max(3);
+            let input_height = (content_lines + 2).min(size.height / 2).max(3);
             let output_height = size.height.saturating_sub(input_height + 1);
             app.output_area = ratatui::layout::Rect {
                 x: 0,
@@ -847,16 +869,16 @@ async fn tui_event_loop(
             break;
         }
 
-        // ── Input-first event processing ─────────────────────────────
+        // ── Input-first event processing ───────────────────────────
         //
-        // Always drain ALL pending input events before processing background
-        // messages. This ensures keyboard/mouse responsiveness even when the
-        // background message channel is saturated (agent output, SSE events).
+        // 1. Always drain ALL pending input events first (non-blocking).
+        // 2. Process a small batch of background messages (non-blocking).
+        // 3. If nothing was available, wait for either with biased select.
         //
-        // If no input is available, wait for either input or a background
-        // message (whichever comes first), but always re-drain input after.
-        // 1. Drain any already-queued input events (non-blocking).
-        //    Take the receiver out of app to avoid borrow conflicts.
+        // This ensures keystrokes are never starved by background traffic.
+
+        // Step 1: Drain all pending input events.
+        let mut input_count = 0;
         let mut pending_inputs = Vec::new();
         if let Some(ref mut input_rx) = app.input_rx {
             while let Ok(ev) = input_rx.try_recv() {
@@ -865,61 +887,76 @@ async fn tui_event_loop(
         }
         for ev in pending_inputs {
             handle_terminal_event(app, ev, client, &tx).await;
+            input_count += 1;
         }
-        let had_input = !app.input.is_empty(); // proxy: we processed something
 
-        // 2. If we processed input, also drain background messages (non-blocking)
-        //    to keep the UI current, then loop back to draw immediately.
-        if had_input {
-            let mut bg_count = 0;
-            while let Ok(msg) = rx.try_recv() {
-                process_background_message(app, msg, client, &tx).await;
-                bg_count += 1;
-                // Cap at 50 background messages per frame to keep draw responsive.
-                if bg_count >= 50 {
-                    break;
+        // Step 2: Process a small batch of background messages (non-blocking).
+        // Cap at 5 per cycle to keep latency low — we'll get more next frame.
+        let mut bg_count = 0;
+        while let Ok(msg) = rx.try_recv() {
+            process_background_message(app, msg, client, &tx).await;
+            bg_count += 1;
+            if bg_count >= 5 {
+                break;
+            }
+        }
+
+        if input_count > 0 || bg_count > 0 {
+            // We processed something — mark for redraw and loop immediately.
+            needs_draw = true;
+            continue;
+        }
+
+        // Step 3: Nothing pending — wait for either input or background message.
+        // Compute remaining time until next frame to avoid busy-waiting.
+        let elapsed = last_draw.elapsed();
+        let sleep_dur = if needs_draw {
+            // A draw is pending but we're within the frame interval — wait it out.
+            frame_interval.saturating_sub(elapsed)
+        } else {
+            // Nothing to draw — sleep up to 100ms to keep health checks responsive.
+            Duration::from_millis(100)
+        };
+
+        let wait_input = async {
+            if let Some(ref mut input_rx) = app.input_rx {
+                input_rx.recv().await
+            } else {
+                std::future::pending().await
+            }
+        };
+
+        tokio::select! {
+            biased;  // Always check input first.
+            ev = wait_input => {
+                if let Some(ev) = ev {
+                    handle_terminal_event(app, ev, client, &tx).await;
+                    // Drain any additional queued input.
+                    let mut more = Vec::new();
+                    if let Some(ref mut input_rx) = app.input_rx {
+                        while let Ok(ev) = input_rx.try_recv() {
+                            more.push(ev);
+                        }
+                    }
+                    for ev in more {
+                        handle_terminal_event(app, ev, client, &tx).await;
+                    }
+                    needs_draw = true;
                 }
             }
-        } else {
-            // 3. No input pending — wait for either input or background message.
-            //    Use biased select so input is always checked first.
-            let wait_input = async {
-                if let Some(ref mut input_rx) = app.input_rx {
-                    input_rx.recv().await
+            msg = rx.recv() => {
+                if let Some(msg) = msg {
+                    process_background_message(app, msg, client, &tx).await;
+                    needs_draw = true;
+                }
+            }
+            _ = tokio::time::sleep(sleep_dur) => {
+                // Timer expired — if needs_draw was set, loop will draw.
+                // Otherwise this just keeps the loop alive for health checks.
+                if needs_draw {
+                    // Will draw on next iteration.
                 } else {
-                    std::future::pending().await
-                }
-            };
-            tokio::select! {
-                biased;  // Check input first.
-                ev = wait_input => {
-                    if let Some(ev) = ev {
-                        handle_terminal_event(app, ev, client, &tx).await;
-                        // Drain any additional queued input.
-                        let mut more = Vec::new();
-                        if let Some(ref mut input_rx) = app.input_rx {
-                            while let Ok(ev) = input_rx.try_recv() {
-                                more.push(ev);
-                            }
-                        }
-                        for ev in more {
-                            handle_terminal_event(app, ev, client, &tx).await;
-                        }
-                    }
-                }
-                msg = rx.recv() => {
-                    if let Some(msg) = msg {
-                        process_background_message(app, msg, client, &tx).await;
-                        // Drain up to 50 more background messages.
-                        let mut bg_count = 0;
-                        while let Ok(msg) = rx.try_recv() {
-                            process_background_message(app, msg, client, &tx).await;
-                            bg_count += 1;
-                            if bg_count >= 50 {
-                                break;
-                            }
-                        }
-                    }
+                    // Nothing happened — loop back without drawing.
                 }
             }
         }
@@ -1140,9 +1177,15 @@ async fn handle_terminal_event(
                                 return;
                             }
                             ":status" => {
-                                let s = super::shell::fetch_status(client, &app.base_url).await;
-                                app.status = s;
-                                app.push_output(OutputLine::info("Status refreshed.".into()));
+                                // Fetch status asynchronously to avoid blocking input.
+                                let client = client.clone();
+                                let base_url = app.base_url.clone();
+                                let tx = tx.clone();
+                                tokio::spawn(async move {
+                                    let s = super::shell::fetch_status(&client, &base_url).await;
+                                    let _ = tx.send(TuiMessage::StatusUpdate(s));
+                                });
+                                app.push_output(OutputLine::info("Refreshing status...".into()));
                                 return;
                             }
                             "clear" => {
@@ -1591,14 +1634,26 @@ fn draw_ui(f: &mut Frame, app: &App) {
 
     // Calculate input area height dynamically based on wrapped text (v0.10.14).
     // The block has top+bottom borders (2 lines), plus content lines.
+    // Account for both word-wrap AND embedded newlines (from paste/Shift+Enter).
     let prompt = app.prompt_str();
-    let display_len = prompt.len() + app.input.chars().count();
-    // Inner width = total width minus 0 (no side borders on input block).
-    let inner_width = size.width.saturating_sub(0) as usize;
-    let content_lines = if inner_width == 0 {
-        1
-    } else {
-        display_len.div_ceil(inner_width).max(1)
+    let display = format!("{}{}", prompt, app.input);
+    let inner_width = size.width.max(1) as usize;
+    let content_lines = {
+        let mut lines = 0u16;
+        let mut col = 0usize;
+        for ch in display.chars() {
+            if ch == '\n' {
+                lines += 1;
+                col = 0;
+            } else {
+                col += 1;
+                if col >= inner_width {
+                    lines += 1;
+                    col = 0;
+                }
+            }
+        }
+        lines + 1 // +1 for the current (possibly partial) line
     };
     // Borders add 2 lines; cap at half the terminal to keep output visible.
     let input_height = (content_lines as u16 + 2).min(size.height / 2).max(3);
