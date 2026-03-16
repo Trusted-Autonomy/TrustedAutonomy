@@ -3971,6 +3971,71 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 ---
 
+### v0.11.4.4 — Constitution Compliance Remediation
+<!-- status: pending -->
+**Goal**: Fix all violations found by the 7-agent constitution compliance audit against `docs/TA-CONSTITUTION.md`. Prioritize High-severity items (data loss on error paths) before Medium-severity (stale injection on follow-up).
+
+**Audit source**: Constitution review run via `ta shell` QA agent (2026-03-16). Sections §2, §3, §9 passed. Violations in §4, §5, and potentially others (audit was cut short — re-run full audit at start of this phase to capture §6–§14).
+
+#### §4 — CLAUDE.md Injection & Cleanup (4 violations)
+
+1. [ ] **`inject_claude_settings()` backup-restore on follow-up**: Before re-injecting, restore from backup first (like `inject_claude_md()` does at `run.rs:2221-2230`). Currently overwrites backup with stale injected content. **Severity: Medium**
+
+2. [ ] **`inject_mcp_server_config()` same backup-restore issue**: Same pattern as item 1 — backup overwritten with already-injected content on `--follow-up`. **Severity: Medium**
+
+3. [ ] **Pre-launch command failure cleanup**: `run.rs:661-671` returns on pre-launch command failure without cleaning up injected files (CLAUDE.md, settings.local.json, MCP config). Add cleanup-on-error. **Severity: High**
+
+4. [ ] **General launch error cleanup**: `run.rs:854-858` — only `NotFound` error cleans up; other launch errors (permission denied, exec format error) leave injected files in staging. All error paths must clean up. **Severity: High**
+
+#### §5 — Goal Lifecycle State Machine (violations TBD)
+
+5. [ ] **Re-run full audit**: The initial audit was cut short. Re-run the full 14-section audit at the start of this phase to capture §5–§14 violations, particularly:
+   - §5: Goal state transitions — are all transitions validated?
+   - §6: Draft lifecycle — supersession rules enforced?
+   - §7: Policy enforcement — capability checks on all paths?
+   - §8: Audit trail — all state changes logged?
+   - §10-§14: Agent isolation, memory injection, event system, error handling, versioning
+
+6. [ ] **Fix all identified violations**: Address each finding, prioritized by severity (High → Medium → Low).
+
+7. [ ] **Add constitution regression tests**: For each fix, add a test that would catch the violation if it regressed. Tests should reference the constitution section they cover (e.g., `// §4.3: injected files must be cleaned up on all error paths`).
+
+8. [ ] **Audit sign-off**: Re-run the full audit after fixes to verify zero violations remain.
+
+**Files**: `apps/ta-cli/src/commands/run.rs` (injection/cleanup), `crates/ta-goal/src/goal_run.rs` (state machine), others TBD by audit.
+
+#### Version: `0.11.4-alpha.4`
+
+---
+
+### v0.11.4.5 — Shell Large-Paste Compaction
+<!-- status: pending -->
+**Goal**: When pasting large blocks of text into `ta shell`, compact the display instead of filling the input buffer with hundreds of lines.
+
+**Problem**: Pasting a large document (e.g., an audit report) into the shell input embeds all the text directly in the input buffer, making it unreadable and hard to edit. Claude Code CLI handles this by compacting large pastes into a summary/link.
+
+#### Items
+
+1. [ ] **Paste size threshold**: If pasted text exceeds a configurable limit (e.g., 500 chars or 10 lines), don't insert it verbatim into the input buffer.
+
+2. [ ] **Compacted display**: Show a compact representation in the input area, e.g.:
+   ```
+   ta> [Pasted 2,847 chars / 47 lines — press Enter to send, Escape to cancel]
+   ```
+   The full text is stored in a separate `pending_paste` field on `App`, not in `app.input`.
+
+3. [ ] **Send full content on Enter**: When submitted, send the full paste content (not the compact display) to the daemon/agent. Combine with any text the user typed before/after the paste indicator.
+
+4. [ ] **Preview on demand**: Allow the user to view the full paste (e.g., `Tab` to expand/collapse) before sending.
+
+5. [ ] **Cross-platform**: Same behavior on macOS, Linux, Windows since it's handled at the `Event::Paste` level.
+
+**Files**: `apps/ta-cli/src/commands/shell_tui.rs` (paste handler, App struct, input rendering)
+
+#### Version: `0.11.4-alpha.5`
+
+---
+
 ### v0.12.0 — Template Projects & Bootstrap Flow
 <!-- status: pending -->
 **Goal**: `ta new` generates projects with `project.toml` plugin declarations so downstream users get a complete, working setup from `ta setup` alone. Template projects in the Trusted-Autonomy org serve as reference implementations. Also: replace the quick-fix Discord command listener with a proper slash-command-based bidirectional integration.
