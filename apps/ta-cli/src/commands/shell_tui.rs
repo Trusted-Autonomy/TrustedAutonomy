@@ -12,10 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-    MouseEventKind,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -675,10 +672,9 @@ async fn run_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    // Enable mouse capture so scroll wheel events go to the TUI instead of
-    // scrolling the terminal's main buffer (which shows pre-shell content).
-    // Text selection still works via Shift+click in most terminals.
-    stdout.execute(EnableMouseCapture)?;
+    // Mouse capture intentionally NOT enabled — preserves native text selection
+    // (click-drag to copy). Scrolling uses PageUp/PageDown (full page) or
+    // Shift+Up/Down (1 line). Mouse wheel scrolls terminal scrollback natively.
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -699,7 +695,6 @@ async fn run_tui(
     // Cleanup.
     running.store(false, Ordering::Relaxed);
     disable_raw_mode()?;
-    terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     // Save history.
@@ -1078,11 +1073,9 @@ async fn handle_terminal_event(
                 _ => {}
             }
         }
-        Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => app.scroll_up(3),
-            MouseEventKind::ScrollDown => app.scroll_down(3),
-            _ => {} // Click/drag events ignored — let terminal handle selection.
-        },
+        Event::Mouse(_) => {
+            // Mouse capture not enabled — terminal handles natively.
+        }
         Event::Resize(_, _) => {
             // Terminal will re-draw on next loop iteration.
         }
