@@ -42,7 +42,18 @@ pub enum DaemonCommands {
         /// Follow the log in real time (like `tail -f`).
         #[arg(long, short)]
         follow: bool,
+        /// Filter by log level (error, warn, info, debug, trace).
+        #[arg(long)]
+        level: Option<String>,
+        /// Filter by component name (substring match in log lines).
+        #[arg(long)]
+        component: Option<String>,
+        /// Filter by goal ID (substring match).
+        #[arg(long)]
+        goal: Option<String>,
     },
+    /// Self-check: API responsive, event system, plugin status, disk space, goal process liveness.
+    Health,
 }
 
 /// Execute a `ta daemon` subcommand.
@@ -52,7 +63,21 @@ pub fn execute(command: &DaemonCommands, project_root: &Path) -> anyhow::Result<
         DaemonCommands::Stop => cmd_stop(project_root),
         DaemonCommands::Restart { port } => cmd_restart(project_root, *port),
         DaemonCommands::Status => cmd_status(project_root),
-        DaemonCommands::Log { lines, follow } => cmd_log(project_root, *lines, *follow),
+        DaemonCommands::Log {
+            lines,
+            follow,
+            level,
+            component,
+            goal,
+        } => cmd_log(
+            project_root,
+            *lines,
+            *follow,
+            level.as_deref(),
+            component.as_deref(),
+            goal.as_deref(),
+        ),
+        DaemonCommands::Health => cmd_health(project_root),
     }
 }
 
@@ -107,7 +132,7 @@ fn remove_pid_file(project_root: &Path) {
 }
 
 /// Check whether a process with the given PID is alive.
-fn is_process_alive(pid: u32) -> bool {
+pub fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         Command::new("kill")
@@ -575,7 +600,14 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_log(project_root: &Path, lines: usize, follow: bool) -> anyhow::Result<()> {
+fn cmd_log(
+    project_root: &Path,
+    lines: usize,
+    follow: bool,
+    level: Option<&str>,
+    component: Option<&str>,
+    goal: Option<&str>,
+) -> anyhow::Result<()> {
     let log = log_path(project_root);
 
     if !log.exists() {
@@ -585,6 +617,8 @@ fn cmd_log(project_root: &Path, lines: usize, follow: bool) -> anyhow::Result<()
         ));
     }
 
+    let has_filters = level.is_some() || component.is_some() || goal.is_some();
+
     if follow {
         // Live tail — open the file, seek to the last N lines, then poll for new content.
         let file = std::fs::File::open(&log)
@@ -592,9 +626,19 @@ fn cmd_log(project_root: &Path, lines: usize, follow: bool) -> anyhow::Result<()
         let reader = std::io::BufReader::new(&file);
         let all_lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
 
-        // Print last N lines first.
-        let start = all_lines.len().saturating_sub(lines);
-        for line in &all_lines[start..] {
+        // Apply filters, then take last N.
+        let filtered: Vec<&str> = if has_filters {
+            all_lines
+                .iter()
+                .filter(|l| matches_log_filters(l, level, component, goal))
+                .map(String::as_str)
+                .collect()
+        } else {
+            all_lines.iter().map(String::as_str).collect()
+        };
+
+        let start = filtered.len().saturating_sub(lines);
+        for line in &filtered[start..] {
             println!("{}", line);
         }
 
@@ -602,7 +646,14 @@ fn cmd_log(project_root: &Path, lines: usize, follow: bool) -> anyhow::Result<()
         let mut last_len = std::fs::metadata(&log)?.len();
         let stdout = std::io::stdout();
 
-        println!("--- following {} (Ctrl-C to stop) ---", log.display());
+        if has_filters {
+            println!(
+                "--- following {} with filters (Ctrl-C to stop) ---",
+                log.display()
+            );
+        } else {
+            println!("--- following {} (Ctrl-C to stop) ---", log.display());
+        }
 
         loop {
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -617,7 +668,9 @@ fn cmd_log(project_root: &Path, lines: usize, follow: bool) -> anyhow::Result<()
                 let reader = std::io::BufReader::new(f);
                 let mut handle = stdout.lock();
                 for l in reader.lines().map_while(Result::ok) {
-                    writeln!(handle, "{}", l)?;
+                    if !has_filters || matches_log_filters(&l, level, component, goal) {
+                        writeln!(handle, "{}", l)?;
+                    }
                 }
                 last_len = current_len;
             } else if current_len < last_len {
@@ -631,20 +684,311 @@ fn cmd_log(project_root: &Path, lines: usize, follow: bool) -> anyhow::Result<()
             .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", log.display(), e))?;
 
         let all_lines: Vec<&str> = content.lines().collect();
-        let start = all_lines.len().saturating_sub(lines);
 
-        for line in &all_lines[start..] {
+        // Apply filters first, then take last N.
+        let filtered: Vec<&str> = if has_filters {
+            all_lines
+                .iter()
+                .filter(|l| matches_log_filters(l, level, component, goal))
+                .copied()
+                .collect()
+        } else {
+            all_lines.clone()
+        };
+
+        let start = filtered.len().saturating_sub(lines);
+        for line in &filtered[start..] {
             println!("{}", line);
         }
 
+        let filter_note = if has_filters { " (filtered)" } else { "" };
         println!(
-            "\n({} of {} lines shown. Use `--follow` for live tail.)",
-            all_lines.len() - start,
-            all_lines.len()
+            "\n({} of {} lines shown{}. Use `--follow` for live tail.)",
+            filtered.len() - start,
+            all_lines.len(),
+            filter_note,
         );
     }
 
     Ok(())
+}
+
+/// Check if a log line matches the given filters.
+///
+/// Daemon logs use tracing's default format:
+///   `2026-03-15T10:30:00.123Z  INFO component: message goal_id=abc123`
+///
+/// Filters match by case-insensitive substring:
+/// - `level`: matches the level token (ERROR, WARN, INFO, DEBUG, TRACE)
+/// - `component`: matches anywhere in the line (component name, module path)
+/// - `goal`: matches goal IDs anywhere in the line
+fn matches_log_filters(
+    line: &str,
+    level: Option<&str>,
+    component: Option<&str>,
+    goal: Option<&str>,
+) -> bool {
+    let line_lower = line.to_lowercase();
+
+    if let Some(lvl) = level {
+        let lvl_lower = lvl.to_lowercase();
+        // Match common tracing log level tokens.
+        if !line_lower.contains(&lvl_lower) {
+            return false;
+        }
+    }
+
+    if let Some(comp) = component {
+        if !line_lower.contains(&comp.to_lowercase()) {
+            return false;
+        }
+    }
+
+    if let Some(goal_id) = goal {
+        if !line_lower.contains(&goal_id.to_lowercase()) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn cmd_health(project_root: &Path) -> anyhow::Result<()> {
+    println!("Daemon Health Check");
+    println!("═══════════════════════════════════════════");
+
+    let mut pass = 0u32;
+    let mut warn = 0u32;
+    let mut fail = 0u32;
+
+    // 1. PID and process
+    print!("  Process... ");
+    match read_pid(project_root) {
+        Some(pid) if is_process_alive(pid) => {
+            println!("ok (pid {})", pid);
+            pass += 1;
+        }
+        Some(pid) => {
+            println!("DEAD (pid {} not alive, stale PID file)", pid);
+            fail += 1;
+        }
+        None => {
+            println!("no PID file");
+            fail += 1;
+        }
+    }
+
+    // 2. API responsiveness
+    print!("  API... ");
+    let base_url = resolve_daemon_url(project_root, None);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?;
+
+    let start = std::time::Instant::now();
+    match client.get(format!("{}/api/status", base_url)).send() {
+        Ok(resp) if resp.status().is_success() => {
+            let latency = start.elapsed();
+            println!("ok ({}ms latency)", latency.as_millis());
+            pass += 1;
+        }
+        Ok(resp) => {
+            println!("ERROR (status {})", resp.status());
+            fail += 1;
+        }
+        Err(e) => {
+            println!("UNREACHABLE ({})", e);
+            fail += 1;
+        }
+    };
+
+    // 3. Event system (check events directory and recent activity)
+    print!("  Event system... ");
+    let events_dir = project_root.join(".ta/events");
+    let events_file = events_dir.join("events.jsonl");
+    if events_file.exists() {
+        let meta = std::fs::metadata(&events_file);
+        match meta {
+            Ok(m) => {
+                let size = m.len();
+                println!("ok ({} events file, {} bytes)", events_file.display(), size);
+                pass += 1;
+            }
+            Err(_) => {
+                println!("warning (cannot read events file)");
+                warn += 1;
+            }
+        }
+    } else if events_dir.exists() {
+        println!("ok (events directory exists, no events yet)");
+        pass += 1;
+    } else {
+        println!("warning (events directory missing — will be created on first event)");
+        warn += 1;
+    }
+
+    // 4. Plugin status
+    print!("  Plugins... ");
+    let plugins = ta_changeset::plugin::discover_plugins(project_root);
+    if plugins.is_empty() {
+        println!("none installed");
+        pass += 1;
+    } else {
+        let mut plugin_ok = true;
+        for p in &plugins {
+            // Check if command binary exists for stdio plugins
+            if p.manifest.protocol == ta_changeset::plugin::PluginProtocol::JsonStdio {
+                if let Some(ref cmd) = p.manifest.command {
+                    let bin_path = p.plugin_dir.join(cmd);
+                    if !bin_path.exists() {
+                        println!(
+                            "WARNING ({} binary missing: {})",
+                            p.manifest.name,
+                            bin_path.display()
+                        );
+                        warn += 1;
+                        plugin_ok = false;
+                    }
+                }
+            }
+        }
+        if plugin_ok {
+            println!("ok ({} plugin(s) installed)", plugins.len());
+            pass += 1;
+        }
+    }
+
+    // 5. Disk space
+    print!("  Disk space... ");
+    let output = std::process::Command::new("df")
+        .args(["-k", &project_root.display().to_string()])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if let Some(line) = stdout.lines().nth(1) {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() >= 4 {
+                    if let Ok(kb) = fields[3].parse::<u64>() {
+                        let bytes = kb * 1024;
+                        let threshold = 2 * 1024 * 1024 * 1024u64; // 2 GB
+                        if bytes >= threshold {
+                            println!("ok ({:.1} GB available)", bytes as f64 / 1_073_741_824.0);
+                            pass += 1;
+                        } else {
+                            println!(
+                                "LOW ({:.1} GB available, recommend >2 GB)",
+                                bytes as f64 / 1_073_741_824.0
+                            );
+                            warn += 1;
+                        }
+                    } else {
+                        println!("unknown");
+                        warn += 1;
+                    }
+                } else {
+                    println!("unknown");
+                    warn += 1;
+                }
+            } else {
+                println!("unknown");
+                warn += 1;
+            }
+        }
+        _ => {
+            println!("unknown");
+            warn += 1;
+        }
+    }
+
+    // 6. Goal process liveness
+    print!("  Goal processes... ");
+    let goals_dir = project_root.join(".ta/goals");
+    if goals_dir.exists() {
+        match ta_goal::GoalRunStore::new(&goals_dir) {
+            Ok(store) => {
+                let goals = store.list().unwrap_or_default();
+                let running: Vec<_> = goals
+                    .iter()
+                    .filter(|g| g.state == ta_goal::GoalRunState::Running)
+                    .collect();
+
+                if running.is_empty() {
+                    println!("ok (no active goals)");
+                    pass += 1;
+                } else {
+                    let zombies: Vec<_> = running
+                        .iter()
+                        .filter(|g| {
+                            g.agent_pid
+                                .map(|pid| !is_process_alive(pid))
+                                .unwrap_or(false)
+                        })
+                        .collect();
+
+                    if zombies.is_empty() {
+                        println!("ok ({} running, all alive)", running.len());
+                        pass += 1;
+                    } else {
+                        println!(
+                            "WARNING ({} zombie(s) of {} running)",
+                            zombies.len(),
+                            running.len()
+                        );
+                        for z in &zombies {
+                            println!(
+                                "    {} \"{}\" (pid {} dead)",
+                                &z.goal_run_id.to_string()[..8],
+                                z.title,
+                                z.agent_pid.unwrap_or(0)
+                            );
+                        }
+                        warn += 1;
+                    }
+                }
+            }
+            Err(_) => {
+                println!("ok (no goal store)");
+                pass += 1;
+            }
+        }
+    } else {
+        println!("ok (no goals directory)");
+        pass += 1;
+    }
+
+    // 7. Log file
+    print!("  Log file... ");
+    let log = log_path(project_root);
+    if log.exists() {
+        let meta = std::fs::metadata(&log)?;
+        let size = meta.len();
+        if size > 100 * 1024 * 1024 {
+            // 100 MB
+            println!("WARNING ({}MB — consider rotation)", size / 1_048_576);
+            warn += 1;
+        } else {
+            println!("ok ({:.1} MB)", size as f64 / 1_048_576.0);
+            pass += 1;
+        }
+    } else {
+        println!("not found (daemon may not have been started yet)");
+        warn += 1;
+    }
+
+    // Summary
+    println!();
+    if fail == 0 && warn == 0 {
+        println!("All checks passed ({}/{}). Daemon is healthy.", pass, pass);
+    } else {
+        println!("{} passed, {} warnings, {} failures", pass, warn, fail);
+    }
+
+    if fail > 0 {
+        Err(anyhow::anyhow!("{} daemon health check(s) failed", fail))
+    } else {
+        Ok(())
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -763,7 +1107,7 @@ mod tests {
     #[test]
     fn cmd_log_missing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let result = cmd_log(dir.path(), 50, false);
+        let result = cmd_log(dir.path(), 50, false, None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No daemon log"));
     }
@@ -782,7 +1126,7 @@ mod tests {
         std::fs::write(&log, &content).unwrap();
 
         // cmd_log prints to stdout; we just verify it doesn't error.
-        assert!(cmd_log(dir.path(), 10, false).is_ok());
+        assert!(cmd_log(dir.path(), 10, false, None, None, None).is_ok());
     }
 
     #[test]
@@ -802,5 +1146,14 @@ mod tests {
     fn is_process_alive_nonexistent() {
         // PID 99999999 is very unlikely to be alive.
         assert!(!is_process_alive(99999999));
+    }
+
+    #[test]
+    fn cmd_health_no_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        // No daemon running — health should report failures but not panic.
+        let result = cmd_health(dir.path());
+        // May return error (fail count > 0) or ok with warnings — either is fine.
+        let _ = result;
     }
 }

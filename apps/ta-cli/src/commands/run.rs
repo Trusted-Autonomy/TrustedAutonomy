@@ -463,6 +463,29 @@ pub fn execute(
 
     let agent_config = agent_launch_config(agent, source);
 
+    // Disk space pre-flight (v0.11.3 item 28).
+    {
+        let wf = ta_submit::WorkflowConfig::load_or_default(
+            &config.workspace_root.join(".ta/workflow.toml"),
+        );
+        let check_path = if config.staging_dir.exists() {
+            &config.staging_dir
+        } else {
+            &config.workspace_root
+        };
+        match ta_submit::check_disk_space_mb(check_path) {
+            Ok(mb) if mb < wf.staging.min_disk_mb => {
+                eprintln!(
+                    "WARNING: Low disk space ({} MB available, {} MB recommended).\n  \
+                     Free up space or adjust [staging].min_disk_mb in .ta/workflow.toml.\n",
+                    mb, wf.staging.min_disk_mb,
+                );
+            }
+            Err(e) => tracing::warn!("Could not check disk space: {}", e),
+            _ => {}
+        }
+    }
+
     // 1. Start the goal (creates overlay workspace), or reuse an existing one
     //    when --goal-id is passed (v0.9.5.1: prevents duplicate goal creation
     //    when the MCP orchestrator's ta_goal_start already created the goal).

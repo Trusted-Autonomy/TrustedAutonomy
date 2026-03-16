@@ -238,6 +238,33 @@ pub enum DraftCommands {
         #[arg(long)]
         archive: bool,
     },
+    /// Lightweight follow-up for PR iteration on an existing feature branch.
+    FollowUp {
+        /// Draft package ID (or prefix).
+        id: String,
+        /// Agent system to use.
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
+        /// Auto-fetch latest CI failure log from the PR and inject as context.
+        #[arg(long)]
+        ci_failure: bool,
+        /// Auto-fetch PR review comments and inject as context.
+        #[arg(long)]
+        review_comments: bool,
+        /// Additional guidance for the agent.
+        #[arg(long)]
+        guidance: Option<String>,
+        /// Don't launch the agent -- just set up the workspace and print instructions.
+        #[arg(long)]
+        no_launch: bool,
+    },
+    /// Show PR state, CI status, and review status for a draft's associated PR.
+    PrStatus {
+        /// Draft package ID (or prefix).
+        id: String,
+    },
+    /// List open PRs created by TA with their draft IDs and CI status.
+    PrList,
 }
 
 /// Review session subcommands for multi-turn artifact review.
@@ -519,6 +546,24 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             close_package(config, &resolved, reason.as_deref(), closed_by)
         }
         DraftCommands::Gc { dry_run, archive } => gc_packages(config, *dry_run, *archive),
+        DraftCommands::FollowUp {
+            id,
+            agent,
+            ci_failure,
+            review_comments,
+            guidance,
+            no_launch,
+        } => draft_follow_up(
+            config,
+            id,
+            agent,
+            *ci_failure,
+            *review_comments,
+            guidance.as_deref(),
+            *no_launch,
+        ),
+        DraftCommands::PrStatus { id } => draft_pr_status(config, id),
+        DraftCommands::PrList => draft_pr_list(config),
     }
 }
 
@@ -2420,6 +2465,9 @@ fn apply_package(
                         commit_sha: vcs_commit_sha,
                         last_checked: Utc::now(),
                     };
+                    // Store PR URL on the goal for cross-reference (v0.11.3).
+                    // Extract review_url before moving vcs_info.
+                    let _review_url = vcs_info.review_url.clone();
                     pkg.vcs_status = Some(vcs_info);
                     // Re-save the draft package with VCS info.
                     let pkg_path = config
@@ -2517,6 +2565,33 @@ fn apply_package(
                 }
             }
             // Different staging (standalone): do NOT auto-close parent draft.
+        }
+    }
+
+    // Auto-clean staging directory if configured (v0.11.3 item 27).
+    {
+        let wf_cfg = ta_submit::WorkflowConfig::load_or_default(
+            &config.workspace_root.join(".ta/workflow.toml"),
+        );
+        if wf_cfg.staging.auto_clean
+            && !goal.workspace_path.as_os_str().is_empty()
+            && goal.workspace_path.exists()
+        {
+            match std::fs::remove_dir_all(&goal.workspace_path) {
+                Ok(()) => {
+                    println!(
+                        "Auto-cleaned staging directory: {} (staging.auto_clean=true)",
+                        goal.workspace_path.display(),
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: could not auto-clean staging {}: {}",
+                        goal.workspace_path.display(),
+                        e,
+                    );
+                }
+            }
         }
     }
 
@@ -3824,6 +3899,467 @@ fn review_show(config: &GatewayConfig, session_id: Option<&str>) -> anyhow::Resu
         }
     }
 
+    Ok(())
+}
+
+// ── Draft follow-up (v0.11.3 items 1-7) ────────────────────────────
+
+/// Follow-up record stored as JSON sidecar.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct FollowUpRecord {
+    timestamp: String,
+    agent: String,
+    reason: String,
+    ci_failure: bool,
+    review_comments: bool,
+    guidance: Option<String>,
+}
+
+fn draft_follow_up(
+    config: &GatewayConfig,
+    id: &str,
+    agent: &str,
+    ci_failure: bool,
+    review_comments: bool,
+    guidance: Option<&str>,
+    no_launch: bool,
+) -> anyhow::Result<()> {
+    let package_id = resolve_draft_id(id, config)?;
+    let pkg = load_package(config, package_id)?;
+
+    // Validate draft is in Applied state.
+    if !matches!(pkg.status, DraftStatus::Applied { .. }) {
+        anyhow::bail!(
+            "Draft {} is in {:?} state. Follow-up requires an Applied draft \
+             (one that has been committed to a feature branch via `ta draft apply`).\n\
+             Use `ta draft follow-up` after `ta draft apply --submit`.",
+            &package_id.to_string()[..8],
+            pkg.status,
+        );
+    }
+
+    // Get VCS tracking info for the branch.
+    let vcs = pkg.vcs_status.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Draft {} has no VCS tracking info. Follow-up requires a draft that was \
+             applied with --submit. Re-apply with `ta draft apply --submit`.",
+            &package_id.to_string()[..8],
+        )
+    })?;
+
+    let branch = &vcs.branch;
+    println!(
+        "Follow-up on draft {} (branch: {})",
+        &package_id.to_string()[..8],
+        branch,
+    );
+
+    // Find the goal for this package.
+    let goal_store = GoalRunStore::new(&config.goals_dir)?;
+    let goals = goal_store.list()?;
+    let goal = goals
+        .iter()
+        .find(|g| g.pr_package_id == Some(package_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No goal found for draft {}. Cannot determine workspace.",
+                &package_id.to_string()[..8],
+            )
+        })?;
+
+    let target_dir = goal
+        .source_dir
+        .clone()
+        .unwrap_or_else(|| config.workspace_root.clone());
+
+    // Branch safety: check that branch HEAD matches recorded commit.
+    if let Some(ref recorded_sha) = vcs.commit_sha {
+        let branch_head = std::process::Command::new("git")
+            .args(["rev-parse", branch])
+            .current_dir(&target_dir)
+            .output();
+
+        if let Ok(output) = branch_head {
+            let current_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let prefix_len = 8.min(recorded_sha.len());
+            if !current_sha.is_empty() && !current_sha.starts_with(&recorded_sha[..prefix_len]) {
+                println!();
+                println!(
+                    "WARNING: Branch '{}' has been modified since TA applied draft {}.",
+                    branch,
+                    &package_id.to_string()[..8],
+                );
+                println!("  Recorded commit: {}", recorded_sha);
+                println!("  Current HEAD:    {}", current_sha);
+                println!("  The follow-up agent will see the current state.");
+            }
+        }
+    }
+
+    // Gather PR context.
+    let pr_url = vcs.review_url.as_deref().or(goal.pr_url.as_deref());
+    let mut context_sections: Vec<String> = Vec::new();
+
+    // Original draft summary.
+    context_sections.push(format!(
+        "## Original Draft\n\nDraft ID: {}\nTitle: {}\nBranch: {}\nSummary: {}",
+        package_id, pkg.goal.title, branch, pkg.summary.what_changed,
+    ));
+
+    // CI failure context.
+    if ci_failure {
+        if let Some(url) = pr_url {
+            println!("Fetching CI failure context from PR...");
+            let ci_ctx = fetch_ci_failure_context(url, &target_dir);
+            if !ci_ctx.is_empty() {
+                context_sections.push(format!(
+                    "## CI Failures\n\nFix these CI failures:\n\n```\n{}\n```",
+                    ci_ctx,
+                ));
+                println!("  Injected CI failure context ({} chars).", ci_ctx.len());
+            } else {
+                println!("  No CI failures found (or `gh` not available).");
+            }
+        } else {
+            println!("  --ci-failure: No PR URL found, skipping.");
+        }
+    }
+
+    // Review comments context.
+    if review_comments {
+        if let Some(url) = pr_url {
+            println!("Fetching review comments from PR...");
+            let comments = fetch_review_comments(url, &target_dir);
+            if !comments.is_empty() {
+                context_sections.push(format!(
+                    "## PR Review Comments\n\nAddress each comment:\n\n{}",
+                    comments,
+                ));
+                println!("  Injected review comments ({} chars).", comments.len());
+            } else {
+                println!("  No review comments found (or `gh` not available).");
+            }
+        } else {
+            println!("  --review-comments: No PR URL found, skipping.");
+        }
+    }
+
+    // User guidance.
+    if let Some(g) = guidance {
+        context_sections.push(format!("## Additional Guidance\n\n{}", g));
+    }
+
+    // Write context file.
+    let context_path = target_dir.join(".ta/follow-up-context.md");
+    fs::create_dir_all(target_dir.join(".ta"))?;
+    let full_context = context_sections.join("\n\n---\n\n");
+    fs::write(&context_path, &full_context)?;
+    println!("\nFollow-up context written to: {}", context_path.display());
+
+    // Record follow-up in sidecar.
+    let followup_path = config
+        .pr_packages_dir
+        .join(format!("{}-followups.json", package_id));
+    let mut records: Vec<FollowUpRecord> = if followup_path.exists() {
+        let content = fs::read_to_string(&followup_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    records.push(FollowUpRecord {
+        timestamp: Utc::now().to_rfc3339(),
+        agent: agent.to_string(),
+        reason: guidance.unwrap_or("follow-up").to_string(),
+        ci_failure,
+        review_comments,
+        guidance: guidance.map(|g| g.to_string()),
+    });
+    fs::write(&followup_path, serde_json::to_string_pretty(&records)?)?;
+
+    if no_launch {
+        println!("\n-- Setup complete (--no-launch) --");
+        println!("  Branch:     {}", branch);
+        println!("  Target dir: {}", target_dir.display());
+        println!("  Context:    {}", context_path.display());
+        println!("\nTo start working:");
+        println!("  cd {} && git checkout {}", target_dir.display(), branch);
+        return Ok(());
+    }
+
+    // Checkout the branch.
+    println!("\nChecking out branch '{}'...", branch);
+    let checkout = std::process::Command::new("git")
+        .args(["checkout", branch])
+        .current_dir(&target_dir)
+        .status();
+
+    match checkout {
+        Ok(status) if status.success() => println!("  On branch '{}'.", branch),
+        Ok(status) => anyhow::bail!(
+            "Failed to checkout branch '{}' (exit {}). Try `git fetch` first.",
+            branch,
+            status.code().unwrap_or(-1),
+        ),
+        Err(e) => anyhow::bail!("Failed to run git checkout: {}. Is git in PATH?", e),
+    }
+
+    // Launch agent.
+    println!("Launching {} agent in {}...", agent, target_dir.display());
+    let objective = format!(
+        "Follow-up on draft {}. Read .ta/follow-up-context.md for what needs fixing. \
+         Make changes and commit to branch '{}'.",
+        &package_id.to_string()[..8],
+        branch,
+    );
+
+    let agent_args: Vec<String> = match agent {
+        "claude-code" => vec!["claude".into(), "--print".into(), objective],
+        other => vec![other.into(), objective],
+    };
+
+    let status = std::process::Command::new(&agent_args[0])
+        .args(&agent_args[1..])
+        .current_dir(&target_dir)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("\nAgent exited successfully.");
+            println!("Push changes with: cd {} && git push", target_dir.display());
+        }
+        Ok(s) => eprintln!("\nAgent exited with code {}.", s.code().unwrap_or(-1),),
+        Err(e) => eprintln!("Failed to launch agent '{}': {}", agent, e),
+    }
+
+    Ok(())
+}
+
+/// Fetch CI failure context from a PR using `gh`.
+fn fetch_ci_failure_context(pr_url: &str, working_dir: &std::path::Path) -> String {
+    let checks = std::process::Command::new("gh")
+        .args(["pr", "checks", pr_url])
+        .current_dir(working_dir)
+        .output();
+
+    let mut context = String::new();
+    if let Ok(output) = checks {
+        let checks_output = String::from_utf8_lossy(&output.stdout);
+        let failed_lines: Vec<&str> = checks_output
+            .lines()
+            .filter(|l| l.contains("fail") || l.contains("X "))
+            .collect();
+        if !failed_lines.is_empty() {
+            context.push_str("Failed checks:\n");
+            for line in &failed_lines {
+                context.push_str(line);
+                context.push('\n');
+            }
+        }
+    }
+    context
+}
+
+/// Fetch PR review comments using `gh`.
+fn fetch_review_comments(pr_url: &str, working_dir: &std::path::Path) -> String {
+    let output = std::process::Command::new("gh")
+        .args(["pr", "view", pr_url, "--comments", "--json", "comments"])
+        .current_dir(working_dir)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let raw = String::from_utf8_lossy(&o.stdout);
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(comments) = data.get("comments").and_then(|c| c.as_array()) {
+                    let mut result = String::new();
+                    for comment in comments {
+                        let author = comment
+                            .get("author")
+                            .and_then(|a| a.get("login"))
+                            .and_then(|l| l.as_str())
+                            .unwrap_or("unknown");
+                        let body = comment.get("body").and_then(|b| b.as_str()).unwrap_or("");
+                        if !body.is_empty() {
+                            result.push_str(&format!("**@{}**: {}\n\n", author, body));
+                        }
+                    }
+                    return result;
+                }
+            }
+            raw.to_string()
+        }
+        _ => String::new(),
+    }
+}
+
+// ── PR lifecycle (v0.11.3 items 24-26) ──────────────────────────────
+
+fn draft_pr_status(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
+    let package_id = resolve_draft_id(id, config)?;
+    let pkg = load_package(config, package_id)?;
+
+    let vcs = pkg.vcs_status.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Draft {} has no VCS tracking info. Apply with --submit first.",
+            &package_id.to_string()[..8],
+        )
+    })?;
+
+    println!(
+        "=== PR Status for Draft {} ===\n",
+        &package_id.to_string()[..8]
+    );
+    println!(
+        "Draft:   {} ({})",
+        pkg.goal.title,
+        &package_id.to_string()[..8]
+    );
+    println!("Branch:  {}", vcs.branch);
+    if let Some(ref sha) = vcs.commit_sha {
+        println!("Commit:  {}", sha);
+    }
+
+    if let Some(ref url) = vcs.review_url {
+        println!("PR URL:  {}", url);
+
+        // Try live status via gh.
+        let gh_output = std::process::Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                url,
+                "--json",
+                "state,statusCheckRollup,reviews,title",
+            ])
+            .current_dir(&config.workspace_root)
+            .output();
+
+        match gh_output {
+            Ok(output) if output.status.success() => {
+                let raw = String::from_utf8_lossy(&output.stdout);
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let state = data
+                        .get("state")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    println!("\n-- Live PR Status --");
+                    println!("  State:    {}", state);
+
+                    if let Some(checks) = data.get("statusCheckRollup").and_then(|v| v.as_array()) {
+                        let total = checks.len();
+                        let passed = checks
+                            .iter()
+                            .filter(|c| {
+                                c.get("conclusion")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s == "SUCCESS" || s == "NEUTRAL" || s == "SKIPPED")
+                                    .unwrap_or(false)
+                            })
+                            .count();
+                        let failed = checks
+                            .iter()
+                            .filter(|c| {
+                                c.get("conclusion")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s == "FAILURE" || s == "ERROR")
+                                    .unwrap_or(false)
+                            })
+                            .count();
+                        println!(
+                            "  CI:       {} passed, {} failed, {} pending (of {})",
+                            passed,
+                            failed,
+                            total - passed - failed,
+                            total
+                        );
+
+                        for check in checks {
+                            let conclusion = check
+                                .get("conclusion")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if conclusion == "FAILURE" || conclusion == "ERROR" {
+                                let name = check
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                println!("            FAIL: {}", name);
+                            }
+                        }
+                    }
+
+                    if let Some(reviews) = data.get("reviews").and_then(|v| v.as_array()) {
+                        if !reviews.is_empty() {
+                            let approved = reviews
+                                .iter()
+                                .filter(|r| {
+                                    r.get("state").and_then(|v| v.as_str()) == Some("APPROVED")
+                                })
+                                .count();
+                            let changes_req = reviews
+                                .iter()
+                                .filter(|r| {
+                                    r.get("state").and_then(|v| v.as_str())
+                                        == Some("CHANGES_REQUESTED")
+                                })
+                                .count();
+                            println!(
+                                "  Reviews:  {} approved, {} changes requested (of {})",
+                                approved,
+                                changes_req,
+                                reviews.len()
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                println!("\n  Could not fetch live status: {}", stderr.trim());
+            }
+            Err(e) => println!("\n  Could not run `gh`: {}", e),
+        }
+    } else {
+        println!("PR URL:  (none recorded)");
+        if let Some(ref state) = vcs.review_state {
+            println!("State:   {}", state);
+        }
+    }
+
+    Ok(())
+}
+
+fn draft_pr_list(config: &GatewayConfig) -> anyhow::Result<()> {
+    let packages = load_all_packages(config)?;
+
+    let with_pr: Vec<&DraftPackage> = packages.iter().filter(|p| p.vcs_status.is_some()).collect();
+
+    if with_pr.is_empty() {
+        println!("No drafts with PR/VCS tracking info found.");
+        println!("  Drafts get VCS tracking after `ta draft apply --submit`.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<10} {:<30} {:<10} {:<8} PR URL",
+        "DRAFT", "TITLE", "BRANCH", "STATE"
+    );
+    println!("{}", "-".repeat(90));
+
+    for pkg in &with_pr {
+        let vcs = pkg.vcs_status.as_ref().unwrap();
+        let short_id = &pkg.package_id.to_string()[..8];
+        let title = truncate(&pkg.goal.title, 28);
+        let branch = truncate(&vcs.branch, 8);
+        let state = vcs.review_state.as_deref().unwrap_or("?");
+        let url = vcs.review_url.as_deref().unwrap_or("-");
+        println!(
+            "{:<10} {:<30} {:<10} {:<8} {}",
+            short_id, title, branch, state, url
+        );
+    }
+
+    println!("\n{} draft(s) with VCS tracking.", with_pr.len());
     Ok(())
 }
 

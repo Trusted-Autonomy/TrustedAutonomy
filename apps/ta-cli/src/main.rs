@@ -257,9 +257,16 @@ enum Commands {
         /// Move to .ta/goals/archive/ instead of deleting.
         #[arg(long)]
         archive: bool,
+        /// Also prune old events from .ta/events/ (v0.11.3).
+        #[arg(long)]
+        include_events: bool,
     },
     /// Project-wide status dashboard: active agents, pending drafts, next phase.
-    Status,
+    Status {
+        /// Deep status: daemon health, disk usage, pending questions, recent events.
+        #[arg(long)]
+        deep: bool,
+    },
     /// Start the MCP server on stdio.
     Serve,
     /// Review and accept the terms of use.
@@ -302,6 +309,8 @@ enum Commands {
         /// Defaults to the most recent active goal.
         goal_id: Option<String>,
     },
+    /// System-wide health check: toolchain, agent binaries, daemon, plugins, .ta integrity.
+    Doctor,
     /// View the interactive conversation history for a goal.
     Conversation {
         /// Goal run ID (or prefix).
@@ -548,12 +557,21 @@ fn main() -> anyhow::Result<()> {
             threshold_days,
             all,
             archive,
-        } => commands::gc::execute(&config, *dry_run, *threshold_days, *all, *archive),
-        Commands::Status => commands::status::execute(&config),
+            include_events,
+        } => commands::gc::execute(
+            &config,
+            *dry_run,
+            *threshold_days,
+            *all,
+            *archive,
+            *include_events,
+        ),
+        Commands::Status { deep } => commands::status::execute(&config, *deep),
         Commands::Serve => commands::serve::execute(&project_root),
         Commands::Build { test } => commands::build::execute(&config, *test),
         Commands::Sync => commands::sync::execute(&config),
         Commands::Verify { goal_id } => commands::verify::execute(&config, goal_id.as_deref()),
+        Commands::Doctor => commands::goal::doctor(&config),
         Commands::Conversation { goal_id, json } => {
             commands::conversation::execute(&config, goal_id, *json)
         }

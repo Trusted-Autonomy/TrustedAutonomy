@@ -23,8 +23,9 @@ pub use adapter::{
 pub use adapter::SubmitAdapter;
 
 pub use config::{
-    BuildConfig, BuildOnFail, DiffConfig, GitConfig, PerforceConfig, ShellConfig, SubmitConfig,
-    SvnConfig, SyncConfig, VerifyCommand, VerifyConfig, VerifyOnFailure, WorkflowConfig,
+    check_disk_space_mb, BuildConfig, BuildOnFail, DiffConfig, GitConfig, PerforceConfig,
+    ShellConfig, StagingConfig, SubmitConfig, SvnConfig, SyncConfig, VerifyCommand, VerifyConfig,
+    VerifyOnFailure, WorkflowConfig,
 };
 pub use git::GitAdapter;
 pub use none::NoneAdapter;

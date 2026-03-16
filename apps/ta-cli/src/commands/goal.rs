@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use ta_goal::{GoalHistoryLedger, GoalRunState, GoalRunStore, HistoryFilter};
+use ta_goal::{GoalHistoryLedger, GoalRun, GoalRunState, GoalRunStore, HistoryFilter};
 use ta_mcp_gateway::GatewayConfig;
 use ta_policy::constitution::{
     AccessConstitution, ConstitutionEntry, ConstitutionStore, EnforcementMode,
@@ -216,6 +216,24 @@ pub enum GoalCommands {
         #[arg(long, default_value = "7")]
         threshold_days: u32,
     },
+    /// Detailed goal inspection: PID, process health, elapsed time, last event, staging path, draft state, agent log tail.
+    Inspect {
+        /// Goal run ID (or prefix).
+        id: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Analyze a failed/stuck goal: timeline, last output, state transitions, errors, likely cause.
+    PostMortem {
+        /// Goal run ID (or prefix).
+        id: String,
+    },
+    /// Check prerequisites before starting a goal: disk space, daemon, agent binary, VCS, env vars.
+    PreFlight {
+        /// Goal title (for context).
+        title: Option<String>,
+    },
     /// Browse the goal history ledger (archived/completed goals, v0.9.8.1).
     History {
         /// Filter by plan phase.
@@ -265,6 +283,14 @@ pub enum ConstitutionCommands {
     },
     /// List all goals that have constitutions.
     List,
+    /// Verify command behavior against TA-CONSTITUTION.md rules (v0.11.3).
+    ///
+    /// Checks current workspace state against constitutional invariants:
+    /// branch restoration, injection cleanup, audit completeness, etc.
+    Verify {
+        /// Goal run ID (optional — if omitted, checks all active goals).
+        goal_id: Option<String>,
+    },
 }
 
 /// Find a parent goal by ID prefix (goal ID or draft ID), or return the latest goal if no prefix given.
@@ -371,6 +397,9 @@ pub fn execute(cmd: &GoalCommands, config: &GatewayConfig) -> anyhow::Result<()>
         GoalCommands::Status { id, json } => show_status(&store, config, id, *json),
         GoalCommands::Delete { id } => delete_goal(&store, id),
         GoalCommands::Constitution { command } => execute_constitution(command, config, &store),
+        GoalCommands::Inspect { id, json } => goal_inspect(config, &store, id, *json),
+        GoalCommands::PostMortem { id } => goal_post_mortem(config, &store, id),
+        GoalCommands::PreFlight { title } => goal_pre_flight(config, title.as_deref()),
         GoalCommands::Gc {
             dry_run,
             include_staging,
@@ -1010,6 +1039,196 @@ fn execute_constitution(
             }
             println!("\n{} constitution(s) total.", goals.len());
         }
+        ConstitutionCommands::Verify { goal_id } => {
+            verify_constitution(config, goal_store, goal_id.as_deref())?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify constitution invariants for active goals (v0.11.3).
+///
+/// Checks workspace state against TA-CONSTITUTION.md rules:
+/// - Rule 3.2: Infrastructure exclusion (no .ta/goals/ in staging)
+/// - Rule 4.3: Injection cleanup (CLAUDE.md state matches goal state)
+/// - Rule 1.5: Audit chain (audit log exists and is non-empty)
+/// - Rule 2.1: Feature branch isolation (applied goals used drafts)
+fn verify_constitution(
+    config: &GatewayConfig,
+    goal_store: &GoalRunStore,
+    goal_id: Option<&str>,
+) -> anyhow::Result<()> {
+    // Load TA-CONSTITUTION.md.
+    let constitution_path = config.workspace_root.join("docs/TA-CONSTITUTION.md");
+    let alt_path = config.workspace_root.join("TA-CONSTITUTION.md");
+    let const_path = if constitution_path.exists() {
+        constitution_path
+    } else if alt_path.exists() {
+        alt_path
+    } else {
+        anyhow::bail!(
+            "No TA-CONSTITUTION.md found.\n\
+             Searched: docs/TA-CONSTITUTION.md, TA-CONSTITUTION.md\n\
+             Create the constitution document to enable verification."
+        );
+    };
+
+    println!(
+        "Verifying constitutional compliance ({})...",
+        const_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("TA-CONSTITUTION.md")
+    );
+    println!();
+
+    let goals = if let Some(id_prefix) = goal_id {
+        let all = goal_store.list()?;
+        let matched: Vec<_> = all
+            .into_iter()
+            .filter(|g| g.goal_run_id.to_string().starts_with(id_prefix))
+            .collect();
+        if matched.is_empty() {
+            anyhow::bail!(
+                "No goal found matching '{}'. Run `ta goal list` to see goals.",
+                id_prefix
+            );
+        }
+        matched
+    } else {
+        let all = goal_store.list()?;
+        all.into_iter()
+            .filter(|g| g.state == GoalRunState::Running || g.state == GoalRunState::PrReady)
+            .collect()
+    };
+
+    let mut pass_count = 0u32;
+    let mut fail_count = 0u32;
+
+    // Rule 3.2: Infrastructure exclusion — staging must not contain leaked TA state.
+    println!("  Rule 3.2 (Infrastructure Exclusion):");
+    for goal in &goals {
+        let staging_goals = goal.workspace_path.join(".ta").join("goals");
+        if staging_goals.exists() {
+            println!(
+                "    [FAIL] Goal {} — .ta/goals/ found in staging at {}",
+                &goal.goal_run_id.to_string()[..8],
+                staging_goals.display()
+            );
+            fail_count += 1;
+        } else {
+            println!(
+                "    [OK]   Goal {} — No leaked TA state in staging",
+                &goal.goal_run_id.to_string()[..8]
+            );
+            pass_count += 1;
+        }
+    }
+    if goals.is_empty() {
+        println!("    (no active goals to check)");
+    }
+
+    // Rule 4.3: Injection cleanup — CLAUDE.md injection must match goal state.
+    println!("  Rule 4.3 (Injection Cleanup):");
+    for goal in &goals {
+        let claude_md = goal.workspace_path.join("CLAUDE.md");
+        if claude_md.exists() {
+            if let Ok(content) = std::fs::read_to_string(&claude_md) {
+                let has_injection =
+                    content.contains("## Plan Context") && content.contains("TA-mediated goal");
+                if has_injection && goal.state == GoalRunState::Running {
+                    println!(
+                        "    [OK]   Goal {} — Injection active (goal is running)",
+                        &goal.goal_run_id.to_string()[..8]
+                    );
+                    pass_count += 1;
+                } else if has_injection {
+                    println!(
+                        "    [WARN] Goal {} — Injection content still present (state: {})",
+                        &goal.goal_run_id.to_string()[..8],
+                        goal.state
+                    );
+                    fail_count += 1;
+                } else {
+                    pass_count += 1;
+                }
+            }
+        } else {
+            pass_count += 1;
+        }
+    }
+
+    // Rule 1.5: Audit chain — audit log must exist and be non-empty.
+    println!("  Rule 1.5 (Append-Only Audit):");
+    let audit_log = config.workspace_root.join(".ta/audit.jsonl");
+    if audit_log.exists() {
+        let content = std::fs::read_to_string(&audit_log).unwrap_or_default();
+        let entries = content.lines().filter(|l| !l.trim().is_empty()).count();
+        if entries > 0 {
+            println!("    [OK]   Audit log exists with {} entries", entries);
+            pass_count += 1;
+        } else {
+            println!("    [WARN] Audit log exists but is empty");
+            fail_count += 1;
+        }
+    } else {
+        println!("    [INFO] No audit log found at .ta/audit.jsonl");
+        pass_count += 1;
+    }
+
+    // Rule 2.1: Feature branch isolation — applied goals must use drafts.
+    println!("  Rule 2.1 (Feature Branch Isolation):");
+    let applied_goals: Vec<_> = if goal_id.is_some() {
+        goals
+            .iter()
+            .filter(|g| g.state == GoalRunState::Applied)
+            .collect()
+    } else {
+        // Collect owned goals first, then reference them.
+        vec![]
+    };
+    let all_goals_for_rule2;
+    let applied_goals_final: Vec<&GoalRun> = if goal_id.is_some() {
+        applied_goals.to_vec()
+    } else {
+        all_goals_for_rule2 = goal_store.list().unwrap_or_default();
+        all_goals_for_rule2
+            .iter()
+            .filter(|g| g.state == GoalRunState::Applied)
+            .take(5)
+            .collect()
+    };
+    if applied_goals_final.is_empty() {
+        println!("    (no applied goals to check)");
+    }
+    for goal in &applied_goals_final {
+        if goal.pr_package_id.is_some() {
+            println!(
+                "    [OK]   Goal {} — Has draft package (branch isolation)",
+                &goal.goal_run_id.to_string()[..8]
+            );
+            pass_count += 1;
+        } else {
+            println!(
+                "    [WARN] Goal {} — Applied without draft package",
+                &goal.goal_run_id.to_string()[..8]
+            );
+            fail_count += 1;
+        }
+    }
+
+    println!();
+    println!(
+        "Constitution verification: {} passed, {} warnings/failures.",
+        pass_count, fail_count
+    );
+
+    if fail_count > 0 {
+        println!(
+            "\nReview TA-CONSTITUTION.md for details on each rule.\n\
+             Some warnings may be expected during active goal execution."
+        );
     }
 
     Ok(())
@@ -1216,6 +1435,770 @@ fn process_health_label(goal: &ta_goal::GoalRun) -> &'static str {
             None => "unknown",
         },
         _ => "—",
+    }
+}
+
+// ── Self-service operations (v0.11.3) ──
+
+enum DiskCheck {
+    Ok(u64),
+    Low(u64),
+    Unknown,
+}
+
+fn check_disk_space_df(path: &std::path::Path) -> DiskCheck {
+    let output = std::process::Command::new("df")
+        .args(["-k", &path.display().to_string()])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if let Some(line) = stdout.lines().nth(1) {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() >= 4 {
+                    if let Ok(kb) = fields[3].parse::<u64>() {
+                        let bytes = kb * 1024;
+                        let threshold = 2 * 1024 * 1024 * 1024; // 2 GB
+                        return if bytes >= threshold {
+                            DiskCheck::Ok(bytes)
+                        } else {
+                            DiskCheck::Low(bytes)
+                        };
+                    }
+                }
+            }
+            DiskCheck::Unknown
+        }
+        _ => DiskCheck::Unknown,
+    }
+}
+
+fn load_draft_summary(pr_packages_dir: &std::path::Path, pr_id: Uuid) -> Option<(String, usize)> {
+    let path = pr_packages_dir.join(format!("{}.json", pr_id));
+    let content = std::fs::read_to_string(&path).ok()?;
+    let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let status = pkg["status"].as_str().unwrap_or("unknown").to_string();
+    let artifacts = pkg["changes"]["artifacts"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    Some((status, artifacts))
+}
+
+fn read_agent_log_tail(
+    config: &GatewayConfig,
+    goal: &ta_goal::GoalRun,
+    lines: usize,
+) -> Vec<String> {
+    let output_dir = config
+        .workspace_root
+        .join(".ta/goal-output")
+        .join(goal.goal_run_id.to_string());
+    let stdout_path = output_dir.join("stdout.log");
+    if let Ok(content) = std::fs::read_to_string(&stdout_path) {
+        let all: Vec<&str> = content.lines().collect();
+        let start = all.len().saturating_sub(lines);
+        all[start..].iter().map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn read_recent_events(
+    config: &GatewayConfig,
+    goal: &ta_goal::GoalRun,
+    count: usize,
+) -> Vec<String> {
+    let events_file = config.workspace_root.join(".ta/events/events.jsonl");
+    if let Ok(content) = std::fs::read_to_string(&events_file) {
+        let goal_id_str = goal.goal_run_id.to_string();
+        let matching: Vec<String> = content
+            .lines()
+            .filter(|line| line.contains(&goal_id_str))
+            .map(|line| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    let event_type = v["event_type"].as_str().unwrap_or("?");
+                    let ts = v["timestamp"].as_str().unwrap_or("?");
+                    let time = if ts.len() > 11 { &ts[11..19] } else { ts };
+                    format!("[{}] {}", time, event_type)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        let start = matching.len().saturating_sub(count);
+        matching[start..].to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Detailed goal inspection: PID, process health, elapsed time, staging, draft, agent log tail.
+fn goal_inspect(
+    config: &GatewayConfig,
+    store: &GoalRunStore,
+    id: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let goal_run_id = resolve_goal_id(id, store)?;
+    let goal = store
+        .get(goal_run_id)?
+        .ok_or_else(|| anyhow::anyhow!("Goal not found: {}", id))?;
+
+    let elapsed = chrono::Utc::now().signed_duration_since(goal.created_at);
+    let process_alive = goal.agent_pid.map(is_process_alive).unwrap_or(false);
+    let staging_exists = goal.workspace_path.exists();
+    let staging_size = if staging_exists {
+        dir_size_bytes(&goal.workspace_path)
+    } else {
+        0
+    };
+    let draft_info = goal
+        .pr_package_id
+        .and_then(|pr_id| load_draft_summary(&config.pr_packages_dir, pr_id));
+    let agent_log_tail = read_agent_log_tail(config, &goal, 20);
+    let recent_events = read_recent_events(config, &goal, 10);
+
+    if json {
+        let obj = serde_json::json!({
+            "goal_id": goal.goal_run_id.to_string(),
+            "tag": goal.tag,
+            "title": goal.title,
+            "objective": goal.objective,
+            "state": goal.state.to_string(),
+            "agent": goal.agent_id,
+            "plan_phase": goal.plan_phase,
+            "created_at": goal.created_at.to_rfc3339(),
+            "updated_at": goal.updated_at.to_rfc3339(),
+            "elapsed_minutes": elapsed.num_minutes(),
+            "agent_pid": goal.agent_pid,
+            "process_alive": process_alive,
+            "staging_path": goal.workspace_path.display().to_string(),
+            "staging_exists": staging_exists,
+            "staging_size_bytes": staging_size,
+            "draft_id": goal.pr_package_id.map(|id| id.to_string()),
+            "draft_status": draft_info.as_ref().map(|(s, _)| s.clone()),
+            "parent_goal_id": goal.parent_goal_id.map(|id| id.to_string()),
+            "is_macro": goal.is_macro,
+            "recent_events": recent_events,
+            "agent_log_tail": agent_log_tail,
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+        return Ok(());
+    }
+
+    let tag_display = goal.tag.as_deref().unwrap_or("-");
+    println!("Goal: {} ({})", goal.title, tag_display);
+    println!("  ID:          {}", goal.goal_run_id);
+    println!("  State:       {}", goal.state);
+    println!("  Agent:       {}", goal.agent_id);
+    if let Some(phase) = &goal.plan_phase {
+        println!("  Plan phase:  {}", phase);
+    }
+    println!(
+        "  Created:     {}",
+        goal.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
+    println!(
+        "  Updated:     {}",
+        goal.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
+    println!(
+        "  Elapsed:     {}h {}m",
+        elapsed.num_hours(),
+        elapsed.num_minutes() % 60
+    );
+    println!();
+
+    println!("Process:");
+    match goal.agent_pid {
+        Some(pid) => {
+            let status = if process_alive { "alive" } else { "dead" };
+            println!("  PID:    {} ({})", pid, status);
+        }
+        None => println!("  PID:    not recorded"),
+    }
+    println!();
+
+    println!("Staging:");
+    println!("  Path:   {}", goal.workspace_path.display());
+    println!("  Exists: {}", staging_exists);
+    if staging_exists {
+        println!("  Size:   {}", format_bytes(staging_size));
+    }
+    if let Some(source) = &goal.source_dir {
+        println!("  Source: {}", source.display());
+    }
+    println!();
+
+    println!("Draft:");
+    match &goal.pr_package_id {
+        Some(pr_id) => {
+            println!("  ID:     {}", pr_id);
+            if let Some((status, artifact_count)) = &draft_info {
+                println!("  Status: {}", status);
+                println!("  Artifacts: {}", artifact_count);
+            }
+        }
+        None => println!("  (no draft built)"),
+    }
+
+    if let Some(parent) = &goal.parent_goal_id {
+        println!();
+        println!("Follow-up of: {}", &parent.to_string()[..8]);
+    }
+    if goal.is_macro {
+        println!();
+        println!("Macro goal: {} sub-goals", goal.sub_goal_ids.len());
+    }
+
+    if !recent_events.is_empty() {
+        println!();
+        println!("Recent events:");
+        for event in &recent_events {
+            println!("  {}", event);
+        }
+    }
+
+    if !agent_log_tail.is_empty() {
+        println!();
+        println!("Agent output (last {} lines):", agent_log_tail.len());
+        for line in &agent_log_tail {
+            println!("  {}", line);
+        }
+    }
+
+    Ok(())
+}
+
+/// Analyze a failed/stuck goal: timeline, last output, state transitions, errors, likely cause.
+fn goal_post_mortem(config: &GatewayConfig, store: &GoalRunStore, id: &str) -> anyhow::Result<()> {
+    let goal_run_id = resolve_goal_id(id, store)?;
+    let goal = store
+        .get(goal_run_id)?
+        .ok_or_else(|| anyhow::anyhow!("Goal not found: {}", id))?;
+
+    let elapsed = chrono::Utc::now().signed_duration_since(goal.created_at);
+    let run_duration = goal.updated_at.signed_duration_since(goal.created_at);
+
+    println!(
+        "Post-mortem: {} \"{}\"",
+        &goal.goal_run_id.to_string()[..8],
+        goal.title
+    );
+    println!("{}", "=".repeat(65));
+    println!();
+
+    println!("Final state: {}", goal.state);
+    if let GoalRunState::Failed { reason } = &goal.state {
+        println!("Failure reason: {}", reason);
+    }
+    println!(
+        "Duration: {}h {}m (created -> last update)",
+        run_duration.num_hours(),
+        run_duration.num_minutes() % 60
+    );
+    println!(
+        "Time since creation: {}h {}m",
+        elapsed.num_hours(),
+        elapsed.num_minutes() % 60
+    );
+    println!();
+
+    println!("Process:");
+    match goal.agent_pid {
+        Some(pid) => {
+            let alive = is_process_alive(pid);
+            if alive {
+                println!("  Agent process {} is still running (possible zombie)", pid);
+            } else {
+                println!("  Agent process {} has exited", pid);
+            }
+        }
+        None => println!("  No agent PID recorded"),
+    }
+    println!();
+
+    println!("Staging:");
+    if goal.workspace_path.exists() {
+        let size = dir_size_bytes(&goal.workspace_path);
+        println!(
+            "  Directory exists: {} ({})",
+            goal.workspace_path.display(),
+            format_bytes(size)
+        );
+        let summary_path = goal.workspace_path.join(".ta/change_summary.json");
+        if summary_path.exists() {
+            println!("  change_summary.json: present (agent completed its work)");
+        } else {
+            println!("  change_summary.json: missing (agent may not have finished)");
+        }
+    } else {
+        println!(
+            "  Directory missing: {} (cleaned or never created)",
+            goal.workspace_path.display()
+        );
+    }
+    println!();
+
+    println!("Draft:");
+    match &goal.pr_package_id {
+        Some(pr_id) => {
+            if let Some((status, count)) = load_draft_summary(&config.pr_packages_dir, *pr_id) {
+                println!(
+                    "  ID: {} -- Status: {} -- {} artifacts",
+                    &pr_id.to_string()[..8],
+                    status,
+                    count
+                );
+            } else {
+                println!(
+                    "  ID: {} -- package file not found (may have been cleaned)",
+                    &pr_id.to_string()[..8]
+                );
+            }
+        }
+        None => println!("  No draft was built"),
+    }
+    println!();
+
+    println!("Diagnosis:");
+    let mut causes: Vec<String> = Vec::new();
+
+    if let GoalRunState::Failed { reason } = &goal.state {
+        if reason.contains("gc:") {
+            causes.push(
+                "Goal was garbage-collected (exceeded stale threshold or staging was missing)."
+                    .to_string(),
+            );
+        }
+        if reason.contains("timeout") || reason.contains("timed out") {
+            causes.push(
+                "Agent operation timed out. Check [verify] timeout configuration.".to_string(),
+            );
+        }
+        if reason.contains("missing staging") {
+            causes.push(
+                "Staging directory was removed externally while goal was active.".to_string(),
+            );
+        }
+        if reason.contains("process") || reason.contains("crash") {
+            causes.push("Agent process exited unexpectedly.".to_string());
+        }
+    }
+
+    if goal.state == GoalRunState::Running {
+        let idle_minutes = chrono::Utc::now()
+            .signed_duration_since(goal.updated_at)
+            .num_minutes();
+        if idle_minutes > 60 {
+            causes.push(format!(
+                "Goal has been in 'running' state with no updates for {} minutes. The agent may be stuck or crashed.",
+                idle_minutes
+            ));
+        }
+        if let Some(pid) = goal.agent_pid {
+            if !is_process_alive(pid) {
+                causes.push(format!(
+                    "Agent process (pid {}) is no longer alive but goal is still 'running'. Transition to failed with: ta goal gc",
+                    pid
+                ));
+            }
+        }
+    }
+
+    if causes.is_empty() {
+        if goal.state == GoalRunState::PrReady {
+            println!("  Goal completed normally -- draft is ready for review.");
+            println!("  Next: ta draft view");
+        } else if goal.state == GoalRunState::Completed || goal.state == GoalRunState::Applied {
+            println!("  Goal completed successfully -- no issues detected.");
+        } else {
+            println!("  No specific diagnosis available. Check agent logs for details.");
+        }
+    } else {
+        for (i, cause) in causes.iter().enumerate() {
+            println!("  {}. {}", i + 1, cause);
+        }
+    }
+
+    println!();
+    println!("Suggested actions:");
+    let short_id = &goal.goal_run_id.to_string()[..8];
+    match &goal.state {
+        GoalRunState::Failed { .. } => {
+            println!("  - Review agent output: ta conversation {}", short_id);
+            println!("  - Retry the goal: ta run --follow-up-goal {}", short_id);
+            println!("  - Clean up: ta gc");
+        }
+        GoalRunState::Running => {
+            if goal
+                .agent_pid
+                .map(|pid| !is_process_alive(pid))
+                .unwrap_or(false)
+            {
+                println!("  - Transition to failed: ta goal gc");
+                println!("  - Retry: ta run --follow-up-goal {}", short_id);
+            } else {
+                println!("  - Check agent output: ta conversation {}", short_id);
+                println!(
+                    "  - Wait for agent to finish, or check process: ps -p {}",
+                    goal.agent_pid.unwrap_or(0)
+                );
+            }
+        }
+        GoalRunState::PrReady => {
+            println!("  - Review the draft: ta draft view");
+            println!("  - Approve: ta draft approve");
+        }
+        _ => {
+            println!("  - Check goal status: ta goal status {}", short_id);
+        }
+    }
+
+    Ok(())
+}
+
+/// Check prerequisites before starting a goal.
+fn goal_pre_flight(config: &GatewayConfig, title: Option<&str>) -> anyhow::Result<()> {
+    println!(
+        "Pre-flight check{}",
+        title.map(|t| format!(" for \"{}\"", t)).unwrap_or_default()
+    );
+    println!("{}", "=".repeat(42));
+
+    let mut issues: Vec<(String, String)> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut passed = 0u32;
+
+    print!("  Disk space... ");
+    match check_disk_space_df(&config.workspace_root) {
+        DiskCheck::Ok(avail) => {
+            println!("ok ({} available)", format_bytes(avail));
+            passed += 1;
+        }
+        DiskCheck::Low(avail) => {
+            println!(
+                "WARNING ({} available, recommend >2 GB)",
+                format_bytes(avail)
+            );
+            warnings.push(format!(
+                "Low disk space: {} available. Free space or run .",
+                format_bytes(avail)
+            ));
+        }
+        DiskCheck::Unknown => {
+            println!("unknown (could not determine)");
+            warnings.push("Could not determine available disk space.".to_string());
+        }
+    }
+
+    print!("  Daemon... ");
+    let daemon_url = super::daemon::resolve_daemon_url(&config.workspace_root, None);
+    let daemon_ok = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()
+        .and_then(|c| c.get(format!("{}/api/status", daemon_url)).send().ok())
+        .is_some();
+    if daemon_ok {
+        println!("ok (responding at {})", daemon_url);
+        passed += 1;
+    } else {
+        println!("not running");
+        warnings.push(format!(
+            "Daemon not running at {}. It will be auto-started by .",
+            daemon_url
+        ));
+    }
+
+    print!("  Agent binary... ");
+    match super::version_guard::find_daemon_binary() {
+        Ok(path) => {
+            println!("ok ({})", path.display());
+            passed += 1;
+        }
+        Err(e) => {
+            println!("MISSING");
+            issues.push((
+                format!("ta-daemon binary not found: {}", e),
+                "Install ta-daemon or check PATH.".to_string(),
+            ));
+        }
+    }
+
+    print!("  .ta directory... ");
+    if config.workspace_root.join(".ta").exists() {
+        println!("ok");
+        passed += 1;
+    } else {
+        println!("MISSING");
+        issues.push((
+            ".ta directory not found.".to_string(),
+            "Initialize with: ta init setup".to_string(),
+        ));
+    }
+
+    print!("  VCS (git)... ");
+    if config.workspace_root.join(".git").exists() {
+        println!("ok");
+        passed += 1;
+    } else {
+        println!("not a git repo");
+        warnings.push("Not a git repository.  will not work.".to_string());
+    }
+
+    print!("  PLAN.md... ");
+    if config.workspace_root.join("PLAN.md").exists() {
+        println!("ok");
+        passed += 1;
+    } else {
+        println!("not found");
+        warnings.push("No PLAN.md found. Create one with  for phase tracking.".to_string());
+    }
+
+    print!("  workflow.toml... ");
+    if config.workspace_root.join(".ta/workflow.toml").exists() {
+        println!("ok");
+        passed += 1;
+    } else {
+        println!("using defaults");
+    }
+
+    print!("  Active goals... ");
+    let active_count = GoalRunStore::new(&config.goals_dir)
+        .ok()
+        .map(|s| {
+            s.list()
+                .unwrap_or_default()
+                .iter()
+                .filter(|g| matches!(g.state, GoalRunState::Running | GoalRunState::Configured))
+                .count()
+        })
+        .unwrap_or(0);
+    if active_count == 0 {
+        println!("none (clean slate)");
+        passed += 1;
+    } else {
+        println!("{} active", active_count);
+        warnings.push(format!(
+            "{} goal(s) already active. Multiple concurrent goals use more disk space.",
+            active_count
+        ));
+    }
+
+    println!();
+    if issues.is_empty() && warnings.is_empty() {
+        println!(
+            "All checks passed ({}/{}). Ready to start a goal.",
+            passed, passed
+        );
+    } else {
+        println!(
+            "{} passed, {} warnings, {} issues",
+            passed,
+            warnings.len(),
+            issues.len()
+        );
+        if !warnings.is_empty() {
+            println!();
+            println!("Warnings:");
+            for w in &warnings {
+                println!("  ! {}", w);
+            }
+        }
+        if !issues.is_empty() {
+            println!();
+            println!("Issues (must fix before starting):");
+            for (issue, fix) in &issues {
+                println!("  x {}", issue);
+                println!("    Fix: {}", fix);
+            }
+        }
+    }
+
+    if !issues.is_empty() {
+        Err(anyhow::anyhow!(
+            "{} pre-flight check(s) failed",
+            issues.len()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// System-wide health check (ta doctor).
+pub fn doctor(config: &GatewayConfig) -> anyhow::Result<()> {
+    println!("TA Doctor -- System Health Check");
+    println!("{}", "=".repeat(43));
+
+    let mut pass = 0u32;
+    let mut warn = 0u32;
+    let mut fail = 0u32;
+
+    print!("  TA version... ");
+    println!("{}", env!("CARGO_PKG_VERSION"));
+    pass += 1;
+
+    print!("  .ta directory... ");
+    let ta_dir = config.workspace_root.join(".ta");
+    if ta_dir.exists() {
+        let subdirs = ["goals", "pr_packages", "events"];
+        let all_ok = subdirs.iter().all(|sd| ta_dir.join(sd).exists());
+        if all_ok {
+            println!("ok (goals, pr_packages, events present)");
+            pass += 1;
+        } else {
+            println!("partial (some directories missing -- will be created on first use)");
+            warn += 1;
+        }
+    } else {
+        println!("MISSING -- run  to initialize");
+        fail += 1;
+    }
+
+    print!("  Daemon binary... ");
+    match super::version_guard::find_daemon_binary() {
+        Ok(path) => {
+            println!("ok ({})", path.display());
+            pass += 1;
+        }
+        Err(e) => {
+            println!("MISSING ({})", e);
+            fail += 1;
+        }
+    }
+
+    print!("  Daemon... ");
+    let daemon_url = super::daemon::resolve_daemon_url(&config.workspace_root, None);
+    let daemon_healthy = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()
+        .and_then(|c| c.get(format!("{}/api/status", daemon_url)).send().ok())
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    if daemon_healthy {
+        println!("ok (healthy at {})", daemon_url);
+        pass += 1;
+    } else {
+        println!("not running (start with: ta daemon start)");
+        warn += 1;
+    }
+
+    print!("  Git... ");
+    if config.workspace_root.join(".git").exists() {
+        let output = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&config.workspace_root)
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                let changes = String::from_utf8_lossy(&o.stdout);
+                let change_count = changes.lines().count();
+                if change_count == 0 {
+                    println!("ok (clean working tree)");
+                } else {
+                    println!("ok ({} uncommitted changes)", change_count);
+                }
+                pass += 1;
+            }
+            _ => {
+                println!("error (git command failed)");
+                warn += 1;
+            }
+        }
+    } else {
+        println!("not a git repo");
+        warn += 1;
+    }
+
+    print!("  Disk space... ");
+    match check_disk_space_df(&config.workspace_root) {
+        DiskCheck::Ok(avail) => {
+            println!("ok ({} available)", format_bytes(avail));
+            pass += 1;
+        }
+        DiskCheck::Low(avail) => {
+            println!("LOW ({} available, recommend >2 GB)", format_bytes(avail));
+            warn += 1;
+        }
+        DiskCheck::Unknown => {
+            println!("unknown");
+            warn += 1;
+        }
+    }
+
+    print!("  Plugins... ");
+    let plugins = ta_changeset::plugin::discover_plugins(&config.workspace_root);
+    if plugins.is_empty() {
+        println!("none installed");
+    } else {
+        println!("{} installed", plugins.len());
+        for p in &plugins {
+            println!(
+                "    {} v{} [{}]",
+                p.manifest.name, p.manifest.version, p.source
+            );
+        }
+    }
+    pass += 1;
+
+    print!("  Goals... ");
+    match GoalRunStore::new(&config.goals_dir) {
+        Ok(goal_store) => {
+            let goals = goal_store.list().unwrap_or_default();
+            let active = goals
+                .iter()
+                .filter(|g| matches!(g.state, GoalRunState::Running | GoalRunState::Configured))
+                .count();
+            let failed = goals
+                .iter()
+                .filter(|g| matches!(g.state, GoalRunState::Failed { .. }))
+                .count();
+            let pending_review = goals
+                .iter()
+                .filter(|g| {
+                    g.state == GoalRunState::PrReady || g.state == GoalRunState::UnderReview
+                })
+                .count();
+            println!(
+                "{} total ({} active, {} failed, {} pending review)",
+                goals.len(),
+                active,
+                failed,
+                pending_review
+            );
+            pass += 1;
+            let zombies: Vec<_> = goals
+                .iter()
+                .filter(|g| g.state == GoalRunState::Running)
+                .filter(|g| {
+                    g.agent_pid
+                        .map(|pid| !is_process_alive(pid))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if !zombies.is_empty() {
+                println!(
+                    "    WARNING: {} zombie goal(s) detected (running but agent dead)",
+                    zombies.len()
+                );
+                println!("    Fix with: ta gc");
+                warn += 1;
+            }
+        }
+        Err(_) => {
+            println!("no goal store");
+        }
+    }
+
+    println!();
+    println!("{} passed, {} warnings, {} failures", pass, warn, fail);
+    if fail > 0 {
+        Err(anyhow::anyhow!("{} health check(s) failed", fail))
+    } else {
+        Ok(())
     }
 }
 
@@ -1497,5 +2480,140 @@ mod tests {
         // Short prefix rejected.
         let result = resolve_goal_id("abc", &store);
         assert!(result.is_err());
+    }
+
+    // ── v0.11.3 tests: inspect, post-mortem, pre-flight, doctor ──
+
+    #[test]
+    fn disk_check_returns_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = check_disk_space_df(dir.path());
+        match result {
+            DiskCheck::Ok(bytes) => assert!(bytes > 0),
+            DiskCheck::Low(bytes) => assert!(bytes > 0),
+            DiskCheck::Unknown => {} // acceptable
+        }
+    }
+
+    #[test]
+    fn format_bytes_display() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(1500), "1.5 KB");
+        assert_eq!(format_bytes(1_500_000), "1.4 MB");
+        assert_eq!(format_bytes(1_500_000_000), "1.4 GB");
+    }
+
+    #[test]
+    fn is_process_alive_current_process() {
+        assert!(is_process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn is_process_alive_dead_process() {
+        assert!(!is_process_alive(99999999));
+    }
+
+    #[test]
+    fn load_draft_summary_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = load_draft_summary(dir.path(), uuid::Uuid::new_v4());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn pre_flight_runs_without_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        // Should not panic; may return error (missing .ta dir) but that is ok.
+        let _ = goal_pre_flight(&config, Some("test"));
+    }
+
+    #[test]
+    fn goal_inspect_runs_for_existing_goal() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        start_goal(
+            &config,
+            &store,
+            "Inspect target",
+            Some(project.path()),
+            "Test inspect",
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let goals = store.list().unwrap();
+        let id = goals[0].goal_run_id.to_string();
+
+        // Human-readable output should succeed.
+        goal_inspect(&config, &store, &id, false).unwrap();
+
+        // JSON output should succeed.
+        goal_inspect(&config, &store, &id, true).unwrap();
+    }
+
+    #[test]
+    fn goal_post_mortem_runs_for_existing_goal() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        start_goal(
+            &config,
+            &store,
+            "PostMortem target",
+            Some(project.path()),
+            "Test post-mortem",
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let goals = store.list().unwrap();
+        let id = goals[0].goal_run_id.to_string();
+
+        goal_post_mortem(&config, &store, &id).unwrap();
+    }
+
+    #[test]
+    fn read_recent_events_empty_when_no_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let goal = ta_goal::GoalRun::new(
+            "Test",
+            "obj",
+            "test-agent",
+            dir.path().to_path_buf(),
+            dir.path().join("store"),
+        );
+        let events = read_recent_events(&config, &goal, 10);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn read_agent_log_tail_empty_when_no_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let goal = ta_goal::GoalRun::new(
+            "Test",
+            "obj",
+            "test-agent",
+            dir.path().to_path_buf(),
+            dir.path().join("store"),
+        );
+        let lines = read_agent_log_tail(&config, &goal, 20);
+        assert!(lines.is_empty());
     }
 }

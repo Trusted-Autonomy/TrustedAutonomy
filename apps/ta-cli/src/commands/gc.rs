@@ -12,6 +12,7 @@ pub fn execute(
     threshold_days: u32,
     gc_all: bool,
     archive: bool,
+    include_events: bool,
 ) -> anyhow::Result<()> {
     let store = GoalRunStore::new(&config.goals_dir)?;
     let ledger = GoalHistoryLedger::for_project(&config.workspace_root);
@@ -218,14 +219,50 @@ pub fn execute(
         }
     }
 
+    // Event store pruning (v0.11.3).
+    let mut event_count = 0u32;
+    if include_events {
+        let events_dir = config.workspace_root.join(".ta/events");
+        if events_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&events_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.is_file() {
+                            if let Ok(modified) = meta.modified() {
+                                let age = std::time::SystemTime::now()
+                                    .duration_since(modified)
+                                    .unwrap_or_default();
+                                let threshold =
+                                    std::time::Duration::from_secs(threshold_days as u64 * 86400);
+                                if gc_all || age > threshold {
+                                    if dry_run {
+                                        println!(
+                                            "[dry-run] Would remove event: {}",
+                                            path.display()
+                                        );
+                                    } else {
+                                        let _ = std::fs::remove_file(&path);
+                                        println!("Removed event: {}", path.display());
+                                    }
+                                    event_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     println!(
-        "\n{}GC complete: {} zombie goal(s) transitioned, {} staging director{} reclaimed ({}), {} orphaned draft(s) removed, {} history entries written.",
+        "\n{}GC complete: {} zombie(s), {} staging ({}) reclaimed, {} orphan draft(s), {} event(s) pruned, {} history entries.",
         if dry_run { "[dry-run] " } else { "" },
         zombie_count,
         staging_count,
-        if staging_count == 1 { "y" } else { "ies" },
         format_bytes(staging_bytes),
         draft_count,
+        event_count,
         history_count,
     );
 

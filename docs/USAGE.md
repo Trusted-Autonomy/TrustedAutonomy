@@ -970,6 +970,111 @@ ta goal history --json
 ta goal history --limit 50
 ```
 
+### Goal Diagnostics
+
+Inspect, diagnose, and pre-check goals without needing filesystem access:
+
+```bash
+# Detailed inspection: PID, health, elapsed time, staging size, draft state
+ta goal inspect <goal-id>
+ta goal inspect <goal-id> --json
+
+# Analyze a failed/stuck goal: timeline, failure reason, suggested actions
+ta goal post-mortem <goal-id>
+
+# Check prerequisites before starting a goal
+ta goal pre-flight
+ta goal pre-flight "My new feature"
+```
+
+### System Health Check (`ta doctor`)
+
+Run a comprehensive system check covering project structure, daemon, git, disk space, and plugins:
+
+```bash
+ta doctor
+```
+
+Reports each check as ok/warning/failed with actionable suggestions.
+
+### Deep Status (`ta status --deep`)
+
+Get a combined view of daemon health, disk usage, pending questions, and recent events:
+
+```bash
+ta status --deep
+```
+
+### Daemon Health
+
+Self-check the daemon's API, event system, plugins, disk space, and goal process liveness:
+
+```bash
+ta daemon health
+```
+
+### Draft Follow-Up (PR Iteration)
+
+After `ta draft apply` creates a PR, iterate on it without creating a new staging copy:
+
+```bash
+# Lightweight follow-up on an existing PR branch
+ta draft follow-up <draft-id>
+
+# Auto-fetch CI failure logs and inject as agent context
+ta draft follow-up <draft-id> --ci-failure
+
+# Auto-fetch PR review comments as agent context
+ta draft follow-up <draft-id> --review-comments
+
+# Provide custom guidance
+ta draft follow-up <draft-id> --guidance "Fix the auth test"
+```
+
+### PR Lifecycle
+
+Track PRs created by TA:
+
+```bash
+# Show PR status for a specific draft
+ta draft pr-status <draft-id>
+
+# List all open PRs created by TA
+ta draft pr-list
+```
+
+### Plan Intelligence
+
+Edit the plan directly from the CLI without manual PLAN.md editing:
+
+```bash
+# Add an item to a phase
+ta plan add-item "Add retry logic" --phase v0.11.3
+
+# Move an item between phases
+ta plan move-item "Add retry logic" --from v0.11.3 --to v0.11.4
+
+# Discuss where a topic fits
+ta plan discuss "webhook support"
+
+# Create a new phase
+ta plan create-phase v0.11.3.1 "Webhook Support" --after v0.11.3
+ta plan create-phase v0.11.3.1 "Webhook Support" --goal "Add webhook delivery for events"
+```
+
+### Plugin Lifecycle
+
+Monitor installed channel plugins:
+
+```bash
+# Show plugin health and version info
+ta plugin status
+
+# View plugin stderr logs
+ta plugin logs discord
+ta plugin logs discord --follow
+```
+
 ### Goal List Filtering
 
 By default, `ta goal list` shows only active (non-terminal) goals:
@@ -4872,6 +4977,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.2.3 | Goal & draft unified UX (tags, VCS tracking, auto-merge, heartbeat) | Done |
 | v0.11.2.4 | Daemon watchdog & process liveness (zombie detection, stale questions, health events) | Done |
 | v0.11.2.5 | Prompt detection hardening & version housekeeping | Done |
+| v0.11.3 | Self-service operations, draft amend & plan intelligence | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

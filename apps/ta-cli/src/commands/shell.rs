@@ -754,6 +754,11 @@ pub(crate) fn render_sse_event(frame: &str) -> Option<String> {
     let event_type = event_type?;
     let data = data?;
 
+    // Internal diagnostic events — not useful for the user.
+    if event_type == "health_check" {
+        return None;
+    }
+
     // Parse JSON data for a human-readable one-liner.
     let json: serde_json::Value = serde_json::from_str(data).ok()?;
     let payload = &json["payload"];

@@ -36,6 +36,9 @@ pub enum PlanCommands {
         /// Output as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Validate plan items against TA-CONSTITUTION.md (v0.11.3).
+        #[arg(long)]
+        check_constitution: bool,
     },
     /// Show the next pending phase and suggest creating a goal for it.
     Next,
@@ -126,12 +129,66 @@ pub enum PlanCommands {
         #[arg(long)]
         follow_up: Option<Option<String>>,
     },
+    /// Add an item to an existing phase (v0.11.3).
+    AddItem {
+        /// Description of the item to add.
+        description: String,
+        /// Phase ID to add the item to.
+        #[arg(long)]
+        phase: String,
+        /// Insert after this item number (1-based).
+        #[arg(long)]
+        after: Option<usize>,
+    },
+    /// Move a plan item between phases (v0.11.3).
+    MoveItem {
+        /// Item text or prefix to match.
+        item: String,
+        /// Source phase ID.
+        #[arg(long)]
+        from: String,
+        /// Destination phase ID.
+        #[arg(long)]
+        to: String,
+    },
+    /// Discuss where a topic fits in the plan (v0.11.3).
+    Discuss {
+        /// Topic or feature to discuss.
+        topic: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a new plan phase (v0.11.3).
+    CreatePhase {
+        /// Phase ID (e.g., "v0.11.3.1").
+        id: String,
+        /// Phase title.
+        title: String,
+        /// Insert after this phase ID.
+        #[arg(long)]
+        after: Option<String>,
+        /// Goal description for the phase.
+        #[arg(long)]
+        goal: Option<String>,
+    },
 }
 
 pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match cmd {
         PlanCommands::List => list_phases(config),
-        PlanCommands::Status { json } => show_status(config, *json),
+        PlanCommands::Status {
+            json,
+            check_constitution,
+        } => {
+            let result = show_status(config, *json);
+            if *check_constitution {
+                if let Ok(phases) = load_plan(&config.workspace_root) {
+                    let _ = check_plan_constitution(config, &phases);
+                }
+            }
+            result
+        }
         PlanCommands::Next => show_next(config),
         PlanCommands::History => show_history(config),
         PlanCommands::Validate { phase } => validate_phase(config, phase),
@@ -171,6 +228,19 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             *auto,
             follow_up.as_ref(),
         ),
+        PlanCommands::AddItem {
+            description,
+            phase,
+            after,
+        } => plan_add_item(config, description, phase, *after),
+        PlanCommands::MoveItem { item, from, to } => plan_move_item(config, item, from, to),
+        PlanCommands::Discuss { topic, json: _j } => plan_discuss(config, topic, false),
+        PlanCommands::CreatePhase {
+            id,
+            title,
+            after,
+            goal,
+        } => plan_create_phase(config, id, title, after.as_deref(), goal.as_deref()),
     }
 }
 
@@ -1643,6 +1713,242 @@ fn plan_from(
         false, // skip_verify = false
         None,  // existing_goal_id = None
     )
+}
+
+// ─── Plan Intelligence (v0.11.3) ─────────────────────────────────────────────
+
+fn plan_add_item(
+    config: &GatewayConfig,
+    description: &str,
+    phase_id: &str,
+    after: Option<usize>,
+) -> anyhow::Result<()> {
+    let plan_path = config.workspace_root.join("PLAN.md");
+    anyhow::ensure!(plan_path.exists(), "No PLAN.md found.");
+    let content = std::fs::read_to_string(&plan_path)?;
+    let phases = load_plan(&config.workspace_root)?;
+    let target = phases
+        .iter()
+        .find(|p| p.id == phase_id || p.id == format!("v{}", phase_id))
+        .ok_or_else(|| anyhow::anyhow!("Phase '{}' not found", phase_id))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let heading = format!("### {}", target.id);
+    let start = lines
+        .iter()
+        .position(|l| l.contains(&heading))
+        .ok_or_else(|| anyhow::anyhow!("Cannot find heading for '{}'", target.id))?;
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| l.starts_with("### ") || l.starts_with("---"))
+        .map(|i| i + start + 1)
+        .unwrap_or(lines.len());
+    let items: Vec<usize> = (start..end)
+        .filter(|&i| {
+            let t = lines[i].trim();
+            t.starts_with("- [ ]")
+                || t.starts_with("- [x]")
+                || t.contains(". [ ]")
+                || t.contains(". [x]")
+        })
+        .collect();
+    let num = items.len() + 1;
+    let new_item = format!("{}. [ ] {}", num, description);
+    let insert = match after {
+        Some(n) if n > 0 && n <= items.len() => items[n - 1] + 1,
+        _ => items.last().copied().map(|i| i + 1).unwrap_or(end),
+    };
+    let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    new_lines.insert(insert, new_item.clone());
+    std::fs::write(&plan_path, new_lines.join("\n"))?;
+    println!("Added to phase {}: {}", target.id, new_item);
+    Ok(())
+}
+
+fn plan_move_item(
+    config: &GatewayConfig,
+    item_text: &str,
+    from_id: &str,
+    to_id: &str,
+) -> anyhow::Result<()> {
+    let plan_path = config.workspace_root.join("PLAN.md");
+    anyhow::ensure!(plan_path.exists(), "No PLAN.md found.");
+    let content = std::fs::read_to_string(&plan_path)?;
+    let phases = load_plan(&config.workspace_root)?;
+    let from = phases
+        .iter()
+        .find(|p| p.id == from_id || p.id == format!("v{}", from_id))
+        .ok_or_else(|| anyhow::anyhow!("Source '{}' not found", from_id))?;
+    let to = phases
+        .iter()
+        .find(|p| p.id == to_id || p.id == format!("v{}", to_id))
+        .ok_or_else(|| anyhow::anyhow!("Dest '{}' not found", to_id))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let fh = format!("### {}", from.id);
+    let fs = lines
+        .iter()
+        .position(|l| l.contains(&fh))
+        .ok_or_else(|| anyhow::anyhow!("Heading for '{}' not found", from.id))?;
+    let fe = lines[fs + 1..]
+        .iter()
+        .position(|l| l.starts_with("### ") || l.starts_with("---"))
+        .map(|i| i + fs + 1)
+        .unwrap_or(lines.len());
+    let idx = lines[fs..fe]
+        .iter()
+        .position(|l| l.contains(item_text))
+        .map(|i| i + fs)
+        .ok_or_else(|| anyhow::anyhow!("Item '{}' not found in '{}'", item_text, from_id))?;
+    let line = lines[idx].to_string();
+    let mut nl: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    nl.remove(idx);
+    let th = format!("### {}", to.id);
+    let ts = nl
+        .iter()
+        .position(|l| l.contains(&th))
+        .ok_or_else(|| anyhow::anyhow!("Heading for '{}' not found", to.id))?;
+    let te = nl[ts + 1..]
+        .iter()
+        .position(|l| l.starts_with("### ") || l.starts_with("---"))
+        .map(|i| i + ts + 1)
+        .unwrap_or(nl.len());
+    let mut last_item = None;
+    for (i, line) in nl[ts..te].iter().enumerate() {
+        let t = line.trim();
+        if t.starts_with("- [ ]") || t.starts_with("- [x]") {
+            last_item = Some(i + ts);
+        }
+    }
+    nl.insert(last_item.map(|i| i + 1).unwrap_or(te), line.clone());
+    std::fs::write(&plan_path, nl.join("\n"))?;
+    println!("Moved from {} to {}: {}", from_id, to_id, line.trim());
+    Ok(())
+}
+
+fn plan_discuss(config: &GatewayConfig, topic: &str, _json: bool) -> anyhow::Result<()> {
+    let phases = load_plan(&config.workspace_root)?;
+    let tl = topic.to_lowercase();
+    println!("Plan Discussion: \"{}\"", topic);
+    let mut matches: Vec<(&PlanPhase, usize)> = Vec::new();
+    for p in &phases {
+        let score: usize = tl
+            .split_whitespace()
+            .map(|w| {
+                if p.title.to_lowercase().contains(w) {
+                    2
+                } else {
+                    0
+                }
+            })
+            .sum();
+        if score > 0 {
+            matches.push((p, score));
+        }
+    }
+    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    if matches.is_empty() {
+        println!("  No existing phases match this topic.");
+    } else {
+        println!("  Related phases:");
+        for (p, s) in matches.iter().take(5) {
+            println!(
+                "    {} — {} [{}] (relevance: {})",
+                p.id, p.title, p.status, s
+            );
+        }
+    }
+    Ok(())
+}
+
+fn plan_create_phase(
+    config: &GatewayConfig,
+    id: &str,
+    title: &str,
+    after: Option<&str>,
+    goal: Option<&str>,
+) -> anyhow::Result<()> {
+    let plan_path = config.workspace_root.join("PLAN.md");
+    anyhow::ensure!(plan_path.exists(), "No PLAN.md found.");
+    let content = std::fs::read_to_string(&plan_path)?;
+    let phases = load_plan(&config.workspace_root)?;
+    let gt = goal.unwrap_or("(to be defined)");
+    let vid = id.strip_prefix('v').unwrap_or(id);
+    let section = format!("\n### {} — {}\n<!-- status: pending -->\n**Goal**: {}\n\n#### Version: `{}-alpha`\n\n---\n", id, title, gt, vid);
+    let lines: Vec<&str> = content.lines().collect();
+    let at = if let Some(aid) = after {
+        let ap = phases
+            .iter()
+            .find(|p| p.id == aid || p.id == format!("v{}", aid))
+            .ok_or_else(|| anyhow::anyhow!("Phase '{}' not found", aid))?;
+        let h = format!("### {}", ap.id);
+        let s = lines.iter().position(|l| l.contains(&h)).unwrap_or(0);
+        lines[s + 1..]
+            .iter()
+            .position(|l| l.trim() == "---")
+            .map(|i| i + s + 2)
+            .unwrap_or(lines.len())
+    } else {
+        let lp = phases
+            .iter()
+            .rev()
+            .find(|p| p.status == PlanStatus::Pending);
+        match lp {
+            Some(l) => {
+                let h = format!("### {}", l.id);
+                let s = lines.iter().position(|l2| l2.contains(&h)).unwrap_or(0);
+                lines[s + 1..]
+                    .iter()
+                    .position(|l2| l2.trim() == "---")
+                    .map(|i| i + s + 2)
+                    .unwrap_or(lines.len())
+            }
+            None => lines.len(),
+        }
+    };
+    let mut out = lines[..at].join("\n");
+    out.push_str(&section);
+    if at < lines.len() {
+        out.push_str(&lines[at..].join("\n"));
+    }
+    std::fs::write(&plan_path, out)?;
+    println!("Created phase: {} — {}", id, title);
+    Ok(())
+}
+
+fn check_plan_constitution(config: &GatewayConfig, phases: &[PlanPhase]) -> anyhow::Result<()> {
+    let path = config.workspace_root.join("docs/TA-CONSTITUTION.md");
+    if !path.exists() {
+        println!("Constitution: no TA-CONSTITUTION.md found (skip).");
+        return Ok(());
+    }
+    let _content = std::fs::read_to_string(&path)?;
+    let pending: Vec<_> = phases
+        .iter()
+        .filter(|p| p.status == PlanStatus::Pending)
+        .collect();
+    println!("Constitution Check:");
+    println!("  Pending phases: {}", pending.len());
+    let mut warnings = 0u32;
+    for phase in &pending {
+        let tl = phase.title.to_lowercase();
+        if tl.contains("intercept") || tl.contains("hook agent") {
+            println!(
+                "  WARN: {} may violate Agent Invisibility: {}",
+                phase.id, phase.title
+            );
+            warnings += 1;
+        }
+        if tl.contains("auto apply") || tl.contains("autonomous apply") {
+            println!(
+                "  WARN: {} may violate Human-in-the-Loop: {}",
+                phase.id, phase.title
+            );
+            warnings += 1;
+        }
+    }
+    if warnings == 0 {
+        println!("  No constitutional concerns found.");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

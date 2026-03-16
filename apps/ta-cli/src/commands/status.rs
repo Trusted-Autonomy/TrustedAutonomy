@@ -3,7 +3,7 @@
 use ta_goal::GoalRunStore;
 use ta_mcp_gateway::GatewayConfig;
 
-pub fn execute(config: &GatewayConfig) -> anyhow::Result<()> {
+pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
     let project_name = config
         .workspace_root
         .file_name()
@@ -77,7 +77,159 @@ pub fn execute(config: &GatewayConfig) -> anyhow::Result<()> {
         }
     }
 
+    if deep {
+        println!();
+        deep_status(config)?;
+    }
+
     Ok(())
+}
+
+fn deep_status(config: &GatewayConfig) -> anyhow::Result<()> {
+    // Daemon health
+    println!("Daemon:");
+    let daemon_url = super::daemon::resolve_daemon_url(&config.workspace_root, None);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+
+    let status_url = format!("{}/api/status", daemon_url);
+    match client.get(&status_url).send() {
+        Ok(resp) if resp.status().is_success() => {
+            let json: serde_json::Value = resp.json()?;
+            let version = json["version"].as_str().unwrap_or("?");
+            let pid = super::daemon::read_pid(&config.workspace_root);
+            println!("  Status:  healthy");
+            println!("  URL:     {}", daemon_url);
+            println!("  Version: {}", version);
+            if let Some(p) = pid {
+                println!("  PID:     {}", p);
+            }
+        }
+        _ => {
+            println!("  Status: not running (start with: ta daemon start)");
+        }
+    }
+
+    // Disk usage
+    println!();
+    println!("Disk usage:");
+    let staging_dir = config.workspace_root.join(".ta/staging");
+    if staging_dir.exists() {
+        let mut total_size = 0u64;
+        let mut count = 0u32;
+        if let Ok(entries) = std::fs::read_dir(&staging_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    total_size += walkdir_size(&entry.path());
+                    count += 1;
+                }
+            }
+        }
+        println!(
+            "  Staging: {} director{} ({})",
+            count,
+            if count == 1 { "y" } else { "ies" },
+            format_staging_size(total_size)
+        );
+    } else {
+        println!("  Staging: none");
+    }
+
+    let pr_dir = &config.pr_packages_dir;
+    if pr_dir.exists() {
+        let count = std::fs::read_dir(pr_dir)
+            .map(|e| {
+                e.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+                    .count()
+            })
+            .unwrap_or(0);
+        println!("  Drafts:  {} package file(s)", count);
+    }
+
+    // Pending questions
+    println!();
+    println!("Pending questions:");
+    let interactions_dir = config.workspace_root.join(".ta/interactions");
+    if interactions_dir.exists() {
+        let mut pending = 0u32;
+        if let Ok(entries) = std::fs::read_dir(&interactions_dir) {
+            for entry in entries.flatten() {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if content.contains("\"pending\"") {
+                        pending += 1;
+                    }
+                }
+            }
+        }
+        if pending == 0 {
+            println!("  none");
+        } else {
+            println!("  {} pending (answer via ta shell or channel)", pending);
+        }
+    } else {
+        println!("  none");
+    }
+
+    // Recent events
+    println!();
+    println!("Recent events:");
+    let events_file = config.workspace_root.join(".ta/events/events.jsonl");
+    if events_file.exists() {
+        if let Ok(content) = std::fs::read_to_string(&events_file) {
+            let lines: Vec<&str> = content.lines().collect();
+            let start = lines.len().saturating_sub(5);
+            if lines.is_empty() {
+                println!("  (no events)");
+            } else {
+                for line in &lines[start..] {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                        let event_type = v["event_type"].as_str().unwrap_or("?");
+                        let ts = v["timestamp"].as_str().unwrap_or("?");
+                        let time = if ts.len() > 11 { &ts[11..19] } else { ts };
+                        let goal = v["goal_id"]
+                            .as_str()
+                            .map(|id| &id[..8.min(id.len())])
+                            .unwrap_or("-");
+                        println!("  [{}] {} (goal: {})", time, event_type, goal);
+                    }
+                }
+            }
+        }
+    } else {
+        println!("  (no events)");
+    }
+
+    Ok(())
+}
+
+fn walkdir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total += meta.len();
+                } else if meta.is_dir() {
+                    total += walkdir_size(&entry.path());
+                }
+            }
+        }
+    }
+    total
+}
+
+fn format_staging_size(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.1} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 fn find_next_pending_phase(plan_content: &str) -> Option<String> {
@@ -165,5 +317,13 @@ mod tests {
     fn count_pending_drafts_missing_dir() {
         let count = count_pending_drafts(std::path::Path::new("/nonexistent/path"));
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn deep_status_no_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ta_mcp_gateway::GatewayConfig::for_project(dir.path());
+        // Should not panic even with empty project.
+        let _ = deep_status(&config);
     }
 }

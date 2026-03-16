@@ -45,6 +45,10 @@ pub struct WorkflowConfig {
     /// Desktop notification configuration
     #[serde(default)]
     pub notify: NotifyConfig,
+
+    /// Staging directory management (v0.11.3)
+    #[serde(default)]
+    pub staging: StagingConfig,
 }
 
 /// Submit adapter configuration
@@ -685,6 +689,58 @@ fn default_notify_enabled() -> bool {
 
 fn default_notify_title() -> String {
     "TA".to_string()
+}
+
+/// Staging directory management (v0.11.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagingConfig {
+    /// Auto-remove staging after successful apply. Default: true.
+    #[serde(default = "default_auto_clean")]
+    pub auto_clean: bool,
+    /// Minimum free disk space in MB. Default: 2048.
+    #[serde(default = "default_min_disk_mb")]
+    pub min_disk_mb: u64,
+}
+
+impl Default for StagingConfig {
+    fn default() -> Self {
+        Self {
+            auto_clean: default_auto_clean(),
+            min_disk_mb: default_min_disk_mb(),
+        }
+    }
+}
+
+fn default_auto_clean() -> bool {
+    true
+}
+fn default_min_disk_mb() -> u64 {
+    2048
+}
+
+/// Check available disk space in MB.
+pub fn check_disk_space_mb(path: &std::path::Path) -> Result<u64, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|e| format!("invalid path: {}", e))?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+        if rc != 0 {
+            return Err(format!(
+                "statvfs failed for {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok((stat.f_bavail as u64) * (stat.f_frsize as u64) / (1024 * 1024))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(u64::MAX)
+    }
 }
 
 impl WorkflowConfig {

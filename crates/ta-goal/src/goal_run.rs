@@ -218,6 +218,10 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_pid: Option<u32>,
 
+    /// PR URL created by `ta draft apply` (v0.11.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+
     /// The PR package ID, if one has been built.
     pub pr_package_id: Option<Uuid>,
 
@@ -299,6 +303,7 @@ impl GoalRun {
             thread_id: None,
             project_name: None,
             agent_pid: None,
+            pr_url: None,
             pr_package_id: None,
             created_at: now,
             updated_at: now,

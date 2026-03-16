@@ -52,6 +52,19 @@ pub enum PluginCommands {
         /// Plugin name to upgrade.
         name: String,
     },
+    /// Show installed plugins with health status and version info (v0.11.3).
+    Status,
+    /// View stderr logs for a channel plugin (v0.11.3).
+    Logs {
+        /// Plugin name.
+        name: String,
+        /// Number of lines to show (default: 50).
+        #[arg(long, default_value = "50")]
+        lines: usize,
+        /// Follow logs in real time.
+        #[arg(long, short)]
+        follow: bool,
+    },
 }
 
 pub fn run_plugin(project_root: &std::path::Path, command: &PluginCommands) -> anyhow::Result<()> {
@@ -62,6 +75,12 @@ pub fn run_plugin(project_root: &std::path::Path, command: &PluginCommands) -> a
         PluginCommands::Build { names, all } => build_plugins(project_root, names, *all),
         PluginCommands::Check => check_plugins(project_root),
         PluginCommands::Upgrade { name } => upgrade_plugin(project_root, name),
+        PluginCommands::Status => plugin_status(project_root),
+        PluginCommands::Logs {
+            name,
+            lines,
+            follow,
+        } => plugin_logs(project_root, name, *lines, *follow),
     }
 }
 
@@ -858,6 +877,136 @@ fn upgrade_plugin(project_root: &Path, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Plugin status (v0.11.3) ──────────────────────────────────────
+
+fn plugin_status(project_root: &Path) -> anyhow::Result<()> {
+    let plugins = plugin::discover_plugins(project_root);
+    if plugins.is_empty() {
+        println!("No channel plugins installed.");
+        println!("Install plugins with: ta plugin install <path>");
+        return Ok(());
+    }
+    println!(
+        "{:<20} {:<10} {:<10} {:<12} DIRECTORY",
+        "NAME", "VERSION", "PROTOCOL", "HEALTH"
+    );
+    println!("{}", "-".repeat(80));
+    for p in &plugins {
+        let m = &p.manifest;
+        let health = if m.protocol == plugin::PluginProtocol::JsonStdio {
+            if let Some(ref cmd) = m.command {
+                let program = cmd.split_whitespace().next().unwrap_or(cmd);
+                let plugin_binary = p.plugin_dir.join(program);
+                if plugin_binary.is_file() || which_program(program) {
+                    "ok"
+                } else {
+                    "no-binary"
+                }
+            } else {
+                "no-command"
+            }
+        } else if m.protocol == plugin::PluginProtocol::Http {
+            if m.deliver_url.is_some() {
+                "configured"
+            } else {
+                "no-url"
+            }
+        } else {
+            "unknown"
+        };
+        println!(
+            "{:<20} {:<10} {:<10} {:<12} {}",
+            m.name,
+            m.version,
+            format!("{}", m.protocol),
+            health,
+            p.plugin_dir.display()
+        );
+    }
+    println!();
+    println!(
+        "{} plugin{} installed.",
+        plugins.len(),
+        if plugins.len() == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+// ── Plugin logs (v0.11.3) ────────────────────────────────────────
+
+fn plugin_logs(
+    project_root: &Path,
+    name: &str,
+    lines_count: usize,
+    follow: bool,
+) -> anyhow::Result<()> {
+    let log_locations = [
+        project_root
+            .join(".ta")
+            .join("plugins")
+            .join("channels")
+            .join(name)
+            .join("stderr.log"),
+        project_root
+            .join(".ta")
+            .join("plugins")
+            .join("channels")
+            .join(name)
+            .join("plugin.log"),
+        project_root
+            .join(".ta")
+            .join("logs")
+            .join(format!("plugin-{}.log", name)),
+        project_root
+            .join(".ta")
+            .join("logs")
+            .join(format!("{}.log", name)),
+    ];
+    let log_path = log_locations.iter().find(|p| p.exists());
+    match log_path {
+        Some(path) => {
+            let content = std::fs::read_to_string(path)?;
+            let all_lines: Vec<&str> = content.lines().collect();
+            let start = if all_lines.len() > lines_count {
+                all_lines.len() - lines_count
+            } else {
+                0
+            };
+            println!("Plugin \'{}\' logs ({}):", name, path.display());
+            println!("{}", "-".repeat(60));
+            for line in &all_lines[start..] {
+                println!("{}", line);
+            }
+            if follow {
+                println!();
+                println!("Note: --follow is not yet implemented for file-based logs.\nUse `tail -f {}` to follow in real time.", path.display());
+            }
+            println!();
+            println!(
+                "Showing last {} of {} total lines.",
+                all_lines.len() - start,
+                all_lines.len()
+            );
+        }
+        None => {
+            println!("No log file found for plugin \'{}\'.", name);
+            println!();
+            println!("Searched:");
+            for loc in &log_locations {
+                println!("  {}", loc.display());
+            }
+            println!();
+            let plugins = plugin::discover_plugins(project_root);
+            if !plugins.iter().any(|p| p.manifest.name == name) {
+                println!("Plugin \'{}\' is not installed. Run `ta plugin list` to see installed plugins.", name);
+            } else {
+                println!("The plugin may not have produced any log output yet.");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Check if a program exists on PATH (simple which-like check).
 fn which_program(program: &str) -> bool {
     std::env::var_os("PATH")
@@ -1177,5 +1326,38 @@ path = "src/main.rs"
         let result = upgrade_plugin(dir.path(), "nonexistent");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not installed"));
+    }
+
+    #[test]
+    fn plugin_status_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = plugin_status(dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn plugin_logs_no_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = plugin_logs(dir.path(), "nonexistent", 50, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn plugin_logs_reads_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir
+            .path()
+            .join(".ta")
+            .join("plugins")
+            .join("channels")
+            .join("test-plugin");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("stderr.log"),
+            "line 1\nline 2\nline 3\nline 4\nline 5\n",
+        )
+        .unwrap();
+        let result = plugin_logs(dir.path(), "test-plugin", 3, false);
+        assert!(result.is_ok());
     }
 }
