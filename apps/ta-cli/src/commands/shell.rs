@@ -419,13 +419,27 @@ pub(crate) async fn send_input(
     }
 
     // For command results, prefer stdout; for agent results, prefer response.
+    // When stdout is empty, fall back to stderr as primary output (v0.11.4.1 item 2).
+    // Commands like `draft apply` may write their output to stderr via eprintln!.
     if let Some(stdout) = json["stdout"].as_str() {
-        let mut output = stdout.to_string();
-        if let Some(stderr) = json["stderr"].as_str() {
+        let stderr = json["stderr"].as_str().unwrap_or("");
+        let mut output = if stdout.is_empty() && !stderr.is_empty() {
+            // stdout is empty but stderr has the real output — use stderr as primary.
+            stderr.to_string()
+        } else {
+            let mut o = stdout.to_string();
             if !stderr.is_empty() {
-                output.push_str(stderr);
+                o.push_str(stderr);
             }
+            o
+        };
+        if !output.ends_with('\n') {
+            output.push('\n');
         }
+        Ok(output)
+    } else if let Some(stderr) = json["stderr"].as_str() {
+        // stdout field absent but stderr present — use stderr (v0.11.4.1 item 2).
+        let mut output = stderr.to_string();
         if !output.ends_with('\n') {
             output.push('\n');
         }

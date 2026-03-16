@@ -453,7 +453,13 @@ async fn run_command(
                 // Check if we've been idle too long.
                 let elapsed = last_activity.lock().await.elapsed();
                 if elapsed > idle_timeout {
-                    // Kill the child and return timeout error.
+                    // Kill the child and return timeout error (v0.11.4.1 item 3).
+                    tracing::warn!(
+                        binary = %binary,
+                        idle_secs = %elapsed.as_secs(),
+                        timeout_secs = %idle_timeout.as_secs(),
+                        "Command idle timeout — killing process"
+                    );
                     let _ = child.kill().await;
                     let _ = stdout_task.await;
                     let _ = stderr_task.await;
