@@ -60,19 +60,25 @@ fn check_parent_staging_eligible(
 
 /// Decide whether a follow-up goal should extend the parent's staging directory.
 ///
+/// When `explicit` is true (user passed `--follow-up-goal <id>`), the intent is
+/// unambiguous — skip confirmation and reuse staging directly. When false (auto-
+/// detected follow-up), prompt for confirmation since the user may not have
+/// intended to reuse staging.
+///
 /// Returns `Some(parent_goal)` if the parent's staging exists and should be reused,
 /// or `None` if a fresh staging copy should be created.
 fn should_extend_parent_staging(
     store: &GoalRunStore,
     parent_goal_id: Uuid,
     config: &GatewayConfig,
+    explicit: bool,
 ) -> anyhow::Result<Option<ta_goal::GoalRun>> {
     let parent = match check_parent_staging_eligible(store, parent_goal_id, config)? {
         Some(p) => p,
         None => return Ok(None),
     };
 
-    // Show the parent's draft info if available.
+    // Show the parent's draft info.
     if let Some(pr_id) = parent.pr_package_id {
         eprintln!(
             "Parent goal \"{}\" has staging at {} (draft: {})",
@@ -88,11 +94,16 @@ fn should_extend_parent_staging(
         );
     }
 
-    // Prompt user (default yes). In non-interactive contexts (tests, CI),
-    // fall back to the configured default.
+    // Explicit follow-up (--follow-up-goal <id>): no confirmation needed.
+    // The user already specified exactly which goal to extend.
+    if explicit {
+        eprintln!("Reusing staging (explicit --follow-up-goal).");
+        return Ok(Some(parent));
+    }
+
+    // Auto-detected follow-up: prompt for confirmation.
     eprint!("Continue in staging for \"{}\"? [Y/n] ", parent.title);
 
-    // Read response — accept empty/y/Y as yes.
     let mut input = String::new();
     if std::io::stdin().read_line(&mut input).is_ok() {
         let trimmed = input.trim().to_lowercase();
@@ -402,8 +413,10 @@ fn start_goal(
     };
 
     // v0.4.1.2: Check if we should extend the parent's staging directory.
+    // Explicit follow-up (user provided a specific ID) skips confirmation.
+    let follow_up_explicit = follow_up.map(|f| f.is_some()).unwrap_or(false);
     let extend_parent = if let Some(pid) = parent_goal_id {
-        should_extend_parent_staging(store, pid, config)?
+        should_extend_parent_staging(store, pid, config, follow_up_explicit)?
     } else {
         None
     };

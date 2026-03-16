@@ -447,6 +447,16 @@ pub fn execute(
     let phase = phase.as_deref();
     let follow_up = follow_up.as_ref();
 
+    // ── Daemon connectivity (v0.11.2.6) ─────────────────────────
+    //
+    // In non-headless mode, ensure the daemon is running before creating the
+    // goal. This prevents the agent from running without output streaming
+    // (the daemon relays stdout to ta shell via SSE).
+    // In headless mode the daemon already spawned us, so skip the check.
+    if !headless && !no_launch {
+        super::daemon::ensure_running(&config.workspace_root)?;
+    }
+
     let title = title.ok_or_else(|| {
         anyhow::anyhow!("Title is required (use --resume to resume an existing session)")
     })?;
