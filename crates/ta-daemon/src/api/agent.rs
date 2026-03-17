@@ -131,6 +131,15 @@ impl AgentSessionManager {
             session.prompt_count += 1;
         }
     }
+
+    /// Check if a session exists and is still running.
+    pub async fn session_exists(&self, session_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(|s| s.status == SessionStatus::Running)
+    }
 }
 
 // ── Persistent QA agent (v0.11.4.2 item 6-10) ──────────────────
@@ -416,6 +425,97 @@ impl PersistentQaAgent {
     #[allow(dead_code)] // Used in tests and shell status display.
     pub async fn restart_count(&self) -> u32 {
         *self.restart_count.lock().await
+    }
+}
+
+/// Background supervisor that ensures a default agent session exists.
+///
+/// On daemon boot, creates a session record via `AgentSessionManager` so that
+/// the first `/api/input` or `/api/agent/ask` request doesn't have cold-start
+/// latency. If the session gets stopped, the supervisor recreates it (up to
+/// `max_restarts`). Configurable via `[shell.qa_agent]` in daemon.toml;
+/// set `auto_start = false` to disable.
+pub async fn auto_spawn_supervisor(
+    state: Arc<super::AppState>,
+    shutdown: Arc<tokio::sync::Notify>,
+) {
+    let config = state.persistent_qa.config.clone();
+    if !config.auto_start {
+        tracing::info!("Agent auto-start disabled (shell.qa_agent.auto_start = false)");
+        return;
+    }
+
+    let agent_name = config.agent.clone();
+    let max_restarts = config.max_restarts;
+    let mut restart_count: u32 = 0;
+
+    tracing::info!(
+        agent = %agent_name,
+        max_restarts,
+        "Auto-spawn supervisor starting"
+    );
+
+    // Brief delay to let the daemon fully initialize.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    loop {
+        // Create or reuse a session for the default agent.
+        let result = state
+            .agent_sessions
+            .get_or_create_default(&agent_name)
+            .await;
+
+        match result {
+            Ok(session) => {
+                tracing::info!(
+                    session_id = %session.session_id,
+                    agent = %agent_name,
+                    "Auto-spawn: agent session ready"
+                );
+                restart_count = 0;
+
+                // Monitor: check every 30s if session is still alive.
+                let sid = session.session_id.clone();
+                loop {
+                    tokio::select! {
+                        _ = shutdown.notified() => {
+                            tracing::info!("Auto-spawn: shutdown requested");
+                            state.agent_sessions.stop_session(&sid).await;
+                            return;
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                            if !state.agent_sessions.session_exists(&sid).await {
+                                tracing::warn!(
+                                    session_id = %sid,
+                                    "Auto-spawn: session ended — will recreate"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Auto-spawn: failed to create session");
+            }
+        }
+
+        restart_count += 1;
+        if restart_count > max_restarts {
+            tracing::error!(
+                restart_count,
+                max_restarts,
+                "Auto-spawn: max restarts exceeded — supervisor stopping"
+            );
+            return;
+        }
+
+        let backoff = std::time::Duration::from_secs(5 * restart_count as u64);
+        tracing::info!(backoff_secs = backoff.as_secs(), "Auto-spawn: backoff");
+        tokio::select! {
+            _ = shutdown.notified() => return,
+            _ = tokio::time::sleep(backoff) => {}
+        }
     }
 }
 

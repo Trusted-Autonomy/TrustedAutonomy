@@ -206,6 +206,9 @@ enum Commands {
         /// Use classic line-mode shell (rustyline) instead of TUI.
         #[arg(long)]
         classic: bool,
+        /// Open web shell in browser instead of terminal TUI.
+        #[arg(long)]
+        web: bool,
         /// Attach to an existing agent session (ID or prefix).
         #[arg(long)]
         attach: Option<String>,
@@ -533,16 +536,23 @@ fn main() -> anyhow::Result<()> {
         Commands::Shell {
             init,
             classic,
+            web,
             attach,
             url,
-        } => commands::shell::execute(
-            &project_root,
-            attach.as_deref(),
-            url.as_deref(),
-            *init,
-            *classic,
-            cli.no_version_check,
-        ),
+        } => {
+            if *web {
+                commands::shell::open_web_shell(&project_root, url.as_deref())
+            } else {
+                commands::shell::execute(
+                    &project_root,
+                    attach.as_deref(),
+                    url.as_deref(),
+                    *init,
+                    *classic,
+                    cli.no_version_check,
+                )
+            }
+        }
         Commands::Daemon { command } => commands::daemon::execute(command, &project_root),
         Commands::Office { command } => commands::office::execute(command, &project_root),
         Commands::Plugin { command } => {

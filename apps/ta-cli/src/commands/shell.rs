@@ -82,6 +82,55 @@ pub fn execute(
     ))
 }
 
+/// Open the web shell in the user's default browser.
+///
+/// Resolves the daemon URL, builds the `/shell` URL, and opens it.
+/// If the daemon is not reachable, prints an error with instructions.
+pub fn open_web_shell(project_root: &Path, daemon_url: Option<&str>) -> anyhow::Result<()> {
+    let base_url = daemon_url
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| resolve_daemon_url(project_root));
+
+    let shell_url = format!("{}/shell", base_url.trim_end_matches('/'));
+
+    // Quick check: is the daemon reachable?
+    let rt = tokio::runtime::Runtime::new()?;
+    let reachable = rt.block_on(async {
+        reqwest::Client::new()
+            .get(format!("{}/api/status", base_url.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .is_ok()
+    });
+
+    if !reachable {
+        anyhow::bail!("Daemon not reachable at {base_url}. Start it with `ta daemon start` first.");
+    }
+
+    println!("Opening web shell: {shell_url}");
+
+    // Open in default browser.
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(&shell_url).spawn()?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&shell_url)
+            .spawn()?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", &shell_url])
+            .spawn()?;
+    }
+
+    Ok(())
+}
+
 /// Resolve the daemon URL from `.ta/daemon.toml` or default.
 ///
 /// Delegates to `daemon::resolve_daemon_url()` for the shared implementation.

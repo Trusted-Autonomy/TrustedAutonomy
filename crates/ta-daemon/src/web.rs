@@ -134,6 +134,11 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../assets/index.html"))
 }
 
+/// Web shell — responsive terminal UI served as a single HTML page.
+async fn shell_page() -> Html<&'static str> {
+    Html(include_str!("../assets/shell.html"))
+}
+
 /// Serve the PWA manifest for mobile-responsive web UI (v0.9.0).
 async fn manifest() -> (
     [(axum::http::header::HeaderName, &'static str); 1],
@@ -425,6 +430,7 @@ pub fn build_router(pr_packages_dir: PathBuf) -> Router {
 fn build_web_routes(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/shell", get(shell_page))
         .route("/manifest.json", get(manifest))
         // Favicon and icon routes (v0.10.18.7)
         .route("/favicon.ico", get(favicon))
@@ -445,10 +451,13 @@ fn build_web_routes(state: Arc<WebState>) -> Router {
 }
 
 /// Build the combined router: web UI routes + full daemon API (v0.9.7).
+///
+/// Returns the router and a shared `AppState` handle so callers (e.g. the
+/// auto-spawn supervisor) can reuse the same state without creating duplicates.
 pub fn build_full_router(
     project_root: std::path::PathBuf,
     daemon_config: crate::config::DaemonConfig,
-) -> Router {
+) -> (Router, Arc<crate::api::AppState>) {
     let app_state = Arc::new(crate::api::AppState::new(project_root, daemon_config));
 
     // Web UI routes use their own state (legacy).
@@ -458,10 +467,10 @@ pub fn build_full_router(
     });
 
     let web_routes = build_web_routes(web_state);
-    let api_routes = crate::api::build_api_router(app_state);
+    let api_routes = crate::api::build_api_router(app_state.clone());
 
     // Merge: API routes take precedence, web routes fill in the rest.
-    api_routes.merge(web_routes)
+    (api_routes.merge(web_routes), app_state)
 }
 
 /// Start the web review UI server (legacy — draft/memory only).
@@ -504,7 +513,15 @@ pub async fn serve_daemon_api(
         tracing::debug!("Removed daemon PID file");
     });
 
-    let app = build_full_router(project_root, daemon_config);
+    let (app, app_state) = build_full_router(project_root, daemon_config);
+
+    // Auto-spawn agent supervisor (runs in background, shares the same AppState).
+    let supervisor_shutdown = shutdown.clone();
+    tokio::spawn(crate::api::agent::auto_spawn_supervisor(
+        app_state,
+        supervisor_shutdown,
+    ));
+
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("Daemon API listening on http://{}", bind);
     axum::serve(listener, app)
