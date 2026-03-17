@@ -29,6 +29,20 @@ use ta_workspace::{
 };
 use uuid::Uuid;
 
+/// Load exclude patterns for a source directory, merging VCS adapter patterns
+/// (e.g. ".git/" for Git) so that VCS metadata never appears in staging diffs.
+///
+/// Without merging adapter patterns, ta draft apply --git-commit can overwrite
+/// .git/HEAD and .git/index from the staging copy, resetting HEAD to main.
+pub fn load_excludes_with_adapter(source_dir: &std::path::Path) -> ExcludePatterns {
+    let mut excludes = ExcludePatterns::load(source_dir);
+    let wf_path = source_dir.join(".ta/workflow.toml");
+    let wf_config = ta_submit::WorkflowConfig::load_or_default(&wf_path);
+    let adapter = ta_submit::select_adapter(source_dir, &wf_config.submit);
+    excludes.merge(&adapter.exclude_patterns());
+    excludes
+}
+
 #[derive(Subcommand)]
 pub enum DraftCommands {
     /// Build a draft package from overlay workspace diffs.
@@ -759,8 +773,8 @@ pub(crate) fn build_package(
         .ok_or_else(|| anyhow::anyhow!("Goal has no source_dir (not an overlay-based goal)"))?;
 
     // Open the overlay workspace and compute diffs.
-    // V1 TEMPORARY: Load exclude patterns for diff filtering.
-    let excludes = ExcludePatterns::load(source_dir);
+    // V1 TEMPORARY: Load exclude patterns, merging VCS adapter patterns.
+    let excludes = load_excludes_with_adapter(source_dir);
     let overlay =
         OverlayWorkspace::open(goal_id.clone(), source_dir, &goal.workspace_path, excludes);
     let changes = overlay.diff_all().map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -2097,8 +2111,8 @@ fn apply_package(
     let applied_files: Vec<String> = if let Some(ref source_dir) = goal.source_dir {
         // Overlay-based goal: diff staging vs source, copy changed files.
         eprintln!("[apply] Opening overlay workspace...");
-        // V1 TEMPORARY: Load exclude patterns for diff filtering.
-        let excludes = ExcludePatterns::load(source_dir);
+        // V1 TEMPORARY: Load exclude patterns, merging VCS adapter patterns.
+        let excludes = load_excludes_with_adapter(source_dir);
         let mut overlay = OverlayWorkspace::open(
             goal.goal_run_id.to_string(),
             source_dir,
@@ -2129,7 +2143,7 @@ fn apply_package(
                 if has_source_changes && workflow_config.follow_up.rebase_on_apply {
                     // Rebase: re-snapshot the current source state so apply compares
                     // staging against the updated source (e.g., after a prior draft was applied).
-                    let excludes = ExcludePatterns::load(source_dir);
+                    let excludes = load_excludes_with_adapter(source_dir);
                     if let Ok(fresh_snapshot) =
                         ta_workspace::SourceSnapshot::capture(&target_dir, |p| {
                             excludes.should_exclude(p)

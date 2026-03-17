@@ -4028,9 +4028,7 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 #### Critical Bug Fix — `.git/` in Overlay Diff
 
-1. [ ] **Merge adapter excludes into overlay**: In `goal.rs`, after selecting the VCS adapter, call `adapter.exclude_patterns()` and merge the result into `ExcludePatterns` before calling `OverlayWorkspace::create()`. For the Git adapter this adds `".git/"`, preventing staging from capturing VCS metadata. Without this, `ta draft apply --git-commit` can overwrite `.git/HEAD`, `.git/index`, and delete local branches by restoring staging's git state.
-   - `goal.rs:490`: `let mut excludes = ExcludePatterns::load(&source_dir); excludes.merge(&adapter.exclude_patterns());`
-   - Add test: create overlay on a git repo, run a git op in staging, confirm `.git/**` not in `diff_all()`.
+1. [x] **Merge adapter excludes into overlay**: `load_excludes_with_adapter()` helper in `draft.rs` merges `adapter.exclude_patterns()` (e.g. `".git/"` for Git) into `ExcludePatterns` before creating/opening the overlay. Applied in `goal.rs` (create), `draft.rs` build (open), `draft.rs` apply (open), and snapshot rebase. Regression test added to `ta-workspace`: verifies `.git/` is not copied into staging and does not appear in `diff_all()` even if created in staging.
 
 #### Goal Progress & Tail UX
 

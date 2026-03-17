@@ -1371,4 +1371,78 @@ mod tests {
             other => panic!("expected Modified, got {:?}", other),
         }
     }
+
+    #[test]
+    fn git_dir_excluded_from_copy_and_diff_when_merged() {
+        // Regression test: ta draft apply --git-commit was overwriting .git/HEAD
+        // and .git/index because goal.rs didn't merge adapter.exclude_patterns().
+        // Verify that when ".git/" is in ExcludePatterns, the overlay neither
+        // copies .git/ into staging nor includes it in diff_all().
+        let source = create_source_project();
+
+        // Simulate a .git directory in the source (like a real git repo).
+        fs::create_dir_all(source.path().join(".git/refs/heads")).unwrap();
+        fs::write(source.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(source.path().join(".git/index"), "binary git index").unwrap();
+
+        // Use ExcludePatterns with ".git/" merged in (simulates the fix in goal.rs).
+        let mut excludes = ExcludePatterns::none();
+        excludes.merge(&[".git/".to_string()]);
+
+        let staging_root = TempDir::new().unwrap();
+        let overlay = OverlayWorkspace::create(
+            "goal-git-exclude",
+            source.path(),
+            staging_root.path(),
+            excludes,
+        )
+        .unwrap();
+
+        // .git/ must NOT be copied into staging.
+        assert!(
+            !overlay.staging_dir().join(".git").exists(),
+            ".git/ should not be copied into staging"
+        );
+
+        // Even if something creates .git/ in staging (e.g. git init), diff should skip it.
+        fs::create_dir_all(overlay.staging_dir().join(".git/refs")).unwrap();
+        fs::write(
+            overlay.staging_dir().join(".git/HEAD"),
+            "ref: refs/heads/feature\n",
+        )
+        .unwrap();
+
+        // Make a real change too.
+        fs::write(
+            overlay.staging_dir().join("src/main.rs"),
+            "fn main() { println!(\"changed\"); }\n",
+        )
+        .unwrap();
+
+        let changes = overlay.diff_all().unwrap();
+
+        // Should see ONLY the main.rs change — .git/ must not appear.
+        let git_changes: Vec<_> = changes
+            .iter()
+            .filter(|c| {
+                let p = match c {
+                    OverlayChange::Modified { path, .. } => path,
+                    OverlayChange::Created { path, .. } => path,
+                    OverlayChange::Deleted { path } => path,
+                };
+                p.starts_with(".git")
+            })
+            .collect();
+        assert!(
+            git_changes.is_empty(),
+            ".git/ changes must not appear in diff: {:?}",
+            git_changes
+        );
+        assert_eq!(
+            changes.len(),
+            1,
+            "expected only src/main.rs change, got: {:?}",
+            changes
+        );
+    }
 }

@@ -8,7 +8,7 @@ use ta_mcp_gateway::GatewayConfig;
 use ta_policy::constitution::{
     AccessConstitution, ConstitutionEntry, ConstitutionStore, EnforcementMode,
 };
-use ta_workspace::{ExcludePatterns, OverlayWorkspace};
+use ta_workspace::OverlayWorkspace;
 use uuid::Uuid;
 
 /// Resolve a draft ID prefix to the goal that produced it.
@@ -486,8 +486,10 @@ fn start_goal(
         goal.parent_goal_id = parent_goal_id;
         let goal_id = goal.goal_run_id.to_string();
 
-        // V1 TEMPORARY: Load exclude patterns from .taignore or defaults.
-        let excludes = ExcludePatterns::load(&source_dir);
+        // V1 TEMPORARY: Load exclude patterns, merging VCS adapter patterns
+        // (e.g. ".git/" for Git) so VCS metadata is never captured in staging
+        // diffs or overwritten on apply.
+        let excludes = super::draft::load_excludes_with_adapter(&source_dir);
         let overlay =
             OverlayWorkspace::create(&goal_id, &source_dir, &config.staging_dir, excludes)?;
 
