@@ -16,6 +16,7 @@
   --fg-event: #ffd93d;
   --fg-info: #6bcb77;
   --fg-notify: #ff9f43;
+  --fg-tail: #a78bfa;
   --border: #333;
   --accent: #4361ee;
 }
@@ -42,6 +43,7 @@ body {
 #output .line.event { color: var(--fg-event); }
 #output .line.info { color: var(--fg-info); }
 #output .line.notify { color: var(--fg-notify); font-weight: bold; }
+#output .line.tail { color: var(--fg-tail); }
 #output .line.separator { color: var(--fg-dim); border-top: 1px solid var(--border); padding-top: 4px; margin-top: 4px; }
 #output .line .ts { color: var(--fg-dim); font-size: 12px; margin-right: 6px; user-select: none; }
 #input-bar {
@@ -77,6 +79,7 @@ body {
 #status-bar .connected { color: var(--fg-info); }
 #status-bar .disconnected { color: var(--fg-stderr); }
 #status-bar .pending { color: var(--fg-notify); }
+#status-bar .tailing { color: var(--fg-tail); }
 .spinner { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
@@ -92,6 +95,7 @@ body {
   <span id="project-info"></span>
   <span id="agent-framework"></span>
   <span id="agent-info"></span>
+  <span id="tail-info"></span>
   <span id="pending-info"></span>
   <span style="flex:1"></span>
   <span id="version-info"></span>
@@ -107,6 +111,7 @@ body {
   const projectInfo = document.getElementById('project-info');
   const agentFramework = document.getElementById('agent-framework');
   const agentInfo = document.getElementById('agent-info');
+  const tailInfo = document.getElementById('tail-info');
   const pendingInfo = document.getElementById('pending-info');
   const versionInfo = document.getElementById('version-info');
 
@@ -116,7 +121,7 @@ body {
   let savedInput = '';
   let autoScroll = true;
   let sseEvents = null;
-  let sseGoals = {};  // Map of goalId -> EventSource (support multiple concurrent streams)
+  let sseGoals = {};  // Map of goalId -> { sse: EventSource, label: string }
   let statusPoll = null;
   let pendingRequests = 0;
 
@@ -128,6 +133,10 @@ body {
     const m = String(d.getMinutes()).padStart(2, '0');
     const s = String(d.getSeconds()).padStart(2, '0');
     return h + ':' + m + ':' + s;
+  }
+
+  function shortId(id) {
+    return (id || '').substring(0, 8);
   }
 
   // ── Output ──────────────────────────────────────────────────
@@ -169,6 +178,98 @@ body {
     }
   }
 
+  // ── Tail status bar tracking ──────────────────────────────
+
+  function updateTailStatus() {
+    const ids = Object.keys(sseGoals);
+    if (ids.length === 0) {
+      tailInfo.textContent = '';
+      tailInfo.className = '';
+    } else if (ids.length === 1) {
+      const entry = sseGoals[ids[0]];
+      tailInfo.textContent = 'tailing ' + (entry.label || shortId(ids[0]));
+      tailInfo.className = 'tailing';
+    } else {
+      tailInfo.textContent = 'tailing ' + ids.length + ' streams';
+      tailInfo.className = 'tailing';
+    }
+  }
+
+  // ── Client-side commands ──────────────────────────────────
+
+  function handleClientCommand(text) {
+    // :tail <id> — attach to a goal's output stream
+    const tailMatch = text.match(/^:tail\s+(\S+)/);
+    if (tailMatch) {
+      const goalId = tailMatch[1];
+      appendLine('tailing output for ' + shortId(goalId) + '...', 'tail');
+      tailGoalOutput(goalId, shortId(goalId));
+      updatePending(+1);
+      return true;
+    }
+
+    // :untail [id] — detach from goal output stream(s)
+    const untailMatch = text.match(/^:untail(?:\s+(\S+))?/);
+    if (untailMatch) {
+      const goalId = untailMatch[1];
+      if (goalId) {
+        // Untail specific goal (match by prefix)
+        const matchedId = Object.keys(sseGoals).find(id => id.startsWith(goalId));
+        if (matchedId) {
+          sseGoals[matchedId].sse.close();
+          delete sseGoals[matchedId];
+          appendLine('stopped tailing ' + shortId(matchedId), 'tail');
+          updatePending(-1);
+        } else {
+          appendLine('not tailing ' + shortId(goalId), 'info');
+        }
+      } else {
+        // Untail all
+        const count = Object.keys(sseGoals).length;
+        for (const id of Object.keys(sseGoals)) {
+          sseGoals[id].sse.close();
+          delete sseGoals[id];
+          updatePending(-1);
+        }
+        appendLine('stopped tailing ' + count + ' stream(s)', 'tail');
+      }
+      updateTailStatus();
+      return true;
+    }
+
+    // :tails — list active tails
+    if (text === ':tails') {
+      const ids = Object.keys(sseGoals);
+      if (ids.length === 0) {
+        appendLine('no active tails', 'info');
+      } else {
+        appendLine('active tails:', 'tail');
+        for (const id of ids) {
+          const entry = sseGoals[id];
+          appendLine('  ' + shortId(id) + ' — ' + (entry.label || '(unlabeled)'), 'tail');
+        }
+      }
+      return true;
+    }
+
+    // :help — show available client commands
+    if (text === ':help') {
+      appendLine('Client commands:', 'info');
+      appendLine('  :tail <id>     — attach to a goal/request output stream', 'info');
+      appendLine('  :untail [id]   — detach from stream(s)', 'info');
+      appendLine('  :tails         — list active tails', 'info');
+      appendLine('  :help          — show this help', 'info');
+      appendLine('  Ctrl+L         — clear output', 'info');
+      appendLine('', 'info');
+      appendLine('Shell shortcuts: approve, deny, view, apply, status, plan, goals, drafts', 'info');
+      appendLine('Commands: ta <cmd>, git <cmd>, !<shell cmd>', 'info');
+      appendLine('Everything else is sent to the QA agent.', 'info');
+      return true;
+    }
+
+    return false;
+  }
+
   // ── Input ───────────────────────────────────────────────────
 
   input.addEventListener('keydown', (e) => {
@@ -184,6 +285,12 @@ body {
       }
 
       appendLine('ta> ' + text, 'cmd');
+
+      // Try client-side commands first (: prefix)
+      if (text.startsWith(':') && handleClientCommand(text)) {
+        return;
+      }
+
       sendInput(text);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
@@ -238,8 +345,8 @@ body {
 
       // Agent response: AskResponse shape {session_id, response, request_id, status}
       if (data.request_id) {
-        appendLine('processing...', 'info');
-        tailGoalOutput(data.request_id);
+        appendLine('agent working — tailing output (' + shortId(data.request_id) + ')...', 'tail');
+        tailGoalOutput(data.request_id, 'agent request');
         return; // pending count decremented when stream ends
       }
 
@@ -272,16 +379,17 @@ body {
 
   // ── Goal Output SSE Stream ──────────────────────────────────
 
-  function tailGoalOutput(goalId) {
+  function tailGoalOutput(goalId, label) {
     // Support multiple concurrent streams
     if (sseGoals[goalId]) {
-      sseGoals[goalId].close();
+      sseGoals[goalId].sse.close();
       delete sseGoals[goalId];
     }
 
     const url = BASE + '/api/goals/' + encodeURIComponent(goalId) + '/output';
     const sse = new EventSource(url);
-    sseGoals[goalId] = sse;
+    sseGoals[goalId] = { sse: sse, label: label || shortId(goalId) };
+    updateTailStatus();
 
     sse.addEventListener('output', (e) => {
       try {
@@ -300,6 +408,7 @@ body {
       sse.close();
       delete sseGoals[goalId];
       updatePending(-1);
+      updateTailStatus();
     });
 
     sse.addEventListener('lagged', () => {
@@ -336,12 +445,16 @@ body {
         if (type === 'goal_started') {
           const p = evt.payload || evt;
           const title = p.title || '(untitled)';
-          const id = (p.goal_id || '').substring(0, 8);
-          appendLine('[goal started] "' + title + '" (' + id + ')', 'notify');
-          if (p.goal_id) tailGoalOutput(p.goal_id);
+          const id = p.goal_id || '';
+          appendLine('[goal started] "' + title + '" (' + shortId(id) + ')', 'notify');
+          if (id) {
+            appendLine('auto-tailing goal output...', 'tail');
+            tailGoalOutput(id, title);
+            updatePending(+1);
+          }
         } else if (type === 'draft_built') {
           const p = evt.payload || evt;
-          appendLine('[draft ready] "' + (p.title || '') + '" — run: draft view ' + (p.display_id || ''), 'notify');
+          appendLine('[draft ready] "' + (p.title || '') + '" -- run: draft view ' + (p.display_id || ''), 'notify');
         } else if (type === 'agent_question') {
           const p = evt.payload || evt;
           appendLine('--- Agent Question ---', 'notify');
@@ -388,7 +501,7 @@ body {
 
   // ── Init ────────────────────────────────────────────────────
 
-  appendLine('ta shell (web) — type a command or message. Ctrl+L to clear.', 'info');
+  appendLine('ta shell (web) -- type a command or message. :help for commands, Ctrl+L to clear.', 'info');
   connectEventStream();
   pollStatus();
   statusPoll = setInterval(pollStatus, 10000);

@@ -349,7 +349,7 @@ pub async fn execute_command(
         return Json(CmdResponse {
             exit_code: 0,
             stdout: format!(
-                "Started in background: {}\nOutput key: {}\nTrack progress with: ta goal list\nStream output with: :tail {}\n",
+                "Started in background: {}\nOutput key: {}\nTrack with: ta goal list\nTail output: :tail {}\n",
                 command_str, output_key_response, &output_key_response[..8.min(output_key_response.len())]
             ),
             stderr: String::new(),
