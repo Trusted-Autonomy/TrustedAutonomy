@@ -43,6 +43,7 @@ body {
 #output .line.info { color: var(--fg-info); }
 #output .line.notify { color: var(--fg-notify); font-weight: bold; }
 #output .line.separator { color: var(--fg-dim); border-top: 1px solid var(--border); padding-top: 4px; margin-top: 4px; }
+#output .line .ts { color: var(--fg-dim); font-size: 12px; margin-right: 6px; user-select: none; }
 #input-bar {
   display: flex;
   border-top: 1px solid var(--border);
@@ -71,9 +72,11 @@ body {
   font-size: 12px;
   border-top: 1px solid var(--border);
   user-select: none;
+  align-items: center;
 }
 #status-bar .connected { color: var(--fg-info); }
 #status-bar .disconnected { color: var(--fg-stderr); }
+#status-bar .pending { color: var(--fg-notify); }
 .spinner { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
@@ -87,7 +90,9 @@ body {
 <div id="status-bar">
   <span id="conn-status" class="disconnected">connecting...</span>
   <span id="project-info"></span>
+  <span id="agent-framework"></span>
   <span id="agent-info"></span>
+  <span id="pending-info"></span>
   <span style="flex:1"></span>
   <span id="version-info"></span>
 </div>
@@ -98,10 +103,11 @@ body {
 
   const output = document.getElementById('output');
   const input = document.getElementById('input');
-  const promptEl = document.getElementById('prompt');
   const connStatus = document.getElementById('conn-status');
   const projectInfo = document.getElementById('project-info');
+  const agentFramework = document.getElementById('agent-framework');
   const agentInfo = document.getElementById('agent-info');
+  const pendingInfo = document.getElementById('pending-info');
   const versionInfo = document.getElementById('version-info');
 
   const BASE = window.location.origin;
@@ -110,25 +116,34 @@ body {
   let savedInput = '';
   let autoScroll = true;
   let sseEvents = null;
-  let sseGoal = null;
+  let sseGoals = {};  // Map of goalId -> EventSource (support multiple concurrent streams)
   let statusPoll = null;
+  let pendingRequests = 0;
+
+  // ── Timestamp ────────────────────────────────────────────────
+
+  function ts() {
+    const d = new Date();
+    const h = String(d.getHours()).padStart(2, '0');
+    const m = String(d.getMinutes()).padStart(2, '0');
+    const s = String(d.getSeconds()).padStart(2, '0');
+    return h + ':' + m + ':' + s;
+  }
 
   // ── Output ──────────────────────────────────────────────────
 
-  function appendLine(text, cls) {
+  function appendLine(text, cls, showTimestamp) {
     const div = document.createElement('div');
     div.className = 'line ' + (cls || '');
-    div.textContent = text;
-    output.appendChild(div);
-    if (autoScroll) {
-      requestAnimationFrame(() => output.scrollTop = output.scrollHeight);
+    if (showTimestamp !== false) {
+      const span = document.createElement('span');
+      span.className = 'ts';
+      span.textContent = ts();
+      div.appendChild(span);
+      div.appendChild(document.createTextNode(text));
+    } else {
+      div.textContent = text;
     }
-  }
-
-  function appendHtml(html, cls) {
-    const div = document.createElement('div');
-    div.className = 'line ' + (cls || '');
-    div.innerHTML = html;
     output.appendChild(div);
     if (autoScroll) {
       requestAnimationFrame(() => output.scrollTop = output.scrollHeight);
@@ -141,6 +156,19 @@ body {
     autoScroll = atBottom;
   });
 
+  // ── Pending requests tracking ─────────────────────────────
+
+  function updatePending(delta) {
+    pendingRequests = Math.max(0, pendingRequests + delta);
+    if (pendingRequests > 0) {
+      pendingInfo.textContent = pendingRequests + ' pending';
+      pendingInfo.className = 'pending';
+    } else {
+      pendingInfo.textContent = '';
+      pendingInfo.className = '';
+    }
+  }
+
   // ── Input ───────────────────────────────────────────────────
 
   input.addEventListener('keydown', (e) => {
@@ -151,7 +179,6 @@ body {
       input.value = '';
       historyIdx = -1;
 
-      // Add to history
       if (history[history.length - 1] !== text) {
         history.push(text);
       }
@@ -186,8 +213,7 @@ body {
   });
 
   // Keep input focused
-  document.addEventListener('click', (e) => {
-    // Don't steal focus if user is selecting text
+  document.addEventListener('click', () => {
     if (window.getSelection().toString()) return;
     input.focus();
   });
@@ -195,6 +221,7 @@ body {
   // ── API ─────────────────────────────────────────────────────
 
   async function sendInput(text) {
+    updatePending(+1);
     try {
       const resp = await fetch(BASE + '/api/input', {
         method: 'POST',
@@ -203,51 +230,60 @@ body {
       });
       const data = await resp.json();
 
-      if (data.routed_to === 'cmd') {
-        // Command response — show stdout/stderr
-        const result = data.result;
-        if (result.stdout) appendLine(result.stdout, 'agent');
-        if (result.stderr) appendLine(result.stderr, 'stderr');
-        if (result.exit_code !== undefined && result.exit_code !== 0) {
-          appendLine('[exit ' + result.exit_code + ']', 'info');
-        }
-        // Check for goal_id in response (long-running command)
-        if (result.goal_id || result.output_key) {
-          const key = result.output_key || result.goal_id;
-          tailGoalOutput(key);
-        }
-      } else if (data.routed_to === 'agent') {
-        // Agent response — might be streamed
-        const result = data.result;
-        if (result.output_key) {
-          tailGoalOutput(result.output_key);
-        } else if (result.response) {
-          appendLine(result.response, 'agent');
-        } else if (typeof result === 'string') {
-          appendLine(result, 'agent');
-        } else {
-          appendLine(JSON.stringify(result, null, 2), 'agent');
-        }
-      } else {
-        appendLine(JSON.stringify(data, null, 2), 'info');
+      if (data.error) {
+        appendLine('Error: ' + data.error, 'stderr');
+        updatePending(-1);
+        return;
       }
+
+      // Agent response: AskResponse shape {session_id, response, request_id, status}
+      if (data.request_id) {
+        appendLine('processing...', 'info');
+        tailGoalOutput(data.request_id);
+        return; // pending count decremented when stream ends
+      }
+
+      // Command response: CmdResponse shape {exit_code, stdout, stderr}
+      if (data.exit_code !== undefined) {
+        if (data.stdout) appendLine(data.stdout, 'agent');
+        if (data.stderr) appendLine(data.stderr, 'stderr');
+        if (data.exit_code !== 0) {
+          appendLine('[exit ' + data.exit_code + ']', 'info');
+        }
+        updatePending(-1);
+        return;
+      }
+
+      // Agent response with inline text (no streaming)
+      if (data.response) {
+        appendLine(data.response, 'agent');
+        updatePending(-1);
+        return;
+      }
+
+      // Fallback: show raw JSON
+      appendLine(JSON.stringify(data, null, 2), 'info');
+      updatePending(-1);
     } catch (err) {
       appendLine('Error: ' + err.message, 'stderr');
+      updatePending(-1);
     }
   }
 
   // ── Goal Output SSE Stream ──────────────────────────────────
 
   function tailGoalOutput(goalId) {
-    if (sseGoal) {
-      sseGoal.close();
-      sseGoal = null;
+    // Support multiple concurrent streams
+    if (sseGoals[goalId]) {
+      sseGoals[goalId].close();
+      delete sseGoals[goalId];
     }
 
     const url = BASE + '/api/goals/' + encodeURIComponent(goalId) + '/output';
-    sseGoal = new EventSource(url);
+    const sse = new EventSource(url);
+    sseGoals[goalId] = sse;
 
-    sseGoal.addEventListener('output', (e) => {
+    sse.addEventListener('output', (e) => {
       try {
         const data = JSON.parse(e.data);
         const cls = data.stream === 'stderr' ? 'stderr' : 'agent';
@@ -259,17 +295,18 @@ body {
       }
     });
 
-    sseGoal.addEventListener('done', () => {
-      appendLine('--- output ended ---', 'separator');
-      sseGoal.close();
-      sseGoal = null;
+    sse.addEventListener('done', () => {
+      appendLine('--- done ---', 'separator');
+      sse.close();
+      delete sseGoals[goalId];
+      updatePending(-1);
     });
 
-    sseGoal.addEventListener('lagged', (e) => {
-      appendLine('[some output lines skipped — subscriber lagged]', 'info');
+    sse.addEventListener('lagged', () => {
+      appendLine('[some output lines skipped]', 'info');
     });
 
-    sseGoal.onerror = () => {
+    sse.onerror = () => {
       // SSE will auto-reconnect; don't spam errors
     };
   }
@@ -289,7 +326,6 @@ body {
     sseEvents.onerror = () => {
       connStatus.textContent = 'disconnected';
       connStatus.className = 'disconnected';
-      // EventSource auto-reconnects
     };
 
     sseEvents.onmessage = (e) => {
@@ -308,12 +344,11 @@ body {
           appendLine('[draft ready] "' + (p.title || '') + '" — run: draft view ' + (p.display_id || ''), 'notify');
         } else if (type === 'agent_question') {
           const p = evt.payload || evt;
-          appendLine('\n--- Agent Question ---', 'notify');
+          appendLine('--- Agent Question ---', 'notify');
           appendLine(p.question || JSON.stringify(p), 'info');
           appendLine('Type your response and press Enter:', 'info');
         }
       } catch (err) {
-        // Non-JSON event — show raw
         if (e.data && e.data.trim()) {
           appendLine(e.data, 'event');
         }
@@ -328,13 +363,21 @@ body {
       const resp = await fetch(BASE + '/api/status');
       const s = await resp.json();
       projectInfo.textContent = s.project + ' v' + s.version;
-      versionInfo.textContent = 'daemon ' + s.daemon_version + ' (' + (s.build_sha || '?').substring(0, 7) + ')';
-      agentInfo.textContent = s.active_agents && s.active_agents.length
-        ? s.active_agents.length + ' agent' + (s.active_agents.length > 1 ? 's' : '')
-        : 'no agents';
-      if (s.pending_drafts > 0) {
-        agentInfo.textContent += ' | ' + s.pending_drafts + ' draft' + (s.pending_drafts > 1 ? 's' : '');
+      versionInfo.textContent = 'daemon ' + (s.build_sha || '?').substring(0, 7);
+
+      // Show default agent framework
+      if (s.default_agent) {
+        agentFramework.textContent = s.default_agent;
       }
+
+      // Show active agents count
+      const agentCount = s.active_agents ? s.active_agents.length : 0;
+      const draftCount = s.pending_drafts || 0;
+      let parts = [];
+      if (agentCount > 0) parts.push(agentCount + ' agent' + (agentCount > 1 ? 's' : ''));
+      if (draftCount > 0) parts.push(draftCount + ' draft' + (draftCount > 1 ? 's' : ''));
+      agentInfo.textContent = parts.length > 0 ? parts.join(' | ') : 'no agents';
+
       connStatus.textContent = 'connected';
       connStatus.className = 'connected';
     } catch (err) {
