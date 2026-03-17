@@ -75,6 +75,11 @@ struct Cli {
     #[arg(long)]
     api: bool,
 
+    /// Run in the foreground (no-op; the daemon always runs in the foreground).
+    /// Accepted for compatibility with `ta daemon start --foreground`.
+    #[arg(long)]
+    foreground: bool,
+
     /// Path to an office.yaml for multi-project mode.
     /// Can also be set via TA_OFFICE_CONFIG env var.
     #[arg(long)]
