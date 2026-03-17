@@ -2572,6 +2572,34 @@ The `/api/status` endpoint includes `process_health` and `agent_pid` fields in t
 }
 ```
 
+### Daemon Debugging
+
+For diagnosing issues with agent output, request routing, or subprocess lifecycle, run the daemon in the foreground with debug logging:
+
+```bash
+ta daemon stop
+RUST_LOG=ta_daemon=debug ta daemon start --foreground
+```
+
+This shows detailed logs including:
+- Subprocess spawn details (binary, args, working directory, PID)
+- Each stderr line from the agent process
+- Stdout line counts when the agent finishes
+- Elapsed time and exit codes for every agent invocation
+- Broadcast channel subscriber counts (helps diagnose missed output)
+
+Log levels: `info` (default), `debug` (verbose subprocess details), `trace` (everything).
+
+You can also target specific modules:
+
+```bash
+# Only debug agent subprocess lifecycle
+RUST_LOG=ta_daemon::api::agent=debug ta daemon start --foreground
+
+# Debug everything including HTTP routing
+RUST_LOG=ta_daemon=debug,tower_http=debug ta daemon start --foreground
+```
+
 ### Daemon API
 
 The TA daemon exposes a full HTTP API that any interface (terminal, web, Discord, Slack, email) can connect to for commands, agent conversations, and event streams.
@@ -2850,43 +2878,52 @@ The gateway will look up each referenced goal and include its title, objective, 
 
 ### Interactive Shell
 
-The interactive shell (`ta shell`) is a full-screen TUI client for the TA daemon. It gives you a persistent terminal with three zones: scrolling output, input line, and a live status bar.
+The interactive shell (`ta shell`) opens a web-based terminal UI in your browser. It connects to the TA daemon for command execution, agent Q&A, and live event streaming.
 
 #### Prerequisites
 
-The shell connects to a running TA daemon. The simplest approach — `ta shell` auto-starts the daemon if needed:
+The shell connects to a running TA daemon. `ta shell` auto-starts the daemon if needed:
 
 ```bash
-ta shell                                  # Starts daemon if needed, opens shell
+ta shell                                  # Opens web shell (auto-starts daemon)
 ta shell --url http://127.0.0.1:8080      # Connect to a specific daemon URL
 ```
 
 Or manage the daemon explicitly:
 
 ```bash
-# Start the daemon (runs on http://127.0.0.1:7700 by default)
-ta-daemon --project-root .
-
-# Or run it in the background
-ta-daemon --project-root . &
-
-# Verify it's running
-curl -s http://127.0.0.1:7700/api/status | head
+ta daemon start                           # Start in background
+ta daemon start --foreground              # Start in foreground (for debugging)
+ta daemon status                          # Check if running
 ```
 
-If the daemon is not running, `ta shell` will show connection errors on startup.
+#### Web Shell (default)
+
+`ta shell` opens a responsive web UI at `http://127.0.0.1:7700/shell`. The web shell completely separates input from output — your typing is never blocked by agent streaming.
+
+Features:
+- **Timestamps** on every output line (HH:MM:SS)
+- **Pending request counter** in the status bar
+- **Agent framework** shown in status bar (e.g., "claude-code")
+- **Conversation chaining** — follow-up questions retain context via `--continue`
+- **Multiple concurrent SSE streams** for parallel goal output
+- **Ctrl+L** to clear, Up/Down for command history
+- **Auto-scroll** that pauses when you scroll up
+
+#### Terminal Shell (opt-in)
+
+The terminal TUI shell is available for users who prefer a terminal-native experience:
+
+```bash
+ta shell --tui                            # Full TUI shell
+ta shell --classic                        # Line-mode REPL (implies --tui)
+ta shell --attach sess-abc123             # Attach to agent session (implies --tui)
+TA_SHELL_TUI=1 ta shell                   # Via environment variable
+```
 
 #### Daemon Version Guard
 
-When `ta shell` or `ta dev` connects to the daemon, it checks whether the daemon version matches the CLI version. After an upgrade (e.g., `./install_local.sh`), the old daemon process may still be running with the previous version. The version guard detects this and prompts you:
-
-```
-Daemon version mismatch: daemon v0.10.6-alpha, CLI v0.10.10-alpha
-Restart daemon with the new version? [Y/n]
-```
-
-- **Yes** (default): The CLI sends a graceful shutdown request, waits for the old daemon to exit, starts the new one, and verifies it's healthy.
-- **No**: The shell proceeds but shows `daemon (stale)` in the status bar so you know you're running against a mismatched daemon.
+When `ta shell` or `ta dev` connects to the daemon, it checks whether the daemon version matches the CLI version. After an upgrade (e.g., `./install_local.sh`), the old daemon process may still be running with the previous version. The version guard detects this and auto-restarts the daemon.
 
 To skip the version check (useful in CI or scripts):
 
@@ -2895,21 +2932,41 @@ ta --no-version-check shell
 ta --no-version-check dev
 ```
 
-The `--no-version-check` flag is global — it works with any subcommand.
+#### QA Agent Auto-Start
+
+The daemon automatically starts a QA agent session on boot (configurable in `.ta/daemon.toml`). This means the first question you type in the shell gets an immediate response — no cold-start delay.
+
+The agent retains conversation context across requests. Each follow-up question builds on the previous context, so you can have a natural multi-turn conversation.
+
+Configure in `.ta/daemon.toml`:
+
+```toml
+[shell.qa_agent]
+auto_start = true          # Start agent on daemon boot (default: true)
+agent = "claude-code"      # Which agent binary to use
+idle_timeout_secs = 300    # Kill after N seconds idle (default: 5 min)
+max_restarts = 3           # Max crash restarts before giving up
+inject_memory = true       # Inject project memory context
+```
+
+Set `auto_start = false` to disable automatic agent spawning. The agent will start on the first question instead.
 
 #### Starting the shell
 
 ```bash
-# Start the full TUI shell (default)
+# Web shell (default) — opens browser
 ta shell
 
 # Connect to a custom daemon URL
 ta shell --url http://my-server:7700
 
-# Attach to an existing agent session
-ta shell --attach sess-abc123
+# Terminal TUI shell
+ta shell --tui
 
-# Use the classic line-mode shell (rustyline REPL, pre-v0.9.8.3 behavior)
+# Attach to an existing agent session (terminal only)
+ta shell --tui --attach sess-abc123
+
+# Classic line-mode shell (rustyline REPL)
 ta shell --classic
 ```
 

@@ -932,7 +932,7 @@ cargo fmt --all -- --check
 - **Follow-up goals** — `--follow-up` to iterate on review feedback with full parent context injection
 - **Submit adapters** — pluggable VCS integration (git commit/push/Draft, or no-VCS file copy)
 - **Multi-stage workflow engine** — pluggable adapters, stage orchestration, verdict scoring
-- **Full TUI shell** — ratatui-based interactive shell (`ta shell`) with command routing and shortcuts
+- **Web shell** — responsive browser-based shell (`ta shell`) with conversation chaining, live agent streaming, and full command routing. Terminal TUI available via `ta shell --tui`
 - **Developer loop** — `ta dev` for iterative development with automatic staging and review
 - **Channel plugin system** — out-of-process review channels (Discord, Slack, Email) via JSON-over-stdio protocol
 - **Multi-project office management** — `ta office` for managing multiple projects under a single daemon
