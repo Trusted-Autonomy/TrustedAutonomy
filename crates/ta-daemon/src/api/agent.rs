@@ -296,6 +296,14 @@ impl PersistentQaAgent {
 
         let timeout = std::time::Duration::from_secs(self.config.idle_timeout_secs.max(60));
 
+        tracing::info!(
+            binary = %binary,
+            args = ?args,
+            cwd = %self.project_root.display(),
+            timeout_secs = timeout.as_secs(),
+            "QA agent: spawning subprocess"
+        );
+
         let result = tokio::process::Command::new(&binary)
             .args(&args)
             .current_dir(&self.project_root)
@@ -307,6 +315,9 @@ impl PersistentQaAgent {
 
         match result {
             Ok(mut child) => {
+                let pid = child.id().unwrap_or(0);
+                tracing::info!(pid, binary = %binary, "QA agent: subprocess started");
+
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
                 let tx2 = tx.clone();
@@ -314,12 +325,15 @@ impl PersistentQaAgent {
                 let stdout_task = tokio::spawn(async move {
                     if let Some(out) = stdout {
                         let mut reader = BufReader::new(out).lines();
+                        let mut count = 0u64;
                         while let Ok(Some(line)) = reader.next_line().await {
+                            count += 1;
                             let _ = tx.send(crate::api::goal_output::OutputLine {
                                 stream: "stdout",
                                 line,
                             });
                         }
+                        tracing::debug!(lines = count, "QA agent: stdout stream ended");
                     }
                 });
 
@@ -327,6 +341,7 @@ impl PersistentQaAgent {
                     if let Some(err) = stderr {
                         let mut reader = BufReader::new(err).lines();
                         while let Ok(Some(line)) = reader.next_line().await {
+                            tracing::debug!(line = %line, "QA agent stderr");
                             let _ = tx2.send(crate::api::goal_output::OutputLine {
                                 stream: "stderr",
                                 line,
@@ -335,9 +350,18 @@ impl PersistentQaAgent {
                     }
                 });
 
+                let started = std::time::Instant::now();
                 let status = tokio::time::timeout(timeout, child.wait()).await;
+                let elapsed = started.elapsed();
                 let _ = stdout_task.await;
                 let _ = stderr_task.await;
+
+                tracing::info!(
+                    pid,
+                    elapsed_secs = elapsed.as_secs_f64(),
+                    result = ?status.as_ref().map(|r| r.as_ref().map(|s| s.code())),
+                    "QA agent: subprocess finished"
+                );
 
                 match status {
                     Ok(Ok(s)) if !s.success() => {
@@ -630,10 +654,13 @@ pub async fn ask_agent(
                     prompt.len()
                 );
 
+                tracing::info!(request_id = %req_id, subscribers = tx.receiver_count(), "QA ask: starting");
                 match persistent_qa.ask(&prompt, tx.clone()).await {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        tracing::info!(request_id = %req_id, "QA ask: completed successfully");
+                    }
                     Err(e) => {
-                        tracing::warn!("Persistent QA agent error: {}: request={}", e, req_id,);
+                        tracing::warn!(request_id = %req_id, error = %e, "QA ask: agent error");
                         let _ = tx.send(OutputLine {
                             stream: "stderr",
                             line: format!("[agent error] {}", e),
@@ -642,6 +669,7 @@ pub async fn ask_agent(
                 }
 
                 goal_output.remove_channel(&req_id).await;
+                tracing::debug!(request_id = %req_id, "QA ask: channel removed");
             });
 
             // Return immediate ack with the request ID for streaming.
