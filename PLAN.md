@@ -4060,6 +4060,38 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 ---
 
+### v0.11.6 — Agent Transparency & Parallel Sessions
+<!-- status: pending -->
+**Goal**: Make the QA agent's work visible in real time and support parallel agent conversations for concurrent workflows.
+
+**Problem 1 — Silent processing**: When a user asks the QA agent a question (e.g., "What is the next phase of our plan?"), the web shell shows "processing..." for 30-60 seconds with no indication of what the agent is doing. Claude Code shows intermediate steps like "Reading PLAN.md", "Searching for phase status" — that output exists on the agent's stderr but isn't surfaced to the user. The shell should stream these intermediate steps so users see the agent thinking, not just waiting.
+
+**Problem 2 — Single conversation**: The daemon chains all requests to a single agent conversation via `--continue`. There's no way to fork a separate agent for parallel work (e.g., one researching while another writes code). Users need `ask --parallel` or similar to spawn independent agent sessions.
+
+#### Agent Transparency (streaming intermediate output)
+
+1. [ ] **Surface agent stderr as progress**: Claude Code writes tool-use progress to stderr (e.g., "Reading file...", "Running command..."). The `ask()` method already streams stderr lines to the broadcast channel, but they may be filtered or not rendered distinctly. Ensure all stderr lines from the agent subprocess appear in the web shell as dimmed progress indicators.
+
+2. [ ] **Structured progress parsing**: Parse stderr for known patterns (`Reading `, `Searching `, `Running `, `Writing `) and render them as distinct "thinking" lines in the web shell with a spinner or activity indicator, separate from actual output.
+
+3. [ ] **Web shell thinking indicator**: When a request is pending and no stdout has arrived yet, show an animated indicator ("Agent is working...") that updates with the latest stderr progress line.
+
+4. [ ] **Collapse progress on completion**: When the agent's stdout response arrives, collapse/dim the intermediate progress lines so the final answer is prominent.
+
+#### Parallel Agent Sessions
+
+5. [ ] **`/parallel` shell command**: New web shell command that spawns an independent agent conversation (no `--continue`). Returns a session tag the user can address follow-ups to. Example: `/parallel research the auth system` → spawns a separate agent, streams output tagged with the session name.
+
+6. [ ] **`POST /api/agent/ask` with `parallel: true`**: API flag that skips conversation chaining and creates a fresh agent subprocess. The web shell can have multiple concurrent SSE streams (already supported).
+
+7. [ ] **Session switching in web shell**: Status bar shows active parallel sessions. User can prefix input with a session tag to direct it to a specific agent: `@research what did you find?`
+
+8. [ ] **Session lifecycle**: Parallel sessions auto-close after idle timeout. User can `/close <tag>` to end a session explicitly. Max concurrent sessions configurable in `daemon.toml`.
+
+#### Version: `0.11.6-alpha`
+
+---
+
 ### v0.12.0 — Template Projects & Bootstrap Flow
 <!-- status: pending -->
 **Goal**: `ta new` generates projects with `project.toml` plugin declarations so downstream users get a complete, working setup from `ta setup` alone. Template projects in the Trusted-Autonomy org serve as reference implementations. Also: replace the quick-fix Discord command listener with a proper slash-command-based bidirectional integration.
