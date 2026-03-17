@@ -29,28 +29,16 @@ use super::shell::{resolve_daemon_url, StatusInfo};
 
 // ── Mouse & scroll handling ─────────────────────────────────────────
 //
-// NO mouse capture (`?1000h`/`?1002h`/`?1003h`) is enabled — those modes
-// intercept clicks, breaking native text selection and copy/paste.
+// NO mouse capture is enabled — no `?1000h`, `?1002h`, `?1003h`, or
+// `?1007h`. This lets the terminal handle ALL mouse interaction natively:
+// click-drag text selection, Command+C/Ctrl+C copy, right-click menus.
 //
-// Instead we enable `?1007h` (alternate screen mouse mode), which makes
-// the terminal convert scroll wheel events into Up/Down arrow key
-// sequences when in the alternate screen buffer. These arrive as normal
-// KeyCode::Up/Down events which we route to output scrolling.
-//
-// This is the same approach used by less, vim, and other TUI apps that
-// want scroll wheel support without sacrificing native text selection.
-//
-// When `?1007h` is active:
-//   - Scroll wheel → Up/Down key events (scroll output)
-//   - Click, drag, Cmd+C → handled by terminal natively (no capture)
-//   - Right-click menus → work normally
-//
-// Key bindings (since wheel-generated Up/Down are indistinguishable
-// from real arrow keys):
-//   Up/Down          → scroll output (1 line)
-//   Option+Up/Down   → command history
-//   PageUp/PageDown  → scroll output (1 page)
+// Scroll wheel does not work in the TUI (it would require mouse capture
+// which breaks native selection). Use keyboard scrolling instead:
+//   Shift+Up/Down    → scroll output 1 line
+//   PageUp/PageDown  → scroll output 1 page
 //   Shift+Home/End   → scroll to top/bottom
+//   Up/Down          → command history
 
 // ── Latency diagnostics ─────────────────────────────────────────
 //
@@ -939,15 +927,9 @@ async fn run_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    // Enable alternate screen mouse mode (?1007h): converts scroll wheel
-    // events into Up/Down arrow key sequences. Does NOT capture clicks,
-    // so native text selection, Command+C copy, and right-click menus
-    // all work normally. We write the raw escape because crossterm's
-    // EnableMouseCapture enables ?1000h/?1002h/?1003h which DO capture
-    // clicks and break native selection.
-    use std::io::Write as _;
-    write!(stdout, "\x1b[?1007h")?;
-    stdout.flush()?;
+    // No mouse capture — the terminal handles all mouse interaction natively:
+    // click-drag selection, Command+C copy, right-click menus.
+    // Scroll: Shift+Up/Down, PageUp/PageDown, Shift+Home/End (keyboard only).
     // Bracketed paste: pasted text arrives as Event::Paste(String) instead of
     // individual key events, so we can insert without executing on newlines.
     stdout.execute(EnableBracketedPaste)?;
@@ -996,13 +978,7 @@ async fn run_tui(
     running.store(false, Ordering::Relaxed);
     disable_raw_mode()?;
     terminal.backend_mut().execute(DisableBracketedPaste)?;
-    // Disable alternate screen mouse mode (?1007h → ?1007l).
-    {
-        use std::io::Write as _;
-        let backend = terminal.backend_mut();
-        write!(backend, "\x1b[?1007l")?;
-        std::io::Write::flush(backend)?;
-    }
+    // No mouse capture to disable — terminal handles mouse natively.
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     // Save history.
@@ -1581,17 +1557,15 @@ async fn handle_terminal_event(
                 }
                 (KeyCode::Home, _) => app.home(),
                 (KeyCode::End, _) => app.end(),
-                // Up/Down scroll output 1 line. This also handles scroll wheel
-                // via ?1007h which converts wheel events into Up/Down arrows.
-                // Alt/Option+Up/Down navigate command history.
-                (KeyCode::Up, m) if m.contains(KeyModifiers::ALT) => {
-                    app.history_up();
+                // Shift+Up/Down scroll output 1 line; plain Up/Down navigate history.
+                (KeyCode::Up, m) if m.contains(KeyModifiers::SHIFT) => {
+                    app.scroll_up(1);
                 }
-                (KeyCode::Down, m) if m.contains(KeyModifiers::ALT) => {
-                    app.history_down();
+                (KeyCode::Down, m) if m.contains(KeyModifiers::SHIFT) => {
+                    app.scroll_down(1);
                 }
-                (KeyCode::Up, _) => app.scroll_up(1),
-                (KeyCode::Down, _) => app.scroll_down(1),
+                (KeyCode::Up, _) => app.history_up(),
+                (KeyCode::Down, _) => app.history_down(),
                 (KeyCode::Tab, _) => app.tab_complete(),
                 (KeyCode::PageUp, _) => {
                     let page = crossterm::terminal::size()
@@ -3410,13 +3384,11 @@ Shell commands:
   clear              Clear the output pane
   Ctrl-L             Clear the output pane
 
-Scrolling:
-  Up / Down          Scroll output 1 line (also: mouse scroll wheel)
+Navigation:
+  Up / Down          Command history
+  Shift+Up / Down    Scroll output 1 line
   PgUp / PgDn        Scroll output one full page
   Shift+Home / End   Scroll to top / bottom of output
-
-History:
-  Option+Up / Down   Navigate command history (Alt+Up/Down on Linux)
 
 Text:
   Click-drag         Select text (native terminal selection)
