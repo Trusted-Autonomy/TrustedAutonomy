@@ -658,14 +658,36 @@ pub fn execute(
         match pre_status {
             Ok(exit) if exit.success() => {}
             Ok(exit) => {
+                // §4.3 constitution fix: clean up injected files before returning on error.
+                if agent_config.injects_context_file {
+                    let _ = restore_claude_md(&staging_path);
+                }
+                if agent_config.injects_settings {
+                    let _ = restore_claude_settings(&staging_path);
+                }
+                if macro_goal {
+                    let _ = restore_mcp_server_config(&staging_path);
+                }
                 return Err(anyhow::anyhow!(
-                    "Pre-launch command exited with status {}",
+                    "Pre-launch command exited with status {}. \
+                     Injected files have been cleaned up.",
                     exit
                 ));
             }
             Err(e) => {
+                // §4.3 constitution fix: clean up injected files before returning on error.
+                if agent_config.injects_context_file {
+                    let _ = restore_claude_md(&staging_path);
+                }
+                if agent_config.injects_settings {
+                    let _ = restore_claude_settings(&staging_path);
+                }
+                if macro_goal {
+                    let _ = restore_mcp_server_config(&staging_path);
+                }
                 return Err(anyhow::anyhow!(
-                    "Failed to run pre-launch command '{}': {}",
+                    "Failed to run pre-launch command '{}': {}. \
+                     Injected files have been cleaned up.",
                     pre.command,
                     e
                 ));
@@ -851,8 +873,20 @@ pub fn execute(
                 println!("  ta draft build {}", goal_id);
                 return Ok(());
             }
+            // §4.4 constitution fix: all launch error paths must clean up injected files,
+            // not just NotFound. Errors like PermissionDenied or ExecFormatError also
+            // leave the agent not running — staging must be restored.
+            if agent_config.injects_context_file {
+                let _ = restore_claude_md(&staging_path);
+            }
+            if agent_config.injects_settings {
+                let _ = restore_claude_settings(&staging_path);
+            }
+            if macro_goal {
+                let _ = restore_mcp_server_config(&staging_path);
+            }
             return Err(anyhow::anyhow!(
-                "Failed to launch {}: {}",
+                "Failed to launch {}: {}. Injected files have been cleaned up.",
                 agent_config.command,
                 e
             ));
@@ -1003,6 +1037,10 @@ pub fn execute(
                                         Err(e) => {
                                             println!("Failed to re-launch agent: {}", e);
                                             println!("Draft NOT created. To fix manually: ta run --follow-up");
+                                            // §4.5: restore re-injected CLAUDE.md before returning.
+                                            if agent_config.injects_context_file {
+                                                let _ = restore_claude_md(&staging_path);
+                                            }
                                             return Ok(());
                                         }
                                     }
@@ -1137,6 +1175,10 @@ pub fn execute(
                             Err(e) => {
                                 println!("Failed to re-launch agent: {}", e);
                                 println!("Draft NOT created. To fix manually: ta run --follow-up");
+                                // §4.6: restore re-injected CLAUDE.md before returning.
+                                if agent_config.injects_context_file {
+                                    let _ = restore_claude_md(&staging_path);
+                                }
                                 return Ok(());
                             }
                         }
@@ -1763,6 +1805,24 @@ fn load_forbidden_tools(source_dir: Option<&Path>) -> Vec<String> {
 /// Allows all standard tools, denies forbidden patterns.
 fn inject_claude_settings(staging_path: &Path, source_dir: Option<&Path>) -> anyhow::Result<()> {
     let settings_path = staging_path.join(SETTINGS_REL_PATH);
+    let backup_path = staging_path.join(SETTINGS_BACKUP);
+
+    // §4.1 constitution fix: if a backup already exists (follow-up reusing parent staging),
+    // restore the original settings first so we inject on top of the real file, not a
+    // stale previously-injected copy that would overwrite the backup with injected content.
+    if backup_path.exists() {
+        let saved_original = std::fs::read_to_string(&backup_path)?;
+        if saved_original == NO_ORIGINAL_SENTINEL {
+            if settings_path.exists() {
+                std::fs::remove_file(&settings_path)?;
+            }
+        } else {
+            if let Some(parent) = settings_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&settings_path, &saved_original)?;
+        }
+    }
 
     // Read and save original content.
     let original_content = if settings_path.exists() {
@@ -1774,7 +1834,7 @@ fn inject_claude_settings(staging_path: &Path, source_dir: Option<&Path>) -> any
     // Save backup.
     let backup_dir = staging_path.join(".ta");
     std::fs::create_dir_all(&backup_dir)?;
-    std::fs::write(staging_path.join(SETTINGS_BACKUP), &original_content)?;
+    std::fs::write(&backup_path, &original_content)?;
 
     // Build allow and deny lists.
     let allow: Vec<String> = DEFAULT_ALLOWED_TOOLS
@@ -1851,6 +1911,20 @@ pub(crate) const MCP_JSON_BACKUP: &str = ".ta/mcp_json_original";
 pub(crate) fn inject_mcp_server_config(staging_path: &Path) -> anyhow::Result<()> {
     let mcp_json_path = staging_path.join(MCP_JSON_PATH);
     let backup_path = staging_path.join(MCP_JSON_BACKUP);
+
+    // §4.2 constitution fix: if a backup already exists (follow-up reusing parent staging),
+    // restore the original .mcp.json first so we inject on top of the real file, not a
+    // stale previously-injected copy.
+    if backup_path.exists() {
+        let saved_original = std::fs::read_to_string(&backup_path)?;
+        if saved_original == NO_ORIGINAL_SENTINEL {
+            if mcp_json_path.exists() {
+                std::fs::remove_file(&mcp_json_path)?;
+            }
+        } else {
+            std::fs::write(&mcp_json_path, &saved_original)?;
+        }
+    }
 
     // Save original content (or sentinel if file doesn't exist).
     let original_content = if mcp_json_path.exists() {
