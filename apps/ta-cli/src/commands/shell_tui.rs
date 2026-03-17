@@ -1078,23 +1078,24 @@ async fn tui_event_loop(
                 }
                 app.latency_diag.busy_cycles += 1;
 
-                // Draw after input so the user sees their keystroke.
+                // Render the input line immediately so the user sees
+                // their keystroke without delay.
                 //
-                // When agent output is actively streaming, the terminal
-                // emulator is busy rendering escape sequences. Drawing
-                // on every keystroke floods it further, delaying its
-                // forwarding of keyboard input through the pty. To avoid
-                // this, rate-limit input draws to 20fps (50ms) while
-                // streaming — still fast enough for responsive typing,
-                // but gentle enough to let the terminal breathe.
-                let streaming = app.tailing_goal.is_some();
-                let min_input_draw = if streaming {
-                    Duration::from_millis(50)
+                // During agent streaming, a full ratatui draw() includes
+                // output pane changes — hundreds of ANSI escape sequences
+                // that saturate the terminal emulator and prevent it from
+                // forwarding keystrokes through the pty.
+                //
+                // Fix: when streaming, write ONLY the input line directly
+                // via crossterm (~50 bytes). The terminal processes this
+                // instantly. Full-frame draws happen on the rate-limited
+                // bg path (2fps) for output updates.
+                if app.tailing_goal.is_some() {
+                    direct_input_write(terminal, app);
+                    // Don't update last_draw — let the bg rate-limiter
+                    // handle full-frame draws independently.
+                    needs_draw = true;
                 } else {
-                    Duration::ZERO
-                };
-                let bg_backlog = rx.len();
-                if bg_backlog < 50 && last_draw.elapsed() >= min_input_draw {
                     let draw_start = Instant::now();
                     update_wrap_cache(terminal, app);
                     terminal.draw(|f| draw_ui(f, app))?;
@@ -1102,8 +1103,6 @@ async fn tui_event_loop(
                     needs_draw = false;
                     app.latency_diag
                         .record_draw(draw_start.elapsed().as_micros() as u64);
-                } else {
-                    needs_draw = true;
                 }
             }
 
@@ -1932,6 +1931,110 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             app.scroll_to_bottom();
         }
     }
+}
+
+/// Write ONLY the input line directly to stdout using crossterm, bypassing
+/// ratatui's full-frame diff entirely. This produces ~50 bytes of output —
+/// the terminal processes it in microseconds regardless of how busy it is
+/// rendering agent output. The ratatui frame buffer stays stale for the
+/// input area, but the next full `terminal.draw()` will resync it.
+fn direct_input_write(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) {
+    use crossterm::cursor::MoveTo;
+    use crossterm::style::Print;
+    use crossterm::terminal::{Clear, ClearType};
+    use crossterm::QueueableCommand;
+
+    let size = match terminal.size() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    // Compute input area position — same layout logic as draw_ui.
+    let prompt = app.prompt_str();
+    let display = format!("{}{}", prompt, app.input);
+    let inner_width = size.width.max(1) as usize;
+    let content_lines = {
+        let mut lines = 0u16;
+        let mut col = 0usize;
+        for ch in display.chars() {
+            if ch == '\n' {
+                lines += 1;
+                col = 0;
+            } else {
+                col += 1;
+                if col >= inner_width {
+                    lines += 1;
+                    col = 0;
+                }
+            }
+        }
+        lines + 1
+    };
+    let input_height = (content_lines + 2).min(size.height / 2).max(3);
+    // Input area: top border at (size.height - 1 - input_height), text starts 1 below.
+    let input_top = size.height.saturating_sub(1 + input_height);
+    let text_start_row = input_top + 1; // skip top border
+    let text_end_row = size.height.saturating_sub(2); // before bottom border + status bar
+
+    let backend = terminal.backend_mut();
+
+    // Clear the input text rows and rewrite content.
+    let mut row = text_start_row;
+    let mut col: usize = 0;
+
+    // Clear all input text rows first.
+    for r in text_start_row..=text_end_row {
+        let _ = backend.queue(MoveTo(0, r));
+        let _ = backend.queue(Clear(ClearType::CurrentLine));
+    }
+
+    // Write the display string with wrapping.
+    let _ = backend.queue(MoveTo(0, text_start_row));
+    for ch in display.chars() {
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+            if row > text_end_row {
+                break;
+            }
+            let _ = backend.queue(MoveTo(0, row));
+        } else {
+            if col >= inner_width {
+                row += 1;
+                col = 0;
+                if row > text_end_row {
+                    break;
+                }
+                let _ = backend.queue(MoveTo(0, row));
+            }
+            let _ = backend.queue(Print(ch));
+            col += 1;
+        }
+    }
+
+    // Position cursor.
+    let cursor_byte = prompt.len() + app.cursor;
+    let mut crow: u16 = 0;
+    let mut ccol: usize = 0;
+    for (i, ch) in display.char_indices() {
+        if i >= cursor_byte {
+            break;
+        }
+        if ch == '\n' {
+            crow += 1;
+            ccol = 0;
+        } else {
+            ccol += 1;
+            if ccol >= inner_width {
+                crow += 1;
+                ccol = 0;
+            }
+        }
+    }
+    let cx = (ccol as u16).min(size.width.saturating_sub(1));
+    let cy = (text_start_row + crow).min(text_end_row);
+    let _ = backend.queue(MoveTo(cx, cy));
+    let _ = std::io::Write::flush(backend);
 }
 
 fn draw_ui(f: &mut Frame, app: &App) {
