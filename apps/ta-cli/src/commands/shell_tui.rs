@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
-    MouseEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -956,15 +956,22 @@ async fn run_tui(
     let input_running = running.clone();
     std::thread::spawn(move || {
         while input_running.load(Ordering::Relaxed) {
-            // ~60fps poll rate — events are forwarded immediately.
+            // Block up to 16ms waiting for the first event.
             if event::poll(std::time::Duration::from_millis(16)).unwrap_or(false) {
-                if let Ok(ev) = event::read() {
+                // Drain ALL available events in a tight loop — critical for
+                // fast typists and for keeping up when the event loop is busy
+                // with draws or bg processing.
+                while let Ok(ev) = event::read() {
                     let stamped = StampedEvent {
                         event: ev,
                         os_read_at: std::time::Instant::now(),
                     };
                     if input_tx.send(stamped).is_err() {
-                        break; // Receiver dropped — TUI is shutting down.
+                        return; // Receiver dropped — TUI is shutting down.
+                    }
+                    // Check for more events with zero timeout (non-blocking).
+                    if !event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+                        break;
                     }
                 }
             }
@@ -1078,7 +1085,9 @@ async fn tui_event_loop(
                 if app.latency_diag.enabled {
                     if let Some(ref mut lf) = latency_log {
                         let ev_desc = match &stamped.event {
-                            Event::Key(k) => format!("key:{:?}+{:?}", k.code, k.modifiers),
+                            Event::Key(k) => {
+                                format!("key:{:?}+{:?} kind={:?}", k.code, k.modifiers, k.kind)
+                            }
                             Event::Paste(_) => "paste".to_string(),
                             Event::Mouse(m) => format!("mouse:{:?}", m.kind),
                             Event::Resize(w, h) => format!("resize:{}x{}", w, h),
@@ -1094,7 +1103,27 @@ async fn tui_event_loop(
                     }
                 }
 
+                let input_before = if app.latency_diag.enabled {
+                    Some(app.input.clone())
+                } else {
+                    None
+                };
                 handle_terminal_event(app, stamped.event, client, &tx).await;
+                // Log input buffer change after handling (traces char insertion).
+                if let Some(before) = input_before {
+                    if app.input != before {
+                        if let Some(ref mut lf) = latency_log {
+                            let _ = writeln!(
+                                lf,
+                                "{} INPUT_CHANGED len={}→{} buf={:?}",
+                                chrono::Local::now().format("%H:%M:%S%.3f"),
+                                before.len(),
+                                app.input.len(),
+                                &app.input,
+                            );
+                        }
+                    }
+                }
             }
             let handle_us = handle_start.elapsed().as_micros() as u64;
             app.latency_diag.record_input_handle(handle_us);
@@ -1244,8 +1273,18 @@ async fn handle_terminal_event(
 ) {
     match ev {
         Event::Key(KeyEvent {
-            code, modifiers, ..
+            code,
+            modifiers,
+            kind,
+            ..
         }) => {
+            // Only process key PRESS events. Some terminals (especially on
+            // macOS with kitty keyboard protocol) also report Release and
+            // Repeat events. Processing those would cause double-inserts or
+            // unexpected behavior.
+            if kind != KeyEventKind::Press {
+                return;
+            }
             match (code, modifiers) {
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                     // If tailing agent output, Ctrl-C detaches instead of exiting (v0.10.14).
@@ -1607,7 +1646,14 @@ async fn handle_terminal_event(
                         .unwrap_or(40);
                     app.scroll_down(page.saturating_sub(4));
                 }
-                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                (KeyCode::Char(c), m)
+                    if !m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    // Accept Char events with any modifier combination EXCEPT
+                    // Ctrl and Alt (which are handled as explicit keybindings
+                    // above). This catches normal typing even when the terminal
+                    // reports unexpected SUPER/HYPER/META/CAPS_LOCK flags —
+                    // common on macOS with some terminal emulators.
                     app.insert_char(c);
                 }
                 _ => {}
