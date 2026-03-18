@@ -4360,6 +4360,23 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 
 ---
 
+### v0.12.2.1 — Draft Compositing: Parent + Child Chain Merge
+<!-- status: pending -->
+**Goal**: Fix the architectural gap where follow-up (child) drafts only capture their own staged writes rather than computing a cumulative diff against the original source. Users see "2 files changed" on a follow-up when the real answer is "parent: 5 + child: 2 = 7 files changed", and `ta draft apply` reports "Applied 0 file(s)" because the rebase compares child-staging against current source (which already has the parent applied) and finds nothing new.
+
+**Root cause**: `draft build` snapshots only the delta since *this goal* started, not since the *root ancestor* of a follow-up chain. When the parent is applied to source before the child, the child's staging matches source and the diff is empty.
+
+1. [ ] **Track parent draft ID on follow-up goals**: When `ta run --follow-up <draft-id>` starts, record `parent_draft_id` on the `GoalRun`. Propagate through `DraftPackage` metadata.
+2. [ ] **Composited diff for child drafts**: In `draft build`, if `parent_draft_id` is set and the parent is Applied, compute the diff as `child-staging vs original-source-snapshot` (the snapshot taken *before* the parent was applied), not vs current source. This captures the full incremental change set.
+3. [ ] **`ta draft view` shows chain summary**: When viewing a child draft, show "Follow-up to `<parent-id>` — combined impact: N files". When viewing a parent with known children, list them.
+4. [ ] **`ta draft apply` merges chains**: Add `ta draft apply --chain <child-id>` which applies parent + all unapplied children in order, with a single merged commit message summarizing the chain. Detect cycles and warn.
+5. [ ] **`ta draft list` chain column**: Show `→ <parent-short-id>` in a new "Parent" column when a draft is a follow-up, so chains are visible at a glance.
+6. [ ] **Tests**: Unit test for composited diff (parent applied, child staging, expect combined N files). Integration test for `apply --chain`.
+
+#### Version: `0.12.2-alpha.1`
+
+---
+
 ### v0.12.3 — Shell Multi-Agent UX & Resilience
 <!-- status: pending -->
 **Goal**: Close the remaining UX and reliability gaps found during v0.12.1 testing. Users need to send messages to running agents, distinguish streams from multiple agents, understand auth failures, and have clean process cleanup when agents exit.
