@@ -4142,24 +4142,6 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 ---
 
-### v0.11.8 — VCS Submit Invariant: Perforce, SVN & Plugin Compliance
-<!-- status: pending -->
-**Goal**: Complete the §15 VCS Submit Invariant for non-git adapters and enforce it at plugin registration time. **Blocked on VCS plugin work** — do this phase alongside the Perforce/SVN plugin extraction (whichever roadmap phase that lands in).
-
-#### Items
-
-1. [ ] **Perforce adapter**: Implement `protected_submit_targets()` (configured depot paths) and `verify_not_on_protected_target()` (checks current CL target stream/branch).
-
-2. [ ] **SVN adapter**: Implement `protected_submit_targets()` (configured protected paths, e.g. `/trunk`) and `verify_not_on_protected_target()` (checks working copy URL).
-
-3. [ ] **Plugin registry enforcement**: When loading a submit adapter plugin, validate that `protected_submit_targets()` and `verify_not_on_protected_target()` are consistent — non-empty targets must produce non-trivial verify. Emit `tracing::warn!` if an adapter declares protected targets but verify is a no-op. Track for v0.14.1 `constitution.toml` integration.
-
-**Files**: `crates/ta-submit/src/perforce.rs`, `crates/ta-submit/src/svn.rs`, plugin registry (TBD)
-
-#### Version: `0.11.8-alpha`
-
----
-
 ### v0.12.0 — Template Projects & Bootstrap Flow
 <!-- status: pending -->
 **Goal**: `ta new` generates projects with `project.toml` plugin declarations so downstream users get a complete, working setup from `ta setup` alone. Template projects in the Trusted-Autonomy org serve as reference implementations. Also: replace the quick-fix Discord command listener with a proper slash-command-based bidirectional integration.
@@ -4605,6 +4587,9 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 6. [ ] **VCS plugin manifest (`plugin.toml`)**: Same schema as channel plugins but with `type = "vcs"` and `capabilities = ["commit", "push", "review", ...]`.
 7. [ ] **Adapter version negotiation**: On first contact, TA sends `{"method": "handshake", "params": {"ta_version": "...", "protocol_version": 1}}`. Plugin responds with its version and supported protocol version. TA refuses plugins with incompatible protocol versions.
 8. [ ] **Test: external VCS plugin lifecycle**: Integration test with a mock VCS plugin (shell script that speaks the protocol) verifying detect → save_state → commit → restore_state flow.
+9. [ ] **§15 compliance — Perforce plugin**: Implement `protected_submit_targets()` (configured depot paths) and `verify_not_on_protected_target()` (checks current CL target stream/branch) in the extracted Perforce plugin.
+10. [ ] **§15 compliance — SVN plugin**: Same for the extracted SVN plugin — configured protected paths (e.g. `/trunk`), verify via working copy URL.
+11. [ ] **§15 compliance — plugin registry enforcement**: When loading any submit adapter plugin, validate that `protected_submit_targets()` and `verify_not_on_protected_target()` are consistent. Emit `tracing::warn!` if an adapter declares protected targets but verify is a no-op. Add to `plugin.toml` capabilities: `"protected_targets"` to signal §15 compliance.
 
 #### Version: `0.13.5-alpha`
 
