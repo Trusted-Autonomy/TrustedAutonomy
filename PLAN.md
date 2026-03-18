@@ -4102,9 +4102,9 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 #### Items
 
-1. [ ] **Heartbeat to status bar**: Move `[heartbeat] still running... Xs elapsed` out of the stream and into the animated bottom status line (currently "Agent is working…"). The status line shows elapsed time, animates (spinning bar or similar), and is updated in-place — not appended to the transcript.
+1. [ ] **Heartbeat into working indicator**: Move `[heartbeat] still running... Xs elapsed` out of the stream. Instead, update the existing "Agent is working…" line in-place: `Agent is working ⠿ (380s elapsed)` — animated spinner character cycles on each heartbeat, elapsed time updates. No separate status bar; no duplicate elapsed display.
 
-2. [ ] **No-heartbeat alert**: If no heartbeat arrives within a configurable window (default 30 s), turn the status line red with a connectivity-lost indicator. Clears automatically when the next heartbeat arrives.
+2. [ ] **No-heartbeat alert**: If no heartbeat arrives within a configurable window (default 30 s), change the working indicator to a red alert: `Agent is working ⚠ (410s elapsed — no heartbeat)`. Clears back to spinner automatically when the next heartbeat arrives.
 
 3. [ ] **Auto-tail on goal start**: When the shell detects a background goal starting (via the `[goal started]` sentinel or SSE `goal_started` event), automatically begin tailing its output and show a banner: "Auto-tailing output for \<title\> (\<id\>)…". No manual `:tail` required.
 
