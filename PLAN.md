@@ -4131,12 +4131,16 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 10. [ ] **Git adapter**: Implement `protected_submit_targets()` returning configured protected branches (defaulting to `["main", "master", "trunk", "dev"]`) and `verify_not_on_protected_target()` via `git rev-parse --abbrev-ref HEAD`.
 
-11. [ ] **Generic guard in `draft.rs`**: Replace the `adapter.name() == "git"` hardcoded check with `adapter.verify_not_on_protected_target()`. All adapters get uniform enforcement with no special-casing.
+11. [ ] **Perforce adapter (built-in)**: Implement `protected_submit_targets()` (configured depot paths, default `["//depot/main/..."]`) and `verify_not_on_protected_target()` checking the current CL's target stream. No Perforce installation required for the check to compile — gate behind a `p4` CLI call that degrades gracefully if not present.
 
-12. [ ] **Constitution §15 — VCS Submit Invariant**: Add to `docs/TA-CONSTITUTION.md`:
+12. [ ] **SVN adapter (built-in)**: Implement `protected_submit_targets()` (configured protected paths, default `["/trunk"]`) and `verify_not_on_protected_target()` via `svn info --show-item url`. SVN's `prepare()` is currently a no-op (no branching) — this at minimum blocks committing to a protected path until proper branch/copy support is added.
+
+13. [ ] **Generic guard in `draft.rs`**: Replace the `adapter.name() == "git"` hardcoded check with `adapter.verify_not_on_protected_target()`. All adapters get uniform enforcement with no special-casing.
+
+14. [ ] **Constitution §15 — VCS Submit Invariant**: Add to `docs/TA-CONSTITUTION.md`:
     > **§15 VCS Submit Invariant**: All VCS adapters MUST route agent-produced changes through an isolation mechanism (branch, shelved CL, patch queue) before any commit. `prepare()` is the mandatory enforcement point — failure is always a hard abort. After `prepare()`, the adapter MUST NOT be positioned to commit directly to a protected target. Adapters MUST declare protected targets via `protected_submit_targets()`. This invariant applies to all current and plugin-supplied adapters.
 
-**Files**: `crates/ta-daemon/assets/shell.html`, `crates/ta-daemon/src/config.rs`, `crates/ta-daemon/src/api/status.rs`, `apps/ta-cli/src/commands/draft.rs`, `crates/ta-submit/src/adapter.rs`, `crates/ta-submit/src/git.rs`, `docs/TA-CONSTITUTION.md`
+**Files**: `crates/ta-daemon/assets/shell.html`, `crates/ta-daemon/src/config.rs`, `crates/ta-daemon/src/api/status.rs`, `apps/ta-cli/src/commands/draft.rs`, `crates/ta-submit/src/adapter.rs`, `crates/ta-submit/src/git.rs`, `crates/ta-submit/src/perforce.rs`, `crates/ta-submit/src/svn.rs`, `docs/TA-CONSTITUTION.md`
 
 #### Version: `0.11.7-alpha`
 
@@ -4587,9 +4591,8 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 6. [ ] **VCS plugin manifest (`plugin.toml`)**: Same schema as channel plugins but with `type = "vcs"` and `capabilities = ["commit", "push", "review", ...]`.
 7. [ ] **Adapter version negotiation**: On first contact, TA sends `{"method": "handshake", "params": {"ta_version": "...", "protocol_version": 1}}`. Plugin responds with its version and supported protocol version. TA refuses plugins with incompatible protocol versions.
 8. [ ] **Test: external VCS plugin lifecycle**: Integration test with a mock VCS plugin (shell script that speaks the protocol) verifying detect → save_state → commit → restore_state flow.
-9. [ ] **§15 compliance — Perforce plugin**: Implement `protected_submit_targets()` (configured depot paths) and `verify_not_on_protected_target()` (checks current CL target stream/branch) in the extracted Perforce plugin.
-10. [ ] **§15 compliance — SVN plugin**: Same for the extracted SVN plugin — configured protected paths (e.g. `/trunk`), verify via working copy URL.
-11. [ ] **§15 compliance — plugin registry enforcement**: When loading any submit adapter plugin, validate that `protected_submit_targets()` and `verify_not_on_protected_target()` are consistent. Emit `tracing::warn!` if an adapter declares protected targets but verify is a no-op. Add to `plugin.toml` capabilities: `"protected_targets"` to signal §15 compliance.
+9. [ ] **§15 compliance — carry forward to plugins**: The built-in Perforce and SVN adapters will already implement `protected_submit_targets()` and `verify_not_on_protected_target()` (added in v0.11.7). When extracting to plugins, port those implementations into the plugin binary and expose them via the JSON-over-stdio protocol (`protected_targets` and `verify_target` messages).
+10. [ ] **§15 compliance — plugin registry enforcement**: When loading any submit adapter plugin, validate that `protected_submit_targets()` and `verify_not_on_protected_target()` are consistent. Emit `tracing::warn!` if an adapter declares protected targets but verify is a no-op. Add to `plugin.toml` capabilities: `"protected_targets"` to signal §15 compliance.
 
 #### Version: `0.13.5-alpha`
 
