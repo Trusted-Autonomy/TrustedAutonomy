@@ -2438,26 +2438,27 @@ fn apply_package(
                         )
                     })?;
 
-                // Safety guard: refuse to commit if prepare() left us on a protected branch.
-                // This catches cases where the adapter has a bug or the branch already existed
-                // on main (second-apply scenario). Protected branches: main, master, trunk, dev.
-                if let Ok(current_branch) = {
-                    use std::process::Command as Cmd;
-                    Cmd::new("git")
-                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                        .current_dir(&target_dir)
-                        .output()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } {
-                    let protected = ["main", "master", "trunk", "dev"];
-                    if protected.contains(&current_branch.as_str()) {
-                        anyhow::bail!(
-                            "Refusing to commit: still on protected branch '{}' after prepare(). \
-                             This would bypass the feature branch + PR workflow. \
-                             Check that the VCS adapter created a feature branch, then re-run \
-                             `ta draft apply --submit`.",
-                            current_branch
-                        );
+                // Safety guard (git adapter only): refuse to commit if prepare() left us on a
+                // protected branch. Skipped for "none" adapter (no git ops at all).
+                if adapter.name() == "git" {
+                    if let Ok(current_branch) = {
+                        use std::process::Command as Cmd;
+                        Cmd::new("git")
+                            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                            .current_dir(&target_dir)
+                            .output()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } {
+                        let protected = ["main", "master", "trunk", "dev"];
+                        if protected.contains(&current_branch.as_str()) {
+                            anyhow::bail!(
+                                "Refusing to commit: still on protected branch '{}' after \
+                                 prepare(). This would bypass the feature branch + PR workflow. \
+                                 Check that the VCS adapter created a feature branch, then \
+                                 re-run `ta draft apply --submit`.",
+                                current_branch
+                            );
+                        }
                     }
                 }
 
