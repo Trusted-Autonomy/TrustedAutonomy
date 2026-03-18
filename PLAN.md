@@ -4096,6 +4096,24 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 ---
 
+### v0.11.7 — Web Shell Stream UX Polish
+<!-- status: pending -->
+**Goal**: Clean up the tail/stream output UX in the web shell so live goal output is comfortable to read and the connection state is always clear.
+
+#### Items
+
+1. [ ] **Heartbeat to status bar**: Move `[heartbeat] still running... Xs elapsed` out of the stream and into the animated bottom status line (currently "Agent is working…"). The status line shows elapsed time, animates (spinning bar or similar), and is updated in-place — not appended to the transcript.
+
+2. [ ] **No-heartbeat alert**: If no heartbeat arrives within a configurable window (default 30 s), turn the status line red with a connectivity-lost indicator. Clears automatically when the next heartbeat arrives.
+
+3. [ ] **Auto-tail on goal start**: When the shell detects a background goal starting (via the `[goal started]` sentinel or SSE `goal_started` event), automatically begin tailing its output and show a banner: "Auto-tailing output for \<title\> (\<id\>)…". No manual `:tail` required.
+
+**Files**: `crates/ta-daemon/assets/shell.html`
+
+#### Version: `0.11.7-alpha`
+
+---
+
 ### v0.12.0 — Template Projects & Bootstrap Flow
 <!-- status: pending -->
 **Goal**: `ta new` generates projects with `project.toml` plugin declarations so downstream users get a complete, working setup from `ta setup` alone. Template projects in the Trusted-Autonomy org serve as reference implementations. Also: replace the quick-fix Discord command listener with a proper slash-command-based bidirectional integration.
