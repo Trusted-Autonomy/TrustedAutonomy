@@ -4121,6 +4121,8 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
    - Config keys: `cursor_color` (CSS color, default `#ffffff`), `cursor_style` (`block` | `bar` | `underline`, default `block`)
    - Applied via CSS on the shell input element; read from `/api/status` alongside other shell config.
 
+7. [ ] **Auto-scroll during tail**: When tailing output, the shell must scroll to follow new lines as they arrive — unless the user has explicitly scrolled up. Behaviour: if the viewport is at (or within a small threshold of) the bottom, each new line scrolls it down to stay visible. If the user scrolls up, auto-scroll pauses. Scrolling back to the bottom resumes auto-scroll. This mirrors the behaviour of `tail -f` in a terminal.
+
 **Files**: `crates/ta-daemon/assets/shell.html`, `crates/ta-daemon/src/config.rs`, `crates/ta-daemon/src/api/status.rs`
 
 #### Version: `0.11.7-alpha`
