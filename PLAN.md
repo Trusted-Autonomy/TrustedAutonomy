@@ -4108,13 +4108,20 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 3. [ ] **Auto-tail on any background command**: Whenever the shell spawns a command in the background (e.g. `ta run`, `ta draft apply`, `ta build`, or any other backgrounded process), automatically begin tailing its output key immediately. Show a single line: "Auto-tailing output for \<key\>…" at the top of the stream. No manual `:tail` required for any background operation.
 
-4. [ ] **Process completion/failure/cancellation states**: When a tailed background process ends, replace the "Agent is working…" indicator with a final status line and clear the working indicator:
+4. [ ] **Tail stream close on completion** *(bug)*: The tail SSE stream is not closed when the background command finishes. The shell keeps tailing indefinitely, accumulating ghost tail subscriptions. When a second background command starts, the shell shows 2 active tails. Fix: daemon sends an explicit `event: done` (or closes the SSE connection) when the output channel is exhausted; client untails and stops tracking that key on receipt.
+
+5. [ ] **Process completion/failure/cancellation states**: When a tailed background process ends, replace the "Agent is working…" indicator with a final status line and clear the working indicator:
    - Completed: `✓ <command> completed`
    - Failed: `✗ <command> failed (exit <code>)`
    - Canceled: `⊘ <command> canceled`
    The working indicator (`Agent is working…`) is removed entirely after any terminal state.
 
-**Files**: `crates/ta-daemon/assets/shell.html`
+6. [ ] **Input cursor style** — configurable in `daemon.toml` `[shell]` section:
+   - Default: larger, white block cursor (replaces the current medium-blue hard-to-read cursor)
+   - Config keys: `cursor_color` (CSS color, default `#ffffff`), `cursor_style` (`block` | `bar` | `underline`, default `block`)
+   - Applied via CSS on the shell input element; read from `/api/status` alongside other shell config.
+
+**Files**: `crates/ta-daemon/assets/shell.html`, `crates/ta-daemon/src/config.rs`, `crates/ta-daemon/src/api/status.rs`
 
 #### Version: `0.11.7-alpha`
 
