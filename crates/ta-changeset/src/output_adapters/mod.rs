@@ -92,8 +92,9 @@ impl std::fmt::Display for DetailLevel {
 pub struct RenderContext<'a> {
     pub package: &'a DraftPackage,
     pub detail_level: DetailLevel,
-    /// Optional: Filter to a specific file (show only one artifact).
-    pub file_filter: Option<String>,
+    /// Optional: Filter artifacts to one or more files (matched by substring against resource_uri).
+    /// Empty vec means no filter (show all). Replaces the old single-value `file_filter`.
+    pub file_filters: Vec<String>,
     /// Optional: Diff content provider (for fetching full diffs).
     pub diff_provider: Option<&'a dyn DiffProvider>,
 }

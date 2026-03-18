@@ -365,19 +365,23 @@ impl OutputAdapter for TerminalAdapter {
 
         // Filter artifacts
         let artifacts = &ctx.package.changes.artifacts;
-        let filtered_artifacts: Vec<&Artifact> = if let Some(filter) = &ctx.file_filter {
+        let filtered_artifacts: Vec<&Artifact> = if !ctx.file_filters.is_empty() {
             artifacts
                 .iter()
-                .filter(|a| a.resource_uri.contains(filter))
+                .filter(|a| {
+                    ctx.file_filters
+                        .iter()
+                        .any(|f| a.resource_uri.contains(f.as_str()))
+                })
                 .collect()
         } else {
             artifacts.iter().collect()
         };
 
-        if let (true, Some(filter)) = (filtered_artifacts.is_empty(), &ctx.file_filter) {
+        if filtered_artifacts.is_empty() && !ctx.file_filters.is_empty() {
             return Err(ChangeSetError::InvalidData(format!(
-                "No artifacts match filter: {}",
-                filter
+                "No artifacts match filter(s): {}",
+                ctx.file_filters.join(", ")
             )));
         }
 
@@ -528,7 +532,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
         };
 
@@ -549,7 +553,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
         };
 
@@ -566,7 +570,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Medium,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
         };
 
@@ -582,7 +586,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: Some("auth.rs".to_string()),
+            file_filters: vec!["auth.rs".to_string()],
             diff_provider: None,
         };
 
@@ -597,7 +601,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: Some("nonexistent.rs".to_string()),
+            file_filters: vec!["nonexistent.rs".to_string()],
             diff_provider: None,
         };
 
@@ -613,7 +617,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Medium,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
         };
         let output = adapter.render(&ctx).unwrap();
@@ -677,7 +681,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
         };
         let output = adapter.render(&ctx).unwrap();
@@ -709,7 +713,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
         };
         let output = adapter.render(&ctx).unwrap();
@@ -737,7 +741,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
         };
         let output = adapter.render(&ctx).unwrap();
@@ -755,7 +759,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
         };
         let output = adapter.render(&ctx).unwrap();
@@ -769,7 +773,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Medium,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
         };
         let output = adapter.render(&ctx).unwrap();

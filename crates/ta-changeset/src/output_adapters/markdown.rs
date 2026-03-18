@@ -51,11 +51,15 @@ impl OutputAdapter for MarkdownAdapter {
             pkg.changes.artifacts.len()
         ));
 
-        let artifacts: Vec<&Artifact> = if let Some(filter) = &ctx.file_filter {
+        let artifacts: Vec<&Artifact> = if !ctx.file_filters.is_empty() {
             pkg.changes
                 .artifacts
                 .iter()
-                .filter(|a| a.resource_uri.contains(filter))
+                .filter(|a| {
+                    ctx.file_filters
+                        .iter()
+                        .any(|f| a.resource_uri.contains(f.as_str()))
+                })
                 .collect()
         } else {
             pkg.changes.artifacts.iter().collect()
