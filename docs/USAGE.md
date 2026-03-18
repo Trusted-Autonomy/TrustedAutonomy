@@ -561,6 +561,19 @@ In warn mode (`on_failure = "warn"`), the draft is created but carries verificat
 
 `ta init` generates a pre-populated `[verify]` section for Rust projects. Other project types get commented-out examples.
 
+#### Constitution Pattern Scan
+
+When `ta draft build` runs, TA automatically scans changed Rust files for potential §4 (CLAUDE.md injection cleanup) violations — functions that inject context into the workspace but may not restore it on all error paths.
+
+```
+[constitution] 2 potential §4 violation(s) — review before approving
+  run.rs: inject_claude_md (3 inject, 1 restore)
+```
+
+The scan is static and grep-based (no agent), runs in under a second, and is non-blocking by default — the draft is still created but carries warnings visible in `ta draft view`. The warnings are also printed to stderr during `ta draft build` so they appear in CI logs.
+
+The scanner counts `inject_*` and `restore_*` call sites in each changed `.rs` file. If a file has more inject calls than restore calls and contains early `return` statements, it is flagged as a candidate for review.
+
 ### Desktop Notifications
 
 TA sends a system notification when a draft is ready for review, so you don't have to watch the terminal. On macOS this uses Notification Center (via `osascript`); on Linux it uses `notify-send`.
@@ -3022,6 +3035,11 @@ Built-in shell commands:
 | `:tail [id] [--lines N]` | Attach to goal output stream (`--lines` overrides backfill count) |
 | `:follow-up [filter]` | List follow-up candidates (failed goals, denied drafts); filter by keyword |
 | `:status` | Refresh the status bar |
+| `/parallel [tag]` | Spawn an independent agent conversation; optional custom tag |
+| `/switch <tag>` | Switch the active parallel session |
+| `/close <tag>` | Close a named parallel session |
+| `/sessions` | List all active parallel sessions |
+| `@<tag> <prompt>` | Send a prompt directly to a named parallel session |
 | `clear` / `Ctrl-L` | Clear the output pane |
 | `Shift+Up` / `Shift+Down` | Scroll output 1 line |
 | `PgUp` / `PgDn` | Scroll output one full page (with 4-line overlap) |
@@ -3046,6 +3064,44 @@ When a goal starts, the shell automatically streams the agent's stdout/stderr in
 - **Agent model**: The status bar shows the detected LLM model name (e.g., "Claude Opus 4") when streaming agent output.
 - **Heartbeat coalescing**: During long-running operations, heartbeat lines (`[heartbeat] still running... Ns elapsed`) update in-place instead of flooding the output. When real output arrives, the heartbeat line is pushed down naturally.
 - **Text selection**: Both mouse scroll and native text selection work simultaneously. The shell uses selective ANSI mouse escapes (`?1000h` + `?1006h`) that capture scroll wheel events without intercepting click-drag, so you can select and copy text normally while still scrolling with the trackpad/mouse wheel.
+
+#### Goal Lifecycle Notifications
+
+When goals complete or fail, the web shell surfaces clear inline notifications:
+
+- **Goal completed**: Shows `[goal completed] "title" (short-id) — Xm Ys` with elapsed time, followed by a next-step prompt (`run: draft view` or `check "drafts"`).
+- **Goal failed**: Shows `[goal failed] (short-id) exit N — <error>` with a suggestion to run `ta goal inspect <id>` for details.
+
+These appear automatically in the output pane — no polling needed.
+
+#### Agent Transparency
+
+While the agent is working, intermediate tool-use output is surfaced as dimmed progress lines in the output pane:
+
+- **Progress lines**: Each stderr line from the agent (file reads, searches, writes) appears in a dimmed `progress` style.
+- **Thinking indicator**: A sticky banner below the input shows "Agent is working... (latest: <progress>)" while a response is pending. It updates with the most recent activity.
+- **Collapse on completion**: Once the agent's answer arrives, all intermediate progress lines for that request are dimmed/collapsed so the final response is prominent.
+
+#### Parallel Agent Sessions
+
+The web shell supports running multiple independent agent conversations at once:
+
+```
+/parallel [tag]        # Spawn a new session; auto-assigns a name like "p1" if no tag given
+/parallel research     # Spawn a session named "research"
+@research <prompt>     # Send a prompt to the "research" session
+/switch research       # Make "research" the active session (plain input goes there)
+/sessions              # List all active parallel sessions and their status
+/close research        # Close the "research" session
+```
+
+The status bar shows active parallel sessions as clickable tags. Clicking a tag switches the active session. Sessions auto-close after an idle timeout (default: 30 minutes). The maximum number of concurrent sessions defaults to 3 — both limits are configurable in `daemon.toml`:
+
+```toml
+[agent]
+max_parallel_sessions = 3       # Maximum concurrent parallel sessions
+parallel_idle_timeout_secs = 1800  # Auto-close idle sessions after 30 min
+```
 
 #### Draft IDs
 

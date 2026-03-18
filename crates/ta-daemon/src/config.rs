@@ -312,10 +312,26 @@ pub struct AgentConfig {
     /// Restricts which MCP tools agents can invoke.
     #[serde(default)]
     pub tool_access: AgentToolAccess,
+    /// Maximum concurrent parallel agent sessions in the web shell (v0.11.5 item 16).
+    /// Each /parallel command spawns one session. Default: 3.
+    #[serde(default = "default_max_parallel_sessions")]
+    pub max_parallel_sessions: usize,
+    /// Idle timeout for parallel sessions in seconds (v0.11.5 item 16).
+    /// Sessions exceeding this idle time are auto-closed. Default: 1800 (30 min).
+    #[serde(default = "default_parallel_idle_timeout_secs")]
+    pub parallel_idle_timeout_secs: u64,
 }
 
 fn default_qa_agent() -> String {
     "claude-code".to_string()
+}
+
+fn default_max_parallel_sessions() -> usize {
+    3
+}
+
+fn default_parallel_idle_timeout_secs() -> u64 {
+    1800
 }
 
 impl Default for AgentConfig {
@@ -327,6 +343,8 @@ impl Default for AgentConfig {
             qa_agent: "claude-code".to_string(),
             timeout_secs: 300,
             tool_access: AgentToolAccess::default(),
+            max_parallel_sessions: default_max_parallel_sessions(),
+            parallel_idle_timeout_secs: default_parallel_idle_timeout_secs(),
         }
     }
 }

@@ -4004,7 +4004,7 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 ---
 
 ### v0.11.5 — Web Shell UX, Agent Transparency & Parallel Sessions
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make goal/agent output clearly visible in the web shell, surface intermediate agent progress in real time, and support parallel agent conversations.
 
 **Problem 1 — No goal feedback**: The web shell shows zero feedback when goals make progress or complete. Users discover completion through external editor notifications or polling `ta goal list`. Events like `goal_started`, `goal_completed`, `draft_built` must be surfaced clearly.
@@ -4023,9 +4023,9 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 #### Goal Progress & Tail UX
 
-2. [ ] **Goal lifecycle events in web shell**: Ensure the daemon emits structured events for all goal state transitions (`goal_started`, `goal_completed`, `goal_failed`, `draft_built`). The web shell must render them as notify-class lines with actionable next steps (e.g., "[goal completed] — draft ready, run: draft view <id>").
+2. [x] **Goal lifecycle events in web shell**: Ensure the daemon emits structured events for all goal state transitions (`goal_started`, `goal_completed`, `goal_failed`, `draft_built`). The web shell must render them as notify-class lines with actionable next steps (e.g., "[goal completed] — draft ready, run: draft view <id>").
 
-3. [ ] **Goal completion notification**: When a goal finishes (agent exits), show a clear "[goal completed]" banner with elapsed time, draft ID if built, and next action. Currently the user gets no signal in the web shell.
+3. [x] **Goal completion notification**: When a goal finishes (agent exits), show a clear "[goal completed]" banner with elapsed time, draft ID if built, and next action. Currently the user gets no signal in the web shell.
 
 4. [x] **Client-side `:tail <id>` command**: Handle `:tail <id>` in the web shell client — opens SSE stream to `/api/goals/{id}/output` directly, no server round-trip. Also `:untail [id]`, `:tails` (list active), `:help`. (PR #184)
 
@@ -4037,27 +4037,27 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 #### Constitution Compliance Scan at Draft Build
 
-8. [ ] **Draft-time constitution pattern scan**: When `ta draft build` runs, scan changed files for known §4 violation patterns (injection functions without cleanup on early-return paths, error arms that `return` without a preceding `restore_*` call). Emit findings as warnings in the draft summary — non-blocking by default, so review flow is unaffected. The scan is static/grep-based (no agent), runs in <1s. Example output: `[constitution] 2 potential §4 violations in run.rs — review before approving`. Configurable: `warn` (default), `block`, `off`.
+8. [x] **Draft-time constitution pattern scan**: When `ta draft build` runs, scan changed files for known §4 violation patterns (injection functions without cleanup on early-return paths, error arms that `return` without a preceding `restore_*` call). Emit findings as warnings in the draft summary — non-blocking by default, so review flow is unaffected. The scan is static/grep-based (no agent), runs in <1s. Example output: `[constitution] 2 potential §4 violations in run.rs — review before approving`. Configurable: `warn` (default), `block`, `off`.
 
 #### Agent Transparency (streaming intermediate output)
 
-9. [ ] **Surface agent stderr as progress**: Ensure all stderr lines from the agent subprocess appear in the web shell as dimmed progress indicators.
+9. [x] **Surface agent stderr as progress**: Ensure all stderr lines from the agent subprocess appear in the web shell as dimmed progress indicators.
 
-10. [ ] **Structured progress parsing**: Parse stderr for known patterns (`Reading `, `Searching `, `Running `, `Writing `) and render them as distinct "thinking" lines with a spinner or activity indicator.
+10. [x] **Structured progress parsing**: Parse stderr for known patterns (`Reading `, `Searching `, `Running `, `Writing `) and render them as distinct "thinking" lines with a spinner or activity indicator.
 
-11. [ ] **Web shell thinking indicator**: When a request is pending and no stdout has arrived yet, show an animated indicator ("Agent is working...") that updates with the latest stderr progress line.
+11. [x] **Web shell thinking indicator**: When a request is pending and no stdout has arrived yet, show an animated indicator ("Agent is working...") that updates with the latest stderr progress line.
 
-12. [ ] **Collapse progress on completion**: When the agent's stdout response arrives, collapse/dim the intermediate progress lines so the final answer is prominent.
+12. [x] **Collapse progress on completion**: When the agent's stdout response arrives, collapse/dim the intermediate progress lines so the final answer is prominent.
 
 #### Parallel Agent Sessions
 
-13. [ ] **`/parallel` shell command**: New web shell command that spawns an independent agent conversation (no `--continue`). Returns a session tag the user can address follow-ups to.
+13. [x] **`/parallel` shell command**: New web shell command that spawns an independent agent conversation (no `--continue`). Returns a session tag the user can address follow-ups to.
 
-14. [ ] **`POST /api/agent/ask` with `parallel: true`**: API flag that skips conversation chaining and creates a fresh agent subprocess.
+14. [x] **`POST /api/agent/ask` with `parallel: true`**: API flag that skips conversation chaining and creates a fresh agent subprocess.
 
-15. [ ] **Session switching in web shell**: Status bar shows active parallel sessions. User can prefix input with a session tag to direct it to a specific agent: `@research what did you find?`
+15. [x] **Session switching in web shell**: Status bar shows active parallel sessions. User can prefix input with a session tag to direct it to a specific agent: `@research what did you find?`
 
-16. [ ] **Session lifecycle**: Parallel sessions auto-close after idle timeout. User can `/close <tag>` to end a session explicitly. Max concurrent sessions configurable in `daemon.toml`.
+16. [x] **Session lifecycle**: Parallel sessions auto-close after idle timeout. User can `/close <tag>` to end a session explicitly. Max concurrent sessions configurable in `daemon.toml`.
 
 #### Version: `0.11.5-alpha`
 

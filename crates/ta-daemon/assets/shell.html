@@ -17,6 +17,8 @@
   --fg-info: #6bcb77;
   --fg-notify: #ff9f43;
   --fg-tail: #a78bfa;
+  --fg-progress: #555;
+  --fg-progress-text: #777;
   --border: #333;
   --accent: #4361ee;
 }
@@ -46,6 +48,14 @@ body {
 #output .line.tail { color: var(--fg-tail); }
 #output .line.separator { color: var(--fg-dim); border-top: 1px solid var(--border); padding-top: 4px; margin-top: 4px; }
 #output .line .ts { color: var(--fg-dim); font-size: 12px; margin-right: 6px; user-select: none; }
+/* Progress lines: dimmed stderr shown as "thinking" indicators (v0.11.5 item 9) */
+#output .line.progress {
+  color: var(--fg-progress-text);
+  font-size: 12px;
+  opacity: 0.7;
+  margin-left: 16px;
+}
+#output .line.progress.collapsed { display: none; }
 #input-bar {
   display: flex;
   border-top: 1px solid var(--border);
@@ -75,17 +85,30 @@ body {
   border-top: 1px solid var(--border);
   user-select: none;
   align-items: center;
+  flex-wrap: wrap;
 }
 #status-bar .connected { color: var(--fg-info); }
 #status-bar .disconnected { color: var(--fg-stderr); }
 #status-bar .pending { color: var(--fg-notify); }
 #status-bar .tailing { color: var(--fg-tail); }
+#status-bar .parallel-session { color: var(--fg-cmd); cursor: pointer; padding: 2px 5px; border: 1px solid var(--border); border-radius: 3px; font-size: 11px; }
+#status-bar .parallel-session.active { border-color: var(--accent); color: var(--fg); }
 .spinner { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Thinking indicator (v0.11.5 item 11) */
+#thinking-indicator {
+  color: var(--fg-progress-text);
+  font-size: 12px;
+  font-style: italic;
+  padding: 2px 12px;
+  display: none;
+}
+#thinking-indicator.visible { display: block; }
 </style>
 </head>
 <body>
 <div id="output"></div>
+<div id="thinking-indicator" aria-live="polite"></div>
 <div id="input-bar">
   <span id="prompt">ta&gt;</span>
   <input id="input" type="text" autocomplete="off" autofocus placeholder="Type a command or message...">
@@ -97,6 +120,7 @@ body {
   <span id="agent-info"></span>
   <span id="tail-info"></span>
   <span id="pending-info"></span>
+  <span id="parallel-sessions-info"></span>
   <span style="flex:1"></span>
   <span id="version-info"></span>
 </div>
@@ -114,6 +138,8 @@ body {
   const tailInfo = document.getElementById('tail-info');
   const pendingInfo = document.getElementById('pending-info');
   const versionInfo = document.getElementById('version-info');
+  const parallelSessionsInfo = document.getElementById('parallel-sessions-info');
+  const thinkingIndicator = document.getElementById('thinking-indicator');
 
   const BASE = window.location.origin;
   let history = [];
@@ -121,9 +147,20 @@ body {
   let savedInput = '';
   let autoScroll = true;
   let sseEvents = null;
-  let sseGoals = {};  // Map of goalId -> { sse: EventSource, label: string }
+  let sseGoals = {};  // Map of goalId -> { sse: EventSource, label: string, progressGroupId: string }
   let statusPoll = null;
   let pendingRequests = 0;
+
+  // ── Parallel sessions (v0.11.5 items 13-16) ──────────────────
+  // Map of tag -> { session_id, label, created_at, last_active }
+  let parallelSessions = {};
+  // Currently active parallel session tag (null = default session)
+  let activeParallelTag = null;
+  let parallelTagCounter = 0;
+
+  // ── Thinking indicator tracking (v0.11.5 item 11) ────────────
+  // Map of requestId -> { latestProgressLine, progressGroupEl, progressLines: [] }
+  let activeRequests = {};
 
   // ── Timestamp ────────────────────────────────────────────────
 
@@ -137,6 +174,14 @@ body {
 
   function shortId(id) {
     return (id || '').substring(0, 8);
+  }
+
+  function formatDuration(secs) {
+    if (!secs) return '';
+    if (secs < 60) return secs + 's';
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m + 'm' + (s > 0 ? s + 's' : '');
   }
 
   // ── Output ──────────────────────────────────────────────────
@@ -157,6 +202,7 @@ body {
     if (autoScroll) {
       requestAnimationFrame(() => output.scrollTop = output.scrollHeight);
     }
+    return div;
   }
 
   // Track scroll position for auto-scroll
@@ -176,6 +222,71 @@ body {
       pendingInfo.textContent = '';
       pendingInfo.className = '';
     }
+    updateThinkingIndicator();
+  }
+
+  // ── Thinking indicator (v0.11.5 item 11) ────────────────────
+
+  function updateThinkingIndicator(latestProgress) {
+    if (pendingRequests > 0) {
+      const msg = latestProgress
+        ? 'Agent is working... ' + latestProgress
+        : 'Agent is working...';
+      thinkingIndicator.textContent = msg;
+      thinkingIndicator.classList.add('visible');
+    } else {
+      thinkingIndicator.textContent = '';
+      thinkingIndicator.classList.remove('visible');
+    }
+  }
+
+  // ── Progress lines (v0.11.5 items 9-10) ─────────────────────
+
+  // Known progress patterns from Claude Code stderr output
+  const PROGRESS_PATTERNS = [
+    /^Reading /,
+    /^Searching /,
+    /^Running /,
+    /^Writing /,
+    /^Editing /,
+    /^Creating /,
+    /^Checking /,
+    /^Analyzing /,
+    /^Looking /,
+    /^Found /,
+    /^Tool:/,
+    /^\[tool:/i,
+    /^Bash\(/,
+    /^Read\(/,
+    /^Edit\(/,
+    /^Write\(/,
+    /^Glob\(/,
+    /^Grep\(/,
+  ];
+
+  function isProgressLine(line) {
+    return PROGRESS_PATTERNS.some(p => p.test(line));
+  }
+
+  // Append a progress (dimmed stderr) line, optionally into a group container.
+  // Returns the created element.
+  function appendProgressLine(text, groupId) {
+    const div = document.createElement('div');
+    div.className = 'line progress';
+    div.dataset.group = groupId || '';
+    div.textContent = '  ⋯ ' + text;
+    output.appendChild(div);
+    if (autoScroll) {
+      requestAnimationFrame(() => output.scrollTop = output.scrollHeight);
+    }
+    return div;
+  }
+
+  // Collapse all progress lines for a given group (v0.11.5 item 12)
+  function collapseProgressLines(groupId) {
+    if (!groupId) return;
+    const lines = output.querySelectorAll('.line.progress[data-group="' + groupId + '"]');
+    lines.forEach(el => el.classList.add('collapsed'));
   }
 
   // ── Tail status bar tracking ──────────────────────────────
@@ -193,6 +304,45 @@ body {
       tailInfo.textContent = 'tailing ' + ids.length + ' streams';
       tailInfo.className = 'tailing';
     }
+  }
+
+  // ── Parallel session status bar (v0.11.5 item 15) ────────────
+
+  function updateParallelSessionsStatus() {
+    parallelSessionsInfo.innerHTML = '';
+    const tags = Object.keys(parallelSessions);
+    if (tags.length === 0) return;
+
+    for (const tag of tags) {
+      const s = parallelSessions[tag];
+      const span = document.createElement('span');
+      span.className = 'parallel-session' + (activeParallelTag === tag ? ' active' : '');
+      span.textContent = '@' + tag;
+      span.title = 'Session ' + s.session_id + ' — click to switch';
+      span.addEventListener('click', () => {
+        switchParallelSession(tag);
+      });
+      parallelSessionsInfo.appendChild(span);
+    }
+
+    // Show current session indicator in prompt
+    const prompt = document.getElementById('prompt');
+    if (activeParallelTag) {
+      prompt.textContent = 'ta[@' + activeParallelTag + ']>';
+    } else {
+      prompt.textContent = 'ta>';
+    }
+  }
+
+  function switchParallelSession(tag) {
+    if (tag === null || tag === 'default') {
+      activeParallelTag = null;
+    } else if (parallelSessions[tag]) {
+      activeParallelTag = tag;
+    }
+    updateParallelSessionsStatus();
+    const name = activeParallelTag ? '@' + activeParallelTag : 'default session';
+    appendLine('Switched to ' + name, 'info');
   }
 
   // ── Client-side commands ──────────────────────────────────
@@ -252,14 +402,75 @@ body {
       return true;
     }
 
+    // /parallel — spawn a new parallel agent session (v0.11.5 item 13)
+    if (text === '/parallel' || text.startsWith('/parallel ')) {
+      spawnParallelSession();
+      return true;
+    }
+
+    // /switch <tag> — switch active parallel session
+    const switchMatch = text.match(/^\/switch\s+(@?\S+)/);
+    if (switchMatch) {
+      const tag = switchMatch[1].replace(/^@/, '');
+      if (tag === 'default' || tag === 'main') {
+        switchParallelSession(null);
+      } else if (parallelSessions[tag]) {
+        switchParallelSession(tag);
+      } else {
+        appendLine('Unknown session tag: @' + tag + '. Use /sessions to list active sessions.', 'info');
+      }
+      return true;
+    }
+
+    // /close [tag] — close a parallel session (v0.11.5 item 16)
+    const closeMatch = text.match(/^\/close(?:\s+(@?\S+))?/);
+    if (closeMatch) {
+      const rawTag = closeMatch[1];
+      const tag = rawTag ? rawTag.replace(/^@/, '') : activeParallelTag;
+      if (!tag) {
+        appendLine('No active parallel session to close. Use /close @<tag> to specify one.', 'info');
+        return true;
+      }
+      if (parallelSessions[tag]) {
+        closeParallelSession(tag);
+      } else {
+        appendLine('Unknown session tag: @' + tag, 'info');
+      }
+      return true;
+    }
+
+    // /sessions — list parallel sessions
+    if (text === '/sessions') {
+      const tags = Object.keys(parallelSessions);
+      if (tags.length === 0) {
+        appendLine('No parallel sessions. Use /parallel to start one.', 'info');
+      } else {
+        appendLine('Parallel sessions:', 'info');
+        for (const tag of tags) {
+          const s = parallelSessions[tag];
+          const active = activeParallelTag === tag ? ' [active]' : '';
+          appendLine('  @' + tag + ' — ' + s.session_id + active, 'info');
+        }
+        appendLine('Use @<tag> prefix to address a session, /switch @<tag> to set default, /close @<tag> to end.', 'info');
+      }
+      return true;
+    }
+
     // :help — show available client commands
     if (text === ':help') {
       appendLine('Client commands:', 'info');
-      appendLine('  :tail <id>     — attach to a goal/request output stream', 'info');
-      appendLine('  :untail [id]   — detach from stream(s)', 'info');
-      appendLine('  :tails         — list active tails', 'info');
-      appendLine('  :help          — show this help', 'info');
-      appendLine('  Ctrl+L         — clear output', 'info');
+      appendLine('  :tail <id>       — attach to a goal/request output stream', 'info');
+      appendLine('  :untail [id]     — detach from stream(s)', 'info');
+      appendLine('  :tails           — list active tails', 'info');
+      appendLine('  :help            — show this help', 'info');
+      appendLine('  Ctrl+L           — clear output', 'info');
+      appendLine('', 'info');
+      appendLine('Parallel session commands (v0.11.5):', 'info');
+      appendLine('  /parallel        — spawn a new independent agent session', 'info');
+      appendLine('  /sessions        — list active parallel sessions', 'info');
+      appendLine('  /switch @<tag>   — set active session for input routing', 'info');
+      appendLine('  /close [@<tag>]  — close a parallel session', 'info');
+      appendLine('  @<tag> <message> — send a message to a specific session', 'info');
       appendLine('', 'info');
       appendLine('Shell shortcuts: approve, deny, view, apply, status, plan, goals, drafts', 'info');
       appendLine('Commands: ta <cmd>, git <cmd>, !<shell cmd>', 'info');
@@ -268,6 +479,101 @@ body {
     }
 
     return false;
+  }
+
+  // ── Parallel session management (v0.11.5 items 13-16) ─────────
+
+  async function spawnParallelSession() {
+    // Check session limit before spawning (v0.11.5 item 16)
+    const activeCount = Object.keys(parallelSessions).length;
+    if (activeCount >= maxParallelSessions) {
+      appendLine(
+        'Maximum parallel sessions (' + maxParallelSessions + ') reached. ' +
+        'Use /close @<tag> to end one first.',
+        'info'
+      );
+      return;
+    }
+
+    parallelTagCounter++;
+    const tag = 'p' + parallelTagCounter;
+    appendLine('Spawning parallel session @' + tag + '...', 'tail');
+
+    try {
+      const resp = await fetch(BASE + '/api/agent/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent: null }), // use default agent
+      });
+      if (!resp.ok) {
+        const err = await resp.text();
+        appendLine('Failed to spawn parallel session: ' + err, 'stderr');
+        parallelTagCounter--;
+        return;
+      }
+      const data = await resp.json();
+      parallelSessions[tag] = {
+        session_id: data.session_id,
+        label: '@' + tag,
+        created_at: new Date(),
+        last_active: new Date(),
+      };
+      activeParallelTag = tag;
+      updateParallelSessionsStatus();
+      appendLine(
+        'Parallel session @' + tag + ' ready (' + data.session_id + '). ' +
+        'Type @' + tag + ' <message> or use /switch @' + tag + ' to set as default.',
+        'notify'
+      );
+    } catch (err) {
+      appendLine('Error spawning parallel session: ' + err.message, 'stderr');
+      parallelTagCounter--;
+    }
+  }
+
+  function closeParallelSession(tag) {
+    const s = parallelSessions[tag];
+    if (!s) return;
+
+    fetch(BASE + '/api/agent/' + encodeURIComponent(s.session_id), { method: 'DELETE' })
+      .catch(() => {}); // best-effort
+
+    delete parallelSessions[tag];
+    if (activeParallelTag === tag) {
+      activeParallelTag = null;
+    }
+    updateParallelSessionsStatus();
+    appendLine('Closed parallel session @' + tag, 'info');
+  }
+
+  // Idle timeout cleanup for parallel sessions (v0.11.5 item 16).
+  // Check every 60s; close sessions idle > parallelIdleMs (daemon-configurable, default: 30 min).
+  // Updated from /api/status on first poll.
+  let parallelIdleMs = 30 * 60 * 1000;
+  let maxParallelSessions = 3;
+  setInterval(() => {
+    const now = new Date();
+    for (const tag of Object.keys(parallelSessions)) {
+      const s = parallelSessions[tag];
+      if (now - s.last_active > parallelIdleMs) {
+        appendLine('Parallel session @' + tag + ' closed after idle timeout.', 'info');
+        closeParallelSession(tag);
+      }
+    }
+  }, 60000);
+
+  // ── @tag routing for parallel sessions ────────────────────────
+
+  // Returns { tag, prompt } if the text is @<tag> prefixed, else null.
+  function parseParallelTarget(text) {
+    const m = text.match(/^@(\S+)\s+([\s\S]+)/);
+    if (m) {
+      const tag = m[1];
+      if (parallelSessions[tag]) {
+        return { tag, prompt: m[2] };
+      }
+    }
+    return null;
   }
 
   // ── Input ───────────────────────────────────────────────────
@@ -284,14 +590,34 @@ body {
         history.push(text);
       }
 
-      appendLine('ta> ' + text, 'cmd');
+      appendLine((activeParallelTag ? 'ta[@' + activeParallelTag + ']> ' : 'ta> ') + text, 'cmd');
 
-      // Try client-side commands first (: prefix)
-      if (text.startsWith(':') && handleClientCommand(text)) {
+      // Try client-side commands first (: or / prefix)
+      if ((text.startsWith(':') || text.startsWith('/')) && handleClientCommand(text)) {
         return;
       }
 
-      sendInput(text);
+      // Check for @tag routing
+      const parallelTarget = parseParallelTarget(text);
+      if (parallelTarget) {
+        const session = parallelSessions[parallelTarget.tag];
+        if (session) {
+          session.last_active = new Date();
+          sendInput(parallelTarget.prompt, session.session_id);
+          return;
+        }
+      }
+
+      // Route to active parallel session if set
+      const sessionId = activeParallelTag && parallelSessions[activeParallelTag]
+        ? parallelSessions[activeParallelTag].session_id
+        : null;
+
+      if (sessionId) {
+        parallelSessions[activeParallelTag].last_active = new Date();
+      }
+
+      sendInput(text, sessionId);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (historyIdx === -1) {
@@ -327,13 +653,16 @@ body {
 
   // ── API ─────────────────────────────────────────────────────
 
-  async function sendInput(text) {
+  async function sendInput(text, sessionId) {
     updatePending(+1);
     try {
+      const body = { text };
+      if (sessionId) body.session_id = sessionId;
+
       const resp = await fetch(BASE + '/api/input', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify(body),
       });
       const data = await resp.json();
 
@@ -346,7 +675,7 @@ body {
       // Agent response: AskResponse shape {session_id, response, request_id, status}
       if (data.request_id) {
         appendLine('agent working — tailing output (' + shortId(data.request_id) + ')...', 'tail');
-        tailGoalOutput(data.request_id, 'agent request');
+        tailGoalOutput(data.request_id, 'agent request', true /* is agent request */);
         return; // pending count decremented when stream ends
       }
 
@@ -379,7 +708,8 @@ body {
 
   // ── Goal Output SSE Stream ──────────────────────────────────
 
-  function tailGoalOutput(goalId, label) {
+  // isAgentRequest: true means this is a Q&A request (show progress as thinking).
+  function tailGoalOutput(goalId, label, isAgentRequest) {
     // Support multiple concurrent streams
     if (sseGoals[goalId]) {
       sseGoals[goalId].sse.close();
@@ -388,15 +718,43 @@ body {
 
     const url = BASE + '/api/goals/' + encodeURIComponent(goalId) + '/output';
     const sse = new EventSource(url);
-    sseGoals[goalId] = { sse: sse, label: label || shortId(goalId) };
+    const progressGroupId = 'pg-' + goalId.substring(0, 8);
+
+    sseGoals[goalId] = { sse: sse, label: label || shortId(goalId), progressGroupId };
+
+    // Track active request for thinking indicator (v0.11.5 item 11)
+    if (isAgentRequest) {
+      activeRequests[goalId] = { latestProgress: null, progressGroupId };
+    }
+
     updateTailStatus();
 
     sse.addEventListener('output', (e) => {
       try {
         const data = JSON.parse(e.data);
-        const cls = data.stream === 'stderr' ? 'stderr' : 'agent';
-        if (data.line !== undefined) {
-          appendLine(data.line, cls);
+        if (data.line === undefined) return;
+
+        if (data.stream === 'stderr') {
+          // v0.11.5 item 9: surface stderr as dimmed progress (not in red error style)
+          // v0.11.5 item 10: parse for known progress patterns
+          if (isProgressLine(data.line)) {
+            // Structured progress: known tool/activity pattern
+            appendProgressLine(data.line, progressGroupId);
+            if (activeRequests[goalId]) {
+              activeRequests[goalId].latestProgress = data.line;
+              updateThinkingIndicator(data.line);
+            }
+          } else {
+            // Other stderr: show as dimmed progress (not as red error)
+            appendProgressLine(data.line, progressGroupId);
+            if (activeRequests[goalId] && !activeRequests[goalId].latestProgress) {
+              activeRequests[goalId].latestProgress = data.line;
+              updateThinkingIndicator(data.line);
+            }
+          }
+        } else {
+          // stdout: real agent response — show prominently (agent color)
+          appendLine(data.line, 'agent');
         }
       } catch (err) {
         appendLine(e.data, 'agent');
@@ -404,11 +762,17 @@ body {
     });
 
     sse.addEventListener('done', () => {
+      // v0.11.5 item 12: collapse progress lines when response arrives
+      collapseProgressLines(progressGroupId);
+      if (activeRequests[goalId]) {
+        delete activeRequests[goalId];
+      }
       appendLine('--- done ---', 'separator');
       sse.close();
       delete sseGoals[goalId];
       updatePending(-1);
       updateTailStatus();
+      updateThinkingIndicator();
     });
 
     sse.addEventListener('lagged', () => {
@@ -443,6 +807,7 @@ body {
         const type = evt.event_type || '';
 
         if (type === 'goal_started') {
+          // v0.11.5 item 2: goal lifecycle events in web shell
           const p = evt.payload || evt;
           const title = p.title || '(untitled)';
           const id = p.goal_id || '';
@@ -452,6 +817,39 @@ body {
             tailGoalOutput(id, title);
             updatePending(+1);
           }
+        } else if (type === 'goal_completed') {
+          // v0.11.5 items 2+3: goal completion notification with elapsed time and next action
+          const p = evt.payload || evt;
+          const title = p.title || '(untitled)';
+          const id = p.goal_id || '';
+          const durationSecs = p.duration_secs;
+          const elapsed = durationSecs ? ' — ' + formatDuration(durationSecs) : '';
+          appendLine(
+            '[goal completed] "' + title + '" (' + shortId(id) + ')' + elapsed,
+            'notify'
+          );
+          appendLine(
+            '  → run: draft view (or check "drafts" for the draft ID)',
+            'info'
+          );
+          // Stop auto-tailing for this goal if active
+          if (sseGoals[id]) {
+            // Let the 'done' event close it naturally; just note completion
+          }
+        } else if (type === 'goal_failed') {
+          // v0.11.5 item 2: goal failure notification
+          const p = evt.payload || evt;
+          const id = p.goal_id || '';
+          const error = p.error || 'unknown error';
+          const exitCode = p.exit_code != null ? ' (exit ' + p.exit_code + ')' : '';
+          appendLine(
+            '[goal failed] (' + shortId(id) + ')' + exitCode + ' — ' + error,
+            'stderr'
+          );
+          appendLine(
+            '  → run: ta goal inspect ' + shortId(id) + ' for details',
+            'info'
+          );
         } else if (type === 'draft_built') {
           const p = evt.payload || evt;
           appendLine('[draft ready] "' + (p.title || '') + '" -- run: draft view ' + (p.display_id || ''), 'notify');
@@ -490,6 +888,10 @@ body {
       if (agentCount > 0) parts.push(agentCount + ' agent' + (agentCount > 1 ? 's' : ''));
       if (draftCount > 0) parts.push(draftCount + ' draft' + (draftCount > 1 ? 's' : ''));
       agentInfo.textContent = parts.length > 0 ? parts.join(' | ') : 'no agents';
+
+      // Update parallel session limits from daemon config (v0.11.5 item 16)
+      if (s.max_parallel_sessions) maxParallelSessions = s.max_parallel_sessions;
+      if (s.parallel_idle_timeout_secs) parallelIdleMs = s.parallel_idle_timeout_secs * 1000;
 
       connStatus.textContent = 'connected';
       connStatus.className = 'connected';

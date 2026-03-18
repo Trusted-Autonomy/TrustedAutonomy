@@ -280,15 +280,20 @@ impl PersistentQaAgent {
     /// For `claude --print`, each invocation is a separate subprocess.
     /// The "persistent" aspect is that we reuse the session tracking and
     /// provide a fast-path that skips session creation overhead.
+    ///
+    /// `parallel`: when true, skips `--continue` chaining even if a prior
+    /// conversation exists. Used for /parallel sessions (v0.11.5 item 14).
     pub async fn ask(
         &self,
         prompt: &str,
         tx: tokio::sync::broadcast::Sender<crate::api::goal_output::OutputLine>,
+        parallel: bool,
     ) -> Result<(), String> {
         *self.last_active.lock().await = std::time::Instant::now();
 
         // Check if we should chain to the previous conversation.
-        let continue_conversation = *self.has_conversation.lock().await;
+        // parallel=true skips --continue so each parallel session starts fresh.
+        let continue_conversation = !parallel && *self.has_conversation.lock().await;
         let (binary, args) = resolve_agent_command(&self.agent, prompt, continue_conversation)?;
 
         let _ = tx.send(crate::api::goal_output::OutputLine {
@@ -566,6 +571,10 @@ pub struct StartSessionResponse {
 pub struct AskRequest {
     pub session_id: String,
     pub prompt: String,
+    /// When true, spawn a fresh agent conversation — no --continue chaining.
+    /// Used by /parallel in the web shell (v0.11.5 item 14).
+    #[serde(default)]
+    pub parallel: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -640,6 +649,7 @@ pub async fn ask_agent(
 
             let agent = s.agent.clone();
             let prompt = body.prompt.clone();
+            let parallel = body.parallel;
             let goal_output = state.goal_output.clone_ref();
             let req_id = request_id.clone();
             let persistent_qa = state.persistent_qa.clone();
@@ -657,8 +667,8 @@ pub async fn ask_agent(
                     prompt.len()
                 );
 
-                tracing::info!(request_id = %req_id, subscribers = tx.receiver_count(), "QA ask: starting");
-                match persistent_qa.ask(&prompt, tx.clone()).await {
+                tracing::info!(request_id = %req_id, subscribers = tx.receiver_count(), parallel, "QA ask: starting");
+                match persistent_qa.ask(&prompt, tx.clone(), parallel).await {
                     Ok(()) => {
                         tracing::info!(request_id = %req_id, "QA ask: completed successfully");
                     }

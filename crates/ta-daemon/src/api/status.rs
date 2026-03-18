@@ -33,6 +33,10 @@ pub struct ProjectStatus {
     pub active_goals: usize,
     pub total_goals: usize,
     pub recent_events: Vec<serde_json::Value>,
+    /// Maximum concurrent parallel sessions allowed (v0.11.5 item 16).
+    pub max_parallel_sessions: usize,
+    /// Idle timeout for parallel sessions in seconds (v0.11.5 item 16).
+    pub parallel_idle_timeout_secs: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,6 +171,8 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         active_goals,
         total_goals,
         recent_events,
+        max_parallel_sessions: state.daemon_config.agent.max_parallel_sessions,
+        parallel_idle_timeout_secs: state.daemon_config.agent.parallel_idle_timeout_secs,
     })
 }
 

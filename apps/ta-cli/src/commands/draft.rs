@@ -11,7 +11,7 @@ use ta_changeset::draft_package::{
     AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType, Artifact,
     ArtifactDisposition, ChangeDependency, ChangeType, Changes, DecisionLogEntry, DependencyKind,
     DraftPackage, DraftStatus, ExplanationTiers, Goal, Iteration, Plan, Provenance,
-    RequestedAction, ReviewRequests, Risk, Signatures, Summary, WorkspaceRef,
+    RequestedAction, ReviewRequests, Risk, Signatures, Summary, VerificationWarning, WorkspaceRef,
 };
 use ta_changeset::explanation::ExplanationSidecar;
 use ta_changeset::output_adapters::{
@@ -1162,6 +1162,20 @@ pub(crate) fn build_package(
             .count();
         let seq = existing + 1;
         pkg.display_id = Some(format!("{}-{:02}", goal_prefix, seq));
+    }
+
+    // v0.11.5 item 8: Draft-time constitution §4 pattern scan.
+    // Scans changed .rs files for inject_* calls without matching restore_* on error paths.
+    // Non-blocking: findings are added as verification_warnings (warn mode by default).
+    {
+        let s4_warnings = scan_s4_violations(&pkg.changes.artifacts, &goal.workspace_path);
+        if !s4_warnings.is_empty() {
+            eprintln!(
+                "[constitution] {} potential §4 violation(s) — review before approving",
+                s4_warnings.len()
+            );
+            pkg.verification_warnings.extend(s4_warnings);
+        }
     }
 
     // Save the draft package.
@@ -4377,10 +4391,241 @@ fn draft_pr_list(config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Constitution §4 scan (v0.11.5 item 8) ────────────────────────────────────
+
+/// Scan changed Rust files for potential §4 (injection cleanup) violations.
+///
+/// For each changed `.rs` file in the staging area, checks whether `inject_*`
+/// calls are balanced by `restore_*` calls. If a file has more inject calls
+/// than restore calls AND contains early-return paths, flags it as a potential
+/// §4 violation. Findings are returned as `VerificationWarning` entries with
+/// `command = "[constitution §4]"` so they appear in `ta draft view` output.
+///
+/// This is static/grep-based (no agent), runs in <1s, and is non-blocking:
+/// warnings are informational — the review flow is unaffected.
+pub fn scan_s4_violations(
+    artifacts: &[Artifact],
+    staging_dir: &std::path::Path,
+) -> Vec<VerificationWarning> {
+    let mut warnings = Vec::new();
+
+    for artifact in artifacts {
+        let uri = &artifact.resource_uri;
+        if !uri.ends_with(".rs") {
+            continue;
+        }
+        // Skip test files — inject/restore patterns there are test fixtures.
+        if uri.contains("/tests/") || uri.ends_with("_test.rs") {
+            continue;
+        }
+
+        let rel_path = uri.strip_prefix("fs://workspace/").unwrap_or(uri.as_str());
+        let staged_path = staging_dir.join(rel_path);
+
+        let content = match std::fs::read_to_string(&staged_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Count inject_* and restore_* call-sites.
+        // Use word-boundary check: look for `inject_` followed by an identifier char
+        // to avoid matching e.g. variable names like `prev_inject_count`.
+        let inject_count = count_call_sites(&content, "inject_");
+        let restore_count = count_call_sites(&content, "restore_");
+
+        if inject_count == 0 {
+            continue;
+        }
+
+        // Check for early-return patterns — `return` or `return Err` at statement level.
+        let has_early_returns = content.contains("return Err")
+            || content.contains("return Ok(")
+            || content.lines().any(|line| {
+                let trimmed = line.trim();
+                (trimmed == "return;" || trimmed.starts_with("return ")) && !trimmed.contains("// ")
+            });
+
+        if has_early_returns && inject_count > restore_count {
+            let file_name = std::path::Path::new(rel_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(rel_path);
+            let gap = inject_count - restore_count;
+            warnings.push(VerificationWarning {
+                command: "[constitution §4]".to_string(),
+                exit_code: None,
+                output: format!(
+                    "{}: {} inject_* call(s) but only {} restore_* call(s) ({} unbalanced) — \
+                     check that all early-return paths restore injected files before returning.",
+                    file_name, inject_count, restore_count, gap
+                ),
+            });
+        }
+    }
+
+    warnings
+}
+
+/// Count how many times an `inject_` or `restore_` pattern appears as a
+/// function-call site (followed by `(`) in file content.
+fn count_call_sites(content: &str, prefix: &str) -> usize {
+    let mut count = 0;
+    let mut pos = 0;
+    while let Some(idx) = content[pos..].find(prefix) {
+        let abs = pos + idx;
+        // Must be preceded by whitespace, `(`, `{`, `;`, or start-of-string (not an ident char).
+        let preceded_ok = abs == 0 || {
+            let prev = content.as_bytes()[abs - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'_'
+        };
+        // Must be followed by `<ident_char>(` — i.e., this is a call expression.
+        let rest = &content[abs + prefix.len()..];
+        let followed_by_call = rest
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphanumeric() || c == '_')
+            .unwrap_or(false)
+            && rest.contains('(');
+        if preceded_ok && followed_by_call {
+            count += 1;
+        }
+        pos = abs + prefix.len();
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ── Constitution §4 scan tests (v0.11.5 item 8) ──────────────
+
+    fn make_test_artifact(uri: &str) -> Artifact {
+        Artifact {
+            resource_uri: uri.to_string(),
+            change_type: ChangeType::Modify,
+            diff_ref: "test-diff".to_string(),
+            tests_run: vec![],
+            disposition: ArtifactDisposition::default(),
+            rationale: None,
+            dependencies: vec![],
+            explanation_tiers: None,
+            comments: None,
+            amendment: None,
+        }
+    }
+
+    #[test]
+    fn count_call_sites_inject_and_restore() {
+        let content = r#"
+fn setup() {
+    inject_claude_md(path);
+    inject_claude_settings(path);
+    restore_claude_md(path);
+}
+"#;
+        assert_eq!(count_call_sites(content, "inject_"), 2);
+        assert_eq!(count_call_sites(content, "restore_"), 1);
+    }
+
+    #[test]
+    fn count_call_sites_no_false_positives() {
+        // Variable name 'prev_inject_count' should not be counted
+        let content = "let prev_inject_count = 0;\nlet restore_value = x;";
+        assert_eq!(count_call_sites(content, "inject_"), 0);
+        // 'restore_value' is not a call (no '(' following ident)
+        assert_eq!(count_call_sites(content, "restore_"), 0);
+    }
+
+    #[test]
+    fn scan_s4_violations_balanced_is_clean() {
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        // Balanced: 1 inject, 1 restore, with early return
+        let content = r#"
+fn run() {
+    inject_claude_md(path);
+    if bad {
+        restore_claude_md(path);
+        return Err("bad".into());
+    }
+    restore_claude_md(path);
+}
+"#;
+        std::fs::write(src_dir.join("run.rs"), content).unwrap();
+
+        let artifact = make_test_artifact("fs://workspace/src/run.rs");
+        let warnings = scan_s4_violations(&[artifact], dir.path());
+        assert!(
+            warnings.is_empty(),
+            "Balanced inject/restore should produce no warnings, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn scan_s4_violations_unbalanced_flags_warning() {
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        // Unbalanced: 2 inject, 1 restore, with early return
+        let content = r#"
+fn run() {
+    inject_claude_md(path);
+    inject_claude_settings(path);
+    if bad {
+        return Err("bad".into());  // missing restore before return
+    }
+    restore_claude_md(path);
+}
+"#;
+        std::fs::write(src_dir.join("run.rs"), content).unwrap();
+
+        let artifact = make_test_artifact("fs://workspace/src/run.rs");
+        let warnings = scan_s4_violations(&[artifact], dir.path());
+        assert_eq!(warnings.len(), 1, "Expected 1 warning, got: {:?}", warnings);
+        assert_eq!(warnings[0].command, "[constitution §4]");
+        assert!(warnings[0].output.contains("run.rs"));
+        assert!(warnings[0].output.contains("2 inject_*"));
+    }
+
+    #[test]
+    fn scan_s4_violations_no_early_return_is_clean() {
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        // inject without restore but NO early returns (could be a bug, but not §4 pattern)
+        let content = r#"
+fn run() {
+    inject_claude_md(path);
+    do_work();
+    // No return — function falls through
+}
+"#;
+        std::fs::write(src_dir.join("run.rs"), content).unwrap();
+
+        let artifact = make_test_artifact("fs://workspace/src/run.rs");
+        let warnings = scan_s4_violations(&[artifact], dir.path());
+        // No early return → no §4 warning (different class of bug)
+        assert!(
+            warnings.is_empty(),
+            "No early return should produce no §4 warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn scan_s4_violations_non_rs_files_skipped() {
+        let dir = TempDir::new().unwrap();
+        let content = "inject_something restore_nothing return bad";
+        std::fs::write(dir.path().join("run.py"), content).unwrap();
+
+        let artifact = make_test_artifact("fs://workspace/run.py");
+        let warnings = scan_s4_violations(&[artifact], dir.path());
+        assert!(warnings.is_empty(), "Non-.rs files should be skipped");
+    }
 
     #[test]
     fn build_pr_from_overlay_changes() {

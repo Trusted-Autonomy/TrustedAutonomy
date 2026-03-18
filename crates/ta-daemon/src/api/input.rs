@@ -98,6 +98,7 @@ pub async fn handle_input(
             let ask_req = super::agent::AskRequest {
                 session_id: session_id.clone(),
                 prompt,
+                parallel: false,
             };
             let response = super::agent::ask_agent(
                 State(state.clone()),
