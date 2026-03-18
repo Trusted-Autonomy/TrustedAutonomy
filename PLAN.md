@@ -4106,7 +4106,7 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 2. [ ] **No-heartbeat alert**: If no heartbeat arrives within a configurable window (default 30 s), change the working indicator to a red alert: `Agent is working ⚠ (410s elapsed — no heartbeat)`. Clears back to spinner automatically when the next heartbeat arrives.
 
-3. [ ] **Auto-tail on goal start**: When the shell detects a background goal starting (via the `[goal started]` sentinel or SSE `goal_started` event), automatically begin tailing its output and show a banner: "Auto-tailing output for \<title\> (\<id\>)…". No manual `:tail` required.
+3. [ ] **Auto-tail on any background command**: Whenever the shell spawns a command in the background (e.g. `ta run`, `ta draft apply`, `ta build`, or any other backgrounded process), automatically begin tailing its output key immediately. Show a single line: "Auto-tailing output for \<key\>…" at the top of the stream. No manual `:tail` required for any background operation.
 
 **Files**: `crates/ta-daemon/assets/shell.html`
 
