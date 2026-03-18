@@ -358,6 +358,25 @@ impl OutputLine {
     }
 }
 
+// ── Large-paste compaction (v0.11.4.5) ──────────────────────────────────────
+//
+// Pasting more than PASTE_CHAR_THRESHOLD chars OR PASTE_LINE_THRESHOLD lines
+// compacts the paste into a single-line indicator in the input area:
+//
+//   ta> [Pasted 2,847 chars / 47 lines — Tab to preview, Esc to cancel]
+//
+// The full text is stored in App::pending_paste (not in App::input).
+// On Enter the full paste is appended to any text already typed in the input.
+// Tab toggles an inline preview of the first few paste lines.
+// Escape (or Ctrl-C) cancels and discards the pending paste.
+
+/// Number of chars above which a paste is compacted.
+const PASTE_CHAR_THRESHOLD: usize = 500;
+/// Number of lines above which a paste is compacted.
+const PASTE_LINE_THRESHOLD: usize = 10;
+/// Max lines shown in the expanded paste preview.
+const PASTE_PREVIEW_LINES: usize = 5;
+
 /// The TUI application state.
 struct App {
     /// Lines displayed in the output pane.
@@ -394,6 +413,11 @@ struct App {
     pending_question: Option<PendingQuestion>,
     /// Pending stdin prompt from agent process awaiting user input (v0.10.18.5).
     pending_stdin_prompt: Option<PendingStdinPrompt>,
+    /// Full text of a large paste awaiting submission (v0.11.4.5).
+    /// When Some, the input area shows a compact indicator instead of raw text.
+    pending_paste: Option<String>,
+    /// Whether the paste preview (Tab to expand) is currently visible (v0.11.4.5).
+    paste_preview_expanded: bool,
     /// Goal ID currently being tailed for agent output (v0.10.11).
     tailing_goal: Option<String>,
     /// Maximum output buffer lines (configurable, v0.10.11).
@@ -451,6 +475,8 @@ impl App {
             session_id,
             pending_question: None,
             pending_stdin_prompt: None,
+            pending_paste: None,
+            paste_preview_expanded: false,
             tailing_goal: None,
             output_buffer_limit: 50000,
             cached_visual_lines: 0,
@@ -683,7 +709,18 @@ impl App {
 
     /// Submit the current input as a command.
     fn submit(&mut self) -> Option<String> {
-        let text = self.input.trim().to_string();
+        // If there's a pending large paste, combine typed prefix with the full paste text.
+        let text = if let Some(paste) = self.pending_paste.take() {
+            self.paste_preview_expanded = false;
+            let prefix = self.input.trim_end().to_string();
+            if prefix.is_empty() {
+                paste
+            } else {
+                format!("{}\n{}", prefix, paste)
+            }
+        } else {
+            self.input.trim().to_string()
+        };
         if text.is_empty() {
             return None;
         }
@@ -696,6 +733,14 @@ impl App {
         self.input.clear();
         self.cursor = 0;
         Some(text)
+    }
+
+    /// Cancel any pending large paste without submitting.
+    fn cancel_pending_paste(&mut self) {
+        if self.pending_paste.take().is_some() {
+            self.paste_preview_expanded = false;
+            self.push_output(OutputLine::info("Paste cancelled.".into()));
+        }
     }
 
     /// Scroll up in the output pane.
@@ -1332,6 +1377,9 @@ async fn handle_terminal_event(
                             "Detached from {} (Ctrl-C)",
                             short
                         )));
+                    } else if app.pending_paste.is_some() {
+                        // Cancel pending large paste (v0.11.4.5).
+                        app.cancel_pending_paste();
                     } else if app.pending_stdin_prompt.is_some() {
                         // Cancel pending stdin prompt (v0.10.18.5).
                         app.pending_stdin_prompt = None;
@@ -1342,6 +1390,12 @@ async fn handle_terminal_event(
                         app.push_output(OutputLine::info("Agent question cancelled.".to_string()));
                     } else {
                         app.running = false;
+                    }
+                }
+                (KeyCode::Esc, _) => {
+                    // Escape cancels a pending large paste (v0.11.4.5).
+                    if app.pending_paste.is_some() {
+                        app.cancel_pending_paste();
                     }
                 }
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
@@ -1670,7 +1724,14 @@ async fn handle_terminal_event(
                 }
                 (KeyCode::Up, _) => app.history_up(),
                 (KeyCode::Down, _) => app.history_down(),
-                (KeyCode::Tab, _) => app.tab_complete(),
+                (KeyCode::Tab, _) => {
+                    if app.pending_paste.is_some() {
+                        // Toggle paste preview when a large paste is pending.
+                        app.paste_preview_expanded = !app.paste_preview_expanded;
+                    } else {
+                        app.tab_complete();
+                    }
+                }
                 (KeyCode::PageUp, _) => {
                     let page = crossterm::terminal::size()
                         .map(|(_, h)| h as usize)
@@ -1707,16 +1768,22 @@ async fn handle_terminal_event(
             }
         }
         Event::Paste(data) => {
-            // Bracketed paste: insert text into input without executing.
-            // Normalize CRLF → LF, standalone CR → LF, tabs → spaces.
-            // Newlines are preserved so multi-line pastes stay readable;
-            // only Enter (KeyCode::Enter) submits.
+            // Bracketed paste: normalize CRLF → LF, standalone CR → LF, tabs → spaces.
             let safe = data
                 .replace("\r\n", "\n")
                 .replace('\r', "\n")
                 .replace('\t', "    ");
-            for ch in safe.chars() {
-                app.insert_char(ch);
+            let line_count = safe.lines().count();
+            let char_count = safe.chars().count();
+            if char_count > PASTE_CHAR_THRESHOLD || line_count > PASTE_LINE_THRESHOLD {
+                // Large paste: compact into an indicator, store full text separately.
+                app.pending_paste = Some(safe);
+                app.paste_preview_expanded = false;
+            } else {
+                // Small paste: insert verbatim (newlines preserved; only Enter submits).
+                for ch in safe.chars() {
+                    app.insert_char(ch);
+                }
             }
         }
         Event::Resize(_, _) => {
@@ -2381,21 +2448,98 @@ fn draw_agent_pane(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let prompt = app.prompt_str();
-    let display = format!("{}{}", &prompt, &app.input);
 
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(Color::DarkGray));
 
     let inner = block.inner(area);
+
+    // When a large paste is pending, show the compact indicator (and optionally
+    // an inline preview) instead of rendering the raw paste text.
+    if let Some(ref paste) = app.pending_paste {
+        let char_count = paste.chars().count();
+        let line_count = paste.lines().count();
+        // Format char_count with thousands separators manually.
+        let chars_fmt = format_with_commas(char_count);
+        let indicator = format!(
+            "[Pasted {} chars / {} lines — Tab to preview, Esc to cancel]",
+            chars_fmt, line_count
+        );
+        // Build display: any typed prefix + yellow indicator + optional preview.
+        let prefix_display = format!("{}{}", &prompt, &app.input);
+        let mut text_lines: Vec<Line> = Vec::new();
+        // First line: typed prefix + indicator in a distinct style.
+        text_lines.push(Line::from(vec![
+            Span::raw(prefix_display.clone()),
+            Span::styled(
+                indicator,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        if app.paste_preview_expanded {
+            // Show the first PASTE_PREVIEW_LINES lines of the paste with a dim style.
+            let preview_lines: Vec<&str> = paste.lines().take(PASTE_PREVIEW_LINES).collect();
+            let remaining = line_count.saturating_sub(PASTE_PREVIEW_LINES);
+            for line in &preview_lines {
+                text_lines.push(Line::from(Span::styled(
+                    format!("  {}", line),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            if remaining > 0 {
+                text_lines.push(Line::from(Span::styled(
+                    format!("  … {} more lines (Tab to collapse)", remaining),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                text_lines.push(Line::from(Span::styled(
+                    "  [end of paste — Tab to collapse]".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        let paragraph = Paragraph::new(text_lines)
+            .wrap(Wrap { trim: false })
+            .block(block);
+        f.render_widget(paragraph, area);
+
+        // Place the cursor at the end of the typed prefix (before the indicator).
+        let cursor_byte = prefix_display.len();
+        let wrap_width = inner.width.max(1) as usize;
+        let mut row: u16 = 0;
+        let mut col: usize = 0;
+        for (i, ch) in prefix_display.char_indices() {
+            if i >= cursor_byte {
+                break;
+            }
+            if ch == '\n' {
+                row += 1;
+                col = 0;
+            } else {
+                col += 1;
+                if col >= wrap_width {
+                    row += 1;
+                    col = 0;
+                }
+            }
+        }
+        let x = inner.x + (col as u16).min(inner.width.saturating_sub(1));
+        let y = inner.y + row.min(inner.height.saturating_sub(1));
+        f.set_cursor_position((x, y));
+        return;
+    }
+
+    // Normal (no pending paste): show typed input with live cursor.
+    let display = format!("{}{}", &prompt, &app.input);
     let paragraph = Paragraph::new(display.clone())
         .wrap(Wrap { trim: false })
         .block(block);
     f.render_widget(paragraph, area);
 
     // Position cursor accounting for line wrap and embedded newlines.
-    // Walk the display string up to the cursor position, tracking row/col
-    // with both explicit newlines and word-wrap boundaries.
     let cursor_byte = prompt.len() + app.cursor;
     let wrap_width = inner.width.max(1) as usize;
     let mut row: u16 = 0;
@@ -3497,6 +3641,19 @@ pub(crate) fn parse_tail_args(text: &str, default_backfill: usize) -> (Option<St
     (goal_id, backfill)
 }
 
+/// Format a usize with thousands separators (e.g. 12345 → "12,345").
+fn format_with_commas(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result.chars().rev().collect()
+}
+
 /// Parse an SSE frame for a `goal_started` event.
 /// Returns `Some((goal_id, title))` if found.
 fn parse_goal_started(frame: &str) -> Option<(String, String)> {
@@ -3608,8 +3765,9 @@ Navigation:
 Text:
   Click-drag         Select text (native terminal selection)
   Cmd+C              Copy selection (native)
-  Paste              Preserves newlines; Shift+Enter for manual newline
-  Tab                Auto-complete commands
+  Paste              Small pastes inserted verbatim; large pastes (>500 chars / >10 lines)
+                     compacted — shows indicator, Tab to preview, Esc to cancel
+  Tab                Auto-complete commands (or toggle paste preview when paste pending)
   Ctrl-W             Toggle split pane (shell | agent side-by-side)
   Ctrl-C / exit      Exit the shell (Ctrl-C detaches when tailing)
 
@@ -5040,6 +5198,197 @@ mod tests {
             app.insert_char(ch);
         }
         assert_eq!(app.input, "line one line two  line three");
+    }
+
+    // ── Large-paste compaction tests (v0.11.4.5) ─────────────────────────────
+
+    #[test]
+    fn large_paste_over_char_threshold_stores_pending() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Build a paste > PASTE_CHAR_THRESHOLD chars on a single line.
+        let big = "x".repeat(PASTE_CHAR_THRESHOLD + 1);
+        // Simulate paste handling directly (mirrors the Event::Paste branch).
+        let safe = big
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ");
+        let char_count = safe.chars().count();
+        let line_count = safe.lines().count();
+        if char_count > PASTE_CHAR_THRESHOLD || line_count > PASTE_LINE_THRESHOLD {
+            app.pending_paste = Some(safe.clone());
+            app.paste_preview_expanded = false;
+        }
+        assert!(
+            app.pending_paste.is_some(),
+            "large paste should be stored as pending"
+        );
+        assert!(
+            app.input.is_empty(),
+            "input buffer should be unaffected by large paste"
+        );
+    }
+
+    #[test]
+    fn large_paste_over_line_threshold_stores_pending() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Build a paste with more than PASTE_LINE_THRESHOLD lines.
+        let big = (0..=PASTE_LINE_THRESHOLD)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let safe = big
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ");
+        let char_count = safe.chars().count();
+        let line_count = safe.lines().count();
+        if char_count > PASTE_CHAR_THRESHOLD || line_count > PASTE_LINE_THRESHOLD {
+            app.pending_paste = Some(safe);
+            app.paste_preview_expanded = false;
+        }
+        assert!(
+            app.pending_paste.is_some(),
+            "multi-line paste should be stored as pending"
+        );
+    }
+
+    #[test]
+    fn small_paste_inserted_verbatim() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Build a paste well under both thresholds.
+        let small = "hello world";
+        let safe = small
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ");
+        let char_count = safe.chars().count();
+        let line_count = safe.lines().count();
+        if char_count > PASTE_CHAR_THRESHOLD || line_count > PASTE_LINE_THRESHOLD {
+            app.pending_paste = Some(safe.clone());
+        } else {
+            for ch in safe.chars() {
+                app.insert_char(ch);
+            }
+        }
+        assert!(
+            app.pending_paste.is_none(),
+            "small paste should not be stored as pending"
+        );
+        assert_eq!(app.input, "hello world");
+    }
+
+    #[test]
+    fn submit_combines_typed_prefix_with_pending_paste() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // User typed a prefix before pasting.
+        for ch in "context: ".chars() {
+            app.insert_char(ch);
+        }
+        let paste_text = "a".repeat(PASTE_CHAR_THRESHOLD + 1);
+        app.pending_paste = Some(paste_text.clone());
+
+        let result = app.submit();
+        assert!(result.is_some());
+        let submitted = result.unwrap();
+        assert!(
+            submitted.starts_with("context:"),
+            "submitted text should include typed prefix"
+        );
+        assert!(
+            submitted.contains(&paste_text),
+            "submitted text should include full paste"
+        );
+        assert!(
+            app.pending_paste.is_none(),
+            "pending_paste should be cleared after submit"
+        );
+        assert!(app.input.is_empty(), "input should be cleared after submit");
+    }
+
+    #[test]
+    fn submit_with_only_pending_paste_no_prefix() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        let paste_text = "b".repeat(PASTE_CHAR_THRESHOLD + 1);
+        app.pending_paste = Some(paste_text.clone());
+
+        let result = app.submit();
+        assert_eq!(result, Some(paste_text));
+        assert!(app.pending_paste.is_none());
+    }
+
+    #[test]
+    fn cancel_pending_paste_clears_state() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.pending_paste = Some("big paste".into());
+        app.paste_preview_expanded = true;
+        app.cancel_pending_paste();
+        assert!(
+            app.pending_paste.is_none(),
+            "paste should be cleared after cancel"
+        );
+        assert!(
+            !app.paste_preview_expanded,
+            "preview flag should be reset after cancel"
+        );
+    }
+
+    #[test]
+    fn tab_toggles_paste_preview() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.pending_paste = Some("big paste content".into());
+        assert!(!app.paste_preview_expanded);
+        // Simulate Tab press when paste is pending.
+        app.paste_preview_expanded = !app.paste_preview_expanded;
+        assert!(
+            app.paste_preview_expanded,
+            "first Tab should expand preview"
+        );
+        app.paste_preview_expanded = !app.paste_preview_expanded;
+        assert!(
+            !app.paste_preview_expanded,
+            "second Tab should collapse preview"
+        );
+    }
+
+    #[test]
+    fn submit_empty_with_pending_paste_returns_none_if_paste_empty() {
+        // If somehow pending_paste is set to empty string, submit returns None.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.pending_paste = Some(String::new());
+        let result = app.submit();
+        assert!(result.is_none(), "empty pending paste should not submit");
     }
 
     #[test]

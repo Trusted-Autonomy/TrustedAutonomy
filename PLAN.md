@@ -3976,26 +3976,26 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 ---
 
 ### v0.11.4.5 — Shell Large-Paste Compaction
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: When pasting large blocks of text into `ta shell`, compact the display instead of filling the input buffer with hundreds of lines.
 
 **Problem**: Pasting a large document (e.g., an audit report) into the shell input embeds all the text directly in the input buffer, making it unreadable and hard to edit. Claude Code CLI handles this by compacting large pastes into a summary/link.
 
 #### Items
 
-1. [ ] **Paste size threshold**: If pasted text exceeds a configurable limit (e.g., 500 chars or 10 lines), don't insert it verbatim into the input buffer.
+1. [x] **Paste size threshold**: If pasted text exceeds a configurable limit (500 chars or 10 lines), don't insert it verbatim into the input buffer. Constants `PASTE_CHAR_THRESHOLD` and `PASTE_LINE_THRESHOLD`.
 
-2. [ ] **Compacted display**: Show a compact representation in the input area, e.g.:
+2. [x] **Compacted display**: Show a compact representation in the input area:
    ```
-   ta> [Pasted 2,847 chars / 47 lines — press Enter to send, Escape to cancel]
+   ta> [Pasted 2,847 chars / 47 lines — Tab to preview, Esc to cancel]
    ```
-   The full text is stored in a separate `pending_paste` field on `App`, not in `app.input`.
+   The full text is stored in `App::pending_paste`; `app.input` holds only any typed prefix.
 
-3. [ ] **Send full content on Enter**: When submitted, send the full paste content (not the compact display) to the daemon/agent. Combine with any text the user typed before/after the paste indicator.
+3. [x] **Send full content on Enter**: `submit()` combines any typed prefix with the full paste content. The compact indicator text is never sent — only the actual paste.
 
-4. [ ] **Preview on demand**: Allow the user to view the full paste (e.g., `Tab` to expand/collapse) before sending.
+4. [x] **Preview on demand**: Tab toggles an inline preview of the first 5 lines (with "N more lines" footer). Tab again collapses. Esc and Ctrl-C cancel the paste entirely.
 
-5. [ ] **Cross-platform**: Same behavior on macOS, Linux, Windows since it's handled at the `Event::Paste` level.
+5. [x] **Cross-platform**: Handled at the `Event::Paste` level (bracketed paste), which is cross-platform. 8 new unit tests.
 
 **Files**: `apps/ta-cli/src/commands/shell_tui.rs` (paste handler, App struct, input rendering)
 
@@ -4035,37 +4035,29 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 7. [x] **Daemon `:tail` output fix**: Updated to "Tail output: :tail <id>" in `cmd.rs`. (PR #184)
 
-#### Goal/Draft List ID Usability
-
-8. [ ] **Copy-paste-ready IDs in `ta goal list` and `ta draft list`**: The list output currently shows short tags like `implement-v0-11-4...` (truncated) as identifiers. Running `ta goal status implement-v0-11-4...` then returns "no goal found" because the truncated tag isn't a valid lookup key. Fix: display the minimal unambiguous ID (short UUID prefix or full tag, whichever `ta goal status` accepts) so users can copy-paste directly from list output into other commands. Also applies to `ta draft list` → `ta draft view/approve/deny`.
-
-#### Web Shell Output Color Coding
-
-9. [ ] **ANSI-aware color rendering in web shell**: Commands like `ta draft view`, `ta goal status`, `ta plan status` produce structured output (headers, file paths, diffs, status badges) that is currently rendered as plain monochrome text. Parse ANSI escape sequences from command output and render them as CSS colors in the web shell. For commands that don't emit ANSI, apply semantic color rules: `+` diff lines green, `-` red, `[approved]` green, `[denied]` red, `[pending]` yellow, file paths dimmed, section headers bold. Non-blocking fallback: plain text if parsing fails.
-
 #### Constitution Compliance Scan at Draft Build
 
-10. [ ] **Draft-time constitution pattern scan**: When `ta draft build` runs, scan changed files for known §4 violation patterns (injection functions without cleanup on early-return paths, error arms that `return` without a preceding `restore_*` call). Emit findings as warnings in the draft summary — non-blocking by default, so review flow is unaffected. The scan is static/grep-based (no agent), runs in <1s. Example output: `[constitution] 2 potential §4 violations in run.rs — review before approving`. Configurable: `warn` (default), `block`, `off`.
+8. [ ] **Draft-time constitution pattern scan**: When `ta draft build` runs, scan changed files for known §4 violation patterns (injection functions without cleanup on early-return paths, error arms that `return` without a preceding `restore_*` call). Emit findings as warnings in the draft summary — non-blocking by default, so review flow is unaffected. The scan is static/grep-based (no agent), runs in <1s. Example output: `[constitution] 2 potential §4 violations in run.rs — review before approving`. Configurable: `warn` (default), `block`, `off`.
 
 #### Agent Transparency (streaming intermediate output)
 
-11. [ ] **Surface agent stderr as progress**: Ensure all stderr lines from the agent subprocess appear in the web shell as dimmed progress indicators.
+9. [ ] **Surface agent stderr as progress**: Ensure all stderr lines from the agent subprocess appear in the web shell as dimmed progress indicators.
 
-12. [ ] **Structured progress parsing**: Parse stderr for known patterns (`Reading `, `Searching `, `Running `, `Writing `) and render them as distinct "thinking" lines with a spinner or activity indicator.
+10. [ ] **Structured progress parsing**: Parse stderr for known patterns (`Reading `, `Searching `, `Running `, `Writing `) and render them as distinct "thinking" lines with a spinner or activity indicator.
 
-13. [ ] **Web shell thinking indicator**: When a request is pending and no stdout has arrived yet, show an animated indicator ("Agent is working...") that updates with the latest stderr progress line.
+11. [ ] **Web shell thinking indicator**: When a request is pending and no stdout has arrived yet, show an animated indicator ("Agent is working...") that updates with the latest stderr progress line.
 
-14. [ ] **Collapse progress on completion**: When the agent's stdout response arrives, collapse/dim the intermediate progress lines so the final answer is prominent.
+12. [ ] **Collapse progress on completion**: When the agent's stdout response arrives, collapse/dim the intermediate progress lines so the final answer is prominent.
 
 #### Parallel Agent Sessions
 
-15. [ ] **`/parallel` shell command**: New web shell command that spawns an independent agent conversation (no `--continue`). Returns a session tag the user can address follow-ups to.
+13. [ ] **`/parallel` shell command**: New web shell command that spawns an independent agent conversation (no `--continue`). Returns a session tag the user can address follow-ups to.
 
-16. [ ] **`POST /api/agent/ask` with `parallel: true`**: API flag that skips conversation chaining and creates a fresh agent subprocess.
+14. [ ] **`POST /api/agent/ask` with `parallel: true`**: API flag that skips conversation chaining and creates a fresh agent subprocess.
 
-17. [ ] **Session switching in web shell**: Status bar shows active parallel sessions. User can prefix input with a session tag to direct it to a specific agent: `@research what did you find?`
+15. [ ] **Session switching in web shell**: Status bar shows active parallel sessions. User can prefix input with a session tag to direct it to a specific agent: `@research what did you find?`
 
-18. [ ] **Session lifecycle**: Parallel sessions auto-close after idle timeout. User can `/close <tag>` to end a session explicitly. Max concurrent sessions configurable in `daemon.toml`.
+16. [ ] **Session lifecycle**: Parallel sessions auto-close after idle timeout. User can `/close <tag>` to end a session explicitly. Max concurrent sessions configurable in `daemon.toml`.
 
 #### Version: `0.11.5-alpha`
 
