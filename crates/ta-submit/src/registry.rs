@@ -431,6 +431,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_select_adapter_loads_external_plugin() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -463,6 +464,7 @@ timeout_secs = 5
         std::fs::write(
             &mock_bin,
             r#"#!/bin/sh
+read -r line
 echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":1,"adapter_name":"plastic","capabilities":["commit","protected_targets"]}}'
 "#,
         )

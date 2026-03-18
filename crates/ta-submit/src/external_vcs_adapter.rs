@@ -689,6 +689,7 @@ mod tests {
         write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
+read -r line
 echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":1,"adapter_name":"mock","capabilities":["commit","protected_targets"]}}'
 "#,
         );
@@ -711,6 +712,7 @@ echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":1,"adapte
         write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
+read -r line
 echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":99,"adapter_name":"bad","capabilities":[]}}'
 "#,
         );
@@ -735,6 +737,7 @@ echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":99,"adapt
         write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
+read -r line
 echo '{"ok":false,"error":"plugin initialization failed"}'
 "#,
         );
@@ -773,6 +776,7 @@ echo '{"ok":false,"error":"plugin initialization failed"}'
         write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
+read -r line
 echo "some error to stderr" >&2
 exit 1
 "#,
@@ -798,6 +802,7 @@ exit 1
         write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
+read -r line
 echo "this is not json"
 "#,
         );
