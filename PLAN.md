@@ -4374,6 +4374,31 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 
 ---
 
+### v0.12.4 — Plugin Template Publication & Registry Bootstrap
+<!-- status: pending -->
+**Goal**: Make it frictionless for public alpha users to add Discord (and optionally Slack) to their TA project. Today `ta setup resolve` with `source = "registry:ta-channel-discord"` falls through to a GitHub releases URL that doesn't exist — this phase creates those repos and publishes the first release binaries so the end-to-end flow works.
+
+**Dependency**: `ta-channel-discord` plugin (fully implemented in v0.12.1). No new code in this repo required — work is external repo creation + USAGE.md/PLUGIN-AUTHORING.md doc updates.
+
+#### Discord template (ready to publish)
+1. [ ] **Create `Trusted-Autonomy/ta-channel-discord` GitHub repo**: Copy `plugins/ta-channel-discord/` as the repo root. Add a `README.md` with full setup guide (bot creation, env vars, `ta plugin install .`, `daemon.toml` snippet, slash command registration). Include `.github/workflows/release.yml` to build and publish binaries on tag.
+2. [ ] **Tag v0.1.0 and publish GitHub release binaries**: Build `ta-channel-discord` for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`. Upload tarballs matching the URL format `registry_client.rs` expects: `ta-channel-discord-{version}-{platform}.tar.gz`.
+3. [ ] **Verify `ta setup resolve` works end-to-end**: Add `[plugins.discord] source = "registry:ta-channel-discord"` to a test project's `.ta/project.toml`, run `ta setup resolve`, confirm binary downloads, installs, and `ta plugin validate` passes.
+4. [ ] **Update `PLUGIN-AUTHORING.md`**: Add links to `ta-discord-template` and `ta-slack-template` repos. Add a "Publishing your plugin" section covering the GitHub releases tarball format.
+5. [ ] **Update `USAGE.md` Discord setup**: Replace "Build from source (clone TrustedAutonomy)" step with `ta setup resolve` one-liner as the primary path. Keep manual build as a fallback.
+
+#### Slack template (send-only starter)
+6. [ ] **Create `Trusted-Autonomy/ta-slack-template` GitHub repo**: Copy `plugins/ta-channel-slack/` as repo root. README must clearly state this is a **send-only** starter (questions delivered to Slack, but slash commands / inbound listener not yet implemented — see [Slack listener roadmap](#v013x--slack-listener)). Same release workflow as Discord.
+7. [ ] **Tag v0.1.0 and publish Slack release binaries**: Same platforms as Discord.
+
+#### Follow-on (deferred to v0.13.x)
+- **Slack inbound listener** (slash commands, button callbacks, Socket Mode) — Slack plugin lacks `listener.rs` and `progress.rs`. Implement in v0.13.x once beta starts. *(Slack is send-only for public alpha.)*
+- **`registry.trustedautonomy.dev` index** — the registry CDN. For now, `ta setup resolve` falls back to GitHub releases directly. A proper registry index (with search, versions, metadata) is a beta-era infrastructure item.
+
+#### Version: `0.12.4-alpha`
+
+---
+
 ## v0.13 — Architecture Extensibility & Beta
 
 > Beta-quality features for enterprise users, team deployments, and extended runtime options. Core alpha workflow (v0.12.x) must be stable before starting. Ordered by dependency chain: transport → runtime → governance → proxy, with VCS externalization already done (v0.12.0.2), community hub and compliance audit as capstones.
