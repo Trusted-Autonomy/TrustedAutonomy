@@ -240,14 +240,17 @@ pub async fn goal_output_stream(
     };
 
     let Some(mut rx) = rx else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": format!("No active output stream for goal '{}'", goal_id),
-                "hint": "The goal may have already completed or not yet started."
-            })),
-        )
-            .into_response();
+        // Channel already closed: process finished before client subscribed.
+        // Send a done event immediately so the client cleans up its tail state
+        // instead of accumulating ghost subscriptions (v0.11.7 item 4).
+        let stream = async_stream::stream! {
+            yield Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default()
+                    .event("done")
+                    .data("{\"status\": \"goal process already exited\"}")
+            );
+        };
+        return Sse::new(stream).into_response();
     };
 
     let stream = async_stream::stream! {

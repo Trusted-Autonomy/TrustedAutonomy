@@ -4262,6 +4262,10 @@ Known issue from v0.10.18: Discord-dispatched `ta run` created a goal record (st
 
 8. [ ] **`ta plan next`**: After merge + sync, suggest the next phase from PLAN.md based on the just-completed phase. Reads the plan, finds the current goal's phase, and prints the next unchecked phase with its goal. Makes the "iterate through phases" loop explicit.
 
+9. [ ] **Two-way shell agent communication (attach mode)**: Replace `:tail <key>` one-way output stream with a bidirectional attach: `ta shell` connects to a running agent's stdin/stdout so the user can send messages mid-run without opening a new session. The agent receives user input as if it were typed interactively. UX: entering attach mode shows a banner ("Attached to goal <tag> — type to send, Ctrl-D to detach"), detach returns to the normal shell prompt. Internally: daemon exposes a WebSocket or SSE+POST pair per active goal output channel; shell upgrades to bidirectional on `:attach <tag>`.
+
+10. [ ] **Short goal tags**: Goals get a short unique tag at creation (e.g., `fix-build-23a`) — human-readable prefix from the title + 3-char collision-resistant suffix. `:tail`, `:attach`, and all shell goal commands accept either the full goal ID or the short tag. Tags are shown in `ta goal list` and `ta shell` status bar. Makes `:tail fix-build-23a` viable instead of `:tail fix build and validation errors caught in draft apply`.
+
 **Files**: `crates/ta-submit/src/adapter.rs`, `crates/ta-submit/src/git.rs`, `crates/ta-submit/src/perforce.rs`, `apps/ta-cli/src/commands/draft.rs`, `apps/ta-cli/src/commands/sync.rs`, `crates/ta-goal/src/goal_run.rs` (new state), `docs/USAGE.md`
 
 #### Version: `0.12.0.1-alpha`

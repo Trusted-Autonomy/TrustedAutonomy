@@ -169,6 +169,44 @@ impl SourceAdapter for SvnAdapter {
             .unwrap_or_else(|| "unknown".to_string());
         Ok(format!("r{}", rev))
     }
+
+    fn protected_submit_targets(&self) -> Vec<String> {
+        // SVN paths that agents must not commit directly to.
+        // Default: /trunk (the conventional integration line).
+        vec!["/trunk".to_string()]
+    }
+
+    fn verify_not_on_protected_target(&self) -> Result<()> {
+        // Check the working copy's URL via `svn info --show-item url`.
+        // SVN's `prepare()` is currently a no-op (no branching), so this
+        // guard blocks commits to /trunk until proper branch/copy support
+        // is added.
+        let url_result = self.svn_cmd(&["info", "--show-item", "url"]);
+        match url_result {
+            Ok(url) => {
+                let protected = self.protected_submit_targets();
+                for target in &protected {
+                    if url.contains(target.as_str()) {
+                        return Err(SubmitError::InvalidState(format!(
+                            "Refusing to commit: working copy URL '{}' contains protected path \
+                             '{}'. SVN branching is not yet supported — use a branch or \
+                             feature copy before applying changes to a protected path.",
+                            url, target
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            Err(_) => {
+                // svn not installed or not an SVN working copy — allow (svn commit
+                // would also fail in this case, providing its own error).
+                tracing::warn!(
+                    "SvnAdapter: could not run `svn info` for protected target check — skipping"
+                );
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +237,23 @@ mod tests {
         // Create .svn directory — should detect
         std::fs::create_dir(dir.path().join(".svn")).unwrap();
         assert!(SvnAdapter::detect(dir.path()));
+    }
+
+    #[test]
+    fn test_svn_adapter_protected_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = SvnAdapter::new(dir.path());
+        let targets = adapter.protected_submit_targets();
+        assert!(targets.contains(&"/trunk".to_string()));
+    }
+
+    #[test]
+    fn test_svn_adapter_verify_degrades_without_svn() {
+        // Without svn CLI or a real working copy, verify should degrade gracefully.
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = SvnAdapter::new(dir.path());
+        // Not an SVN working copy, so svn info will fail → should return Ok
+        assert!(adapter.verify_not_on_protected_target().is_ok());
     }
 
     #[test]

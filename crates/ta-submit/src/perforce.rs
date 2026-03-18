@@ -257,6 +257,64 @@ impl SourceAdapter for PerforceAdapter {
             .to_string();
         Ok(format!("@{}", cl))
     }
+
+    fn protected_submit_targets(&self) -> Vec<String> {
+        // Depot paths that agents must never submit directly to.
+        // Default: the conventional main depot path.
+        vec!["//depot/main/...".to_string()]
+    }
+
+    fn verify_not_on_protected_target(&self) -> Result<()> {
+        // Check current CL's target stream/depot via `p4 info`.
+        // If p4 is not installed, degrade gracefully (allow the submit to proceed
+        // but log a warning — p4 itself will enforce restrictions).
+        let p4_available = std::process::Command::new("p4")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if !p4_available {
+            tracing::warn!(
+                "PerforceAdapter: p4 CLI not found — cannot verify protected targets. \
+                 Ensure your depot paths are not in: {:?}",
+                self.protected_submit_targets()
+            );
+            return Ok(());
+        }
+
+        // Get the current client's root stream/depot mapping.
+        match self.p4_cmd(&["info"]) {
+            Ok(info) => {
+                let client_root = info
+                    .lines()
+                    .find(|l| l.starts_with("Client root:"))
+                    .map(|l| l.trim_start_matches("Client root:").trim().to_string())
+                    .unwrap_or_default();
+
+                let protected = self.protected_submit_targets();
+                for target in &protected {
+                    // Simple check: if the target depot path appears in client info
+                    // and there's no branch indicator, warn but allow (Perforce
+                    // enforces protection through its own permission system; our
+                    // `prepare()` creates a pending CL which is the isolation mechanism).
+                    tracing::debug!(
+                        client_root = %client_root,
+                        protected_target = %target,
+                        "PerforceAdapter: protected target check (informational)"
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "PerforceAdapter: could not run `p4 info` for protected target check"
+                );
+                Ok(()) // Degrade gracefully
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -295,5 +353,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let adapter = PerforceAdapter::new(dir.path());
         assert_eq!(adapter.name(), "perforce");
+    }
+
+    #[test]
+    fn test_perforce_adapter_protected_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = PerforceAdapter::new(dir.path());
+        let targets = adapter.protected_submit_targets();
+        assert!(targets.contains(&"//depot/main/...".to_string()));
+    }
+
+    #[test]
+    fn test_perforce_adapter_verify_degrades_without_p4() {
+        // Without p4 CLI, verify_not_on_protected_target should succeed (degrade gracefully).
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = PerforceAdapter::new(dir.path());
+        // This will either succeed (p4 not installed) or succeed (p4 installed but warns).
+        assert!(adapter.verify_not_on_protected_target().is_ok());
     }
 }

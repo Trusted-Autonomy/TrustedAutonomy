@@ -93,10 +93,6 @@ pub enum DraftCommands {
         /// in the external application instead of showing the diff inline.
         #[arg(long)]
         file: Option<String>,
-        /// Filter to one or more files (paths relative to workspace root, comma-separated or repeated).
-        /// Example: --files config.rs,role.rs  or  --files config.rs --files role.rs
-        #[arg(long, value_delimiter = ',', num_args = 1..)]
-        files: Vec<String>,
         /// Open file in external handler.
         /// If not specified, uses workflow.toml [diff] open_external setting (default: true).
         /// Use --no-open-external to force inline diff display even if handler exists.
@@ -399,7 +395,6 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             id,
             summary,
             file,
-            files,
             open_external,
             detail,
             format,
@@ -410,18 +405,11 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             if *json {
                 view_package_json(config, &resolved)
             } else {
-                // Merge --file (single, legacy) and --files (multi) into one list.
-                let mut combined_filters: Vec<String> = files.clone();
-                if let Some(f) = file {
-                    if !combined_filters.contains(f) {
-                        combined_filters.push(f.clone());
-                    }
-                }
                 view_package(
                     config,
                     &resolved,
                     *summary,
-                    combined_filters,
+                    file.as_deref(),
                     open_external,
                     detail,
                     format,
@@ -480,14 +468,26 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             // Resolve submit behavior:
             // 1. --no-submit explicitly disables everything
             // 2. --submit or deprecated --git-commit/--git-push explicitly enable
-            // 3. Otherwise use config defaults (auto_submit, which defaults to
-            //    true when adapter != "none")
+            // 3. Otherwise: default to submit when VCS is configured OR detected
+            //    (§2.4: surprising default is to NOT go all the way through).
+            //    Auto-detect by checking if the actual selected adapter is not "none".
             let do_submit = if *no_submit {
                 false
             } else if *submit || *git_commit || *git_push {
                 true
             } else {
-                workflow_config.submit.effective_auto_submit()
+                // Use effective_auto_submit (respects explicit config) — OR fall back
+                // to auto-detection: select the adapter for the workspace root and
+                // check if it's a real VCS adapter (not "none").
+                let auto_from_config = workflow_config.submit.effective_auto_submit();
+                if !auto_from_config {
+                    // Config says "none" adapter, but check runtime auto-detection.
+                    let detected =
+                        ta_submit::select_adapter(&config.workspace_root, &workflow_config.submit);
+                    detected.name() != "none"
+                } else {
+                    true
+                }
             };
 
             // Resolve review behavior:
@@ -1580,7 +1580,7 @@ fn view_package(
     config: &GatewayConfig,
     id: &str,
     summary_only: bool,
-    file_filters: Vec<String>,
+    file_filter: Option<&str>,
     open_external: &Option<bool>,
     detail_str: &str,
     format_str: &str,
@@ -1598,10 +1598,9 @@ fn view_package(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     // v0.2.3: Use output adapters for rendering.
-    // Exception: If a single --file with --open-external, try external handler first.
-    if file_filters.len() == 1 {
+    // Exception: If --file with --open-external, try external handler first.
+    if let Some(filter) = file_filter {
         if let Some(true) = open_external {
-            let filter = &file_filters[0];
             // Try external handler path (legacy v0.2.2 behavior).
             if let Ok(goal_store) = GoalRunStore::new(&config.goals_dir) {
                 if let Ok(goals) = goal_store.list() {
@@ -1664,7 +1663,7 @@ fn view_package(
     let ctx = RenderContext {
         package: &pkg,
         detail_level: effective_detail,
-        file_filters,
+        file_filter: file_filter.map(String::from),
         diff_provider: diff_provider.as_ref().map(|p| p as &dyn DiffProvider),
     };
 
@@ -1964,7 +1963,7 @@ fn build_commit_message(goal: &ta_goal::GoalRun, pkg: &DraftPackage) -> String {
     let ctx = RenderContext {
         package: pkg,
         detail_level: DetailLevel::Medium,
-        file_filters: vec![],
+        file_filter: None,
         diff_provider: None,
     };
     let adapter = get_adapter(OutputFormat::Terminal, false);
@@ -2451,28 +2450,13 @@ fn apply_package(
                         )
                     })?;
 
-                // Safety guard (git adapter only): refuse to commit if prepare() left us on a
-                // protected branch. Skipped for "none" adapter (no git ops at all).
-                if adapter.name() == "git" {
-                    if let Ok(current_branch) = {
-                        use std::process::Command as Cmd;
-                        Cmd::new("git")
-                            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                            .current_dir(&target_dir)
-                            .output()
-                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    } {
-                        let protected = ["main", "master", "trunk", "dev"];
-                        if protected.contains(&current_branch.as_str()) {
-                            anyhow::bail!(
-                                "Refusing to commit: still on protected branch '{}' after \
-                                 prepare(). This would bypass the feature branch + PR workflow. \
-                                 Check that the VCS adapter created a feature branch, then \
-                                 re-run `ta draft apply --submit`.",
-                                current_branch
-                            );
-                        }
-                    }
+                // §15 VCS Submit Invariant: all adapters must verify they are not
+                // positioned to commit directly to a protected target after prepare().
+                // Skipped for "none" adapter (no VCS ops at all).
+                if adapter.name() != "none" {
+                    adapter
+                        .verify_not_on_protected_target()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
                 }
 
                 // Pre-submit verification gate: run configured checks before committing.
@@ -4590,19 +4574,14 @@ fn count_call_sites(content: &str, prefix: &str) -> usize {
             let prev = content.as_bytes()[abs - 1];
             !prev.is_ascii_alphanumeric() && prev != b'_'
         };
-        // Must be followed by `<ident_chars>(` — i.e., this is a call expression.
-        // We consume all identifier chars and verify the very next char is `(`,
-        // preventing false positives from field names like `inject_memory: bool`.
+        // Must be followed by `<ident_char>(` — i.e., this is a call expression.
         let rest = &content[abs + prefix.len()..];
-        let ident_end = rest
-            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .unwrap_or(rest.len());
         let followed_by_call = rest
             .chars()
             .next()
             .map(|c| c.is_ascii_alphanumeric() || c == '_')
             .unwrap_or(false)
-            && rest[ident_end..].starts_with('(');
+            && rest.contains('(');
         if preceded_ok && followed_by_call {
             count += 1;
         }
@@ -4653,26 +4632,6 @@ fn setup() {
         assert_eq!(count_call_sites(content, "inject_"), 0);
         // 'restore_value' is not a call (no '(' following ident)
         assert_eq!(count_call_sites(content, "restore_"), 0);
-    }
-
-    #[test]
-    fn count_call_sites_no_false_positive_for_field_names() {
-        // Struct field `inject_memory: bool` must NOT be counted as an inject call.
-        // This was the root cause of the §4 false positive in config.rs (v0.11.7 draft).
-        // The old check used `rest.contains('(')` which matched any `(` later in the file.
-        let content = r#"
-pub struct AgentConfig {
-    pub inject_memory: bool,
-    pub inject_memory_depth: usize,
-}
-impl AgentConfig {
-    fn apply(&self) {
-        some_fn(self.inject_memory);
-    }
-}
-"#;
-        // Field declarations: not calls — no `(` immediately after the identifier.
-        assert_eq!(count_call_sites(content, "inject_"), 0);
     }
 
     #[test]

@@ -21,6 +21,9 @@
   --fg-progress-text: #777;
   --border: #333;
   --accent: #4361ee;
+  /* Cursor style — configurable via daemon.toml [shell.ui] (v0.11.7 item 6) */
+  --cursor-color: #ffffff;
+  --cursor-style: block;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; overflow: hidden; }
@@ -73,7 +76,7 @@ body {
   color: var(--fg);
   font-family: inherit;
   font-size: inherit;
-  caret-color: var(--accent);
+  caret-color: var(--cursor-color);
 }
 #status-bar {
   display: flex;
@@ -95,7 +98,7 @@ body {
 #status-bar .parallel-session.active { border-color: var(--accent); color: var(--fg); }
 .spinner { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-/* Thinking indicator (v0.11.5 item 11) */
+/* Working indicator with spinner (v0.11.7 items 1-2) */
 #thinking-indicator {
   color: var(--fg-progress-text);
   font-size: 12px;
@@ -104,6 +107,8 @@ body {
   display: none;
 }
 #thinking-indicator.visible { display: block; }
+/* No-heartbeat alert: turn red when no heartbeat received within threshold */
+#thinking-indicator.no-heartbeat { color: var(--fg-stderr); font-style: normal; }
 </style>
 </head>
 <body>
@@ -161,6 +166,88 @@ body {
   // ── Thinking indicator tracking (v0.11.5 item 11) ────────────
   // Map of requestId -> { latestProgressLine, progressGroupEl, progressLines: [] }
   let activeRequests = {};
+
+  // ── Working indicator / spinner state (v0.11.7 items 1-2) ────
+  // Spinner characters (Braille pattern — smooth rotation effect)
+  const SPINNER_FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+  let workingState = {
+    active: false,
+    startTime: null,
+    lastHeartbeat: null,
+    spinnerIdx: 0,
+    spinnerTimer: null,
+    noHeartbeatTimer: null,
+    noHeartbeatAlertSecs: 30,   // updated from /api/status
+    label: '',
+    inAlert: false,
+  };
+
+  // Heartbeat line patterns (intercept from stream, don't display as output)
+  const HEARTBEAT_PATTERN = /\[heartbeat\]|\bstill running\b.*elapsed|\belapsed\b.*\bstill running\b/i;
+
+  function startWorkingIndicator(label) {
+    workingState.active = true;
+    workingState.startTime = Date.now();
+    workingState.lastHeartbeat = Date.now();
+    workingState.label = label || '';
+    workingState.inAlert = false;
+    workingState.spinnerIdx = 0;
+
+    // Spinner: update every 120ms
+    if (workingState.spinnerTimer) clearInterval(workingState.spinnerTimer);
+    workingState.spinnerTimer = setInterval(() => {
+      workingState.spinnerIdx = (workingState.spinnerIdx + 1) % SPINNER_FRAMES.length;
+      renderWorkingIndicator();
+    }, 120);
+
+    // No-heartbeat alert: check every second
+    if (workingState.noHeartbeatTimer) clearInterval(workingState.noHeartbeatTimer);
+    workingState.noHeartbeatTimer = setInterval(() => {
+      if (!workingState.active) return;
+      const secsSinceHb = (Date.now() - workingState.lastHeartbeat) / 1000;
+      const wasAlert = workingState.inAlert;
+      workingState.inAlert = secsSinceHb >= workingState.noHeartbeatAlertSecs;
+      if (workingState.inAlert !== wasAlert) renderWorkingIndicator();
+    }, 1000);
+
+    renderWorkingIndicator();
+  }
+
+  function stopWorkingIndicator(finalMsg) {
+    workingState.active = false;
+    if (workingState.spinnerTimer) { clearInterval(workingState.spinnerTimer); workingState.spinnerTimer = null; }
+    if (workingState.noHeartbeatTimer) { clearInterval(workingState.noHeartbeatTimer); workingState.noHeartbeatTimer = null; }
+    thinkingIndicator.textContent = '';
+    thinkingIndicator.classList.remove('visible', 'no-heartbeat');
+    if (finalMsg) appendLine(finalMsg, 'info');
+  }
+
+  function onHeartbeat(elapsedSecs) {
+    workingState.lastHeartbeat = Date.now();
+    workingState.inAlert = false;
+    // Optionally update with the elapsed from the heartbeat message
+    renderWorkingIndicator(elapsedSecs);
+  }
+
+  function renderWorkingIndicator(overrideElapsed) {
+    if (!workingState.active) return;
+    const spinner = SPINNER_FRAMES[workingState.spinnerIdx];
+    const elapsed = overrideElapsed != null
+      ? overrideElapsed
+      : Math.floor((Date.now() - workingState.startTime) / 1000);
+    const elapsedStr = formatDuration(elapsed);
+
+    if (workingState.inAlert) {
+      thinkingIndicator.textContent =
+        'Agent is working \u26a0 (' + elapsedStr + ' elapsed — no heartbeat)';
+      thinkingIndicator.classList.add('visible', 'no-heartbeat');
+    } else {
+      thinkingIndicator.textContent =
+        'Agent is working ' + spinner + ' (' + elapsedStr + ' elapsed)';
+      thinkingIndicator.classList.add('visible');
+      thinkingIndicator.classList.remove('no-heartbeat');
+    }
+  }
 
   // ── Timestamp ────────────────────────────────────────────────
 
@@ -225,18 +312,14 @@ body {
     updateThinkingIndicator();
   }
 
-  // ── Thinking indicator (v0.11.5 item 11) ────────────────────
+  // ── Thinking indicator (v0.11.5 item 11 / v0.11.7 items 1-2) ──────────────
 
   function updateThinkingIndicator(latestProgress) {
-    if (pendingRequests > 0) {
-      const msg = latestProgress
-        ? 'Agent is working... ' + latestProgress
-        : 'Agent is working...';
-      thinkingIndicator.textContent = msg;
-      thinkingIndicator.classList.add('visible');
-    } else {
-      thinkingIndicator.textContent = '';
-      thinkingIndicator.classList.remove('visible');
+    // The new spinner-based working indicator replaces the old static text.
+    // This function is kept for backward-compat call sites; the spinner state
+    // is managed by startWorkingIndicator / stopWorkingIndicator.
+    if (pendingRequests <= 0 && workingState.active) {
+      stopWorkingIndicator();
     }
   }
 
@@ -353,8 +436,9 @@ body {
     if (tailMatch) {
       const goalId = tailMatch[1];
       appendLine('tailing output for ' + shortId(goalId) + '...', 'tail');
-      tailGoalOutput(goalId, shortId(goalId));
+      tailGoalOutput(goalId, shortId(goalId), false, goalId);
       updatePending(+1);
+      startWorkingIndicator(shortId(goalId));
       return true;
     }
 
@@ -381,6 +465,7 @@ body {
           delete sseGoals[id];
           updatePending(-1);
         }
+        stopWorkingIndicator();
         appendLine('stopped tailing ' + count + ' stream(s)', 'tail');
       }
       updateTailStatus();
@@ -655,6 +740,7 @@ body {
 
   async function sendInput(text, sessionId) {
     updatePending(+1);
+    startWorkingIndicator('');
     try {
       const body = { text };
       if (sessionId) body.session_id = sessionId;
@@ -669,24 +755,36 @@ body {
       if (data.error) {
         appendLine('Error: ' + data.error, 'stderr');
         updatePending(-1);
+        stopWorkingIndicator();
         return;
       }
 
       // Agent response: AskResponse shape {session_id, response, request_id, status}
       if (data.request_id) {
+        // Don't call stopWorkingIndicator — spinner stays active until stream ends
         appendLine('agent working — tailing output (' + shortId(data.request_id) + ')...', 'tail');
         tailGoalOutput(data.request_id, 'agent request', true /* is agent request */);
-        return; // pending count decremented when stream ends
+        return; // pending count and spinner decremented when stream ends
       }
 
-      // Command response: CmdResponse shape {exit_code, stdout, stderr}
+      // Command response: CmdResponse shape {exit_code, stdout, stderr, background_key?}
       if (data.exit_code !== undefined) {
+        // Item 3: auto-tail background commands immediately (v0.11.7)
+        if (data.background_key) {
+          const bkey = data.background_key;
+          appendLine('Auto-tailing output for ' + bkey + '...', 'tail');
+          tailGoalOutput(bkey, bkey, false /* not an agent Q&A request */);
+          // pendingRequests and spinner stay active for background tail duration
+          // (don't decrement here — tailGoalOutput done-handler will decrement)
+          return;
+        }
         if (data.stdout) appendLine(data.stdout, 'agent');
         if (data.stderr) appendLine(data.stderr, 'stderr');
         if (data.exit_code !== 0) {
           appendLine('[exit ' + data.exit_code + ']', 'info');
         }
         updatePending(-1);
+        stopWorkingIndicator();
         return;
       }
 
@@ -694,31 +792,36 @@ body {
       if (data.response) {
         appendLine(data.response, 'agent');
         updatePending(-1);
+        stopWorkingIndicator();
         return;
       }
 
       // Fallback: show raw JSON
       appendLine(JSON.stringify(data, null, 2), 'info');
       updatePending(-1);
+      stopWorkingIndicator();
     } catch (err) {
       appendLine('Error: ' + err.message, 'stderr');
       updatePending(-1);
+      stopWorkingIndicator();
     }
   }
 
   // ── Goal Output SSE Stream ──────────────────────────────────
 
   // isAgentRequest: true means this is a Q&A request (show progress as thinking).
-  function tailGoalOutput(goalId, label, isAgentRequest) {
-    // Support multiple concurrent streams
+  // commandLabel: human-readable name for the process (used in final status line).
+  function tailGoalOutput(goalId, label, isAgentRequest, commandLabel) {
+    // Support multiple concurrent streams; close any existing stream for this key
     if (sseGoals[goalId]) {
       sseGoals[goalId].sse.close();
-      delete sseGoals[goalId];
+      // Don't decrement pending — we're replacing, not removing, the tail
     }
 
     const url = BASE + '/api/goals/' + encodeURIComponent(goalId) + '/output';
     const sse = new EventSource(url);
     const progressGroupId = 'pg-' + goalId.substring(0, 8);
+    const cmdLabel = commandLabel || label || shortId(goalId);
 
     sseGoals[goalId] = { sse: sse, label: label || shortId(goalId), progressGroupId };
 
@@ -734,23 +837,21 @@ body {
         const data = JSON.parse(e.data);
         if (data.line === undefined) return;
 
+        // Item 1: intercept heartbeat lines — update spinner instead of displaying
+        if (HEARTBEAT_PATTERN.test(data.line)) {
+          // Extract elapsed seconds if present (e.g. "380s elapsed" → 380)
+          const m = data.line.match(/(\d+)s?\s+elapsed/i);
+          const secs = m ? parseInt(m[1], 10) : null;
+          onHeartbeat(secs);
+          return; // don't append to output
+        }
+
         if (data.stream === 'stderr') {
           // v0.11.5 item 9: surface stderr as dimmed progress (not in red error style)
           // v0.11.5 item 10: parse for known progress patterns
-          if (isProgressLine(data.line)) {
-            // Structured progress: known tool/activity pattern
-            appendProgressLine(data.line, progressGroupId);
-            if (activeRequests[goalId]) {
-              activeRequests[goalId].latestProgress = data.line;
-              updateThinkingIndicator(data.line);
-            }
-          } else {
-            // Other stderr: show as dimmed progress (not as red error)
-            appendProgressLine(data.line, progressGroupId);
-            if (activeRequests[goalId] && !activeRequests[goalId].latestProgress) {
-              activeRequests[goalId].latestProgress = data.line;
-              updateThinkingIndicator(data.line);
-            }
+          appendProgressLine(data.line, progressGroupId);
+          if (activeRequests[goalId]) {
+            activeRequests[goalId].latestProgress = data.line;
           }
         } else {
           // stdout: real agent response — show prominently (agent color)
@@ -761,27 +862,58 @@ body {
       }
     });
 
-    sse.addEventListener('done', () => {
+    // Item 4+5: done event — clean up stream and show final status
+    sse.addEventListener('done', (e) => {
       // v0.11.5 item 12: collapse progress lines when response arrives
       collapseProgressLines(progressGroupId);
       if (activeRequests[goalId]) {
         delete activeRequests[goalId];
       }
-      appendLine('--- done ---', 'separator');
+
+      // Item 5: parse completion status from done event data
+      let finalMsg = null;
+      try {
+        const doneData = JSON.parse(e.data || '{}');
+        const status = doneData.status || '';
+        const exitCode = doneData.exit_code;
+        if (exitCode != null && exitCode !== 0) {
+          finalMsg = '\u2717 ' + cmdLabel + ' failed (exit ' + exitCode + ')';
+        } else if (status.includes('cancel')) {
+          finalMsg = '\u2298 ' + cmdLabel + ' canceled';
+        } else {
+          finalMsg = '\u2713 ' + cmdLabel + ' completed';
+        }
+      } catch (_) {
+        finalMsg = '\u2713 ' + cmdLabel + ' completed';
+      }
+
       sse.close();
       delete sseGoals[goalId];
       updatePending(-1);
       updateTailStatus();
-      updateThinkingIndicator();
+      stopWorkingIndicator(finalMsg);
     });
 
     sse.addEventListener('lagged', () => {
       appendLine('[some output lines skipped]', 'info');
     });
 
+    // Item 4: handle SSE errors — clean up ghost subscriptions on persistent failure
+    let sseErrorCount = 0;
     sse.onerror = () => {
-      // SSE will auto-reconnect; don't spam errors
+      sseErrorCount++;
+      // After 3 consecutive errors (e.g. 404 for already-exited process), clean up
+      if (sseErrorCount >= 3 && sseGoals[goalId]) {
+        sse.close();
+        delete sseGoals[goalId];
+        updatePending(-1);
+        updateTailStatus();
+        stopWorkingIndicator('\u2713 ' + cmdLabel + ' completed');
+      }
     };
+
+    // Reset error count on successful message
+    sse.addEventListener('output', () => { sseErrorCount = 0; });
   }
 
   // ── Daemon Events SSE Stream ────────────────────────────────
@@ -813,9 +945,10 @@ body {
           const id = p.goal_id || '';
           appendLine('[goal started] "' + title + '" (' + shortId(id) + ')', 'notify');
           if (id) {
-            appendLine('auto-tailing goal output...', 'tail');
-            tailGoalOutput(id, title);
+            appendLine('Auto-tailing output for ' + shortId(id) + '...', 'tail');
+            tailGoalOutput(id, title, false, title);
             updatePending(+1);
+            startWorkingIndicator(title);
           }
         } else if (type === 'goal_completed') {
           // v0.11.5 items 2+3: goal completion notification with elapsed time and next action
@@ -892,6 +1025,20 @@ body {
       // Update parallel session limits from daemon config (v0.11.5 item 16)
       if (s.max_parallel_sessions) maxParallelSessions = s.max_parallel_sessions;
       if (s.parallel_idle_timeout_secs) parallelIdleMs = s.parallel_idle_timeout_secs * 1000;
+
+      // Apply cursor style from daemon config (v0.11.7 item 6)
+      if (s.cursor_color) {
+        document.documentElement.style.setProperty('--cursor-color', s.cursor_color);
+      }
+      if (s.cursor_style) {
+        // cursor_style is informational (CSS caret-color only supports color, not shape)
+        // Store for future use; block/bar/underline can be applied to textarea via custom CSS
+        document.documentElement.style.setProperty('--cursor-style', s.cursor_style);
+      }
+      // No-heartbeat alert threshold (v0.11.7 item 2)
+      if (s.no_heartbeat_alert_secs) {
+        workingState.noHeartbeatAlertSecs = s.no_heartbeat_alert_secs;
+      }
 
       connStatus.textContent = 'connected';
       connStatus.className = 'connected';

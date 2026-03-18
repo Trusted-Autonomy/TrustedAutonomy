@@ -37,6 +37,12 @@ pub struct ProjectStatus {
     pub max_parallel_sessions: usize,
     /// Idle timeout for parallel sessions in seconds (v0.11.5 item 16).
     pub parallel_idle_timeout_secs: u64,
+    /// CSS color for the shell input cursor (v0.11.7 item 6).
+    pub cursor_color: String,
+    /// Cursor style: "block", "bar", or "underline" (v0.11.7 item 6).
+    pub cursor_style: String,
+    /// Seconds without heartbeat before showing no-heartbeat alert (v0.11.7 item 2).
+    pub no_heartbeat_alert_secs: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,6 +179,9 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         recent_events,
         max_parallel_sessions: state.daemon_config.agent.max_parallel_sessions,
         parallel_idle_timeout_secs: state.daemon_config.agent.parallel_idle_timeout_secs,
+        cursor_color: state.daemon_config.shell.ui.cursor_color.clone(),
+        cursor_style: state.daemon_config.shell.ui.cursor_style.clone(),
+        no_heartbeat_alert_secs: state.daemon_config.shell.ui.no_heartbeat_alert_secs,
     })
 }
 

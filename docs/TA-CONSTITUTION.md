@@ -327,67 +327,23 @@ Operational runbooks execute step-by-step with each step visible to the user. Th
 
 ## 15. VCS Submit Invariant
 
-### 15.1 Isolation Before Commit
-All VCS adapters MUST route agent-produced changes through an isolation mechanism (branch, shelved CL, patch queue) before any commit. `prepare()` is the mandatory enforcement point — failure is always a hard abort, never a warning.
+### 15.1 Mandatory Branch Isolation
+All VCS adapters MUST route agent-produced changes through an isolation mechanism (branch, shelved CL, patch queue) before any commit. `prepare()` is the mandatory enforcement point — failure is always a hard abort. After `prepare()`, the adapter MUST NOT be positioned to commit directly to a protected target.
 
-### 15.2 Protected Target Guard
-After `prepare()`, the adapter MUST NOT be positioned to commit directly to a protected target. Adapters declare their protected targets via `protected_submit_targets()`. The default protected targets for Git are `main`, `master`, `trunk`, and `dev`. Each adapter may extend or override this list via configuration.
+### 15.2 Protected Target Declaration
+Adapters MUST declare protected targets via `protected_submit_targets()`. The default implementation returns an empty list (safe for adapters where `prepare()` guarantees isolation without an explicit target check). Built-in adapters MUST override:
+- **Git**: `["main", "master", "trunk", "dev"]` by default; overridable via `[submit.git].protected_branches` in `workflow.toml`.
+- **Perforce**: `["//depot/main/..."]` by default; `prepare()` creates a pending CL as isolation.
+- **SVN**: `["/trunk"]` by default; blocks direct trunk commits until branch/copy support is added.
 
-### 15.3 Verification Is Adapter-Owned
-Adapters implement `verify_not_on_protected_target()` to assert the post-`prepare()` invariant. The draft apply pipeline calls this method after `prepare()` — regardless of adapter type — via the `SourceAdapter` trait. No adapter-specific special-casing in the pipeline.
+### 15.3 Verification After Prepare
+`verify_not_on_protected_target()` MUST be called immediately after `prepare()` succeeds and before any commit or push. Hard failure on any match — the apply workflow aborts. This check replaces all hardcoded adapter-name checks in the apply path (no more `if adapter.name() == "git"`).
 
-### 15.4 Invariant Applies to Plugins
-This invariant applies to all adapters: built-in (Git, Perforce, SVN) and plugin-supplied. Plugin adapters MUST implement `protected_targets` and `verify_target` messages in the JSON-over-stdio protocol. A plugin that omits these MUST return an empty protected targets list and document this explicitly.
+### 15.4 Plugin Compliance
+When extracting adapters to external plugins, implementations MUST expose `protected_targets` and `verify_target` capabilities via the JSON-over-stdio protocol. The plugin registry SHOULD emit `tracing::warn!` if a plugin declares protected targets but `verify_target` is a no-op.
 
-### 15.5 Failure Mode
-A `prepare()` failure or protected-target guard violation produces an error with:
-- What was being attempted (commit on branch X)
-- Why it failed (prepare error or protected branch match)
-- What the user can do (clean working tree, check branch state, re-run)
-
-Silent continuation after a `prepare()` failure is a critical violation of this invariant.
-
----
-
-## 16. Constitution Review Architecture
-
-### 16.1 Static Checking Is Language- and Project-Specific
-Static constitution checkers (like the §4 injection/cleanup scanner in TA's own build pipeline) are valid only for the specific project and language they were written for. A checker for TA's Rust codebase MUST NOT run against Python, JavaScript, C++, non-code drafts (emails, posts, documents), or any project with different conventions. The TA core pipeline MUST NOT embed language- or project-specific static checks that silently no-op or mislead on unrelated projects.
-
-### 16.2 Three Review Modes
-TA supports three constitution review modes, each suited to different verification needs:
-
-**`agent-constitution-draft-review`** — Hooks into the draft review process. An AI agent reads the project's constitution (`.ta/constitution.md`) and the draft's artifacts and diff, then produces structured findings (violations, concerns, confirmations). Non-blocking by default; can be configured to block approval on high-severity findings. Best for per-change review.
-
-**`agent-constitution-project-review`** — Runs against the full project state, not just a single draft. Invoked on-demand (`ta constitution review --project`) or hooked into the release pipeline. The agent reads the constitution, the project plan, recent git history, and a configurable sample of source files, then reports systemic adherence or drift. Best for periodic health checks and pre-release gates.
-
-**`agent-build-constitution-static-checker`** — An agent that reads the project's constitution and codebase context, then *generates* a project-specific static checker. The output is a human-readable, human-editable checker definition (patterns, rules, assertions) that integrates with `ta draft build` as a plugin. This is how TA's own §4 scanner was conceptually derived — but with the right tool, the derivation is automated and any project can get a tailored checker. Humans can review and modify the generated checker before it is activated.
-
-### 16.3 Project Constitution
-Each project using TA SHOULD maintain a project constitution at `.ta/constitution.md`. A project constitution declares the behavioral invariants for that project's agents — what they may inject, how they must clean up, what targets are protected, what content policies apply. TA ships a generator (`ta constitution init`) that drafts a starter constitution from the project's plan and stated objectives. The TA constitution itself (`docs/TA-CONSTITUTION.md`) serves as the reference implementation.
-
-### 16.4 Hook Points
-Constitution review integrates through TA's hook system:
-- `draft-build-post` — run `agent-constitution-draft-review` after a draft is built
-- `draft-approve-pre` — block approval if draft review found blocking findings
-- `release-pre` — run `agent-constitution-project-review` before cutting a release
-- `constitution-check` — standalone `ta constitution check` command for CI integration
-
-Hooks are configured in `.ta/workflow.toml` and are opt-in. Default: no constitution review hooks are active.
-
-### 16.5 Separation of Concerns
-The access constitution (which files the agent may touch, governed by `ta-policy`) is separate from the behavioral constitution (what the agent may do within those files, governed by §16). Both serve human oversight, but through different mechanisms: access is enforced by the policy engine at capability-grant time; behavior is reviewed by agents or static checkers after the fact.
-
-### 16.6 No Project-Specific Logic in TA Core Commands
-TA core commands MUST NOT embed logic that is specific to TA's own codebase, language (Rust), naming conventions, or internal patterns. This includes static analyzers, pattern matchers, heuristics, or rules that were derived from observing TA's own source code. Examples of what is prohibited:
-
-- Scanning `.rs` files for `inject_*/restore_*` patterns in the generic draft build pipeline
-- Hardcoding TA-internal function name conventions as universal rules
-- Skipping non-`.rs` files with an implicit "nothing to check" result on other languages
-
-Such logic belongs exclusively in a project-specific constitution checker plugin, scoped to the project that needs it. For TA's own development, this means the §4 injection/cleanup scanner runs as a TA-project plugin, not as part of the generic `ta draft build` command. Any project using TA can have its own checker — generated or authored — but that checker MUST NOT ship inside TA core.
-
-**Rationale**: TA is a substrate for any project, in any language, producing any kind of output. Embedding TA-specific heuristics in core commands produces false positives (TA patterns flagged in unrelated projects), false negatives (non-Rust projects get no checking at all), and violates the principle that TA is invisible to the projects it mediates.
+### 15.5 This Invariant Applies to All Adapters
+The VCS Submit Invariant applies to all current built-in adapters (git, svn, perforce) and to all future plugin-supplied adapters. No adapter may bypass it through special-casing or by returning an always-Ok `verify_not_on_protected_target()` when `protected_submit_targets()` is non-empty.
 
 ---
 
@@ -407,14 +363,9 @@ For pre-release review, verify each command against these rules:
 | `ta shell` | 9.1-9.5 (thin client, daemon mediates, auto-start, version guard) |
 | `ta plan *` | 9.4 (read-only agent inspection) |
 | `ta audit verify` | 7.2 (hash chain validation) |
-| Plugins | 11.2-11.4 (discovery, isolation, signing), 15.4 (VCS submit invariant) |
+| Plugins | 11.2-11.4 (discovery, isolation, signing) |
 | Watchdog | 14.1 (detection without mutation), 14.5 (audit) |
 | Auto-heal | 14.2-14.3 (approval, scoped policy), 14.6 (escalation) |
 | Diagnostic goals | 14.4 (read-only), 6.1-6.5 (policy enforcement) |
 | Runbooks | 14.7 (step-by-step transparency), 14.2 (approval per step) |
 | `ta status` | 13.3 (confirmation), 14.1 (surfaces watchdog findings) |
-| `ta draft apply --submit` | 15.1-15.5 (VCS submit invariant, isolation, guard) |
-| `ta constitution check` | 16.4 (hook points), 16.2 (review modes) |
-| Constitution review hooks | 16.3-16.5 (project constitution, hooks, separation of concerns) |
-| Static checkers (project) | 16.1 (language/project specificity), 16.2 (build mode) |
-| TA core commands | 16.6 (no TA-specific logic in generic commands) |

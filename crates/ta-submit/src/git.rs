@@ -473,6 +473,35 @@ impl SourceAdapter for GitAdapter {
         }
     }
 
+    fn protected_submit_targets(&self) -> Vec<String> {
+        // Configured protected branches (from submit config), or the well-known defaults.
+        let custom = &self.config.git.protected_branches;
+        if !custom.is_empty() {
+            return custom.clone();
+        }
+        vec![
+            "main".to_string(),
+            "master".to_string(),
+            "trunk".to_string(),
+            "dev".to_string(),
+        ]
+    }
+
+    fn verify_not_on_protected_target(&self) -> Result<()> {
+        let current = self.current_branch()?;
+        let protected = self.protected_submit_targets();
+        if protected.iter().any(|b| b == &current) {
+            return Err(SubmitError::InvalidState(format!(
+                "Refusing to commit: still on protected branch '{}' after prepare(). \
+                 This would bypass the feature branch + PR workflow. \
+                 Check that the VCS adapter created a feature branch, then \
+                 re-run `ta draft apply --submit`.",
+                current
+            )));
+        }
+        Ok(())
+    }
+
     fn check_review(&self, review_id: &str) -> Result<Option<ReviewStatus>> {
         if !self.has_gh_cli() {
             return Ok(None);
@@ -671,6 +700,69 @@ mod tests {
             .output()?;
 
         Ok(())
+    }
+
+    #[test]
+    fn test_git_adapter_protected_targets_default() {
+        let dir = tempdir().unwrap();
+        let adapter = GitAdapter::new(dir.path());
+        let targets = adapter.protected_submit_targets();
+        assert!(targets.contains(&"main".to_string()));
+        assert!(targets.contains(&"master".to_string()));
+        assert!(targets.contains(&"trunk".to_string()));
+        assert!(targets.contains(&"dev".to_string()));
+    }
+
+    #[test]
+    fn test_git_adapter_protected_targets_custom() {
+        let dir = tempdir().unwrap();
+        let config = SubmitConfig {
+            git: crate::config::GitConfig {
+                protected_branches: vec!["release".to_string(), "staging".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let adapter = GitAdapter::with_config(dir.path(), config);
+        let targets = adapter.protected_submit_targets();
+        assert_eq!(targets, vec!["release", "staging"]);
+    }
+
+    #[test]
+    fn test_verify_not_on_protected_target_feature_branch() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+
+        let adapter = GitAdapter::new(dir.path());
+        let goal = GoalRun::new(
+            "Test Goal",
+            "Test",
+            "test-agent",
+            dir.path().to_path_buf(),
+            dir.path().join("store"),
+        );
+
+        // Create a feature branch
+        let config = SubmitConfig::default();
+        adapter.prepare(&goal, &config).unwrap();
+
+        // On a feature branch: verify should pass
+        assert!(adapter.verify_not_on_protected_target().is_ok());
+    }
+
+    #[test]
+    fn test_verify_not_on_protected_target_on_main() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+
+        let adapter = GitAdapter::new(dir.path());
+
+        // On main/master (initial branch after init): verify should fail
+        let current = adapter.current_branch().unwrap();
+        // Only test if we're on a protected branch
+        if ["main", "master", "trunk", "dev"].contains(&current.as_str()) {
+            assert!(adapter.verify_not_on_protected_target().is_err());
+        }
     }
 
     #[test]

@@ -39,6 +39,11 @@ pub struct DaemonConfig {
 /// agent = "claude-code"
 /// idle_timeout_secs = 300
 /// inject_memory = true
+///
+/// [shell.ui]
+/// cursor_color = "#ffffff"
+/// cursor_style = "block"
+/// no_heartbeat_alert_secs = 30
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -46,6 +51,56 @@ pub struct ShellQaConfig {
     /// Nested Q&A agent config.
     #[serde(default)]
     pub qa_agent: QaAgentConfig,
+    /// Web shell UI configuration (v0.11.7).
+    #[serde(default)]
+    pub ui: ShellUiConfig,
+}
+
+/// Web shell UI configuration (v0.11.7).
+///
+/// Controls visual elements of the web shell (cursor style, alert thresholds).
+///
+/// ```toml
+/// [shell.ui]
+/// cursor_color = "#ffffff"
+/// cursor_style = "block"
+/// no_heartbeat_alert_secs = 30
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellUiConfig {
+    /// CSS color for the shell input cursor (default: "#ffffff").
+    #[serde(default = "default_cursor_color")]
+    pub cursor_color: String,
+    /// Cursor style: "block", "bar", or "underline" (default: "block").
+    #[serde(default = "default_cursor_style")]
+    pub cursor_style: String,
+    /// Seconds without a heartbeat before showing the no-heartbeat alert
+    /// in the working indicator (default: 30).
+    #[serde(default = "default_no_heartbeat_alert_secs")]
+    pub no_heartbeat_alert_secs: u32,
+}
+
+fn default_cursor_color() -> String {
+    "#ffffff".to_string()
+}
+
+fn default_cursor_style() -> String {
+    "block".to_string()
+}
+
+fn default_no_heartbeat_alert_secs() -> u32 {
+    30
+}
+
+impl Default for ShellUiConfig {
+    fn default() -> Self {
+        Self {
+            cursor_color: default_cursor_color(),
+            cursor_style: default_cursor_style(),
+            no_heartbeat_alert_secs: default_no_heartbeat_alert_secs(),
+        }
+    }
 }
 
 /// Persistent Q&A agent subprocess configuration (v0.11.4.2 item 6-10).
@@ -1019,6 +1074,28 @@ mod tests {
         let toml_str = toml::to_string_pretty(&config).unwrap();
         // socket_path should be omitted when None.
         assert!(!toml_str.contains("socket_path"));
+    }
+
+    #[test]
+    fn shell_ui_config_defaults() {
+        let config = ShellUiConfig::default();
+        assert_eq!(config.cursor_color, "#ffffff");
+        assert_eq!(config.cursor_style, "block");
+        assert_eq!(config.no_heartbeat_alert_secs, 30);
+    }
+
+    #[test]
+    fn shell_ui_config_roundtrip() {
+        let toml_str = r##"
+            [shell.ui]
+            cursor_color = "#00d2ff"
+            cursor_style = "bar"
+            no_heartbeat_alert_secs = 60
+        "##;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.shell.ui.cursor_color, "#00d2ff");
+        assert_eq!(config.shell.ui.cursor_style, "bar");
+        assert_eq!(config.shell.ui.no_heartbeat_alert_secs, 60);
     }
 
     #[test]

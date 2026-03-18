@@ -2932,6 +2932,19 @@ Features:
 - **Multiple concurrent SSE streams** for parallel goal output
 - **Ctrl+L** to clear, Up/Down for command history
 - **Auto-scroll** that pauses when you scroll up
+- **Animated working indicator** — background commands show a live spinner (`Agent is working ⠿ (120s elapsed)`) updated on each heartbeat. Heartbeat lines are removed from the output stream so they don't flood the view.
+- **No-heartbeat alert** — if no heartbeat arrives within the configured window (default 30 s), the indicator turns red: `Agent is working ⚠ (150s elapsed — no heartbeat)`. Clears automatically when the next heartbeat arrives.
+- **Auto-tail on background commands** — when any command runs in the background, the shell immediately starts tailing its output. No manual `:tail` needed.
+- **Process completion states** — when a background process exits, the working indicator is replaced by a terminal status: `✓ completed`, `✗ failed (exit N)`, or `⊘ canceled`.
+
+Configure the input cursor in `.ta/daemon.toml`:
+
+```toml
+[shell.ui]
+cursor_color = "#ffffff"     # CSS color for the input cursor (default: white)
+cursor_style = "block"       # block | bar | underline (default: block)
+no_heartbeat_alert_secs = 30 # How long before the no-heartbeat alert fires
+```
 
 #### Terminal Shell (opt-in)
 

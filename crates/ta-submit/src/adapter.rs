@@ -245,6 +245,33 @@ pub trait SourceAdapter: Send + Sync {
         let _ = project_root;
         false
     }
+
+    /// Protected submit targets for this adapter (§15 VCS Submit Invariant).
+    ///
+    /// Returns the list of refs/branches/paths that agents must never commit
+    /// directly to. `prepare()` must create an isolation mechanism (feature
+    /// branch, shelved CL, etc.) before `verify_not_on_protected_target()` is
+    /// called.
+    ///
+    /// Default: empty list (no protected targets — applies to adapters that
+    /// handle isolation entirely through their `prepare()` implementation).
+    fn protected_submit_targets(&self) -> Vec<String> {
+        vec![]
+    }
+
+    /// Assert the post-`prepare()` invariant: the adapter must not be
+    /// positioned to commit directly to a protected target (§15).
+    ///
+    /// Called immediately after `prepare()` succeeds, before any commit or
+    /// push. Hard failure aborts the apply workflow.
+    ///
+    /// Default implementation: if `protected_submit_targets()` returns a
+    /// non-empty list, subclasses should override this to check the current
+    /// position. The base implementation is a no-op (safe for adapters whose
+    /// `prepare()` guarantees isolation without needing an extra check).
+    fn verify_not_on_protected_target(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Status of a VCS review/PR (v0.11.2.3).
@@ -264,6 +291,37 @@ pub use SourceAdapter as SubmitAdapter;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MockAdapter;
+    impl SourceAdapter for MockAdapter {
+        fn prepare(&self, _: &GoalRun, _: &SubmitConfig) -> Result<()> {
+            Ok(())
+        }
+        fn commit(&self, _: &GoalRun, _: &DraftPackage, _: &str) -> Result<CommitResult> {
+            unimplemented!()
+        }
+        fn push(&self, _: &GoalRun) -> Result<PushResult> {
+            unimplemented!()
+        }
+        fn open_review(&self, _: &GoalRun, _: &DraftPackage) -> Result<ReviewResult> {
+            unimplemented!()
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+    }
+
+    #[test]
+    fn default_protected_targets_empty() {
+        let adapter = MockAdapter;
+        assert!(adapter.protected_submit_targets().is_empty());
+    }
+
+    #[test]
+    fn default_verify_not_on_protected_target_ok() {
+        let adapter = MockAdapter;
+        assert!(adapter.verify_not_on_protected_target().is_ok());
+    }
 
     #[test]
     fn sync_result_is_clean_when_no_conflicts() {

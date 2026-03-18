@@ -247,6 +247,11 @@ pub struct GitConfig {
     /// When true, runs `gh pr merge --auto --squash` after `gh pr create`.
     #[serde(default)]
     pub auto_merge: bool,
+
+    /// Protected branches that agents must never commit to directly (§15).
+    /// Defaults to ["main", "master", "trunk", "dev"] when empty.
+    #[serde(default)]
+    pub protected_branches: Vec<String>,
 }
 
 impl Default for GitConfig {
@@ -258,6 +263,7 @@ impl Default for GitConfig {
             pr_template: None,
             remote: default_remote(),
             auto_merge: false,
+            protected_branches: vec![],
         }
     }
 }

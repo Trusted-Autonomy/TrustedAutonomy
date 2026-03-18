@@ -152,7 +152,6 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             id: Some(id.clone()),
             summary: *summary,
             file: file.clone(),
-            files: vec![],
             open_external: *open_external,
             detail: detail.clone(),
             format: format.clone(),

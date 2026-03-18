@@ -25,6 +25,11 @@ pub struct CmdResponse {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// Output key for a background command (v0.11.7 item 3).
+    /// When set, the web shell should auto-tail this key immediately.
+    /// Format: the same key passed to `:tail <key>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_key: Option<String>,
 }
 
 /// `POST /api/cmd` — Execute a `ta` CLI command.
@@ -354,6 +359,7 @@ pub async fn execute_command(
                 command_str, output_key_response, output_key_response
             ),
             stderr: String::new(),
+            background_key: Some(output_key_response),
         })
         .into_response();
     }
@@ -493,6 +499,7 @@ async fn run_command(
             exit_code: s.code().unwrap_or(-1),
             stdout: stdout_lines.lock().await.join("\n"),
             stderr: stderr_lines.lock().await.join("\n"),
+            background_key: None,
         }),
         Err(e) => Err(format!("Command wait error: {}", e)),
     }
