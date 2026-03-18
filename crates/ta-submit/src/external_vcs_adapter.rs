@@ -609,30 +609,35 @@ fn call_plugin(
 }
 
 /// Wait for a child process to exit, killing it after `timeout_ms` milliseconds.
+///
+/// Uses an `mpsc` channel to signal the watchdog thread as soon as the child
+/// exits, so `join()` returns immediately rather than blocking for the full
+/// `timeout_ms` on every successful (fast) invocation.
 fn wait_with_timeout(
     child: std::process::Child,
     timeout_ms: u64,
 ) -> std::result::Result<std::process::Output, String> {
-    use std::sync::{Arc, Mutex};
+    use std::sync::mpsc;
 
     let child_id = child.id();
-    let done = Arc::new(Mutex::new(false));
-    let done_clone = Arc::clone(&done);
+    let (tx, rx) = mpsc::channel::<()>();
 
-    // Spawn a watchdog thread that kills the child after timeout.
+    // Watchdog thread: waits for the "done" signal or the timeout, then kills.
     let watchdog = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(timeout_ms));
-        let already_done = *done_clone.lock().unwrap();
-        if !already_done {
-            // Best-effort kill — ignore errors (child may have already exited).
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(child_id as libc::pid_t, libc::SIGKILL);
+        match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+            Ok(()) => {
+                // Child exited normally — nothing to do.
             }
-            #[cfg(not(unix))]
-            {
-                // On Windows, use taskkill or just ignore — we don't have a clean API here.
-                let _ = child_id;
+            Err(_) => {
+                // Timeout expired (or sender dropped on early `?` return) — kill the child.
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(child_id as libc::pid_t, libc::SIGKILL);
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = child_id;
+                }
             }
         }
     });
@@ -641,7 +646,8 @@ fn wait_with_timeout(
         .wait_with_output()
         .map_err(|e| format!("wait_with_output failed: {}", e))?;
 
-    *done.lock().unwrap() = true;
+    // Signal the watchdog that the child has exited — it will wake immediately.
+    let _ = tx.send(());
     let _ = watchdog.join();
 
     Ok(output)

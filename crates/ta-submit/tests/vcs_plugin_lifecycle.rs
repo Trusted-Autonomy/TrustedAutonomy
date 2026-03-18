@@ -31,7 +31,7 @@ fn write_mock_plugin(dir: &std::path::Path) -> PathBuf {
 
 read -r line
 
-method=$(echo "$line" | sed 's/.*"method":"\([^"]*\)".*/\1/')
+method=$(echo "$line" | awk -F'"' '{print $4}')
 
 case "$method" in
   handshake)
