@@ -73,6 +73,7 @@ const VERSION_SCHEMAS: &[(&str, &str)] = &[
 ];
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum NewCommands {
     /// Start a conversational project bootstrapping session.
     Run {
