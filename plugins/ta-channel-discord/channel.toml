@@ -1,11 +1,19 @@
 name = "discord"
-version = "0.2.0"
+version = "0.3.0"
 command = "ta-channel-discord"
 protocol = "json-stdio"
-capabilities = ["deliver_question", "receive_commands"]
-description = "Discord channel plugin — posts agent questions as rich embeds, listens for commands"
+capabilities = ["deliver_question", "receive_commands", "slash_commands", "interaction_callbacks", "goal_progress", "draft_notify"]
+description = "Discord channel plugin — posts agent questions as rich embeds, handles slash commands and button clicks, streams goal progress"
 timeout_secs = 30
 
-# Listen mode: `ta-channel-discord --listen`
-# Persistent bot that watches for messages prefixed with "ta " and forwards
-# them to the daemon HTTP API. Env vars: TA_DAEMON_URL, TA_DISCORD_PREFIX.
+# Listen mode: `ta-channel-discord --listen` (or managed by daemon)
+# Persistent Gateway bot for commands, slash commands, and button callbacks.
+# Env vars: TA_DAEMON_URL, TA_DISCORD_PREFIX, TA_DISCORD_APP_ID
+#
+# Daemon-managed (recommended):
+# Set [channels.discord_listener] enabled = true in .ta/daemon.toml
+# and the daemon will auto-start the listener.
+#
+# Slash command registration (once):
+# TA_DISCORD_APP_ID=<app_id> ta-channel-discord --register-commands
+# Or for guild-only (instant): add TA_DISCORD_GUILD_ID=<guild_id>

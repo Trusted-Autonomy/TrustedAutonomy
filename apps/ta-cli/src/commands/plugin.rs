@@ -252,24 +252,35 @@ fn validate_plugins(project_root: &std::path::Path) -> anyhow::Result<()> {
 // ── Build command ──────────────────────────────────────────────────────
 
 /// A plugin source directory discovered in `plugins/`.
+/// Plugin kind: channel (deliver_question) or vcs (submit adapter).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PluginKind {
+    /// Channel plugin with channel.toml — installed to .ta/plugins/channels/<name>/
+    Channel,
+    /// VCS/submit plugin with plugin.toml — installed to .ta/plugins/vcs/<name>/
+    Vcs,
+}
+
 struct BuildablePlugin {
     /// Directory name (e.g., "ta-channel-discord").
     dir_name: String,
     /// Full path to the plugin source directory.
     source_dir: PathBuf,
-    /// Parsed channel.toml manifest.
+    /// Parsed manifest (channel.toml or plugin.toml — same structure).
     manifest: plugin::PluginManifest,
     /// Binary name from Cargo.toml [[bin]] or package name.
     binary_name: String,
     /// Whether this is a Rust plugin (has Cargo.toml).
     is_rust: bool,
+    /// Whether this is a channel or VCS plugin.
+    kind: PluginKind,
 }
 
 /// Discover buildable plugins in the `plugins/` directory.
 ///
-/// A buildable plugin is a subdirectory that contains `channel.toml` and either:
-///   - `Cargo.toml` (Rust plugin — built with `cargo build --release` by default)
-///   - A `build_command` field in `channel.toml` (non-Rust: Go, Python, Node, etc.)
+/// A buildable plugin is a subdirectory that contains either:
+///   - `channel.toml` (channel plugin) + `Cargo.toml` or `build_command`
+///   - `plugin.toml` with `type = "vcs"` + `Cargo.toml` or `build_command`
 ///
 /// The binary name is extracted from `[[bin]]` entries for Rust plugins or
 /// falls back to the directory name.
@@ -301,19 +312,30 @@ fn discover_buildable_plugins(project_root: &Path) -> Vec<BuildablePlugin> {
 
         let cargo_path = path.join("Cargo.toml");
         let channel_path = path.join("channel.toml");
+        let vcs_plugin_path = path.join("plugin.toml");
 
-        if !channel_path.exists() {
+        // Determine manifest file and kind.
+        let (manifest_path, kind) = if channel_path.exists() {
+            (channel_path, PluginKind::Channel)
+        } else if vcs_plugin_path.exists() {
+            // Check it has type = "vcs" before treating as a VCS plugin.
+            let raw = std::fs::read_to_string(&vcs_plugin_path).unwrap_or_default();
+            if !raw.contains("type = \"vcs\"") && !raw.contains("type=\"vcs\"") {
+                continue;
+            }
+            (vcs_plugin_path, PluginKind::Vcs)
+        } else {
             continue;
-        }
+        };
 
-        // Parse channel.toml.
-        let manifest = match plugin::PluginManifest::load(&channel_path) {
+        // Parse manifest (channel.toml and plugin.toml share the relevant fields).
+        let manifest = match plugin::PluginManifest::load(&manifest_path) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(
-                    path = %channel_path.display(),
+                    path = %manifest_path.display(),
                     error = %e,
-                    "Skipping plugin with invalid channel.toml"
+                    "Skipping plugin with invalid manifest"
                 );
                 continue;
             }
@@ -321,7 +343,7 @@ fn discover_buildable_plugins(project_root: &Path) -> Vec<BuildablePlugin> {
 
         let is_rust = cargo_path.exists();
 
-        // Non-Rust plugins need a build_command in channel.toml.
+        // Non-Rust plugins need a build_command in the manifest.
         if !is_rust && manifest.build_command.is_none() {
             continue;
         }
@@ -346,6 +368,7 @@ fn discover_buildable_plugins(project_root: &Path) -> Vec<BuildablePlugin> {
             manifest,
             binary_name,
             is_rust,
+            kind,
         });
     }
 
@@ -404,9 +427,9 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
     if buildable.is_empty() {
         println!("No buildable plugins found in plugins/.");
         println!();
-        println!("A buildable plugin is a subdirectory of plugins/ containing both:");
-        println!("  - Cargo.toml (Rust project)");
-        println!("  - channel.toml (plugin manifest)");
+        println!("A buildable plugin is a subdirectory of plugins/ containing:");
+        println!("  Channel plugins: Cargo.toml + channel.toml");
+        println!("  VCS plugins:     Cargo.toml + plugin.toml (with type = \"vcs\")");
         return Ok(());
     }
 
@@ -445,17 +468,26 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
     );
     println!();
 
-    let install_base = project_root.join(".ta").join("plugins").join("channels");
     let mut results: Vec<BuildResult> = Vec::new();
 
     for plugin in &to_build {
         let build_kind = if plugin.is_rust { "Rust" } else { "custom" };
+        let plugin_type_label = match plugin.kind {
+            PluginKind::Channel => "channel",
+            PluginKind::Vcs => "vcs",
+        };
         println!(
-            "  Building {} ({}/, {})...",
-            plugin.manifest.name, plugin.dir_name, build_kind
+            "  Building {} ({}/, {}, {})...",
+            plugin.manifest.name, plugin.dir_name, build_kind, plugin_type_label
         );
 
-        // Determine build command: use channel.toml build_command, or default to cargo.
+        // Install base depends on plugin kind.
+        let install_base = match plugin.kind {
+            PluginKind::Channel => project_root.join(".ta").join("plugins").join("channels"),
+            PluginKind::Vcs => project_root.join(".ta").join("plugins").join("vcs"),
+        };
+
+        // Determine build command: use manifest build_command, or default to cargo.
         let build_output = if let Some(ref build_cmd) = plugin.manifest.build_command {
             // Custom build command (non-Rust plugins).
             println!("    Running: {}", build_cmd);
@@ -477,7 +509,7 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
 
         match build_output {
             Ok(out) if out.status.success() => {
-                // Install: copy files to .ta/plugins/channels/<name>/.
+                // Install: copy files to .ta/plugins/{channels|vcs}/<name>/.
                 let target_dir = install_base.join(&plugin.manifest.name);
                 if let Err(e) = std::fs::create_dir_all(&target_dir) {
                     results.push(BuildResult {
@@ -495,6 +527,12 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
                     });
                     continue;
                 }
+
+                // Determine the manifest filename to copy.
+                let manifest_filename = match plugin.kind {
+                    PluginKind::Channel => "channel.toml",
+                    PluginKind::Vcs => "plugin.toml",
+                };
 
                 if plugin.is_rust {
                     // Rust: find binary in target/release/.
@@ -522,7 +560,7 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
 
                     let binary_size = std::fs::metadata(&binary_path).ok().map(|m| m.len());
                     let installed_binary = target_dir.join(&plugin.binary_name);
-                    let installed_manifest = target_dir.join("channel.toml");
+                    let installed_manifest = target_dir.join(manifest_filename);
 
                     let copy_result =
                         std::fs::copy(&binary_path, &installed_binary).and_then(|_| {
@@ -533,13 +571,19 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
                                 std::fs::set_permissions(&installed_binary, perms)?;
                             }
                             std::fs::copy(
-                                plugin.source_dir.join("channel.toml"),
+                                plugin.source_dir.join(manifest_filename),
                                 &installed_manifest,
                             )
                         });
 
                     match copy_result {
                         Ok(_) => {
+                            // macOS re-signing: after copy the binary's code signature
+                            // is invalidated. Re-sign with the ad-hoc identity ("-")
+                            // so Gatekeeper allows execution.
+                            #[cfg(target_os = "macos")]
+                            resign_binary_macos(&installed_binary);
+
                             println!("    Installed to {}/", target_dir.display());
                             results.push(BuildResult {
                                 name: plugin.manifest.name.clone(),
@@ -565,15 +609,25 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
                     }
                 } else {
                     // Non-Rust: copy the entire plugin source directory.
-                    let installed_manifest = target_dir.join("channel.toml");
+                    let installed_manifest = target_dir.join(manifest_filename);
                     match copy_plugin_dir(&plugin.source_dir, &target_dir) {
                         Ok(_) => {
-                            // Ensure channel.toml is present.
+                            // Ensure the manifest is present.
                             if !installed_manifest.exists() {
                                 let _ = std::fs::copy(
-                                    plugin.source_dir.join("channel.toml"),
+                                    plugin.source_dir.join(manifest_filename),
                                     &installed_manifest,
                                 );
+                            }
+                            // macOS re-signing for any Mach-O binaries in the dir.
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Some(cmd) = &plugin.manifest.command {
+                                    let installed_binary = target_dir.join(cmd);
+                                    if installed_binary.exists() {
+                                        resign_binary_macos(&installed_binary);
+                                    }
+                                }
                             }
                             println!("    Installed to {}/", target_dir.display());
                             results.push(BuildResult {
@@ -692,6 +746,47 @@ fn build_plugins(project_root: &Path, names: &[String], all: bool) -> anyhow::Re
     }
 
     Ok(())
+}
+
+/// Re-sign a binary on macOS with the ad-hoc identity (`-`).
+///
+/// After copying a Mach-O binary to a new location, the code signature is
+/// invalidated on Apple Silicon macs (SIP enforces it). Re-signing with
+/// `codesign -s - <path>` restores a valid ad-hoc signature so the OS can
+/// execute the binary without a Gatekeeper warning.
+///
+/// This is a best-effort operation — if `codesign` is not available or fails,
+/// we emit a warning but don't fail the build. The binary may still work on
+/// Intel macs or if SIP is partially disabled.
+#[cfg(target_os = "macos")]
+fn resign_binary_macos(binary_path: &Path) {
+    match std::process::Command::new("codesign")
+        .args(["--force", "--sign", "-", binary_path.to_str().unwrap_or("")])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            println!("    Re-signed (macOS ad-hoc): {}", binary_path.display());
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!(
+                "    Warning: codesign re-signing failed for {}:\n      {}\n    \
+                 The binary may not execute on Apple Silicon. \
+                 Install Xcode Command Line Tools: xcode-select --install",
+                binary_path.display(),
+                stderr.trim()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "    Warning: codesign not found ({}). \
+                 Binary at {} may need re-signing on macOS Apple Silicon. \
+                 Install Xcode Command Line Tools: xcode-select --install",
+                e,
+                binary_path.display()
+            );
+        }
+    }
 }
 
 /// Format a binary size in human-readable form.
@@ -1282,6 +1377,93 @@ path = "src/main.rs"
                 || p.dir_name == format!("ta-channel-{}", "ta-channel-discord")
         });
         assert!(found2.is_some());
+    }
+
+    #[test]
+    fn discover_buildable_finds_vcs_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("plugins").join("ta-submit-perforce");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("Cargo.toml"),
+            r#"
+[package]
+name = "ta-submit-perforce"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ta-submit-perforce"
+path = "src/main.rs"
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            r#"
+name = "perforce"
+version = "0.1.0"
+type = "vcs"
+command = "ta-submit-perforce"
+protocol = "json-stdio"
+capabilities = ["commit"]
+"#,
+        )
+        .unwrap();
+
+        let buildable = discover_buildable_plugins(dir.path());
+        assert_eq!(buildable.len(), 1);
+        assert_eq!(buildable[0].manifest.name, "perforce");
+        assert_eq!(buildable[0].binary_name, "ta-submit-perforce");
+        assert_eq!(buildable[0].kind, PluginKind::Vcs);
+        assert!(buildable[0].is_rust);
+    }
+
+    #[test]
+    fn discover_buildable_skips_vcs_plugin_without_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("plugins").join("ta-something");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("Cargo.toml"),
+            "[package]\nname = \"ta-something\"\nversion = \"0.1.0\"\nedition = \"2021\"",
+        )
+        .unwrap();
+
+        // plugin.toml without type = "vcs" → skipped
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            "name = \"something\"\nprotocol = \"json-stdio\"\n",
+        )
+        .unwrap();
+
+        let buildable = discover_buildable_plugins(dir.path());
+        assert!(buildable.is_empty());
+    }
+
+    #[test]
+    fn channel_plugin_has_channel_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("plugins").join("ta-channel-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("Cargo.toml"),
+            "[package]\nname = \"ta-channel-test\"\nversion = \"0.1.0\"\nedition = \"2021\"",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join("channel.toml"),
+            "name = \"test\"\ncommand = \"ta-channel-test\"\nprotocol = \"json-stdio\"",
+        )
+        .unwrap();
+
+        let buildable = discover_buildable_plugins(dir.path());
+        assert_eq!(buildable.len(), 1);
+        assert_eq!(buildable[0].kind, PluginKind::Channel);
     }
 
     #[test]

@@ -4316,25 +4316,29 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 ---
 
 ### v0.12.1 — Discord Channel Polish
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Complete the Discord channel integration started in v0.10.18. Replace the quick-fix message-prefix listener with a proper slash-command integration, give the daemon full control over listener lifecycle, and add user-facing features (progress streaming, draft notifications, response threading) that make Discord a first-class TA interaction surface.
 
 **Depends on**: v0.12.0 (Discord template context), v0.10.2.1 (Discord external plugin architecture)
 
 #### Items
 
-1. [ ] **Discord slash commands**: Register `/ta` slash command via Discord Application Commands API instead of message-prefix matching. Benefits: auto-complete, built-in help, no MESSAGE_CONTENT intent required, works in servers with strict permissions.
-2. [ ] **Interaction callback handler**: Handle button clicks from `deliver_question` embeds. Currently button `custom_id` values (e.g., `ta_{interaction_id}_yes`) are sent to Discord but no handler receives them. Add an HTTP endpoint or Gateway handler that receives interaction callbacks and POSTs answers to the daemon's `/api/interactions/:id/respond`.
-3. [ ] **Gateway reconnect with resume**: Current listener reconnects from scratch on disconnect. Implement Discord's resume protocol (session_id + last sequence number) for seamless reconnection without missed events.
-4. [ ] **Daemon auto-launches listener**: The daemon should auto-start `ta-channel-discord --listen` when `default_channels` includes `"discord"` in `daemon.toml`, instead of requiring a separate manual process. Lifecycle: daemon starts → spawns listener → monitors health → restarts on crash.
-5. [ ] **Rate limiting**: Add rate limiting on command forwarding to prevent Discord abuse from flooding the daemon API.
-6. [ ] **Response threading**: Post command responses as thread replies to the original message instead of top-level messages, to keep the channel clean.
-7. [ ] **Long-running command status**: For commands that take >5s (e.g., `ta run`), post an initial "Running..." message, then edit it with the result when done. Use Discord message editing API.
-8. [ ] **Remove `--listen` flag**: Once the daemon manages the listener lifecycle (item 4), the standalone `--listen` mode becomes internal. The user-facing entry point is `ta daemon start` with Discord configured in `daemon.toml`.
-9. [ ] **Goal progress streaming**: Subscribe to daemon SSE events for active goals and post progress updates to the Discord channel (stage transitions, key milestones). Avoids flooding by batching/throttling updates.
-10. [ ] **Draft summary on completion**: When a goal finishes and produces a draft, post the AI summary + artifact list to Discord. Include approve/deny buttons that call the daemon API.
-11. [ ] **`ta plugin build <name|all>`**: Build channel/submit plugins from the main workspace. `ta plugin build discord` builds `plugins/ta-channel-discord`, `ta plugin build all` builds all plugins. Re-signs binaries on macOS after copy.
-12. [ ] **Reference template: ta-discord-template**: Published to `Trusted-Autonomy/ta-discord-template`. Demonstrates Discord channel plugin integration with a local TA daemon. Includes project.toml, setup.sh, .env.example, test-connection script. *(external repo)*
+1. [x] **Discord slash commands**: Register `/ta` slash command via Discord Application Commands API instead of message-prefix matching. Benefits: auto-complete, built-in help, no MESSAGE_CONTENT intent required, works in servers with strict permissions. (`--register-commands` flag + `INTERACTION_CREATE` handler in listener.rs)
+2. [x] **Interaction callback handler**: Handle button clicks from `deliver_question` embeds. `INTERACTION_TYPE_MESSAGE_COMPONENT` events parsed, `custom_id` decoded, answers POSTed to `/api/interactions/:id/respond`. (listener.rs `handle_interaction_create`)
+3. [x] **Gateway reconnect with resume**: `GatewaySession` tracks `session_id` + `sequence` + `resume_gateway_url`. Reconnect sends `OP_RESUME`; falls back to fresh `IDENTIFY` on `OP_INVALID_SESSION`. (listener.rs)
+4. [x] **Daemon auto-launches listener**: `[channels.discord_listener] enabled = true` in `daemon.toml` makes the daemon spawn `ta-channel-discord --listen` and restart on crash. (`channel_listener_manager.rs`, `DiscordListenerConfig` in config.rs)
+5. [x] **Rate limiting**: Per-user token bucket (10 cmds / 60s, configurable as constants). Excess commands get a polite Discord reply. (listener.rs `RateLimiter`)
+6. [x] **Response threading**: All command responses posted as `message_reference` replies to the original message, keeping the main channel clean. (listener.rs `post_thread_reply`)
+7. [x] **Long-running command status**: Posts `:hourglass_flowing_sand: Working…` placeholder immediately, then edits it with the final result. (listener.rs `execute_command_with_status`)
+8. [x] **Remove `--listen` flag**: Flag remains but is now "internal" — daemon manages the lifecycle. Users configure `[channels.discord_listener]` in `daemon.toml` instead of running `--listen` manually. Help text updated accordingly.
+9. [x] **Goal progress streaming**: `progress.rs` subscribes to `/api/events` SSE stream, posts goal state transition embeds throttled at 1/10s per goal. (progress.rs `run_progress_streamer`)
+10. [x] **Draft summary on completion**: `progress.rs` handles `draft.ready` events, posts summary embed with artifact count + approve/deny buttons. (progress.rs `handle_draft_ready`)
+11. [x] **`ta plugin build <name|all>`**: Extended to discover and build VCS plugins (plugin.toml with `type = "vcs"`) in addition to channel plugins. Install path is `.ta/plugins/vcs/<name>/`. macOS ad-hoc re-signing via `codesign -s -` after binary copy. (plugin.rs `resign_binary_macos`, VCS discovery)
+12. [ ] **Reference template: ta-discord-template**: Published to `Trusted-Autonomy/ta-discord-template`. *(external repo — deferred: requires GitHub repo creation outside this codebase)*
+
+#### Deferred items moved/resolved
+
+- Item 12 (ta-discord-template reference repo) → deferred to future work, requires creating an external GitHub repository.
 
 #### Version: `0.12.1-alpha`
 

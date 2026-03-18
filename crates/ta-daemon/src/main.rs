@@ -33,6 +33,7 @@
 
 mod api;
 pub mod channel_dispatcher;
+pub mod channel_listener_manager;
 mod config;
 pub mod config_watcher;
 pub mod external_channel;
@@ -226,6 +227,20 @@ async fn main() -> Result<()> {
             }
             shutdown.notify_waiters();
         });
+    }
+
+    // Start Discord listener manager if configured (v0.12.1).
+    // Runs in both API and MCP modes so Discord is available regardless of how
+    // the daemon is started.
+    if daemon_config.channels.discord_listener.enabled {
+        tracing::info!(
+            "Discord listener auto-start enabled — spawning ta-channel-discord --listen"
+        );
+        channel_listener_manager::start(
+            project_root.clone(),
+            daemon_config.channels.discord_listener.clone(),
+            shutdown.clone(),
+        );
     }
 
     if cli.api {

@@ -588,6 +588,69 @@ pub struct ChannelsConfig {
     /// Restricts which users/roles can interact with TA through channels.
     #[serde(default)]
     pub access_control: ChannelAccessControl,
+    /// Discord listener auto-launch configuration (v0.12.1).
+    ///
+    /// When set, the daemon auto-starts `ta-channel-discord --listen` and
+    /// monitors its health, restarting on crash.
+    ///
+    /// ```toml
+    /// [channels.discord_listener]
+    /// enabled = true
+    /// # Optional: override the binary name (default: "ta-channel-discord")
+    /// # binary = "ta-channel-discord"
+    /// # Optional: extra env vars for the listener process
+    /// # env = { TA_DISCORD_PREFIX = "bot " }
+    /// ```
+    #[serde(default)]
+    pub discord_listener: DiscordListenerConfig,
+}
+
+/// Configuration for the daemon-managed Discord listener process (v0.12.1).
+///
+/// When `enabled = true` and `"discord"` is in `default_channels`, the daemon
+/// spawns `ta-channel-discord --listen` and restarts it if it crashes.
+///
+/// The listener process inherits the daemon's environment, so
+/// `TA_DISCORD_TOKEN` and `TA_DISCORD_CHANNEL_ID` must be set in the
+/// daemon's environment (or in the system service unit file).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiscordListenerConfig {
+    /// Whether to auto-start the Discord listener. Default: false (opt-in).
+    pub enabled: bool,
+    /// Binary name or path. Defaults to `"ta-channel-discord"` (must be on PATH
+    /// or in `.ta/plugins/channels/discord/`).
+    #[serde(default = "default_discord_binary")]
+    pub binary: String,
+    /// Seconds between restart attempts after a crash. Default: 10.
+    #[serde(default = "default_restart_delay_secs")]
+    pub restart_delay_secs: u64,
+    /// Maximum consecutive restarts before giving up. 0 = unlimited.
+    #[serde(default = "default_max_restarts")]
+    pub max_restarts: u32,
+}
+
+fn default_discord_binary() -> String {
+    "ta-channel-discord".to_string()
+}
+
+fn default_restart_delay_secs() -> u64 {
+    10
+}
+
+fn default_max_restarts() -> u32 {
+    0 // unlimited by default
+}
+
+impl Default for DiscordListenerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            binary: default_discord_binary(),
+            restart_delay_secs: default_restart_delay_secs(),
+            max_restarts: default_max_restarts(),
+        }
+    }
 }
 
 /// Inline external channel plugin configuration in daemon.toml.
