@@ -4345,15 +4345,15 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 ---
 
 ### v0.12.2 — Shell Paste-at-End UX
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix the `ta shell` paste behavior so that pasting (⌘V / Ctrl+V / middle-click) always appends at the end of the current `ta>` prompt text, regardless of where the visual cursor is positioned. Users naturally click or scroll around while reading output and forget where the cursor is — paste should always go to the input buffer end, not a random insertion point.
 
 #### Items
 
-1. [ ] **Intercept paste event in TUI**: Detect paste sequences (OSC 52, bracketed paste `\e[200~`, or large clipboard burst) in the TUI shell input handler.
-2. [ ] **Force cursor to end before paste**: When a paste event is detected, move the cursor to `input_buffer.len()` before inserting characters.
-3. [ ] **Web shell**: Verify the web shell textarea already appends at end (standard browser behavior). Add a test if not.
-4. [ ] **Bracketed paste mode**: Enable terminal bracketed paste mode (`\e[?2004h`) so multi-line pastes arrive as a unit. Strip leading/trailing newlines to avoid accidental submission.
+1. [x] **Intercept paste event in TUI**: Detect paste sequences (OSC 52, bracketed paste `\e[200~`, or large clipboard burst) in the TUI shell input handler.
+2. [x] **Force cursor to end before paste**: When a paste event is detected, move the cursor to `input_buffer.len()` before inserting characters.
+3. [x] **Web shell**: Added `paste` event listener to `shell.html` that forces insertion at end; standard `<input>` pastes at cursor, so the listener moves cursor to end before inserting.
+4. [x] **Bracketed paste mode**: Enable terminal bracketed paste mode (`\e[?2004h`) so multi-line pastes arrive as a unit. Strip leading/trailing newlines to avoid accidental submission.
 5. [ ] **Manual test**: Paste with cursor at start, middle, and end of input; verify text always appears at end. Test in Terminal.app, iTerm2, and the web shell.
 
 #### Version: `0.12.2-alpha`
