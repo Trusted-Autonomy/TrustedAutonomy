@@ -730,6 +730,24 @@ body {
     }
   });
 
+  // Paste-at-end: always append pasted text at the end of the input value (v0.12.2).
+  // Standard browser <input> pastes at cursor position, but for a shell prompt
+  // users expect paste to land at the end regardless of where they clicked.
+  input.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text');
+    if (!text) return;
+    // Normalize: strip leading/trailing newlines, replace tabs with spaces.
+    const safe = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      .replace(/\t/g, '    ').replace(/^\n+|\n+$/g, '');
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
+    document.execCommand('insertText', false, safe);
+    // Ensure cursor stays at end after insertion.
+    const newEnd = input.value.length;
+    input.setSelectionRange(newEnd, newEnd);
+  });
+
   // Keep input focused
   document.addEventListener('click', () => {
     if (window.getSelection().toString()) return;

@@ -1868,18 +1868,25 @@ async fn handle_terminal_event(
         }
         Event::Paste(data) => {
             // Bracketed paste: normalize CRLF → LF, standalone CR → LF, tabs → spaces.
+            // Strip leading/trailing newlines to prevent accidental submission (v0.12.2).
             let safe = data
                 .replace("\r\n", "\n")
                 .replace('\r', "\n")
-                .replace('\t', "    ");
+                .replace('\t', "    ")
+                .trim_matches('\n')
+                .to_string();
             let line_count = safe.lines().count();
             let char_count = safe.chars().count();
             if char_count > PASTE_CHAR_THRESHOLD || line_count > PASTE_LINE_THRESHOLD {
                 // Large paste: compact into an indicator, store full text separately.
+                // Cursor position is irrelevant here; submit() combines prefix + paste.
                 app.pending_paste = Some(safe);
                 app.paste_preview_expanded = false;
             } else {
-                // Small paste: insert verbatim (newlines preserved; only Enter submits).
+                // Small paste: always append at end of input regardless of cursor position
+                // (v0.12.2). Users paste via ⌘V/Ctrl+V after clicking around the output
+                // pane and expect the text to land at the prompt end, not mid-input.
+                app.cursor = app.input.len();
                 for ch in safe.chars() {
                     app.insert_char(ch);
                 }
@@ -5508,6 +5515,132 @@ mod tests {
         app.pending_paste = Some(String::new());
         let result = app.submit();
         assert!(result.is_none(), "empty pending paste should not submit");
+    }
+
+    // ── Paste-at-end tests (v0.12.2) ──────────────────────────────────────────
+
+    /// Helper that simulates the Event::Paste handler on an App.
+    fn simulate_paste(app: &mut App, data: &str) {
+        let safe = data
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ")
+            .trim_matches('\n')
+            .to_string();
+        let line_count = safe.lines().count();
+        let char_count = safe.chars().count();
+        if char_count > PASTE_CHAR_THRESHOLD || line_count > PASTE_LINE_THRESHOLD {
+            app.pending_paste = Some(safe);
+            app.paste_preview_expanded = false;
+        } else {
+            app.cursor = app.input.len();
+            for ch in safe.chars() {
+                app.insert_char(ch);
+            }
+        }
+    }
+
+    #[test]
+    fn small_paste_with_cursor_at_start_appends_at_end() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Type "hello" then move cursor to the beginning.
+        for ch in "hello".chars() {
+            app.insert_char(ch);
+        }
+        app.cursor = 0;
+        assert_eq!(app.cursor, 0);
+        simulate_paste(&mut app, "world");
+        // Pasted text must appear at the end, not at position 0.
+        assert_eq!(
+            app.input, "helloworld",
+            "paste should append at end when cursor is at start"
+        );
+        assert_eq!(
+            app.cursor,
+            app.input.len(),
+            "cursor should be at end after paste"
+        );
+    }
+
+    #[test]
+    fn small_paste_with_cursor_in_middle_appends_at_end() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for ch in "abcde".chars() {
+            app.insert_char(ch);
+        }
+        // Move cursor to middle (position 2, between 'b' and 'c').
+        app.cursor = 2;
+        simulate_paste(&mut app, "XYZ");
+        assert_eq!(
+            app.input, "abcdeXYZ",
+            "paste should append at end even when cursor is mid-input"
+        );
+        assert_eq!(app.cursor, app.input.len());
+    }
+
+    #[test]
+    fn small_paste_with_cursor_at_end_appends_normally() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for ch in "prefix ".chars() {
+            app.insert_char(ch);
+        }
+        // Cursor is already at the end here.
+        assert_eq!(app.cursor, app.input.len());
+        simulate_paste(&mut app, "pasted");
+        assert_eq!(app.input, "prefix pasted");
+    }
+
+    #[test]
+    fn paste_strips_leading_and_trailing_newlines() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Leading/trailing newlines are stripped to avoid accidental submit.
+        simulate_paste(&mut app, "\nhello\n");
+        assert_eq!(
+            app.input, "hello",
+            "leading/trailing newlines must be stripped"
+        );
+    }
+
+    #[test]
+    fn paste_strips_multiple_leading_trailing_newlines() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        simulate_paste(&mut app, "\n\nhello world\n\n");
+        assert_eq!(app.input, "hello world");
+    }
+
+    #[test]
+    fn paste_preserves_internal_newlines() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // A small multi-line paste (under threshold) keeps internal newlines intact.
+        simulate_paste(&mut app, "line one\nline two");
+        assert_eq!(
+            app.input, "line one\nline two",
+            "internal newlines in a small paste must be preserved"
+        );
     }
 
     #[test]
