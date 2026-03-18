@@ -149,20 +149,12 @@ mod tests {
     fn cargo_adapter_test_captures_failure_unix() {
         let dir = tempdir().unwrap();
         let script_path = dir.path().join("fail.sh");
-        // Write + sync + close the file before chmod+exec to avoid ETXTBSY.
-        {
-            use std::io::Write;
-            let mut f = std::fs::File::create(&script_path).unwrap();
-            f.write_all(b"#!/bin/sh\nexit 1\n").unwrap();
-            f.sync_all().unwrap();
-        }
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let adapter = CargoAdapter::with_commands(
-            dir.path(),
-            None,
-            Some(script_path.to_string_lossy().to_string()),
-        );
+        std::fs::write(&script_path, b"#!/bin/sh\nexit 1\n").unwrap();
+        // Run via `sh <path>` rather than exec'ing the script directly.
+        // Direct execve() on a freshly-written file triggers ETXTBSY (os error 26)
+        // on Linux even after sync, because the kernel sees the inode as still open.
+        let cmd = format!("sh {}", script_path.to_string_lossy());
+        let adapter = CargoAdapter::with_commands(dir.path(), None, Some(cmd));
         let result = adapter.test().unwrap();
         assert!(!result.success);
         assert_eq!(result.exit_code, 1);

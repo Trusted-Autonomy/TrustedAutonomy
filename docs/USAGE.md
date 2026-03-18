@@ -314,6 +314,16 @@ ta> exit                                # Done for now
 
 The shell remembers your command history across sessions. Reconnect any time with `ta shell` -- the daemon keeps running.
 
+**Pasting large text**: The shell automatically compacts large pastes (over 500 chars or 10 lines). Instead of flooding the input with raw text, you'll see an indicator:
+
+```
+ta> [Pasted 2,847 chars / 47 lines — Tab to preview, Esc to cancel]
+```
+
+- Press **Tab** to toggle an inline preview of the first few lines.
+- Press **Enter** to send the full paste text (combined with anything you typed before pasting).
+- Press **Esc** or **Ctrl-C** to discard the paste.
+
 ---
 
 ## Core Concepts
