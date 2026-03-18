@@ -90,6 +90,11 @@ esac
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).unwrap();
+    // On Linux with overlayfs (e.g. Nix devShell TMPDIR), executing a file
+    // immediately after writing it can race against the kernel completing the
+    // copy-up, returning ETXTBSY (error 26).  Reading the file back forces
+    // the inode into a fully-committed state before we try to exec it.
+    let _ = std::fs::read(&path).unwrap();
     path
 }
 
