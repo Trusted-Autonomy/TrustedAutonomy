@@ -605,6 +605,17 @@ pub fn execute(
         if let Err(e) = event_store.append(&EventEnvelope::new(event)) {
             tracing::warn!("Failed to persist GoalStarted event: {}", e);
         }
+        // In headless mode the daemon scans stderr for this line to register
+        // a UUID→output_key alias so :tail and SSE auto-tail can connect.
+        // Uses ta_events::GOAL_STARTED_SENTINEL — must stay in sync with cmd.rs scanner.
+        if headless {
+            eprintln!(
+                "{} \"{}\" ({})",
+                ta_events::GOAL_STARTED_SENTINEL,
+                title,
+                goal.goal_run_id
+            );
+        }
     }
 
     // Build the prompt string.

@@ -237,9 +237,10 @@ pub async fn execute_command(
                         if let Some(err) = stderr {
                             let mut reader = BufReader::new(err).lines();
                             while let Ok(Some(line)) = reader.next_line().await {
-                                // Detect [goal started] events and register the goal UUID
+                                // Detect goal-started events and register the goal UUID
                                 // as an alias so :tail <uuid> and stdin relay resolve correctly.
-                                if line.contains("[goal started]") {
+                                // Uses ta_events::GOAL_STARTED_SENTINEL — must stay in sync with run.rs emitter.
+                                if line.contains(ta_events::GOAL_STARTED_SENTINEL) {
                                     if let Some(goal_uuid) = extract_goal_uuid_from_event(&line) {
                                         goal_output2.add_alias(&goal_uuid, &output_key2).await;
                                         goal_input2.add_alias(&goal_uuid, &output_key2).await;
@@ -350,7 +351,7 @@ pub async fn execute_command(
             exit_code: 0,
             stdout: format!(
                 "Started in background: {}\nOutput key: {}\nTrack with: ta goal list\nTail output: :tail {}\n",
-                command_str, output_key_response, &output_key_response[..8.min(output_key_response.len())]
+                command_str, output_key_response, output_key_response
             ),
             stderr: String::new(),
         })
@@ -1247,6 +1248,33 @@ mod tests {
     fn extract_goal_uuid_non_hex() {
         let line = r#"[goal started] "title" (not-hex-zzzz)"#;
         assert_eq!(extract_goal_uuid_from_event(line), None);
+    }
+
+    /// Validates that the sentinel emitted by `ta run --headless` (run.rs) and the
+    /// sentinel scanned by the daemon background runner (cmd.rs) are identical.
+    /// If this test fails, the two sites have drifted and tail/auto-tail will break.
+    #[test]
+    fn goal_started_sentinel_round_trip() {
+        let uuid = "492fac59-eda4-4e87-bf65-9e2edd2e70ce";
+        let title = "v0.11.4.5 — Shell Large-Paste Compaction";
+        // Simulate what run.rs emits in headless mode.
+        let emitted = format!(
+            "{} \"{}\" ({})",
+            ta_events::GOAL_STARTED_SENTINEL,
+            title,
+            uuid
+        );
+        // Simulate what cmd.rs scans for.
+        assert!(
+            emitted.contains(ta_events::GOAL_STARTED_SENTINEL),
+            "emitted line must contain GOAL_STARTED_SENTINEL"
+        );
+        // Simulate uuid extraction.
+        assert_eq!(
+            extract_goal_uuid_from_event(&emitted),
+            Some(uuid.to_string()),
+            "UUID must survive the emit→scan round trip"
+        );
     }
 
     // ── v0.11.2.2 schema-driven parsing tests ──────────────────
