@@ -6,6 +6,11 @@
 //! The mock plugin script responds to every method with a hardcoded success
 //! response. This validates the adapter-to-plugin plumbing without requiring
 //! a live VCS installation.
+//!
+//! Unix-only: the mock plugin is a shell script and relies on Unix executable
+//! permissions. Windows CI skips this test file entirely.
+
+#![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
