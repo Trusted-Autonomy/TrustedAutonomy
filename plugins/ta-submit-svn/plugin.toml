@@ -1,0 +1,19 @@
+name = "svn"
+version = "0.1.0"
+type = "vcs"
+command = "ta-submit-svn"
+protocol = "json-stdio"
+capabilities = ["commit", "push", "sync", "save_state", "protected_targets"]
+description = "Subversion (SVN) VCS adapter — commit-based workflow, no separate push step"
+timeout_secs = 60
+
+# Installation:
+# 1. Build: cargo build --release
+# 2. Copy binary to PATH or to .ta/plugins/vcs/svn/
+# 3. Copy this plugin.toml to .ta/plugins/vcs/svn/
+# 4. Set submit.adapter = "svn" in .ta/workflow.toml
+#
+# Notes:
+# - SVN commit is immediately remote (no local-only commits)
+# - The push() method is a no-op since commit() already sends to the server
+# - SVN does not have built-in code review; use an external tool (Crucible, ReviewBoard)

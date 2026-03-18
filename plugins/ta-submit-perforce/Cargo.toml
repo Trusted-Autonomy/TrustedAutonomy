@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "ta-submit-perforce"
+version = "0.1.0"
+edition = "2021"
+description = "Perforce / Helix Core VCS adapter plugin for Trusted Autonomy — external JSON-over-stdio plugin"
+license = "Apache-2.0"
+
+[[bin]]
+name = "ta-submit-perforce"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

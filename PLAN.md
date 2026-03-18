@@ -4659,7 +4659,7 @@ auto_approve_reads = true  # SELECT is fine, INSERT/UPDATE/DELETE needs review
 ---
 
 ### v0.13.5 — VCS Adapter Externalization
-<!-- status: pending -->
+<!-- status: done -->
 <!-- priority: pre-alpha — moved earlier; Perforce users need this before public alpha; no dependency on v0.13.1 or v0.13.2 (uses JSON-over-stdio protocol from v0.10.2) -->
 **Goal**: Migrate VCS adapters from built-in compiled code to external plugins using the same JSON-over-stdio protocol as channel plugins. Git remains built-in as the zero-dependency fallback. Perforce, SVN, and any future VCS adapters become external plugins that users install when needed.
 
@@ -4673,16 +4673,16 @@ Today git, perforce, and svn adapters are compiled into the `ta` binary. This me
 Channel plugins proved this migration pattern works (Discord went from built-in crate to external plugin in v0.10.2.1). VCS adapters follow the same path.
 
 #### Items
-1. [ ] **`ta-submit-*` plugin protocol**: Define the JSON-over-stdio protocol for VCS plugins. Messages: `detect` (auto-detect from project), `exclude_patterns`, `save_state`, `restore_state`, `commit`, `push`, `open_review`, `revision_id`. Same request/response structure as channel plugins.
-2. [ ] **Plugin discovery for VCS adapters**: When `submit.adapter = "perforce"`, TA checks built-in adapters first, then looks for `ta-submit-perforce` in `.ta/plugins/vcs/`, `~/.config/ta/plugins/vcs/`, and `$PATH`.
-3. [ ] **Extract PerforceAdapter to external plugin**: Move `crates/ta-submit/src/perforce.rs` logic into `plugins/ta-submit-perforce/` as a standalone Rust binary. Communicates via JSON-over-stdio. Include `plugin.toml` manifest.
-4. [ ] **Extract SvnAdapter to external plugin**: Same treatment for `svn.rs` → `plugins/ta-submit-svn/`.
-5. [ ] **GitAdapter stays built-in**: Git is the overwhelmingly common case. Keep it compiled in as the zero-configuration default. It also serves as the reference implementation for the protocol.
-6. [ ] **VCS plugin manifest (`plugin.toml`)**: Same schema as channel plugins but with `type = "vcs"` and `capabilities = ["commit", "push", "review", ...]`.
-7. [ ] **Adapter version negotiation**: On first contact, TA sends `{"method": "handshake", "params": {"ta_version": "...", "protocol_version": 1}}`. Plugin responds with its version and supported protocol version. TA refuses plugins with incompatible protocol versions.
-8. [ ] **Test: external VCS plugin lifecycle**: Integration test with a mock VCS plugin (shell script that speaks the protocol) verifying detect → save_state → commit → restore_state flow.
-9. [ ] **§15 compliance — carry forward to plugins**: The built-in Perforce and SVN adapters will already implement `protected_submit_targets()` and `verify_not_on_protected_target()` (added in v0.11.7). When extracting to plugins, port those implementations into the plugin binary and expose them via the JSON-over-stdio protocol (`protected_targets` and `verify_target` messages).
-10. [ ] **§15 compliance — plugin registry enforcement**: When loading any submit adapter plugin, validate that `protected_submit_targets()` and `verify_not_on_protected_target()` are consistent. Emit `tracing::warn!` if an adapter declares protected targets but verify is a no-op. Add to `plugin.toml` capabilities: `"protected_targets"` to signal §15 compliance.
+1. [x] **`ta-submit-*` plugin protocol**: Define the JSON-over-stdio protocol for VCS plugins. Messages: `detect` (auto-detect from project), `exclude_patterns`, `save_state`, `restore_state`, `commit`, `push`, `open_review`, `revision_id`. Same request/response structure as channel plugins. → `crates/ta-submit/src/vcs_plugin_protocol.rs`
+2. [x] **Plugin discovery for VCS adapters**: When `submit.adapter = "perforce"`, TA checks built-in adapters first, then looks for `ta-submit-perforce` in `.ta/plugins/vcs/`, `~/.config/ta/plugins/vcs/`, and `$PATH`. → `crates/ta-submit/src/vcs_plugin_manifest.rs` + updated `registry.rs`
+3. [x] **Extract PerforceAdapter to external plugin**: Move `crates/ta-submit/src/perforce.rs` logic into `plugins/ta-submit-perforce/` as a standalone Rust binary. Communicates via JSON-over-stdio. Include `plugin.toml` manifest. → `plugins/ta-submit-perforce/`
+4. [x] **Extract SvnAdapter to external plugin**: Same treatment for `svn.rs` → `plugins/ta-submit-svn/`. → `plugins/ta-submit-svn/`
+5. [x] **GitAdapter stays built-in**: Git is the overwhelmingly common case. Keep it compiled in as the zero-configuration default. It also serves as the reference implementation for the protocol.
+6. [x] **VCS plugin manifest (`plugin.toml`)**: Same schema as channel plugins but with `type = "vcs"` and `capabilities = ["commit", "push", "review", ...]`. → `VcsPluginManifest` in `vcs_plugin_manifest.rs`
+7. [x] **Adapter version negotiation**: On first contact, TA sends `{"method": "handshake", "params": {"ta_version": "...", "protocol_version": 1}}`. Plugin responds with its version and supported protocol version. TA refuses plugins with incompatible protocol versions. → `ExternalVcsAdapter::new()` handshake
+8. [x] **Test: external VCS plugin lifecycle**: Integration test with a mock VCS plugin (shell script that speaks the protocol) verifying detect → save_state → commit → restore_state flow. → `crates/ta-submit/tests/vcs_plugin_lifecycle.rs` (12 integration tests)
+9. [x] **§15 compliance — carry forward to plugins**: The built-in Perforce and SVN adapters implement `protected_submit_targets()` and `verify_not_on_protected_target()` (added in v0.11.7). Ported to plugin binaries as `protected_targets` and `verify_target` messages.
+10. [x] **§15 compliance — plugin registry enforcement**: When loading any submit adapter plugin, `enforce_section15_plugin()` warns if `"protected_targets"` capability is absent. `plugin.toml` capabilities include `"protected_targets"` to signal §15 compliance.
 
 #### Version: `0.13.5-alpha`
 
