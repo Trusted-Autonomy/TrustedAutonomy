@@ -494,38 +494,47 @@ impl Default for ShellConfig {
                 ShortcutEntry {
                     r#match: "approve".to_string(),
                     expand: "ta draft approve".to_string(),
+                    bare_only: false,
                 },
                 ShortcutEntry {
                     r#match: "deny".to_string(),
                     expand: "ta draft deny".to_string(),
+                    bare_only: false,
                 },
                 ShortcutEntry {
                     r#match: "view".to_string(),
                     expand: "ta draft view".to_string(),
+                    bare_only: false,
                 },
                 ShortcutEntry {
                     r#match: "apply".to_string(),
                     expand: "ta draft apply".to_string(),
+                    bare_only: false,
                 },
                 ShortcutEntry {
                     r#match: "status".to_string(),
                     expand: "ta status".to_string(),
+                    bare_only: false,
                 },
                 ShortcutEntry {
                     r#match: "plan".to_string(),
                     expand: "ta plan list".to_string(),
+                    bare_only: true,
                 },
                 ShortcutEntry {
                     r#match: "goals".to_string(),
                     expand: "ta goal list".to_string(),
+                    bare_only: true,
                 },
                 ShortcutEntry {
                     r#match: "drafts".to_string(),
                     expand: "ta draft list".to_string(),
+                    bare_only: true,
                 },
                 ShortcutEntry {
                     r#match: "release".to_string(),
                     expand: "ta release run --yes".to_string(),
+                    bare_only: true,
                 },
             ],
             ta_subcommands: default_ta_subcommands(),
@@ -568,6 +577,13 @@ pub struct RouteEntry {
 pub struct ShortcutEntry {
     pub r#match: String,
     pub expand: String,
+    /// When true, only fire for a bare word with no trailing text.
+    /// If the user types `<match> <rest>`, routing falls through to
+    /// `ta_subcommands`, building `ta <match> <rest>` instead.
+    /// Use for shortcuts that expand to a terminal command (e.g. `ta plan list`)
+    /// where the user may also type explicit subcommands (`plan status`).
+    #[serde(default)]
+    pub bare_only: bool,
 }
 
 /// Channel delivery configuration for external question routing.

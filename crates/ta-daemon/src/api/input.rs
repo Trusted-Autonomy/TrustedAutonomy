@@ -168,6 +168,10 @@ fn expand_shortcut(text: &str, shortcuts: &[ShortcutEntry]) -> Option<String> {
             let rest = text[first_word.len()..].trim_start();
             if rest.is_empty() {
                 return Some(shortcut.expand.clone());
+            } else if shortcut.bare_only {
+                // Don't expand — fall through so `ta_subcommands` can route
+                // `<match> <rest>` as `ta <match> <rest>` instead.
+                return None;
             } else {
                 return Some(format!("{} {}", shortcut.expand, rest));
             }
@@ -239,11 +243,12 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_release() {
+    fn shortcut_release_with_subcommand_falls_through() {
+        // bare_only: release with args falls through to ta_subcommands → ta release <args>
         let config = default_config();
-        match route_input("release v0.10.6", &config) {
-            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta release run --yes v0.10.6"),
-            _ => panic!("expected Command from release shortcut"),
+        match route_input("release run --yes", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta release run --yes"),
+            _ => panic!("expected Command from ta_subcommands"),
         }
     }
 
@@ -253,6 +258,34 @@ mod tests {
         match route_input("release", &config) {
             RouteDecision::Command(cmd) => assert_eq!(cmd, "ta release run --yes"),
             _ => panic!("expected Command from release shortcut"),
+        }
+    }
+
+    #[test]
+    fn plan_bare_expands_to_list() {
+        let config = default_config();
+        match route_input("plan", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta plan list"),
+            _ => panic!("expected Command from plan shortcut"),
+        }
+    }
+
+    #[test]
+    fn plan_status_routes_correctly() {
+        // bare_only: `plan status` must not become `ta plan list status`
+        let config = default_config();
+        match route_input("plan status", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta plan status"),
+            _ => panic!("expected Command: ta plan status"),
+        }
+    }
+
+    #[test]
+    fn plan_list_routes_correctly() {
+        let config = default_config();
+        match route_input("plan list", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta plan list"),
+            _ => panic!("expected Command: ta plan list"),
         }
     }
 
