@@ -609,7 +609,12 @@ pub fn execute(
         // a UUID→output_key alias so :tail and SSE auto-tail can connect.
         // Uses ta_events::GOAL_STARTED_SENTINEL — must stay in sync with cmd.rs scanner.
         if headless {
-            eprintln!("{} \"{}\" ({})", ta_events::GOAL_STARTED_SENTINEL, title, goal.goal_run_id);
+            eprintln!(
+                "{} \"{}\" ({})",
+                ta_events::GOAL_STARTED_SENTINEL,
+                title,
+                goal.goal_run_id
+            );
         }
     }
 

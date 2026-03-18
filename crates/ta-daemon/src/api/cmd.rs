@@ -1258,7 +1258,12 @@ mod tests {
         let uuid = "492fac59-eda4-4e87-bf65-9e2edd2e70ce";
         let title = "v0.11.4.5 — Shell Large-Paste Compaction";
         // Simulate what run.rs emits in headless mode.
-        let emitted = format!("{} \"{}\" ({})", ta_events::GOAL_STARTED_SENTINEL, title, uuid);
+        let emitted = format!(
+            "{} \"{}\" ({})",
+            ta_events::GOAL_STARTED_SENTINEL,
+            title,
+            uuid
+        );
         // Simulate what cmd.rs scans for.
         assert!(
             emitted.contains(ta_events::GOAL_STARTED_SENTINEL),
