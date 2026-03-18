@@ -4108,6 +4108,12 @@ The output pipeline is: user types command → `send_input()` POST to daemon `/a
 
 3. [ ] **Auto-tail on any background command**: Whenever the shell spawns a command in the background (e.g. `ta run`, `ta draft apply`, `ta build`, or any other backgrounded process), automatically begin tailing its output key immediately. Show a single line: "Auto-tailing output for \<key\>…" at the top of the stream. No manual `:tail` required for any background operation.
 
+4. [ ] **Process completion/failure/cancellation states**: When a tailed background process ends, replace the "Agent is working…" indicator with a final status line and clear the working indicator:
+   - Completed: `✓ <command> completed`
+   - Failed: `✗ <command> failed (exit <code>)`
+   - Canceled: `⊘ <command> canceled`
+   The working indicator (`Agent is working…`) is removed entirely after any terminal state.
+
 **Files**: `crates/ta-daemon/assets/shell.html`
 
 #### Version: `0.11.7-alpha`
