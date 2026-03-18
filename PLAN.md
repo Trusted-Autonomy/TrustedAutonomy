@@ -4380,16 +4380,16 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 ---
 
 ### v0.12.2.2 — Draft Apply: Transactional Rollback on Validation Failure
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make `ta draft apply` safe to run on `main`. If pre-submit verification fails (fmt, clippy, tests), all files written to the working tree must be restored to their pre-apply state. Currently the apply is not atomic — files land on disk but the commit never happens, leaving the working tree dirty and requiring manual `git checkout HEAD -- <files>` to recover.
 
 **Found during**: v0.12.2.1 apply failed due to a corrupted Nix store entry (`glib-2.86.3-dev` reference invalid), leaving 11 files modified in working tree on `main`.
 
-1. [ ] **Snapshot working tree before copy**: Before writing any files, record the set of paths that will be modified. For tracked files, stash or snapshot current content via `git stash push -- <paths>`.
-2. [ ] **Rollback on verification failure**: If any verification step exits non-zero, reverse-copy all written files back from the pre-apply snapshot. Print `[rollback] Restored N file(s) to pre-apply state.`
-3. [ ] **Rollback on unexpected error**: Any panic or early return in the apply path must also trigger rollback (use a guard/drop pattern or explicit cleanup).
-4. [ ] **Test**: Write an integration test that injects a failing verification command and asserts the working tree is clean after the failed apply.
-5. [ ] **Distinguish env failures from code failures**: If the failure is in the Nix/build environment (not the code itself), print a clear message: `Verification failed — this may be a build environment issue, not a code problem. Re-run after fixing your environment.`
+1. [x] **Snapshot working tree before copy**: Before writing any files, record the set of paths that will be modified. `ApplyRollbackGuard` reads each file's current content (or None if it doesn't exist yet) before the overlay apply call.
+2. [x] **Rollback on verification failure**: If any verification step exits non-zero, anyhow::bail! propagates, the guard drops uncommitted, restoring all files. Prints `[rollback] Restored N file(s) to pre-apply state.`
+3. [x] **Rollback on unexpected error**: `ApplyRollbackGuard` uses a Drop-based guard pattern — any early return (bail!, `?`, or panic) that doesn't call `guard.commit()` triggers automatic restoration.
+4. [x] **Test**: `apply_rollback_on_verification_failure` integration test: injects a failing `sh fail_check.sh` verify command, confirms `apply_package` returns Err, README.md restored to original, NEW.md removed, and `git status --porcelain --untracked-files=no` is clean.
+5. [x] **Distinguish env failures from code failures**: Heuristic patterns (`/nix/store`, `glib-`, `hash mismatch`, etc.) trigger an additional eprintln! noting the failure may be a build-environment issue with guidance to re-run after fixing the environment.
 
 #### Version: `0.12.2-alpha.2`
 

@@ -2342,6 +2342,87 @@ fn build_commit_message(goal: &ta_goal::GoalRun, pkg: &DraftPackage) -> String {
     )
 }
 
+/// Guard that snapshots working-tree files before `ta draft apply` and rolls them
+/// back atomically if pre-submit verification fails (or any other error occurs
+/// before the guard is committed).
+///
+/// Usage:
+/// 1. Call `snapshot_file` for every path that will be written.
+/// 2. Proceed with the apply.
+/// 3. On the success path, call `commit()` to prevent rollback.
+/// 4. On any failure, let the guard drop — it will restore all snapshotted files.
+struct ApplyRollbackGuard {
+    /// `(path, pre-apply content)`. `None` means the file did not exist before
+    /// apply and should be deleted on rollback.
+    snapshots: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
+    committed: bool,
+}
+
+impl ApplyRollbackGuard {
+    fn new() -> Self {
+        ApplyRollbackGuard {
+            snapshots: Vec::new(),
+            committed: false,
+        }
+    }
+
+    /// Record the current on-disk content of `path` before it is written.
+    /// Silently ignores duplicate snapshots for the same path — only the
+    /// first snapshot (true pre-apply state) is kept.
+    fn snapshot_file(&mut self, path: &std::path::Path) {
+        // Skip duplicates — the first snapshot has the real pre-apply content.
+        if self.snapshots.iter().any(|(p, _)| p == path) {
+            return;
+        }
+        let content = std::fs::read(path).ok(); // None → file not yet on disk
+        self.snapshots.push((path.to_path_buf(), content));
+    }
+
+    /// Mark the apply as committed — `Drop` will not roll back.
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+
+    /// Restore all snapshotted files to their pre-apply state.
+    /// Returns the number of paths successfully restored.
+    fn rollback(&self) -> usize {
+        let mut count = 0;
+        for (path, original) in &self.snapshots {
+            let result = match original {
+                Some(content) => std::fs::write(path, content),
+                None => {
+                    // File did not exist before apply — remove it.
+                    if path.exists() {
+                        std::fs::remove_file(path)
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+            match result {
+                Ok(()) => count += 1,
+                Err(e) => eprintln!(
+                    "[rollback] Warning: could not restore {}: {}",
+                    path.display(),
+                    e
+                ),
+            }
+        }
+        count
+    }
+}
+
+impl Drop for ApplyRollbackGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let n = self.rollback();
+            if n > 0 {
+                eprintln!("[rollback] Restored {} file(s) to pre-apply state.", n);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_package(
     config: &GatewayConfig,
@@ -2535,6 +2616,20 @@ fn apply_package(
             .unwrap_or_else(|| config.workspace_root.clone()),
     };
 
+    // ── Transactional rollback guard (v0.12.2.2) ─────────────────────────────
+    // Snapshot working-tree files before any writes so we can restore them
+    // atomically if pre-submit verification fails (or any other error occurs).
+    let mut rollback_guard = ApplyRollbackGuard::new();
+    // PLAN.md is touched twice: once by the artifact apply (if the agent
+    // modified it) and once by the plan-phase status update below. Snapshot
+    // it now — before either write — so rollback restores the true original.
+    {
+        let plan_md = target_dir.join("PLAN.md");
+        if plan_md.exists() {
+            rollback_guard.snapshot_file(&plan_md);
+        }
+    }
+
     // Apply changes — use overlay path for overlay-based goals, legacy path otherwise.
     eprintln!("[apply] Applying changes to {}...", target_dir.display());
     let applied_files: Vec<String> = if let Some(ref source_dir) = goal.source_dir {
@@ -2618,6 +2713,13 @@ fn apply_package(
                 .map(|a| a.resource_uri.clone())
                 .collect()
         };
+
+        // Snapshot each artifact's current on-disk content before overwriting.
+        for uri in &artifact_uris {
+            if let Some(rel) = uri.strip_prefix("fs://workspace/") {
+                rollback_guard.snapshot_file(&target_dir.join(rel));
+            }
+        }
 
         eprintln!("[apply] Diffing staging vs source and copying changes...");
         let applied = overlay
@@ -2733,6 +2835,12 @@ fn apply_package(
         }
     }
 
+    // No VCS submit: apply is complete — commit the rollback guard so it does
+    // not attempt to restore files when it drops at the end of this function.
+    if !git_commit {
+        rollback_guard.commit();
+    }
+
     // Submit workflow integration (VCS-agnostic: git, svn, perforce, etc.).
     if git_commit {
         use ta_submit::{select_adapter, SourceAdapter, WorkflowConfig};
@@ -2776,6 +2884,8 @@ fn apply_package(
             }
             println!("\n  No changes were made. Remove --dry-run to execute.");
             // Skip the actual submit workflow but continue with goal state transitions.
+            // Files are already on disk — no rollback needed for dry-run.
+            rollback_guard.commit();
         } else {
             // Save VCS state so we can restore after apply operations.
             // Uses a closure to ensure restore_state() always runs, even on
@@ -2839,7 +2949,36 @@ fn apply_package(
                             "\nPre-submit verification failed — {} of {} checks failed.",
                             failed, total
                         );
-                        eprintln!("\nFix the issues above and re-run `ta draft apply`.");
+
+                        // Heuristic: if failure output mentions Nix store paths or known
+                        // build-environment patterns, it's likely an env issue, not a code bug.
+                        let env_patterns = [
+                            "/nix/store",
+                            "nix store",
+                            "nix-store",
+                            "invalid store path",
+                            "store path",
+                            "glib-",
+                            "libz.",
+                            "build environment",
+                            "hash mismatch",
+                        ];
+                        let is_likely_env_failure = verify_result.warnings.iter().any(|w| {
+                            let lower = w.output.to_lowercase();
+                            env_patterns.iter().any(|pat| lower.contains(pat))
+                        });
+                        if is_likely_env_failure {
+                            eprintln!(
+                                "\nNote: this failure may be a build-environment issue, not a \
+                                 code problem (Nix store or dependency error detected)."
+                            );
+                            eprintln!(
+                                "Re-run after fixing your environment (e.g. `nix develop` or \
+                                 rebuilding your Nix store), then retry `ta draft apply`."
+                            );
+                        } else {
+                            eprintln!("\nFix the issues above and re-run `ta draft apply`.");
+                        }
                         eprintln!("To skip verification: `ta draft apply --skip-verify`");
                         anyhow::bail!("Pre-submit verification failed");
                     }
@@ -2977,7 +3116,12 @@ fn apply_package(
             }
 
             // Now propagate any error from the submit operations.
+            // If this returns Ok(()), VCS submit succeeded — commit the rollback
+            // guard so it does not restore files when it drops.
+            // If this returns Err, the ? propagates and the guard drops uncommitted,
+            // triggering automatic file rollback.
             submit_result?;
+            rollback_guard.commit();
         } // end of non-dry-run block
     }
 
@@ -5620,6 +5764,152 @@ fn run() {
         assert!(full_msg.contains("README.md"));
         // No Debug-format change types like "Modify" — should use ~ + - > icons.
         assert!(!full_msg.contains("Modify  "));
+    }
+
+    /// v0.12.2.2 — Transactional rollback: when pre-submit verification fails,
+    /// all files written to the working tree must be restored to their
+    /// pre-apply state so the tree is clean and no manual recovery is needed.
+    #[test]
+    fn apply_rollback_on_verification_failure() {
+        use std::io::Write;
+
+        // ── Set up a git repo project ──────────────────────────────────────
+        let project = TempDir::new().unwrap();
+
+        for cmd_args in &[
+            vec!["init"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            std::process::Command::new("git")
+                .args(cmd_args)
+                .current_dir(project.path())
+                .output()
+                .unwrap();
+        }
+
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        std::fs::write(project.path().join("lib.rs"), "// original\n").unwrap();
+
+        for cmd_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
+            std::process::Command::new("git")
+                .args(cmd_args)
+                .current_dir(project.path())
+                .output()
+                .unwrap();
+        }
+
+        let config = GatewayConfig::for_project(project.path());
+
+        // ── Create goal and stage changes ─────────────────────────────────
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Rollback test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test rollback on verify failure".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Modify existing file and add a new file in staging.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+        std::fs::write(goal.workspace_path.join("NEW.md"), "new content\n").unwrap();
+
+        // ── Write a workflow.toml with a failing verification command ──────
+        // The command always exits 1 so verification will fail.
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        {
+            // Write a tiny shell script that always fails.
+            let fail_script = project.path().join(".ta/fail_check.sh");
+            let mut f = std::fs::File::create(&fail_script).unwrap();
+            writeln!(f, "#!/bin/sh").unwrap();
+            writeln!(f, "echo 'check failed intentionally'").unwrap();
+            writeln!(f, "exit 1").unwrap();
+            drop(f);
+            // Make it executable on Unix.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o755);
+                std::fs::set_permissions(&fail_script, perms).unwrap();
+            }
+
+            std::fs::write(
+                project.path().join(".ta/workflow.toml"),
+                format!("[verify]\ncommands = [\"sh {}\"]\n", fail_script.display()),
+            )
+            .unwrap();
+        }
+
+        // ── Build + approve the draft ─────────────────────────────────────
+        build_package(&config, &goal_id, "Modified README and new file", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester").unwrap();
+
+        // ── Apply with git_commit=true — verification will fail ────────────
+        let result = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            true,  // git_commit
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+        );
+
+        // Apply must have returned an error.
+        assert!(
+            result.is_err(),
+            "apply_package should fail when verification fails"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("verification failed"),
+            "unexpected error: {err_msg}"
+        );
+
+        // ── Working tree must be clean (rollback fired) ───────────────────
+        // README.md must be restored to the original content.
+        let readme = std::fs::read_to_string(project.path().join("README.md")).unwrap();
+        assert_eq!(
+            readme, "# Original\n",
+            "README.md was not rolled back after verification failure"
+        );
+
+        // NEW.md must not exist (it was a new file — rollback should remove it).
+        assert!(
+            !project.path().join("NEW.md").exists(),
+            "NEW.md was not removed after rollback"
+        );
+
+        // ── Tracked git files must show no modifications ───────────────────
+        // Use -uno to ignore untracked files (e.g. the .ta/ config dir we
+        // created for this test — it was never committed to the test repo).
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        let status_output = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            status_output.trim().is_empty(),
+            "tracked files are dirty after rollback:\n{status_output}"
+        );
     }
 
     #[test]
