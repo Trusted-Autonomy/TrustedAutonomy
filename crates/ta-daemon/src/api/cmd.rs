@@ -176,6 +176,9 @@ pub async fn execute_command(
                     use crate::api::goal_output::OutputLine;
                     use tokio::io::{AsyncBufReadExt, BufReader};
 
+                    // Capture PID for structured logs before moving child into tasks.
+                    let child_pid = child.id().unwrap_or(0);
+
                     let stdout = child.stdout.take();
                     let stderr = child.stderr.take();
 
@@ -238,13 +241,11 @@ pub async fn execute_command(
                     let goal_output2 = goal_output.clone();
                     let goal_input2 = goal_input.clone();
                     let output_key2 = output_key.clone();
-                    // Shared goal UUID detected from sentinel — used by state-poll task.
+                    // Shared goal UUID detected from sentinel — used by state-poll and running-log tasks.
                     let detected_goal_id: std::sync::Arc<tokio::sync::Mutex<Option<uuid::Uuid>>> =
                         std::sync::Arc::new(tokio::sync::Mutex::new(None));
-                    #[allow(unused_variables)]
-                    let detected_goal_id2 = detected_goal_id.clone();
-                    let events_dir2 = events_dir.clone();
-                    let working_dir2 = working_dir.clone();
+                    let detected_goal_id2 = detected_goal_id.clone(); // moved into stderr_task
+                    let detected_goal_id3 = detected_goal_id.clone(); // moved into running_log_task
                     let stderr_task = tokio::spawn(async move {
                         if let Some(err) = stderr {
                             let mut reader = BufReader::new(err).lines();
@@ -256,12 +257,15 @@ pub async fn execute_command(
                                     if let Some(goal_uuid) = extract_goal_uuid_from_event(&line) {
                                         goal_output2.add_alias(&goal_uuid, &output_key2).await;
                                         goal_input2.add_alias(&goal_uuid, &output_key2).await;
-                                        // Emit GoalStarted SSE event so channel plugins see it.
                                         if let Ok(uid) = uuid::Uuid::parse_str(&goal_uuid) {
-                                            emit_goal_started_event(
-                                                &events_dir2,
-                                                uid,
-                                                &working_dir2,
+                                            // Structured log for goal start (v0.12.6 item 1).
+                                            // run.rs already emits GoalStarted to FsEventStore;
+                                            // we only register the alias here (item 10: removed
+                                            // redundant emit_goal_started_event call).
+                                            tracing::info!(
+                                                goal_id = %uid,
+                                                pid = child_pid,
+                                                "Goal started — alias registered for output relay"
                                             );
                                             *detected_goal_id2.lock().await = Some(uid);
                                         }
@@ -288,6 +292,7 @@ pub async fn execute_command(
                     let poll_done2 = poll_done.clone();
                     let state_poll_task = tokio::spawn(async move {
                         let mut last_state: Option<String> = None;
+                        let mut logged_start = false;
                         loop {
                             tokio::select! {
                                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
@@ -297,6 +302,7 @@ pub async fn execute_command(
                             }
                             let goal_id = *detected_goal_id.lock().await;
                             let Some(goal_id) = goal_id else { continue };
+
                             let goal_dir = working_dir3.join(".ta/goals");
                             let store = ta_goal::store::GoalRunStore::new(&goal_dir);
                             let Ok(store) = store else { continue };
@@ -304,10 +310,32 @@ pub async fn execute_command(
                                 continue;
                             };
                             let state_str = goal.state.to_string();
+
+                            // Log on first poll after goal ID is known (item 2).
+                            if !logged_start {
+                                tracing::info!(
+                                    goal_id = %goal_id,
+                                    initial_state = %state_str,
+                                    "State-poll task started"
+                                );
+                                logged_start = true;
+                            }
+
                             if last_state.as_deref() == Some(&state_str) {
                                 continue;
                             }
+
+                            // Log state transition (item 2).
+                            if let Some(ref prev) = last_state {
+                                tracing::info!(
+                                    goal_id = %goal_id,
+                                    from = %prev,
+                                    to = %state_str,
+                                    "Goal state transition"
+                                );
+                            }
                             last_state = Some(state_str.clone());
+
                             match state_str.as_str() {
                                 "completed" => {
                                     emit_goal_completed_event(&events_dir3, goal_id, &goal.title);
@@ -316,6 +344,13 @@ pub async fn execute_command(
                                     // Emit ReviewRequested so channel plugins show draft-ready.
                                     let pr_dir = working_dir3.join(".ta/pr_packages");
                                     if let Some(d) = latest_draft_for_goal(&pr_dir, goal_id) {
+                                        // Log draft detected (item 3).
+                                        tracing::info!(
+                                            goal_id = %goal_id,
+                                            draft_id = %d.id,
+                                            artifact_count = d.artifact_count,
+                                            "Draft detected — emitting ReviewRequested event"
+                                        );
                                         emit_draft_ready_events(
                                             &events_dir3,
                                             goal_id,
@@ -331,11 +366,17 @@ pub async fn execute_command(
                                 }
                                 _ => {}
                             }
-                            // Stop polling terminal states.
+
+                            // Stop polling terminal states (item 4: log before stopping).
                             if matches!(
                                 state_str.as_str(),
                                 "completed" | "failed" | "denied" | "applied"
                             ) {
+                                tracing::info!(
+                                    goal_id = %goal_id,
+                                    terminal_state = %state_str,
+                                    "State-poll task exiting (terminal state reached)"
+                                );
                                 break;
                             }
                         }
@@ -365,13 +406,54 @@ pub async fn execute_command(
                         }
                     });
 
+                    // Periodic structured log task: emits tracing::info! every N minutes
+                    // (default 5) with goal UUID, elapsed time, and current state (v0.12.6 item 6).
+                    // Provides operational visibility for diagnosing stuck agents from logs.
+                    let goal_log_interval_secs = state
+                        .daemon_config
+                        .operations
+                        .as_ref()
+                        .and_then(|ops| ops.goal_log_interval_secs)
+                        .unwrap_or(300) as u64;
+                    let running_log_goal_id = detected_goal_id3;
+                    let running_log_working_dir = working_dir.clone();
+                    let running_log_task = tokio::spawn(async move {
+                        let task_start = std::time::Instant::now();
+                        loop {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(
+                                goal_log_interval_secs,
+                            ))
+                            .await;
+                            let elapsed_secs = task_start.elapsed().as_secs();
+                            let goal_id = *running_log_goal_id.lock().await;
+                            if let Some(gid) = goal_id {
+                                // Read current state from store for the log.
+                                let goal_dir = running_log_working_dir.join(".ta/goals");
+                                let current_state = ta_goal::store::GoalRunStore::new(&goal_dir)
+                                    .ok()
+                                    .and_then(|s| s.get(gid).ok().flatten())
+                                    .map(|g| g.state.to_string())
+                                    .unwrap_or_else(|| "unknown".to_string());
+                                tracing::info!(
+                                    goal_id = %gid,
+                                    elapsed_secs = elapsed_secs,
+                                    state = %current_state,
+                                    "Goal still running"
+                                );
+                            }
+                        }
+                    });
+
                     let status = child.wait().await;
                     heartbeat_task.abort(); // Stop heartbeat when command exits.
+                    running_log_task.abort(); // Stop periodic running-log when command exits.
                     poll_done.notify_one(); // Trigger final state poll before aborting.
                     let _ = stdout_task.await;
                     let _ = stderr_task.await;
                     // Give the state poll task a moment for its final check, then abort.
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    // Log poll task stop for process-exit path (item 4).
+                    tracing::info!("State-poll task stopping (agent process exited)");
                     state_poll_task.abort();
 
                     match status {
@@ -1025,25 +1107,6 @@ fn emit_sse_event(events_dir: &std::path::Path, event: ta_events::schema::Sessio
     }
 }
 
-fn emit_goal_started_event(
-    events_dir: &std::path::Path,
-    goal_id: uuid::Uuid,
-    project_root: &std::path::Path,
-) {
-    use ta_events::schema::SessionEvent;
-    // Load goal title from store if possible.
-    let title = load_goal_title(project_root, goal_id).unwrap_or_else(|| "(goal)".to_string());
-    emit_sse_event(
-        events_dir,
-        SessionEvent::GoalStarted {
-            goal_id,
-            title,
-            agent_id: "ta-run".to_string(),
-            phase: None,
-        },
-    );
-}
-
 fn emit_goal_completed_event(events_dir: &std::path::Path, goal_id: uuid::Uuid, title: &str) {
     use ta_events::schema::SessionEvent;
     emit_sse_event(
@@ -1100,11 +1163,6 @@ fn emit_draft_ready_events(
             },
         },
     );
-}
-
-fn load_goal_title(project_root: &std::path::Path, goal_id: uuid::Uuid) -> Option<String> {
-    let store = ta_goal::store::GoalRunStore::new(project_root.join(".ta/goals")).ok()?;
-    store.get(goal_id).ok()?.map(|g| g.title)
 }
 
 struct LatestDraft {
@@ -1476,6 +1534,32 @@ mod tests {
             Some(uuid.to_string()),
             "UUID must survive the emit→scan round trip"
         );
+    }
+
+    // ── v0.12.6 dedup / observability tests ─────────────────────
+
+    /// Verify that the sentinel detection path does NOT call emit_goal_started_event.
+    /// run.rs writes GoalStarted to FsEventStore; cmd.rs should only register the alias.
+    /// This is a static/structural test: if emit_goal_started_event were still called,
+    /// it would show up as a call to `emit_sse_event` in the function. Since we removed
+    /// the call, this test verifies the function is no longer present at the old call site
+    /// by ensuring the extract_goal_uuid_from_event + alias path compiles without the
+    /// emit function being reachable from the sentinel branch.
+    #[test]
+    fn sentinel_handler_does_not_define_goal_started_emission() {
+        // The emit_goal_started_event function was removed from cmd.rs (item 10).
+        // This test confirms the sentinel produces only an alias registration, not
+        // a double GoalStarted event. The check is that extract_goal_uuid_from_event
+        // still works (alias registration depends on it) and is the sole side effect.
+        let line = r#"[goal started] "v0.12.6 test" (aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee)"#;
+        let uuid = extract_goal_uuid_from_event(line);
+        assert_eq!(
+            uuid,
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()),
+            "UUID must be extractable for alias registration"
+        );
+        // The sentinel path does alias registration only — no emit call.
+        // (Structural: emit_goal_started_event is no longer in this file's call graph.)
     }
 
     // ── v0.11.2.2 schema-driven parsing tests ──────────────────

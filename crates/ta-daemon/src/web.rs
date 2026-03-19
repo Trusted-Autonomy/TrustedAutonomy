@@ -515,6 +515,10 @@ pub async fn serve_daemon_api(
 
     let (app, app_state) = build_full_router(project_root, daemon_config);
 
+    // Startup recovery: resume state-poll tasks for any goals that were
+    // in-flight when the daemon was last restarted (v0.12.6 item 11).
+    start_goal_recovery_tasks(&app_state);
+
     // Auto-spawn agent supervisor (runs in background, shares the same AppState).
     let supervisor_shutdown = shutdown.clone();
     tokio::spawn(crate::api::agent::auto_spawn_supervisor(
@@ -557,6 +561,174 @@ fn write_pid_file(path: &std::path::Path, server: &crate::config::ServerConfig) 
             error = %e,
             "Failed to write daemon PID file — auto-start may not detect this instance"
         ),
+    }
+}
+
+/// Spawn state-poll recovery tasks for any goals that were in-flight
+/// (state: `running` or `pr_ready`) when the daemon last restarted (v0.12.6 item 11).
+///
+/// This prevents goals from silently stalling in the goal store when the daemon
+/// is restarted mid-run. Each recovered goal gets a lightweight poll task that
+/// emits SSE events as state transitions occur (or as the watchdog updates state).
+fn start_goal_recovery_tasks(app_state: &std::sync::Arc<crate::api::AppState>) {
+    let goal_dir = app_state.project_root.join(".ta/goals");
+    let events_dir = app_state.events_dir.clone();
+    let project_root = app_state.project_root.clone();
+
+    let store = match ta_goal::store::GoalRunStore::new(&goal_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "Startup recovery: failed to open GoalRunStore");
+            return;
+        }
+    };
+
+    let goals = match store.list() {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "Startup recovery: failed to list goals");
+            return;
+        }
+    };
+
+    let in_flight: Vec<_> = goals
+        .into_iter()
+        .filter(|g| {
+            let s = g.state.to_string();
+            s == "running" || s == "pr_ready"
+        })
+        .collect();
+
+    if in_flight.is_empty() {
+        return;
+    }
+
+    tracing::info!(
+        count = in_flight.len(),
+        "Startup recovery: resuming state-poll tasks for in-flight goals"
+    );
+
+    for goal in in_flight {
+        let goal_id = goal.goal_run_id;
+        let goal_title = goal.title.clone();
+        let events_dir = events_dir.clone();
+        let goal_dir = project_root.join(".ta/goals");
+        let pr_dir = project_root.join(".ta/pr_packages");
+
+        tracing::info!(
+            goal_id = %goal_id,
+            title = %goal_title,
+            state = %goal.state,
+            "Startup recovery: restarting state-poll for goal"
+        );
+
+        tokio::spawn(async move {
+            let mut last_state: Option<String> = None;
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                let store = match ta_goal::store::GoalRunStore::new(&goal_dir) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let goal = match store.get(goal_id) {
+                    Ok(Some(g)) => g,
+                    _ => continue,
+                };
+                let state_str = goal.state.to_string();
+
+                if last_state.as_deref() == Some(&state_str) {
+                    continue;
+                }
+
+                if let Some(ref prev) = last_state {
+                    tracing::info!(
+                        goal_id = %goal_id,
+                        from = %prev,
+                        to = %state_str,
+                        "Recovery goal state transition"
+                    );
+                }
+                last_state = Some(state_str.clone());
+
+                // Emit SSE events for the new state.
+                use ta_events::schema::{EventEnvelope, SessionEvent};
+                use ta_events::store::{EventStore, FsEventStore};
+                let event_store = FsEventStore::new(&events_dir);
+
+                match state_str.as_str() {
+                    "completed" => {
+                        let event = SessionEvent::GoalCompleted {
+                            goal_id,
+                            title: goal.title.clone(),
+                            duration_secs: None,
+                        };
+                        let _ = event_store.append(&EventEnvelope::new(event));
+                    }
+                    "pr_ready" => {
+                        // Emit draft-ready events if a draft package exists.
+                        use ta_changeset::draft_package::DraftPackage;
+                        let goal_str = goal_id.to_string();
+                        let latest = std::fs::read_dir(&pr_dir)
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|e| e.ok())
+                            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                            .filter_map(|s| serde_json::from_str::<DraftPackage>(&s).ok())
+                            .filter(|d| d.goal.goal_id == goal_str)
+                            .max_by_key(|d| d.created_at);
+
+                        if let Some(d) = latest {
+                            tracing::info!(
+                                goal_id = %goal_id,
+                                draft_id = %d.package_id,
+                                artifact_count = d.changes.artifacts.len(),
+                                "Recovery: draft detected — emitting ReviewRequested"
+                            );
+                            let built = SessionEvent::DraftBuilt {
+                                goal_id,
+                                draft_id: d.package_id,
+                                artifact_count: d.changes.artifacts.len(),
+                            };
+                            let _ = event_store.append(&EventEnvelope::new(built));
+                            let review = SessionEvent::ReviewRequested {
+                                goal_id,
+                                draft_id: d.package_id,
+                                summary: format!(
+                                    "Draft ready for '{}' — {} file(s) changed.",
+                                    goal.title,
+                                    d.changes.artifacts.len()
+                                ),
+                            };
+                            let _ = event_store.append(&EventEnvelope::new(review));
+                        }
+                    }
+                    "failed" | "denied" => {
+                        let event = SessionEvent::GoalFailed {
+                            goal_id,
+                            error: "Goal in terminal failure state at daemon restart".to_string(),
+                            exit_code: None,
+                        };
+                        let _ = event_store.append(&EventEnvelope::new(event));
+                    }
+                    _ => {}
+                }
+
+                // Stop polling once the goal reaches a terminal state.
+                if matches!(
+                    state_str.as_str(),
+                    "completed" | "failed" | "denied" | "applied"
+                ) {
+                    tracing::info!(
+                        goal_id = %goal_id,
+                        terminal_state = %state_str,
+                        "Recovery state-poll task exiting (terminal state)"
+                    );
+                    break;
+                }
+            }
+        });
     }
 }
 

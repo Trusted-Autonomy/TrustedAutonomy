@@ -1250,6 +1250,40 @@ Configure the interval in `.ta/daemon.toml`:
 heartbeat_interval_secs = 10   # default: 10
 ```
 
+### Goal Lifecycle Structured Logging
+
+TA emits structured `tracing` log events at every major goal lifecycle milestone, making it easy to diagnose stuck agents, slow builds, or missed state transitions using your existing log aggregation tools.
+
+Key log events emitted during a goal run:
+
+| Event | Fields | When |
+|-------|--------|------|
+| `CLAUDE.md inject started` | `goal_id`, `staging`, `target_file` | Before CLAUDE.md is written to staging |
+| `CLAUDE.md inject complete` | same | After successful inject |
+| `Launching agent` | `goal_id`, `agent`, `staging` | Just before the agent process spawns |
+| `Goal started — alias registered for output relay` | `goal_id`, `pid` | When sentinel is detected in agent output |
+| `Goal state-poll task started` | `goal_id`, `initial_state` | When the background state watcher starts |
+| `Goal state transition` | `goal_id`, `from`, `to` | On every state change |
+| `Draft detected for goal` | `goal_id`, `draft_id`, `artifact_count` | When a draft is first built |
+| `Goal still running` | `goal_id`, `elapsed_secs`, `state` | Periodically (default: every 5 minutes) |
+| `Agent exited` | `goal_id`, `exit_code`, `elapsed_secs` | When the agent process terminates |
+| `Files changed in staging workspace after agent exit` | `goal_id`, `changed_files` | After agent exits |
+
+To see these logs, run the daemon with `RUST_LOG=info ta daemon start`.
+
+#### Configuring the periodic "still running" log
+
+By default, a structured log is emitted every 5 minutes for any in-flight goal. Configure this in `.ta/daemon.toml`:
+
+```toml
+[operations]
+goal_log_interval_secs = 300   # default: 300 (5 minutes); set higher to reduce log volume
+```
+
+#### Daemon startup recovery
+
+When the daemon starts, it scans for goals left in `running` or `pr_ready` state from before a restart and immediately resumes state-poll tasks for them. This ensures no notifications are missed across daemon restarts.
+
 ### Auto-Approval Policy
 
 Configure policy-driven draft auto-approval in `.ta/policy.yaml`:
@@ -5310,6 +5344,25 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.11.4 | Plugin registry & project manifest (`ta setup resolve`, daemon enforcement) | Done |
 | v0.11.4.1 | Shell reliability: command output, text selection & heartbeat polish | Done |
 | v0.11.4.2 | Shell mouse & agent session fix (scroll+selection, persistent QA, input threading) | Done |
+| v0.11.4.3 | Smart input routing & intent disambiguation | Done |
+| v0.11.4.4 | Constitution compliance remediation | Done |
+| v0.11.4.5 | Shell large-paste compaction | Done |
+| v0.11.5 | Web shell UX, agent transparency & parallel sessions | Done |
+| v0.11.6 | Constitution audit completion | Done |
+| v0.11.7 | Web shell stream UX polish | Done |
+| v0.12.0 | Template projects & bootstrap flow | Done |
+| v0.12.0.1 | PR merge & main sync completion | Done |
+| v0.12.0.2 | VCS adapter externalization | Done |
+| v0.12.1 | Discord channel polish | Done |
+| v0.12.2 | Shell paste-at-end UX | Done |
+| v0.12.2.1 | Draft compositing: parent + child chain merge | Done |
+| v0.12.2.2 | Draft apply: transactional rollback on validation failure | Done |
+| v0.12.2.3 | Follow-up draft completeness & injection cleanup | Done |
+| v0.12.3 | Shell multi-agent UX & resilience | Done |
+| v0.12.4 | Plugin template publication & registry bootstrap | Done |
+| v0.12.4.1 | Shell: clear working indicator & auto-scroll fix + channel goal input | Done |
+| v0.12.5 | Semantic memory: RuVector backing store & context injection | Done |
+| v0.12.6 | Goal lifecycle observability & channel notification reliability | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

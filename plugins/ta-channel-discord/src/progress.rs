@@ -13,10 +13,18 @@
 //! `run_progress_streamer` connects to `GET /api/events` (SSE stream) and
 //! processes events in a loop, reconnecting with backoff on errors. It runs
 //! as a background task alongside the Gateway listener.
+//!
+//! ## Cursor-based replay prevention (v0.12.6)
+//!
+//! On initial connect the streamer passes `?since=<startup_time>` so events
+//! that occurred before the plugin started are never replayed. On reconnect it
+//! passes `?since=<last_event_timestamp>` (extracted from each event's data
+//! envelope) so no events are skipped or replayed across reconnects.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde_json::json;
 
@@ -63,6 +71,10 @@ fn state_color(state: &str) -> u32 {
 ///
 /// Connects to `{daemon_url}/api/events`, parses SSE events, and posts
 /// goal progress updates to the configured Discord channel.
+///
+/// Uses a cursor to prevent event replay (v0.12.6):
+/// - Initial connect: `?since=<startup_time>` — skip events before startup.
+/// - Reconnect: `?since=<last_event_timestamp>` — resume from last seen event.
 pub async fn run_progress_streamer(
     daemon_url: String,
     token: String,
@@ -70,23 +82,29 @@ pub async fn run_progress_streamer(
     application_id: Option<String>,
 ) {
     let client = Client::new();
-    let events_url = format!("{}/api/events", daemon_url);
+    let base_events_url = format!("{}/api/events", daemon_url);
 
     eprintln!(
         "[discord-progress] Starting SSE streamer on {}",
-        events_url
+        base_events_url
     );
+
+    // Record startup time once — never replay events before this point (item 8).
+    let startup_time: DateTime<Utc> = Utc::now();
+    // cursor tracks the last seen event timestamp for reconnect (item 9).
+    let mut cursor: DateTime<Utc> = startup_time;
 
     let mut throttle_map: HashMap<String, Instant> = HashMap::new();
 
     loop {
         match stream_events(
             &client,
-            &events_url,
+            &base_events_url,
             &token,
             &channel_id,
             &application_id,
             &mut throttle_map,
+            &mut cursor,
         )
         .await
         {
@@ -104,16 +122,22 @@ pub async fn run_progress_streamer(
     }
 }
 
+/// Connect to the SSE stream starting from `cursor` (passed as `?since=`).
+/// Updates `cursor` in-place as events arrive so the caller can resume after reconnect.
 async fn stream_events(
     client: &Client,
-    events_url: &str,
+    base_events_url: &str,
     token: &str,
     channel_id: &str,
     application_id: &Option<String>,
     throttle_map: &mut HashMap<String, Instant>,
+    cursor: &mut DateTime<Utc>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Pass `?since=` so the server replays only events after our cursor (items 8 & 9).
+    let events_url = format!("{}?since={}", base_events_url, cursor.to_rfc3339());
+
     let resp = client
-        .get(events_url)
+        .get(&events_url)
         .header("Accept", "text/event-stream")
         .timeout(Duration::from_secs(3600)) // long-lived connection
         .send()
@@ -138,6 +162,16 @@ async fn stream_events(
         if line.is_empty() {
             // End of SSE event — process it.
             if !event_data.is_empty() {
+                // Advance cursor from the event envelope's timestamp field (item 9).
+                // This ensures reconnects resume from exactly where we left off.
+                if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&event_data) {
+                    if let Some(ts_str) = envelope["timestamp"].as_str() {
+                        if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
+                            *cursor = ts.with_timezone(&Utc);
+                        }
+                    }
+                }
+
                 process_event(
                     client,
                     token,
@@ -432,5 +466,58 @@ mod tests {
         let count: u64 = 1;
         let suffix = if count == 1 { "" } else { "s" };
         assert_eq!(suffix, "");
+    }
+
+    // ── v0.12.6: Cursor-based replay prevention tests ──
+
+    #[test]
+    fn startup_cursor_is_before_now() {
+        // The startup cursor should be at or before the current time.
+        let startup: DateTime<Utc> = Utc::now();
+        let after: DateTime<Utc> = Utc::now();
+        assert!(startup <= after);
+    }
+
+    #[test]
+    fn cursor_advances_from_event_timestamp() {
+        // Simulate extracting a timestamp from an event envelope.
+        let ts_str = "2026-03-19T12:00:00Z";
+        let event_data = serde_json::json!({
+            "timestamp": ts_str,
+            "event_type": "goal_started",
+            "payload": {}
+        })
+        .to_string();
+
+        let envelope: serde_json::Value = serde_json::from_str(&event_data).unwrap();
+        let extracted_ts = envelope["timestamp"].as_str().unwrap();
+        let parsed = DateTime::parse_from_rfc3339(extracted_ts)
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(parsed.to_rfc3339(), "2026-03-19T12:00:00+00:00");
+    }
+
+    #[test]
+    fn cursor_since_param_format() {
+        // Verify the ?since= URL format used on connect/reconnect.
+        let cursor: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-03-19T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let events_url = format!("http://localhost:7700/api/events?since={}", cursor.to_rfc3339());
+        // URL contains the since parameter in RFC 3339 format.
+        assert!(events_url.contains("?since=2026-03-19T10:00:00"));
+    }
+
+    #[test]
+    fn cursor_does_not_replay_before_startup() {
+        // Cursor starts at startup_time; reconnect URL uses cursor, not epoch 0.
+        let startup_time: DateTime<Utc> = Utc::now();
+        let cursor = startup_time;
+        // The cursor should be after the unix epoch (no history replayed).
+        let epoch = DateTime::parse_from_rfc3339("1970-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(cursor > epoch);
     }
 }

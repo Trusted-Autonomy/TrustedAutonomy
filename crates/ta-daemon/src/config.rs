@@ -144,12 +144,18 @@ impl Default for QaAgentConfig {
 /// stale_question_threshold_secs = 3600
 /// prompt_dismiss_after_output_secs = 5
 /// prompt_verify_timeout_secs = 10
+/// goal_log_interval_secs = 300
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationsConfig {
     /// Heartbeat interval in seconds for long-running commands (default: 10).
     #[serde(default)]
     pub heartbeat_interval_secs: Option<u32>,
+
+    /// How often (in seconds) to emit a structured "still running" log for in-flight goals
+    /// (v0.12.6). Helps diagnose stuck agents from logs alone. Default: 300 (5 minutes).
+    #[serde(default)]
+    pub goal_log_interval_secs: Option<u32>,
 
     /// Watchdog check cycle in seconds (default: 30). Set to 0 to disable.
     #[serde(default = "default_watchdog_interval")]
@@ -202,6 +208,7 @@ impl Default for OperationsConfig {
     fn default() -> Self {
         Self {
             heartbeat_interval_secs: None,
+            goal_log_interval_secs: None,
             watchdog_interval_secs: default_watchdog_interval(),
             zombie_transition_delay_secs: default_zombie_delay(),
             stale_question_threshold_secs: default_stale_question_threshold(),

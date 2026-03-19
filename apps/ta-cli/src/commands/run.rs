@@ -575,6 +575,11 @@ pub fn execute(
 
     // 2. Inject context and settings into the staging workspace.
     if agent_config.injects_context_file {
+        tracing::info!(
+            goal_id = %goal.goal_run_id,
+            staging = %staging_path.display(),
+            "Injecting CLAUDE.md context into staging workspace"
+        );
         inject_claude_md(
             &staging_path,
             title,
@@ -588,6 +593,7 @@ pub fn execute(
             interactive,
             follow_up_context.as_deref(),
         )?;
+        tracing::info!(goal_id = %goal.goal_run_id, "CLAUDE.md injected");
     }
     // v0.12.5: For non-Claude agents that set context_file, write a generic
     // agent_context.md with the same sections (memory, plan, etc.).
@@ -742,6 +748,12 @@ pub fn execute(
     };
 
     // 5. Launch the agent in the staging directory.
+    tracing::info!(
+        goal_id = %goal.goal_run_id,
+        agent = %agent_config.command,
+        staging = %staging_path.display(),
+        "Launching agent"
+    );
     if !quiet {
         println!(
             "\nLaunching {} in staging workspace...",
@@ -821,13 +833,27 @@ pub fn execute(
                 }
             }
 
-            if exit.success() {
-                println!("\nAgent exited. Building draft...");
-            } else {
-                println!(
-                    "\nAgent exited with status {}. Building draft anyway...",
-                    exit
-                );
+            {
+                let elapsed_secs = agent_start.elapsed().as_secs();
+                if exit.success() {
+                    tracing::info!(
+                        goal_id = %goal.goal_run_id,
+                        elapsed_secs = elapsed_secs,
+                        "Agent exited successfully — building draft"
+                    );
+                    println!("\nAgent exited. Building draft...");
+                } else {
+                    tracing::info!(
+                        goal_id = %goal.goal_run_id,
+                        elapsed_secs = elapsed_secs,
+                        exit_code = exit.code().unwrap_or(-1),
+                        "Agent exited with error — building draft anyway"
+                    );
+                    println!(
+                        "\nAgent exited with status {}. Building draft anyway...",
+                        exit
+                    );
+                }
             }
 
             // Emit GoalCompleted or GoalFailed based on exit code (v0.9.4.1).
@@ -940,6 +966,18 @@ pub fn execute(
     }
     if macro_goal {
         restore_mcp_server_config(&staging_path)?;
+    }
+
+    // 6a. Log the file-change count in staging vs source (v0.12.6 item 7).
+    {
+        let source_dir = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
+        let changed_count = count_changed_files(&staging_path, source_dir);
+        tracing::info!(
+            goal_id = %goal.goal_run_id,
+            changed_files = changed_count,
+            staging = %staging_path.display(),
+            "Files changed in staging workspace after agent exit"
+        );
     }
 
     // 6b. Pre-draft verification gate (v0.10.8).
@@ -2806,10 +2844,110 @@ fn restore_claude_md(staging_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Count files that differ between staging and source (v0.12.6 item 7).
+///
+/// Returns the number of files that exist in staging (outside `.ta/`) and either:
+/// - Don't exist in the corresponding source path, or
+/// - Have a different size from the source file.
+///
+/// This is an O(N) approximation (no content hashing) to keep logging fast.
+fn count_changed_files(staging: &Path, source: &Path) -> usize {
+    count_changed_recursive(staging, staging, source)
+}
+
+fn count_changed_recursive(staging_root: &Path, dir: &Path, source_root: &Path) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut count = 0;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let rel = match path.strip_prefix(staging_root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        // Skip .ta/ directory — it's TA metadata, not agent work.
+        if rel
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == ".ta")
+        {
+            continue;
+        }
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            count += count_changed_recursive(staging_root, &path, source_root);
+        } else if ft.is_file() {
+            let source_path = source_root.join(rel);
+            let staging_size = entry.metadata().ok().map(|m| m.len());
+            let source_size = source_path.metadata().ok().map(|m| m.len());
+            match (staging_size, source_size) {
+                (Some(s), Some(d)) if s != d => count += 1, // size changed
+                (Some(_), None) => count += 1,              // new file
+                _ => {}
+            }
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ── v0.12.6 count_changed_files tests ───────────────────────
+
+    #[test]
+    fn count_changed_files_empty_staging() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        assert_eq!(count_changed_files(staging.path(), source.path()), 0);
+    }
+
+    #[test]
+    fn count_changed_files_new_file_in_staging() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        // Write a file in staging that doesn't exist in source.
+        std::fs::write(staging.path().join("new.rs"), "fn main() {}").unwrap();
+        assert_eq!(count_changed_files(staging.path(), source.path()), 1);
+    }
+
+    #[test]
+    fn count_changed_files_identical_file_not_counted() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        // Same content → same size → not counted.
+        std::fs::write(staging.path().join("same.rs"), "fn foo() {}").unwrap();
+        std::fs::write(source.path().join("same.rs"), "fn foo() {}").unwrap();
+        assert_eq!(count_changed_files(staging.path(), source.path()), 0);
+    }
+
+    #[test]
+    fn count_changed_files_modified_file_counted() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        // Different sizes → counted as changed.
+        std::fs::write(staging.path().join("lib.rs"), "fn foo() { /* modified */ }").unwrap();
+        std::fs::write(source.path().join("lib.rs"), "fn foo() {}").unwrap();
+        assert_eq!(count_changed_files(staging.path(), source.path()), 1);
+    }
+
+    #[test]
+    fn count_changed_files_ta_dir_excluded() {
+        let staging = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        // File inside .ta/ should NOT be counted.
+        let ta_dir = staging.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(ta_dir.join("state.json"), "{}").unwrap();
+        assert_eq!(count_changed_files(staging.path(), source.path()), 0);
+    }
 
     #[test]
     fn run_creates_goal_and_restores_on_no_launch() {
