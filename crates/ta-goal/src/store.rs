@@ -126,22 +126,15 @@ impl GoalRunStore {
                 slug
             };
 
-            // Find the next sequence number for this slug.
+            // If the slug is already taken, fall back to the 8-char UUID.
             let existing = self.list().unwrap_or_default();
-            let mut max_seq: u32 = 0;
-            for g in &existing {
-                if let Some(ref tag) = g.tag {
-                    if let Some(rest) = tag.strip_prefix(&slug) {
-                        if let Some(num_str) = rest.strip_prefix('-') {
-                            if let Ok(n) = num_str.parse::<u32>() {
-                                max_seq = max_seq.max(n);
-                            }
-                        }
-                    }
-                }
-            }
+            let taken = existing.iter().any(|g| g.tag.as_deref() == Some(&slug));
 
-            goal_run.tag = Some(format!("{}-{:02}", slug, max_seq + 1));
+            goal_run.tag = Some(if taken {
+                goal_run.goal_run_id.to_string()[..8].to_string()
+            } else {
+                slug
+            });
         }
         self.save(goal_run)
     }
@@ -369,12 +362,14 @@ mod tests {
         let mut gr = make_goal_run("Fix Authentication Bug");
         assert!(gr.tag.is_none());
         store.save_with_tag(&mut gr).unwrap();
-        assert_eq!(gr.tag, Some("fix-01".to_string()));
+        assert_eq!(gr.tag, Some("fix".to_string()));
 
-        // Second goal with same title gets sequence 02.
+        // Second goal with same slug falls back to 8-char UUID.
         let mut gr2 = make_goal_run("Fix Authentication Bug");
         store.save_with_tag(&mut gr2).unwrap();
-        assert_eq!(gr2.tag, Some("fix-02".to_string()));
+        let tag2 = gr2.tag.as_ref().unwrap();
+        assert_eq!(tag2.len(), 8);
+        assert_ne!(tag2, "fix");
     }
 
     #[test]
