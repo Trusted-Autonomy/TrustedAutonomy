@@ -13,19 +13,18 @@
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use ta_submit::external_vcs_adapter::ExternalVcsAdapter;
 use ta_submit::vcs_plugin_manifest::VcsPluginManifest;
 use ta_submit::SourceAdapter;
 
 // ---------------------------------------------------------------------------
-// Mock plugin script
+// Mock plugin script — written once per test process
 // ---------------------------------------------------------------------------
 
-/// Write the mock VCS plugin shell script and return its path.
-fn write_mock_plugin(dir: &std::path::Path) -> PathBuf {
-    let script = r#"#!/bin/sh
+const MOCK_SCRIPT: &str = r#"#!/bin/sh
 # Mock VCS plugin for TA integration testing.
 # Reads one JSON line from stdin, dispatches to a hardcoded response.
 
@@ -85,32 +84,50 @@ case "$method" in
 esac
 "#;
 
+/// Returns the path to the shared mock VCS plugin binary.
+///
+/// The binary is written exactly once per test process using `OnceLock`.
+/// This avoids concurrent writes to the overlayfs-backed TMPDIR used by
+/// Nix devShells, which would race against the kernel completing the
+/// copy-up and produce ETXTBSY (error 26) when tests exec the file.
+fn mock_plugin_path() -> &'static PathBuf {
+    // The TempDir is stored in the static so it is not dropped until the
+    // test process exits — keeping the binary on disk for all tests.
+    static PLUGIN: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
+    &PLUGIN
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_plugin_binary(dir.path());
+            (dir, path)
+        })
+        .1
+}
+
+/// Write the mock plugin binary into `dir` and return its path.
+fn write_plugin_binary(dir: &Path) -> PathBuf {
+    use std::io::Write as _;
     let path = dir.join("ta-submit-mock-vcs");
-    // Use File::create + sync_all so the kernel flushes all dirty pages to the
-    // overlayfs upper layer before we close the fd.  On Linux with overlayfs
-    // (e.g. Nix devShell TMPDIR), writing and then exec-ing a file can race
-    // against the kernel completing the copy-up, returning ETXTBSY (error 26).
-    // sync_all() + the subsequent read-back together make the fix reliable even
-    // under concurrent test load (12 tests each writing their own binary).
+    // Write with sync_all so the kernel flushes all dirty pages to the
+    // overlayfs upper layer before the fd is closed.
     {
-        use std::io::Write as _;
         let mut file = std::fs::File::create(&path).unwrap();
-        file.write_all(script.as_bytes()).unwrap();
+        file.write_all(MOCK_SCRIPT.as_bytes()).unwrap();
         file.sync_all().unwrap();
     }
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).unwrap();
+    // Read back to force the overlayfs copy-up to complete.
     let _ = std::fs::read(&path).unwrap();
     path
 }
 
-fn mock_manifest(command_path: &str) -> VcsPluginManifest {
+fn mock_manifest() -> VcsPluginManifest {
     VcsPluginManifest {
         name: "mock-vcs".to_string(),
         version: "0.1.0".to_string(),
         plugin_type: "vcs".to_string(),
-        command: command_path.to_string(),
+        command: mock_plugin_path().display().to_string(),
         args: vec![],
         capabilities: vec![
             "commit".to_string(),
@@ -131,10 +148,7 @@ fn mock_manifest(command_path: &str) -> VcsPluginManifest {
 #[test]
 fn handshake_succeeds_with_mock_plugin() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha")
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha")
         .expect("handshake should succeed");
 
     assert_eq!(adapter.name(), "mock-vcs");
@@ -143,10 +157,7 @@ fn handshake_succeeds_with_mock_plugin() {
 #[test]
 fn exclude_patterns_returns_mock_patterns() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha").unwrap();
     let patterns = adapter.exclude_patterns();
 
     assert_eq!(patterns, vec![".mock-vcs/"]);
@@ -155,10 +166,7 @@ fn exclude_patterns_returns_mock_patterns() {
 #[test]
 fn save_state_returns_some() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha").unwrap();
     let state = adapter.save_state().expect("save_state should succeed");
 
     assert!(state.is_some(), "expected Some(SavedVcsState)");
@@ -167,10 +175,7 @@ fn save_state_returns_some() {
 #[test]
 fn restore_state_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha").unwrap();
 
     // Save then restore.
     let state = adapter.save_state().unwrap();
@@ -182,10 +187,7 @@ fn restore_state_round_trip() {
 #[test]
 fn protected_targets_returns_mock_targets() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha").unwrap();
     let targets = adapter.protected_submit_targets();
 
     assert_eq!(targets, vec!["mock://protected/main"]);
@@ -194,10 +196,7 @@ fn protected_targets_returns_mock_targets() {
 #[test]
 fn verify_not_on_protected_target_succeeds() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha").unwrap();
     adapter
         .verify_not_on_protected_target()
         .expect("verify_target should succeed");
@@ -206,10 +205,7 @@ fn verify_not_on_protected_target_succeeds() {
 #[test]
 fn revision_id_returns_mock_rev() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha").unwrap();
     let rev = adapter.revision_id().expect("revision_id should succeed");
     assert_eq!(rev, "mock-rev-42");
 }
@@ -217,10 +213,7 @@ fn revision_id_returns_mock_rev() {
 #[test]
 fn sync_upstream_returns_updated_true() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha").unwrap();
     let result = adapter
         .sync_upstream()
         .expect("sync_upstream should succeed");
@@ -232,10 +225,7 @@ fn sync_upstream_returns_updated_true() {
 #[test]
 fn check_review_returns_open() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha").unwrap();
     let status = adapter
         .check_review("mock-pr-1")
         .expect("check_review should succeed");
@@ -247,10 +237,7 @@ fn check_review_returns_open() {
 #[test]
 fn merge_review_returns_merged_true() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
+    let adapter = ExternalVcsAdapter::new(&mock_manifest(), dir.path(), "0.13.5-alpha").unwrap();
     let result = adapter
         .merge_review("mock-pr-1")
         .expect("merge_review should succeed");
@@ -261,18 +248,15 @@ fn merge_review_returns_merged_true() {
 #[test]
 fn detect_with_mock_plugin() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
-
-    let detected = ExternalVcsAdapter::detect_with_plugin(&manifest, dir.path(), "0.13.5-alpha");
+    let detected =
+        ExternalVcsAdapter::detect_with_plugin(&mock_manifest(), dir.path(), "0.13.5-alpha");
     assert!(detected, "mock plugin should return detected=true");
 }
 
 #[test]
 fn full_lifecycle_detect_save_commit_restore() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = write_mock_plugin(dir.path());
-    let manifest = mock_manifest(&bin.display().to_string());
+    let manifest = mock_manifest();
 
     // 1. Detect
     let detected = ExternalVcsAdapter::detect_with_plugin(&manifest, dir.path(), "0.13.5-alpha");
