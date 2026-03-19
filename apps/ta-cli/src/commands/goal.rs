@@ -591,11 +591,27 @@ fn list_goals(
     // Load draft packages to show inline draft/VCS status.
     let packages = load_all_packages_silent(config);
 
+    // Compute tag column width dynamically so full tags always fit.
+    let tag_w = goals
+        .iter()
+        .map(|g| g.display_tag().len())
+        .max()
+        .unwrap_or(3)
+        .max(3)  // min width for "TAG" header
+        + 2; // padding
+
+    let sep_len = tag_w + 22 + 12 + 10 + 10 + 14 + 5; // 5 spaces between cols
     println!(
-        "{:<22} {:<22} {:<12} {:<10} {:<10} {:<14}",
-        "TAG", "TITLE", "STATE", "HEALTH", "DRAFT", "VCS"
+        "{:<tag_w$} {:<22} {:<12} {:<10} {:<10} {:<14}",
+        "TAG",
+        "TITLE",
+        "STATE",
+        "HEALTH",
+        "DRAFT",
+        "VCS",
+        tag_w = tag_w,
     );
-    println!("{}", "-".repeat(90));
+    println!("{}", "-".repeat(sep_len));
 
     for g in &goals {
         let tag = g.display_tag();
@@ -624,13 +640,14 @@ fn list_goals(
         let (draft_col, vcs_col) = goal_draft_vcs_columns(g, &packages);
 
         println!(
-            "{:<22} {:<22} {:<12} {:<10} {:<10} {:<14}",
-            truncate(&tag, 20),
+            "{:<tag_w$} {:<22} {:<12} {:<10} {:<10} {:<14}",
+            tag,
             title_display,
             g.state.to_string(),
             health,
             draft_col,
             vcs_col,
+            tag_w = tag_w,
         );
     }
     println!("\n{} goal(s) total.", goals.len());

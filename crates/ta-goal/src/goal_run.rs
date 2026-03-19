@@ -241,8 +241,17 @@ pub struct GoalRun {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Generate a slug from a title: lowercase, hyphens, max 30 chars.
+/// Generate a slug from a title: lowercase, hyphens, max 16 chars.
+///
+/// If the title contains a version string (e.g. "v0.12.4.1"), that version
+/// is used as the slug directly (e.g. "v0-12-4-1") — it's short, unique, and
+/// immediately recognisable.
 pub fn slugify_title(title: &str) -> String {
+    // Extract the first version pattern like v0.12.4 or v0.12.4.1
+    if let Some(version) = extract_version(title) {
+        return version;
+    }
+
     let slug: String = title
         .to_lowercase()
         .chars()
@@ -264,9 +273,9 @@ pub fn slugify_title(title: &str) -> String {
     }
     // Trim trailing hyphen.
     let trimmed = collapsed.trim_end_matches('-');
-    if trimmed.len() > 30 {
-        // Don't cut mid-word: find last hyphen before 30 chars.
-        let cut = &trimmed[..30];
+    if trimmed.len() > 16 {
+        // Don't cut mid-word: find last hyphen before 16 chars.
+        let cut = &trimmed[..16];
         if let Some(idx) = cut.rfind('-') {
             cut[..idx].to_string()
         } else {
@@ -275,6 +284,35 @@ pub fn slugify_title(title: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Extract a version string from a title, returning it as a hyphenated slug.
+/// Matches patterns like "v0.12", "v0.12.4", "v0.12.4.1".
+/// e.g. "Implement v0.12.4.1 — Shell fix" → "v0-12-4-1"
+fn extract_version(title: &str) -> Option<String> {
+    // Find 'v' followed by digit-dot sequences.
+    let bytes = title.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if (bytes[i] == b'v' || bytes[i] == b'V')
+            && i + 1 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+        {
+            // Consume the version: digits and dots only.
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                i += 1;
+            }
+            let version = &title[start..i];
+            // Must have at least one dot to be a real version.
+            if version.contains('.') {
+                return Some(version.to_lowercase().replace('.', "-"));
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 impl GoalRun {
@@ -624,25 +662,41 @@ mod tests {
 
     #[test]
     fn slugify_title_basic() {
-        assert_eq!(
-            slugify_title("Fix Authentication Bug"),
-            "fix-authentication-bug"
-        );
+        // "fix-authentication-bug" is 22 chars — truncates at last hyphen before 16 → "fix"
+        // (only hyphen before char 16 is at position 3)
+        assert_eq!(slugify_title("Fix Authentication Bug"), "fix");
     }
 
     #[test]
     fn slugify_title_special_chars() {
-        assert_eq!(
-            slugify_title("Add JWT (v2) & OAuth support!"),
-            "add-jwt-v2-oauth-support"
-        );
+        // "add-jwt-v2-oauth-support" — "v2" looks like a version but has no dot, so
+        // no version extraction. Slugified and truncated at last hyphen before 16.
+        // "add-jwt-v2-oauth" is 16 chars; rfind('-') = 10 → "add-jwt-v2"
+        assert_eq!(slugify_title("Add JWT (v2) & OAuth support!"), "add-jwt-v2");
     }
 
     #[test]
     fn slugify_title_truncates_long_names() {
         let long = "implement-the-very-long-feature-that-needs-many-words";
         let slug = slugify_title(long);
-        assert!(slug.len() <= 30, "slug len {} > 30: {}", slug.len(), slug);
+        assert!(slug.len() <= 16, "slug len {} > 16: {}", slug.len(), slug);
+    }
+
+    #[test]
+    fn slugify_title_extracts_version() {
+        assert_eq!(
+            slugify_title("Implement v0.12.4.1 — Shell fix"),
+            "v0-12-4-1"
+        );
+        assert_eq!(slugify_title("v0.12.2 — Shell Paste-at-End UX"), "v0-12-2");
+        assert_eq!(slugify_title("Fix build v0.12.3"), "v0-12-3");
+    }
+
+    #[test]
+    fn slugify_title_no_version_for_bare_v() {
+        // "v2" without a dot is not a version.
+        let slug = slugify_title("Add OAuth v2 support");
+        assert_ne!(slug, "v2");
     }
 
     #[test]

@@ -369,12 +369,12 @@ mod tests {
         let mut gr = make_goal_run("Fix Authentication Bug");
         assert!(gr.tag.is_none());
         store.save_with_tag(&mut gr).unwrap();
-        assert_eq!(gr.tag, Some("fix-authentication-bug-01".to_string()));
+        assert_eq!(gr.tag, Some("fix-01".to_string()));
 
         // Second goal with same title gets sequence 02.
         let mut gr2 = make_goal_run("Fix Authentication Bug");
         store.save_with_tag(&mut gr2).unwrap();
-        assert_eq!(gr2.tag, Some("fix-authentication-bug-02".to_string()));
+        assert_eq!(gr2.tag, Some("fix-02".to_string()));
     }
 
     #[test]
