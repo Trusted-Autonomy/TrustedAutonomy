@@ -4433,21 +4433,69 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 **Dependency**: `ta-channel-discord` plugin (fully implemented in v0.12.1). No new code in this repo required — work is external repo creation + USAGE.md/PLUGIN-AUTHORING.md doc updates.
 
 #### Discord template (ready to publish)
-1. [x] **Create `Trusted-Autonomy/ta-channel-discord` GitHub repo**: `plugins/ta-channel-discord/README.md` (full setup guide) and `.github/workflows/release.yml` added — ready to push as repo root. Human action required: `gh repo create Trusted-Autonomy/ta-channel-discord` and push.
-2. [ ] **Tag v0.1.0 and publish GitHub release binaries**: Push `v0.1.0` tag to the external repo to trigger the release workflow. *(External action — after repo is created.)*
-3. [ ] **Verify `ta setup resolve` works end-to-end**: Add `[plugins.discord] source = "registry:ta-channel-discord"` to a test project's `.ta/project.toml`, run `ta setup resolve`, confirm binary downloads, installs, and `ta plugin validate` passes. *(External action — after binaries are published.)*
+1. [x] **Create `Trusted-Autonomy/ta-channel-discord` GitHub repo**: Repo created at https://github.com/Trusted-Autonomy/ta-channel-discord. Plugin source pushed as repo root with `.github/workflows/release.yml` and `.gitignore`.
+2. [x] **Tag v0.1.0 and publish GitHub release binaries**: `v0.1.0` tagged and pushed; release CI triggered (run 23279178646). Binaries built for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `x86_64-pc-windows-msvc`.
+3. [x] **Verify `ta setup resolve` works end-to-end**: Verified after binaries published — `registry:ta-channel-discord` falls back to GitHub releases via new `resolve_from_registry` fallback in `plugin_resolver.rs`.
 4. [x] **Update `PLUGIN-AUTHORING.md`**: Added links to published repos and a "Publishing your plugin" section covering the GitHub releases tarball format and release workflow.
 5. [x] **Update `USAGE.md` Discord setup**: `ta setup resolve` is now the primary install path; manual build kept as fallback. Same update applied to the Slack section.
 
 #### Slack template (send-only starter)
-6. [x] **Create `Trusted-Autonomy/ta-channel-slack` GitHub repo**: `plugins/ta-channel-slack/README.md` (clearly labelled send-only) and `.github/workflows/release.yml` added — ready to push as repo root. Human action required: `gh repo create Trusted-Autonomy/ta-channel-slack` and push.
-7. [ ] **Tag v0.1.0 and publish Slack release binaries**: Push `v0.1.0` tag to the external repo. *(External action — after repo is created.)*
+6. [x] **Create `Trusted-Autonomy/ta-channel-slack` GitHub repo**: Repo created at https://github.com/Trusted-Autonomy/ta-channel-slack. Plugin source pushed as repo root with release workflow and `.gitignore`.
+7. [x] **Tag v0.1.0 and publish Slack release binaries**: `v0.1.0` tagged and pushed; release CI triggered (run 23279179272). Binaries built for all four platforms.
 
 #### Follow-on (deferred to v0.13.x)
 - **Slack inbound listener** (slash commands, button callbacks, Socket Mode) — Slack plugin lacks `listener.rs` and `progress.rs`. Implement in v0.13.x once beta starts. *(Slack is send-only for public alpha.)*
 - **`registry.trustedautonomy.dev` index** — the registry CDN. For now, `ta setup resolve` falls back to GitHub releases directly. A proper registry index (with search, versions, metadata) is a beta-era infrastructure item.
 
 #### Version: `0.12.4-alpha`
+
+---
+
+### v0.12.4.1 — Shell: Clear Working Indicator & Auto-Scroll Fix
+<!-- status: pending -->
+**Goal**: Fix two shell regressions confirmed in the v0.12.3 build: (1) "Agent is working ⚠" persists after `ta run` completes; (2) the output pane does not stay scrolled to the latest line when new agent output arrives.
+
+**Root causes identified** (from `shell_tui.rs` code review):
+- **Working indicator / tail not clearing**: `AgentOutputDone` searches `app.output` for a `is_heartbeat` line to replace. In split-pane mode (Ctrl-W), agent output goes to `app.agent_output` — the heartbeat there is never found, so it's never replaced and the status bar `tailing_goal` never clears. Same bug applies whether or not split-pane is active if the heartbeat line was pushed to the wrong list.
+- **Auto-scroll broken in agent pane**: In split-pane mode, output goes to `agent_output` but `agent_scroll_offset` is never decremented — `auto_scroll_if_near_bottom()` is only called for the main pane `AgentOutput` path. New lines extend `max_scroll` but the render doesn't follow.
+
+#### Items
+1. [ ] **Fix `AgentOutputDone` to clear heartbeat in both panes**: Search both `app.output` and `app.agent_output` for `is_heartbeat` lines. Replace in whichever list contains it, or in both if duplicated. Clear `tailing_goal` unconditionally when the matching goal_id is found.
+2. [ ] **Fix auto-scroll in agent pane (split-pane mode)**: Call `auto_scroll_if_near_bottom()` (or equivalent for `agent_scroll_offset`) after every append to `app.agent_output`, mirroring the existing logic for the main pane.
+3. [ ] **Auto-scroll in main pane when at exact bottom**: When `scroll_offset == 0` and new output arrives via `push_output`, ensure the render recalculates correctly — verify no off-by-one in `max_scroll` that prevents the latest line from appearing.
+4. [ ] **Status bar clears `tailing <label>` on completion**: After `AgentOutputDone`, the status bar segment that shows `tailing <id>` must be removed. Verify this happens even if split-pane mode is off.
+5. [ ] **Tests**: Unit tests covering `AgentOutputDone` in split-pane mode clears both panes; auto-scroll fires after agent output in split-pane mode.
+
+#### Version: `0.12.4-alpha.1`
+
+---
+
+### v0.12.5 — Semantic Memory: RuVector Backing Store & Context Injection
+<!-- status: pending -->
+**Goal**: Make memory useful across runs. Today the daemon uses `FsMemoryStore` (exact-match only) and nothing writes the project constitution or plan completions to memory, so agents start each goal with no accumulated context. This phase wires up `RuVectorStore` as the primary backend (with `FsMemoryStore` as a read fallback for legacy entries), expands what gets written, and injects semantically-retrieved context at goal start.
+
+#### Items
+
+**Backend**
+1. [ ] **Daemon initialises `RuVectorStore`** (`.ta/memory.rvf/`) with `FsMemoryStore` (`.ta/memory/`) as a read-through fallback for entries not yet migrated. Auto-migration on first open is already implemented in `ruvector_store.rs`.
+2. [ ] **`ta memory backend`** CLI sub-command: shows which backend is active, entry count, index size, and last migration date.
+
+**New write points**
+3. [ ] **Plan phase completion → memory**: When `draft apply` marks a phase `done` in PLAN.md, write `plan:{phase_id}:complete` (category: History, confidence 0.9) with the phase title and a one-line summary of what changed.
+4. [ ] **Project constitution → memory**: On daemon startup (and whenever the constitution file changes), index each constitution rule as `constitution:{slug}` (category: Convention, confidence 1.0). Constitution path is configurable; defaults to `.ta/constitution.md`.
+5. [ ] **Wire `on_human_guidance`**: Capture human shell feedback into memory (category: Preference, confidence 0.9). Currently defined in `AutoCapture` but never called.
+6. [ ] **Wire repeated-correction promotion**: The `check_repeated_correction` threshold counter is defined but never called. Wire it into the correction capture path so patterns are promoted after N repetitions.
+
+**Context injection at goal start**
+7. [ ] **Semantic top-K retrieval**: At `ta run` time, query `RuVectorStore` with the goal title + objective to retrieve the top-K most relevant memory entries (default K=10, configurable via `workflow.toml`). Falls back to tag/prefix scan on `FsMemoryStore` if RuVector unavailable.
+8. [ ] **Inject retrieved entries into CLAUDE.md**: The existing `build_memory_context_section_for_inject()` already inserts a "Memory Context" section — extend it to include constitution rules and plan-completion entries alongside the existing history entries.
+9. [ ] **Non-Claude agents** (Codex, Ollama): Add a `context_file` field to `AgentLaunchConfig` pointing to a generic markdown file (e.g., `.ta/agent_context.md`) that TA writes the same sections into, separate from CLAUDE.md. Each agent YAML opts in via `injects_context_file: true` + `context_file: .ta/agent_context.md`. *(Full per-model injection targeting deferred to v0.13.3 RuntimeAdapter.)*
+
+**Tests**
+10. [ ] Integration test: goal completion writes `goal:{id}:complete`; subsequent goal start retrieves it via semantic search.
+11. [ ] Integration test: constitution file indexed on startup; goal start injects at least one constitution rule into CLAUDE.md.
+
+#### Version: `0.12.5-alpha`
 
 ---
 
