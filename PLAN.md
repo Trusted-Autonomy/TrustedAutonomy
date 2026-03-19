@@ -116,6 +116,7 @@ Needed for compliance-focused or container-isolated deployments.
 - v0.13.3 — Runtime Adapter Trait (SecureTA/OCI; depends on v0.13.2)
 - v0.13.6 — Community Knowledge Hub (post-launch community feature)
 - v0.13.9 — Compliance-Ready Audit Ledger
+- v0.13.10 — Feature Velocity Stats: build time, fix time, goal outcomes, connector events
 
 ### Deferred / May Drop
 
@@ -5214,6 +5215,94 @@ Even on the happy path, the `GoalHistoryEntry` lacks:
 12. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new audit ledger format on first run.
 
 #### Version: `0.13.9-alpha`
+
+---
+
+---
+
+### v0.13.10 — Feature Velocity Stats & Outcome Telemetry
+<!-- status: pending -->
+<!-- beta: yes — enterprise observability -->
+**Goal**: Instrument the full goal lifecycle to produce a local `velocity-stats.json` file with per-goal timing, outcome, and workflow metadata. Give teams insight into build throughput, rework cost, and failure patterns. Emit a connector event on every completion so enterprise deployments can upload stats per-project to a central dashboard.
+
+#### Problem
+There is currently no durable record of:
+- How long each goal took from start to `pr_ready` (build time)
+- How long was spent on follow-up goals amending/fixing the original (rework time)
+- How many goals failed, were cancelled, or were denied vs applied
+- Which workflow type (code, doc, qa, etc.) produced which outcomes
+- Whether a goal required human amendment before apply
+
+This data exists ephemerally in goal JSON and draft packages, but is never aggregated or surfaced. As workflows diversify (code → doc → qa → office routing in v0.13.7), per-workflow benchmarking becomes essential for both personal insight and enterprise SLAs.
+
+#### Design
+
+**Stats file**: `.ta/velocity-stats.json` — append-on-each-goal-completion, human-readable.
+
+```json
+{
+  "schema_version": "1.0",
+  "project": "TrustedAutonomy",
+  "entries": [
+    {
+      "goal_id": "226dea99-...",
+      "title": "Implement v0.12.8...",
+      "workflow": "code",
+      "agent": "claude-code",
+      "plan_phase": "v0.12.8",
+      "outcome": "applied",           // applied | denied | cancelled | failed | timeout
+      "started_at": "2026-03-19T22:10:00Z",
+      "pr_ready_at": "2026-03-19T22:30:00Z",
+      "applied_at":  "2026-03-19T22:45:00Z",
+      "build_seconds": 1200,          // start → pr_ready
+      "review_seconds": 900,          // pr_ready → applied/denied
+      "total_seconds": 2100,
+      "amended": false,               // human amended any artifact before apply
+      "follow_up_count": 0,           // number of follow-up goals spawned from this one
+      "rework_seconds": 0,            // sum of follow-up goal build_seconds
+      "denial_reason": null,
+      "cancel_reason": null
+    }
+  ]
+}
+```
+
+**Connector event**: On every terminal outcome (`GoalApplied`, `GoalDenied`, `GoalCancelled`, `GoalFailed`), emit a `VelocitySnapshot` event via the existing event router. Channel plugins (Discord, Slack, future HTTP webhook) receive this and can forward to a central endpoint.
+
+```json
+{
+  "event_type": "VelocitySnapshot",
+  "project": "TrustedAutonomy",
+  "entry": { /* same structure as above */ },
+  "aggregate": {
+    "total_goals": 42,
+    "applied": 38,
+    "failed": 2,
+    "cancelled": 2,
+    "avg_build_seconds": 850,
+    "avg_rework_seconds": 120,
+    "p90_build_seconds": 1800
+  }
+}
+```
+
+#### Items
+
+1. [ ] **`VelocityEntry` struct** (`crates/ta-goal/src/velocity.rs`): fields per schema above; `Serialize`/`Deserialize`; builder from `GoalRun` + `DraftPackage`
+2. [ ] **`VelocityStore`** (`crates/ta-goal/src/velocity.rs`): append-only writer to `.ta/velocity-stats.json`; load/query helpers; rolling 90-day window
+3. [ ] **Hook into goal terminal states**: `ta draft apply`, `ta goal cancel`, `ta goal delete`, and gc-driven `failed` transitions each write a `VelocityEntry`
+4. [ ] **Build time calculation**: `started_at` from `GoalRun.created_at`; `pr_ready_at` from first `DraftBuilt` event timestamp
+5. [ ] **Rework tracking**: follow-up goals (`GoalRun.parent_goal_id`) sum their `build_seconds` into the root goal's `rework_seconds`
+6. [ ] **`ta stats`** CLI command: pretty-print aggregate velocity stats; `--json` for raw output; `--workflow <type>` filter; `--since <date>` filter
+7. [ ] **`ta stats velocity`**: per-goal breakdown table (title, outcome, build time, rework time, amended)
+8. [ ] **`VelocitySnapshot` event emission**: emit via `EventRouter` on every terminal outcome; include entry + rolling aggregate
+9. [ ] **Connector forwarding**: channel plugins receive `VelocitySnapshot` events; Discord plugin posts a compact summary card on `applied`/`failed` (opt-in via `channel.toml` `velocity_events = true`)
+10. [ ] **Enterprise HTTP connector** *(stretch)*: `[connectors.velocity]` in `daemon.toml` — POST snapshot JSON to a configured URL on each completion event; supports bearer token auth
+11. [ ] **`ta stats export`**: export full history as CSV or JSON for external analysis
+12. [ ] Add `velocity_events` opt-in flag to `channel.toml` schema (default `false`)
+13. [ ] Tests: `VelocityEntry` builder from mock goal/draft; `VelocityStore` append + load round-trip; aggregate calculation; rework rollup
+
+#### Version: `0.13.10-alpha`
 
 ---
 
