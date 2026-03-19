@@ -238,6 +238,8 @@ pub enum TuiMessage {
         display_id: String,
         title: String,
     },
+    /// Tail stream successfully connected to a goal — track in active set (v0.12.3).
+    TailStarted { goal_id: String },
 }
 
 /// A line of live agent output (v0.10.11).
@@ -245,6 +247,8 @@ pub enum TuiMessage {
 pub struct AgentOutputLine {
     pub stream: String,
     pub line: String,
+    /// Goal ID this line belongs to — used for multi-agent tag prefixing (v0.12.3).
+    pub goal_id: Option<String>,
 }
 
 /// A pending question from an agent that needs a human response.
@@ -456,6 +460,12 @@ struct App {
     output_area: ratatui::layout::Rect,
     /// Latency diagnostics (`:latency on/off/dump`).
     latency_diag: LatencyDiag,
+    /// All goal IDs currently being tailed (for multi-agent tag-prefix logic, v0.12.3).
+    active_tailing_goals: std::collections::HashSet<String>,
+    /// Short tag of last agent routed to via `>tag message` — shows `[→tag]` in status bar (v0.12.3).
+    last_routed_tag: Option<String>,
+    /// Goal ID awaiting auth-failure retry/abort decision (v0.12.3).
+    pending_auth_retry: Option<String>,
 }
 
 impl App {
@@ -503,6 +513,9 @@ impl App {
             selection: None,
             output_area: ratatui::layout::Rect::default(),
             latency_diag: LatencyDiag::new(),
+            active_tailing_goals: std::collections::HashSet::new(),
+            last_routed_tag: None,
+            pending_auth_retry: None,
         }
     }
 
@@ -568,6 +581,8 @@ impl App {
             } else {
                 "[stdin] > ".to_string()
             }
+        } else if self.pending_auth_retry.is_some() {
+            "auth-fail> [r]etry [a]bort: ".to_string()
         } else if let Some(ref goal_id) = self.attach_mode {
             let short = &goal_id[..8.min(goal_id.len())];
             format!("[attach:{}] > ", short)
@@ -575,6 +590,9 @@ impl App {
             format!("[agent Q{}] > ", q.turn)
         } else if self.workflow_prompt.is_some() {
             "workflow> ".to_string()
+        } else if let Some(ref tag) = self.last_routed_tag {
+            // After a `>tag message` route, show where the last message went (v0.12.3).
+            format!("[→{}] > ", tag)
         } else {
             "ta> ".to_string()
         }
@@ -771,6 +789,19 @@ impl App {
     fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
         self.unread_events = 0;
+    }
+
+    /// Auto-scroll to bottom when "near bottom" (within threshold lines).
+    ///
+    /// Called after agent output lines arrive so that a user who is at or
+    /// near the bottom stays pinned there — matching a `tail -f` experience.
+    /// If the user has scrolled far up to read history, this is a no-op.
+    fn auto_scroll_if_near_bottom(&mut self) {
+        const NEAR_BOTTOM_LINES: usize = 5;
+        if self.scroll_offset <= NEAR_BOTTOM_LINES {
+            self.scroll_offset = 0;
+            self.unread_events = 0;
+        }
     }
 }
 
@@ -1484,6 +1515,155 @@ async fn handle_terminal_event(
                             }
                         }
 
+                        // Auth retry/abort prompt handling (v0.12.3).
+                        // When `pending_auth_retry` is set, only 'r' / 'a' / "retry" / "abort"
+                        // are accepted; everything else shows the prompt again.
+                        if let Some(goal_id) = app.pending_auth_retry.clone() {
+                            let lower = text.to_lowercase();
+                            if lower == "r" || lower == "retry" {
+                                app.pending_auth_retry = None;
+                                app.last_routed_tag = None;
+                                // No daemon restart API yet — instruct the user to re-run.
+                                app.push_output(OutputLine::info(
+                                    "[auth retry] Re-running the goal is not yet supported \
+                                     from the shell. Run: ta goal list  and restart via CLI."
+                                        .to_string(),
+                                ));
+                                app.push_output(OutputLine::info(format!(
+                                    "  Goal ID: {}  — ta run <title> to start a new session.",
+                                    &goal_id[..8.min(goal_id.len())]
+                                )));
+                            } else if lower == "a" || lower == "abort" {
+                                app.pending_auth_retry = None;
+                                app.last_routed_tag = None;
+                                app.push_output(OutputLine::info(
+                                    "[auth abort] Dismissed auth failure notice. \
+                                     Agent process may still be running."
+                                        .to_string(),
+                                ));
+                            } else {
+                                app.push_output(OutputLine::error(
+                                    "Auth failure pending — type 'r' to retry or 'a' to abort."
+                                        .to_string(),
+                                ));
+                            }
+                            return;
+                        }
+
+                        // `>tag message` — inline agent routing (v0.12.3).
+                        // Syntax: >tag message OR > message (routes to sole active agent).
+                        if let Some(after_gt) = text.strip_prefix('>') {
+                            let rest = after_gt.trim();
+                            // Parse optional tag prefix: `>tag message` vs `> message`.
+                            let (tag, message) = if rest.contains(' ') {
+                                let space = rest.find(' ').unwrap();
+                                let candidate_tag = rest[..space].trim();
+                                let msg = rest[space..].trim();
+                                // If candidate_tag looks like a goal tag (no spaces, non-empty),
+                                // use it; otherwise treat the whole rest as the message.
+                                if !candidate_tag.is_empty()
+                                    && !candidate_tag.contains('\n')
+                                    && !msg.is_empty()
+                                {
+                                    (Some(candidate_tag.to_string()), msg.to_string())
+                                } else {
+                                    (None, rest.to_string())
+                                }
+                            } else if !rest.is_empty() {
+                                // `>tag` with no message — show help.
+                                app.push_output(OutputLine::info(
+                                    "Usage: >tag message   OR   > message (routes to sole active agent)"
+                                        .to_string(),
+                                ));
+                                return;
+                            } else {
+                                (None, String::new())
+                            };
+
+                            if message.is_empty() {
+                                app.push_output(OutputLine::info(
+                                    "Usage: >tag message   OR   > message (routes to sole active agent)"
+                                        .to_string(),
+                                ));
+                                return;
+                            }
+
+                            // Resolve which goal to send to.
+                            let goal_id_to_route = if let Some(ref t) = tag {
+                                // Find goal matching the tag (prefix match on active_tailing_goals).
+                                app.active_tailing_goals
+                                    .iter()
+                                    .find(|g| {
+                                        g.starts_with(t.as_str()) || {
+                                            let short = &g[..8.min(g.len())];
+                                            short.starts_with(t.as_str())
+                                        }
+                                    })
+                                    .cloned()
+                                    .or_else(|| app.tailing_goal.clone())
+                            } else {
+                                // No tag: use sole active goal or primary tailing goal.
+                                if app.active_tailing_goals.len() == 1 {
+                                    app.active_tailing_goals.iter().next().cloned()
+                                } else {
+                                    app.tailing_goal.clone()
+                                }
+                            };
+
+                            match goal_id_to_route {
+                                None => {
+                                    app.push_output(OutputLine::error(
+                                        "No active agent to route to. Start a goal or use :attach."
+                                            .to_string(),
+                                    ));
+                                }
+                                Some(goal_id) => {
+                                    let short = goal_id[..8.min(goal_id.len())].to_string();
+                                    // Update `last_routed_tag` so the prompt shows `[→tag] >`.
+                                    app.last_routed_tag = Some(short.clone());
+                                    app.push_output(OutputLine::info(format!(
+                                        "[→{}] {}",
+                                        short, message
+                                    )));
+
+                                    let client = client.clone();
+                                    let base_url = app.base_url.clone();
+                                    let tx = tx.clone();
+                                    let input_text = message.clone();
+                                    tokio::spawn(async move {
+                                        let url =
+                                            format!("{}/api/goals/{}/input", base_url, goal_id);
+                                        let result = client
+                                            .post(&url)
+                                            .json(&serde_json::json!({ "input": input_text }))
+                                            .send()
+                                            .await;
+                                        match result {
+                                            Ok(resp) if resp.status().is_success() => {}
+                                            Ok(resp) => {
+                                                let status = resp.status();
+                                                let body = resp.text().await.unwrap_or_default();
+                                                let _ =
+                                                    tx.send(TuiMessage::CommandResponse(format!(
+                                                        "[→] Route error (HTTP {}): {}",
+                                                        status, body
+                                                    )));
+                                            }
+                                            Err(e) => {
+                                                let _ = tx.send(TuiMessage::CommandResponse(
+                                                    format!("[→] Route failed: {}", e),
+                                                ));
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            return;
+                        }
+
+                        // Routing complete — any non-`>` command clears the last_routed_tag.
+                        app.last_routed_tag = None;
+
                         // If there's a pending stdin prompt, route to goal input endpoint (v0.10.18.5).
                         if let Some(sp) = app.pending_stdin_prompt.take() {
                             let client = client.clone();
@@ -2000,6 +2180,38 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                 }
             }
 
+            // Detect auth / API-key failure in stderr lines (v0.12.3).
+            // Patterns: HTTP 401, "Invalid API key", "authentication", "Unauthorized".
+            if line.stream == "stderr" {
+                let lower = line.line.to_lowercase();
+                let is_auth_failure = lower.contains("401")
+                    || lower.contains("invalid api key")
+                    || lower.contains("authentication failed")
+                    || lower.contains("unauthorized")
+                    || lower.contains("invalid x-api-key")
+                    || lower.contains("api key not found");
+                if is_auth_failure {
+                    let goal_id = line
+                        .goal_id
+                        .clone()
+                        .or_else(|| app.tailing_goal.clone())
+                        .unwrap_or_default();
+                    // Only show once per goal (if not already pending).
+                    if app.pending_auth_retry.is_none() {
+                        app.pending_auth_retry = Some(goal_id);
+                        app.push_output(OutputLine::error(
+                            "━━━ Agent auth failure detected ━━━".to_string(),
+                        ));
+                        app.push_output(OutputLine::error(line.line.clone()));
+                        app.push_output(OutputLine::error(
+                            "Agent auth failed — type 'r' to retry or 'a' to abort.".to_string(),
+                        ));
+                        app.scroll_to_bottom();
+                        return;
+                    }
+                }
+            }
+
             // Heartbeat coalescing: detect [heartbeat] lines and update in-place
             // instead of appending (v0.11.4.1 items 9-10).
             if line.line.starts_with("[heartbeat]") {
@@ -2020,7 +2232,7 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             }
 
             let styled = if line.stream == "stderr" {
-                OutputLine::agent_stderr(line.line)
+                OutputLine::agent_stderr(line.line.clone())
             } else {
                 // Schema-driven stream-json parsing (v0.11.2.2).
                 // Extract model name from any line if not yet known.
@@ -2030,9 +2242,30 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                     }
                 }
                 match ta_output_schema::parse_line(&app.output_schema, &line.line) {
-                    ta_output_schema::ParseResult::Text(text) => OutputLine::agent_stdout(text),
+                    ta_output_schema::ParseResult::Text(text) => {
+                        // Multi-agent tag prefix: prepend `[short]` when multiple goals tailing (v0.12.3).
+                        if app.active_tailing_goals.len() > 1 {
+                            if let Some(ref gid) = line.goal_id {
+                                let short = &gid[..8.min(gid.len())];
+                                OutputLine::agent_stdout(format!("[{}] {}", short, text))
+                            } else {
+                                OutputLine::agent_stdout(text)
+                            }
+                        } else {
+                            OutputLine::agent_stdout(text)
+                        }
+                    }
                     ta_output_schema::ParseResult::ToolUse(name) => {
-                        OutputLine::agent_stdout(format!("[tool] {}", name))
+                        if app.active_tailing_goals.len() > 1 {
+                            if let Some(ref gid) = line.goal_id {
+                                let short = &gid[..8.min(gid.len())];
+                                OutputLine::agent_stdout(format!("[{}] [tool] {}", short, name))
+                            } else {
+                                OutputLine::agent_stdout(format!("[tool] {}", name))
+                            }
+                        } else {
+                            OutputLine::agent_stdout(format!("[tool] {}", name))
+                        }
                     }
                     ta_output_schema::ParseResult::Model(model) => {
                         if app.status.agent_model.is_none() {
@@ -2042,7 +2275,17 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                     }
                     ta_output_schema::ParseResult::Suppress => return,
                     ta_output_schema::ParseResult::NotJson => {
-                        OutputLine::agent_stdout(line.line) // Not JSON — show raw.
+                        // Not JSON — show raw, with multi-agent prefix if needed.
+                        if app.active_tailing_goals.len() > 1 {
+                            if let Some(ref gid) = line.goal_id {
+                                let short = &gid[..8.min(gid.len())];
+                                OutputLine::agent_stdout(format!("[{}] {}", short, line.line))
+                            } else {
+                                OutputLine::agent_stdout(line.line)
+                            }
+                        } else {
+                            OutputLine::agent_stdout(line.line)
+                        }
                     }
                 }
             };
@@ -2056,6 +2299,16 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                 }
             } else {
                 app.push_output(styled);
+                // Auto-scroll to bottom when "near bottom" — keeps latest visible (v0.12.3).
+                app.auto_scroll_if_near_bottom();
+            }
+        }
+        TuiMessage::TailStarted { goal_id } => {
+            // Track this goal in the active_tailing_goals set (v0.12.3).
+            app.active_tailing_goals.insert(goal_id.clone());
+            // Also set tailing_goal if not already set (covers explicit :tail calls).
+            if app.tailing_goal.is_none() {
+                app.tailing_goal = Some(goal_id);
             }
         }
         TuiMessage::GoalStarted { goal_id, title } => {
@@ -2070,6 +2323,10 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             if app.auto_tail && app.tailing_goal.is_none() {
                 app.tailing_goal = Some(goal_id.clone());
             }
+            // Track in active_tailing_goals for multi-agent tag display (v0.12.3).
+            if app.auto_tail {
+                app.active_tailing_goals.insert(goal_id.clone());
+            }
             // If in attach mode with __latest__ sentinel, resolve to the real goal ID.
             if app.attach_mode.as_deref() == Some("__latest__") {
                 app.attach_mode = Some(goal_id);
@@ -2077,17 +2334,41 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
         }
         TuiMessage::AgentOutputDone(goal_id) => {
             let short_id = &goal_id[..8.min(goal_id.len())];
-            app.push_output(OutputLine::separator(format!(
-                "━━━ Agent output ended ({}) ━━━",
-                short_id
-            )));
+
+            // Replace the last heartbeat line with a clean "[agent exited]" line
+            // so the "Agent is working ⚠" indicator doesn't linger after exit (v0.12.3 items 5, 7).
+            let replaced = if let Some(last) = app.output.iter_mut().rev().find(|l| l.is_heartbeat)
+            {
+                last.is_heartbeat = false;
+                last.text = format!("[agent exited] {}", short_id);
+                last.style = Style::default().fg(Color::DarkGray);
+                true
+            } else {
+                false
+            };
+
+            if !replaced {
+                app.push_output(OutputLine::separator(format!(
+                    "━━━ Agent output ended ({}) ━━━",
+                    short_id
+                )));
+            } else {
+                app.push_output(OutputLine::separator(format!(
+                    "━━━ Agent exited ({}) ━━━",
+                    short_id
+                )));
+            }
+
+            // Remove from active_tailing_goals set (v0.12.3).
+            app.active_tailing_goals.remove(&goal_id);
+
             if app.tailing_goal.as_deref() == Some(&goal_id) {
                 app.tailing_goal = None;
             }
             if app.attach_mode.as_deref() == Some(&goal_id) {
                 app.attach_mode = None;
                 app.push_output(OutputLine::info(
-                    "[attach] Agent output ended — detached.".to_string(),
+                    "[attach] Agent exited — detached.".to_string(),
                 ));
             }
             // Layer 2, item 8: Clear pending stdin prompt on stream end (v0.11.2.5).
@@ -2100,6 +2381,11 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                     ));
                 }
             }
+            // Clear auth retry if it was for this goal.
+            if app.pending_auth_retry.as_deref() == Some(&goal_id) {
+                app.pending_auth_retry = None;
+            }
+            app.scroll_to_bottom();
         }
         TuiMessage::DraftReady {
             goal_id: _,
@@ -2818,6 +3104,18 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    // Last-routed agent indicator (`>tag message` prefix, v0.12.3).
+    if let Some(ref tag) = app.last_routed_tag {
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            format!(" →{} ", tag),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Tailing indicator (v0.10.11) / Attach indicator (v0.12.0.1).
     if let Some(ref goal_id) = app.attach_mode {
         let short = &goal_id[..8.min(goal_id.len())];
@@ -2829,6 +3127,16 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
+    } else if app.active_tailing_goals.len() > 1 {
+        // Multiple agents — show count (v0.12.3).
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            format!(" {} agents ", app.active_tailing_goals.len()),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
     } else if let Some(ref goal_id) = app.tailing_goal {
         let short = &goal_id[..8.min(goal_id.len())];
         spans.push(Span::raw("│"));
@@ -2837,6 +3145,18 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Auth failure indicator (v0.12.3).
+    if app.pending_auth_retry.is_some() {
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            " auth failed — r/a ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -3384,6 +3704,10 @@ async fn start_tail_stream(
     let _ = tx.send(TuiMessage::CommandResponse(
         "─── live output ───".to_string(),
     ));
+    // Notify TUI to track this goal in active_tailing_goals (v0.12.3).
+    let _ = tx.send(TuiMessage::TailStarted {
+        goal_id: target.clone(),
+    });
 
     // Connect to goal output SSE stream. Retry with escalating strategies:
     // 1. Try the exact target (may be full UUID, short ID, or output key)
@@ -3527,12 +3851,14 @@ async fn start_tail_stream(
                                     let _ = tx.send(TuiMessage::AgentOutput(AgentOutputLine {
                                         stream: stream_name,
                                         line,
+                                        goal_id: Some(target.clone()),
                                     }));
                                 }
                             } else {
                                 let _ = tx.send(TuiMessage::AgentOutput(AgentOutputLine {
                                     stream: stream_name,
                                     line,
+                                    goal_id: Some(target.clone()),
                                 }));
                             }
                         }
@@ -3867,6 +4193,12 @@ Agent output:
   :tail [id] [--lines N]  Attach to goal output (--lines overrides backfill count)
   Agent output auto-streams when a goal starts (configurable: shell.auto_tail)
 
+Agent routing (v0.12.3):
+  >tag message           Send a message to the agent whose short ID starts with 'tag'
+  > message              Send to the sole active agent (when only one is running)
+  Prompt shows [→tag] > after routing; any other command clears the indicator.
+  Multiple agents: each output line is prefixed with [short-id] for disambiguation.
+
 Follow-up:
   :follow-up             List all follow-up candidates (failed goals, denied drafts, etc.)
   :follow-up <filter>    Filter candidates by keyword (fuzzy match on title/status/type)
@@ -3874,6 +4206,7 @@ Follow-up:
 Interactive mode:
   When an agent asks a question, the prompt changes to [agent Q1] >
   Type your response and press Enter to send it back to the agent.
+  Auth failure: type 'r' to retry or 'a' to abort when auth-fail prompt appears.
 
 Shell commands:
   :status            Refresh the status bar
@@ -4361,6 +4694,7 @@ mod tests {
             TuiMessage::AgentOutput(AgentOutputLine {
                 stream: "stdout".into(),
                 line: "Building crate...".into(),
+                goal_id: None,
             }),
         );
         assert_eq!(app.output.len(), 1);
@@ -4381,6 +4715,7 @@ mod tests {
             TuiMessage::AgentOutput(AgentOutputLine {
                 stream: "stderr".into(),
                 line: "warning: unused var".into(),
+                goal_id: None,
             }),
         );
         assert_eq!(app.output.len(), 1);
@@ -5072,6 +5407,7 @@ mod tests {
             TuiMessage::AgentOutput(AgentOutputLine {
                 stream: "stdout".into(),
                 line: "More output from the agent".into(),
+                goal_id: None,
             }),
         );
 
@@ -5244,6 +5580,7 @@ mod tests {
             TuiMessage::AgentOutput(AgentOutputLine {
                 stream: "stderr".into(),
                 line: "[heartbeat] still running... 10s elapsed".into(),
+                goal_id: None,
             }),
         );
         assert_eq!(app.output.len(), 1);
@@ -5255,6 +5592,7 @@ mod tests {
             TuiMessage::AgentOutput(AgentOutputLine {
                 stream: "stderr".into(),
                 line: "[heartbeat] still running... 20s elapsed".into(),
+                goal_id: None,
             }),
         );
         assert_eq!(app.output.len(), 1);
@@ -5269,6 +5607,7 @@ mod tests {
             TuiMessage::AgentOutput(AgentOutputLine {
                 stream: "stdout".into(),
                 line: "Compiling crate...".into(),
+                goal_id: None,
             }),
         );
         assert_eq!(app.output.len(), 2);
@@ -5278,6 +5617,7 @@ mod tests {
             TuiMessage::AgentOutput(AgentOutputLine {
                 stream: "stderr".into(),
                 line: "[heartbeat] still running... 30s elapsed".into(),
+                goal_id: None,
             }),
         );
         assert_eq!(app.output.len(), 3);
@@ -5738,6 +6078,7 @@ mod tests {
             let _ = bg_tx.send(TuiMessage::AgentOutput(AgentOutputLine {
                 stream: "stdout".into(),
                 line: format!("Agent output line {}", i),
+                goal_id: None,
             }));
         }
 

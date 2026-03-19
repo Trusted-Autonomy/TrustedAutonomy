@@ -2957,6 +2957,23 @@ Features:
 - **No-heartbeat alert** — if no heartbeat arrives within the configured window (default 30 s), the indicator turns red: `Agent is working ⚠ (150s elapsed — no heartbeat)`. Clears automatically when the next heartbeat arrives.
 - **Auto-tail on background commands** — when any command runs in the background, the shell immediately starts tailing its output. No manual `:tail` needed.
 - **Process completion states** — when a background process exits, the working indicator is replaced by a terminal status: `✓ completed`, `✗ failed (exit N)`, or `⊘ canceled`.
+- **Multi-agent tag prefix** — when two or more agents are streaming concurrently, each output line is prefixed with `[short-id]` so you can tell which output belongs to which goal. Single-agent sessions are untagged.
+- **Auth failure prompt** — if an agent receives a 401 / invalid API key response, the shell shows `Agent auth failed — type 'r' to retry or 'a' to abort.` and the prompt changes to `auth-fail> [r]etry [a]bort:`.
+- **Clean agent exit** — when an agent finishes, the heartbeat `[Agent is working]` line is replaced with `[agent exited <id>]` in gray. No lingering indicators.
+
+#### Sending messages to running agents
+
+While an agent is running in the background you can send it messages without switching modes:
+
+```
+# Route a message to the sole running agent
+> how far along are you?
+
+# Route to a specific agent by goal tag (first 8 chars of the goal ID)
+>abc12345 please prioritise the auth module
+```
+
+The shell prompt temporarily changes to `[→abc12345] >` after a `>tag` dispatch, indicating the current routing target. Any non-`>` command clears the target.
 
 Configure the input cursor in `.ta/daemon.toml`:
 

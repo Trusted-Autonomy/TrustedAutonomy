@@ -4411,16 +4411,16 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 ---
 
 ### v0.12.3 — Shell Multi-Agent UX & Resilience
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Close the remaining UX and reliability gaps found during v0.12.1 testing. Users need to send messages to running agents, distinguish streams from multiple agents, understand auth failures, and have clean process cleanup when agents exit.
 
-1. [ ] **`>tag message` inline prefix for two-way agent communication**: In ta shell, if input starts with `>` followed by an optional goal tag and a space, route the message to the matching running agent (or the sole active agent if no tag given) rather than the normal routing table. No mode switch required — works alongside any other command.
-2. [ ] **Prompt and status bar reflect connected agent**: When a `>tag` message is sent, the shell prompt briefly shows `[→tag]` and the status bar indicates the active target agent for that burst of messages.
-3. [ ] **Stream output includes short tag when multiple agents active**: Each line of agent stream output is prefixed with `[tag]` (e.g., `[v0.12.3]`) when more than one agent is streaming concurrently. Single-agent sessions remain untagged to reduce noise.
-4. [ ] **Auth failure surfaces as user interaction**: When the agent process receives a 401 / authentication error (API outage, expired key), ta shell displays a prompt: `Agent auth failed — [r]etry / [a]bort?`. If retry, re-attempt with a brief backoff; if abort, clean up the session.
-5. [ ] **Heartbeat / tail stream cleanup when agent exits**: After the agent process exits, the `tail` stream and heartbeat timers are torn down immediately. Shell prints a clean `[agent exited]` line rather than silently hanging or orphaning the tail task.
-6. [ ] **Auto-scroll to bottom during agent stream output**: When the user is at (or near) the bottom of the output pane and new agent output arrives, the shell automatically scrolls to keep the latest line visible — matching a `tail -f` experience. If the user has manually scrolled up to read history, auto-scroll is suspended. Once they scroll back to the bottom, auto-scroll resumes. Prevents output from running below the prompt bar and requiring manual scroll to catch up.
-7. [ ] **Clear "Agent is working" indicator on goal completion**: When a goal finishes (via `ta run`, `ta draft apply`, or any other daemon command that drives the working indicator), the tail stream is closed and the "Agent is working ⚠ (Xm elapsed — no heartbeat)" line is replaced with a clean completion summary. Currently this line persists indefinitely after the goal completes, confusing the user about whether the process is still running.
+1. [x] **`>tag message` inline prefix for two-way agent communication**: In ta shell, if input starts with `>` followed by an optional goal tag and a space, route the message to the matching running agent (or the sole active agent if no tag given) rather than the normal routing table. No mode switch required — works alongside any other command.
+2. [x] **Prompt and status bar reflect connected agent**: When a `>tag` message is sent, the shell prompt briefly shows `[→tag]` and the status bar indicates the active target agent for that burst of messages.
+3. [x] **Stream output includes short tag when multiple agents active**: Each line of agent stream output is prefixed with `[tag]` (e.g., `[v0.12.3]`) when more than one agent is streaming concurrently. Single-agent sessions remain untagged to reduce noise.
+4. [x] **Auth failure surfaces as user interaction**: When the agent process receives a 401 / authentication error (API outage, expired key), ta shell displays a prompt: `Agent auth failed — [r]etry / [a]bort?`. If retry, shows actionable instructions; if abort, cleans up the session.
+5. [x] **Heartbeat / tail stream cleanup when agent exits**: After the agent process exits, the `tail` stream and heartbeat timers are torn down immediately. Shell prints a clean `[agent exited]` line rather than silently hanging or orphaning the tail task.
+6. [x] **Auto-scroll to bottom during agent stream output**: When the user is at (or near) the bottom of the output pane and new agent output arrives, the shell automatically scrolls to keep the latest line visible — matching a `tail -f` experience. If the user has manually scrolled up to read history, auto-scroll is suspended. Once they scroll back to the bottom, auto-scroll resumes. Prevents output from running below the prompt bar and requiring manual scroll to catch up.
+7. [x] **Clear "Agent is working" indicator on goal completion**: When a goal finishes, the `AgentOutputDone` handler replaces the last heartbeat line with `[agent exited <id>]` in dark gray and removes the goal from `active_tailing_goals`. The "Agent is working ⚠" line no longer persists after completion.
 
 #### Version: `0.12.3-alpha`
 
