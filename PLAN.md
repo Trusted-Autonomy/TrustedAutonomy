@@ -4442,6 +4442,7 @@ Channel plugins proved this migration pattern works (Discord went from built-in 
 #### Slack template (send-only starter)
 6. [x] **Create `Trusted-Autonomy/ta-channel-slack` GitHub repo**: Repo created at https://github.com/Trusted-Autonomy/ta-channel-slack. Plugin source pushed as repo root with release workflow and `.gitignore`.
 7. [x] **Tag v0.1.0 and publish Slack release binaries**: `v0.1.0` tagged and pushed; release CI triggered (run 23279179272). Binaries built for all four platforms.
+8. [x] **Verify `ta setup resolve` works end-to-end (both plugins)**: Fixed URL construction bug in `resolve_from_registry` fallback — was using plugin key ("discord") instead of registry name ("ta-channel-discord") for tarball filename. Both `discord` and `slack` now install via `ta setup resolve` from `registry:` source.
 
 #### Follow-on (deferred to v0.13.x)
 - **Slack inbound listener** (slash commands, button callbacks, Socket Mode) — Slack plugin lacks `listener.rs` and `progress.rs`. Implement in v0.13.x once beta starts. *(Slack is send-only for public alpha.)*
