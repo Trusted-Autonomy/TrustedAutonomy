@@ -90,6 +90,7 @@ External users (working on their own projects, not TA itself) need these phases 
 | **v0.12.1** | Discord Channel Polish — slash commands, rate limiting, goal progress streaming |
 | **v0.12.2** | Shell Paste-at-End UX fix |
 | **v0.12.6** | Goal lifecycle observability + Discord/Slack SSE notification reliability |
+| **v0.12.7** | Shell UX: "Agent is working" clearance on goal completion + scroll reliability |
 | ⬇ **PUBLIC BETA (v0.13.x)** | Runtime flexibility, enterprise governance, community ecosystem, goal workflow automation |
 
 ### Pre-Alpha Bugs to Fix (must resolve before external release)
@@ -4542,6 +4543,35 @@ The daemon already exposes `POST /api/goals/{id}/input` which writes directly to
 #### Completed: 2026-03-19 — 13/13 items done, 10 new tests added
 
 #### Version: `0.12.6-alpha`
+
+---
+
+### v0.12.7 — Shell UX: Working Indicator Clearance & Scroll Reliability
+<!-- status: pending -->
+**Goal**: Fix two persistent shell regressions that surfaced after v0.12.4.1:
+1. The "Agent is working..." line pushed when a goal is dispatched is not cleared when the goal completes (draft ready, failed, or any terminal state). The heartbeat lines from the tail stream are correctly replaced by `[agent exited]`, but the initial "Agent is working..." line is a non-heartbeat `CommandResponse` that `AgentOutputDone` never finds.
+2. The output pane intermittently does not stay scrolled to the bottom when new output arrives, even when the user has not scrolled up.
+
+**Root cause — working indicator**:
+`AgentOutputDone` searches for `is_heartbeat = true` lines to replace. The "Agent is working..." line is pushed via `TuiMessage::CommandResponse` → `OutputLine::command` which has `is_heartbeat = false`. It is never replaced.
+
+**Fix approach — working indicator**:
+Add `TuiMessage::WorkingIndicator(String)` variant (or change the `CommandResponse` at line 1950 to push via a new path) that calls `app.push_heartbeat()`, marking the line `is_heartbeat = true`. `AgentOutputDone` then finds and replaces it as part of its existing heartbeat replacement logic. Alternatively, extend `AgentOutputDone` to also scan for lines containing "Agent is working" by text.
+
+**Fix approach — scroll reliability**:
+Audit all `push_output`, `push_heartbeat`, and `agent_output.push` call sites to ensure `scroll_to_bottom()` or `auto_scroll_if_near_bottom()` is called consistently. Add a dedicated `push_and_scroll()` helper that combines the two. Identify the specific interaction (e.g., SSE event burst, split-pane toggle) that causes the pane to stop following.
+
+#### Items
+1. [x] **Fix working indicator clearance**: Added `TuiMessage::WorkingIndicator(String)` variant; changed "Agent is working..." emission to use it; handler calls `app.push_heartbeat()` so the line gets `is_heartbeat = true` and `AgentOutputDone` clears it on any terminal goal state. 2 new tests.
+2. [x] **Verify clearance for all terminal goal states**: `working_indicator_pushed_as_heartbeat` and `agent_output_done_clears_working_indicator` tests cover the full cycle; `AgentOutputDone` logic was already terminal-state-agnostic (searches by `is_heartbeat` flag).
+3. [x] **Fix intermittent scroll-to-bottom**: Root cause identified — heartbeat handling paths returned early without calling `auto_scroll_if_near_bottom()`. Fixed: non-split heartbeat now calls `auto_scroll_if_near_bottom()` after `push_heartbeat`; split-pane in-place update and push both reset `agent_scroll_offset` when within `AGENT_NEAR_BOTTOM_LINES`. 3 new tests.
+4. [x] **Regression test**: `scroll_stays_bottom_through_burst_of_output` — delivers 100 `AgentOutput` messages, asserts `scroll_offset` stays 0.
+5. [x] Update CLAUDE.md version to `0.12.7-alpha`
+
+#### Completed
+- 6 new tests in `apps/ta-cli/src/commands/shell_tui.rs` covering all items above.
+
+#### Version: `0.12.7-alpha`
 
 ---
 

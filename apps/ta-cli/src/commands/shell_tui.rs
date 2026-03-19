@@ -229,6 +229,8 @@ pub enum TuiMessage {
     GoalStarted { goal_id: String, title: String },
     /// Agent output stream ended (goal process exited).
     AgentOutputDone(String),
+    /// "Agent is working..." indicator — pushed as a heartbeat so AgentOutputDone clears it (v0.12.7).
+    WorkingIndicator(String),
     /// A draft is ready for review (v0.10.11).
     DraftReady {
         #[allow(dead_code)]
@@ -1947,7 +1949,9 @@ async fn handle_terminal_event(
                                     if let Some(request_id) = output.strip_prefix("__streaming__:")
                                     {
                                         let request_id = request_id.trim().to_string();
-                                        let _ = tx.send(TuiMessage::CommandResponse(
+                                        // Use WorkingIndicator so AgentOutputDone can clear it
+                                        // (it's pushed as a heartbeat line — v0.12.7 item 1).
+                                        let _ = tx.send(TuiMessage::WorkingIndicator(
                                             "Agent is working...".to_string(),
                                         ));
                                         // Subscribe to the agent output stream.
@@ -2103,6 +2107,14 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             }
             app.push_lines(&text, OutputLine::command);
         }
+        TuiMessage::WorkingIndicator(text) => {
+            // Push "Agent is working..." as a heartbeat-flagged line so that
+            // AgentOutputDone can find and replace it on any terminal goal state
+            // (v0.12.7 item 1). Using push_heartbeat ensures at most one such
+            // indicator is visible at a time.
+            app.push_heartbeat(text);
+            app.scroll_to_bottom();
+        }
         TuiMessage::DaemonDown => {
             if app.daemon_connected {
                 app.daemon_connected = false;
@@ -2214,6 +2226,8 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
 
             // Heartbeat coalescing: detect [heartbeat] lines and update in-place
             // instead of appending (v0.11.4.1 items 9-10).
+            // Auto-scroll after heartbeat so a user pinned near the bottom stays
+            // at the bottom even when only the heartbeat ticker changes (v0.12.7 item 3).
             if line.line.starts_with("[heartbeat]") {
                 let heartbeat_text = line.line.clone();
                 if app.split_pane {
@@ -2221,12 +2235,24 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                     if let Some(last) = app.agent_output.last_mut() {
                         if last.is_heartbeat {
                             last.text = heartbeat_text;
+                            // Still auto-scroll agent pane when near bottom (v0.12.7 item 3).
+                            const AGENT_NEAR_BOTTOM_LINES: usize = 5;
+                            if app.agent_scroll_offset <= AGENT_NEAR_BOTTOM_LINES {
+                                app.agent_scroll_offset = 0;
+                            }
                             return;
                         }
                     }
                     app.agent_output.push(OutputLine::heartbeat(heartbeat_text));
+                    // Auto-scroll agent pane when near bottom.
+                    const AGENT_NEAR_BOTTOM_LINES: usize = 5;
+                    if app.agent_scroll_offset <= AGENT_NEAR_BOTTOM_LINES {
+                        app.agent_scroll_offset = 0;
+                    }
                 } else {
                     app.push_heartbeat(heartbeat_text);
+                    // Auto-scroll main pane when near bottom (v0.12.7 item 3).
+                    app.auto_scroll_if_near_bottom();
                 }
                 return;
             }
@@ -6395,6 +6421,170 @@ mod tests {
         // agent_scroll_offset should remain 0 (pinned to bottom).
         assert_eq!(app.agent_scroll_offset, 0);
         assert!(!app.agent_output.is_empty());
+    }
+
+    // ── v0.12.7 working indicator & scroll reliability tests ─────────────────
+
+    #[test]
+    fn working_indicator_pushed_as_heartbeat() {
+        // Item 1: WorkingIndicator must push a heartbeat-flagged line so
+        // AgentOutputDone can find and replace it.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        handle_tui_message(
+            &mut app,
+            TuiMessage::WorkingIndicator("Agent is working...".into()),
+        );
+        let last = app.output.last().expect("should have output");
+        assert!(
+            last.is_heartbeat,
+            "WorkingIndicator must be a heartbeat line"
+        );
+        assert!(last.text.contains("Agent is working"));
+    }
+
+    #[test]
+    fn agent_output_done_clears_working_indicator() {
+        // Item 1: AgentOutputDone must clear the working indicator pushed by
+        // WorkingIndicator (which is a heartbeat-flagged line).
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.tailing_goal = Some("goal-wi".into());
+        handle_tui_message(
+            &mut app,
+            TuiMessage::WorkingIndicator("Agent is working...".into()),
+        );
+        // Confirm it's there as a heartbeat.
+        assert!(app.output.iter().any(|l| l.is_heartbeat));
+
+        // Now simulate goal completion.
+        handle_tui_message(&mut app, TuiMessage::AgentOutputDone("goal-wi".into()));
+
+        // No heartbeat lines should remain.
+        let remaining: Vec<_> = app.output.iter().filter(|l| l.is_heartbeat).collect();
+        assert!(
+            remaining.is_empty(),
+            "AgentOutputDone must clear the working indicator heartbeat"
+        );
+        assert!(app.output.iter().any(|l| l.text.contains("agent exited")));
+    }
+
+    #[test]
+    fn heartbeat_auto_scrolls_main_pane_near_bottom() {
+        // Item 3: heartbeat lines in main pane must auto-scroll when scroll_offset
+        // is within NEAR_BOTTOM_LINES (intermittent scroll regression fix).
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Simulate user near-bottom (3 lines up — within NEAR_BOTTOM_LINES=5).
+        app.scroll_offset = 3;
+
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stdout".into(),
+                line: "[heartbeat] still running... 5s elapsed".into(),
+                goal_id: None,
+            }),
+        );
+
+        // Should have snapped back to bottom.
+        assert_eq!(
+            app.scroll_offset, 0,
+            "near-bottom scroll_offset must be reset to 0 after heartbeat"
+        );
+    }
+
+    #[test]
+    fn heartbeat_preserves_scroll_when_far_up_main_pane() {
+        // Item 3: if user has scrolled far up, heartbeat must NOT auto-scroll.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.scroll_offset = 50;
+
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stdout".into(),
+                line: "[heartbeat] still running... 5s elapsed".into(),
+                goal_id: None,
+            }),
+        );
+
+        assert_eq!(
+            app.scroll_offset, 50,
+            "far-up scroll must not be reset by heartbeat"
+        );
+    }
+
+    #[test]
+    fn heartbeat_auto_scrolls_agent_pane_near_bottom() {
+        // Item 3: heartbeat in split-pane agent pane must auto-scroll when
+        // agent_scroll_offset is within AGENT_NEAR_BOTTOM_LINES.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.split_pane = true;
+        // Simulate user near-bottom in agent pane (3 lines up).
+        app.agent_scroll_offset = 3;
+        // First push a heartbeat line so the in-place update path is exercised.
+        app.agent_output
+            .push(OutputLine::heartbeat("[heartbeat] running".into()));
+
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stdout".into(),
+                line: "[heartbeat] still running... 10s elapsed".into(),
+                goal_id: None,
+            }),
+        );
+
+        assert_eq!(
+            app.agent_scroll_offset, 0,
+            "near-bottom agent_scroll_offset must be reset to 0 after heartbeat"
+        );
+    }
+
+    #[test]
+    fn scroll_stays_bottom_through_burst_of_output() {
+        // Item 4: verify scroll stays at 0 through a burst of 100 output lines
+        // with no user scroll interaction.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        assert_eq!(app.scroll_offset, 0);
+
+        for i in 0..100 {
+            handle_tui_message(
+                &mut app,
+                TuiMessage::AgentOutput(AgentOutputLine {
+                    stream: "stdout".into(),
+                    line: format!("output line {}", i),
+                    goal_id: None,
+                }),
+            );
+        }
+
+        assert_eq!(
+            app.scroll_offset, 0,
+            "scroll_offset must stay at 0 through a burst of 100 output lines"
+        );
     }
 
     #[test]
