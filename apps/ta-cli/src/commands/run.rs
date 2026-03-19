@@ -88,6 +88,11 @@ struct AgentLaunchConfig {
     #[serde(default)]
     #[allow(dead_code)]
     auto_answers: Vec<AutoAnswerConfig>,
+    /// Path (relative to staging root) of the context file TA writes for non-Claude agents
+    /// (v0.12.5). When set, TA writes the same context that would go into CLAUDE.md into
+    /// this file instead. Example: `.ta/agent_context.md`. Ignored when absent.
+    #[serde(default)]
+    context_file: Option<String>,
 }
 
 /// Auto-answer configuration for interactive prompts (v0.10.18.5).
@@ -191,6 +196,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             ],
             non_interactive_env: Default::default(),
             auto_answers: Vec::new(),
+            context_file: None,
         },
         "codex" => AgentLaunchConfig {
             command: "codex".to_string(),
@@ -211,6 +217,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             headless_args: Vec::new(),
             non_interactive_env: Default::default(),
             auto_answers: Vec::new(),
+            context_file: None,
         },
         "claude-flow" => AgentLaunchConfig {
             command: "npx".to_string(),
@@ -264,6 +271,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
                     fallback: false,
                 },
             ],
+            context_file: None,
         },
         _ => AgentLaunchConfig {
             command: agent_id.to_string(),
@@ -280,6 +288,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             headless_args: Vec::new(),
             non_interactive_env: Default::default(),
             auto_answers: Vec::new(),
+            context_file: None,
         },
     }
 }
@@ -578,6 +587,18 @@ pub fn execute(
             macro_goal,
             interactive,
             follow_up_context.as_deref(),
+        )?;
+    }
+    // v0.12.5: For non-Claude agents that set context_file, write a generic
+    // agent_context.md with the same sections (memory, plan, etc.).
+    if let Some(ref ctx_file) = agent_config.context_file {
+        inject_agent_context_file(
+            &staging_path,
+            title,
+            &goal_id,
+            goal.plan_phase.as_deref(),
+            config,
+            ctx_file,
         )?;
     }
     if agent_config.injects_settings {
@@ -1505,6 +1526,7 @@ fn execute_resume(
             headless_args: Vec::new(),
             non_interactive_env: Default::default(),
             auto_answers: Vec::new(),
+            context_file: None,
         };
 
         launch_agent_interactive(&resume_config, staging_path, "", &mut session_store)
@@ -2478,18 +2500,76 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
     Ok(())
 }
 
-/// Auto-capture goal completion into memory (v0.5.6).
+/// Write a generic context file for non-Claude agents (v0.12.5).
+///
+/// Agents that set `context_file` in their YAML get the same memory/plan
+/// context that Claude Code sees in CLAUDE.md, written to a generic markdown
+/// file at the given path (relative to staging_path).
+fn inject_agent_context_file(
+    staging_path: &Path,
+    title: &str,
+    goal_id: &str,
+    plan_phase: Option<&str>,
+    config: &GatewayConfig,
+    context_file: &str,
+) -> anyhow::Result<()> {
+    let memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
+
+    let plan_content = {
+        let plan_path = staging_path.join("PLAN.md");
+        if plan_path.exists() {
+            std::fs::read_to_string(&plan_path).ok()
+        } else {
+            None
+        }
+    };
+    let plan_section = plan_content
+        .as_deref()
+        .map(|p| format!("\n## Plan\n\n{}\n", truncate_str(p, 8_000)))
+        .unwrap_or_default();
+
+    let content = format!(
+        "# TA Agent Context\n\n**Goal:** {}\n**Goal ID:** {}{}{}\n",
+        title, goal_id, plan_section, memory_section,
+    );
+
+    let target = if std::path::Path::new(context_file).is_absolute() {
+        std::path::PathBuf::from(context_file)
+    } else {
+        staging_path.join(context_file)
+    };
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&target, content)?;
+    tracing::debug!(path = %target.display(), "wrote agent context file");
+    Ok(())
+}
+
+/// Truncate a string to max_bytes without splitting UTF-8 characters.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        s
+    } else {
+        // Find the last valid char boundary at or before max_bytes.
+        let mut end = max_bytes;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
+}
+
+/// Auto-capture goal completion into memory (v0.5.6 / v0.12.5: RuVectorStore primary).
 ///
 /// Reads `.ta/change_summary.json` from the staging workspace and stores
 /// the goal completion event in the memory store for future context injection.
+/// Uses RuVectorStore as primary backend (with FsMemoryStore as fallback).
 fn auto_capture_goal_completion(
     config: &GatewayConfig,
     goal: &ta_goal::GoalRun,
     staging_path: &Path,
 ) {
-    let memory_dir = config.workspace_root.join(".ta").join("memory");
-    let mut store = ta_memory::FsMemoryStore::new(&memory_dir);
-
     let workflow_toml = config.workspace_root.join(".ta").join("workflow.toml");
     let capture_config = ta_memory::auto_capture::load_config(&workflow_toml);
     let capture = ta_memory::AutoCapture::new(capture_config);
@@ -2525,16 +2605,49 @@ fn auto_capture_goal_completion(
         phase_id: goal.plan_phase.clone(),
     };
 
+    // v0.12.5: Write to RuVectorStore (primary). Migrate FsMemoryStore on first open.
+    #[cfg(feature = "ruvector")]
+    {
+        let memory_config = ta_memory::key_schema::load_memory_config(&config.workspace_root);
+        if memory_config.backend.as_deref() != Some("fs") {
+            let rvf_path = config.workspace_root.join(".ta").join("memory.rvf");
+            match ta_memory::RuVectorStore::open(&rvf_path) {
+                Ok(mut rv_store) => {
+                    // Auto-migrate from FsMemoryStore on first open.
+                    let fs_dir = config.workspace_root.join(".ta").join("memory");
+                    if fs_dir.exists() {
+                        if let Err(e) = rv_store.migrate_from_fs(&fs_dir) {
+                            tracing::warn!("memory migration error: {}", e);
+                        }
+                    }
+                    if let Err(e) = capture.on_goal_complete(&mut rv_store, &event) {
+                        tracing::warn!("failed to auto-capture goal completion (ruvector): {}", e);
+                    }
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!("could not open ruvector store, falling back to fs: {}", e);
+                }
+            }
+        }
+    }
+
+    // Fallback: FsMemoryStore.
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let mut store = ta_memory::FsMemoryStore::new(&memory_dir);
     if let Err(e) = capture.on_goal_complete(&mut store, &event) {
         tracing::warn!("failed to auto-capture goal completion: {}", e);
     }
 }
 
-/// Build a memory context section from prior sessions for CLAUDE.md injection (v0.6.3).
+/// Build a memory context section from prior sessions for CLAUDE.md injection (v0.12.5).
 ///
 /// Phase-aware: filters entries by the current plan phase. Respects the
-/// `backend` field in `.ta/memory.toml` (v0.7.4): "ruvector" uses semantic
-/// search when available, "fs" forces filesystem-only mode.
+/// `backend` field in `.ta/memory.toml`: "ruvector" (default) uses semantic
+/// search; "fs" forces filesystem-only mode.
+///
+/// On every call, indexes the project constitution (`.ta/constitution.md`) into
+/// the active store so constitution rules appear in context injection.
 pub fn build_memory_context_section_for_inject(
     config: &GatewayConfig,
     goal_title: &str,
@@ -2544,16 +2657,40 @@ pub fn build_memory_context_section_for_inject(
     let capture_config = ta_memory::auto_capture::load_config(&workflow_toml);
     let max_entries = capture_config.max_context_entries;
 
-    // v0.7.4: Respect backend toggle from .ta/memory.toml.
+    // Respect backend toggle from .ta/memory.toml.
     let memory_config = ta_memory::key_schema::load_memory_config(&config.workspace_root);
-    let _backend = memory_config.backend.as_deref().unwrap_or("ruvector");
+    let backend = memory_config.backend.as_deref().unwrap_or("ruvector");
 
-    // Try RuVector backend when configured (or default).
+    // Load project constitution content for indexing (v0.12.5).
+    let constitution_content = {
+        let constitution_path = config.workspace_root.join(".ta").join("constitution.md");
+        if constitution_path.exists() {
+            std::fs::read_to_string(&constitution_path).ok()
+        } else {
+            None
+        }
+    };
+
+    // v0.12.5: RuVectorStore is the primary backend. Always create/open it (creates
+    // the directory if needed), then auto-migrate FsMemoryStore entries on first open.
     #[cfg(feature = "ruvector")]
-    if _backend != "fs" {
+    if backend != "fs" {
         let rvf_path = config.workspace_root.join(".ta").join("memory.rvf");
-        if rvf_path.exists() {
-            if let Ok(store) = ta_memory::RuVectorStore::open(&rvf_path) {
+        match ta_memory::RuVectorStore::open(&rvf_path) {
+            Ok(mut store) => {
+                // Auto-migrate legacy FsMemoryStore entries on first open.
+                let fs_dir = config.workspace_root.join(".ta").join("memory");
+                if fs_dir.exists() {
+                    if let Err(e) = store.migrate_from_fs(&fs_dir) {
+                        tracing::warn!("memory migration error during context build: {}", e);
+                    }
+                }
+                // Index constitution rules (v0.12.5).
+                if let Some(ref content) = constitution_content {
+                    if let Err(e) = ta_memory::index_constitution_rules(&mut store, content) {
+                        tracing::warn!("failed to index constitution rules: {}", e);
+                    }
+                }
                 return ta_memory::auto_capture::build_memory_context_section_with_phase(
                     &store,
                     goal_title,
@@ -2562,14 +2699,23 @@ pub fn build_memory_context_section_for_inject(
                 )
                 .unwrap_or_default();
             }
+            Err(e) => {
+                tracing::warn!("could not open ruvector store for context injection: {}", e);
+            }
         }
     }
 
-    // Filesystem backend (explicit "fs" or fallback).
+    // Filesystem backend (explicit "fs" or ruvector unavailable).
     let memory_dir = config.workspace_root.join(".ta").join("memory");
-    let store = ta_memory::FsMemoryStore::new(&memory_dir);
+    let mut fs_store = ta_memory::FsMemoryStore::new(&memory_dir);
+    // Index constitution rules into fs store too (v0.12.5).
+    if let Some(ref content) = constitution_content {
+        if let Err(e) = ta_memory::index_constitution_rules(&mut fs_store, content) {
+            tracing::warn!("failed to index constitution rules (fs): {}", e);
+        }
+    }
     ta_memory::auto_capture::build_memory_context_section_with_phase(
-        &store,
+        &fs_store,
         goal_title,
         max_entries,
         phase_id,

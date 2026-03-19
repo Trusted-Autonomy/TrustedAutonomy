@@ -391,6 +391,127 @@ impl AutoCapture {
     }
 }
 
+/// Index project constitution rules into memory (v0.12.5).
+///
+/// Reads `.ta/constitution.md` (or the provided content) and writes each rule as a
+/// `constitution:{slug}` entry (category: Convention, confidence 1.0). Idempotent —
+/// existing entries are overwritten so the memory stays current.
+pub fn index_constitution_rules(
+    store: &mut dyn MemoryStore,
+    constitution_content: &str,
+) -> Result<usize, MemoryError> {
+    let mut indexed = 0usize;
+
+    for (slug, rule_text) in parse_constitution_rules(constitution_content) {
+        let key = format!("constitution:{}", slug);
+        let value = serde_json::json!(rule_text);
+        let params = StoreParams {
+            category: Some(MemoryCategory::Convention),
+            confidence: Some(1.0),
+            ..Default::default()
+        };
+        store.store_with_params(
+            &key,
+            value,
+            vec!["constitution".to_string(), "convention".to_string()],
+            "ta-constitution",
+            params,
+        )?;
+        indexed += 1;
+    }
+
+    debug!(indexed, "indexed constitution rules into memory");
+    Ok(indexed)
+}
+
+/// Capture plan phase completion into memory (v0.12.5).
+///
+/// Called by `ta draft apply` when a phase is marked done. Writes a
+/// `plan:{phase_id}:complete` entry (category: History, confidence 0.9).
+pub fn capture_plan_phase_complete(
+    store: &mut dyn MemoryStore,
+    phase_id: &str,
+    phase_title: &str,
+    summary: Option<&str>,
+) -> Result<(), MemoryError> {
+    let key = format!("plan:{}:complete", phase_id);
+    let value = serde_json::json!({
+        "phase_id": phase_id,
+        "title": phase_title,
+        "summary": summary.unwrap_or(""),
+    });
+    let params = StoreParams {
+        category: Some(MemoryCategory::History),
+        confidence: Some(0.9),
+        phase_id: Some(phase_id.to_string()),
+        ..Default::default()
+    };
+    store.store_with_params(
+        &key,
+        value,
+        vec!["plan".to_string(), "phase-complete".to_string()],
+        "ta-system",
+        params,
+    )?;
+    debug!(phase_id, "captured plan phase completion into memory");
+    Ok(())
+}
+
+/// Parse constitution rules from markdown content.
+///
+/// Extracts bullet-point rules from each section. Returns (slug, text) pairs.
+fn parse_constitution_rules(content: &str) -> Vec<(String, String)> {
+    let mut rules = Vec::new();
+    let mut seen_slugs = std::collections::HashSet::new();
+
+    let mut current_section = String::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Track section headings.
+        if trimmed.starts_with("## ") {
+            current_section = trimmed
+                .trim_start_matches("## ")
+                .to_lowercase()
+                .replace(' ', "-")
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-')
+                .collect();
+            continue;
+        }
+
+        // Extract bullet-point rules.
+        let rule_text = if let Some(rest) = trimmed.strip_prefix("- **") {
+            // Markdown bold: `- **Rule**: Description`
+            Some(rest.replacen("**:", ":", 1).replacen("**", "", 1))
+        } else {
+            trimmed.strip_prefix("- ").map(|rest| rest.to_string())
+        };
+
+        if let Some(text) = rule_text {
+            if text.len() < 5 {
+                continue;
+            }
+            let base_slug = if current_section.is_empty() {
+                slug_from_text(&text, 60)
+            } else {
+                format!("{}:{}", current_section, slug_from_text(&text, 40))
+            };
+            // Deduplicate slugs.
+            let mut slug = base_slug.clone();
+            let mut n = 1u32;
+            while seen_slugs.contains(&slug) {
+                slug = format!("{}-{}", base_slug, n);
+                n += 1;
+            }
+            seen_slugs.insert(slug.clone());
+            rules.push((slug, text));
+        }
+    }
+
+    rules
+}
+
 /// Build a context injection section from memory entries for CLAUDE.md (v0.6.3).
 ///
 /// Phase-aware: filters entries matching the current phase or global entries.
@@ -635,6 +756,10 @@ fn classify_guidance_domain(guidance: &str, tags: &[String]) -> Option<String> {
 }
 
 /// Create a URL-safe slug from text (for use as memory keys).
+pub fn slug_from_text_pub(text: &str, max_len: usize) -> String {
+    slug_from_text(text, max_len)
+}
+
 fn slug_from_text(text: &str, max_len: usize) -> String {
     let slug: String = text
         .to_lowercase()
@@ -1205,5 +1330,124 @@ max_context_entries = 20
         let all = store.list(None).unwrap();
         assert_eq!(all.len(), 1);
         assert!(all[0].key.starts_with("guidance:"));
+    }
+
+    #[test]
+    fn constitution_rules_indexed() {
+        let dir = TempDir::new().unwrap();
+        let mut store = test_store(&dir);
+
+        let constitution = r#"# My Project — Agent Behavioral Constitution
+
+## Core Invariants
+
+- **Never commit directly to main**: All changes must go through a PR.
+- **Always run tests before commit**: Run the full test suite.
+
+## Development Standards
+
+- Use tempfile for test fixtures.
+"#;
+
+        let count = index_constitution_rules(&mut store, constitution).unwrap();
+        assert_eq!(count, 3);
+
+        // All entries should use Convention category.
+        let all = store.list(None).unwrap();
+        for entry in &all {
+            assert_eq!(entry.category, Some(MemoryCategory::Convention));
+            assert_eq!(entry.confidence, 1.0);
+            assert!(entry.key.starts_with("constitution:"));
+            assert!(entry.tags.contains(&"constitution".to_string()));
+        }
+    }
+
+    #[test]
+    fn constitution_indexing_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let mut store = test_store(&dir);
+
+        let constitution = "## Core Invariants\n- Never skip tests.\n";
+
+        index_constitution_rules(&mut store, constitution).unwrap();
+        index_constitution_rules(&mut store, constitution).unwrap();
+
+        // Should overwrite, not duplicate.
+        let all = store.list(None).unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn plan_phase_complete_captured() {
+        let dir = TempDir::new().unwrap();
+        let mut store = test_store(&dir);
+
+        capture_plan_phase_complete(
+            &mut store,
+            "v0.12.5",
+            "Semantic Memory",
+            Some("Added RuVector backing store"),
+        )
+        .unwrap();
+
+        let entry = store.recall("plan:v0.12.5:complete").unwrap().unwrap();
+        assert_eq!(entry.category, Some(MemoryCategory::History));
+        assert_eq!(entry.confidence, 0.9);
+        assert_eq!(entry.value["phase_id"].as_str(), Some("v0.12.5"));
+        assert_eq!(entry.value["title"].as_str(), Some("Semantic Memory"));
+        assert!(entry.tags.contains(&"phase-complete".to_string()));
+    }
+
+    #[test]
+    fn goal_completion_appears_in_context_section() {
+        // Integration test: after a goal completes, the next goal start should
+        // see that history in the injected context section.
+        let dir = TempDir::new().unwrap();
+        let mut store = test_store(&dir);
+        let capture = AutoCapture::new(AutoCaptureConfig::default());
+
+        let goal_id = Uuid::new_v4();
+        let event = GoalCompleteEvent {
+            goal_id,
+            title: "Implement semantic search".to_string(),
+            agent_framework: "claude-code".to_string(),
+            change_summary: Some(serde_json::json!({
+                "summary": "Added HNSW-indexed vector store for memory retrieval"
+            })),
+            changed_files: vec!["crates/ta-memory/src/ruvector_store.rs".into()],
+            phase_id: Some("v0.12.5".into()),
+        };
+        capture.on_goal_complete(&mut store, &event).unwrap();
+
+        // The next goal start retrieves context — goal completion entry must appear.
+        let section =
+            build_memory_context_section_with_phase(&store, "next goal", 20, Some("v0.12.5"))
+                .unwrap();
+        let key = format!("goal:{}:complete", goal_id);
+        assert!(
+            section.contains(&key) || section.contains("semantic search"),
+            "context section should reference the completed goal"
+        );
+    }
+
+    #[test]
+    fn constitution_rules_appear_in_context_section() {
+        // Integration test: after constitution rules are indexed, they should
+        // appear in the injected context section for any subsequent goal.
+        let dir = TempDir::new().unwrap();
+        let mut store = test_store(&dir);
+
+        let constitution = "## Development Rules\n\
+            - Never commit directly to main.\n\
+            - Always run clippy before push.\n";
+
+        let count = index_constitution_rules(&mut store, constitution).unwrap();
+        assert_eq!(count, 2);
+
+        let section = build_memory_context_section(&store, "any goal", 20).unwrap();
+        assert!(
+            section.contains("commit") || section.contains("clippy"),
+            "context section should include at least one constitution rule"
+        );
     }
 }

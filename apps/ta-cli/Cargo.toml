@@ -14,7 +14,7 @@ name = "ta"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["ruvector"]
 ruvector = ["ta-memory/ruvector"]
 
 [dependencies]

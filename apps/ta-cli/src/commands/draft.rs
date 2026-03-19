@@ -2323,8 +2323,121 @@ fn deny_package(
         }
     }
 
+    // v0.12.5: Capture denial as human guidance and draft rejection into memory.
+    capture_draft_denial_to_memory(config, package_goal_id, &pkg, reason);
+
     println!("Denied draft package {}: {}", package_id, reason);
     Ok(())
+}
+
+/// Capture a draft denial into the memory store (v0.12.5).
+///
+/// Writes a draft rejection entry (NegativePath) and treats the denial reason
+/// as human guidance (Preference). Also increments the repeated-correction
+/// counter and promotes to preference if the threshold is reached.
+fn capture_draft_denial_to_memory(
+    config: &GatewayConfig,
+    goal_id: Option<uuid::Uuid>,
+    pkg: &ta_changeset::DraftPackage,
+    reason: &str,
+) {
+    use ta_memory::{AutoCapture, DraftRejectEvent, HumanGuidanceEvent};
+
+    let workflow_toml = config.workspace_root.join(".ta").join("workflow.toml");
+    let capture_config = ta_memory::auto_capture::load_config(&workflow_toml);
+    let capture = AutoCapture::new(capture_config);
+
+    // Look up plan_phase and agent_framework from the GoalRun.
+    let (plan_phase, agent_framework) = goal_id
+        .and_then(|gid| {
+            ta_goal::GoalRunStore::new(&config.goals_dir)
+                .ok()
+                .and_then(|gs| gs.get(gid).ok().flatten())
+                .map(|g| (g.plan_phase, g.agent_id))
+        })
+        .unwrap_or((None, "unknown".to_string()));
+
+    // Determine the appropriate memory store.
+    let write_to_memory = |store: &mut dyn ta_memory::MemoryStore| {
+        // Draft rejection (NegativePath).
+        let reject_event = DraftRejectEvent {
+            goal_id: goal_id.unwrap_or_else(uuid::Uuid::new_v4),
+            draft_id: pkg.package_id,
+            agent_framework: agent_framework.clone(),
+            attempted: pkg.summary.what_changed.clone(),
+            rejection_reason: reason.to_string(),
+            phase_id: plan_phase.clone(),
+        };
+        if let Err(e) = capture.on_draft_reject(store, &reject_event) {
+            tracing::warn!("failed to capture draft rejection: {}", e);
+        }
+
+        // Human guidance (Preference) from the denial reason.
+        let guidance_event = HumanGuidanceEvent {
+            goal_id,
+            agent_framework: agent_framework.clone(),
+            guidance: reason.to_string(),
+            tags: vec!["draft-denial".to_string()],
+            phase_id: plan_phase.clone(),
+        };
+        if let Err(e) = capture.on_human_guidance(store, &guidance_event) {
+            tracing::warn!("failed to capture human guidance from denial: {}", e);
+        }
+
+        // Repeated-correction tracking.
+        let correction_key = ta_memory::auto_capture::slug_from_text_pub(reason, 60);
+        if let Err(e) = capture.check_repeated_correction(store, &correction_key, reason) {
+            tracing::warn!("failed to check repeated correction: {}", e);
+        }
+    };
+
+    // Write to RuVectorStore if available.
+    #[cfg(feature = "ruvector")]
+    {
+        let memory_config = ta_memory::key_schema::load_memory_config(&config.workspace_root);
+        if memory_config.backend.as_deref() != Some("fs") {
+            let rvf_path = config.workspace_root.join(".ta").join("memory.rvf");
+            if let Ok(mut rv_store) = ta_memory::RuVectorStore::open(&rvf_path) {
+                write_to_memory(&mut rv_store);
+                return;
+            }
+        }
+    }
+
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let mut fs_store = ta_memory::FsMemoryStore::new(&memory_dir);
+    write_to_memory(&mut fs_store);
+}
+
+/// Write plan phase completion into memory (v0.12.5).
+fn capture_phase_complete_to_memory(
+    config: &GatewayConfig,
+    phase_id: &str,
+    phase_title: &str,
+    summary: Option<&str>,
+) {
+    let do_write = |store: &mut dyn ta_memory::MemoryStore| {
+        if let Err(e) =
+            ta_memory::capture_plan_phase_complete(store, phase_id, phase_title, summary)
+        {
+            tracing::warn!("failed to capture plan phase completion: {}", e);
+        }
+    };
+
+    #[cfg(feature = "ruvector")]
+    {
+        let memory_config = ta_memory::key_schema::load_memory_config(&config.workspace_root);
+        if memory_config.backend.as_deref() != Some("fs") {
+            let rvf_path = config.workspace_root.join(".ta").join("memory.rvf");
+            if let Ok(mut rv_store) = ta_memory::RuVectorStore::open(&rvf_path) {
+                do_write(&mut rv_store);
+                return;
+            }
+        }
+    }
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let mut fs_store = ta_memory::FsMemoryStore::new(&memory_dir);
+    do_write(&mut fs_store);
 }
 
 /// Selective review patterns for artifact disposition.
@@ -2943,6 +3056,21 @@ fn apply_package(
             }
 
             std::fs::write(&plan_path, &content)?;
+
+            // v0.12.5: Write plan phase completion into memory for future context injection.
+            for phase in &phase_ids {
+                let phase_title = super::plan::parse_plan(&content)
+                    .into_iter()
+                    .find(|p| super::plan::phase_ids_match(&p.id, phase))
+                    .map(|p| p.title)
+                    .unwrap_or_else(|| phase.clone());
+                capture_phase_complete_to_memory(
+                    config,
+                    phase,
+                    &phase_title,
+                    Some(&pkg.summary.what_changed),
+                );
+            }
 
             // Auto-suggest the next pending phase (after the last marked phase).
             let phases_after = super::plan::parse_plan(&content);

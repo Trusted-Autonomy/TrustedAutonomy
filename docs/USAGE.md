@@ -1521,6 +1521,7 @@ Config fields:
 | `command` | string | Command to execute (must be on PATH) |
 | `args_template` | string[] | Arguments; `{prompt}` replaced with goal text |
 | `injects_context_file` | bool | Inject goal context into CLAUDE.md |
+| `context_file` | string | Path for non-Claude agents to receive memory context (e.g., `.ta/agent_context.md`) |
 | `injects_settings` | bool | Inject `.claude/settings.local.json` with permissions |
 | `pre_launch` | object | Command to run before agent launch |
 | `env` | map | Environment variables for the agent process |
@@ -2242,6 +2243,51 @@ When a draft is rejected, TA stores it as a **negative path** entry (`negative_p
 | **History** | "Goal completed: fixed auth bug" | Goal completion auto-capture |
 | **Preferences** | "Human prefers small focused PRs" | Repeated correction auto-promotion |
 | **Relationships** | "config.toml depends on src/config.rs" | Agent stores via MCP |
+| **Plan phases** | "v0.12.5 Semantic Memory completed" | Auto-captured when `ta draft apply` marks phase done |
+| **Constitution rules** | "Never commit directly to main" | Indexed from `.ta/constitution.md` on every goal start |
+
+#### Inspecting the memory backend
+
+```bash
+# Show which backend is active, entry count, and storage size
+ta memory backend
+
+# List entries (optionally filtered by category)
+ta memory list
+ta memory list --category convention
+ta memory list --limit 5
+```
+
+Example output of `ta memory backend`:
+
+```
+Memory Backend
+  Active backend:  ruvector
+  RuVector store:  .ta/memory.rvf (42 entries, 1.2 MiB)
+  FsMemory store:  .ta/memory (3 legacy entries)
+
+  Note: 3 legacy entries found. They will be auto-migrated
+        the next time RuVectorStore is opened (at goal start).
+```
+
+#### Constitution indexing
+
+Place a `.ta/constitution.md` file with your project's behavioral rules. TA indexes every bullet-point rule into memory as a `constitution:{section}:{slug}` entry (category: Convention, confidence 1.0) on every goal start. These rules are injected into agent context alongside history and architectural entries.
+
+Example constitution file:
+
+```markdown
+## Core Invariants
+
+- **Never commit directly to main**: All changes must go through a PR.
+- Always run the full test suite before committing.
+
+## Development Standards
+
+- Use `tempfile::tempdir()` for all test fixtures that need filesystem access.
+```
+
+The indexing is idempotent — re-indexing the same rules overwrites without duplication.
 
 #### Storage details
 

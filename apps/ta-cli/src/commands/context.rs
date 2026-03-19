@@ -268,7 +268,7 @@ fn semantic_recall(config: &GatewayConfig, query: &str, limit: usize) -> anyhow:
         );
         println!();
         for e in &results {
-            print_entry_summary(&e);
+            print_entry_summary(e);
         }
         Ok(())
     }

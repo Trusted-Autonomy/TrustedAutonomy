@@ -201,6 +201,14 @@ enum Commands {
         #[command(subcommand)]
         command: commands::constitution::ConstitutionCommands,
     },
+    /// Inspect and manage the semantic memory store (v0.12.5).
+    ///
+    /// `ta memory backend` shows the active backend, entry count, and storage size.
+    /// `ta memory list` prints stored entries (alias for `ta context list`).
+    Memory {
+        #[command(subcommand)]
+        command: commands::memory::MemoryCommands,
+    },
     /// Manage agent adapter integrations.
     Adapter {
         #[command(subcommand)]
@@ -548,6 +556,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Credentials { command } => commands::credentials::execute(command, &config),
         Commands::Agent { command } => commands::agent::execute(command, &config),
         Commands::Constitution { command } => commands::constitution::execute(command, &config),
+        Commands::Memory { command } => commands::memory::execute(command, &config),
         Commands::Adapter { command } => commands::adapter::execute(command, &project_root),
         Commands::Setup { command } => commands::setup::execute(command, &config),
         Commands::Init { command } => commands::init::execute(command, &config),

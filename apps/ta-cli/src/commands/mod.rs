@@ -16,6 +16,7 @@ pub mod follow_up;
 pub mod gc;
 pub mod goal;
 pub mod init;
+pub mod memory;
 pub mod new;
 pub mod notify;
 pub mod office;

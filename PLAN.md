@@ -4487,29 +4487,29 @@ The daemon already exposes `POST /api/goals/{id}/input` which writes directly to
 ---
 
 ### v0.12.5 — Semantic Memory: RuVector Backing Store & Context Injection
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make memory useful across runs. Today the daemon uses `FsMemoryStore` (exact-match only) and nothing writes the project constitution or plan completions to memory, so agents start each goal with no accumulated context. This phase wires up `RuVectorStore` as the primary backend (with `FsMemoryStore` as a read fallback for legacy entries), expands what gets written, and injects semantically-retrieved context at goal start.
 
 #### Items
 
 **Backend**
-1. [ ] **Daemon initialises `RuVectorStore`** (`.ta/memory.rvf/`) with `FsMemoryStore` (`.ta/memory/`) as a read-through fallback for entries not yet migrated. Auto-migration on first open is already implemented in `ruvector_store.rs`.
-2. [ ] **`ta memory backend`** CLI sub-command: shows which backend is active, entry count, index size, and last migration date.
+1. [x] **Daemon initialises `RuVectorStore`** (`.ta/memory.rvf/`) with `FsMemoryStore` (`.ta/memory/`) as a read-through fallback for entries not yet migrated. Auto-migration on first open is already implemented in `ruvector_store.rs`.
+2. [x] **`ta memory backend`** CLI sub-command: shows which backend is active, entry count, index size, and last migration date.
 
 **New write points**
-3. [ ] **Plan phase completion → memory**: When `draft apply` marks a phase `done` in PLAN.md, write `plan:{phase_id}:complete` (category: History, confidence 0.9) with the phase title and a one-line summary of what changed.
-4. [ ] **Project constitution → memory**: On daemon startup (and whenever the constitution file changes), index each constitution rule as `constitution:{slug}` (category: Convention, confidence 1.0). Constitution path is configurable; defaults to `.ta/constitution.md`.
-5. [ ] **Wire `on_human_guidance`**: Capture human shell feedback into memory (category: Preference, confidence 0.9). Currently defined in `AutoCapture` but never called.
-6. [ ] **Wire repeated-correction promotion**: The `check_repeated_correction` threshold counter is defined but never called. Wire it into the correction capture path so patterns are promoted after N repetitions.
+3. [x] **Plan phase completion → memory**: When `draft apply` marks a phase `done` in PLAN.md, write `plan:{phase_id}:complete` (category: History, confidence 0.9) with the phase title and a one-line summary of what changed.
+4. [x] **Project constitution → memory**: On daemon startup (and whenever the constitution file changes), index each constitution rule as `constitution:{slug}` (category: Convention, confidence 1.0). Constitution path is configurable; defaults to `.ta/constitution.md`.
+5. [x] **Wire `on_human_guidance`**: Capture human shell feedback into memory (category: Preference, confidence 0.9). Currently defined in `AutoCapture` but never called.
+6. [x] **Wire repeated-correction promotion**: The `check_repeated_correction` threshold counter is defined but never called. Wire it into the correction capture path so patterns are promoted after N repetitions.
 
 **Context injection at goal start**
-7. [ ] **Semantic top-K retrieval**: At `ta run` time, query `RuVectorStore` with the goal title + objective to retrieve the top-K most relevant memory entries (default K=10, configurable via `workflow.toml`). Falls back to tag/prefix scan on `FsMemoryStore` if RuVector unavailable.
-8. [ ] **Inject retrieved entries into CLAUDE.md**: The existing `build_memory_context_section_for_inject()` already inserts a "Memory Context" section — extend it to include constitution rules and plan-completion entries alongside the existing history entries.
-9. [ ] **Non-Claude agents** (Codex, Ollama): Add a `context_file` field to `AgentLaunchConfig` pointing to a generic markdown file (e.g., `.ta/agent_context.md`) that TA writes the same sections into, separate from CLAUDE.md. Each agent YAML opts in via `injects_context_file: true` + `context_file: .ta/agent_context.md`. *(Full per-model injection targeting deferred to v0.13.3 RuntimeAdapter.)*
+7. [x] **Semantic top-K retrieval**: At `ta run` time, query `RuVectorStore` with the goal title + objective to retrieve the top-K most relevant memory entries (default K=10, configurable via `workflow.toml`). Falls back to tag/prefix scan on `FsMemoryStore` if RuVector unavailable.
+8. [x] **Inject retrieved entries into CLAUDE.md**: The existing `build_memory_context_section_for_inject()` already inserts a "Memory Context" section — extend it to include constitution rules and plan-completion entries alongside the existing history entries.
+9. [x] **Non-Claude agents** (Codex, Ollama): Add a `context_file` field to `AgentLaunchConfig` pointing to a generic markdown file (e.g., `.ta/agent_context.md`) that TA writes the same sections into, separate from CLAUDE.md. Each agent YAML opts in via `injects_context_file: true` + `context_file: .ta/agent_context.md`. *(Full per-model injection targeting deferred to v0.13.3 RuntimeAdapter.)*
 
 **Tests**
-10. [ ] Integration test: goal completion writes `goal:{id}:complete`; subsequent goal start retrieves it via semantic search.
-11. [ ] Integration test: constitution file indexed on startup; goal start injects at least one constitution rule into CLAUDE.md.
+10. [x] Integration test: goal completion writes `goal:{id}:complete`; subsequent goal start retrieves it via semantic search.
+11. [x] Integration test: constitution file indexed on startup; goal start injects at least one constitution rule into CLAUDE.md.
 
 #### Version: `0.12.5-alpha`
 
