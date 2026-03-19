@@ -358,10 +358,7 @@ async fn register_slash_commands(
             Some(gid) => format!("guild {}", gid),
             None => "global".to_string(),
         };
-        println!(
-            "Registered /ta command (id: {}, scope: {}).",
-            cmd_id, scope
-        );
+        println!("Registered /ta command (id: {}, scope: {}).", cmd_id, scope);
         if guild_id.is_none() {
             println!("Global commands propagate to all servers in approximately 1 hour.");
         }
