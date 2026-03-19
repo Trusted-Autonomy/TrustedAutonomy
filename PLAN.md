@@ -89,6 +89,7 @@ External users (working on their own projects, not TA itself) need these phases 
 | ⬇ **PUBLIC ALPHA** | TA can be set up on a new project, plan built, goals run, drafts applied, PRs merged, main synced — in git or P4, from `ta shell` + Discord/Slack |
 | **v0.12.1** | Discord Channel Polish — slash commands, rate limiting, goal progress streaming |
 | **v0.12.2** | Shell Paste-at-End UX fix |
+| **v0.12.6** | Goal lifecycle observability + Discord/Slack SSE notification reliability |
 | ⬇ **PUBLIC BETA (v0.13.x)** | Runtime flexibility, enterprise governance, community ecosystem, goal workflow automation |
 
 ### Pre-Alpha Bugs to Fix (must resolve before external release)
@@ -4512,6 +4513,33 @@ The daemon already exposes `POST /api/goals/{id}/input` which writes directly to
 11. [x] Integration test: constitution file indexed on startup; goal start injects at least one constitution rule into CLAUDE.md.
 
 #### Version: `0.12.5-alpha`
+
+---
+
+### v0.12.6 — Goal Lifecycle Observability & Channel Notification Reliability
+<!-- status: pending -->
+**Goal**: Two related gaps that surfaced during v0.12.5 operations: (1) the daemon and CLI emit almost no structured logs for goal lifecycle — making it impossible to diagnose stuck agents, missed state transitions, or slow draft builds from logs alone; (2) the Discord/Slack SSE progress streamers replay all historical events on every reconnect, flooding channels with old notifications and missing new ones if a reconnect races with an event.
+
+#### Items
+
+**Goal lifecycle observability (daemon + CLI)**
+1. [ ] **`cmd.rs` sentinel detection log**: `tracing::info!` when `GOAL_STARTED_SENTINEL` is found — include goal UUID, agent PID.
+2. [ ] **State-poll task logs**: `tracing::info!` when state-poll task starts (goal UUID, initial state) and on each transition (`running → pr_ready`, etc.).
+3. [ ] **Draft detected log**: When `latest_draft_for_goal` returns a result, log draft ID and artifact count.
+4. [ ] **Poll task stop log**: Log when the poll task exits (terminal state reached or process exited).
+5. [ ] **`run.rs` structured logs**: `tracing::info!` for staging copy start/complete (file count), CLAUDE.md inject, agent launch (PID), and goal completion (state, elapsed, files changed).
+6. [ ] **Periodic "still running" structured log**: Every N minutes (configurable, default 5), emit `tracing::info!` with goal UUID, elapsed time, and current state — replaces the raw heartbeat stdout noise.
+7. [ ] **File change count on exit**: When the agent process exits, log how many files were modified in staging vs source.
+
+**Channel notification reliability (Discord + Slack)**
+8. [ ] **`progress.rs` startup cursor**: On initial connect, pass `?since=<startup_time>` so historical events are never replayed. Store startup time once at process start.
+9. [ ] **`progress.rs` reconnect cursor**: Track last seen event timestamp; pass `?since=<last_event_timestamp>` on every reconnect so no events are replayed or skipped.
+10. [ ] **Deduplicate GoalStarted emission**: `run.rs` already writes `GoalStarted` to `FsEventStore` directly. Remove the redundant `emit_goal_started_event()` call from `cmd.rs`'s sentinel handler — keep only the alias registration there.
+11. [ ] **Daemon startup recovery**: On daemon start, scan `GoalRunStore` for goals in `running` or `pr_ready` state and immediately start state-poll tasks for them — handles goals that were in flight when the daemon was restarted.
+12. [ ] **Same fix for Slack plugin** (`plugins/ta-channel-slack/src/progress.rs` if it exists, or the equivalent): apply the same cursor and dedup fixes.
+13. [ ] **Tests**: Unit test for cursor passing on connect/reconnect; integration test that restarting the daemon does not re-emit historical events to Discord.
+
+#### Version: `0.12.6-alpha`
 
 ---
 
