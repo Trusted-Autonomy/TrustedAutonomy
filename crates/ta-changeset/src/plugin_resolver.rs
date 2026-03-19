@@ -225,11 +225,19 @@ fn resolve_from_registry(
     let index = match registry_index {
         Some(idx) => idx,
         None => {
-            return PluginResolveResult::Failed {
-                name: name.to_string(),
-                reason: "Registry index not available. Check network connection and try again."
-                    .to_string(),
-            };
+            // Registry index unavailable (network error or registry not yet live).
+            // Fall back to the canonical GitHub releases URL for official TA plugins:
+            //   https://github.com/Trusted-Autonomy/{registry_name}/releases/download/...
+            // This lets `source = "registry:ta-channel-discord"` work before
+            // registry.trustedautonomy.dev exists, as long as the GitHub release
+            // binaries are published.
+            tracing::info!(
+                plugin = %name,
+                registry = %registry_name,
+                "Registry index unavailable — falling back to Trusted-Autonomy GitHub releases"
+            );
+            let github_repo = format!("Trusted-Autonomy/{}", registry_name);
+            return resolve_from_github(name, &github_repo, requirement, project_root, platform);
         }
     };
 
