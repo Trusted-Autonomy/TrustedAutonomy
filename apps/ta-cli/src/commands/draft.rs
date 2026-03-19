@@ -4194,8 +4194,21 @@ pub fn load_all_packages(config: &GatewayConfig) -> anyhow::Result<Vec<DraftPack
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "json") {
             let json = fs::read_to_string(&path)?;
-            if let Ok(pkg) = serde_json::from_str::<DraftPackage>(&json) {
-                packages.push(pkg);
+            match serde_json::from_str::<DraftPackage>(&json) {
+                Ok(pkg) => packages.push(pkg),
+                Err(e) => {
+                    let filename = path.file_name().unwrap_or_default().to_string_lossy();
+                    tracing::warn!(
+                        file = %filename,
+                        error = %e,
+                        "Skipping unreadable draft package (parse error — possible version skew between CLI and daemon)"
+                    );
+                    eprintln!(
+                        "  [warn] Skipping unreadable draft: {}: {} \
+                        \n         (Hint: re-run `./install_local.sh` to rebuild the CLI and daemon together)",
+                        filename, e
+                    );
+                }
             }
         }
     }
@@ -8035,6 +8048,77 @@ fn run() {
         assert!(
             !staging.path().join("CLAUDE.md").exists(),
             "CLAUDE.md should be removed when no original content existed"
+        );
+    }
+
+    // ── v0.12.8: load_all_packages deserialization error logging regression test ──
+
+    #[test]
+    fn load_all_packages_skips_corrupted_file_and_returns_valid() {
+        // Regression test for Bug 2 (v0.12.8): load_all_packages must silently
+        // skip unreadable JSON files (logging a warning) and return the valid
+        // packages. Previously, silent `if let Ok(...)` meant the user saw
+        // "No active drafts" with no explanation.
+
+        // Set up a full project so we can produce a real DraftPackage.
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Regression test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test corrupted draft skip".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+        build_package(&config, &goal_id, "Test changes", false).unwrap();
+
+        // Verify we have exactly 1 valid package.
+        let packages_before = load_all_packages(&config).unwrap();
+        assert_eq!(
+            packages_before.len(),
+            1,
+            "Should have 1 valid package before corruption"
+        );
+
+        // Now drop a corrupted JSON file into pr_packages_dir alongside the valid one.
+        let corrupted_path = config
+            .pr_packages_dir
+            .join("00000000-0000-0000-0000-000000000000.json");
+        std::fs::write(
+            &corrupted_path,
+            r#"{"this_is": "not a valid DraftPackage", "missing_required_fields": true}"#,
+        )
+        .unwrap();
+
+        // load_all_packages must not panic or error — it should skip the bad file
+        // and return the 1 valid package.
+        let packages_after = load_all_packages(&config).unwrap();
+        assert_eq!(
+            packages_after.len(),
+            1,
+            "Corrupted draft file should be skipped; valid package should still be returned"
+        );
+        assert_eq!(
+            packages_after[0].goal.goal_id, goal_id,
+            "The returned package should be the valid one"
         );
     }
 }

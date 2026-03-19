@@ -2,9 +2,9 @@
 # install_local.sh — Build TA from source and add it to your PATH.
 #
 # Usage:
-#   ./install_local.sh              # Build ta + ta-daemon (release) and install
+#   ./install_local.sh              # Build ta + ta-daemon + channel plugins and install
 #   ./install_local.sh --debug      # Build debug binaries (faster compile)
-#   ./install_local.sh --no-daemon  # Build only the ta CLI, skip ta-daemon
+#   ./install_local.sh --no-daemon  # Build only the ta CLI, skip ta-daemon and plugins
 #
 # After running, either:
 #   1. Restart your shell, or
@@ -91,6 +91,42 @@ if [[ "$BUILD_DAEMON" == true ]]; then
     fi
     install -m 755 "$DAEMON_BINARY" "$INSTALL_DIR/ta-daemon"
     echo "Installed: $INSTALL_DIR/ta-daemon"
+
+    # Build and install channel plugins so the plugin binary version always
+    # matches the installed daemon. Version skew between the main binary and a
+    # stale plugin was the root cause of the Discord notification flood regression
+    # (v0.12.8 / Bug 1 hardening item 2).
+    PLUGIN_INSTALL_DIR="${HOME}/.local/share/ta/plugins/channels"
+
+    # Discord channel plugin.
+    DISCORD_PLUGIN_DIR="${SCRIPT_DIR}/plugins/ta-channel-discord"
+    if [[ -d "$DISCORD_PLUGIN_DIR" ]]; then
+        echo "Building channel plugin: ta-channel-discord..."
+        build_discord_plugin() {
+            if [[ "$PROFILE" == "dev" ]]; then
+                cargo build --manifest-path "$DISCORD_PLUGIN_DIR/Cargo.toml"
+            else
+                cargo build --release --manifest-path "$DISCORD_PLUGIN_DIR/Cargo.toml"
+            fi
+        }
+        if command -v nix &>/dev/null && [[ -f "${SCRIPT_DIR}/flake.nix" ]]; then
+            nix develop "${SCRIPT_DIR}" --command bash -c \
+                "$(declare -f build_discord_plugin); PROFILE='$PROFILE' DISCORD_PLUGIN_DIR='$DISCORD_PLUGIN_DIR' build_discord_plugin"
+        else
+            build_discord_plugin
+        fi
+
+        DISCORD_BINARY="${DISCORD_PLUGIN_DIR}/${TARGET_DIR}/ta-channel-discord"
+        if [[ -f "$DISCORD_BINARY" ]]; then
+            mkdir -p "${PLUGIN_INSTALL_DIR}/discord"
+            install -m 755 "$DISCORD_BINARY" "${PLUGIN_INSTALL_DIR}/discord/ta-channel-discord"
+            echo "Installed: ${PLUGIN_INSTALL_DIR}/discord/ta-channel-discord"
+        else
+            echo "Warning: Discord plugin build succeeded but binary not found at $DISCORD_BINARY"
+        fi
+    else
+        echo "Note: Discord plugin source not found at $DISCORD_PLUGIN_DIR — skipping plugin build."
+    fi
 fi
 
 echo ""

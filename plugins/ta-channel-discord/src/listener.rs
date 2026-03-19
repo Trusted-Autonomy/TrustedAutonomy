@@ -257,10 +257,7 @@ async fn run_session(
     session: &mut GatewaySession,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Use resume URL if available, otherwise use default gateway URL.
-    let gateway_url = session
-        .resume_gateway_url
-        .as_deref()
-        .unwrap_or(GATEWAY_URL);
+    let gateway_url = session.resume_gateway_url.as_deref().unwrap_or(GATEWAY_URL);
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(gateway_url).await?;
     let (mut write, mut read) = ws_stream.split();
@@ -279,7 +276,10 @@ async fn run_session(
 
     // RESUME if we have a session, otherwise IDENTIFY.
     if let Some(ref sid) = session.session_id.clone() {
-        eprintln!("[discord-listener] Resuming session {}...", &sid[..8.min(sid.len())]);
+        eprintln!(
+            "[discord-listener] Resuming session {}...",
+            &sid[..8.min(sid.len())]
+        );
         let resume = json!({
             "op": OP_RESUME,
             "d": {
@@ -510,9 +510,7 @@ async fn handle_message_create(
 
     // `ta input <goal-id> <text>` explicit form.
     // After stripping the channel prefix, the command may start with "ta input" or "input".
-    let normalized = command
-        .strip_prefix("ta ")
-        .unwrap_or(command);
+    let normalized = command.strip_prefix("ta ").unwrap_or(command);
     if let Some(rest) = normalized.strip_prefix("input ") {
         let rest = rest.trim();
         // Split on first whitespace to get goal-id and text.
@@ -555,8 +553,7 @@ async fn forward_goal_input(client: &reqwest::Client, url: &str, text: &str) -> 
             if resp.status().is_success() {
                 ":speech_balloon: Delivered to agent.".to_string()
             } else {
-                let body: serde_json::Value =
-                    resp.json().await.unwrap_or_else(|_| json!({}));
+                let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| json!({}));
                 let err = body["error"].as_str().unwrap_or("unknown error");
                 format!(":x: No running goal or delivery failed: {}", err)
             }
@@ -656,13 +653,7 @@ async fn handle_interaction_create(
             let result = forward_command(http_client, cmd_url, &full_command).await;
             let reply = format_reply(&result);
 
-            let _ = edit_interaction_followup(
-                http_client,
-                interaction_token,
-                token,
-                &reply,
-            )
-            .await;
+            let _ = edit_interaction_followup(http_client, interaction_token, token, &reply).await;
         }
         INTERACTION_TYPE_MESSAGE_COMPONENT => {
             // Button click: custom_id = "ta_{interaction_id}_{choice}"
@@ -864,13 +855,20 @@ fn format_reply(result: &CommandResult) -> String {
     if let Some(ref err) = result.error {
         format!(":x: **Error:** {}", err)
     } else {
-        let status_emoji = if result.success { ":white_check_mark:" } else { ":x:" };
+        let status_emoji = if result.success {
+            ":white_check_mark:"
+        } else {
+            ":x:"
+        };
         let status_label = if result.success { "ok" } else { "failed" };
         let output = truncate_output(&result.output, 1800);
         if output.is_empty() {
             format!("{} **[{}]** (no output)", status_emoji, status_label)
         } else {
-            format!("{} **[{}]**\n```\n{}\n```", status_emoji, status_label, output)
+            format!(
+                "{} **[{}]**\n```\n{}\n```",
+                status_emoji, status_label, output
+            )
         }
     }
 }
@@ -1125,8 +1123,7 @@ mod tests {
 
     #[test]
     fn parse_button_custom_id_choice_index() {
-        let (id, choice) =
-            parse_button_custom_id("550e8400-e29b-41d4-a716-446655440000_choice_2");
+        let (id, choice) = parse_button_custom_id("550e8400-e29b-41d4-a716-446655440000_choice_2");
         assert_eq!(id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(choice, "choice_2");
     }
@@ -1158,7 +1155,9 @@ mod tests {
 
     fn classify_command(command: &str) -> DispatchDecision<'_> {
         if let Some(input_text) = command.strip_prefix('>') {
-            return DispatchDecision::GoalInputLatest { text: input_text.trim() };
+            return DispatchDecision::GoalInputLatest {
+                text: input_text.trim(),
+            };
         }
         let normalized = command.strip_prefix("ta ").unwrap_or(command);
         if let Some(rest) = normalized.strip_prefix("input ") {

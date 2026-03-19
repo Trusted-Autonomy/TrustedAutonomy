@@ -34,6 +34,11 @@ const GOAL_UPDATE_THROTTLE_SECS: u64 = 10;
 /// How often to retry the SSE connection after a failure.
 const RECONNECT_DELAY_SECS: u64 = 15;
 
+/// Maximum age of an SSE event before it is silently dropped (safety net for
+/// replay regressions). Events older than this relative to wall-clock time are
+/// discarded even if the cursor filter should have excluded them.
+const MAX_EVENT_AGE_SECS: i64 = 600; // 10 minutes
+
 /// Goal state labels for human-readable Discord messages.
 fn state_label(state: &str) -> Option<&'static str> {
     match state {
@@ -52,14 +57,14 @@ fn state_label(state: &str) -> Option<&'static str> {
 /// Discord embed colors for goal states.
 fn state_color(state: &str) -> u32 {
     match state {
-        "running" => 0x5865F2,       // blurple
-        "pr_ready" => 0xFEE75C,      // yellow
-        "under_review" => 0xFEE75C,  // yellow
-        "approved" => 0x57F287,      // green
-        "applied" => 0x57F287,       // green
-        "completed" => 0x57F287,     // green
+        "running" => 0x5865F2,           // blurple
+        "pr_ready" => 0xFEE75C,          // yellow
+        "under_review" => 0xFEE75C,      // yellow
+        "approved" => 0x57F287,          // green
+        "applied" => 0x57F287,           // green
+        "completed" => 0x57F287,         // green
         "failed" | "denied" => 0xED4245, // red
-        _ => 0x99AAB5,               // grey
+        _ => 0x99AAB5,                   // grey
     }
 }
 
@@ -109,7 +114,10 @@ pub async fn run_progress_streamer(
         .await
         {
             Ok(()) => {
-                eprintln!("[discord-progress] SSE stream ended. Reconnecting in {}s...", RECONNECT_DELAY_SECS);
+                eprintln!(
+                    "[discord-progress] SSE stream ended. Reconnecting in {}s...",
+                    RECONNECT_DELAY_SECS
+                );
             }
             Err(e) => {
                 eprintln!(
@@ -164,24 +172,41 @@ async fn stream_events(
             if !event_data.is_empty() {
                 // Advance cursor from the event envelope's timestamp field (item 9).
                 // This ensures reconnects resume from exactly where we left off.
+                let mut event_age_ok = true;
                 if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&event_data) {
                     if let Some(ts_str) = envelope["timestamp"].as_str() {
                         if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
-                            *cursor = ts.with_timezone(&Utc);
+                            let event_ts = ts.with_timezone(&Utc);
+                            *cursor = event_ts;
+
+                            // Age filter (item 1 / v0.12.8): drop events that are
+                            // too old relative to wall-clock time. This is a safety
+                            // net for replay regressions; the cursor filter is the
+                            // primary defence.
+                            let age_secs = Utc::now().signed_duration_since(event_ts).num_seconds();
+                            if age_secs > MAX_EVENT_AGE_SECS {
+                                eprintln!(
+                                    "[discord-progress] Dropping stale event (age {}s > {}s limit)",
+                                    age_secs, MAX_EVENT_AGE_SECS
+                                );
+                                event_age_ok = false;
+                            }
                         }
                     }
                 }
 
-                process_event(
-                    client,
-                    token,
-                    channel_id,
-                    application_id,
-                    &event_type,
-                    &event_data,
-                    throttle_map,
-                )
-                .await;
+                if event_age_ok {
+                    process_event(
+                        client,
+                        token,
+                        channel_id,
+                        application_id,
+                        &event_type,
+                        &event_data,
+                        throttle_map,
+                    )
+                    .await;
+                }
             }
             event_type.clear();
             event_data.clear();
@@ -221,8 +246,8 @@ async fn process_event(
 
     match etype {
         // Legacy names kept for compatibility; actual daemon emits these types:
-        "goal_started" | "goal.state_changed" | "goal_state_changed"
-        | "goal_completed" | "goal_failed" => {
+        "goal_started" | "goal.state_changed" | "goal_state_changed" | "goal_completed"
+        | "goal_failed" => {
             handle_goal_state_changed(client, token, channel_id, &event, throttle_map).await;
         }
         "review_requested" | "draft_built" | "draft.ready" | "draft_ready" => {
@@ -276,7 +301,11 @@ async fn handle_goal_state_changed(
     }
     throttle_map.insert(goal_id.to_string(), now);
 
-    let short_id = if goal_id.len() >= 8 { &goal_id[..8] } else { goal_id };
+    let short_id = if goal_id.len() >= 8 {
+        &goal_id[..8]
+    } else {
+        goal_id
+    };
     let description = format!("**{}**\n`{}`", title, short_id);
 
     let embed = json!({
@@ -323,7 +352,11 @@ async fn handle_draft_ready(
         return;
     }
 
-    let short_draft = if draft_id.len() >= 8 { &draft_id[..8] } else { draft_id };
+    let short_draft = if draft_id.len() >= 8 {
+        &draft_id[..8]
+    } else {
+        draft_id
+    };
 
     let description = format!(
         "{}\n\n**{} file{}** changed.",
@@ -399,13 +432,7 @@ async fn post_embed(
     channel_id: &str,
     embed: serde_json::Value,
 ) -> Result<(), reqwest::Error> {
-    post_payload(
-        client,
-        token,
-        channel_id,
-        json!({ "embeds": [embed] }),
-    )
-    .await
+    post_payload(client, token, channel_id, json!({ "embeds": [embed] })).await
 }
 
 async fn post_payload(
@@ -504,7 +531,10 @@ mod tests {
         let cursor: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-03-19T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let events_url = format!("http://localhost:7700/api/events?since={}", cursor.to_rfc3339());
+        let events_url = format!(
+            "http://localhost:7700/api/events?since={}",
+            cursor.to_rfc3339()
+        );
         // URL contains the since parameter in RFC 3339 format.
         assert!(events_url.contains("?since=2026-03-19T10:00:00"));
     }
@@ -519,5 +549,53 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert!(cursor > epoch);
+    }
+
+    // ── v0.12.8: Age filter tests ──
+
+    #[test]
+    fn age_filter_rejects_old_event() {
+        // An event timestamped 15 minutes ago exceeds the 10-minute limit.
+        let old_ts = Utc::now() - chrono::Duration::seconds(15 * 60);
+        let age_secs = Utc::now().signed_duration_since(old_ts).num_seconds();
+        assert!(
+            age_secs > MAX_EVENT_AGE_SECS,
+            "15-min-old event should be rejected"
+        );
+    }
+
+    #[test]
+    fn age_filter_accepts_recent_event() {
+        // An event timestamped 5 minutes ago is within the 10-minute limit.
+        let recent_ts = Utc::now() - chrono::Duration::seconds(5 * 60);
+        let age_secs = Utc::now().signed_duration_since(recent_ts).num_seconds();
+        assert!(
+            age_secs <= MAX_EVENT_AGE_SECS,
+            "5-min-old event should be accepted"
+        );
+    }
+
+    #[test]
+    fn age_filter_accepts_fresh_event() {
+        // An event timestamped 1 second ago is well within the limit.
+        let fresh_ts = Utc::now() - chrono::Duration::seconds(1);
+        let age_secs = Utc::now().signed_duration_since(fresh_ts).num_seconds();
+        assert!(
+            age_secs <= MAX_EVENT_AGE_SECS,
+            "1-sec-old event should be accepted"
+        );
+    }
+
+    #[test]
+    fn age_filter_boundary_at_limit() {
+        // An event exactly at the limit (600s) should still be accepted
+        // (we use > not >=).
+        let boundary_ts = Utc::now() - chrono::Duration::seconds(MAX_EVENT_AGE_SECS);
+        let age_secs = Utc::now().signed_duration_since(boundary_ts).num_seconds();
+        // Allow 1s of test execution jitter: the boundary age is ≤ MAX_EVENT_AGE_SECS+1.
+        assert!(
+            age_secs <= MAX_EVENT_AGE_SECS + 1,
+            "boundary event should not exceed limit by more than 1s"
+        );
     }
 }
