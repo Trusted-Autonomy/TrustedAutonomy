@@ -86,14 +86,21 @@ esac
 "#;
 
     let path = dir.join("ta-submit-mock-vcs");
-    std::fs::write(&path, script).unwrap();
+    // Use File::create + sync_all so the kernel flushes all dirty pages to the
+    // overlayfs upper layer before we close the fd.  On Linux with overlayfs
+    // (e.g. Nix devShell TMPDIR), writing and then exec-ing a file can race
+    // against the kernel completing the copy-up, returning ETXTBSY (error 26).
+    // sync_all() + the subsequent read-back together make the fix reliable even
+    // under concurrent test load (12 tests each writing their own binary).
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(script.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).unwrap();
-    // On Linux with overlayfs (e.g. Nix devShell TMPDIR), executing a file
-    // immediately after writing it can race against the kernel completing the
-    // copy-up, returning ETXTBSY (error 26).  Reading the file back forces
-    // the inode into a fully-committed state before we try to exec it.
     let _ = std::fs::read(&path).unwrap();
     path
 }
