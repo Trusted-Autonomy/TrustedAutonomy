@@ -24,6 +24,8 @@ use crate::api::AppState;
 #[derive(Clone)]
 pub struct GoalOutputManager {
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<OutputLine>>>>,
+    /// Creation order for resolving "latest" — newest entry is last (v0.12.4.1).
+    creation_order: Arc<Mutex<Vec<String>>>,
 }
 
 /// A single line of output from the agent process.
@@ -37,6 +39,7 @@ impl GoalOutputManager {
     pub fn new() -> Self {
         Self {
             channels: Arc::new(Mutex::new(HashMap::new())),
+            creation_order: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -51,6 +54,9 @@ impl GoalOutputManager {
         // Buffer 256 lines — if a subscriber falls behind, it skips.
         let (tx, _) = broadcast::channel(256);
         channels.insert(goal_id.to_string(), tx.clone());
+        drop(channels);
+        let mut order = self.creation_order.lock().await;
+        order.push(goal_id.to_string());
         tx
     }
 
@@ -76,6 +82,21 @@ impl GoalOutputManager {
     pub async fn remove_channel(&self, goal_id: &str) {
         let mut channels = self.channels.lock().await;
         channels.remove(goal_id);
+        drop(channels);
+        let mut order = self.creation_order.lock().await;
+        order.retain(|id| id != goal_id);
+    }
+
+    /// Return the most recently created goal ID that still has an active channel (v0.12.4.1).
+    pub async fn latest_goal(&self) -> Option<String> {
+        let order = self.creation_order.lock().await;
+        let channels = self.channels.lock().await;
+        // Iterate newest-first (reverse order) to find first still-active goal.
+        order
+            .iter()
+            .rev()
+            .find(|id| channels.contains_key(*id))
+            .cloned()
     }
 
     /// List goal IDs that have active output channels.
@@ -298,7 +319,15 @@ pub async fn list_active_output(State(state): State<Arc<AppState>>) -> impl Into
 }
 
 /// Resolve a short goal ID prefix to a full ID.
+///
+/// Special values:
+/// - `"latest"` — resolves to the most recently started still-running goal (v0.12.4.1).
 async fn resolve_goal_id(state: &AppState, query: &str) -> Option<String> {
+    // Special alias: "latest" resolves to the newest running goal.
+    if query == "latest" {
+        return state.goal_output.latest_goal().await;
+    }
+
     let active = state.goal_output.active_goals().await;
     // Exact match.
     if active.contains(&query.to_string()) {
@@ -387,5 +416,38 @@ mod tests {
         // Should not panic or create a channel.
         mgr.add_alias("alias", "nonexistent").await;
         assert!(mgr.subscribe("alias").await.is_none());
+    }
+
+    // ── v0.12.4.1: latest_goal and resolve_goal_id("latest") ─────────────────
+
+    #[tokio::test]
+    async fn latest_goal_returns_newest_active() {
+        let mgr = GoalOutputManager::new();
+        assert!(mgr.latest_goal().await.is_none());
+
+        mgr.create_channel("goal-first").await;
+        assert_eq!(mgr.latest_goal().await.as_deref(), Some("goal-first"));
+
+        mgr.create_channel("goal-second").await;
+        // Newest is "goal-second".
+        assert_eq!(mgr.latest_goal().await.as_deref(), Some("goal-second"));
+
+        mgr.create_channel("goal-third").await;
+        assert_eq!(mgr.latest_goal().await.as_deref(), Some("goal-third"));
+    }
+
+    #[tokio::test]
+    async fn latest_goal_skips_removed_channels() {
+        let mgr = GoalOutputManager::new();
+        mgr.create_channel("goal-a").await;
+        mgr.create_channel("goal-b").await;
+
+        // Remove the newest — "latest" should fall back to goal-a.
+        mgr.remove_channel("goal-b").await;
+        assert_eq!(mgr.latest_goal().await.as_deref(), Some("goal-a"));
+
+        // Remove everything — no latest.
+        mgr.remove_channel("goal-a").await;
+        assert!(mgr.latest_goal().await.is_none());
     }
 }

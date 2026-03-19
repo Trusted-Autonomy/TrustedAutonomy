@@ -314,6 +314,7 @@ async fn run_session(
     let http_client = reqwest::Client::new();
     let cmd_url = format!("{}/api/cmd", daemon_url);
     let interactions_url = format!("{}/api/interactions", daemon_url);
+    let goal_input_base_url = format!("{}/api/goals", daemon_url);
 
     let mut self_user_id: Option<String> = None;
     let mut rate_limiter = RateLimiter::new(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SECS);
@@ -382,6 +383,7 @@ async fn run_session(
                                     &mut rate_limiter,
                                     &http_client,
                                     &cmd_url,
+                                    &goal_input_base_url,
                                     token,
                                 ).await;
                             }
@@ -444,6 +446,7 @@ async fn handle_message_create(
     rate_limiter: &mut RateLimiter,
     http_client: &reqwest::Client,
     cmd_url: &str,
+    goal_input_base_url: &str,
     token: &str,
 ) {
     let msg_channel = d["channel_id"].as_str().unwrap_or("");
@@ -485,12 +488,81 @@ async fn handle_message_create(
         return;
     }
 
+    // ── Goal input shortcuts (v0.12.4.1) ────────────────────────────────────
+    //
+    // `>message text here` → route to latest running goal's stdin.
+    // `ta input <goal-id> <text>` → route to specified goal's stdin.
+    //
+    // These bypass the normal command forwarding path.
+
+    if let Some(input_text) = command.strip_prefix('>') {
+        // `>text` shorthand: deliver to the most recently started running goal.
+        let text = input_text.trim();
+        eprintln!(
+            "[discord-listener] Goal input (>shorthand) from {}: {:?}",
+            author_name, text
+        );
+        let url = format!("{}/latest/input", goal_input_base_url);
+        let reply = forward_goal_input(http_client, &url, text).await;
+        let _ = post_thread_reply(http_client, token, channel_id, msg_id, &reply).await;
+        return;
+    }
+
+    // `ta input <goal-id> <text>` explicit form.
+    // After stripping the channel prefix, the command may start with "ta input" or "input".
+    let normalized = command
+        .strip_prefix("ta ")
+        .unwrap_or(command);
+    if let Some(rest) = normalized.strip_prefix("input ") {
+        let rest = rest.trim();
+        // Split on first whitespace to get goal-id and text.
+        if let Some((goal_id, text)) = rest.split_once(char::is_whitespace) {
+            let goal_id = goal_id.trim();
+            let text = text.trim();
+            eprintln!(
+                "[discord-listener] Goal input (explicit) from {} → goal {}: {:?}",
+                author_name, goal_id, text
+            );
+            let url = format!("{}/{}/input", goal_input_base_url, goal_id);
+            let reply = forward_goal_input(http_client, &url, text).await;
+            let _ = post_thread_reply(http_client, token, channel_id, msg_id, &reply).await;
+            return;
+        }
+        // `input` without enough args — show usage.
+        let reply = ":x: Usage: `input <goal-id> <message>` or `>message text`";
+        let _ = post_thread_reply(http_client, token, channel_id, msg_id, reply).await;
+        return;
+    }
+
     eprintln!(
         "[discord-listener] Message command from {}: {}",
         author_name, command
     );
 
     execute_command_with_status(http_client, cmd_url, token, channel_id, msg_id, command).await;
+}
+
+/// POST `{ "input": text }` to a goal input URL and return a Discord reply string.
+async fn forward_goal_input(client: &reqwest::Client, url: &str, text: &str) -> String {
+    match client
+        .post(url)
+        .json(&json!({ "input": text }))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                ":speech_balloon: Delivered to agent.".to_string()
+            } else {
+                let body: serde_json::Value =
+                    resp.json().await.unwrap_or_else(|_| json!({}));
+                let err = body["error"].as_str().unwrap_or("unknown error");
+                format!(":x: No running goal or delivery failed: {}", err)
+            }
+        }
+        Err(e) => format!(":x: Cannot reach daemon: {}", e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,5 +1144,87 @@ mod tests {
         assert!(s.session_id.is_none());
         assert!(s.sequence.is_none());
         assert!(s.resume_gateway_url.is_none());
+    }
+
+    // ── v0.12.4.1: goal input routing tests ──────────────────────────────────
+
+    /// Helper that mirrors the routing logic in handle_message_create.
+    enum DispatchDecision<'a> {
+        GoalInputLatest { text: &'a str },
+        GoalInputExplicit { goal_id: &'a str, text: &'a str },
+        GoalInputMissingArgs,
+        Command { command: &'a str },
+    }
+
+    fn classify_command(command: &str) -> DispatchDecision<'_> {
+        if let Some(input_text) = command.strip_prefix('>') {
+            return DispatchDecision::GoalInputLatest { text: input_text.trim() };
+        }
+        let normalized = command.strip_prefix("ta ").unwrap_or(command);
+        if let Some(rest) = normalized.strip_prefix("input ") {
+            let rest = rest.trim();
+            if let Some((goal_id, text)) = rest.split_once(char::is_whitespace) {
+                return DispatchDecision::GoalInputExplicit {
+                    goal_id: goal_id.trim(),
+                    text: text.trim(),
+                };
+            }
+            return DispatchDecision::GoalInputMissingArgs;
+        }
+        DispatchDecision::Command { command }
+    }
+
+    #[test]
+    fn gt_shorthand_routes_to_latest_input() {
+        // `>fix the sorting` after prefix-strip → GoalInputLatest.
+        let cmd = ">fix the sorting";
+        match classify_command(cmd) {
+            DispatchDecision::GoalInputLatest { text } => assert_eq!(text, "fix the sorting"),
+            _ => panic!("expected GoalInputLatest"),
+        }
+    }
+
+    #[test]
+    fn ta_input_explicit_routes_correctly() {
+        let cmd = "ta input abc123 please fix the bug";
+        match classify_command(cmd) {
+            DispatchDecision::GoalInputExplicit { goal_id, text } => {
+                assert_eq!(goal_id, "abc123");
+                assert_eq!(text, "please fix the bug");
+            }
+            _ => panic!("expected GoalInputExplicit"),
+        }
+    }
+
+    #[test]
+    fn bare_input_explicit_routes_correctly() {
+        // Without the "ta " prefix — bare "input <id> <text>".
+        let cmd = "input abc123 hello";
+        match classify_command(cmd) {
+            DispatchDecision::GoalInputExplicit { goal_id, text } => {
+                assert_eq!(goal_id, "abc123");
+                assert_eq!(text, "hello");
+            }
+            _ => panic!("expected GoalInputExplicit"),
+        }
+    }
+
+    #[test]
+    fn input_without_args_shows_usage() {
+        let cmd = "input abc123";
+        // Only goal-id, no text — should trigger missing args.
+        match classify_command(cmd) {
+            DispatchDecision::GoalInputMissingArgs => {}
+            _ => panic!("expected GoalInputMissingArgs"),
+        }
+    }
+
+    #[test]
+    fn normal_command_not_intercepted() {
+        let cmd = "ta draft list";
+        match classify_command(cmd) {
+            DispatchDecision::Command { command } => assert_eq!(command, "ta draft list"),
+            _ => panic!("expected Command"),
+        }
     }
 }

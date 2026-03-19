@@ -238,6 +238,12 @@ pub async fn execute_command(
                     let goal_output2 = goal_output.clone();
                     let goal_input2 = goal_input.clone();
                     let output_key2 = output_key.clone();
+                    // Shared goal UUID detected from sentinel — used by state-poll task.
+                    let detected_goal_id: std::sync::Arc<tokio::sync::Mutex<Option<uuid::Uuid>>> =
+                        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+                    let detected_goal_id2 = detected_goal_id.clone();
+                    let events_dir2 = events_dir.clone();
+                    let working_dir2 = working_dir.clone();
                     let stderr_task = tokio::spawn(async move {
                         if let Some(err) = stderr {
                             let mut reader = BufReader::new(err).lines();
@@ -249,6 +255,13 @@ pub async fn execute_command(
                                     if let Some(goal_uuid) = extract_goal_uuid_from_event(&line) {
                                         goal_output2.add_alias(&goal_uuid, &output_key2).await;
                                         goal_input2.add_alias(&goal_uuid, &output_key2).await;
+                                        // Emit GoalStarted SSE event so channel plugins see it.
+                                        emit_goal_started_event(
+                                            &events_dir2,
+                                            goal_uuid,
+                                            &working_dir2,
+                                        );
+                                        *detected_goal_id2.lock().await = Some(goal_uuid);
                                     }
                                 }
                                 let _ = tx2.send(OutputLine {
@@ -261,6 +274,64 @@ pub async fn execute_command(
                                     lines.remove(0);
                                 }
                                 lines.push(line);
+                            }
+                        }
+                    });
+                    // State-poll task: watches GoalRunStore for state transitions and
+                    // emits GoalCompleted / ReviewRequested SSE events for channel plugins.
+                    let events_dir3 = events_dir.clone();
+                    let working_dir3 = working_dir.clone();
+                    let poll_done = std::sync::Arc::new(tokio::sync::Notify::new());
+                    let poll_done2 = poll_done.clone();
+                    let state_poll_task = tokio::spawn(async move {
+                        let mut last_state: Option<String> = None;
+                        loop {
+                            tokio::select! {
+                                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
+                                _ = poll_done2.notified() => {
+                                    // One final poll on process exit.
+                                }
+                            }
+                            let goal_id = *detected_goal_id.lock().await;
+                            let Some(goal_id) = goal_id else { continue };
+                            let goal_dir = working_dir3.join(".ta/goals");
+                            let store = ta_goal::store::GoalRunStore::new(&goal_dir);
+                            let Ok(store) = store else { continue };
+                            let Ok(Some(goal)) = store.load(goal_id) else { continue };
+                            let state_str = goal.state.to_string();
+                            if last_state.as_deref() == Some(&state_str) {
+                                continue;
+                            }
+                            last_state = Some(state_str.clone());
+                            match state_str.as_str() {
+                                "completed" => {
+                                    emit_goal_completed_event(&events_dir3, goal_id, &goal.title);
+                                }
+                                "pr_ready" => {
+                                    // Emit ReviewRequested so channel plugins show draft-ready.
+                                    let pr_dir = working_dir3.join(".ta/pr_packages");
+                                    let summary = latest_draft_summary(&pr_dir, goal_id);
+                                    let artifact_count = latest_draft_artifact_count(&pr_dir, goal_id);
+                                    let draft_id = latest_draft_id(&pr_dir, goal_id);
+                                    if let Some(draft_id) = draft_id {
+                                        emit_draft_ready_events(
+                                            &events_dir3,
+                                            goal_id,
+                                            draft_id,
+                                            &goal.title,
+                                            &summary,
+                                            artifact_count,
+                                        );
+                                    }
+                                }
+                                "failed" | "denied" => {
+                                    emit_goal_failed_event(&events_dir3, goal_id, &goal.title);
+                                }
+                                _ => {}
+                            }
+                            // Stop polling terminal states.
+                            if matches!(state_str.as_str(), "completed" | "failed" | "denied" | "applied") {
+                                break;
                             }
                         }
                     });
@@ -291,8 +362,12 @@ pub async fn execute_command(
 
                     let status = child.wait().await;
                     heartbeat_task.abort(); // Stop heartbeat when command exits.
+                    poll_done.notify_one(); // Trigger final state poll before aborting.
                     let _ = stdout_task.await;
                     let _ = stderr_task.await;
+                    // Give the state poll task a moment for its final check, then abort.
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    state_poll_task.abort();
 
                     match status {
                         Ok(s) if s.success() => {

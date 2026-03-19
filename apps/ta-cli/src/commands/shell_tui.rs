@@ -2297,6 +2297,12 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
                     let excess = app.agent_output.len() - app.output_buffer_limit;
                     app.agent_output.drain(..excess);
                 }
+                // Auto-scroll agent pane when near bottom (v0.12.4.1 fix item 2).
+                // Mirrors the main-pane auto_scroll_if_near_bottom() logic.
+                const AGENT_NEAR_BOTTOM_LINES: usize = 5;
+                if app.agent_scroll_offset <= AGENT_NEAR_BOTTOM_LINES {
+                    app.agent_scroll_offset = 0;
+                }
             } else {
                 app.push_output(styled);
                 // Auto-scroll to bottom when "near bottom" — keeps latest visible (v0.12.3).
@@ -2337,15 +2343,26 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
 
             // Replace the last heartbeat line with a clean "[agent exited]" line
             // so the "Agent is working ⚠" indicator doesn't linger after exit (v0.12.3 items 5, 7).
-            let replaced = if let Some(last) = app.output.iter_mut().rev().find(|l| l.is_heartbeat)
-            {
-                last.is_heartbeat = false;
-                last.text = format!("[agent exited] {}", short_id);
-                last.style = Style::default().fg(Color::DarkGray);
-                true
-            } else {
-                false
-            };
+            // v0.12.4.1 fix: also search agent_output (split-pane mode sends heartbeats there).
+            let replaced_main =
+                if let Some(last) = app.output.iter_mut().rev().find(|l| l.is_heartbeat) {
+                    last.is_heartbeat = false;
+                    last.text = format!("[agent exited] {}", short_id);
+                    last.style = Style::default().fg(Color::DarkGray);
+                    true
+                } else {
+                    false
+                };
+            let replaced_agent =
+                if let Some(last) = app.agent_output.iter_mut().rev().find(|l| l.is_heartbeat) {
+                    last.is_heartbeat = false;
+                    last.text = format!("[agent exited] {}", short_id);
+                    last.style = Style::default().fg(Color::DarkGray);
+                    true
+                } else {
+                    false
+                };
+            let replaced = replaced_main || replaced_agent;
 
             if !replaced {
                 app.push_output(OutputLine::separator(format!(
@@ -6301,5 +6318,107 @@ mod tests {
         diag.cycles = 100;
         diag.last_report = std::time::Instant::now() - std::time::Duration::from_secs(10);
         assert!(diag.report().is_none());
+    }
+
+    // ── v0.12.4.1 split-pane shell fix tests ─────────────────────────────────
+
+    #[test]
+    fn agent_output_done_clears_heartbeat_in_agent_pane() {
+        // Item 1: AgentOutputDone must clear heartbeats from agent_output (split-pane).
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.split_pane = true;
+        app.tailing_goal = Some("goal-abc".into());
+        // Push a heartbeat directly into agent_output (as split-pane mode does).
+        app.agent_output.push(OutputLine::heartbeat(
+            "[heartbeat] still running... 5s elapsed".into(),
+        ));
+        assert!(app.agent_output[0].is_heartbeat);
+
+        handle_tui_message(&mut app, TuiMessage::AgentOutputDone("goal-abc".into()));
+
+        // Heartbeat in agent_output must be replaced with [agent exited].
+        assert!(!app.agent_output[0].is_heartbeat);
+        assert!(app.agent_output[0].text.contains("agent exited"));
+        // tailing_goal should be cleared.
+        assert!(app.tailing_goal.is_none());
+    }
+
+    #[test]
+    fn agent_output_done_clears_heartbeat_in_main_pane_when_not_split() {
+        // Item 1 (non-split path): heartbeat in main output is replaced.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.tailing_goal = Some("goal-xyz".into());
+        app.push_heartbeat("[heartbeat] still running... 10s elapsed".into());
+        assert!(app.output.last().unwrap().is_heartbeat);
+
+        handle_tui_message(&mut app, TuiMessage::AgentOutputDone("goal-xyz".into()));
+
+        // Heartbeat in main output replaced with [agent exited].
+        let heartbeat_lines: Vec<_> = app.output.iter().filter(|l| l.is_heartbeat).collect();
+        assert!(
+            heartbeat_lines.is_empty(),
+            "no heartbeat lines should remain"
+        );
+        assert!(app.output.iter().any(|l| l.text.contains("agent exited")));
+    }
+
+    #[test]
+    fn auto_scroll_agent_pane_when_near_bottom() {
+        // Item 2: auto-scroll fires for agent pane in split mode.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.split_pane = true;
+        // agent_scroll_offset = 0 means pinned to bottom.
+        app.agent_scroll_offset = 0;
+
+        // Deliver agent output in split-pane mode.
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stdout".into(),
+                line: "some agent output".into(),
+                goal_id: None,
+            }),
+        );
+
+        // agent_scroll_offset should remain 0 (pinned to bottom).
+        assert_eq!(app.agent_scroll_offset, 0);
+        assert!(!app.agent_output.is_empty());
+    }
+
+    #[test]
+    fn no_auto_scroll_agent_pane_when_scrolled_up() {
+        // Item 2: when user has scrolled up in agent pane, offset is preserved.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.split_pane = true;
+        // Simulate user scrolled 10 lines up in the agent pane.
+        app.agent_scroll_offset = 10;
+
+        handle_tui_message(
+            &mut app,
+            TuiMessage::AgentOutput(AgentOutputLine {
+                stream: "stdout".into(),
+                line: "more output".into(),
+                goal_id: None,
+            }),
+        );
+
+        // Scrolled far up — offset should NOT be reset.
+        assert_eq!(app.agent_scroll_offset, 10);
     }
 }
