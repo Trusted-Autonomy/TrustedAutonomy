@@ -1103,7 +1103,7 @@ fn emit_draft_ready_events(
 }
 
 fn load_goal_title(project_root: &std::path::Path, goal_id: uuid::Uuid) -> Option<String> {
-    let store = ta_goal::store::GoalRunStore::new(&project_root.join(".ta/goals")).ok()?;
+    let store = ta_goal::store::GoalRunStore::new(project_root.join(".ta/goals")).ok()?;
     store.get(goal_id).ok()?.map(|g| g.title)
 }
 
