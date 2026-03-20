@@ -538,13 +538,44 @@ fn call_plugin(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| {
-        SubmitError::VcsError(format!(
-            "Failed to spawn VCS plugin '{}' for method '{}': {}. \
-             Ensure the plugin is installed and on PATH.",
-            command, request.method, e
-        ))
-    })?;
+    // Retry on ETXTBSY (os error 26): on Linux the kernel can return this when a
+    // freshly-written executable has not yet been fully flushed through the page
+    // cache / copy-up layer (common on overlayfs in Nix CI). A short backoff is
+    // sufficient; real plugin binaries never trigger this in production.
+    let mut child = {
+        const ETXTBSY: i32 = 26;
+        let mut last_err: Option<std::io::Error> = None;
+        let mut spawned = None;
+        for delay_ms in [0u64, 20, 80, 200] {
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            match cmd.spawn() {
+                Ok(c) => {
+                    spawned = Some(c);
+                    break;
+                }
+                Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                    last_err = Some(e);
+                }
+                Err(e) => {
+                    return Err(SubmitError::VcsError(format!(
+                        "Failed to spawn VCS plugin '{}' for method '{}': {}. \
+                         Ensure the plugin is installed and on PATH.",
+                        command, request.method, e
+                    )));
+                }
+            }
+        }
+        spawned.ok_or_else(|| {
+            let e = last_err.unwrap();
+            SubmitError::VcsError(format!(
+                "Failed to spawn VCS plugin '{}' for method '{}': {}. \
+                 Ensure the plugin is installed and on PATH.",
+                command, request.method, e
+            ))
+        })?
+    };
 
     // Write request to stdin.
     if let Some(mut stdin) = child.stdin.take() {
