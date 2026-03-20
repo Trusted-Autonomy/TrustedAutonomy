@@ -96,7 +96,7 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
         if ret == 0 {
             let stats = unsafe { stats.assume_init() };
             // f_bavail = blocks available to unprivileged user, f_frsize = block size
-            Some(stats.f_bavail as u64 * stats.f_frsize)
+            Some(u64::from(stats.f_bavail) * stats.f_frsize)
         } else {
             None
         }
