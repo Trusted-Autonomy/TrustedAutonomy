@@ -79,14 +79,14 @@ impl CopyStat {
 /// [`CopyStrategy::Full`] if no COW support is detected.
 ///
 /// Called once per workspace creation — negligible overhead.
-pub fn detect_strategy(staging_dir: &Path) -> CopyStrategy {
+pub fn detect_strategy(_staging_dir: &Path) -> CopyStrategy {
     #[cfg(target_os = "macos")]
-    if probe_apfs_clone(staging_dir) {
+    if probe_apfs_clone(_staging_dir) {
         return CopyStrategy::ApfsClone;
     }
 
     #[cfg(target_os = "linux")]
-    if probe_btrfs_reflink(staging_dir) {
+    if probe_btrfs_reflink(_staging_dir) {
         return CopyStrategy::BtrfsReflink;
     }
 
