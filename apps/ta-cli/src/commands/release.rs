@@ -92,6 +92,34 @@ pub enum ReleaseCommands {
         #[arg(long)]
         pipeline: Option<PathBuf>,
     },
+    /// Trigger the GitHub Actions release workflow for an arbitrary tag label.
+    ///
+    /// Use this when the tag name doesn't follow the `v*` auto-trigger pattern
+    /// (e.g. `public-alpha-v0.13.1.1`). The workflow runs `workflow_dispatch`
+    /// with the tag as an input; the release workflow creates the tag automatically.
+    ///
+    /// Requires `gh` (GitHub CLI) to be installed and authenticated.
+    ///
+    /// Example:
+    ///   ta release dispatch public-alpha-v0.13.1.1
+    Dispatch {
+        /// The GitHub tag label to use for the release (e.g. "public-alpha-v0.13.1.1").
+        /// Does not need to exist — the release workflow creates it.
+        tag: String,
+
+        /// Mark the release as a pre-release on GitHub (default: false = latest).
+        #[arg(long, default_value_t = false)]
+        prerelease: bool,
+
+        /// GitHub repository in `owner/repo` format.
+        /// Defaults to the `GITHUB_REPOSITORY` env var or auto-detected from git remote.
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Workflow file name (default: "release.yml").
+        #[arg(long, default_value = "release.yml")]
+        workflow: String,
+    },
 }
 
 pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -134,6 +162,12 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
         ReleaseCommands::Validate { version, pipeline } => {
             validate_release(config, version, pipeline.as_deref())
         }
+        ReleaseCommands::Dispatch {
+            tag,
+            prerelease,
+            repo,
+            workflow,
+        } => dispatch_release(tag, *prerelease, repo.as_deref(), workflow),
     }
 }
 
@@ -1446,6 +1480,98 @@ fn validate_release_with_env(
             errors.len()
         );
     }
+
+    Ok(())
+}
+
+// ── Dispatch release via workflow_dispatch ───────────────────────
+
+/// Trigger the GitHub Actions release workflow for a custom tag label.
+///
+/// For tags that don't match `v*` (e.g. `public-alpha-v0.13.1.1`), the
+/// `push: tags: v*` CI trigger doesn't fire. This function calls
+/// `gh workflow run <workflow> --field tag=<tag>` to trigger via
+/// `workflow_dispatch` instead.
+fn dispatch_release(
+    tag: &str,
+    prerelease: bool,
+    repo: Option<&str>,
+    workflow: &str,
+) -> anyhow::Result<()> {
+    // Resolve repo: explicit arg > GITHUB_REPOSITORY env > git remote parse.
+    let repo = if let Some(r) = repo {
+        r.to_string()
+    } else if let Ok(r) = std::env::var("GITHUB_REPOSITORY") {
+        r
+    } else {
+        // Try to parse from `git remote get-url origin`.
+        let out = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .map_err(|e| anyhow::anyhow!("Cannot run git: {}", e))?;
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // Parse github.com/owner/repo or git@github.com:owner/repo
+        url.split("github.com")
+            .nth(1)
+            .map(|s| s.trim_start_matches('/').trim_start_matches(':').trim_end_matches(".git").to_string())
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine GitHub repo from remote URL: {}\nPass --repo owner/repo explicitly.", url))?
+    };
+
+    // Check gh is available.
+    let gh_check = Command::new("gh").arg("--version").output();
+    if gh_check.is_err() || !gh_check.unwrap().status.success() {
+        anyhow::bail!(
+            "GitHub CLI (gh) is required for `ta release dispatch`.\n\
+             Install: https://cli.github.com"
+        );
+    }
+
+    println!("Dispatching release workflow for tag: {}", tag);
+    println!("  Repository: {}", repo);
+    println!("  Workflow:   {}", workflow);
+    println!("  Pre-release: {}", prerelease);
+    println!();
+
+    let mut args = vec![
+        "workflow".to_string(),
+        "run".to_string(),
+        workflow.to_string(),
+        "--repo".to_string(),
+        repo.clone(),
+        "--field".to_string(),
+        format!("tag={}", tag),
+        "--field".to_string(),
+        format!("prerelease={}", prerelease),
+    ];
+
+    // Use --ref main so workflow_dispatch targets the main branch.
+    args.push("--ref".to_string());
+    args.push("main".to_string());
+
+    let status = Command::new("gh")
+        .args(&args)
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run gh: {}", e))?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "gh workflow run failed (exit {}).\n\
+             Check that the workflow file '{}' exists and you are authenticated:\n\
+             gh auth status",
+            status.code().unwrap_or(-1),
+            workflow
+        );
+    }
+
+    println!("Release workflow dispatched.");
+    println!(
+        "Monitor progress:\n  gh run list --repo {} --workflow {}",
+        repo, workflow
+    );
+    println!(
+        "View release when complete:\n  gh release view {} --repo {}",
+        tag, repo
+    );
 
     Ok(())
 }

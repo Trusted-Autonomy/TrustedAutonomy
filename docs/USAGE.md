@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.13.1-alpha
+**Version**: 0.13.1-alpha.1
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -2016,6 +2016,30 @@ ta release show
 
 # Create a customizable .ta/release.yaml
 ta release init
+```
+
+#### Dispatching a release with a custom tag label
+
+The standard `ta release run` pipeline creates a `v<semver>` git tag and pushes it, which triggers the `push: tags: v*` CI path. For public alpha labels that don't follow the `v*` pattern (e.g. `public-alpha-v0.13.1.1`), use `ta release dispatch` to trigger the release workflow via `workflow_dispatch` instead:
+
+```bash
+# Trigger a release with a human-readable public label
+ta release dispatch public-alpha-v0.13.1.1
+
+# Mark as pre-release on GitHub
+ta release dispatch public-alpha-v0.13.1.1 --prerelease
+
+# Explicit repo (defaults to git remote auto-detection)
+ta release dispatch public-alpha-v0.13.1.1 --repo Trusted-Autonomy/TrustedAutonomy
+
+# Different workflow file
+ta release dispatch public-alpha-v0.13.1.1 --workflow release.yml
+```
+
+`ta release dispatch` requires the [GitHub CLI (`gh`)](https://cli.github.com) to be installed and authenticated (`gh auth login`). The release workflow creates the tag automatically — no local `git tag` needed. Monitor the run with:
+
+```bash
+gh run list --repo Trusted-Autonomy/TrustedAutonomy --workflow release.yml
 ```
 
 From `ta shell`, the `release` shortcut launches the pipeline as a long-running command:
