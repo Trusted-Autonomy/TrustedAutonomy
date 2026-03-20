@@ -210,10 +210,28 @@ fn handle_draft_build(
         )
     })?;
 
-    let summary_why = if goal.objective.is_empty() {
-        goal.title.clone()
-    } else {
-        goal.objective.clone()
+    // Bug C fix: when a plan phase is linked, use the phase's **Goal**: description
+    // as `summary_why` rather than the goal's objective (which is often just a repeat
+    // of the title). Fall back to objective when no phase is set or the description
+    // cannot be extracted.
+    let summary_why = {
+        let phase_goal = goal.plan_phase.as_deref().and_then(|phase_id| {
+            let plan_path = state.config.workspace_root.join("PLAN.md");
+            extract_phase_goal_description(&plan_path, phase_id)
+        });
+        // Also detect placeholder: if objective equals the goal title exactly,
+        // prefer the phase description when available.
+        let obj_is_placeholder =
+            goal.objective.is_empty() || goal.objective.trim() == goal.title.trim();
+        match phase_goal {
+            Some(desc)
+                if !desc.is_empty() && (obj_is_placeholder || !goal.objective.is_empty()) =>
+            {
+                desc
+            }
+            _ if goal.objective.is_empty() => goal.title.clone(),
+            _ => goal.objective.clone(),
+        }
     };
     let pr_package = connector
         .build_pr_package(&goal.title, &goal.objective, summary, &summary_why)
@@ -754,4 +772,98 @@ fn handle_draft_list(state: &GatewayState) -> Result<CallToolResult, McpError> {
         .map_err(|e| {
             McpError::internal_error(e.to_string(), None)
         })?]))
+}
+
+// ── Bug C fix helper ──────────────────────────────────────────────────────────
+
+/// Extract the `**Goal**:` description for a given plan phase ID from PLAN.md.
+///
+/// Searches for the phase section header (e.g. `### v0.13.1.2 —`), then looks
+/// for the first `**Goal**:` line within that section. Returns `None` when the
+/// file cannot be read, the phase is not found, or no `**Goal**:` line exists.
+fn extract_phase_goal_description(plan_path: &std::path::Path, phase_id: &str) -> Option<String> {
+    let content = std::fs::read_to_string(plan_path).ok()?;
+
+    // Find the line that introduces the section for this phase.
+    // Phase headers look like: `### v0.13.1.2 — Release Completeness...`
+    let phase_header_marker = format!("### {}", phase_id);
+    let phase_start = content
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains(&phase_header_marker))
+        .map(|(i, _)| i)?;
+
+    // Scan forward from the phase header until we hit the next `###` section
+    // or end of file, looking for a `**Goal**:` line.
+    for line in content.lines().skip(phase_start + 1) {
+        // Stop at the next phase header.
+        if line.starts_with("### ") {
+            break;
+        }
+        // Match `**Goal**: <description>` (with or without leading whitespace).
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("**Goal**:") {
+            let desc = rest.trim().to_string();
+            if !desc.is_empty() {
+                return Some(desc);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_phase_goal_description_finds_goal_line() {
+        let plan = "\
+### v0.13.1.2 — Release Completeness & Cross-Platform Launch Fix
+<!-- status: pending -->
+**Goal**: Fix two classes of critical bugs: missing ta-daemon and silent PR failure.
+
+#### Items
+1. [ ] Item one
+";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("PLAN.md");
+        std::fs::write(&path, plan).unwrap();
+        let result = extract_phase_goal_description(&path, "v0.13.1.2");
+        assert_eq!(
+            result,
+            Some(
+                "Fix two classes of critical bugs: missing ta-daemon and silent PR failure."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn extract_phase_goal_description_stops_at_next_section() {
+        let plan = "\
+### v0.13.1.2 — Phase A
+<!-- status: pending -->
+
+### v0.13.2 — Phase B
+**Goal**: This is phase B's goal.
+";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("PLAN.md");
+        std::fs::write(&path, plan).unwrap();
+        // Phase A has no **Goal** line — should return None.
+        let result = extract_phase_goal_description(&path, "v0.13.1.2");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn extract_phase_goal_description_returns_none_for_missing_phase() {
+        let plan = "### v0.13.2 — Some Phase\n**Goal**: Something.\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("PLAN.md");
+        std::fs::write(&path, plan).unwrap();
+        let result = extract_phase_goal_description(&path, "v0.99.0");
+        assert_eq!(result, None);
+    }
 }

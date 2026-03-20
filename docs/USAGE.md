@@ -89,25 +89,43 @@ Set a specific version: `TA_VERSION=v0.10.12-alpha curl -fsSL ... | bash`
 
 **Option B -- Binary download**
 
+Each release archive contains two binaries: `ta` (the CLI) and `ta-daemon` (the background daemon). Both must be available — `ta` spawns `ta-daemon` as a sibling process, looking for it next to the `ta` binary first, then falling back to `$PATH`.
+
 ```bash
 # macOS (Apple Silicon)
 curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest/download/ta-aarch64-apple-darwin.tar.gz
 tar xzf ta-aarch64-apple-darwin.tar.gz
-sudo mv ta /usr/local/bin/
+sudo cp ta ta-daemon /usr/local/bin/
 
 # macOS (Intel)
 curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest/download/ta-x86_64-apple-darwin.tar.gz
 tar xzf ta-x86_64-apple-darwin.tar.gz
-sudo mv ta /usr/local/bin/
+sudo cp ta ta-daemon /usr/local/bin/
 
 # Linux (x86_64)
 curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest/download/ta-x86_64-unknown-linux-musl.tar.gz
 tar xzf ta-x86_64-unknown-linux-musl.tar.gz
-sudo mv ta /usr/local/bin/
+sudo cp ta ta-daemon /usr/local/bin/
 
 # Windows (x86_64)
 # Download ta-x86_64-pc-windows-msvc.zip from the latest release
-# Extract and add ta.exe to your PATH
+# Extract ta.exe and ta-daemon.exe into the same directory, then add that directory to your PATH
+```
+
+> **Note**: If `ta-daemon` is not found, commands that require the daemon (e.g. `ta daemon start`, `ta run`, `ta shell`) will fail with a "daemon binary not found" error. Ensure both binaries are on your `$PATH` or in the same directory.
+
+#### Windows platform notes
+
+On Windows, `ta daemon start`, `ta run`, and all non-interactive commands work normally. The interactive shell (`ta shell`) uses a Unix PTY and **is not available on Windows**. Use `ta run` for agent-driven goals and review drafts with `ta draft view`/`ta draft apply` on Windows.
+
+```powershell
+# Run a goal (works on Windows)
+ta run "Fix the authentication bug"
+
+# Review and apply the draft (works on Windows)
+ta draft list
+ta draft view <id>
+ta draft apply <id>
 ```
 
 **Option C -- Docker** *(Coming Soon)*

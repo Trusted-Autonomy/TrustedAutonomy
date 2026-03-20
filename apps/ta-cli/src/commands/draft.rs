@@ -287,6 +287,14 @@ pub enum DraftCommands {
         /// Draft package ID (or prefix).
         id: String,
     },
+    /// Retry PR creation for an applied draft whose branch was pushed but whose PR was never created.
+    ///
+    /// Use this when `ta draft apply --submit` failed at the PR-creation step but succeeded at push.
+    /// The branch is already on the remote — this command creates the missing PR.
+    ReopenReview {
+        /// Draft package ID (or prefix).
+        id: String,
+    },
     /// List open PRs created by TA with their draft IDs and CI status.
     PrList,
     /// Merge the PR/review for an applied draft and sync the local main branch.
@@ -642,6 +650,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             *no_launch,
         ),
         DraftCommands::PrStatus { id } => draft_pr_status(config, id),
+        DraftCommands::ReopenReview { id } => draft_reopen_review(config, id),
         DraftCommands::PrList => draft_pr_list(config),
         DraftCommands::Merge {
             id,
@@ -3327,6 +3336,49 @@ fn apply_package(
                             if let Some(b) = result.metadata.get("branch") {
                                 vcs_branch = b.clone();
                             }
+                            // Item 5: fall back to adapter-derived branch name if metadata
+                            // didn't include "branch" (e.g. external VCS plugins).
+                            if vcs_branch.is_empty() {
+                                // Use the same slugification the git adapter uses so the
+                                // branch name is stable even when metadata is absent.
+                                let slug: String = goal
+                                    .title
+                                    .to_lowercase()
+                                    .chars()
+                                    .map(|c| {
+                                        if c.is_alphanumeric() || c == '-' {
+                                            c
+                                        } else {
+                                            '-'
+                                        }
+                                    })
+                                    .collect();
+                                let mut collapsed = String::with_capacity(slug.len());
+                                let mut prev = false;
+                                for c in slug.chars() {
+                                    if c == '-' {
+                                        if !prev {
+                                            collapsed.push(c);
+                                        }
+                                        prev = true;
+                                    } else {
+                                        collapsed.push(c);
+                                        prev = false;
+                                    }
+                                }
+                                let trimmed = collapsed.trim_matches('-');
+                                let slug_part = if trimmed.is_empty() { "goal" } else { trimmed };
+                                let truncated = if slug_part.len() > 50 {
+                                    slug_part[..50].trim_end_matches('-')
+                                } else {
+                                    slug_part
+                                };
+                                vcs_branch = format!("ta/{}", truncated);
+                                tracing::warn!(
+                                    branch = %vcs_branch,
+                                    "Push result missing 'branch' metadata — derived from goal title"
+                                );
+                            }
                         }
                         Err(e) => {
                             if adapter.name() != "none" {
@@ -3349,9 +3401,49 @@ fn apply_package(
                             vcs_review_id = Some(result.review_id);
                         }
                         Err(e) => {
-                            eprintln!("Warning: review creation failed: {}", e);
-                            eprintln!(
-                                "  You can manually create a review from the submitted branch."
+                            // Item 4: PR failure must not silently succeed.
+                            // Store the branch so `ta pr status` can show recovery steps,
+                            // then fail with a clear, actionable error message.
+                            let branch_display = if vcs_branch.is_empty() {
+                                "<branch>".to_string()
+                            } else {
+                                vcs_branch.clone()
+                            };
+                            // Save VCS tracking info before failing so the branch is
+                            // preserved and `ta draft reopen-review` can retry.
+                            if !vcs_branch.is_empty() || vcs_commit_sha.is_some() {
+                                use ta_changeset::VcsTrackingInfo;
+                                let vcs_info = VcsTrackingInfo {
+                                    branch: if vcs_branch.is_empty() {
+                                        "unknown".to_string()
+                                    } else {
+                                        vcs_branch.clone()
+                                    },
+                                    review_url: None,
+                                    review_id: None,
+                                    review_state: Some("pr-failed".to_string()),
+                                    commit_sha: vcs_commit_sha.clone(),
+                                    last_checked: Utc::now(),
+                                };
+                                pkg.vcs_status = Some(vcs_info);
+                                let pkg_path = config
+                                    .pr_packages_dir
+                                    .join(format!("{}.json", pkg.package_id));
+                                if let Ok(json) = serde_json::to_string_pretty(&pkg) {
+                                    let _ = std::fs::write(&pkg_path, json);
+                                }
+                            }
+                            let short_id = &pkg.package_id.to_string()[..8];
+                            anyhow::bail!(
+                                "PR creation failed: {}\n\n\
+                                 Branch '{}' was pushed successfully. To create the PR manually:\n\
+                                 \n  gh pr create --head {} --base main\n\
+                                 \nOr retry automatically once the issue is resolved:\n\
+                                 \n  ta draft reopen-review {}",
+                                e,
+                                branch_display,
+                                branch_display,
+                                short_id,
                             );
                         }
                     }
@@ -5289,6 +5381,124 @@ fn draft_pr_status(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
         println!("PR URL:  (none recorded)");
         if let Some(ref state) = vcs.review_state {
             println!("State:   {}", state);
+        }
+        // Item 7: show branch and recovery hint when PR creation failed.
+        if !vcs.branch.is_empty() && vcs.branch != "unknown" {
+            println!(
+                "\nThe branch '{}' was pushed but no PR was created.",
+                vcs.branch
+            );
+            println!("To create the missing PR:");
+            println!("  ta draft reopen-review {}", &package_id.to_string()[..8]);
+            println!("  gh pr create --head {} --base main", vcs.branch);
+        }
+    }
+
+    Ok(())
+}
+
+// ── ta draft reopen-review (v0.13.1.2) ────────────────────────────────────────
+
+/// Retry PR creation for an applied draft that was pushed but whose PR creation failed.
+fn draft_reopen_review(config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
+    use ta_submit::{select_adapter, SourceAdapter, WorkflowConfig};
+
+    let package_id = resolve_draft_id(id, config)?;
+    let mut pkg = load_package(config, package_id)?;
+
+    let vcs = pkg.vcs_status.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Draft {} has no VCS tracking info — was it applied with --submit?",
+            &package_id.to_string()[..8],
+        )
+    })?;
+
+    if vcs.review_url.is_some() {
+        anyhow::bail!(
+            "Draft {} already has a PR URL: {}\nNothing to do.",
+            &package_id.to_string()[..8],
+            vcs.review_url.as_deref().unwrap_or(""),
+        );
+    }
+
+    let branch = vcs.branch.clone();
+    if branch.is_empty() || branch == "unknown" {
+        anyhow::bail!(
+            "Draft {} has no branch recorded — cannot create PR without a branch name.\n\
+             Create the PR manually with `gh pr create`.",
+            &package_id.to_string()[..8],
+        );
+    }
+
+    println!(
+        "=== Reopen Review for Draft {} ===\n",
+        &package_id.to_string()[..8]
+    );
+    println!(
+        "Draft:  {} ({})",
+        pkg.goal.title,
+        &package_id.to_string()[..8]
+    );
+    println!("Branch: {}", branch);
+    println!("Attempting to create PR...\n");
+
+    let target_dir = config.workspace_root.clone();
+    let workflow_config_path = target_dir.join(".ta/workflow.toml");
+    let workflow_config = WorkflowConfig::load_or_default(&workflow_config_path);
+    let adapter: Box<dyn SourceAdapter> = select_adapter(&target_dir, &workflow_config.submit);
+
+    if adapter.name() == "none" {
+        anyhow::bail!(
+            "No VCS adapter detected in {}.\n\
+             Create the PR manually:\n  gh pr create --head {} --base main",
+            target_dir.display(),
+            branch,
+        );
+    }
+
+    // Load the GoalRun from the goal store — `open_review` takes a `&GoalRun`, not the
+    // lightweight `ta_changeset::Goal` embedded in the draft package.
+    let goal_run: GoalRun = {
+        let goal_store = GoalRunStore::new(&config.goals_dir)?;
+        let goal_id_str = &pkg.goal.goal_id;
+        let goal_uuid = resolve_goal_id_from_store(goal_id_str, &goal_store)?;
+        goal_store
+            .get(goal_uuid)?
+            .ok_or_else(|| anyhow::anyhow!("Goal {} not found in store", goal_id_str))?
+    };
+
+    match adapter.open_review(&goal_run, &pkg) {
+        Ok(result) => {
+            println!("[ok] {}", result.message);
+            if !result.review_url.starts_with("none://") {
+                println!("  Review URL: {}", result.review_url);
+            }
+            // Update the stored VCS tracking info with the new PR URL.
+            let vcs_mut = pkg.vcs_status.as_mut().expect("vcs_status checked above");
+            vcs_mut.review_url = Some(result.review_url);
+            vcs_mut.review_id = Some(result.review_id);
+            vcs_mut.review_state = Some("open".to_string());
+            vcs_mut.last_checked = Utc::now();
+            let pkg_path = config
+                .pr_packages_dir
+                .join(format!("{}.json", pkg.package_id));
+            if let Ok(json) = serde_json::to_string_pretty(&pkg) {
+                let _ = std::fs::write(&pkg_path, json);
+            }
+            println!(
+                "\nPR created and recorded. Use `ta draft pr-status {}` to check status.",
+                &package_id.to_string()[..8]
+            );
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "PR creation failed: {}\n\n\
+                 Branch '{}' is on the remote. Create the PR manually:\n\
+                 \n  gh pr create --head {} --base main",
+                e,
+                branch,
+                branch,
+            );
         }
     }
 

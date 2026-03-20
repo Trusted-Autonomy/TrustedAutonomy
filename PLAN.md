@@ -4758,7 +4758,7 @@ These items integrate with the per-project validation commands defined in `const
 ---
 
 ### v0.13.1.2 — Release Completeness & Cross-Platform Launch Fix
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix two classes of critical bugs: (1) release binaries non-functional out of the box because `ta-daemon` is missing, and (2) `ta draft apply` silently succeeds when PR creation fails, leaving the user with a pushed branch and no PR and no clear recovery path.
 
 #### Bug A — Missing `ta-daemon` in release archives
@@ -4782,14 +4782,14 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 1. [x] **Build `ta-daemon` in release workflow**: Add `-p ta-daemon` build step for all 5 targets
 2. [x] **Package `ta-daemon` in all archives**: `ta-daemon` (Unix) / `ta-daemon.exe` (Windows) alongside `ta`
 3. [x] **Fix `find_daemon_binary()` for Windows**: `EXE_SUFFIX` for sibling path; `where` on Windows PATH fallback
-4. [ ] **Fix Bug B — PR failure must not silently succeed**: When `open_review` fails and `do_review=true`, emit a clear error with the branch name and the manual `gh pr create` command. Do not exit 0. Store the branch even when review fails so `ta pr status` can show recovery steps.
-5. [ ] **Capture branch unconditionally after push**: Store the branch from push result regardless of review outcome. Fall back to the goal's `branch_prefix + slug` if metadata doesn't include it.
-6. [ ] **`ta draft reopen-review <id>`**: For applied drafts with a branch but no PR URL, attempt to create the PR. Useful recovery command without needing to re-apply.
-7. [ ] **`ta pr status` branch display**: Show branch name even when `pr_url` is None, with hint: `ta draft reopen-review <id>` to create the missing PR.
-8. [ ] **Update USAGE.md install instructions**: Add note that both `ta` and `ta-daemon` must be on `$PATH` (or in the same directory); update manual install steps to `cp ta ta-daemon /usr/local/bin/`
-9. [ ] **Windows install note**: Document in USAGE.md that `ta shell` (PTY) is Unix-only; `ta daemon start`, `ta run`, and all non-interactive commands work on Windows
+4. [x] **Fix Bug B — PR failure must not silently succeed**: When `open_review` fails and `do_review=true`, emit a clear error with the branch name and the manual `gh pr create` command. Do not exit 0. Store the branch even when review fails so `ta pr status` can show recovery steps.
+5. [x] **Capture branch unconditionally after push**: Store the branch from push result regardless of review outcome. Fall back to the goal's `branch_prefix + slug` if metadata doesn't include it. Derived via same slug algorithm as `GitAdapter::branch_name()` when metadata `"branch"` key is absent.
+6. [x] **`ta draft reopen-review <id>`**: For applied drafts with a branch but no PR URL, attempt to create the PR. Useful recovery command without needing to re-apply. New `DraftCommands::ReopenReview` variant + `draft_reopen_review()` function.
+7. [x] **`ta pr status` branch display**: Show branch name even when `pr_url` is None, with hint: `ta draft reopen-review <id>` and the manual `gh pr create` command to create the missing PR.
+8. [x] **Update USAGE.md install instructions**: Added note that both `ta` and `ta-daemon` must be on `$PATH` (or in the same directory); updated manual install steps to `cp ta ta-daemon /usr/local/bin/`; added daemon-not-found error guidance.
+9. [x] **Windows install note**: Documented in USAGE.md that `ta shell` (PTY) is Unix-only; `ta daemon start`, `ta run`, and all non-interactive commands work on Windows. Includes PowerShell examples.
 10. [x] **Fix Windows clippy: `cmd_install` unused params + `dirs_home` dead code**: On Windows, `project_root` and `apply` are used only in macOS/Linux `#[cfg]` blocks; `dirs_home()` is only called from those same blocks. Add `let _ = (project_root, apply)` in the Windows branch and gate `dirs_home` with `#[cfg(any(target_os = "macos", target_os = "linux"))]`.
-11. [ ] **Bug C — Incomplete top-level draft summary fields** (GitHub issue #76): `ta draft view` shows generic placeholders in the Summary/Why/Impact header (e.g., `Summary: Changes from goal: v0.13.1.1`, `Why: v0.13.1.1`) while per-artifact `explanation_tiers` are rich and correct. Two root causes: (1) the TA agent calls `ta_pr_build` with minimal filler text instead of synthesizing a real summary; (2) `tools/draft.rs:213-216` sets `summary_why = goal.objective.clone()` without checking the linked plan phase description. Fix: when `goal.plan_phase` is set, parse PLAN.md to find the phase's `**Goal**:` line and use it as `why`; fall back to `goal.objective` only when no phase is linked. Also detect placeholder values (e.g., `why == goal title exactly`) and substitute the phase description.
+11. [x] **Bug C — Incomplete top-level draft summary fields** (GitHub issue #76): Added `extract_phase_goal_description()` helper in `ta-mcp-gateway/src/tools/draft.rs`. When `goal.plan_phase` is set, reads PLAN.md and finds the phase's `**Goal**:` line for use as `summary_why`; also detects placeholder values (objective equals title exactly) and substitutes the phase description. 3 new tests.
 
 #### Version: `0.13.1-alpha.2`
 
@@ -4797,111 +4797,63 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 ### v0.13.1.3 — Shell Help & UX Polish
 <!-- status: pending -->
-**Goal**: Fix the `ta shell` help text and input prompt to be accurate, discoverable, and consistent.
-
-#### Problems
-- `run` command missing from shortcuts list
-- Prompt prefix says `ta <cmd>` instead of matching the shell's actual prompt context
-- `git <cmd>` is confusing — should be `vcs <cmd>` to work with the configured VCS provider (not just git)
-- `!<cmd>` shell escape is undocumented (what it does is unclear to new users)
-- Shortcut list is hardcoded — new shortcuts added to the code won't appear in help
+**Goal**: Fix discoverability gaps in the interactive shell: prompt prefix confusion, missing `run` shortcut, `git` command verb, undocumented `!<cmd>` escape, and hardcoded keybinding list.
 
 #### Items
-1. [ ] **Fix prompt prefix in help**: Change `ta <cmd>` to `ta> <cmd>` (or the actual prompt string the shell uses) so examples match what the user sees
-2. [ ] **Add `run` shortcut to help**: `run <title>` missing from the shortcut list; add alongside `goals`, `drafts`, `plan`, `status`
-3. [ ] **Rename `git <cmd>` → `vcs <cmd>`**: The shell passes git commands through to the underlying VCS provider via the VCS plugin system. Rename in help to `vcs <cmd>` with a note: "runs via your configured VCS provider (default: git)"
-4. [ ] **Document `!<cmd>` shell escape**: Add a clear one-liner: "Escape to system shell — runs any shell command (e.g., `!ls -la`, `!cat file.txt`)"
-5. [ ] **Make shortcut list data-driven**: Define shortcuts in a single `&[(&str, &str)]` table and generate both the dispatch logic and the help text from it, so they can't diverge
+
+1. [ ] **Prompt prefix**: Change `> ` to `ta> ` so users know they're in the TA shell (not bash/zsh)
+2. [ ] **`run` shortcut**: Accept `run <prompt>` as an alias for `goal <prompt>` inside the shell
+3. [ ] **`git` → `vcs` command**: Rename the `git` shell command to `vcs` (or support both) to match multi-VCS intent
+4. [ ] **`!<cmd>` documentation**: Add `!<command>` to shell help output and USAGE.md (escape to run arbitrary shell commands)
+5. [ ] **Data-driven keybinding list**: Read available shortcuts from the same table that handles them — `?` or `help` shows live list, not a hardcoded string
 
 #### Version: `0.13.1-alpha.3`
 
 ---
 
-### v0.13.1.4 — Game Engine Project Templates (Unreal / Unity)
+### v0.13.1.4 — Game Engine Project Templates
 <!-- status: pending -->
-**Goal**: Make onboarding an existing game project to TA fast and opinionated. Add `unreal-cpp` and `unity-csharp` templates to `ta init` that wire up BMAD (for structured planning) and Claude Flow (for parallel implementation) out of the box, and launch an automated discovery goal that produces ready-to-use context for both frameworks.
+**Goal**: Make onboarding an existing Unreal C++ or Unity C# game project seamless. `ta init --template unreal` / `ta init --template unity` provisions BMAD agent configs, Claude Flow `.mcp.json`, a discovery goal, and project-appropriate `.taignore` and `policy.yaml`. First-run experience: one command starts a structured onboarding goal that produces a PRD, architecture doc, and sprint-1 stories.
 
-#### Design
-
-**The onboarding problem for games:**
-- Game codebases are large, domain-specific, and have unusual build toolchains (UBT, IL2CPP, hot reload)
-- Agents need UE/Unity-specific conventions up front or they produce wrong code (raw pointers vs TObjectPtr, UPROPERTY, C# coroutines vs Unity Jobs, etc.)
-- BMAD requires a `PRD.md` and `architecture.md` to function well — these don't exist for existing projects
-- Claude Flow swarms need module boundaries to parallelize safely — those aren't obvious from the outside
-
-**Solution: discovery-first onboarding**
-`ta init run --template unreal-cpp` (or `unity-csharp`) does two things:
-1. Writes all TA + BMAD + Claude Flow config files from an opinionated template
-2. Immediately kicks off a **discovery goal** whose output *is* the remaining context — it produces `docs/architecture.md`, `docs/prd.md`, and a populated `.ta/memory/` — rather than asking the user to fill in blanks
-
-#### What each framework provides
-
-| Framework | Role in workflow | Where it lives |
-|---|---|---|
-| **BMAD** | Structured planning — PRD, architecture, story decomposition, role-based review | `docs/bmad/`, `.ta/agents/bmad-*.toml` |
-| **Claude Flow** | Parallel implementation — swarm coordination across module boundaries | `.mcp.json` (claude-flow server), `.ta/workflow.toml` swarm steps |
-| **TA** | Governance — staging isolation, draft review, audit trail, policy | `.ta/` (all of it) |
-
-BMAD drives *what* to build; Claude Flow drives *how* to parallelize the build; TA ensures every change is reviewed before it lands.
+**Prerequisite note for users**: Claude Code (claude CLI), Claude Flow MCP server (`claude-flow`), and BMAD must be installed on the machine before running the discovery goal. TA does not install these — it configures the project to use them. BMAD is consumed as a cloned git repo or npm-installed package; the template includes setup instructions in the generated `ONBOARDING.md`.
 
 #### Items
 
-1. [ ] **`detect_project_type` for games**: Detect `*.uproject` → `ProjectType::UnrealCpp`; detect `*.asmdef` / `ProjectSettings/` → `ProjectType::UnityCsharp`; add both to auto-detect path in `init.rs`
-
-2. [ ] **`unreal-cpp` template — TA config**:
-   - `.taignore`: exclude `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`, `*.generated.h`, `*.gen.cpp`
-   - `workflow.toml` verify: `"UnrealBuildTool ..."` or `"Engine/Build/BatchFiles/RunUAT.sh BuildCookRun"` (platform-conditional)
-   - `policy.yaml`: protect `Config/DefaultEngine.ini`, `*.uproject`, `Build.cs` files from agent writes without approval
-   - `memory.toml`: pre-seed UE5 conventions key (TObjectPtr, UPROPERTY/UFUNCTION, UE_LOG, TArray not std::vector, game thread rules)
-
-3. [ ] **`unity-csharp` template — TA config**:
-   - `.taignore`: exclude `Library/`, `Temp/`, `obj/`, `*.csproj.user`
-   - `workflow.toml` verify: `"dotnet build"` or Unity batch-mode compile command
-   - `policy.yaml`: protect `ProjectSettings/`, `*.asmdef`, `manifest.json` (package manager)
-   - `memory.toml`: pre-seed Unity conventions key (MonoBehaviour lifecycle, Coroutines vs Jobs, SerializeField, Unity.Mathematics)
-
-4. [ ] **BMAD agent configs** (both templates):
-   Write `.ta/agents/bmad-pm.toml`, `.ta/agents/bmad-architect.toml`, `.ta/agents/bmad-dev.toml`, `.ta/agents/bmad-qa.toml` pointing at the BMAD role prompts. These become available as named agents in `ta run --agent bmad-architect "..."`.
-
-5. [ ] **Claude Flow `.mcp.json` stub** (both templates):
-   Merge claude-flow MCP server into project `.mcp.json` so `ta run` sessions have both TA and claude-flow tools available. Include swarm config stub in `workflow.toml` that splits work by module/directory.
-
-6. [ ] **Discovery goal template** — the key UX win:
-   After writing config files, `ta init run --template unreal-cpp` automatically starts:
-   ```
-   ta run "Game project discovery: explore codebase, produce BMAD docs and TA memory" \
-     --agent bmad-architect \
-     --phase onboarding
-   ```
-   The goal's injected CLAUDE.md gives the agent explicit instructions:
-   - Read `*.uproject` / `Source/` / `Config/` / key `.h` files
-   - Write `docs/architecture.md` (module list, key classes, plugin deps, build targets)
-   - Write `docs/bmad/prd.md` (inferred from GameMode, maps, feature flags)
-   - Write `docs/bmad/stories/` — top 5 inferred work areas as story stubs
-   - Call `ta_pr_build` with all docs as artifacts for human review before they land
-
-   User reviews the draft, approves/edits, and immediately has a BMAD-ready project.
-
-7. [ ] **`ta init templates` output**: Update to show game templates with engine versions and notes about BMAD + Claude Flow dependency:
-   ```
-   unreal-cpp        Unreal Engine C++ project (UE5+) — includes BMAD planning + Claude Flow swarm
-   unity-csharp      Unity C# project (2021+) — includes BMAD planning + Claude Flow swarm
-   ```
-
-8. [ ] **USAGE.md section**: Add "Game project onboarding" how-to covering the two-command workflow:
-   ```bash
-   cd MyUnrealGame
-   ta init run --template unreal-cpp   # config + auto-starts discovery goal
-   # review draft in ta shell, approve docs
-   ta run "implement story X" --agent bmad-dev  # now you're in the workflow
-   ```
-
-#### Dependencies
-- BMAD method repo: github.com/bmadcode/BMAD-METHOD (brownfield agent prompts)
-- Claude Flow: `npx claude-flow@alpha` or local install; `.mcp.json` server entry
-- These are external tools — TA configs reference them but doesn't bundle them
+1. [ ] **`ProjectType` enum**: Add `UnrealCpp` and `UnityCsharp` variants to `detect_project_type()` (detect by `*.uproject` / `*.sln` + `Assets/` presence)
+2. [ ] **`ta init --template unreal`**: Write `.taignore` (excludes `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`), `workflow.toml`, `policy.yaml` (require review for source changes), and `memory.toml`
+3. [ ] **`ta init --template unity`**: Write `.taignore` (excludes `Library/`, `Temp/`, `obj/`, `Build/`), `workflow.toml`, `policy.yaml`, `memory.toml`
+4. [ ] **BMAD agent config**: Generate `.bmad/agents/` with PM, architect, dev, and QA role configs pointing to Claude as the model; include `team.yaml` defining the swarm topology
+5. [ ] **Claude Flow `.mcp.json`**: Generate project-root `.mcp.json` with `claude-flow` server entry and `ta` MCP server entry; document that `claude-flow` must be installed separately
+6. [ ] **Discovery goal template**: Generate `ONBOARDING.md` with the first TA goal prompt: "Survey this project — produce a PRD, architecture overview, and sprint-1 story list using BMAD roles." Include prerequisite checklist (Claude installed, claude-flow installed, BMAD cloned).
+7. [ ] **USAGE.md section**: Add "Game Engine Projects" subsection under "Project Templates" documenting both templates, prerequisites, and the first-run workflow
+8. [ ] **`ta init` help text**: List `unreal` and `unity` in `--template` choices with a one-line description each
 
 #### Version: `0.13.1-alpha.4`
+
+---
+
+### v0.13.1.5 — Shell Regression Fixes
+<!-- status: pending -->
+**Goal**: Resolve three confirmed-active shell regressions. All three were nominally fixed in v0.12.2/v0.12.7 but are observed broken in v0.13.1.
+
+#### Regressions
+
+**R1 — Run indicator not clearing on completion**: The "Agent is working..." indicator (introduced as `TuiMessage::WorkingIndicator` in v0.12.7) persists after the agent finishes. Users see a stale spinner/banner when the shell is idle.
+
+**R2 — Scroll not staying at bottom when user is at tail**: Auto-scroll-to-bottom (via `auto_scroll_if_near_bottom()` added in v0.12.7 heartbeat paths) is not firing consistently. When new output arrives and the scroll position is already at the tail, the view doesn't follow.
+
+**R3 — Paste within prompt inserts at cursor, not end**: v0.12.2 added paste-from-outside → force to prompt end. But when the cursor is already inside the prompt line (e.g., user moved left), pasting inserts at the cursor position rather than appending to the end. The v0.12.2 manual verification item was never confirmed green (item `[ ]` still open in v0.12.2 phase at time of discovery).
+
+#### Items
+
+1. [ ] **Reproduce R1 in a test or manual repro script**: Confirm the indicator state machine path that leaves `working = true` after agent exit
+2. [ ] **Fix R1**: Clear `WorkingIndicator` on `AgentExit` / `GoalCompleted` events; add state assertion in existing TUI tests
+3. [ ] **Reproduce R2**: Confirm whether `auto_scroll_if_near_bottom()` is called on all output paths (streaming tokens, tool results, heartbeat)
+4. [ ] **Fix R2**: Ensure scroll-to-bottom fires on every output-append path when the view is within N lines of the bottom (N = configurable, default 3)
+5. [ ] **Fix R3**: On paste, always move cursor to end of prompt before inserting; ignore current cursor position within the prompt line
+6. [ ] **Manual verification**: Run all three scenarios and confirm fixed; update the v0.12.2 open verification item
+
+#### Version: `0.13.1-alpha.5`
 
 ---
 
