@@ -105,6 +105,7 @@ External users (working on their own projects, not TA itself) need these phases 
 | v0.13.0 | Reflink/COW — perf optimization, not blocking |
 | v0.13.0.1 | Draft parent title rollup — follow-up chains show "Changes from parent" |
 | v0.13.1 | Self-healing daemon + auto-follow-up on validation failure |
+| v0.13.1.1 | Power & sleep management — prevent App Nap, hold sleep assertion during goals, wake recovery |
 | v0.13.4 | External Action Governance — needed when agents send emails/API calls/posts |
 | v0.13.5 | Database Proxy Plugins — depends on v0.13.4 |
 | v0.13.9 | Product Constitution Framework — project-level behavioral contracts, draft-time scan, release gate |
@@ -4759,40 +4760,43 @@ These items integrate with the per-project validation commands defined in `const
 34. [ ] **External action compaction (stub for v0.13.4+)**: Reserve a `discard_external_actions_after_days` policy field now. When v0.13.4 (External Action Governance) and v0.13.5 (DB Proxy) land, email bodies, API request/response logs, and DB mutation records respect this window — summary retained (what action, when, who approved), payload discarded.
 35. [ ] **Compaction audit trail**: Every compaction pass writes a single audit event: `{ event: "compaction_pass", goals_compacted: N, bytes_reclaimed: M, auto: true|false, timestamp }`. This event is itself never compacted (audit log is append-only, not subject to lifecycle policy).
 
-#### Power & Sleep Management
+#### Version: `0.13.1-alpha`
 
-**Problem**: macOS App Nap throttles background processes when the app is not frontmost. System idle sleep pauses all processes entirely. Tokio's monotonic timer doesn't advance during sleep, so the agent resumes correctly on wake — but the `no_heartbeat_alert_secs` window has already elapsed, producing a false alarm. Separately, HTTP connections to the Claude API (via reqwest/hyper) may have timed out during sleep and need re-establishment before the agent can continue.
+---
+
+### v0.13.1.1 — Power & Sleep Management
+<!-- status: pending -->
+**Goal**: Make the daemon and all running goals behave correctly and predictably when the host machine sleeps (screen saver, idle sleep, lid close) or enters low-power mode. Today macOS App Nap throttles the daemon when it is not frontmost, and system sleep triggers a false no-heartbeat alert on wake even though the agent continues normally.
+
+**Depends on**: v0.13.1 (watchdog loop and heartbeat infrastructure)
 
 **Root causes**:
-- **App Nap**: macOS deprioritizes background processes not doing visible UI work. The daemon gets CPU-starved even when not sleeping.
-- **Idle sleep**: System sleeps, all processes pause. On wake: Tokio timers fire correctly (monotonic clock resumes), but heartbeat gap alert triggers before the agent has had a chance to resume.
-- **Stale API connections**: HTTP keep-alive connections are dropped by the OS or the remote during sleep; the agent's next API call may fail and need retry.
+- **App Nap**: macOS deprioritizes background processes not doing visible UI work. The daemon gets CPU-starved even without a full sleep.
+- **Idle sleep**: All processes pause. On wake, Tokio timers fire correctly (monotonic clock resumes), but the heartbeat gap alert triggers before the agent has had a chance to emit its first post-wake heartbeat — a false alarm.
+- **Stale API connections**: HTTP keep-alive connections to the Claude API are dropped by the OS during sleep; the agent's next call may fail and need retry.
 
-36. [ ] **Sleep/wake detection**: Compare wall-clock (`SystemTime::now()`) against monotonic elapsed (`Instant::now()`) on each watchdog tick. A wall-clock advance significantly larger than the monotonic advance indicates a sleep event. Emit a `SystemWoke { slept_for_secs }` daemon event; suppress heartbeat alerts for a configurable grace period after wake.
+#### Items
+
+1. [ ] **Sleep/wake detection**: Compare wall-clock (`SystemTime::now()`) against monotonic elapsed (`Instant::now()`) on each watchdog tick. A divergence significantly larger than the tick interval indicates a sleep event. Emit `SystemWoke { slept_for_secs }` daemon event; reset heartbeat deadlines for all running goals.
     ```toml
     [power]
-    wake_grace_secs = 60     # suppress no-heartbeat alert for N seconds after wake
+    wake_grace_secs = 60     # extend heartbeat deadline by N seconds after wake
     ```
-37. [ ] **Heartbeat skip tolerance on wake**: When `SystemWoke` is detected, extend the heartbeat deadline for all running goals by `wake_grace_secs`. The no-heartbeat alert only fires if the agent is still silent *after* the grace period — which is a genuine problem, not a sleep artefact.
-38. [ ] **macOS power assertion (prevent App Nap + idle sleep during active goals)**:
-    - While any goal is in `running` state, the daemon holds an `IOPMAssertion` via the macOS `IOKit` framework (type `kIOPMAssertionTypePreventUserIdleSystemSleep`). Prevents the system from sleeping mid-goal.
-    - Released immediately when no goals are running.
-    - Configurable opt-out:
+2. [ ] **Heartbeat skip tolerance on wake**: When `SystemWoke` is detected, extend the no-heartbeat alert deadline for all running goals by `wake_grace_secs`. Alert only fires if agent is still silent *after* the grace period — an actual problem, not a sleep artefact.
+3. [ ] **macOS power assertion while goals are active**: Hold `IOPMAssertionTypePreventUserIdleSystemSleep` via IOKit while any goal is in `running` state. Released immediately when no goals are running. Prevents idle sleep mid-goal; also suppresses App Nap (`NSAppSleepDisabled`).
     ```toml
     [power]
-    prevent_sleep_during_active_goals = true    # default: true
-    prevent_app_nap = true                      # default: true (sets NSAppSleepDisabled)
+    prevent_sleep_during_active_goals = true   # default: true
+    prevent_app_nap = true                     # default: true
     ```
-    - Linux: equivalent systemd-inhibit lock held while goals are active (`systemd-inhibit --what=idle:sleep --who=ta-daemon --why="goal in progress"`).
-    - Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` while goals are active.
-39. [ ] **API connection recovery on wake**: After a `SystemWoke` event, the daemon pings a lightweight health endpoint to verify the Claude API is reachable. If not, emits a `ApiConnectionLost` event and surfaces it to the user ("System woke from sleep — waiting for network before resuming goal"). Once reachable, emits `ApiConnectionRestored` and the goal continues normally.
-40. [ ] **LaunchAgent / systemd unit hardening**:
-    - macOS `ta.plist` (generated by `ta daemon install`): add `ProcessType = Background` → `Interactive` (prevents App Nap on the daemon process), `KeepAlive = true`.
+    Linux: `systemd-inhibit --what=idle:sleep --who=ta-daemon --why="goal in progress"` held equivalently. Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`.
+4. [ ] **API connection recovery on wake**: After `SystemWoke`, daemon pings a lightweight connectivity check before declaring goals healthy. Emits `ApiConnectionLost` if unreachable (shown in shell: "Woke from sleep — waiting for network..."). Emits `ApiConnectionRestored` once reachable; goal resumes. No user action needed.
+5. [ ] **LaunchAgent / systemd unit hardening**: `ta daemon install` generates platform-appropriate service config:
+    - macOS `ta.plist`: `ProcessType = Interactive` (suppresses App Nap), `KeepAlive = true`.
     - Linux systemd: `Restart=on-failure`, `RestartSec=5`, `After=network-online.target`.
-    - Document in `ta daemon install --help` what the LaunchAgent/systemd unit does and how to uninstall.
-41. [ ] **`ta status` shows power state**: If `prevent_sleep_during_active_goals` is active and goals are running, `ta status` shows `⚡ Power assertion held (1 goal running)`. If the daemon is App-Nap eligible (no active assertion), shows a note suggesting `prevent_app_nap = true`.
+6. [ ] **`ta status` power state indicator**: While a power assertion is held, `ta status` shows `⚡ sleep prevented (1 goal running)`. When no assertion is held and App Nap is eligible, shows a hint suggesting `prevent_app_nap = true`.
 
-#### Version: `0.13.1-alpha`
+#### Version: `0.13.1.1-alpha`
 
 ---
 
