@@ -231,7 +231,8 @@ jobs:
           # Write to file for the release action (handles multiline safely)
           echo "$BODY" > release-body.md
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
+        id: release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_version.outputs.version }}
@@ -240,6 +241,45 @@ jobs:
           prerelease: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease == 'true' }}
           files: artifacts/*
           body_path: release-body.md
+          # Update the release if it already exists (e.g. manually created before CI ran)
+          make_latest: true
+
+      - name: Validate release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.get_version.outputs.version }}
+        run: |
+          echo "Waiting for asset propagation..."
+          sleep 5
+          ASSETS=$(gh release view "$TAG" --json assets --jq '[.assets[].name]')
+          echo "Attached assets: $ASSETS"
+
+          REQUIRED=(
+            "ta-${TAG}-aarch64-apple-darwin.tar.gz"
+            "ta-${TAG}-x86_64-apple-darwin.tar.gz"
+            "ta-${TAG}-x86_64-unknown-linux-musl.tar.gz"
+            "ta-${TAG}-aarch64-unknown-linux-musl.tar.gz"
+            "ta-${TAG}-x86_64-pc-windows-msvc.zip"
+            "SHA256SUMS.txt"
+          )
+
+          MISSING=()
+          for asset in "${REQUIRED[@]}"; do
+            if ! echo "$ASSETS" | grep -q "\"$asset\""; then
+              MISSING+=("$asset")
+            fi
+          done
+
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "ERROR: Missing release assets:"
+            for m in "${MISSING[@]}"; do echo "  - $m"; done
+            echo ""
+            echo "Release URL: https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/$TAG"
+            exit 1
+          fi
+
+          echo "All required assets present for $TAG:"
+          for asset in "${REQUIRED[@]}"; do echo "  ✓ $asset"; done
 
   publish-crate:
     name: Publish to crates.io
