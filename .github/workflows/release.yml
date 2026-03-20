@@ -85,7 +85,11 @@ jobs:
         run: |
           mkdir -p staging
           cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} staging/
-          cp docs/USAGE.md staging/ 2>/dev/null || true
+          # Stamp the release version into USAGE.md before packaging
+          if [ -f docs/USAGE.md ]; then
+            sed "s/^\*\*Version\*\*:.*/**Version**: ${{ steps.get_version.outputs.version }}/" \
+              docs/USAGE.md > staging/USAGE.md
+          fi
           cp DISCLAIMER.md staging/ 2>/dev/null || true
           cp LICENSE staging/ 2>/dev/null || true
           cp .release-draft.md staging/RELEASE-NOTES.md 2>/dev/null || true
@@ -99,7 +103,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path staging, artifacts | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe" staging/
-          foreach ($f in @("docs/USAGE.md", "DISCLAIMER.md", "LICENSE", ".release-draft.md")) {
+          # Stamp the release version into USAGE.md before packaging
+          if (Test-Path "docs/USAGE.md") {
+            (Get-Content "docs/USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: ${{ steps.get_version.outputs.version }}" |
+              Set-Content "staging/USAGE.md"
+          }
+          foreach ($f in @("DISCLAIMER.md", "LICENSE", ".release-draft.md")) {
             if (Test-Path $f) { Copy-Item $f staging/ }
           }
           Compress-Archive -Path staging/* -DestinationPath "artifacts/${{ env.BINARY_NAME }}-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.zip"
@@ -127,13 +136,14 @@ jobs:
         if: matrix.target == 'x86_64-apple-darwin'
         run: |
           brew install pandoc
-          pandoc docs/USAGE.md -s --metadata title="Trusted Autonomy Usage Guide" \
+          # Use the version-stamped copy from staging/
+          pandoc staging/USAGE.md -s --metadata title="Trusted Autonomy Usage Guide" \
             -c https://cdn.simplecss.org/simple.min.css \
             -o artifacts/USAGE.html
           pandoc DISCLAIMER.md -s --metadata title="Trusted Autonomy Terms of Use" \
             -c https://cdn.simplecss.org/simple.min.css \
             -o artifacts/DISCLAIMER.html
-          cp docs/USAGE.md artifacts/USAGE.md
+          cp staging/USAGE.md artifacts/USAGE.md
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

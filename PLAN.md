@@ -5456,6 +5456,10 @@ Current releases ship archives containing a bare binary and docs. Users must man
 8. [ ] **Update USAGE.md**: macOS — run DMG/pkg; Windows — run MSI; Linux — extract tar.gz, move to `$PATH`; note Homebrew tap
 9. [ ] **Homebrew tap (stretch)**: `trustedautonomy/homebrew-ta` formula — enables `brew install trustedautonomy/ta/ta` on macOS
 
+#### Release infrastructure fixes (landed ahead of full v0.13.11)
+10. [x] **Version stamped into USAGE.md at release time**: Release workflow now `sed`-replaces the `**Version**:` line in USAGE.md with the actual tag before packaging, so USAGE.html and the bundled USAGE.md always show the correct version. (Was hardcoded as `0.10.18-alpha.1` in all previous releases.)
+11. [x] **Docker option marked Coming Soon in header**: `**Option C -- Docker** *(Coming Soon)*` in USAGE.md install section.
+
 #### Version: `0.13.11-alpha`
 
 ---

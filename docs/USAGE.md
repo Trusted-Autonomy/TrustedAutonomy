@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.10.18-alpha.1
+**Version**: 0.13.1-alpha
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -110,10 +110,10 @@ sudo mv ta /usr/local/bin/
 # Extract and add ta.exe to your PATH
 ```
 
-**Option C -- Docker**
+**Option C -- Docker** *(Coming Soon)*
 
 ```bash
-docker pull ghcr.io/trustedautonomy/ta:latest  # coming soon — not yet published
+docker pull ghcr.io/trustedautonomy/ta:latest
 docker run -it -v $(pwd):/workspace ta --help
 ```
 
