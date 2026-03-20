@@ -4795,6 +4795,28 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 ---
 
+### v0.13.1.3 — Shell Help & UX Polish
+<!-- status: pending -->
+**Goal**: Fix the `ta shell` help text and input prompt to be accurate, discoverable, and consistent.
+
+#### Problems
+- `run` command missing from shortcuts list
+- Prompt prefix says `ta <cmd>` instead of matching the shell's actual prompt context
+- `git <cmd>` is confusing — should be `vcs <cmd>` to work with the configured VCS provider (not just git)
+- `!<cmd>` shell escape is undocumented (what it does is unclear to new users)
+- Shortcut list is hardcoded — new shortcuts added to the code won't appear in help
+
+#### Items
+1. [ ] **Fix prompt prefix in help**: Change `ta <cmd>` to `ta> <cmd>` (or the actual prompt string the shell uses) so examples match what the user sees
+2. [ ] **Add `run` shortcut to help**: `run <title>` missing from the shortcut list; add alongside `goals`, `drafts`, `plan`, `status`
+3. [ ] **Rename `git <cmd>` → `vcs <cmd>`**: The shell passes git commands through to the underlying VCS provider via the VCS plugin system. Rename in help to `vcs <cmd>` with a note: "runs via your configured VCS provider (default: git)"
+4. [ ] **Document `!<cmd>` shell escape**: Add a clear one-liner: "Escape to system shell — runs any shell command (e.g., `!ls -la`, `!cat file.txt`)"
+5. [ ] **Make shortcut list data-driven**: Define shortcuts in a single `&[(&str, &str)]` table and generate both the dispatch logic and the help text from it, so they can't diverge
+
+#### Version: `0.13.1-alpha.3`
+
+---
+
 ### v0.13.2 — MCP Transport Abstraction (TCP/Unix Socket)
 <!-- status: pending -->
 <!-- beta: yes — enables container isolation and remote agent execution for team deployments -->
