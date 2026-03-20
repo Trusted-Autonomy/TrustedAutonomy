@@ -130,11 +130,17 @@ fn deep_status(config: &GatewayConfig) -> anyhow::Result<()> {
             let json: serde_json::Value = resp.json()?;
             let version = json["version"].as_str().unwrap_or("?");
             let pid = super::daemon::read_pid(&config.workspace_root);
+            let power_active = json["power_assertion_active"].as_bool().unwrap_or(false);
             println!("  Status:  healthy");
             println!("  URL:     {}", daemon_url);
             println!("  Version: {}", version);
             if let Some(p) = pid {
                 println!("  PID:     {}", p);
+            }
+            if power_active {
+                println!("  Power:   sleep prevented (active goal in progress)");
+            } else {
+                println!("  Power:   no assertion (no active goals)");
             }
         }
         _ => {

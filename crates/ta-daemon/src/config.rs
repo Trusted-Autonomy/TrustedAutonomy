@@ -28,6 +28,9 @@ pub struct DaemonConfig {
     /// Lifecycle management configuration (v0.13.1).
     #[serde(default)]
     pub lifecycle: LifecycleConfig,
+    /// Power & sleep management configuration (v0.13.1.1).
+    #[serde(default)]
+    pub power: PowerConfig,
 }
 
 /// Shell Q&A agent configuration (v0.11.4.2).
@@ -309,6 +312,73 @@ pub struct LifecycleConfig {
     /// Compaction policy for applied/closed goals.
     #[serde(default)]
     pub compaction: CompactionConfig,
+}
+
+/// Power & sleep management configuration (v0.13.1.1).
+///
+/// Controls how the daemon behaves when the host machine sleeps or enters
+/// low-power mode. Prevents false no-heartbeat alerts on wake and keeps
+/// agent goals running through sleep/wake cycles.
+///
+/// ```toml
+/// [power]
+/// wake_grace_secs = 60
+/// prevent_sleep_during_active_goals = true
+/// prevent_app_nap = true
+/// connectivity_check_url = "https://api.anthropic.com"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PowerConfig {
+    /// Seconds to extend heartbeat deadlines after waking from sleep (default: 60).
+    /// Prevents false no-heartbeat alerts before the agent has had a chance to
+    /// resume and emit its first post-wake heartbeat.
+    #[serde(default = "default_wake_grace_secs")]
+    pub wake_grace_secs: u64,
+
+    /// Whether to hold a power assertion while goals are running (default: true).
+    ///
+    /// macOS: holds `IOPMAssertionTypePreventUserIdleSystemSleep` via caffeinate.
+    /// Linux: holds `systemd-inhibit --what=idle:sleep`.
+    /// Windows: calls `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`.
+    #[serde(default = "default_true")]
+    pub prevent_sleep_during_active_goals: bool,
+
+    /// Whether to suppress macOS App Nap for the daemon process (default: true).
+    /// App Nap throttles background processes not doing visible UI work.
+    /// When `prevent_sleep_during_active_goals` is true, App Nap is also suppressed
+    /// while goals are running via the same caffeinate invocation.
+    #[serde(default = "default_true")]
+    pub prevent_app_nap: bool,
+
+    /// URL to ping for connectivity check after waking from sleep (default: Anthropic API).
+    /// If unreachable, `ApiConnectionLost` event is emitted and the shell shows a
+    /// "waiting for network..." indicator. Restored when reachable again.
+    #[serde(default = "default_connectivity_check_url")]
+    pub connectivity_check_url: String,
+}
+
+fn default_wake_grace_secs() -> u64 {
+    60
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_connectivity_check_url() -> String {
+    "https://api.anthropic.com".to_string()
+}
+
+impl Default for PowerConfig {
+    fn default() -> Self {
+        Self {
+            wake_grace_secs: default_wake_grace_secs(),
+            prevent_sleep_during_active_goals: true,
+            prevent_app_nap: true,
+            connectivity_check_url: default_connectivity_check_url(),
+        }
+    }
 }
 
 impl DaemonConfig {
@@ -1228,6 +1298,43 @@ mod tests {
         assert!(toml_str.contains("socket_path"));
         let parsed: ServerConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.socket_path.as_deref(), Some(".ta/daemon.sock"));
+    }
+
+    #[test]
+    fn power_config_defaults() {
+        let config = PowerConfig::default();
+        assert_eq!(config.wake_grace_secs, 60);
+        assert!(config.prevent_sleep_during_active_goals);
+        assert!(config.prevent_app_nap);
+        assert_eq!(config.connectivity_check_url, "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn power_config_roundtrip() {
+        let toml_str = r#"
+            [power]
+            wake_grace_secs = 120
+            prevent_sleep_during_active_goals = false
+            prevent_app_nap = true
+            connectivity_check_url = "https://example.com"
+        "#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.power.wake_grace_secs, 120);
+        assert!(!config.power.prevent_sleep_during_active_goals);
+        assert!(config.power.prevent_app_nap);
+        assert_eq!(config.power.connectivity_check_url, "https://example.com");
+    }
+
+    #[test]
+    fn power_config_partial_override() {
+        let toml_str = r#"
+            [power]
+            wake_grace_secs = 30
+        "#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.power.wake_grace_secs, 30);
+        assert!(config.power.prevent_sleep_during_active_goals); // default
+        assert!(config.power.prevent_app_nap); // default
     }
 
     #[test]
