@@ -661,11 +661,14 @@ fn find_latest_draft(config: &GatewayConfig) -> anyhow::Result<Option<uuid::Uuid
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 if let Ok(id) = uuid::Uuid::parse_str(stem) {
                     // Only consider drafts that can still be approved.
+                    // "approved" is excluded too — already-approved drafts
+                    // would fail re-approval with "Cannot approve in Approved state".
                     if let Ok(contents) = std::fs::read_to_string(&path) {
                         let dominated_by_terminal = contents.contains("\"applied\"")
                             || contents.contains("\"denied\"")
                             || contents.contains("\"superseded\"")
-                            || contents.contains("\"closed\"");
+                            || contents.contains("\"closed\"")
+                            || contents.contains("\"approved\"");
                         if dominated_by_terminal {
                             continue;
                         }
