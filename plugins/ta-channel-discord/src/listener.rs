@@ -510,7 +510,7 @@ async fn handle_message_create(
 
     // `ta input <goal-id> <text>` explicit form.
     // After stripping the channel prefix, the command may start with "ta input" or "input".
-    let normalized = command.strip_prefix("ta ").unwrap_or(command);
+    let normalized = strip_ta_prefix(command);
     if let Some(rest) = normalized.strip_prefix("input ") {
         let rest = rest.trim();
         // Split on first whitespace to get goal-id and text.
@@ -784,6 +784,17 @@ async fn handle_interaction_create(
 /// Parse button custom_id suffix (after the leading "ta_") into (interaction_id, choice).
 /// Input: "550e8400-e29b-41d4-a716-446655440000_yes"
 /// Output: ("550e8400-e29b-41d4-a716-446655440000", "yes")
+/// Strip a leading `ta ` prefix case-insensitively.
+///
+/// Handles `ta`, `Ta`, `TA`, `tA` variants. Argument casing is preserved.
+fn strip_ta_prefix(s: &str) -> &str {
+    if s.len() >= 3 && s[..2].eq_ignore_ascii_case("ta") && s.as_bytes()[2] == b' ' {
+        &s[3..]
+    } else {
+        s
+    }
+}
+
 fn parse_button_custom_id(suffix: &str) -> (&str, &str) {
     // UUID format: 8-4-4-4-12 chars = 36 chars, followed by _<choice>
     // Try to find the last '_' that separates UUID from choice.
@@ -1220,7 +1231,7 @@ mod tests {
                 text: input_text.trim(),
             };
         }
-        let normalized = command.strip_prefix("ta ").unwrap_or(command);
+        let normalized = strip_ta_prefix(command);
         if let Some(rest) = normalized.strip_prefix("input ") {
             let rest = rest.trim();
             if let Some((goal_id, text)) = rest.split_once(char::is_whitespace) {

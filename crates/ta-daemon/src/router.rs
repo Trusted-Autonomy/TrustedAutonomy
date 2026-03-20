@@ -141,11 +141,20 @@ impl MessageRouter {
     }
 
     /// Try to extract a project name from a `@ta <project> ...` prefix.
+    ///
+    /// The `@ta`/`ta` keyword is matched case-insensitively; project name casing is preserved.
     fn extract_project_prefix(&self, message: &str) -> Option<String> {
         let trimmed = message.trim();
-        let after_ta = trimmed
-            .strip_prefix("@ta ")
-            .or_else(|| trimmed.strip_prefix("ta "))?;
+        // Strip optional `@` sigil then check `ta ` case-insensitively.
+        let without_sigil = trimmed.strip_prefix('@').unwrap_or(trimmed);
+        let after_ta = if without_sigil.len() >= 3
+            && without_sigil[..2].eq_ignore_ascii_case("ta")
+            && without_sigil.as_bytes()[2] == b' '
+        {
+            &without_sigil[3..]
+        } else {
+            return None;
+        };
 
         // The next word should be a project name.
         let next_word = after_ta.split_whitespace().next()?;

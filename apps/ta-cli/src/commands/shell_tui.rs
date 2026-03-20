@@ -1904,10 +1904,19 @@ async fn handle_terminal_event(
                         // If the command is `run` or `dev`, verify that agent consent is current
                         // before dispatching. If consent is missing or outdated, block the
                         // dispatch with an actionable error message.
-                        if text.starts_with("run ")
-                            || text.starts_with("dev ")
-                            || text == "run"
-                            || text == "dev"
+                        // Strip optional case-insensitive "ta " prefix before checking subcommand.
+                        let text_cmd = if text.len() >= 3
+                            && text[..2].eq_ignore_ascii_case("ta")
+                            && text.as_bytes()[2] == b' '
+                        {
+                            &text[3..]
+                        } else {
+                            text.as_str()
+                        };
+                        if text_cmd.starts_with("run ")
+                            || text_cmd.starts_with("dev ")
+                            || text_cmd == "run"
+                            || text_cmd == "dev"
                         {
                             let default_agent = "claude-code";
                             let current_version =
