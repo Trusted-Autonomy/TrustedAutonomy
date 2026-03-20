@@ -4284,7 +4284,10 @@ const KEYBINDING_TABLE: &[(&str, &str)] = &[
     ("Ctrl-U / Ctrl-K", "Clear input before / after cursor"),
     ("Ctrl-W", "Toggle split pane (shell | agent side-by-side)"),
     ("Ctrl-L", "Clear the output pane"),
-    ("Tab", "Auto-complete commands (or toggle paste preview when paste pending)"),
+    (
+        "Tab",
+        "Auto-complete commands (or toggle paste preview when paste pending)",
+    ),
     ("Click-drag", "Select text (native terminal selection)"),
     ("Cmd+C", "Copy selection (native)"),
     (
@@ -4293,12 +4296,24 @@ const KEYBINDING_TABLE: &[(&str, &str)] = &[
     ),
     ("", ""),
     // Exit
-    ("Ctrl-C / exit", "Exit the shell (Ctrl-C detaches when tailing)"),
+    (
+        "Ctrl-C / exit",
+        "Exit the shell (Ctrl-C detaches when tailing)",
+    ),
     ("", ""),
     // Scrollback
-    ("Scrollback", "Output is retained in a scrollback buffer (default: 50000 lines)."),
-    ("", "Configure via [shell] scrollback_lines in .ta/workflow.toml (minimum: 10000)."),
-    ("", "Status bar shows scroll position and new output indicator when scrolled up."),
+    (
+        "Scrollback",
+        "Output is retained in a scrollback buffer (default: 50000 lines).",
+    ),
+    (
+        "",
+        "Configure via [shell] scrollback_lines in .ta/workflow.toml (minimum: 10000).",
+    ),
+    (
+        "",
+        "Status bar shows scroll position and new output indicator when scrolled up.",
+    ),
 ];
 
 /// Generate the Navigation/Text/Scrollback section of the help text from
