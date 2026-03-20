@@ -4524,6 +4524,89 @@ runtime = "native-cli"
 
 After adding a custom framework, run `ta setup refine agents` to generate its agent config.
 
+### Using TA with BMAD-METHOD
+
+[BMAD-METHOD](https://github.com/bmad-method) is a structured AI-assisted development methodology that uses persona-based agents (Analyst, Product Manager, Architect, Developer, QA) to guide work through defined phases. BMAD wraps an underlying agent runtime — typically Claude Code — so no separate install is needed beyond `claude`.
+
+TA governs BMAD goals the same way it governs any other agent: staging, draft review, and human approval before any change reaches your codebase. BMAD's structured phases map naturally onto TA's plan phases.
+
+#### Setup
+
+```bash
+# 1. Initialize TA for your project (detects Claude Code, which BMAD uses)
+ta init run --detect
+
+# 2. TA generates .ta/agents/claude-code.yaml — BMAD uses the same runtime.
+#    Optionally create a named BMAD agent config for clarity:
+ta setup refine agents
+```
+
+When prompted during `ta setup refine agents`, select "Claude Code" as the runtime. You can rename the generated config to `bmad.yaml` and set a distinct display name:
+
+```yaml
+# .ta/agents/bmad.yaml
+name: BMAD
+display_name: "BMAD-METHOD Agent"
+runtime: claude-code
+launch:
+  command: claude
+  args: []
+description: "Persona-driven development via BMAD-METHOD"
+```
+
+#### Running a BMAD goal
+
+BMAD goals work like any TA goal. Pass your BMAD prompt (persona + task) as the goal title or via a context file:
+
+```bash
+# Start a goal with a BMAD persona prompt
+ta run "As the Architect persona: design the authentication module for this service" \
+  --agent bmad \
+  --phase v0.13.2
+
+# Or run interactively — BMAD personas work naturally in ta shell
+ta shell
+ta> run "As the PM persona: create a PRD for the new notification system"
+```
+
+TA stages the agent's output, builds a draft, and routes it for your review — regardless of which persona produced it.
+
+#### Mapping BMAD phases to TA plan phases
+
+BMAD's methodology phases (Discovery → Architecture → Implementation → QA) map well onto TA plan phases. You can link each BMAD phase run to its corresponding plan entry:
+
+```bash
+# Analyst phase
+ta run "As the Analyst: define requirements for v0.13.7 goal workflows" --phase v0.13.7
+
+# Architect phase
+ta run "As the Architect: design the workflow DAG structure for v0.13.7" --phase v0.13.7
+
+# Developer phase
+ta run "As the Developer: implement the workflow engine described in the architect draft" --phase v0.13.7
+```
+
+Each run produces a separate draft. You review and apply them in sequence. The draft chain (`--follow-up`) links the implementation draft back to the architecture draft so the full reasoning is traceable.
+
+#### BMAD + ta shell (recommended)
+
+Running BMAD personas interactively in `ta shell` lets you guide the persona conversation and approve drafts without leaving the shell:
+
+```bash
+ta shell
+
+ta> run "As the PM persona: write a one-page brief for X feature" --agent bmad
+# ... agent works, draft produced ...
+ta> draft view latest
+ta> draft approve latest
+```
+
+#### Notes
+
+- BMAD requires no special TA configuration beyond a Claude Code agent entry — the methodology is in the prompts, not the runtime.
+- If your BMAD workflow produces multiple artifacts across personas, use `--follow-up` to chain them into a single reviewable draft thread.
+- BMAD's QA persona pairs well with TA's `[validate]` commands in `constitution.toml` — the QA persona writes the tests, and TA's validation gate runs them before the draft is built.
+
 ### Workflow Engine
 
 TA includes a pluggable workflow engine for orchestrating multi-stage, multi-role workflows. Define stages, assign roles to agents, and let TA handle routing, verdict scoring, and human-in-the-loop interaction.
