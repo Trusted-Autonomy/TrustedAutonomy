@@ -4788,6 +4788,8 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 7. [ ] **`ta pr status` branch display**: Show branch name even when `pr_url` is None, with hint: `ta draft reopen-review <id>` to create the missing PR.
 8. [ ] **Update USAGE.md install instructions**: Add note that both `ta` and `ta-daemon` must be on `$PATH` (or in the same directory); update manual install steps to `cp ta ta-daemon /usr/local/bin/`
 9. [ ] **Windows install note**: Document in USAGE.md that `ta shell` (PTY) is Unix-only; `ta daemon start`, `ta run`, and all non-interactive commands work on Windows
+10. [ ] **Fix Windows clippy: `cmd_install` unused params + `dirs_home` dead code**: On Windows, `project_root` and `apply` are used only in macOS/Linux `#[cfg]` blocks; `dirs_home()` is only called from those same blocks. Add `let _ = (project_root, apply)` in the Windows branch and gate `dirs_home` with `#[cfg(any(target_os = "macos", target_os = "linux"))]`.
+11. [ ] **Bug C — Incomplete draft summary in `ta shell`**: Draft view truncates after "What Changed (N files):" — shows file names but not descriptions. Root cause: `ta draft view` / shell display format reads only the short-form summary rather than the full artifact list. Fix to show at minimum: Why section, per-file descriptions (from artifact metadata), and tip for `--detail full`.
 
 #### Version: `0.13.1-alpha.2`
 

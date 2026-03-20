@@ -1155,6 +1155,9 @@ WantedBy=default.target
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
+        // Suppress unused-variable warnings: project_root and apply are
+        // used only in the macOS/Linux cfg branches above.
+        let _ = (project_root, apply);
         println!(
             "ta daemon install is not yet supported on this platform.\n\
              On Windows, add ta-daemon to Task Scheduler manually.\n\
@@ -1167,6 +1170,7 @@ WantedBy=default.target
 }
 
 /// Returns the current user's home directory.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn dirs_home() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
