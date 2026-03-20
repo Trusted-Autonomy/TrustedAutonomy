@@ -4754,7 +4754,7 @@ These items integrate with the per-project validation commands defined in `const
     # discard_external_actions_after_days = 90
     ```
 31. [ ] **Automatic compaction pass**: Daemon runs a compaction pass on startup and on a configurable schedule (default: nightly). Identifies goals past `compact_after_days` in terminal state (`applied`, `denied`, `completed`). Proposes removal of fat artifacts; auto-executes if `clean_applied_staging` is in `allowed` auto-heal list. Audit event emitted for every compaction.
-32. [ ] **Compaction never touches the ledger**: `goal-history.jsonl` grows forever (it's small — ~200 bytes/entry). Compaction only removes fat artifacts. `ta goal history` continues to show all historical goals after their staging/drafts are gone.
+32. [ ] **Compaction never touches the ledger**: `goal-history.jsonl` is not subject to compaction — it grows as a running ledger. At ~200 bytes/entry it stays small for typical use, but rollover/segmentation by version range is planned for v0.13.10 when the file is read at scale for velocity stats.
 33. [ ] **`ta gc --compact`**: Adds a compaction pass to the existing `ta gc` command for manual triggering. Dry-run shows what would be discarded: "Goal abc1234 (applied 45 days ago): removes 2.1 GB staging + 84 KB draft package; retains history entry."
 34. [ ] **External action compaction (stub for v0.13.4+)**: Reserve a `discard_external_actions_after_days` policy field now. When v0.13.4 (External Action Governance) and v0.13.5 (DB Proxy) land, email bodies, API request/response logs, and DB mutation records respect this window — summary retained (what action, when, who approved), payload discarded.
 35. [ ] **Compaction audit trail**: Every compaction pass writes a single audit event: `{ event: "compaction_pass", goals_compacted: N, bytes_reclaimed: M, auto: true|false, timestamp }`. This event is itself never compacted (audit log is append-only, not subject to lifecycle policy).
@@ -5399,6 +5399,28 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 11. [ ] **`ta stats export`**: export full history as CSV or JSON for external analysis
 12. [ ] Add `velocity_events` opt-in flag to `channel.toml` schema (default `false`)
 13. [ ] Tests: `VelocityEntry` builder from mock goal/draft; `VelocityStore` append + load round-trip; aggregate calculation; rework rollup
+
+#### Goal History Rollover
+
+`goal-history.jsonl` accumulates one line per goal indefinitely. For long-lived projects this becomes unwieldy to query and back up. Rollover segments the ledger by version range (or time range) — analogous to log rotation but keyed to release milestones rather than wall-clock dates, since a project's natural unit of history is a version, not a week.
+
+14. [ ] **Rollover policy in `daemon.toml`**:
+    ```toml
+    [lifecycle.history_rollover]
+    enabled = true
+    strategy = "version"   # "version" | "size" | "time"
+    # version: roll over when a new minor version is released (e.g. v0.13.0 → v0.14.0)
+    # size: roll over when file exceeds max_kb
+    # time: roll over on calendar period (e.g. quarterly)
+    max_kb = 2048          # used by "size" strategy
+    period = "quarterly"   # used by "time" strategy
+    keep_segments = 4      # number of rolled-over segments to retain; older ones archived/removed
+    ```
+15. [ ] **Rollover mechanics**: On trigger (version tag created, size threshold crossed, period boundary), the current `goal-history.jsonl` is renamed to `.ta/history/goal-history-<label>.jsonl` (e.g. `goal-history-v0.13.jsonl`). A fresh `goal-history.jsonl` starts for the new period. Existing segments are never modified.
+16. [ ] **`ta goal history` reads across segments**: Queries that span multiple periods (e.g. `--since 2025-01-01`) transparently read all relevant segment files. `--segment v0.13` targets a specific rollover file directly.
+17. [ ] **`ta stats` and velocity queries span segments**: `VelocityStore` loader collects entries from all segments within the query window. No API change for callers — segmentation is transparent.
+18. [ ] **`ta history rollover --now`**: Manual trigger for testing or out-of-band milestones (e.g. a major project phase completing). Prints the new segment file name and entry count moved.
+19. [ ] **Archive old segments**: When `keep_segments` is exceeded, the oldest segment is moved to `.ta/history/archive/` (not deleted). A separate `--purge-archive` flag is required to delete archived segments, requiring explicit confirmation.
 
 #### Version: `0.13.10-alpha`
 
