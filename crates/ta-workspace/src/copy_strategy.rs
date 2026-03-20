@@ -206,7 +206,11 @@ mod linux {
         // satisfy both without panicking — ioctl request codes fit in 32 bits.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let ret = unsafe {
-            libc::ioctl(dst_file.as_raw_fd(), FICLONE as libc::Ioctl, src_file.as_raw_fd())
+            libc::ioctl(
+                dst_file.as_raw_fd(),
+                FICLONE as libc::Ioctl,
+                src_file.as_raw_fd(),
+            )
         };
 
         Ok(ret == 0)
