@@ -663,12 +663,26 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     /// Write a shell-script mock plugin to a temp file and make it executable.
+    ///
+    /// Uses a unique name per call to avoid ETXTBSY races when concurrent tests
+    /// write to the same path on overlayfs-backed TMPDIR (Nix CI / devShell).
     fn write_mock_plugin(dir: &Path, script: &str) -> PathBuf {
-        let path = dir.join("ta-submit-mock");
-        std::fs::write(&path, script).unwrap();
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = format!("ta-submit-mock-{}", n);
+        let path = dir.join(&name);
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(script.as_bytes()).unwrap();
+            f.sync_all().unwrap(); // flush before chmod to avoid ETXTBSY on overlayfs
+        }
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).unwrap();
+        // Read back metadata to ensure the chmod is visible before exec.
+        let _ = std::fs::metadata(&path).unwrap();
         path
     }
 
@@ -692,7 +706,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         // A minimal shell script that echoes a valid handshake response.
-        write_mock_plugin(
+        let plugin_path = write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
 read -r line
@@ -700,10 +714,7 @@ echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":1,"adapte
 "#,
         );
 
-        let manifest = mock_manifest(
-            &dir.path().join("ta-submit-mock").display().to_string(),
-            dir.path(),
-        );
+        let manifest = mock_manifest(&plugin_path.display().to_string(), dir.path());
 
         let adapter = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap();
         assert_eq!(adapter.name(), "mock");
@@ -715,7 +726,7 @@ echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":1,"adapte
         let dir = tempfile::tempdir().unwrap();
 
         // Plugin claims protocol version 99 — incompatible.
-        write_mock_plugin(
+        let plugin_path = write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
 read -r line
@@ -723,10 +734,7 @@ echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":99,"adapt
 "#,
         );
 
-        let manifest = mock_manifest(
-            &dir.path().join("ta-submit-mock").display().to_string(),
-            dir.path(),
-        );
+        let manifest = mock_manifest(&plugin_path.display().to_string(), dir.path());
 
         let err = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap_err();
         assert!(
@@ -740,7 +748,7 @@ echo '{"ok":true,"result":{"plugin_version":"0.1.0","protocol_version":99,"adapt
     fn handshake_error_response_returns_error() {
         let dir = tempfile::tempdir().unwrap();
 
-        write_mock_plugin(
+        let plugin_path = write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
 read -r line
@@ -748,10 +756,7 @@ echo '{"ok":false,"error":"plugin initialization failed"}'
 "#,
         );
 
-        let manifest = mock_manifest(
-            &dir.path().join("ta-submit-mock").display().to_string(),
-            dir.path(),
-        );
+        let manifest = mock_manifest(&plugin_path.display().to_string(), dir.path());
 
         let err = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap_err();
         let msg = err.to_string();
@@ -779,7 +784,7 @@ echo '{"ok":false,"error":"plugin initialization failed"}'
     fn plugin_non_zero_exit_returns_error() {
         let dir = tempfile::tempdir().unwrap();
 
-        write_mock_plugin(
+        let plugin_path = write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
 read -r line
@@ -788,10 +793,7 @@ exit 1
 "#,
         );
 
-        let manifest = mock_manifest(
-            &dir.path().join("ta-submit-mock").display().to_string(),
-            dir.path(),
-        );
+        let manifest = mock_manifest(&plugin_path.display().to_string(), dir.path());
 
         let err = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap_err();
         assert!(
@@ -805,7 +807,7 @@ exit 1
     fn plugin_invalid_json_output_returns_error() {
         let dir = tempfile::tempdir().unwrap();
 
-        write_mock_plugin(
+        let plugin_path = write_mock_plugin(
             dir.path(),
             r#"#!/bin/sh
 read -r line
@@ -813,10 +815,7 @@ echo "this is not json"
 "#,
         );
 
-        let manifest = mock_manifest(
-            &dir.path().join("ta-submit-mock").display().to_string(),
-            dir.path(),
-        );
+        let manifest = mock_manifest(&plugin_path.display().to_string(), dir.path());
 
         let err = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap_err();
         assert!(err.to_string().contains("invalid JSON"), "Got: {}", err);
