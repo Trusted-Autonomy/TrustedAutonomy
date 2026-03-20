@@ -4757,6 +4757,32 @@ These items integrate with the per-project validation commands defined in `const
 
 ---
 
+### v0.13.1.2 — Release Completeness & Cross-Platform Launch Fix
+<!-- status: pending -->
+**Goal**: Fix critical gaps that make release binaries non-functional out of the box. `ta-daemon` is missing from all release archives — every command that auto-starts the daemon (`ta shell`, `ta run`, `ta daemon start`) fails immediately on a fresh install. Also fix Windows-specific daemon lookup that ignores the `.exe` extension.
+
+#### Root cause
+The release workflow only builds `-p ta-cli`. The `ta` CLI spawns `ta-daemon` as a sibling process, looking for it next to the `ta` binary (then `$PATH`). Because `ta-daemon` is never packaged, every install is broken at the first daemon-requiring command.
+
+On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daemon")` produces `ta-daemon` (no `.exe`), and the PATH fallback uses `which` (a Unix command) rather than `where`.
+
+#### Fixes from this session already landed on `main`
+- [x] Release workflow validates artifacts locally before publishing (no more empty-draft releases)
+- [x] USAGE.md version stamped from release tag at package time
+- [x] Docker install option marked *(Coming Soon)* in header
+
+#### Items
+1. [ ] **Build `ta-daemon` in release workflow**: Add `-p ta-daemon` build step alongside `-p ta-cli` for all 5 targets (native and cross)
+2. [ ] **Package `ta-daemon` in all archives**: Include `ta-daemon` (Unix) / `ta-daemon.exe` (Windows) in the `.tar.gz` and `.zip` release archives alongside `ta`
+3. [ ] **Fix `find_daemon_binary()` for Windows**: Use `std::env::consts::EXE_SUFFIX` (= `".exe"` on Windows, `""` elsewhere) when constructing the sibling path; replace `which` with `where` on Windows for the PATH fallback
+4. [ ] **Add `ta-daemon` to required-assets validation**: The release workflow asset check currently only validates the archive filenames — the check is at archive level so no new step needed, but add a post-extract smoke-test comment
+5. [ ] **Update USAGE.md install instructions**: Add note that both `ta` and `ta-daemon` must be on `$PATH` (or in the same directory); update manual install steps to `cp ta ta-daemon /usr/local/bin/`
+6. [ ] **Windows install note**: Document in USAGE.md that `ta shell` (PTY) is Unix-only; `ta daemon start`, `ta run`, and all non-interactive commands work on Windows
+
+#### Version: `0.13.1-alpha.2`
+
+---
+
 ### v0.13.2 — MCP Transport Abstraction (TCP/Unix Socket)
 <!-- status: pending -->
 <!-- beta: yes — enables container isolation and remote agent execution for team deployments -->
