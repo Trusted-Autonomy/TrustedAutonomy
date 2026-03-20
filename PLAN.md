@@ -106,7 +106,8 @@ External users (working on their own projects, not TA itself) need these phases 
 | v0.13.1 | Self-healing daemon — makes the loop more robust |
 | v0.13.4 | External Action Governance — needed when agents send emails/API calls/posts |
 | v0.13.5 | Database Proxy Plugins — depends on v0.13.4 |
-| v0.14.3 | Full Constitution Framework — §16.6 is pulled into v0.12.0 (scanner extraction); the remaining constitution tooling can be post-alpha |
+| v0.13.9 | Product Constitution Framework — project-level behavioral contracts, draft-time scan, release gate |
+| v0.14.x | Enterprise Readiness — sandboxing, attestation, multi-party governance, cloud/team deployment, SSO |
 
 ### Enterprise (Beta)
 
@@ -115,7 +116,7 @@ Needed for compliance-focused or container-isolated deployments.
 - v0.13.2 — MCP Transport Abstraction (SecureTA/container enabler; runtime adapters depend on this)
 - v0.13.3 — Runtime Adapter Trait (SecureTA/OCI; depends on v0.13.2)
 - v0.13.6 — Community Knowledge Hub (post-launch community feature)
-- v0.13.9 — Compliance-Ready Audit Ledger
+- v0.13.9 — Product Constitution Framework (project-level invariants, draft-time scan, release gate)
 - v0.13.10 — Feature Velocity Stats: build time, fix time, goal outcomes, connector events
 
 ### Deferred / May Drop
@@ -126,7 +127,7 @@ Needed for compliance-focused or container-isolated deployments.
 
 - v0.13.7 — Goal Workflows: Serial Chains, Parallel Swarms & Office Routing
 - v0.13.8 — Agent Framework: Pluggable Agent Backends (Claude Code, Codex, Claude-Flow, Ollama+Qwen, user-defined)
-- v0.14.x — Secure Autonomy (sandboxing, attestation, multi-party governance)
+- v0.14.x — Enterprise Readiness (sandboxing, attestation, multi-party governance, cloud/multi-user deployment)
 
 ---
 
@@ -5170,49 +5171,62 @@ ta run "write tests" --model ollama/phi4-mini   # shorthand: model implies ta-ag
 
 ---
 
-### v0.13.9 — Compliance-Ready Audit Ledger
+### v0.13.9 — Product Constitution Framework
 <!-- status: pending -->
-<!-- beta: yes — enterprise compliance capstone -->
-**Goal**: Replace the lightweight goal history index with a compliance-ready audit ledger that captures full decision context, covers all goal lifecycle paths, and supports pluggable storage backends.
+<!-- beta: yes — project-level behavioral contracts and release governance -->
+**Goal**: Make the constitution a first-class, configurable artifact that downstream projects declare, extend, and enforce — not a TA-internal concept hard-wired to `docs/TA-CONSTITUTION.md`. A project using TA can define its own invariants (what functions inject, what functions restore, what the rules are), and TA's draft-build scan and release checklist gate read from that config.
 
-#### Problem
-The current `.ta/goal-history.jsonl` is a compact index written only on the happy path (`ta draft apply`). It records *what* happened but not *why*. Multiple lifecycle paths produce no audit record at all:
-- `ta goal delete` — data vanishes with no trace
-- `ta goal gc` — transitions zombies to `failed` but writes no history entry
-- `ta draft deny` / `ta draft close` — no record of the denial or reason
-- Agent crash / timeout — goal silently moves to `failed` with a gc reason string
+*(Moved forward from v0.14.3 — constitution tooling is a natural capstone to beta governance, not a post-beta concern. Compliance audit ledger moves to v0.14.3 as an enterprise-tier feature requiring cloud deployment context.)*
 
-Even on the happy path, the `GoalHistoryEntry` lacks:
-- **Intent**: What was the user trying to accomplish (objective, prompt)
-- **Summary**: AI-generated summary of what changed and why
-- **Decision rationale**: Why this approach was chosen over alternatives
-- **Reviewer identity**: Who approved/denied and when
-- **Denial reason**: Why a draft was rejected
-- **Artifact manifest**: Which files were created/modified/deleted (URIs)
-- **Policy evaluation**: Which policies were checked and their pass/fail status
+**Problem**: Currently the constitution is TA-specific. The §4 injection/cleanup rules, the pattern scanner, and the release checklist all reference TA's own codebase conventions. A downstream project using TA (e.g., a web service or a data pipeline) has different injection patterns, different error paths, and different invariants. They get no constitution enforcement at all.
+
+#### Architecture: `constitution.toml`
+
+A project-level constitution config in `.ta/constitution.toml`:
+
+```toml
+[rules.injection_cleanup]
+# Functions that inject context into the workspace (must be cleaned up on all error paths)
+inject_fns = ["inject_config", "inject_credentials"]
+restore_fns = ["restore_config", "restore_credentials"]
+severity = "high"
+
+[rules.error_paths]
+# Error return patterns that must be preceded by cleanup
+patterns = ["return Err(", "return Ok(()) # error"]
+severity = "medium"
+
+[scan]
+# Files/dirs to scan for constitution violations
+include = ["src/"]
+exclude = ["src/tests/"]
+on_violation = "warn"   # "warn" | "block" | "off"
+
+[release]
+# Whether to include a constitution compliance gate in the release pipeline
+checklist_gate = true
+# Whether to run parallel agent constitution review during release
+agent_review = false   # opt-in — spins up a lighter concurrent review agent
+
+[agent_review]
+# Prompt prefix for the constitution reviewer (lighter than full release notes agent)
+model_hint = "fast"    # hint to use a smaller/faster model
+max_tokens = 2000
+focus = "injection_cleanup,error_paths"
+```
 
 #### Items
-1. [ ] **`AuditEntry` data model**: Rich audit record capturing: goal ID, title, objective/intent, final state, phase, agent, timestamps, duration, draft ID, AI summary, reviewer/approver, denial reason, artifact URIs with change types, policy evaluation results, parent goal (for chained goals). Serialized as JSONL.
-2. [ ] **Emit audit entry on all terminal transitions**: Every path that ends a goal's lifecycle must write an `AuditEntry`: apply, deny, close, delete, gc, timeout, agent crash. No goal data should be removed without an audit record.
-3. [ ] **Separate ledger for deleted incomplete goals**: Goals deleted before producing a draft get a distinct `disposition: "abandoned"` entry with whatever context is available (objective, agent, duration, reason for deletion if provided).
-4. [ ] **`ta goal delete --reason`**: Require or prompt for a reason when manually deleting goals. Stored in the audit entry.
-5. [ ] **`ta goal gc` writes audit entries**: Before transitioning or removing any goal data, append an audit entry with `disposition: "gc"` and the gc reason.
-6. [ ] **Populate artifact count and lines changed**: The existing `GoalHistoryEntry` fields `artifact_count` and `lines_changed` are always 0. Wire them to the draft's actual artifact data.
-7. [ ] **`ta audit export`**: Export audit ledger in structured formats (JSONL, CSV, or compliance-specific formats). Filterable by date range, phase, agent, disposition.
-8. [ ] **Pluggable audit storage backend**: Use the existing data write plugin architecture to support configurable storage destinations. Config in `daemon.toml`:
-   ```toml
-   [audit]
-   backend = "file"  # default: .ta/audit-ledger.jsonl
-   # backend = "database"
-   # backend = "s3"
-   # connection = "postgres://..."
-   # bucket = "my-audit-bucket"
-   ```
-   Built-in: local JSONL file. Plugin interface for database, shared filesystem, cloud storage.
-9. [ ] **Audit ledger integrity**: Append-only with hash chaining (each entry includes hash of previous entry). `ta audit verify` validates the chain. Tampering is detectable.
-10. [ ] **Retention policy**: Configurable retention period for audit entries. `ta audit gc --older-than 1y` removes entries beyond retention while preserving chain integrity (tombstone markers).
-11. [ ] **Structured agent output logging for compliance**: Optional mode (`[agent].output_log = "structured"` in daemon.toml) that captures full JSON agent output to the audit ledger alongside the human-readable text shown in the shell. Default remains plain text stdout/stderr for the interactive shell; this mode adds a parallel structured log sink for compliance, reproducibility, and post-hoc analysis. The output schema engine (v0.11.2.2) already defines per-agent output formats — this item wires those schemas to the audit pipeline.
-12. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new audit ledger format on first run.
+
+1. [ ] **`constitution.toml` schema**: Define and document the config format. Ship TA's own rules as the default template (generated by `ta init constitution`).
+2. [ ] **`ta init constitution`**: Scaffolding command. Writes `.ta/constitution.toml` with TA's default rules as a starting point. Users edit for their project's patterns.
+3. [ ] **Draft-time scanner reads `constitution.toml`**: Move the hardcoded §4 pattern scan (v0.11.5 item 8) to read inject/restore function names from `constitution.toml`. Projects with different conventions get correct scanning.
+4. [ ] **Release pipeline reads `checklist_gate`**: The release checklist gate step (v0.11.4.4 item 9) is enabled/disabled by `constitution.toml`. The checklist content is generated from the declared rules, not hardcoded.
+5. [ ] **Parallel agent review during release**: When `agent_review = true` in `constitution.toml`, the release pipeline fans out two agents concurrently: the existing release notes writer, and a lighter constitution reviewer. Its output is appended to the release draft as a "Constitution Review" section.
+6. [ ] **`ta constitution check`**: CLI command to run the scan outside of draft build — useful for CI integration and pre-commit hooks. Exit code 0 = clean, 1 = violations found. Output is machine-readable JSON with `--json` flag.
+7. [ ] **Inheritance**: `constitution.toml` can `extends = "ta-default"` to inherit TA's rules and only override specific sections. TA ships a built-in `ta-default` profile.
+8. [ ] **Documentation**: "How to write a constitution for your project" guide in `docs/`. Includes worked example for a web service with DB migration injection patterns.
+
+**Files**: `.ta/constitution.toml` (new), `apps/ta-cli/src/commands/` (init, check, draft build scan, release step), `crates/ta-workspace/src/` (scanner crate or module).
 
 #### Version: `0.13.9-alpha`
 
@@ -5310,9 +5324,33 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 
 ---
 
-## v0.14 — Secure Autonomy
+## v0.14 — Enterprise Readiness
 
-> **Focus**: Hardened execution environments, verifiable agent behavior, and multi-party governance for high-stakes deployments.
+> **Focus**: TA running as a shared, multi-user service — teams and enterprises connecting from their workstations to a central daemon, with hardened sandboxing, verifiable audit trails, multi-party governance, and compliance-grade storage. Phases 0–3 harden single-node deployments; phases 4–5 add the cloud/team topology layer.
+
+### Cloud & Multi-User Deployment Model
+
+Today TA is a **per-developer local daemon**: one `ta-daemon` process per workstation, one agent at a time, files on the local filesystem. Enterprise teams need a different topology:
+
+```
+                  ┌─────────────────────────────────────┐
+  Developer A ────┤                                     ├──── agent pool
+  Developer B ────┤   Central TA Daemon (cloud/server)  ├──── shared project workspace
+  Developer C ────┤                                     ├──── shared review queue
+  CI pipeline ────┤     RBAC · multi-tenant · TLS       ├──── audit ledger → S3/DB
+                  └─────────────────────────────────────┘
+```
+
+Key design questions to resolve in v0.14:
+
+- **Identity & auth**: Who can run goals? Who can approve? OAuth/OIDC vs API keys vs SSH certs.
+- **Project tenancy**: One daemon per project (current model) vs one daemon serving multiple projects with namespace isolation.
+- **Workspace model**: Central NFS/object-store workspace vs each agent gets a containerised ephemeral workspace that syncs back.
+- **Review routing**: Draft review goes to the project's approval queue; any authorised team member (not just the initiator) can approve.
+- **Concurrency**: Multiple agents running in parallel on different goals; resource scheduling and queue depth.
+- **Remote shell**: `ta shell` connects over TLS/WebSocket to a remote daemon, not localhost. Same UX, different transport.
+
+These are addressed across v0.14.4–v0.14.5.
 
 ### v0.14.0 — Agent Sandboxing & Process Isolation
 <!-- status: pending -->
@@ -5364,69 +5402,117 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 
 ---
 
-### v0.14.3 — Product Constitution Framework
+### v0.14.4 — Central Daemon & Multi-User Deployment
 <!-- status: pending -->
-**Goal**: Make the constitution a first-class, configurable artifact that downstream projects declare, extend, and enforce — not a TA-internal concept hard-wired to `docs/TA-CONSTITUTION.md`. A project using TA can define its own invariants (what functions inject, what functions restore, what the rules are), and TA's draft-build scan and release checklist gate read from that config. *(Previously v0.14.1 — moved to Secure Autonomy as the capstone governance phase.)*
+<!-- enterprise: yes — team and cloud deployment topology -->
+**Goal**: Enable TA to run as a shared service — a single `ta-daemon` instance (on a server, cloud VM, or container) that multiple developers and CI pipelines connect to over the network, sharing project workspaces, review queues, and audit infrastructure.
 
-**Problem**: Currently the constitution is TA-specific. The §4 injection/cleanup rules, the pattern scanner, and the release checklist all reference TA's own codebase conventions. A downstream project using TA (e.g., a web service or a data pipeline) has different injection patterns, different error paths, and different invariants. They get no constitution enforcement at all.
+**Depends on**: v0.14.0 (sandboxing — each agent must be isolated before multi-user is safe), v0.13.2 (MCP Transport — TCP/TLS transport for remote agent sessions)
 
-#### Architecture: `constitution.toml`
+#### Design
 
-A project-level constitution config in `.ta/constitution.toml`:
+```
+Developer workstation A  ─── TLS/WebSocket ───┐
+Developer workstation B  ─── TLS/WebSocket ───┤── Central TA Daemon ──── Agent Pool
+CI / CD pipeline         ─── API key ─────────┤   (cloud VM, k8s pod)
+ta shell (remote)        ─── TLS/WebSocket ───┘       │
+                                                  Shared project workspace
+                                                  (NFS / object store / git)
+                                                  Shared review queue
+                                                  Shared audit ledger → S3/Postgres
+```
+
+#### Identity & Auth
 
 ```toml
-[rules.injection_cleanup]
-# Functions that inject context into the workspace (must be cleaned up on all error paths)
-inject_fns = ["inject_config", "inject_credentials"]
-restore_fns = ["restore_config", "restore_credentials"]
-severity = "high"
+# .ta/daemon.toml — server side
+[auth]
+mode = "oidc"   # "oidc" | "api-keys" | "ssh-cert" | "none" (local only)
+issuer = "https://accounts.google.com"
+audience = "ta-daemon-myorg"
 
-[rules.error_paths]
-# Error return patterns that must be preceded by cleanup
-patterns = ["return Err(", "return Ok(()) # error"]
-severity = "medium"
+[[auth.api_keys]]
+key = "ta_key_abc123..."
+identity = "ci-pipeline"
+roles = ["run-goals", "read-drafts"]
 
-[scan]
-# Files/dirs to scan for constitution violations
-include = ["src/"]
-exclude = ["src/tests/"]
-on_violation = "warn"   # "warn" | "block" | "off"
-
-[release]
-# Whether to include a constitution compliance gate in the release pipeline
-checklist_gate = true
-# Whether to run parallel agent constitution review during release
-agent_review = false   # opt-in — spins up a lighter concurrent review agent
-
-[agent_review]
-# Prompt prefix for the constitution reviewer (lighter than full release notes agent)
-model_hint = "fast"    # hint to use a smaller/faster model
-max_tokens = 2000
-focus = "injection_cleanup,error_paths"
+[[auth.users]]
+identity = "alice@example.com"
+roles = ["run-goals", "approve-drafts", "admin"]
 ```
 
 #### Items
 
-1. [ ] **`constitution.toml` schema**: Define and document the config format. Ship TA's own rules as the default template (generated by `ta init constitution`).
+1. [ ] **TLS listener**: `ta-daemon` optionally binds on a non-localhost address with TLS. `daemon.toml` `[server] bind = "0.0.0.0:7700"`, `cert`, `key`.
+2. [ ] **Authentication middleware**: OIDC JWT validation + API key lookup on every request. Identity propagated to all operations (goal runs, approvals, audit entries).
+3. [ ] **RBAC**: Roles `run-goals`, `read-drafts`, `approve-drafts`, `admin`. Config in `daemon.toml`. Enforced per-endpoint.
+4. [ ] **Multi-project tenancy**: Daemon can serve multiple projects with namespace isolation. Each project has its own `.ta/` dir, goal queue, and review queue. URL prefix `/projects/<name>/api/...`.
+5. [ ] **Remote workspace adapter**: Agent workspaces can be on a shared NFS mount or object store (S3/GCS). `OverlayWorkspace` abstraction gains a remote backend. Agents still work in an ephemeral local copy; changes sync back on draft build.
+6. [ ] **Concurrent agent scheduling**: Multiple goals can run in parallel up to a configurable `max_concurrent_agents` limit. Queue depth and wait-time exposed via `/api/queue`.
+7. [ ] **Remote `ta shell`**: `ta shell --remote <url>` connects over TLS/WebSocket to a central daemon. Full interactive experience (goals, drafts, events) over the wire. Auth via stored API key or OIDC device flow.
+8. [ ] **Team review queue**: `ta draft list` shows all pending drafts project-wide, not just the current user's. Any authorised team member can approve via `ta draft approve`.
+9. [ ] **`ta daemon deploy`**: Helper command to generate a `docker-compose.yml` or Kubernetes manifest for a central TA deployment. Includes daemon, reverse proxy (nginx/caddy), and optional Postgres for audit storage.
+10. [ ] **`ta daemon invite <email>`**: Generate an API key or OIDC onboarding link for a new team member.
+11. [ ] **Health & observability**: `/metrics` endpoint (Prometheus format) exposing queue depth, active agents, approval latency, error rates.
+12. [ ] **Documentation**: "Running TA for your team" guide — setup, auth config, workspace options, review workflow.
 
-2. [ ] **`ta init constitution`**: Scaffolding command. Writes `.ta/constitution.toml` with TA's default rules as a starting point. Users edit for their project's patterns.
+#### Version: `0.14.4-alpha`
 
-3. [ ] **Draft-time scanner reads `constitution.toml`**: Move the hardcoded §4 pattern scan (v0.11.5 item 8) to read inject/restore function names from `constitution.toml`. Projects with different conventions get correct scanning.
+---
 
-4. [ ] **Release pipeline reads `checklist_gate`**: The release checklist gate step (v0.11.4.4 item 9) is enabled/disabled by `constitution.toml`. The checklist content is generated from the declared rules, not hardcoded.
+### v0.14.5 — Enterprise Identity & SSO Integration
+<!-- status: pending -->
+<!-- enterprise: yes — org-wide identity, SAML/SCIM, group-based RBAC -->
+**Goal**: Integrate with enterprise identity providers (Okta, Azure AD, Google Workspace) via SAML 2.0 and SCIM for automated provisioning. Replace per-user config with group-based RBAC so adding a developer to the "ta-engineers" group in Okta automatically grants them the right TA permissions without any manual `daemon.toml` edit.
 
-5. [ ] **Parallel agent review during release**: When `agent_review = true` in `constitution.toml`, the release pipeline fans out two agents concurrently: the existing release notes writer, and a lighter constitution reviewer. The reviewer gets the diff + the declared rules + a compact prompt. Its output is appended to the release draft as a "Constitution Review" section. Uses `model_hint = "fast"` to keep it cheap. Opt-in because it adds an LLM call per release.
+**Depends on**: v0.14.4 (Central Daemon — identity and auth infrastructure)
 
-6. [ ] **`ta constitution check`**: CLI command to run the scan outside of draft build — useful for CI integration and pre-commit hooks. Exit code 0 = clean, 1 = violations found. Output is machine-readable JSON with `--json` flag.
+#### Items
 
-7. [ ] **Inheritance**: `constitution.toml` can `extends = "ta-default"` to inherit TA's rules and only override specific sections. TA ships a built-in `ta-default` profile.
+1. [ ] **SAML 2.0 SP**: TA daemon acts as a SAML Service Provider. `[auth] mode = "saml"` with `idp_metadata_url`. Handles SSO login redirect and assertion validation.
+2. [ ] **SCIM 2.0 endpoint**: `/scim/v2/Users` and `/scim/v2/Groups` for automated provisioning/deprovisioning from Okta/Azure AD. New users auto-get default role; removed users are immediately locked out.
+3. [ ] **Group → role mapping**: `[auth.group_roles]` maps IdP group names to TA roles. E.g., `"ta-approvers" = ["approve-drafts"]`.
+4. [ ] **Audit entries include SSO identity**: All audit records carry the IdP-verified identity (email + IdP subject), not just a local username.
+5. [ ] **`ta daemon status --identity`**: Show current authenticated identity, roles, and session expiry.
+6. [ ] **Session management**: Short-lived JWT sessions (1h), refresh via OIDC/SAML, configurable idle timeout.
+7. [ ] **Tested with**: Okta, Azure AD / Entra ID, Google Workspace, GitHub (OAuth app).
 
-8. [ ] **Documentation**: "How to write a constitution for your project" guide in `docs/`. Includes worked example for a web service with DB migration injection patterns.
+#### Version: `0.14.5-alpha`
 
-**Files**: `.ta/constitution.toml` (new), `apps/ta-cli/src/commands/` (init, check, draft build scan, release step), `crates/ta-workspace/src/` (scanner crate or module).
+---
+
+### v0.14.3 — Compliance-Ready Audit Ledger
+<!-- status: pending -->
+<!-- enterprise: yes — compliance capstone, builds on cloud deployment (v0.14.4) -->
+**Goal**: Replace the lightweight goal history index with a compliance-ready audit ledger that captures full decision context, covers all goal lifecycle paths, and supports pluggable storage backends including cloud object stores and databases suitable for enterprise compliance requirements.
+
+*(Moved from v0.13.9 — audit ledger is most useful in the cloud/multi-user context introduced in v0.14.4, where multiple teams need a central compliance record.)*
+
+#### Problem
+The current `.ta/goal-history.jsonl` is a compact index written only on the happy path (`ta draft apply`). It records *what* happened but not *why*. Multiple lifecycle paths produce no audit record at all: `ta goal delete`, `ta goal gc`, `ta draft deny`, agent crash/timeout. Even on the happy path, `GoalHistoryEntry` lacks intent, AI summary, reviewer identity, denial reason, artifact manifest, and policy evaluation results.
+
+#### Items
+1. [ ] **`AuditEntry` data model**: Rich audit record capturing: goal ID, title, objective/intent, final state, phase, agent, timestamps, duration, draft ID, AI summary, reviewer/approver, denial reason, artifact URIs with change types, policy evaluation results, parent goal (for chained goals). Serialized as JSONL.
+2. [ ] **Emit audit entry on all terminal transitions**: apply, deny, close, delete, gc, timeout, agent crash. No goal data should be removed without an audit record.
+3. [ ] **Separate ledger for deleted incomplete goals**: Goals deleted before producing a draft get `disposition: "abandoned"` with available context.
+4. [ ] **`ta goal delete --reason`**: Require or prompt for a reason when manually deleting goals. Stored in the audit entry.
+5. [ ] **`ta goal gc` writes audit entries**: Before transitioning or removing any goal data, append an audit entry with `disposition: "gc"` and the gc reason.
+6. [ ] **Populate artifact count and lines changed**: Wire the existing `artifact_count` / `lines_changed` fields to the draft's actual artifact data (currently always 0).
+7. [ ] **`ta audit export`**: Export audit ledger in structured formats (JSONL, CSV). Filterable by date range, phase, agent, disposition.
+8. [ ] **Pluggable audit storage backend**:
+   ```toml
+   [audit]
+   backend = "file"  # default: .ta/audit-ledger.jsonl
+   # backend = "database"  # connection = "postgres://..."
+   # backend = "s3"        # bucket = "my-audit-bucket"
+   ```
+   Built-in: local JSONL. Plugin interface for database, shared filesystem, cloud storage — integrates with central daemon from v0.14.4.
+9. [ ] **Audit ledger integrity**: Append-only with hash chaining (each entry includes hash of previous entry). `ta audit verify` validates the chain. Tampering is detectable.
+10. [ ] **Retention policy**: Configurable retention. `ta audit gc --older-than 1y` removes entries beyond retention while preserving chain integrity.
+11. [ ] **Structured agent output logging**: Optional `[agent].output_log = "structured"` captures full JSON agent output to the audit ledger for compliance and reproducibility.
+12. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new format on first run.
 
 #### Version: `0.14.3-alpha`
-<!-- previously v0.14.1 — moved to Secure Autonomy as the capstone governance phase -->
 
 ---
 
