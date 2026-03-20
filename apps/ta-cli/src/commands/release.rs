@@ -59,6 +59,13 @@ pub enum ReleaseCommands {
         /// non-TTY contexts (daemon) will prompt via TUI interaction.
         #[arg(long)]
         auto_approve: bool,
+
+        /// Override the base git tag used to compute the commit range for release notes.
+        /// By default the pipeline uses `git describe --tags --abbrev=0` to find the
+        /// previous tag. If that tag is stale (e.g. several releases were skipped without
+        /// tagging), use this to pin the correct base, e.g. `--from-tag v0.12.7-alpha`.
+        #[arg(long)]
+        from_tag: Option<String>,
     },
     /// Show the pipeline that would be executed (without running it).
     Show {
@@ -99,6 +106,7 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             prompt,
             interactive,
             auto_approve,
+            from_tag,
         } => {
             if *interactive {
                 run_interactive_release(config, version)?;
@@ -112,6 +120,7 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
                     *dry_run,
                     *from_step,
                     pipeline.as_deref(),
+                    from_tag.as_deref(),
                 )?;
                 if *press_release {
                     generate_press_release(config, version, prompt.as_deref())?;
@@ -313,19 +322,41 @@ fn validate_pipeline(pipeline: &ReleasePipeline) -> anyhow::Result<()> {
 
 // ── Commit collection ───────────────────────────────────────────
 
-/// Collect commit messages since the last git tag.
-fn collect_commits_since_last_tag(project_root: &Path) -> anyhow::Result<(String, Option<String>)> {
-    // Find last tag.
-    let last_tag_output = Command::new("git")
-        .args(["describe", "--tags", "--abbrev=0"])
-        .current_dir(project_root)
-        .output();
-
-    let last_tag = match last_tag_output {
-        Ok(output) if output.status.success() => {
-            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+/// Collect commit messages since the given tag (or the most recent tag if none specified).
+///
+/// Pass `from_tag = Some("v0.12.7-alpha")` to override auto-detection. This is useful when
+/// intermediate releases were not git-tagged, which would cause `git describe` to return a
+/// much older tag and flood the agent with hundreds of unrelated commits.
+fn collect_commits_since_tag(
+    project_root: &Path,
+    from_tag: Option<&str>,
+) -> anyhow::Result<(String, Option<String>)> {
+    // Resolve the base tag: use the explicit override if given, otherwise ask git.
+    let last_tag = if let Some(tag) = from_tag {
+        // Validate the tag exists so we fail fast with a clear error.
+        let check = Command::new("git")
+            .args(["rev-parse", "--verify", tag])
+            .current_dir(project_root)
+            .output();
+        match check {
+            Ok(out) if out.status.success() => Some(tag.to_string()),
+            _ => anyhow::bail!(
+                "Tag '{}' not found in this repository.\n\
+                 Run `git tag` to list available tags.",
+                tag
+            ),
         }
-        _ => None,
+    } else {
+        let out = Command::new("git")
+            .args(["describe", "--tags", "--abbrev=0"])
+            .current_dir(project_root)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            }
+            _ => None,
+        }
     };
 
     let log_args = match &last_tag {
@@ -349,6 +380,11 @@ fn collect_commits_since_last_tag(project_root: &Path) -> anyhow::Result<(String
 
     let commits = String::from_utf8_lossy(&output.stdout).to_string();
     Ok((commits, last_tag))
+}
+
+/// Backwards-compatible wrapper used by non-pipeline code paths.
+fn collect_commits_since_last_tag(project_root: &Path) -> anyhow::Result<(String, Option<String>)> {
+    collect_commits_since_tag(project_root, None)
 }
 
 // ── Variable substitution ───────────────────────────────────────
@@ -405,6 +441,7 @@ fn run_pipeline(
     dry_run: bool,
     from_step: Option<usize>,
     pipeline_path: Option<&Path>,
+    from_tag: Option<&str>,
 ) -> anyhow::Result<()> {
     let pipeline = load_pipeline(config, pipeline_path)?;
 
@@ -420,7 +457,8 @@ fn run_pipeline(
             version
         );
     }
-    let (commits, last_tag) = collect_commits_since_last_tag(&config.workspace_root)?;
+    let (commits, last_tag) =
+        collect_commits_since_tag(&config.workspace_root, from_tag)?;
 
     let total = pipeline.steps.len();
     let start_idx = from_step.map(|s| s.saturating_sub(1)).unwrap_or(0);
@@ -1725,7 +1763,7 @@ steps:
         .unwrap();
 
         // Dry run should succeed even though the step would fail.
-        run_pipeline(&config, "1.0.0", true, true, None, None).unwrap();
+        run_pipeline(&config, "1.0.0", true, true, None, None, None).unwrap();
     }
 
     #[test]
@@ -1996,7 +2034,7 @@ steps:
         .unwrap();
 
         // Run with --yes to skip approvals.
-        run_pipeline(&config, "1.0.0", true, false, None, None).unwrap();
+        run_pipeline(&config, "1.0.0", true, false, None, None, None).unwrap();
 
         // Verify the marker file was created.
         let marker = temp.path().join("release-marker.txt");
@@ -2205,7 +2243,7 @@ steps:
         .unwrap();
 
         // Dry run should succeed even with failing steps and approval gates.
-        run_pipeline(&config, "1.0.0", false, true, None, None).unwrap();
+        run_pipeline(&config, "1.0.0", false, true, None, None, None).unwrap();
 
         // Nothing should have been executed — no files created.
         assert!(!temp.path().join("release-marker.txt").exists());
