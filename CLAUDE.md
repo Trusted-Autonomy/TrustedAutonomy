@@ -58,6 +58,13 @@ This applies to both manual work and TA-mediated goals. When `ta pr apply --git-
 - All work stays within ~/development/TrustedAutonomy/
 - Use `tempfile::tempdir()` for all test fixtures that need filesystem access
 
+## Release Rules
+
+- **Never manually create a GitHub release before CI runs.** Once a tag is used in a published release, GitHub permanently locks that tag — even if you delete the release and the tag. The only recovery is a new tag name. Let the `push: tags: v*` workflow trigger handle release creation.
+- **To retrigger a release**: use `workflow_dispatch` with the tag input — do not delete and recreate releases or tags manually.
+- **If a release workflow fails after assets uploaded**: the assets may be on a draft release. Check with `gh release view <tag> --json draft,assets`. If all assets are present and `draft: true`, publish it with `gh release edit <tag> --draft=false` rather than rerunning from scratch.
+- **Tag naming**: use `v<semver>` for production releases (e.g. `v0.13.0`). The release workflow auto-triggers on `v*` tags. Non-`v*` tags (e.g. `public-alpha-v0.12.8`) require a manual `workflow_dispatch` trigger.
+
 ## Deferred Items Policy
 
 Completed phases must not contain open "Remaining (deferred)" lists. When finishing a phase:

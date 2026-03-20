@@ -108,6 +108,7 @@ External users (working on their own projects, not TA itself) need these phases 
 | v0.13.4 | External Action Governance — needed when agents send emails/API calls/posts |
 | v0.13.5 | Database Proxy Plugins — depends on v0.13.4 |
 | v0.13.9 | Product Constitution Framework — project-level behavioral contracts, draft-time scan, release gate |
+| v0.13.11 | Platform Installers — macOS DMG/pkg, Windows MSI with PATH registration |
 | v0.14.x | Enterprise Readiness — sandboxing, attestation, multi-party governance, cloud/team deployment, SSO |
 
 ### Enterprise (Beta)
@@ -4738,6 +4739,24 @@ These items integrate with the per-project validation commands defined in `const
 
 ---
 
+### v0.13.1.1 — Power & Sleep Management
+<!-- status: done -->
+**Goal**: Make the daemon behave correctly when the host machine sleeps or enters low-power mode. Prevents idle sleep during active goals, detects wake events, suppresses false heartbeat alerts in the grace window, and checks API connectivity after waking.
+
+#### Items
+
+1. [x] **Sleep/wake detection**: Watchdog compares wall-clock vs monotonic clock delta each cycle. When wall elapsed > monotonic elapsed + interval + 30s, a sleep is detected. Emits `SystemWoke { slept_for_secs }` event and updates `state.last_wake_wall`.
+2. [x] **Heartbeat skip tolerance on wake**: After waking, all liveness/heartbeat checks are suppressed for `wake_grace_secs` (default: 60, configurable via `[power] wake_grace_secs`). Prevents spurious dead-goal alerts when the OS resumes from sleep.
+3. [x] **macOS/Linux power assertion**: `PowerManager` in `crates/ta-daemon/src/power_manager.rs`. Spawns `caffeinate -i -s` (macOS) or `systemd-inhibit --what=idle:sleep` (Linux) while any goal is Running. Released immediately when no goals are running. Non-fatal on all platforms.
+4. [x] **API connectivity check on wake**: Post-wake, watchdog does a HEAD request to `connectivity_check_url` (default: `https://api.anthropic.com`). Emits `ApiConnectionLost` / `ApiConnectionRestored` on transitions. Suggested action: `ta status --deep`.
+5. [x] **`ta daemon install`**: New subcommand generates a macOS LaunchAgent plist or Linux systemd user service for auto-start. `--apply` writes and loads the unit. Prints the generated file and install path without `--apply` for dry inspection.
+6. [x] **`ta status --deep` power indicator**: `GET /api/status` now includes `power_assertion_active: bool`. The deep status output shows whether sleep is currently prevented.
+7. [x] **Config**: `[power]` section in `daemon.toml` with `wake_grace_secs`, `prevent_sleep_during_active_goals`, `prevent_app_nap`, `connectivity_check_url`. All fields have safe defaults and are fully optional.
+
+#### Version: `0.13.1-alpha.1`
+
+---
+
 ### v0.13.2 — MCP Transport Abstraction (TCP/Unix Socket)
 <!-- status: pending -->
 <!-- beta: yes — enables container isolation and remote agent execution for team deployments -->
@@ -5398,6 +5417,46 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 19. [ ] **Archive old segments**: When `keep_segments` is exceeded, the oldest segment is moved to `.ta/history/archive/` (not deleted). A separate `--purge-archive` flag is required to delete archived segments, requiring explicit confirmation.
 
 #### Version: `0.13.10-alpha`
+
+---
+
+### v0.13.11 — Platform Installers (macOS DMG, Windows MSI)
+<!-- status: pending -->
+<!-- beta: yes — first-class installation experience for non-developer users -->
+**Goal**: Replace bare `.tar.gz`/`.zip` downloads with proper platform installers. macOS gets a signed pkg/DMG. Windows gets an MSI with PATH registration. Eliminates the "extract and manually place binary" step for non-developer users and team rollouts.
+
+#### Problem
+Current releases ship archives containing a bare binary and docs. Users must manually extract, move the binary onto their `$PATH`, and repeat on every update. This is a barrier for non-developer users and small-team adoption — a tool designed to replace manual work should install itself.
+
+#### Design
+
+**macOS pkg/DMG**
+- `pkgbuild` + `productbuild` produces a `.pkg` installer: one-screen accept → binary placed at `/usr/local/bin/ta`
+- Wrapped in a DMG for the download experience (`create-dmg`)
+- Code-signed and notarized when `APPLE_DEVELOPER_CERT` / `APPLE_NOTARIZE_*` secrets are present; unsigned fallback if not set
+
+**Windows MSI**
+- Built with `cargo-wix` (WiX Toolset v4 wrapper)
+- Installs `ta.exe` to `%ProgramFiles%\TrustedAutonomy\`, adds to `$PATH`, registers uninstaller in Add/Remove Programs
+- Start Menu shortcut: `ta shell` (opens web shell in default browser)
+- Code-signed when `WINDOWS_CODE_SIGN_CERT` secret is present; unsigned fallback
+
+**Linux**
+- Existing musl `.tar.gz` archives remain (standard for CLI tools)
+- Optional `.deb` stretch goal (see item 9)
+
+#### Items
+1. [ ] **`wix/` setup**: Add WiX source XML for Windows MSI — product name, version, install dir, PATH registration, uninstaller entry
+2. [ ] **MSI build in release workflow**: `cargo wix` step on `windows-latest`; upload `ta-<version>-x86_64-pc-windows-msvc.msi` as release artifact
+3. [ ] **macOS pkg build**: `pkgbuild` + `productbuild` step on `macos-latest`; installs to `/usr/local/bin/ta`
+4. [ ] **macOS DMG wrapping**: `create-dmg` wraps the pkg into a DMG for download; upload `ta-<version>-macos.dmg`
+5. [ ] **Code signing (conditional)**: macOS: sign pkg + notarize if `APPLE_DEVELOPER_CERT` present; Windows: sign MSI if `WINDOWS_CODE_SIGN_CERT` present; skip silently otherwise
+6. [ ] **Update required-assets validation**: Add `.msi` and `.dmg` to the asset check list in the release workflow
+7. [ ] **Update release body template**: Installers (`.dmg`, `.msi`) as primary download options; archives (`.tar.gz`, `.zip`) under "Advanced / manual install"
+8. [ ] **Update USAGE.md**: macOS — run DMG/pkg; Windows — run MSI; Linux — extract tar.gz, move to `$PATH`; note Homebrew tap
+9. [ ] **Homebrew tap (stretch)**: `trustedautonomy/homebrew-ta` formula — enables `brew install trustedautonomy/ta/ta` on macOS
+
+#### Version: `0.13.11-alpha`
 
 ---
 
