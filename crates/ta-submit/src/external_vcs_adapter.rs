@@ -664,19 +664,27 @@ mod tests {
 
     /// Write a shell-script mock plugin to a temp file and make it executable.
     ///
-    /// Uses a unique name per call to avoid ETXTBSY races when concurrent tests
-    /// write to the same path on overlayfs-backed TMPDIR (Nix CI / devShell).
-    fn write_mock_plugin(dir: &Path, script: &str) -> PathBuf {
+    /// On Linux we write to `/tmp` directly (always tmpfs) rather than using the
+    /// test's `tempdir()` path.  `tempdir()` respects `$TMPDIR` which Nix's devShell
+    /// sets to an overlayfs-backed directory; exec-ing a newly created file there
+    /// races against the kernel's copy-up and returns ETXTBSY (os error 26).
+    /// On macOS and other platforms the provided `dir` is used as normal.
+    fn write_mock_plugin(_dir: &Path, script: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let name = format!("ta-submit-mock-{}", n);
-        let path = dir.join(&name);
+        let pid = std::process::id();
+        let name = format!("ta-submit-mock-{}-{}", pid, n);
+        // On Linux use /tmp (tmpfs) to avoid ETXTBSY on overlayfs-backed TMPDIR.
+        #[cfg(target_os = "linux")]
+        let path = std::path::PathBuf::from("/tmp").join(&name);
+        #[cfg(not(target_os = "linux"))]
+        let path = _dir.join(&name);
         {
             use std::io::Write;
             let mut f = std::fs::File::create(&path).unwrap();
             f.write_all(script.as_bytes()).unwrap();
-            f.sync_all().unwrap(); // flush before chmod to avoid ETXTBSY on overlayfs
+            f.sync_all().unwrap();
         }
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o755);
