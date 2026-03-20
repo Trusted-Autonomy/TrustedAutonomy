@@ -696,6 +696,7 @@ fn start_goal_recovery_tasks(app_state: &std::sync::Arc<crate::api::AppState>) {
                             let review = SessionEvent::ReviewRequested {
                                 goal_id,
                                 draft_id: d.package_id,
+                                title: goal.title.clone(),
                                 summary: format!(
                                     "Draft ready for '{}' — {} file(s) changed.",
                                     goal.title,

@@ -574,7 +574,7 @@ async fn handle_interaction_create(
     cmd_url: &str,
     interactions_url: &str,
     token: &str,
-    _daemon_url: &str,
+    daemon_url: &str,
 ) {
     let interaction_id = d["id"].as_str().unwrap_or("");
     let interaction_token = d["token"].as_str().unwrap_or("");
@@ -656,17 +656,78 @@ async fn handle_interaction_create(
             let _ = edit_interaction_followup(http_client, interaction_token, token, &reply).await;
         }
         INTERACTION_TYPE_MESSAGE_COMPONENT => {
-            // Button click: custom_id = "ta_{interaction_id}_{choice}"
+            // Button click. Two custom_id schemes:
+            //   draft_{draft_uuid}_{approve|deny}  — draft approve/deny buttons
+            //   ta_{ta_interaction_id}_{choice}    — agent interaction answer buttons
             let custom_id = d["data"]["custom_id"].as_str().unwrap_or("");
-
-            if !custom_id.starts_with("ta_") {
-                return;
-            }
 
             eprintln!(
                 "[discord-listener] Button click from {}: {}",
                 username, custom_id
             );
+
+            if custom_id.starts_with("draft_") {
+                // Draft approve/deny: custom_id = "draft_{uuid}_{approve|deny}"
+                let without_prefix = &custom_id["draft_".len()..];
+                // UUID is 36 chars, followed by _approve or _deny.
+                if without_prefix.len() > 37 && without_prefix.as_bytes()[36] == b'_' {
+                    let draft_id = &without_prefix[..36];
+                    let action = &without_prefix[37..];
+
+                    let endpoint = match action {
+                        "approve" => format!("{}/api/drafts/{}/approve", daemon_url, draft_id),
+                        "deny" => format!("{}/api/drafts/{}/deny", daemon_url, draft_id),
+                        other => {
+                            eprintln!("[discord-listener] Unknown draft action: {}", other);
+                            return;
+                        }
+                    };
+
+                    let reply_text = match http_client
+                        .post(&endpoint)
+                        .json(&json!({}))
+                        .timeout(Duration::from_secs(10))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            eprintln!(
+                                "[discord-listener] Draft {} {}d via button.",
+                                draft_id, action
+                            );
+                            format!(":white_check_mark: Draft **{}d** (`{}`)", action, &draft_id[..8])
+                        }
+                        Ok(resp) => {
+                            eprintln!(
+                                "[discord-listener] Draft {} {} failed: HTTP {}",
+                                draft_id, action, resp.status()
+                            );
+                            format!(":x: Failed to {} draft: HTTP {}", action, resp.status())
+                        }
+                        Err(e) => {
+                            eprintln!("[discord-listener] Cannot reach daemon: {}", e);
+                            format!(":x: Cannot reach daemon: {}", e)
+                        }
+                    };
+
+                    let _ = send_interaction_response(
+                        http_client,
+                        interaction_id,
+                        interaction_token,
+                        INTERACTION_RESPONSE_CHANNEL_MESSAGE,
+                        &reply_text,
+                        false,
+                    )
+                    .await;
+                } else {
+                    eprintln!("[discord-listener] Malformed draft button custom_id: {}", custom_id);
+                }
+                return;
+            }
+
+            if !custom_id.starts_with("ta_") {
+                return;
+            }
 
             // Parse the custom_id.
             // Format: ta_{ta_interaction_id}_{choice}

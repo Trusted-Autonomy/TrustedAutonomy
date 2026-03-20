@@ -149,6 +149,8 @@ pub enum SessionEvent {
     ReviewRequested {
         goal_id: Uuid,
         draft_id: Uuid,
+        /// Human-readable goal title, for display in channel notifications.
+        title: String,
         summary: String,
     },
 
@@ -638,6 +640,7 @@ mod tests {
             SessionEvent::ReviewRequested {
                 goal_id: gid,
                 draft_id: did,
+                title: "test goal".into(),
                 summary: "s".into(),
             },
             SessionEvent::PolicyViolation {

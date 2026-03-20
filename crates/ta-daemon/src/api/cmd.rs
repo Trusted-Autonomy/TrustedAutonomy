@@ -1163,6 +1163,7 @@ fn emit_draft_ready_events(
         SessionEvent::ReviewRequested {
             goal_id,
             draft_id,
+            title: title.to_string(),
             summary: if summary.is_empty() {
                 format!(
                     "Draft ready for '{}' — {} file(s) changed.",

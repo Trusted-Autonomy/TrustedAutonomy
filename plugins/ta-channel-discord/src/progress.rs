@@ -250,7 +250,10 @@ async fn process_event(
         | "goal_failed" => {
             handle_goal_state_changed(client, token, channel_id, &event, throttle_map).await;
         }
-        "review_requested" | "draft_built" | "draft.ready" | "draft_ready" => {
+        // Only fire on review_requested — that's the authoritative "draft is ready for
+        // human review" signal. draft_built is an internal pipeline event emitted earlier
+        // in the same pipeline run; handling both causes duplicate Discord notifications.
+        "review_requested" => {
             handle_draft_ready(client, token, channel_id, application_id, &event).await;
         }
         _ => {}
