@@ -279,6 +279,33 @@ pub enum SessionEvent {
         question_preview: String,
         pending_secs: u64,
     },
+
+    /// The host woke from sleep (v0.13.1.1).
+    ///
+    /// Detected by comparing wall-clock advance vs monotonic advance: a wall-clock
+    /// delta significantly larger than the monotonic delta indicates the system slept.
+    /// Heartbeat deadlines are extended by `wake_grace_secs` after this event.
+    SystemWoke {
+        /// Approximate number of seconds the system was asleep.
+        slept_for_secs: u64,
+    },
+
+    /// Network connectivity to the Claude API was lost after waking from sleep (v0.13.1.1).
+    ///
+    /// Emitted when the daemon's post-wake connectivity check finds the API unreachable.
+    /// The shell shows "Woke from sleep — waiting for network..." until restored.
+    ApiConnectionLost {
+        /// The URL that was unreachable.
+        checked_url: String,
+    },
+
+    /// Network connectivity to the Claude API was restored (v0.13.1.1).
+    ///
+    /// Emitted after `ApiConnectionLost` when the API becomes reachable again.
+    ApiConnectionRestored {
+        /// The URL that is now reachable.
+        checked_url: String,
+    },
 }
 
 /// A single issue found during a watchdog health check (v0.11.2.4).
@@ -324,6 +351,9 @@ impl SessionEvent {
             Self::GoalProcessExited { .. } => "goal_process_exited",
             Self::HealthCheck { .. } => "health_check",
             Self::QuestionStale { .. } => "question_stale",
+            Self::SystemWoke { .. } => "system_woke",
+            Self::ApiConnectionLost { .. } => "api_connection_lost",
+            Self::ApiConnectionRestored { .. } => "api_connection_restored",
         }
     }
 
@@ -445,6 +475,13 @@ impl SessionEvent {
                     "respond",
                     format!("ta interact respond {}", iid),
                     "Respond to stale question".to_string(),
+                )]
+            }
+            Self::ApiConnectionLost { .. } => {
+                vec![EventAction::new(
+                    "status",
+                    "ta status --deep",
+                    "Check daemon and network status",
                 )]
             }
             // All other events have no suggested actions.
@@ -845,5 +882,36 @@ mod tests {
         assert!(envelope.actions[0]
             .command
             .contains(&interaction_id.to_string()));
+    }
+
+    #[test]
+    fn system_woke_event_type() {
+        let event = SessionEvent::SystemWoke {
+            slept_for_secs: 120,
+        };
+        let envelope = EventEnvelope::new(event);
+        assert_eq!(envelope.event_type, "system_woke");
+        assert!(envelope.actions.is_empty());
+    }
+
+    #[test]
+    fn api_connection_lost_has_status_action() {
+        let event = SessionEvent::ApiConnectionLost {
+            checked_url: "https://api.anthropic.com".into(),
+        };
+        let envelope = EventEnvelope::new(event);
+        assert_eq!(envelope.event_type, "api_connection_lost");
+        assert_eq!(envelope.actions.len(), 1);
+        assert_eq!(envelope.actions[0].verb, "status");
+    }
+
+    #[test]
+    fn api_connection_restored_event_type() {
+        let event = SessionEvent::ApiConnectionRestored {
+            checked_url: "https://api.anthropic.com".into(),
+        };
+        let envelope = EventEnvelope::new(event);
+        assert_eq!(envelope.event_type, "api_connection_restored");
+        assert!(envelope.actions.is_empty());
     }
 }

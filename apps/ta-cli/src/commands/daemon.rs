@@ -54,6 +54,14 @@ pub enum DaemonCommands {
     },
     /// Self-check: API responsive, event system, plugin status, disk space, goal process liveness.
     Health,
+    /// Generate a platform launch unit (macOS LaunchAgent or Linux systemd service) so the
+    /// daemon starts automatically on login/boot.  Prints the generated file and its install
+    /// path; does NOT write the file without --apply.
+    Install {
+        /// Write and load the launch unit instead of just printing it.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 /// Execute a `ta daemon` subcommand.
@@ -78,6 +86,7 @@ pub fn execute(command: &DaemonCommands, project_root: &Path) -> anyhow::Result<
             goal.as_deref(),
         ),
         DaemonCommands::Health => cmd_health(project_root),
+        DaemonCommands::Install { apply } => cmd_install(project_root, *apply),
     }
 }
 
@@ -989,6 +998,179 @@ fn cmd_health(project_root: &Path) -> anyhow::Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Generate (and optionally install) the platform launch unit for auto-start.
+///
+/// macOS: `~/Library/LaunchAgents/com.trustedautonomy.daemon.plist`
+///   Loaded via `launchctl load` when `--apply` is set.
+///
+/// Linux: `~/.config/systemd/user/ta-daemon.service`
+///   Enabled via `systemctl --user enable --now` when `--apply` is set.
+///
+/// Windows: not yet supported (prints a warning).
+fn cmd_install(project_root: &Path, apply: bool) -> anyhow::Result<()> {
+    let daemon_bin = super::version_guard::find_daemon_binary().unwrap_or_else(|_| {
+        // Fallback: assume installed in PATH as ta-daemon.
+        std::path::PathBuf::from("ta-daemon")
+    });
+
+    #[cfg(target_os = "macos")]
+    {
+        let label = "com.trustedautonomy.daemon";
+        let plist_path = dirs_home()
+            .join("Library/LaunchAgents")
+            .join(format!("{}.plist", label));
+
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{bin}</string>
+        <string>--api</string>
+        <string>--project-root</string>
+        <string>{root}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{root}/.ta/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>{root}/.ta/daemon.log</string>
+</dict>
+</plist>
+"#,
+            label = label,
+            bin = daemon_bin.display(),
+            root = project_root.display(),
+        );
+
+        println!("LaunchAgent plist:");
+        println!("{}", plist);
+        println!("Install path: {}", plist_path.display());
+
+        if apply {
+            if let Some(parent) = plist_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&plist_path, &plist).map_err(|e| {
+                anyhow::anyhow!("Cannot write plist to {}: {}", plist_path.display(), e)
+            })?;
+            println!("Written to {}", plist_path.display());
+
+            let status = Command::new("launchctl")
+                .args(["load", "-w", &plist_path.to_string_lossy()])
+                .status()
+                .map_err(|e| anyhow::anyhow!("Cannot run launchctl: {}", e))?;
+
+            if status.success() {
+                println!("LaunchAgent loaded. Daemon will start automatically on login.");
+                println!("To remove: launchctl unload -w {}", plist_path.display());
+            } else {
+                return Err(anyhow::anyhow!(
+                    "launchctl load failed (exit {}). Check the plist path and try manually:\n  launchctl load -w {}",
+                    status.code().unwrap_or(-1),
+                    plist_path.display()
+                ));
+            }
+        } else {
+            println!("Run `ta daemon install --apply` to write and load this LaunchAgent.");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let service_path = dirs_home().join(".config/systemd/user/ta-daemon.service");
+
+        let service = format!(
+            r#"[Unit]
+Description=Trusted Autonomy daemon
+After=network.target
+
+[Service]
+ExecStart={bin} --api --project-root {root}
+Restart=on-failure
+StandardOutput=append:{root}/.ta/daemon.log
+StandardError=append:{root}/.ta/daemon.log
+
+[Install]
+WantedBy=default.target
+"#,
+            bin = daemon_bin.display(),
+            root = project_root.display(),
+        );
+
+        println!("systemd user service unit:");
+        println!("{}", service);
+        println!("Install path: {}", service_path.display());
+
+        if apply {
+            if let Some(parent) = service_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&service_path, &service).map_err(|e| {
+                anyhow::anyhow!(
+                    "Cannot write service file to {}: {}",
+                    service_path.display(),
+                    e
+                )
+            })?;
+            println!("Written to {}", service_path.display());
+
+            // Reload systemd and enable the service.
+            let reload = Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .status()
+                .map_err(|e| anyhow::anyhow!("Cannot run systemctl: {}", e))?;
+            if !reload.success() {
+                return Err(anyhow::anyhow!("systemctl --user daemon-reload failed"));
+            }
+
+            let enable = Command::new("systemctl")
+                .args(["--user", "enable", "--now", "ta-daemon.service"])
+                .status()
+                .map_err(|e| anyhow::anyhow!("Cannot run systemctl: {}", e))?;
+
+            if enable.success() {
+                println!("systemd service enabled and started.");
+                println!("To remove: systemctl --user disable --now ta-daemon.service");
+            } else {
+                return Err(anyhow::anyhow!(
+                    "systemctl enable failed (exit {}). Try:\n  systemctl --user enable --now ta-daemon.service",
+                    enable.code().unwrap_or(-1),
+                ));
+            }
+        } else {
+            println!("Run `ta daemon install --apply` to write and enable this service unit.");
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        println!(
+            "ta daemon install is not yet supported on this platform.\n\
+             On Windows, add ta-daemon to Task Scheduler manually.\n\
+             Binary path: {}",
+            daemon_bin.display()
+        );
+    }
+
+    Ok(())
+}
+
+/// Returns the current user's home directory.
+fn dirs_home() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

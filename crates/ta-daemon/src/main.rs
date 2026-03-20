@@ -38,6 +38,7 @@ mod config;
 pub mod config_watcher;
 pub mod external_channel;
 pub mod office;
+pub mod power_manager;
 pub mod project_context;
 pub mod question_registry;
 pub mod router;
@@ -247,16 +248,19 @@ async fn main() -> Result<()> {
         // API server mode: start the full HTTP API.
         tracing::info!("Running in API server mode");
 
-        // Start the watchdog loop (v0.11.2.4).
+        // Start the watchdog loop (v0.11.2.4, power manager v0.13.1.1).
         {
             let wd_config = match &daemon_config.operations {
-                Some(ops) => watchdog::WatchdogConfig::from_operations(ops),
+                Some(ops) => watchdog::WatchdogConfig::from_config(ops, &daemon_config.power),
                 None => watchdog::WatchdogConfig::default(),
             };
+            let pm = Arc::new(power_manager::PowerManager::new(
+                daemon_config.power.clone(),
+            ));
             let wd_root = project_root.clone();
             let wd_shutdown = shutdown.clone();
             tokio::spawn(async move {
-                watchdog::run_watchdog(wd_root, wd_config, wd_shutdown).await;
+                watchdog::run_watchdog(wd_root, wd_config, Some(pm), wd_shutdown).await;
             });
         }
 
@@ -304,16 +308,19 @@ async fn main() -> Result<()> {
             });
         }
 
-        // Start the watchdog loop in MCP mode too (v0.11.2.4).
+        // Start the watchdog loop in MCP mode too (v0.11.2.4, power manager v0.13.1.1).
         {
             let wd_config = match &daemon_config.operations {
-                Some(ops) => watchdog::WatchdogConfig::from_operations(ops),
+                Some(ops) => watchdog::WatchdogConfig::from_config(ops, &daemon_config.power),
                 None => watchdog::WatchdogConfig::default(),
             };
+            let pm = Arc::new(power_manager::PowerManager::new(
+                daemon_config.power.clone(),
+            ));
             let wd_root = project_root.clone();
             let wd_shutdown = shutdown.clone();
             tokio::spawn(async move {
-                watchdog::run_watchdog(wd_root, wd_config, wd_shutdown).await;
+                watchdog::run_watchdog(wd_root, wd_config, Some(pm), wd_shutdown).await;
             });
         }
 

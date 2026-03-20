@@ -43,6 +43,9 @@ pub struct ProjectStatus {
     pub cursor_style: String,
     /// Seconds without heartbeat before showing no-heartbeat alert (v0.11.7 item 2).
     pub no_heartbeat_alert_secs: u32,
+    /// Whether a power assertion (preventing idle sleep) is currently active (v0.13.1.1).
+    /// True when there are active goals and `prevent_sleep_during_active_goals` is enabled.
+    pub power_assertion_active: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +168,9 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
             .collect()
     };
 
+    let power_assertion_active =
+        active_goals > 0 && state.daemon_config.power.prevent_sleep_during_active_goals;
+
     Json(ProjectStatus {
         project: project_name,
         version: version.clone(),
@@ -182,6 +188,7 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         cursor_color: state.daemon_config.shell.ui.cursor_color.clone(),
         cursor_style: state.daemon_config.shell.ui.cursor_style.clone(),
         no_heartbeat_alert_secs: state.daemon_config.shell.ui.no_heartbeat_alert_secs,
+        power_assertion_active,
     })
 }
 

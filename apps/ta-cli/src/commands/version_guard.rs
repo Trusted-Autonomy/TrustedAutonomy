@@ -124,20 +124,34 @@ pub fn check_daemon_version(
 ///   1. Same directory as the current `ta` binary
 ///   2. PATH lookup
 pub fn find_daemon_binary() -> anyhow::Result<std::path::PathBuf> {
-    // Try sibling of the current executable.
+    // On Windows the binary is "ta-daemon.exe"; on Unix it is "ta-daemon".
+    let bin_name = format!("ta-daemon{}", std::env::consts::EXE_SUFFIX);
+
+    // Try sibling of the current executable first (works for zip/tar installs
+    // where both binaries are in the same directory).
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(dir) = current_exe.parent() {
-            let sibling = dir.join("ta-daemon");
+            let sibling = dir.join(&bin_name);
             if sibling.exists() {
                 return Ok(sibling);
             }
         }
     }
 
-    // Try PATH lookup.
-    if let Ok(output) = Command::new("which").arg("ta-daemon").output() {
+    // Fall back to PATH lookup.  `where` is the Windows equivalent of `which`.
+    #[cfg(windows)]
+    let which_cmd = "where";
+    #[cfg(not(windows))]
+    let which_cmd = "which";
+
+    if let Ok(output) = Command::new(which_cmd).arg("ta-daemon").output() {
         if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if !path.is_empty() {
                 return Ok(std::path::PathBuf::from(path));
             }
@@ -145,8 +159,9 @@ pub fn find_daemon_binary() -> anyhow::Result<std::path::PathBuf> {
     }
 
     Err(anyhow::anyhow!(
-        "Cannot find 'ta-daemon' binary. \
-         Ensure it is in the same directory as 'ta' or on your PATH."
+        "Cannot find '{}' binary. \
+         Ensure it is in the same directory as 'ta' or on your PATH.",
+        bin_name
     ))
 }
 
