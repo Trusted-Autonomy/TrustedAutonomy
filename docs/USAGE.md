@@ -971,6 +971,73 @@ ta gc --archive
 - **Orphaned draft cleanup**: draft package JSON files whose goal no longer exists → removed
 - **History ledger writes**: every GC'd goal gets a compact summary appended to `.ta/goal-history.jsonl`
 
+#### Lifecycle Compaction (`ta gc --compact`)
+
+Compaction removes "fat" artifacts — staging copies and draft packages — from applied/completed goals that are older than a configurable age threshold. Unlike standard GC (which handles zombie and orphaned records), compaction specifically targets successfully completed work where the VCS record is the source of truth and the staging copy is no longer needed.
+
+```bash
+# Preview compaction (no changes)
+ta gc --compact --dry-run
+
+# Compact goals applied more than 30 days ago (default)
+ta gc --compact
+
+# Compact goals applied more than 14 days ago
+ta gc --compact --compact-after-days 14
+```
+
+The `goal-history.jsonl` ledger is **never** compacted — it is append-only and preserves a compact audit record of every goal. Compaction only discards staging directory copies and draft package JSON files.
+
+You can also configure compaction in `.ta/daemon.toml` for reference by tooling:
+
+```toml
+[lifecycle.compaction]
+enabled = true
+compact_after_days = 30
+discard = ["staging_copy", "draft_package"]
+```
+
+### Autonomous Operations (`ta operations`)
+
+The daemon watchdog continuously monitors goal health, disk space, and system status. When it detects issues, it records **corrective action proposals** to `.ta/operations.jsonl`. Use `ta operations log` to review what the daemon has detected:
+
+```bash
+# Show last 20 corrective actions (default)
+ta operations log
+
+# Show all recorded actions
+ta operations log --all
+
+# Filter by severity: info, warning, critical
+ta operations log --severity critical
+
+# Show more entries
+ta operations log --limit 50
+```
+
+Each corrective action shows:
+- **Severity** (`INFO`, `WARN`, `CRIT`) and timestamp
+- **Issue**: one-line description of what was detected
+- **Diagnosis**: what caused the issue
+- **Proposed action**: what to do about it
+- **Status**: `proposed`, `approved by <who>`, `executed`, etc.
+- **Auto-heal eligibility**: actions marked as auto-healable can be executed without human approval when configured
+
+**Auto-heal policy** (`daemon.toml`): configure which low-risk actions the daemon can take automatically:
+
+```toml
+[operations.auto_heal]
+enabled = true
+allowed = [
+  "restart_crashed_plugin",      # restart a plugin that exited unexpectedly
+  "transition_zombie_to_failed", # mark dead-process goals as failed
+  "clean_applied_staging",       # remove staging for successfully applied goals
+]
+# All other actions require human approval
+```
+
+By default, auto-heal is **disabled** (`enabled = false`). Opt in explicitly for the actions you trust. All corrective actions — auto-healed or manually approved — are recorded in `.ta/operations.jsonl` for audit traceability.
+
 ### Goal History
 
 Browse archived and completed goals, even after their JSON files have been GC'd:
@@ -5451,7 +5518,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.12.7 | Shell UX: working indicator clearance & scroll reliability | Done |
 | v0.12.8 | Alpha bug-fixes: Discord notification flood & draft CLI disconnect | Done |
 | v0.13.0 | Reflink/COW overlay optimization (APFS + Btrfs zero-cost staging) | Done |
-| v0.13.1 | Autonomous operations & self-healing daemon | Planned |
+| v0.13.1 | Autonomous operations & self-healing daemon | Done |
 | v0.13.2 | MCP transport abstraction (TCP/Unix socket) | Planned |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.

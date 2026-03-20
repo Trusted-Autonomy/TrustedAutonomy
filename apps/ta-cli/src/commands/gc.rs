@@ -6,6 +6,7 @@
 use ta_goal::{GoalHistoryEntry, GoalHistoryLedger, GoalRunState, GoalRunStore};
 use ta_mcp_gateway::GatewayConfig;
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     config: &GatewayConfig,
     dry_run: bool,
@@ -13,6 +14,8 @@ pub fn execute(
     gc_all: bool,
     archive: bool,
     include_events: bool,
+    compact: bool,
+    compact_after_days: u32,
 ) -> anyhow::Result<()> {
     let store = GoalRunStore::new(&config.goals_dir)?;
     let ledger = GoalHistoryLedger::for_project(&config.workspace_root);
@@ -219,6 +222,82 @@ pub fn execute(
         }
     }
 
+    // Lifecycle compaction pass (v0.13.1).
+    let mut compaction_count = 0u32;
+    let mut compaction_bytes = 0u64;
+    if compact {
+        let compact_cutoff = chrono::Utc::now() - chrono::Duration::days(compact_after_days as i64);
+        for goal in &goals {
+            let is_compactable =
+                matches!(goal.state, GoalRunState::Applied | GoalRunState::Completed)
+                    && goal.updated_at < compact_cutoff;
+
+            if !is_compactable {
+                continue;
+            }
+
+            // Remove staging directory.
+            if !goal.workspace_path.as_os_str().is_empty() && goal.workspace_path.exists() {
+                let dir_size = walkdir_size(&goal.workspace_path);
+                if dry_run {
+                    println!(
+                        "[dry-run] compact: Would remove staging for {} \"{}\" (applied {}d ago, {})",
+                        &goal.goal_run_id.to_string()[..8],
+                        truncate(&goal.title, 40),
+                        (chrono::Utc::now() - goal.updated_at).num_days(),
+                        format_bytes(dir_size),
+                    );
+                } else {
+                    if let Err(e) = std::fs::remove_dir_all(&goal.workspace_path) {
+                        tracing::warn!(
+                            goal_id = %goal.goal_run_id,
+                            "compact: failed to remove staging: {}", e
+                        );
+                    } else {
+                        println!(
+                            "compact: Removed staging for {} \"{}\" ({})",
+                            &goal.goal_run_id.to_string()[..8],
+                            truncate(&goal.title, 40),
+                            format_bytes(dir_size),
+                        );
+                        // Write history entry (compaction preserves the ledger).
+                        let entry = GoalHistoryEntry::from_goal(goal);
+                        let _ = ledger.append(&entry);
+                        history_count += 1;
+                    }
+                }
+                compaction_bytes += dir_size;
+                compaction_count += 1;
+            }
+
+            // Remove associated draft package if present.
+            if let Some(draft_id) = &goal.pr_package_id {
+                let draft_path = config.pr_packages_dir.join(format!("{}.json", draft_id));
+                if draft_path.exists() {
+                    if dry_run {
+                        println!(
+                            "[dry-run] compact: Would remove draft package {} (goal: {})",
+                            draft_id,
+                            &goal.goal_run_id.to_string()[..8],
+                        );
+                    } else if let Err(e) = std::fs::remove_file(&draft_path) {
+                        tracing::warn!(
+                            "compact: failed to remove draft package {}: {}",
+                            draft_id,
+                            e
+                        );
+                    } else {
+                        println!(
+                            "compact: Removed draft package {} (goal: {})",
+                            draft_id,
+                            &goal.goal_run_id.to_string()[..8],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Event store pruning (v0.11.3).
     let mut event_count = 0u32;
     if include_events {
@@ -255,16 +334,31 @@ pub fn execute(
         }
     }
 
-    println!(
-        "\n{}GC complete: {} zombie(s), {} staging ({}) reclaimed, {} orphan draft(s), {} event(s) pruned, {} history entries.",
-        if dry_run { "[dry-run] " } else { "" },
-        zombie_count,
-        staging_count,
-        format_bytes(staging_bytes),
-        draft_count,
-        event_count,
-        history_count,
-    );
+    if compact {
+        println!(
+            "\n{}GC complete: {} zombie(s), {} staging ({}) reclaimed, {} orphan draft(s), {} event(s) pruned, {} history entries, {} compacted ({}).",
+            if dry_run { "[dry-run] " } else { "" },
+            zombie_count,
+            staging_count,
+            format_bytes(staging_bytes),
+            draft_count,
+            event_count,
+            history_count,
+            compaction_count,
+            format_bytes(compaction_bytes),
+        );
+    } else {
+        println!(
+            "\n{}GC complete: {} zombie(s), {} staging ({}) reclaimed, {} orphan draft(s), {} event(s) pruned, {} history entries.",
+            if dry_run { "[dry-run] " } else { "" },
+            zombie_count,
+            staging_count,
+            format_bytes(staging_bytes),
+            draft_count,
+            event_count,
+            history_count,
+        );
+    }
 
     Ok(())
 }
