@@ -5375,11 +5375,12 @@ These are addressed across v0.14.4–v0.14.5.
 
 #### Items
 
-1. [ ] **Attestation backend trait**: `AttestationBackend` with `sign(payload) → attestation`, `verify(payload, attestation) → bool`. Backends: TPM 2.0 (Linux/Windows), Apple Secure Enclave (macOS), software fallback (Ed25519 key in `.ta/keys/`).
-2. [ ] **TPM 2.0 integration**: Use `tss2-rs` or `tpm2-tools` to obtain PCR quote and sign audit entries on Linux/Windows.
-3. [ ] **Apple Secure Enclave integration**: macOS Keychain + CryptoKit `SecureEnclave.P256` to sign audit entries.
-4. [ ] **Attestation fields in AuditEntry**: `attestation: Option<AttestationRecord>` with backend, public key fingerprint, and signature.
-5. [ ] **`ta audit verify-attestation <id>`**: Verify the hardware signature on an audit entry. Useful for compliance review and post-incident investigation.
+1. [ ] **`AttestationBackend` trait**: `sign(payload) → attestation`, `verify(payload, attestation) → bool`. Plugin registry loads backends from `~/.config/ta/plugins/attestation/`.
+2. [ ] **Software fallback backend**: Ed25519 key in `.ta/keys/` — ships in TA, works on any machine without hardware TPM.
+3. [ ] **TPM 2.0 backend plugin**: `tss2-rs` / `tpm2-tools` PCR quote and signing. Linux/Windows.
+4. [ ] **Apple Secure Enclave backend plugin**: macOS Keychain + CryptoKit `SecureEnclave.P256`.
+5. [ ] **Attestation fields in `AuditEntry`**: `attestation: Option<AttestationRecord>` with backend name, public key fingerprint, and signature.
+6. [ ] **`ta audit verify-attestation <id>`**: Verify the attestation signature on an audit entry using the stored public key.
 
 #### Version: `0.14.1-alpha`
 
@@ -5540,6 +5541,13 @@ If the decision is to keep TUI, the original v0.13.6 items (survey Rust TUI apps
 
 > These are NOT part of TA core. They are independent projects that consume TA's extension points.
 > See `docs/ADR-product-concept-model.md` for how they integrate.
+
+### SecureTA *(future separate project)*
+> Planned enterprise security layer built on TA's extension points.
+
+Adds OCI/gVisor container isolation, hardware-bound audit trail signing (TPM 2.0, Apple Secure Enclave), and kernel-level network policy — for regulated deployments and environments running untrusted agent code. Depends on TA v0.13.3 (RuntimeAdapter) and v0.14.1 (AttestationBackend). Not yet started.
+
+---
 
 ### TA Web UI *(separate project)*
 > Lightweight web frontend for non-engineers to use TA without the CLI.
