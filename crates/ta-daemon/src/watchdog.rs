@@ -14,6 +14,7 @@ use chrono::Utc;
 use ta_events::schema::{HealthIssue, SessionEvent};
 use ta_events::store::{EventStore, FsEventStore};
 use ta_events::EventEnvelope;
+use ta_goal::operations::{ActionSeverity, CorrectiveAction, OperationsLog};
 use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
 use uuid::Uuid;
 
@@ -83,6 +84,34 @@ pub async fn run_watchdog(
     }
 }
 
+/// Check available disk space on the project root filesystem.
+/// Returns available bytes, or None if we can't determine it.
+fn available_disk_bytes(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::mem::MaybeUninit;
+        let path_cstr = std::ffi::CString::new(path.to_string_lossy().as_bytes()).ok()?;
+        let mut stats: MaybeUninit<libc::statvfs> = MaybeUninit::uninit();
+        let ret = unsafe { libc::statvfs(path_cstr.as_ptr(), stats.as_mut_ptr()) };
+        if ret == 0 {
+            let stats = unsafe { stats.assume_init() };
+            // f_bavail = blocks available to unprivileged user, f_frsize = block size
+            // f_bavail is u32 on macOS but u64 on Linux; u64::from() widens
+            // safely on macOS and is a no-op on Linux — allow the lint rather
+            // than a cfg branch just for a widening conversion.
+            #[allow(clippy::useless_conversion)]
+            Some(u64::from(stats.f_bavail) * stats.f_frsize)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// One watchdog check cycle. Synchronous — runs quickly and infrequently.
 fn watchdog_cycle(project_root: &Path, config: &WatchdogConfig) {
     let goals_dir = project_root.join(".ta").join("goals");
@@ -108,6 +137,37 @@ fn watchdog_cycle(project_root: &Path, config: &WatchdogConfig) {
     let mut issues: Vec<HealthIssue> = Vec::new();
     let mut goals_checked: usize = 0;
     let event_store = FsEventStore::new(&events_dir);
+
+    // Check disk space and emit corrective action if low.
+    let low_disk_threshold_bytes: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
+    if let Some(avail) = available_disk_bytes(project_root) {
+        if avail < low_disk_threshold_bytes {
+            let avail_gb = avail as f64 / 1_073_741_824.0;
+            tracing::warn!(
+                available_gb = format!("{:.2}", avail_gb),
+                "Disk space low — emitting corrective action"
+            );
+            let action = CorrectiveAction::new(
+                format!("Low disk space: {:.1} GB available", avail_gb),
+                ActionSeverity::Critical,
+                format!(
+                    "Available disk on project root is {:.1} GB, below 2 GB threshold. \
+                     Stale staging directories may be consuming significant space.",
+                    avail_gb
+                ),
+                "Run `ta gc` to clean stale staging directories and reclaim disk space.",
+                "clean_applied_staging",
+            )
+            .set_auto_healable();
+            let ops_log = OperationsLog::for_project(project_root);
+            if let Err(e) = ops_log.append(&action) {
+                tracing::warn!(
+                    "Watchdog: failed to write disk-space corrective action: {}",
+                    e
+                );
+            }
+        }
+    }
 
     for goal in &goals {
         match &goal.state {

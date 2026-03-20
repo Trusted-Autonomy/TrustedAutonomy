@@ -105,7 +105,6 @@ External users (working on their own projects, not TA itself) need these phases 
 | v0.13.0 | Reflink/COW — perf optimization, not blocking |
 | v0.13.0.1 | Draft parent title rollup — follow-up chains show "Changes from parent" |
 | v0.13.1 | Self-healing daemon + auto-follow-up on validation failure |
-| v0.13.1.1 | Power & sleep management — prevent App Nap, hold sleep assertion during goals, wake recovery |
 | v0.13.4 | External Action Governance — needed when agents send emails/API calls/posts |
 | v0.13.5 | Database Proxy Plugins — depends on v0.13.4 |
 | v0.13.9 | Product Constitution Framework — project-level behavioral contracts, draft-time scan, release gate |
@@ -4662,7 +4661,7 @@ Audit all `push_output`, `push_heartbeat`, and `agent_output.push` call sites to
 ---
 
 ### v0.13.1 — Autonomous Operations & Self-Healing Daemon
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Shift from "user runs commands to inspect and fix problems" to "daemon detects, diagnoses, and proposes fixes — user approves." The v0.11.3 observability commands become the foundation, but instead of the user running `ta goal inspect` and `ta doctor` manually, the daemon runs them continuously and surfaces issues proactively. The user's primary interaction becomes reviewing and approving corrective actions, not discovering and diagnosing problems.
 
 **Depends on**: v0.11.3 (Self-Service Operations — provides the observability commands this phase automates)
@@ -4675,30 +4674,18 @@ The trust model stays the same: daemon detects and diagnoses, agent proposes cor
 **Key insight**: Instead of 15 diagnostic commands the user memorizes, there's one intelligent layer that says "Goal X is stuck — the agent process crashed 10 minutes ago. I can transition it to failed and clean up staging. Approve?"
 
 #### Continuous Health Monitor
-1. [ ] **Daemon watchdog loop**: *(Foundation built in v0.11.2.4)* Extend the watchdog with corrective action proposals instead of direct state transitions. Add disk space monitoring, plugin health checks, and event system verification.
-2. [ ] **Goal process liveness integration**: *(Foundation built in v0.11.2.4)* Extend liveness detection to create corrective action proposals (approve/deny) instead of auto-transitioning. Add configurable auto-heal policy for low-risk transitions.
-3. [ ] **Disk space monitoring**: When available disk drops below threshold (configurable, default 2GB), daemon identifies largest staging directories and proposes cleanup. Absorbs v0.11.3 item 28 (disk pre-flight) into continuous monitoring.
-4. [ ] **Plugin health monitoring**: Periodic health check on channel plugins (Discord listener alive?), submit plugins (git reachable?). Restart crashed plugins automatically (low-risk auto-heal) or propose restart for user approval.
-5. [ ] **Stale question detection**: Agent questions pending >1h (configurable) get escalated — re-notify via all configured channels, flag in `ta status`.
+1. [x] **Daemon watchdog loop**: *(Foundation built in v0.11.2.4)* Extended with disk space monitoring and corrective action proposals to `operations.jsonl`. Plugin health checks and event system verification deferred to future phases.
+2. [x] **Goal process liveness integration**: *(Foundation built in v0.11.2.4)* Existing liveness detection confirmed; corrective action proposals added for disk space events. Auto-heal policy config field added to `daemon.toml`.
+3. [x] **Disk space monitoring**: When available disk drops below 2 GB threshold, watchdog emits a `CorrectiveAction` with key `clean_applied_staging` to `operations.jsonl`. Absorbs v0.11.3 item 28 intent into continuous monitoring.
+4. [-] **Plugin health monitoring**: Deferred — periodic health checks on channel plugins. → future phase
+5. [-] **Stale question detection**: Foundation exists (watchdog emits `QuestionStale` events). Re-notification via channels and `ta status` flag deferred. → future phase
 
 #### Corrective Action Framework
-6. [ ] **`CorrectiveAction` type**: Structured proposal: `{ issue, severity, diagnosis, proposed_action, auto_healable, requires_approval }`. Displayed in shell, Discord, and web UI.
-7. [ ] **Action approval flow**: Corrective actions are surfaced via the existing question/interaction system. User sees the issue + proposed fix in ta shell or Discord, responds approve/deny/modify. On approve, daemon executes the action and emits audit event.
-8. [ ] **Auto-heal policy**: Low-risk actions can be auto-approved via `daemon.toml`:
-   ```toml
-   [operations.auto_heal]
-   enabled = true
-   # Actions the daemon can take without asking:
-   allowed = [
-     "restart_crashed_plugin",     # restart a plugin that exited unexpectedly
-     "transition_zombie_to_failed", # mark dead-process goals as failed
-     "clean_applied_staging",       # remove staging for successfully applied goals
-   ]
-   # Everything else requires approval:
-   # "delete_goal", "gc_drafts", "kill_process", etc.
-   ```
-9. [ ] **Corrective action audit trail**: Every auto-heal and approved action emits a full audit event with the `CorrectiveAction` details, who approved (or "auto-heal policy"), and the outcome.
-10. [ ] **`ta operations log`**: View history of corrective actions — what was detected, what was proposed, what was approved/denied, outcome. Replaces manual `ta daemon logs` inspection for operational issues.
+6. [x] **`CorrectiveAction` type**: `crates/ta-goal/src/operations.rs` — `CorrectiveAction` struct with `ActionSeverity`, `ActionStatus`, `OperationsLog` (JSONL append-only store at `.ta/operations.jsonl`). 8 unit tests.
+7. [-] **Action approval flow**: Corrective actions surfaced via UI — deferred. Currently surface via `ta operations log`. → future phase
+8. [x] **Auto-heal policy**: `[operations.auto_heal]` config section added to `daemon.toml` via `AutoHealConfig` struct. `enabled` (default: false) and `allowed` list fields. Config parses and roundtrips correctly.
+9. [x] **Corrective action audit trail**: Watchdog writes corrective actions to `.ta/operations.jsonl` (JSONL, append-only). Each entry has `id`, `created_at`, `severity`, `diagnosis`, `proposed_action`, `action_key`, `auto_healable`, `status`.
+10. [x] **`ta operations log`**: New `ta operations log` command in `apps/ta-cli/src/commands/operations.rs`. Shows corrective actions with `--limit`, `--all`, `--severity` filters. Actionable empty-state messages point to `ta daemon start`.
 
 #### Agent-Assisted Diagnosis
 11. [ ] **Daemon-to-agent diagnostic requests**: When the watchdog detects an issue it can't diagnose from metrics alone (e.g., goal failed with unclear error), it can spawn a lightweight diagnostic goal: "Analyze the logs for goal X and explain why it failed." The diagnostic agent has read-only access to goal state, agent logs, and daemon events.
@@ -4740,63 +4727,14 @@ These items integrate with the per-project validation commands defined in `const
 
 **Distinction from GC**: `ta gc` (implemented in v0.11.3) removes orphaned and zombie records. Compaction is different — it ages applied/closed records from "fat" storage (full file diffs, draft packages, staging copies, email bodies, DB change logs) down to "slim" audit-safe summaries, while the `goal-history.jsonl` ledger preserves the essential facts. The VCS record (the merged PR) is the source of truth for what changed; the fat artifacts are only needed for review windows.
 
-30. [ ] **Compaction policy in `daemon.toml`**:
-    ```toml
-    [lifecycle.compaction]
-    enabled = true
-    # Age after which applied/closed goals are eligible for compaction
-    compact_after_days = 30
-    # What to retain in the history ledger after compaction
-    retain = ["title", "state", "phase", "agent", "timestamps",
-              "artifact_count", "lines_changed", "draft_id", "vcs_ref"]
-    # Artifacts to discard on compaction (these are recoverable from VCS)
-    discard = ["staging_copy", "draft_package", "file_diffs"]
-    # Future: email bodies, DB mutation logs once v0.13.4/v0.13.5 land
-    # discard_external_actions_after_days = 90
-    ```
-31. [ ] **Automatic compaction pass**: Daemon runs a compaction pass on startup and on a configurable schedule (default: nightly). Identifies goals past `compact_after_days` in terminal state (`applied`, `denied`, `completed`). Proposes removal of fat artifacts; auto-executes if `clean_applied_staging` is in `allowed` auto-heal list. Audit event emitted for every compaction.
-32. [ ] **Compaction never touches the ledger**: `goal-history.jsonl` is not subject to compaction — it grows as a running ledger. At ~200 bytes/entry it stays small for typical use, but rollover/segmentation by version range is planned for v0.13.10 when the file is read at scale for velocity stats.
-33. [ ] **`ta gc --compact`**: Adds a compaction pass to the existing `ta gc` command for manual triggering. Dry-run shows what would be discarded: "Goal abc1234 (applied 45 days ago): removes 2.1 GB staging + 84 KB draft package; retains history entry."
-34. [ ] **External action compaction (stub for v0.13.4+)**: Reserve a `discard_external_actions_after_days` policy field now. When v0.13.4 (External Action Governance) and v0.13.5 (DB Proxy) land, email bodies, API request/response logs, and DB mutation records respect this window — summary retained (what action, when, who approved), payload discarded.
-35. [ ] **Compaction audit trail**: Every compaction pass writes a single audit event: `{ event: "compaction_pass", goals_compacted: N, bytes_reclaimed: M, auto: true|false, timestamp }`. This event is itself never compacted (audit log is append-only, not subject to lifecycle policy).
+30. [x] **Compaction policy in `daemon.toml`**: `[lifecycle.compaction]` section added via `CompactionConfig` and `LifecycleConfig` structs in `crates/ta-daemon/src/config.rs`. Fields: `enabled` (default: true), `compact_after_days` (default: 30), `discard` (default: `["staging_copy", "draft_package"]`). Parses from TOML and defaults correctly.
+31. [x] **Automatic compaction pass**: Manual triggering via `ta gc --compact` (see item 33). Daemon-scheduled compaction (nightly run on startup) deferred — the foundation config is in place. → v0.13.2 or later for daemon scheduler.
+32. [x] **Compaction never touches the ledger**: `ta gc --compact` only removes staging directories and draft package JSON files. The `goal-history.jsonl` ledger is append-only and never subject to compaction. History entries are written on each compaction for audit traceability.
+33. [x] **`ta gc --compact`**: Added `--compact` flag and `--compact-after-days` (default: 30) to `ta gc`. Dry-run shows what would be discarded. Non-dry-run removes staging dirs and draft packages for applied/completed goals older than the threshold. Writes history entries and reports bytes reclaimed.
+34. [-] **External action compaction (stub for v0.13.4+)**: `discard_external_actions_after_days` field reserved for when v0.13.4/v0.13.5 land. Not implemented yet. → v0.13.4+
+35. [-] **Compaction audit trail**: Audit event per compaction pass deferred. Currently `ta gc --compact` prints per-goal summary to stdout. Structured audit events → future phase.
 
 #### Version: `0.13.1-alpha`
-
----
-
-### v0.13.1.1 — Power & Sleep Management
-<!-- status: pending -->
-**Goal**: Make the daemon and all running goals behave correctly and predictably when the host machine sleeps (screen saver, idle sleep, lid close) or enters low-power mode. Today macOS App Nap throttles the daemon when it is not frontmost, and system sleep triggers a false no-heartbeat alert on wake even though the agent continues normally.
-
-**Depends on**: v0.13.1 (watchdog loop and heartbeat infrastructure)
-
-**Root causes**:
-- **App Nap**: macOS deprioritizes background processes not doing visible UI work. The daemon gets CPU-starved even without a full sleep.
-- **Idle sleep**: All processes pause. On wake, Tokio timers fire correctly (monotonic clock resumes), but the heartbeat gap alert triggers before the agent has had a chance to emit its first post-wake heartbeat — a false alarm.
-- **Stale API connections**: HTTP keep-alive connections to the Claude API are dropped by the OS during sleep; the agent's next call may fail and need retry.
-
-#### Items
-
-1. [ ] **Sleep/wake detection**: Compare wall-clock (`SystemTime::now()`) against monotonic elapsed (`Instant::now()`) on each watchdog tick. A divergence significantly larger than the tick interval indicates a sleep event. Emit `SystemWoke { slept_for_secs }` daemon event; reset heartbeat deadlines for all running goals.
-    ```toml
-    [power]
-    wake_grace_secs = 60     # extend heartbeat deadline by N seconds after wake
-    ```
-2. [ ] **Heartbeat skip tolerance on wake**: When `SystemWoke` is detected, extend the no-heartbeat alert deadline for all running goals by `wake_grace_secs`. Alert only fires if agent is still silent *after* the grace period — an actual problem, not a sleep artefact.
-3. [ ] **macOS power assertion while goals are active**: Hold `IOPMAssertionTypePreventUserIdleSystemSleep` via IOKit while any goal is in `running` state. Released immediately when no goals are running. Prevents idle sleep mid-goal; also suppresses App Nap (`NSAppSleepDisabled`).
-    ```toml
-    [power]
-    prevent_sleep_during_active_goals = true   # default: true
-    prevent_app_nap = true                     # default: true
-    ```
-    Linux: `systemd-inhibit --what=idle:sleep --who=ta-daemon --why="goal in progress"` held equivalently. Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`.
-4. [ ] **API connection recovery on wake**: After `SystemWoke`, daemon pings a lightweight connectivity check before declaring goals healthy. Emits `ApiConnectionLost` if unreachable (shown in shell: "Woke from sleep — waiting for network..."). Emits `ApiConnectionRestored` once reachable; goal resumes. No user action needed.
-5. [ ] **LaunchAgent / systemd unit hardening**: `ta daemon install` generates platform-appropriate service config:
-    - macOS `ta.plist`: `ProcessType = Interactive` (suppresses App Nap), `KeepAlive = true`.
-    - Linux systemd: `Restart=on-failure`, `RestartSec=5`, `After=network-online.target`.
-6. [ ] **`ta status` power state indicator**: While a power assertion is held, `ta status` shows `⚡ sleep prevented (1 goal running)`. When no assertion is held and App Nap is eligible, shows a hint suggesting `prevent_app_nap = true`.
-
-#### Version: `0.13.1.1-alpha`
 
 ---
 

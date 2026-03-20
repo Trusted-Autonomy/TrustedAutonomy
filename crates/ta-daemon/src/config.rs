@@ -25,6 +25,9 @@ pub struct DaemonConfig {
     /// Operations configuration (v0.11.2.3): heartbeat, watchdog, etc.
     #[serde(default)]
     pub operations: Option<OperationsConfig>,
+    /// Lifecycle management configuration (v0.13.1).
+    #[serde(default)]
+    pub lifecycle: LifecycleConfig,
 }
 
 /// Shell Q&A agent configuration (v0.11.4.2).
@@ -161,6 +164,10 @@ pub struct OperationsConfig {
     #[serde(default = "default_watchdog_interval")]
     pub watchdog_interval_secs: u32,
 
+    /// Auto-heal policy configuration (v0.13.1).
+    #[serde(default)]
+    pub auto_heal: AutoHealConfig,
+
     /// Seconds to wait after detecting a dead process before transitioning
     /// the goal state (default: 60). Prevents false positives from brief
     /// process restarts.
@@ -182,6 +189,32 @@ pub struct OperationsConfig {
     /// stays visible (fail-open).
     #[serde(default = "default_prompt_verify_timeout")]
     pub prompt_verify_timeout_secs: u64,
+}
+
+/// Auto-heal policy: which low-risk corrective actions the daemon can take without asking.
+///
+/// ```toml
+/// [operations.auto_heal]
+/// enabled = true
+/// allowed = [
+///   "restart_crashed_plugin",
+///   "transition_zombie_to_failed",
+///   "clean_applied_staging",
+/// ]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoHealConfig {
+    /// Whether auto-heal is enabled (default: false — require explicit opt-in).
+    pub enabled: bool,
+    /// Action keys the daemon can execute without human approval.
+    /// All other corrective actions are surfaced for human review.
+    ///
+    /// Well-known keys:
+    /// - `"restart_crashed_plugin"` — restart a plugin that exited unexpectedly
+    /// - `"transition_zombie_to_failed"` — mark dead-process goals as failed
+    /// - `"clean_applied_staging"` — remove staging for successfully applied goals
+    pub allowed: Vec<String>,
 }
 
 fn default_watchdog_interval() -> u32 {
@@ -214,6 +247,7 @@ impl Default for OperationsConfig {
             stale_question_threshold_secs: default_stale_question_threshold(),
             prompt_dismiss_after_output_secs: default_prompt_dismiss_after_output(),
             prompt_verify_timeout_secs: default_prompt_verify_timeout(),
+            auto_heal: AutoHealConfig::default(),
         }
     }
 }
@@ -233,6 +267,48 @@ pub struct SandboxSection {
     /// Path to a sandbox config file (relative to project root).
     /// If not set, uses the built-in `SandboxConfig::default()`.
     pub config_path: Option<String>,
+}
+
+/// Lifecycle compaction policy (v0.13.1).
+///
+/// Compaction ages applied/closed goals from "fat" storage (staging copies,
+/// draft packages) down to slim audit-safe summaries, while the
+/// `goal-history.jsonl` ledger preserves the essential facts.
+///
+/// ```toml
+/// [lifecycle.compaction]
+/// enabled = true
+/// compact_after_days = 30
+/// discard = ["staging_copy", "draft_package"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompactionConfig {
+    /// Whether automatic compaction is enabled (default: true).
+    pub enabled: bool,
+    /// Age (days) after which applied/closed goals are eligible for compaction (default: 30).
+    pub compact_after_days: u32,
+    /// What to discard on compaction. Valid values: "staging_copy", "draft_package".
+    pub discard: Vec<String>,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            compact_after_days: 30,
+            discard: vec!["staging_copy".to_string(), "draft_package".to_string()],
+        }
+    }
+}
+
+/// Lifecycle management configuration section (v0.13.1).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LifecycleConfig {
+    /// Compaction policy for applied/closed goals.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 impl DaemonConfig {

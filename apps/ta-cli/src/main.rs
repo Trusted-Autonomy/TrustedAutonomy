@@ -288,6 +288,21 @@ enum Commands {
         /// Also prune old events from .ta/events/ (v0.11.3).
         #[arg(long)]
         include_events: bool,
+        /// Run lifecycle compaction: remove fat artifacts (staging, draft packages)
+        /// for applied/closed goals older than --compact-after-days (v0.13.1).
+        #[arg(long)]
+        compact: bool,
+        /// Age threshold for compaction in days (default: 30). Only used with --compact.
+        #[arg(long, default_value = "30")]
+        compact_after_days: u32,
+    },
+    /// View and manage autonomous daemon operations (v0.13.1).
+    ///
+    /// The daemon watchdog continuously monitors goal health, disk space,
+    /// and plugin status. Corrective action proposals are logged here.
+    Operations {
+        #[command(subcommand)]
+        command: commands::operations::OperationsCommands,
     },
     /// Project-wide status dashboard: active agents, pending drafts, next phase.
     Status {
@@ -605,6 +620,8 @@ fn main() -> anyhow::Result<()> {
             all,
             archive,
             include_events,
+            compact,
+            compact_after_days,
         } => commands::gc::execute(
             &config,
             *dry_run,
@@ -612,7 +629,10 @@ fn main() -> anyhow::Result<()> {
             *all,
             *archive,
             *include_events,
+            *compact,
+            *compact_after_days,
         ),
+        Commands::Operations { command } => commands::operations::execute(command, &config),
         Commands::Status { deep } => commands::status::execute(&config, *deep),
         Commands::Serve => commands::serve::execute(&project_root),
         Commands::Build { test } => commands::build::execute(&config, *test),

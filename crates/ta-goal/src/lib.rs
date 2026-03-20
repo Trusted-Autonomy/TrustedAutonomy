@@ -21,6 +21,7 @@ pub mod error;
 pub mod events;
 pub mod goal_run;
 pub mod history;
+pub mod operations;
 pub mod store;
 
 pub use conversation::{ConversationStore, ConversationTurn, TurnRole};
@@ -28,4 +29,5 @@ pub use error::GoalError;
 pub use events::{EventDispatcher, LogSink, NotificationSink, TaEvent};
 pub use goal_run::{slugify_title, GoalRun, GoalRunState};
 pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
+pub use operations::{ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog};
 pub use store::GoalRunStore;
