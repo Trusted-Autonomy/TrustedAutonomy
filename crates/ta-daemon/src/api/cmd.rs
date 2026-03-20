@@ -64,8 +64,18 @@ pub async fn execute_command(
         }
     }
 
-    // Parse the command into args. Strip leading "ta " if present.
-    let args_str = command_str.strip_prefix("ta ").unwrap_or(command_str);
+    // Parse the command into args. Strip leading "ta " if present (case-insensitive).
+    // Only the keyword is normalised — argument casing (goal titles, paths) is preserved.
+    // Handles: `ta run`, `Ta run`, `TA run` → `run`. Also strips `@ta `.
+    let without_sigil = command_str.strip_prefix('@').unwrap_or(command_str);
+    let args_str = if without_sigil.len() >= 3
+        && without_sigil[..2].eq_ignore_ascii_case("ta")
+        && without_sigil.as_bytes()[2] == b' '
+    {
+        &without_sigil[3..]
+    } else {
+        command_str
+    };
 
     let args: Vec<String> = match parse_command_args(args_str) {
         ParseResult::Parsed(args) => args,
