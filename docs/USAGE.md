@@ -337,6 +337,8 @@ This means:
 - Multiple goals can run concurrently without interfering with each other.
 - If something goes wrong, you reject the draft and start over.
 
+**Copy-on-write staging (macOS/Linux)**: On APFS (macOS) and Btrfs (Linux), TA creates staging workspaces using the kernel's native copy-on-write mechanism. The staging copy appears instantly and consumes no additional disk space until the agent actually modifies a file. On other filesystems (ext4, network mounts, etc.), TA falls back to a regular byte-for-byte copy. The strategy is detected automatically — no configuration needed. Staging creation timing and file counts are logged to help diagnose performance issues.
+
 ### Goals
 
 A goal is a unit of work. It has a lifecycle:
@@ -5363,6 +5365,11 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.12.4.1 | Shell: clear working indicator & auto-scroll fix + channel goal input | Done |
 | v0.12.5 | Semantic memory: RuVector backing store & context injection | Done |
 | v0.12.6 | Goal lifecycle observability & channel notification reliability | Done |
+| v0.12.7 | Shell UX: working indicator clearance & scroll reliability | Done |
+| v0.12.8 | Alpha bug-fixes: Discord notification flood & draft CLI disconnect | Done |
+| v0.13.0 | Reflink/COW overlay optimization (APFS + Btrfs zero-cost staging) | Done |
+| v0.13.1 | Autonomous operations & self-healing daemon | Planned |
+| v0.13.2 | MCP transport abstraction (TCP/Unix socket) | Planned |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

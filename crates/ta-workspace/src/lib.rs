@@ -17,12 +17,14 @@
 //!   append-optimized, survives process restarts.
 
 pub mod conflict;
+pub mod copy_strategy;
 pub mod error;
 pub mod overlay;
 pub mod staging;
 pub mod store;
 
 pub use conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
+pub use copy_strategy::{CopyStat, CopyStrategy};
 pub use error::WorkspaceError;
 pub use overlay::{ExcludePatterns, OverlayWorkspace};
 pub use staging::StagingWorkspace;

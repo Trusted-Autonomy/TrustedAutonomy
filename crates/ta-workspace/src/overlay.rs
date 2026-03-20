@@ -1,15 +1,23 @@
 // overlay.rs — Copy-on-write overlay workspace for transparent agent mediation.
 //
-// An OverlayWorkspace creates a full copy of a source project in a staging
-// directory. The agent operates on the copy using its native tools — it sees
-// a complete, normal-looking project. When work is done, TA diffs the staging
-// copy against the original source to identify what changed.
+// An OverlayWorkspace creates a staging copy of a source project where the
+// agent operates using its native tools — it sees a complete, normal-looking
+// project. When work is done, TA diffs the staging copy against the original
+// source to identify what changed.
 //
-// V1: Full directory copy (cross-platform, simple).
-// V2 (future): Lazy copy-on-write via reflinks (APFS/Btrfs) or FUSE overlay.
+// Copy strategies (v0.13.0):
+// - ApfsClone: macOS APFS clonefile(2) — instant, zero disk space until write
+// - BtrfsReflink: Linux Btrfs FICLONE ioctl — instant, zero disk space until write
+// - Full: byte-for-byte copy (cross-platform fallback, always works)
+//
+// The strategy is detected automatically at workspace creation time by probing
+// the staging directory. No configuration is needed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use crate::copy_strategy::{copy_file_with_strategy, detect_strategy, CopyStat, CopyStrategy};
 
 use crate::conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
 use crate::error::WorkspaceError;
@@ -167,24 +175,35 @@ pub enum OverlayChange {
 /// The agent works in `staging_dir` using its native tools (Read, Write, Edit,
 /// Bash, etc.) and sees a complete project. TA is invisible — the only excluded
 /// directory is `.ta/` itself to avoid recursion and hide TA's internal state.
+///
+/// On APFS (macOS) and Btrfs (Linux), staging creation uses copy-on-write:
+/// files are cloned instantly with zero disk space consumed until the agent
+/// actually modifies them. Falls back to full copy on other filesystems.
 pub struct OverlayWorkspace {
     goal_id: String,
     source_dir: PathBuf,
     staging_dir: PathBuf,
-    excludes: ExcludePatterns,               // V1 TEMPORARY
+    excludes: ExcludePatterns,
     source_snapshot: Option<SourceSnapshot>, // v0.2.1: Conflict detection
+    /// Statistics from staging creation (strategy, duration, file count).
+    copy_stat: Option<CopyStat>,
 }
 
 impl OverlayWorkspace {
     /// Create an overlay workspace by copying the source project to staging.
     ///
     /// Copies everything from `source_dir` to `staging_root/<goal_id>/`,
-    /// excluding `.ta/` (always) and V1 exclude patterns.
+    /// excluding `.ta/` (always) and configured exclude patterns.
+    ///
+    /// On APFS (macOS) and Btrfs (Linux), uses copy-on-write (COW) cloning:
+    /// the staging copy is created instantly with no disk I/O. The filesystem
+    /// shares data pages between the source and staging until either is modified.
+    /// Falls back to full byte-for-byte copy on other filesystems.
     pub fn create(
         goal_id: impl Into<String>,
         source_dir: impl AsRef<Path>,
         staging_root: impl AsRef<Path>,
-        excludes: ExcludePatterns, // V1 TEMPORARY
+        excludes: ExcludePatterns,
     ) -> Result<Self, WorkspaceError> {
         let goal_id = goal_id.into();
         let source_dir = source_dir.as_ref().to_path_buf();
@@ -195,11 +214,37 @@ impl OverlayWorkspace {
             source,
         })?;
 
-        copy_dir_recursive(&source_dir, &staging_dir, &excludes)?;
+        // Detect the best available copy strategy for this filesystem.
+        let strategy = detect_strategy(&staging_dir);
+
+        tracing::info!(
+            goal_id = %goal_id,
+            strategy = strategy.description(),
+            source = %source_dir.display(),
+            staging = %staging_dir.display(),
+            "creating overlay workspace"
+        );
+
+        let start = Instant::now();
+        let mut stat = CopyStat::new(strategy);
+
+        copy_dir_recursive(&source_dir, &staging_dir, &excludes, strategy, &mut stat)?;
+
+        stat.duration = start.elapsed();
+
+        tracing::info!(
+            goal_id = %goal_id,
+            strategy = strategy.description(),
+            files = stat.files_copied,
+            bytes = stat.bytes_total,
+            duration_ms = stat.duration.as_millis(),
+            cow = strategy.is_cow(),
+            "overlay workspace created"
+        );
 
         // v0.2.1: Capture source snapshot for conflict detection.
         let snapshot =
-            SourceSnapshot::capture(&source_dir, |path| excludes.should_skip_path(path)).ok(); // Tolerate snapshot failure — conflict detection is optional.
+            SourceSnapshot::capture(&source_dir, |path| excludes.should_skip_path(path)).ok();
 
         Ok(Self {
             goal_id,
@@ -207,6 +252,7 @@ impl OverlayWorkspace {
             staging_dir,
             excludes,
             source_snapshot: snapshot,
+            copy_stat: Some(stat),
         })
     }
 
@@ -215,7 +261,7 @@ impl OverlayWorkspace {
         goal_id: impl Into<String>,
         source_dir: impl AsRef<Path>,
         staging_dir: impl AsRef<Path>,
-        excludes: ExcludePatterns, // V1 TEMPORARY
+        excludes: ExcludePatterns,
     ) -> Self {
         Self {
             goal_id: goal_id.into(),
@@ -223,6 +269,7 @@ impl OverlayWorkspace {
             staging_dir: staging_dir.as_ref().to_path_buf(),
             excludes,
             source_snapshot: None, // Snapshot must be loaded separately if needed.
+            copy_stat: None,       // Not available when reopening an existing workspace.
         }
     }
 
@@ -246,6 +293,18 @@ impl OverlayWorkspace {
 
     pub fn staging_dir(&self) -> &Path {
         &self.staging_dir
+    }
+
+    /// Statistics from staging creation: strategy used, duration, file count, bytes.
+    /// Returns `None` for workspaces opened from disk (not freshly created).
+    pub fn copy_stat(&self) -> Option<&CopyStat> {
+        self.copy_stat.as_ref()
+    }
+
+    /// The copy strategy used when creating this workspace.
+    /// Returns `None` for workspaces opened from disk.
+    pub fn copy_strategy(&self) -> Option<CopyStrategy> {
+        self.copy_stat.as_ref().map(|s| s.strategy)
     }
 
     /// Diff the staging workspace against the source to find all changes.
@@ -709,11 +768,16 @@ impl OverlayWorkspace {
 
 // ── Directory copy ──────────────────────────────────────────────
 
-/// Recursively copy a directory, excluding `.ta/` (always) and V1 exclude patterns.
+/// Recursively copy a directory using the specified strategy.
+///
+/// Excludes `.ta/` (always, via [`ExcludePatterns`]) and any other configured
+/// patterns. Updates `stat` with file count and byte totals.
 fn copy_dir_recursive(
     src: &Path,
     dst: &Path,
-    excludes: &ExcludePatterns, // V1 TEMPORARY
+    excludes: &ExcludePatterns,
+    strategy: CopyStrategy,
+    stat: &mut CopyStat,
 ) -> Result<(), WorkspaceError> {
     let entries = fs::read_dir(src).map_err(|source| WorkspaceError::IoError {
         path: src.to_path_buf(),
@@ -728,7 +792,6 @@ fn copy_dir_recursive(
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
 
-        // V1 TEMPORARY: Check exclude patterns (includes hardcoded .ta/ skip).
         if excludes.should_exclude(&name) {
             continue;
         }
@@ -741,12 +804,20 @@ fn copy_dir_recursive(
                 path: dst_path.clone(),
                 source,
             })?;
-            copy_dir_recursive(&src_path, &dst_path, excludes)?;
+            copy_dir_recursive(&src_path, &dst_path, excludes, strategy, stat)?;
         } else {
-            fs::copy(&src_path, &dst_path).map_err(|source| WorkspaceError::IoError {
-                path: dst_path,
-                source,
+            // Collect source file size for benchmarking before copying.
+            let file_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+
+            copy_file_with_strategy(&src_path, &dst_path, strategy).map_err(|source| {
+                WorkspaceError::IoError {
+                    path: dst_path,
+                    source,
+                }
             })?;
+
+            stat.files_copied += 1;
+            stat.bytes_total += file_size;
         }
     }
 
@@ -1040,7 +1111,15 @@ mod tests {
         // Apply to a fresh target.
         let target = TempDir::new().unwrap();
         // Pre-populate target with source files to test modification and deletion.
-        copy_dir_recursive(source.path(), target.path(), &ExcludePatterns::none()).unwrap();
+        let mut stat = CopyStat::new(CopyStrategy::Full);
+        copy_dir_recursive(
+            source.path(),
+            target.path(),
+            &ExcludePatterns::none(),
+            CopyStrategy::Full,
+            &mut stat,
+        )
+        .unwrap();
 
         let applied = overlay.apply_to(target.path()).unwrap();
         assert_eq!(applied.len(), 3);

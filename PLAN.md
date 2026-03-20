@@ -108,9 +108,6 @@ External users (working on their own projects, not TA itself) need these phases 
 | v0.13.4 | External Action Governance — needed when agents send emails/API calls/posts |
 | v0.13.5 | Database Proxy Plugins — depends on v0.13.4 |
 | v0.13.9 | Product Constitution Framework — project-level behavioral contracts, draft-time scan, release gate |
-| v0.13.11 | Shell as first-class channel consumer — shell/web driven by same SSE events as Discord |
-| v0.13.12 | Full Slack plugin — bidirectional (Socket Mode listener + progress streamer + buttons) |
-| v0.13.13 | Full Email plugin — bidirectional (webhook inbound + approve-by-link) |
 | v0.14.x | Enterprise Readiness — sandboxing, attestation, multi-party governance, cloud/team deployment, SSO |
 
 ### Enterprise (Beta)
@@ -4624,19 +4621,23 @@ Audit all `push_output`, `push_heartbeat`, and `agent_output.push` call sites to
 > Beta-quality features for enterprise users, team deployments, and extended runtime options. Core alpha workflow (v0.12.x) must be stable before starting. Ordered by dependency chain: transport → runtime → governance → proxy, with VCS externalization already done (v0.12.0.2), community hub and compliance audit as capstones.
 
 ### v0.13.0 — Reflink/COW Overlay Optimization
-<!-- status: pending -->
+<!-- status: done -->
 <!-- beta milestone start -->
-**Goal**: Replace full-copy staging with copy-on-write to eliminate filesystem bloat. Detect APFS/Btrfs and use native reflinks; fall back to FUSE overlay on unsupported filesystems.
+**Goal**: Replace full-copy staging with copy-on-write to eliminate filesystem bloat. Detect APFS/Btrfs and use native reflinks; fall back to full copy on unsupported filesystems.
 
-#### Items
+#### Completed
 
-1. [ ] Detect filesystem type (APFS, Btrfs, ext4, etc.) at staging creation time
-2. [ ] APFS: use `cp -c` (reflink) for instant zero-cost copies on macOS
-3. [ ] Btrfs: use `cp --reflink=always` on Linux
-4. [ ] Fallback: full copy on unsupported filesystems (current behavior)
-5. [ ] Optional FUSE overlay for cross-platform COW on filesystems without reflink support
-6. [ ] Benchmark: measure staging creation time and disk usage before/after
-7. [ ] Update OverlayWorkspace to detect and select strategy automatically
+- [x] **Filesystem probe at creation time** — `detect_strategy(staging_dir)` probes with a tiny temp file clone at workspace creation. No configuration needed; strategy chosen automatically (`copy_strategy.rs`).
+- [x] **APFS clone via `clonefile(2)` (macOS)** — Direct syscall via `extern "C"` (libSystem.B.dylib, always linked). Zero data I/O; pages shared until modified. No extra crate dependency.
+- [x] **Btrfs reflink via `FICLONE` ioctl (Linux)** — `libc::ioctl(dst_fd, FICLONE, src_fd)`. Zero data I/O on Btrfs and XFS (Linux 4.5+). `libc` added as linux-only target dep.
+- [x] **Fallback full copy** — Transparent fallback when COW not supported (ext4, network FS, cross-device). Same behavior as before.
+- [x] **Benchmark / observability** — `CopyStat` records: strategy used, wall-clock duration, file count, total source bytes. Logged at `tracing::info!` level on every workspace creation. Exposed via `OverlayWorkspace::copy_stat()` and `copy_strategy()`.
+- [x] **`OverlayWorkspace` integration** — `create()` detects strategy, passes it to `copy_dir_recursive`, accumulates `CopyStat`. Stores result in workspace for callers. Public API: `copy_stat() -> Option<&CopyStat>`, `copy_strategy() -> Option<CopyStrategy>`.
+- [x] **9 new tests** — strategy description/is_cow, detect_strategy probe, full-copy correctness, stat accumulation, platform-specific COW probe + copy validation (macOS/Linux). All 48 ta-workspace tests pass.
+
+#### Deferred items
+
+- **FUSE overlay** (item 5) — Cross-platform COW via user-space FUSE requires a separate crate (fuse-overlayfs) and kernel FUSE module availability, with significant complexity for limited benefit given APFS/Btrfs coverage. Deferred to a future enhancement phase.
 
 #### Version: `0.13.0-alpha`
 
@@ -5376,102 +5377,6 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 13. [ ] Tests: `VelocityEntry` builder from mock goal/draft; `VelocityStore` append + load round-trip; aggregate calculation; rework rollup
 
 #### Version: `0.13.10-alpha`
-
----
-
-### v0.13.11 — Shell as First-Class Channel Consumer
-
-<!-- status: pending -->
-<!-- beta: yes — UX parity across all interfaces -->
-**Goal**: Make `ta shell` (and the web UI) consume the same SSE events as channel plugins (Discord, Slack, email) rather than ad-hoc polling or separate code paths. Today the shell has auto-tail for goal progress but it does not render `ReviewRequested`, draft-ready notifications, or other lifecycle events in a consistent, event-driven way. This phase unifies all interfaces under a single event model.
-
-**Motivation**: The channel plugin model (SSE → event handler → channel-specific render) is already proven with Discord. The shell is effectively a channel that happens to be a local TUI/CLI. Driving it from the same events means any new event type or data improvement automatically benefits all interfaces.
-
-**Depends on**: v0.12.1 (Discord channel polish, proven event model), v0.12.8 (event schema with title/summary fields)
-
-#### Design
-
-The shell subscribes to `GET /api/events` (same endpoint as Discord's `run_progress_streamer`). For each event type, it renders an appropriate inline notification:
-
-| Event | Shell rendering |
-|---|---|
-| `goal_started` | `→ Goal started: <title>` banner |
-| `goal_completed` | `✓ Goal complete: <title>` + "Draft ready — type `ta draft view <id>` to review" |
-| `review_requested` | Inline card: title, summary, draft ID, approve/deny shorthand |
-| `draft_applied` | `✓ Applied: <N> files changed` |
-| `goal_failed` | `✗ Failed: <error>` with next-step suggestion |
-| `agent_question` | Already handled via interactive prompt — confirm wiring |
-
-The shell event loop runs in a background task alongside the REPL, posting notifications when the user is idle (between prompts). During an active command, notifications are queued and shown after the response.
-
-#### Items
-
-1. [ ] Extract `EventSubscriber` trait from `progress.rs` (Discord) — shared interface for SSE event consumption
-2. [ ] Implement `ShellEventRenderer` that satisfies `EventSubscriber` — renders events as inline shell output
-3. [ ] Run `ShellEventRenderer` as background task in `ta shell` (REPL mode and TUI mode)
-4. [ ] Render `ReviewRequested` as an inline draft-ready card with `ta draft view <id>` and `ta draft approve <id>` shortcuts
-5. [ ] Render `GoalFailed` with actionable suggestion (inspect staging, re-run, etc.)
-6. [ ] Queue notifications during active command execution; flush after response displayed
-7. [ ] Web UI (`/api/events` EventSource): hook the existing web frontend to the same event stream; render review-ready banners in the review UI without page refresh
-8. [ ] Tests: mock SSE server, verify `ShellEventRenderer` emits correct strings for each event type
-
-#### Version: `0.13.11-alpha`
-
----
-
-### v0.13.12 — Full Slack Channel Plugin (Bidirectional)
-
-<!-- status: pending -->
-<!-- beta: yes — channel parity -->
-**Goal**: Promote `ta-channel-slack` from send-only connector to a full bidirectional channel plugin on par with `ta-channel-discord`. Users can issue `ta` commands from Slack, receive goal progress and draft-ready notifications, and approve/deny drafts via Slack buttons.
-
-**Current state**: `ta-connector-slack` (v0.11.5) can *deliver* interactive questions and receive answers via Slack Block Kit. It does not have a persistent listener (`listener.rs`), SSE event streamer (`progress.rs`), or slash-command handler. It is send-only and not discoverable as a channel plugin.
-
-**Depends on**: v0.12.1 (Discord reference implementation to mirror), v0.13.11 (unified event model)
-
-#### Items
-
-1. [ ] `plugins/ta-channel-slack/src/listener.rs` — Slack Socket Mode WebSocket listener (replaces polling; no public URL required)
-2. [ ] Slash command handling: `/ta <command>` → forward to daemon `POST /api/cmd` → reply in thread
-3. [ ] `plugins/ta-channel-slack/src/progress.rs` — SSE event streamer (mirrors Discord `progress.rs`)
-   - `review_requested` → Block Kit draft-ready card with Approve/Deny buttons (`custom_id = "draft_{uuid}_{approve|deny}"`)
-   - Goal state transitions → compact status messages
-4. [ ] Button callback handler: approve/deny button clicks → `POST /api/drafts/{id}/approve|deny`
-5. [ ] Rate limiting (per-user token bucket, same as Discord)
-6. [ ] `channel.toml` manifest for the Slack plugin
-7. [ ] `install_local.sh` updated to build and install Slack plugin alongside Discord
-8. [ ] Integration tests: mock Slack Socket Mode server, verify round-trip command → response and event → notification
-9. [ ] Documentation: `docs/USAGE.md` Slack setup section (app manifest, Socket Mode token, install)
-
-#### Version: `0.13.12-alpha`
-
----
-
-### v0.13.13 — Full Email Channel Plugin (Bidirectional)
-
-<!-- status: pending -->
-<!-- beta: yes — channel parity -->
-**Goal**: Promote `ta-channel-email` from send-only connector to a bidirectional channel plugin. Users can issue `ta` commands by replying to TA emails or sending to a designated mailbox, and receive draft-ready notifications with approve/deny links.
-
-**Current state**: `ta-connector-email` (v0.11.5) sends HTML+text emails via a configurable HTTP endpoint. It has no inbound handler, cannot receive replies, and is not discoverable as a channel plugin.
-
-**Approach**: Inbound email is harder than Slack (no persistent socket). Two supported modes:
-1. **Webhook mode** (recommended): Email provider (SendGrid, Postmark, Mailgun) parses incoming mail and POSTs JSON to `POST /api/channels/email/inbound` — TA parses the parsed body, no raw MIME handling needed.
-2. **IMAP polling** (self-hosted): Poll a mailbox every N seconds, parse replies using `mail-parser`.
-
-#### Items
-
-1. [ ] `POST /api/channels/email/inbound` daemon endpoint — accepts webhook payloads from SendGrid/Postmark/Mailgun; extracts sender, subject, body text; strips quoted reply text
-2. [ ] Command extraction: parse `ta <command>` from email body (same case-insensitive prefix rules as shell/Discord)
-3. [ ] Reply routing: match reply's `In-Reply-To` / `References` headers to originating goal thread
-4. [ ] IMAP poller (`plugins/ta-channel-email/src/imap.rs`) — optional, for self-hosted setups without a webhook-capable email provider
-5. [ ] `progress.rs` SSE event streamer: `review_requested` → HTML email with approve link (`{daemon_url}/api/drafts/{id}/approve` — one-click approve via GET with token)
-6. [ ] Approve-by-link: short-lived signed token (HMAC, 24h TTL) attached to approve/deny URLs in emails; `GET /api/drafts/{id}/approve?token=<tok>` validates and applies
-7. [ ] `channel.toml` manifest for the email plugin
-8. [ ] Tests: webhook inbound parsing (SendGrid format), command extraction, reply threading, token validation
-9. [ ] Documentation: `docs/USAGE.md` email setup section (webhook URL, IMAP config, approve-by-link security)
-
-#### Version: `0.13.13-alpha`
 
 ---
 

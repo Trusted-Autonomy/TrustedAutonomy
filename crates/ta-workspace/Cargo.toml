@@ -17,5 +17,8 @@ tracing = { workspace = true }
 sha2 = "0.10"
 ta-changeset = { path = "../ta-changeset" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
