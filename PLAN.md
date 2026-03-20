@@ -4735,6 +4735,30 @@ These items integrate with the per-project validation commands defined in `const
 28. [ ] **Cycle guard**: If a follow-up itself fails validation, do not auto-follow-up again — surface to human with history of the chain. Prevent runaway self-healing loops.
 29. [ ] **`ta operations log`** extension: Validation failure events and follow-up launches appear in the operations log with outcome (fixed, abandoned, pending).
 
+#### Lifecycle Compaction
+
+**Distinction from GC**: `ta gc` (implemented in v0.11.3) removes orphaned and zombie records. Compaction is different — it ages applied/closed records from "fat" storage (full file diffs, draft packages, staging copies, email bodies, DB change logs) down to "slim" audit-safe summaries, while the `goal-history.jsonl` ledger preserves the essential facts. The VCS record (the merged PR) is the source of truth for what changed; the fat artifacts are only needed for review windows.
+
+30. [ ] **Compaction policy in `daemon.toml`**:
+    ```toml
+    [lifecycle.compaction]
+    enabled = true
+    # Age after which applied/closed goals are eligible for compaction
+    compact_after_days = 30
+    # What to retain in the history ledger after compaction
+    retain = ["title", "state", "phase", "agent", "timestamps",
+              "artifact_count", "lines_changed", "draft_id", "vcs_ref"]
+    # Artifacts to discard on compaction (these are recoverable from VCS)
+    discard = ["staging_copy", "draft_package", "file_diffs"]
+    # Future: email bodies, DB mutation logs once v0.13.4/v0.13.5 land
+    # discard_external_actions_after_days = 90
+    ```
+31. [ ] **Automatic compaction pass**: Daemon runs a compaction pass on startup and on a configurable schedule (default: nightly). Identifies goals past `compact_after_days` in terminal state (`applied`, `denied`, `completed`). Proposes removal of fat artifacts; auto-executes if `clean_applied_staging` is in `allowed` auto-heal list. Audit event emitted for every compaction.
+32. [ ] **Compaction never touches the ledger**: `goal-history.jsonl` grows forever (it's small — ~200 bytes/entry). Compaction only removes fat artifacts. `ta goal history` continues to show all historical goals after their staging/drafts are gone.
+33. [ ] **`ta gc --compact`**: Adds a compaction pass to the existing `ta gc` command for manual triggering. Dry-run shows what would be discarded: "Goal abc1234 (applied 45 days ago): removes 2.1 GB staging + 84 KB draft package; retains history entry."
+34. [ ] **External action compaction (stub for v0.13.4+)**: Reserve a `discard_external_actions_after_days` policy field now. When v0.13.4 (External Action Governance) and v0.13.5 (DB Proxy) land, email bodies, API request/response logs, and DB mutation records respect this window — summary retained (what action, when, who approved), payload discarded.
+35. [ ] **Compaction audit trail**: Every compaction pass writes a single audit event: `{ event: "compaction_pass", goals_compacted: N, bytes_reclaimed: M, auto: true|false, timestamp }`. This event is itself never compacted (audit log is append-only, not subject to lifecycle policy).
+
 #### Version: `0.13.1-alpha`
 
 ---
