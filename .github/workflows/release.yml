@@ -241,9 +241,6 @@ jobs:
           prerelease: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease == 'true' }}
           files: artifacts/*
           body_path: release-body.md
-          # Pin target_commitish to the tag so GitHub doesn't try to change it
-          # on an already-published release (which would fail with "immutable" error).
-          target_commitish: ${{ steps.get_version.outputs.version }}
           # Update the release if it already exists (e.g. manually created before CI ran)
           make_latest: true
 
