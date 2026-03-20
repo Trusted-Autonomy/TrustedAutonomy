@@ -4813,20 +4813,29 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 ### v0.13.1.4 — Game Engine Project Templates
 <!-- status: pending -->
-**Goal**: Make onboarding an existing Unreal C++ or Unity C# game project seamless. `ta init --template unreal` / `ta init --template unity` provisions BMAD agent configs, Claude Flow `.mcp.json`, a discovery goal, and project-appropriate `.taignore` and `policy.yaml`. First-run experience: one command starts a structured onboarding goal that produces a PRD, architecture doc, and sprint-1 stories.
+**Goal**: Make onboarding an existing Unreal C++ or Unity C# game project seamless. `ta init --template unreal-cpp` / `ta init --template unity-csharp` provisions BMAD agent configs, Claude Flow `.mcp.json`, a discovery goal, and project-appropriate `.taignore` and `policy.yaml`. First-run experience: one command starts a structured onboarding goal that produces a PRD, architecture doc, and sprint-1 stories.
 
-**Prerequisite note for users**: Claude Code (claude CLI), Claude Flow MCP server (`claude-flow`), and BMAD must be installed on the machine before running the discovery goal. TA does not install these — it configures the project to use them. BMAD is consumed as a cloned git repo or npm-installed package; the template includes setup instructions in the generated `ONBOARDING.md`.
+**BMAD integration model**: BMAD is a git repo of markdown persona prompts — it must be installed **machine-locally**, not cloned into the game project (Perforce depot or otherwise). The canonical install location is `~/.bmad/` (Unix) or `%USERPROFILE%\.bmad` (Windows). TA stores the path in `.ta/bmad.toml` and agent configs reference it from there. The project itself stays clean — no BMAD files are committed to VCS.
+
+| Framework | Role | Installation |
+|---|---|---|
+| **BMAD** | Structured planning — PRD, architecture, story decomposition, role-based review | `git clone` to `~/.bmad/` (machine-local, not in project) |
+| **Claude Flow** | Parallel implementation — swarm coordination across module boundaries | `npm install -g @ruvnet/claude-flow` |
+| **TA** | Governance — staging isolation, draft review, audit trail, policy | `ta` binary (already installed) |
+
+**Prerequisite note for users**: Claude Code (`claude` CLI), Claude Flow, and BMAD must be installed on the machine before running the discovery goal. TA does not install these — it configures the project to use them. See USAGE.md "Game Engine Projects" for per-platform setup.
 
 #### Items
 
-1. [ ] **`ProjectType` enum**: Add `UnrealCpp` and `UnityCsharp` variants to `detect_project_type()` (detect by `*.uproject` / `*.sln` + `Assets/` presence)
-2. [ ] **`ta init --template unreal`**: Write `.taignore` (excludes `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`), `workflow.toml`, `policy.yaml` (require review for source changes), and `memory.toml`
-3. [ ] **`ta init --template unity`**: Write `.taignore` (excludes `Library/`, `Temp/`, `obj/`, `Build/`), `workflow.toml`, `policy.yaml`, `memory.toml`
-4. [ ] **BMAD agent config**: Generate `.bmad/agents/` with PM, architect, dev, and QA role configs pointing to Claude as the model; include `team.yaml` defining the swarm topology
-5. [ ] **Claude Flow `.mcp.json`**: Generate project-root `.mcp.json` with `claude-flow` server entry and `ta` MCP server entry; document that `claude-flow` must be installed separately
-6. [ ] **Discovery goal template**: Generate `ONBOARDING.md` with the first TA goal prompt: "Survey this project — produce a PRD, architecture overview, and sprint-1 story list using BMAD roles." Include prerequisite checklist (Claude installed, claude-flow installed, BMAD cloned).
-7. [ ] **USAGE.md section**: Add "Game Engine Projects" subsection under "Project Templates" documenting both templates, prerequisites, and the first-run workflow
-8. [ ] **`ta init` help text**: List `unreal` and `unity` in `--template` choices with a one-line description each
+1. [ ] **`ProjectType` enum**: Add `UnrealCpp` and `UnityCsharp` variants to `detect_project_type()` — detect by `*.uproject` or `*.sln` + `Assets/` presence
+2. [ ] **`ta init --template unreal-cpp`**: Write `.taignore` (excludes `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`, `*.generated.h`), `workflow.toml`, `policy.yaml` (protect `Config/DefaultEngine.ini`, `*.uproject`, `Build.cs`), `memory.toml` (pre-seed UE5 conventions: TObjectPtr, UPROPERTY, game thread rules)
+3. [ ] **`ta init --template unity-csharp`**: Write `.taignore` (excludes `Library/`, `Temp/`, `obj/`, `*.csproj.user`), `workflow.toml`, `policy.yaml` (protect `ProjectSettings/`, `*.asmdef`), `memory.toml` (pre-seed Unity conventions: MonoBehaviour lifecycle, Coroutines vs Jobs)
+4. [ ] **`.ta/bmad.toml` config**: Written by `ta init --template`; stores `bmad_home` (default: `~/.bmad` / `%USERPROFILE%\.bmad`). `TA_BMAD_HOME` env var takes precedence. Agent configs reference `${bmad_home}/agents/`.
+5. [ ] **BMAD agent configs (`.ta/agents/`)**: Generate `bmad-pm.toml`, `bmad-architect.toml`, `bmad-dev.toml`, `bmad-qa.toml` pointing to `${bmad_home}/agents/` persona prompts. Lives under `.ta/agents/` — not in the game source tree.
+6. [ ] **Claude Flow `.mcp.json`**: Generate project-root `.mcp.json` with `claude-flow` and `ta` MCP server entries; note that `claude-flow` must be installed via npm separately.
+7. [ ] **Discovery goal template** (`.ta/onboarding-goal.md`): Describes the first TA goal to run — survey the project, produce `docs/architecture.md`, `docs/bmad/prd.md`, and `docs/bmad/stories/` using BMAD roles. Includes prerequisite checklist: Claude installed, claude-flow installed, BMAD cloned to `bmad_home`.
+8. [ ] **`ta init templates` output**: List `unreal-cpp` and `unity-csharp` with one-line descriptions noting BMAD + Claude Flow dependency.
+9. [ ] **USAGE.md section**: "Game Engine Projects" with per-platform setup (Windows/macOS), BMAD machine-local install steps, and the `ta init` → `ta run` first-run workflow.
 
 #### Version: `0.13.1-alpha.4`
 
@@ -4846,7 +4855,7 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 #### Items
 
-1. [ ] **Reproduce R1 in a test or manual repro script**: Confirm the indicator state machine path that leaves `working = true` after agent exit
+1. [ ] **Reproduce R1**: Confirm the indicator state machine path that leaves `working = true` after agent exit
 2. [ ] **Fix R1**: Clear `WorkingIndicator` on `AgentExit` / `GoalCompleted` events; add state assertion in existing TUI tests
 3. [ ] **Reproduce R2**: Confirm whether `auto_scroll_if_near_bottom()` is called on all output paths (streaming tokens, tool results, heartbeat)
 4. [ ] **Fix R2**: Ensure scroll-to-bottom fires on every output-append path when the view is within N lines of the bottom (N = configurable, default 3)
@@ -5333,6 +5342,8 @@ ta run "write tests" --model ollama/phi4-mini   # shorthand: model implies ta-ag
 <!-- beta: yes — project-level behavioral contracts and release governance -->
 **Goal**: Make the constitution a first-class, configurable artifact that downstream projects declare, extend, and enforce — not a TA-internal concept hard-wired to `docs/TA-CONSTITUTION.md`. A project using TA can define its own invariants (what functions inject, what functions restore, what the rules are), and TA's draft-build scan and release checklist gate read from that config.
 
+**Theoretical basis**: The constitution is TA's implementation of the "Value Judgment module" (§13) and "Self-Reflexive Meta Control System" (§15) described in *Suggested Metrics for Trusted Autonomy* (Finkelstein, NIST docket NIST-2023-0009-0002, Jan 2024). See `docs/trust-metrics.md` for the full mapping of TA architecture to that paper's 15 trust variables.
+
 *(Moved forward from v0.14.3 — constitution tooling is a natural capstone to beta governance, not a post-beta concern. Compliance audit ledger moves to v0.14.3 as an enterprise-tier feature requiring cloud deployment context.)*
 
 **Problem**: Currently the constitution is TA-specific. The §4 injection/cleanup rules, the pattern scanner, and the release checklist all reference TA's own codebase conventions. A downstream project using TA (e.g., a web service or a data pipeline) has different injection patterns, different error paths, and different invariants. They get no constitution enforcement at all.
@@ -5600,6 +5611,8 @@ These are addressed across v0.14.4–v0.14.5.
 <!-- status: pending -->
 **Goal**: Run agent processes in hardened sandboxes that limit filesystem access, network reach, and syscall surface. TA manages the sandbox lifecycle; agents work inside it transparently.
 
+**Trust metric alignment**: Directly satisfies Security (§11), Risk Mitigation (§1), and Robustness & Resilience (§10) from *Suggested Metrics for Trusted Autonomy* (NIST-2023-0009-0002). Sandboxing reduces the consequence term in the risk formula: even a misbehaving agent cannot affect production without explicit approval. See `docs/trust-metrics.md`.
+
 **Market context (March 2026)**: NVIDIA launched OpenShell — a Rust-based agent runtime using Landlock + seccomp + L7 network proxy, with 17 named enterprise partners. Rather than building equivalent kernel-level isolation from scratch, this phase supports OpenShell as a first-class runtime adapter. The positioning: OpenShell = runtime confinement; TA = change governance. They are complementary, and the joint story turns NVIDIA's distribution into a tailwind for TA. See `/Paid add-ons/nvidia-openstack-positioning.md`.
 
 #### Items
@@ -5625,6 +5638,8 @@ These are addressed across v0.14.4–v0.14.5.
 ### v0.14.1 — Hardware Attestation & Verifiable Audit Trails
 <!-- status: pending -->
 **Goal**: Bind audit log entries to the hardware that produced them via TPM attestation or Apple Secure Enclave signing. Enables cryptographic proof that audit records were produced on the declared machine and not retroactively fabricated.
+
+**Trust metric alignment**: Implements the "complete accounting of behavior" requirement in Self-Reflexive Meta Control (§15) and the traceability requirement in Reliability (§3) from *Suggested Metrics for Trusted Autonomy* (NIST-2023-0009-0002). A tamper-evident log cryptographically bound to hardware is the infrastructure that makes the accounting trustworthy rather than self-reported. See `docs/trust-metrics.md`.
 
 #### Items
 

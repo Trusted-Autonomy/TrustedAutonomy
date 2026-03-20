@@ -1429,6 +1429,157 @@ agents:
 
 ---
 
+## Game Engine Projects
+
+Use `ta init --template` to onboard an existing Unreal C++ or Unity C# project. The template wires up [BMAD](https://github.com/bmadcode/BMAD-METHOD) (structured planning) and [Claude Flow](https://github.com/ruvnet/claude-flow) (parallel implementation) alongside TA governance.
+
+### Prerequisites
+
+Install these once per machine — they are not bundled with TA:
+
+**1. Claude Code (the `claude` CLI)**
+
+```bash
+# macOS / Linux
+npm install -g @anthropic-ai/claude-code
+
+# Windows (PowerShell)
+npm install -g @anthropic-ai/claude-code
+```
+
+**2. Claude Flow MCP server**
+
+```bash
+npm install -g @ruvnet/claude-flow
+```
+
+Verify: `claude-flow --version`
+
+**3. BMAD — install machine-locally, NOT inside your game project**
+
+BMAD is a collection of markdown persona prompts. Install it once to a home directory location. **Do not clone it into your Perforce depot or game repo** — it is a tool, not project source.
+
+```bash
+# macOS / Linux
+git clone https://github.com/bmadcode/BMAD-METHOD ~/.bmad
+
+# Windows (PowerShell — run from your user home directory)
+git clone https://github.com/bmadcode/BMAD-METHOD "$env:USERPROFILE\.bmad"
+```
+
+TA stores the path in `.ta/bmad.toml` (set automatically by `ta init --template`). You can override it with the `TA_BMAD_HOME` environment variable:
+
+```bash
+# If you cloned BMAD somewhere else
+export TA_BMAD_HOME=/path/to/bmad   # Unix
+$env:TA_BMAD_HOME = "C:\tools\bmad"  # Windows PowerShell
+```
+
+**4. Anthropic API key**
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...   # Unix
+$env:ANTHROPIC_API_KEY = "sk-ant-..."  # Windows PowerShell
+```
+
+Add to your shell profile (`.zshrc`, `.bashrc`) or Windows user environment variables so it persists across sessions.
+
+---
+
+### Initialize a game project
+
+Navigate to the root of your game project (the directory containing `MyGame.uproject` or the Unity `Assets/` folder) and run:
+
+```bash
+# Unreal Engine C++ project
+ta init --template unreal-cpp
+
+# Unity C# project
+ta init --template unity-csharp
+```
+
+This writes:
+
+| File | Purpose |
+|---|---|
+| `.ta/bmad.toml` | Path to your machine-local BMAD install |
+| `.ta/agents/bmad-*.toml` | PM, architect, dev, QA role configs referencing BMAD personas |
+| `.ta/workflow.toml` | TA config with Perforce/git adapter, verify commands, auto-approval policy |
+| `.ta/policy.yaml` | Protects critical files (`.uproject`, `Build.cs`, `Config/DefaultEngine.ini`) |
+| `.ta/.taignore` | Excludes build artifacts from staging (`Binaries/`, `Intermediate/`, `Library/`, etc.) |
+| `.mcp.json` | MCP server entries for both `ta` and `claude-flow` |
+| `.ta/onboarding-goal.md` | The first goal prompt to run — produces PRD, architecture doc, sprint stories |
+
+> **Perforce note**: None of these files need to go into the depot. Add `.ta/`, `.mcp.json`, and `ONBOARDING.md` to your `.p4ignore` (or equivalent) if you prefer to keep them local.
+
+---
+
+### Run the discovery goal
+
+After `ta init`, start the daemon and run the onboarding goal:
+
+```bash
+ta daemon start
+ta run "$(cat .ta/onboarding-goal.md)"
+```
+
+The agent will:
+1. Explore your codebase (`Source/`, `Config/`, `*.uproject` for Unreal; `Assets/`, `ProjectSettings/` for Unity)
+2. Write `docs/architecture.md` — module list, key classes, plugin deps, build targets
+3. Write `docs/bmad/prd.md` — inferred product requirements from GameMode, maps, feature flags
+4. Write `docs/bmad/stories/` — top 5 inferred work areas as BMAD story stubs
+5. Call `ta_pr_build` — packages all docs as a draft for your review
+
+Review and approve the draft:
+
+```bash
+ta draft list
+ta draft view <id>
+ta draft approve <id>
+```
+
+Once approved, the docs are in your workspace and you have a BMAD-ready project.
+
+---
+
+### Start implementing with BMAD roles
+
+```bash
+# Use the architect role to design a feature
+ta run "Design the inventory system" --agent bmad-architect
+
+# Use the dev role to implement a story
+ta run "Implement inventory pickup and drop" --agent bmad-dev
+
+# Use the QA role to write test cases
+ta run "Write integration tests for inventory system" --agent bmad-qa
+```
+
+Each goal runs in staging, produces a draft, and requires your approval before any changes land in the project.
+
+---
+
+### Using Claude Flow for parallel implementation
+
+Once BMAD has produced module boundaries in `docs/architecture.md`, Claude Flow can parallelize implementation across those modules. Add a swarm step to your `workflow.toml`:
+
+```toml
+[workflow.swarm]
+enabled = true
+max_agents = 4
+split_by = "module"   # each agent works on a separate module directory
+```
+
+Then run with swarm mode:
+
+```bash
+ta run "Implement sprint 1 stories" --agent bmad-dev --swarm
+```
+
+Claude Flow orchestrates the agents; TA collects all their changes into a single draft for your review.
+
+---
+
 ## Configuration
 
 ### Workflow Config (`.ta/workflow.toml`)
