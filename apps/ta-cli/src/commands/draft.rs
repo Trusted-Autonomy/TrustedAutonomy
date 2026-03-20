@@ -2837,11 +2837,20 @@ fn apply_package(
     // This ensures the apply is atomic — either everything succeeds or we
     // fail fast without leaving files in a half-applied state.
     if !goal.state.can_transition_to(&GoalRunState::Applied) {
+        let short_id = &goal.goal_run_id.to_string()[..8];
         anyhow::bail!(
-            "Cannot apply: goal {} is in state '{}', which cannot transition to 'applied'.\n\
-             Valid source states: pr_ready, under_review, approved.",
-            &goal.goal_run_id.to_string()[..8],
-            goal.state
+            "Cannot apply draft — the agent task \"{title}\" ({short_id}) did not complete successfully.\n\
+             \n\
+             The task is in state '{state}', but applying a draft requires the task to be in\n\
+             'pr_ready', 'under_review', or 'approved'.\n\
+             \n\
+             What to do:\n\
+             1. Check what went wrong:  ta goal status {short_id}\n\
+             2. Clean up the failed task: ta goal delete {short_id}\n\
+             3. Re-run from the beginning (e.g. ta release run <version>)",
+            title = goal.title,
+            short_id = short_id,
+            state = goal.state,
         );
     }
 

@@ -600,9 +600,13 @@ fn execute_agent_step(
             .status()?;
         if !approve_status.success() {
             anyhow::bail!(
-                "Failed to auto-approve draft {} for agent step '{}'",
-                id_str,
-                step.name
+                "Release pipeline stopped at step '{}': could not approve the agent draft (see error above).\n\
+                 \n\
+                 Fix the underlying issue, then re-run:\n\
+                 \n\
+                 ta release run {}",
+                step.name,
+                version
             );
         }
 
@@ -613,9 +617,13 @@ fn execute_agent_step(
             .status()?;
         if !apply_status.success() {
             anyhow::bail!(
-                "Failed to auto-apply draft {} for agent step '{}'",
-                id_str,
-                step.name
+                "Release pipeline stopped at step '{}' (see error above).\n\
+                 \n\
+                 Fix the underlying issue, then re-run:\n\
+                 \n\
+                 ta release run {}",
+                step.name,
+                version
             );
         }
         println!("  Draft {} applied to working directory.", id_str);
