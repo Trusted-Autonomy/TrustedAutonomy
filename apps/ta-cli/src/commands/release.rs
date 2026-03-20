@@ -320,13 +320,120 @@ fn validate_pipeline(pipeline: &ReleasePipeline) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Release history tracking ─────────────────────────────────────
+
+/// One entry in `.ta/release-history.json` — written after each successful pipeline run.
+#[derive(Debug, Serialize, Deserialize)]
+struct ReleaseRecord {
+    version: String,
+    tag: String,
+    commit: String,
+    released_at: String,
+}
+
+/// Path to the release history file within a project.
+fn release_history_path(project_root: &Path) -> PathBuf {
+    project_root.join(".ta").join("release-history.json")
+}
+
+/// Load the release history, returning an empty vec if the file doesn't exist.
+fn load_release_history(project_root: &Path) -> Vec<ReleaseRecord> {
+    let path = release_history_path(project_root);
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+/// Append a new release record to `.ta/release-history.json`.
+///
+/// Called at the end of a successful `run_pipeline`. Gets the current HEAD commit
+/// SHA automatically so the caller doesn't need to pass it.
+fn record_release(project_root: &Path, version: &str) -> anyhow::Result<()> {
+    let tag = format!("v{}", version);
+
+    // Capture HEAD commit SHA.
+    let sha_out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project_root)
+        .output()?;
+    let commit = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+
+    // ISO 8601 timestamp (UTC).
+    let released_at = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Format as YYYY-MM-DDTHH:MM:SSZ using simple arithmetic (no chrono dep).
+        let s = now;
+        let sec = s % 60;
+        let min = (s / 60) % 60;
+        let hour = (s / 3600) % 24;
+        let days = s / 86400; // days since epoch
+                              // Compute year/month/day from days-since-epoch (Gregorian).
+        let (year, month, day) = days_to_ymd(days);
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            year, month, day, hour, min, sec
+        )
+    };
+
+    let record = ReleaseRecord {
+        version: version.to_string(),
+        tag,
+        commit,
+        released_at,
+    };
+
+    let mut history = load_release_history(project_root);
+    history.push(record);
+
+    let path = release_history_path(project_root);
+    // Ensure .ta/ exists.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&history)?;
+    std::fs::write(&path, json)?;
+
+    println!(
+        "Release recorded in .ta/release-history.json (v{})",
+        version
+    );
+    Ok(())
+}
+
+/// Convert days-since-Unix-epoch to (year, month, day).
+///
+/// Uses the proleptic Gregorian calendar algorithm.
+fn days_to_ymd(days: u64) -> (u32, u32, u32) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u32, m, d)
+}
+
 // ── Commit collection ───────────────────────────────────────────
 
 /// Collect commit messages since the given tag (or the most recent tag if none specified).
 ///
-/// Pass `from_tag = Some("v0.12.7-alpha")` to override auto-detection. This is useful when
-/// intermediate releases were not git-tagged, which would cause `git describe` to return a
-/// much older tag and flood the agent with hundreds of unrelated commits.
+/// Resolution order (highest priority first):
+///   1. `from_tag` — explicit override, e.g. `--from-tag v0.12.7-alpha`
+///   2. `.ta/release-history.json` — tag from the last successful pipeline run
+///   3. `git describe --tags --abbrev=0` — most recent git tag (fallback)
+///
+/// Using the tracking file (#2) means the pipeline always knows the exact commit
+/// delta for the current release — even if intermediate git tags were created for
+/// bookkeeping purposes or if git describe returns a stale/wrong tag.
 fn collect_commits_since_tag(
     project_root: &Path,
     from_tag: Option<&str>,
@@ -347,15 +454,22 @@ fn collect_commits_since_tag(
             ),
         }
     } else {
-        let out = Command::new("git")
-            .args(["describe", "--tags", "--abbrev=0"])
-            .current_dir(project_root)
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+        // Try the release history file first — most precise source of truth.
+        let history = load_release_history(project_root);
+        if let Some(last) = history.last() {
+            Some(last.tag.clone())
+        } else {
+            // Fall back to git describe.
+            let out = Command::new("git")
+                .args(["describe", "--tags", "--abbrev=0"])
+                .current_dir(project_root)
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                }
+                _ => None,
             }
-            _ => None,
         }
     };
 
@@ -519,6 +633,16 @@ fn run_pipeline(
     }
 
     println!("Release pipeline complete.");
+
+    // Record this release in .ta/release-history.json so future runs know the
+    // exact commit delta without relying on `git describe`.
+    if !dry_run {
+        if let Err(e) = record_release(&config.workspace_root, version) {
+            // Non-fatal — release succeeded; tracking file failure is just a warning.
+            eprintln!("Warning: could not update release-history.json: {}", e);
+        }
+    }
+
     Ok(())
 }
 
