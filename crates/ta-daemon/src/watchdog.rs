@@ -96,6 +96,10 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
         if ret == 0 {
             let stats = unsafe { stats.assume_init() };
             // f_bavail = blocks available to unprivileged user, f_frsize = block size
+            // f_bavail is u32 on macOS but u64 on Linux; u64::from() widens
+            // safely on macOS and is a no-op on Linux — allow the lint rather
+            // than a cfg branch just for a widening conversion.
+            #[allow(clippy::useless_conversion)]
             Some(u64::from(stats.f_bavail) * stats.f_frsize)
         } else {
             None
