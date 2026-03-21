@@ -4879,18 +4879,18 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 #### Intelligent Surface
 
-1. [ ] **`ta status` as the one command**: Unified, prioritized view replacing `ta goal list`, `ta draft list`, `ta plan status`, `ta daemon health`, and `ta doctor`. Urgent items first (stuck goals, pending approvals, health issues), then active work, then recent completions. Details expand on demand.
-2. [ ] **`ta` with no arguments shows dashboard**: Instead of showing help, run `ta status`. The bare command becomes the entry point.
-3. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack).
-4. [ ] **Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase."
-5. [ ] **Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") are translated to command sequences by the shell agent, shown for approval before executing.
-6. [ ] **Reduce command surface**: Commands subsumed by the intelligent layer are marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface.
+1. [x] **`ta status` as the one command**: Unified, prioritized view replacing `ta goal list`, `ta draft list`, `ta plan status`, `ta daemon health`, and `ta doctor`. Urgent items first (stuck goals, pending approvals, health issues), then active work, then recent completions. Details expand on demand.
+2. [x] **`ta` with no arguments shows dashboard**: Instead of showing help, run `ta status`. The bare command becomes the entry point.
+3. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack). → v0.13.12
+4. [ ] **Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase." → v0.13.12
+5. [ ] **Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") are translated to command sequences by the shell agent, shown for approval before executing. → v0.13.12
+6. [ ] **Reduce command surface**: Commands subsumed by the intelligent layer are marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface. → v0.13.12
 
 #### Operational Runbooks
 
-7. [ ] **Runbook definitions**: YAML files in `.ta/runbooks/` defining common procedures as corrective action sequences. Example: `disk-pressure.yaml` — identify largest staging dirs, propose cleanup, execute, verify.
-8. [ ] **Runbook triggers**: Triggered automatically by watchdog conditions or manually via `ta runbook run <name>`. Each step presented for approval unless auto-heal policy covers it.
-9. [ ] **Built-in runbooks**: Ship defaults for: disk pressure, zombie goals, crashed plugins, stale drafts, failed CI. Users can override or add their own.
+7. [x] **Runbook definitions**: YAML files in `.ta/runbooks/` defining common procedures as corrective action sequences. Example: `disk-pressure.yaml` — identify largest staging dirs, propose cleanup, execute, verify.
+8. [x] **Runbook triggers**: Triggered automatically by watchdog conditions or manually via `ta runbook run <name>`. Each step presented for approval unless auto-heal policy covers it.
+9. [x] **Built-in runbooks**: Ship defaults for: disk pressure, zombie goals, crashed plugins, stale drafts, failed CI. Users can override or add their own.
 
 #### Version: `0.13.1-alpha.6`
 
@@ -5623,6 +5623,35 @@ Current releases ship archives containing a bare binary and docs. Users must man
 11. [x] **Docker option marked Coming Soon in header**: `**Option C -- Docker** *(Coming Soon)*` in USAGE.md install section.
 
 #### Version: `0.13.11-alpha`
+
+---
+
+### v0.13.12 — Beta Bug Bash & Polish
+<!-- status: pending -->
+**Goal**: Catch and fix accumulated polish debt, false positives, and deferred UX items from the v0.13.1.x sub-phases before advancing to the deeper v0.13.2+ infrastructure phases. No new features — only fixes, observability improvements, and cleanup.
+
+#### Release Pipeline & Staging Bugs
+
+1. [ ] **`ta draft apply` scans unrelated staging dirs**: During diff/rebase, `apply` enumerates all `.ta/staging/` entries and hits I/O errors on dirs deleted mid-run by GC or manual cleanup. Fix: `apply` should only access its own goal's staging dir by ID — never enumerate the staging directory. (Discovered during v0.13.1.7 release run — GC deleted a sibling staging dir while `ta draft apply` was running.)
+2. [ ] **Release pipeline drift false positive**: The "Generate release notes" agent step triggers `[info] Source changed since goal start — rebasing against current source.` even when the source has not changed since the goal started. Root cause: drift check uses mtime rather than content hash. Fix: record a content hash of source files at goal-start time and compare by content, not mtime. (Discovered during v0.13.1.7 release run.)
+3. [ ] **Release notes agent should not need a full workspace copy**: The release notes agent only reads git history and writes one `.md` file — it does not need a full staging copy of the workspace. Redesign: release notes generation queries `goal-history.jsonl` (v0.13.10) for completed phases since last tag, then writes the file directly to source without staging. This eliminates the staging/drift fragility entirely for this use case. Longer term: introduce a lightweight "scribe" goal type (no workspace copy, declared write path only) for pure-write, no-compile artifacts. (Design discussion: staging is the right model for code changes that need build/test validation; it is wasteful and fragile for pure documentation/metadata outputs that don't need verification.)
+4. [x] **`--label` dispatches even when pipeline is aborted**: When the user cancels at an approval gate (e.g., "Proceed with 'Push'? [y/N] n"), `run_pipeline` returns early via `?` but the `--label` dispatch block was outside the else branch and ran unconditionally. Fix: moved `--label` dispatch inside the `else { run_pipeline()? ... }` block so it only executes on successful pipeline completion. (Fixed in `release.rs` during v0.13.12 planning.)
+5. [ ] **GC should not run while a release pipeline is active**: `ta gc` should check for running release pipeline processes (or a lockfile written by `ta release run`) and skip — or warn — rather than deleting staging dirs mid-pipeline. Add a `--force` flag to override.
+
+#### Intelligent Surface (deferred from v0.13.1.6)
+
+5. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack).
+6. [ ] **Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase."
+7. [ ] **Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") are translated to command sequences by the shell agent, shown for approval before executing.
+8. [ ] **Reduce command surface**: Commands subsumed by the intelligent layer are marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface.
+
+#### Release Pipeline Polish (deferred from v0.13.1.x)
+
+9. [x] **Stale `.release-draft.md` poisons release notes**: If a prior release run left `.release-draft.md` in the source tree, the next release notes agent reads it as context and re-emits the old version header. Fix: added "Clear stale release draft" shell step immediately before the "Generate release notes" agent step in `DEFAULT_PIPELINE_YAML`. (Fixed in `release.rs` during v0.13.12 planning.)
+10. [ ] **Single GitHub release per build**: `ta release run --label` currently creates two GitHub release objects (one for the semver tag, one for the label tag). Redesign: one release using the label tag as the primary identifier; semver tag is a lightweight git tag only (no GH release object). Avoids duplicate entries in the GitHub releases UI.
+11. [ ] **VCS-agnostic release pipeline**: `release.rs` calls `git` and `gh` directly. Document that `ta release` requires git for now; design a path for VCS-agnostic release via `.ta/release.yaml` script hooks that project owners can override for Perforce or SVN environments.
+
+#### Version: `0.13.12-alpha`
 
 ---
 

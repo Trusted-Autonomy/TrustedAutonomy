@@ -166,19 +166,21 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
                 if *press_release {
                     generate_press_release(config, version, prompt.as_deref())?;
                 }
-            }
-            // If --label is provided, dispatch the GitHub Actions release workflow
-            // using the label tag after the pipeline completes.
-            if let Some(tag) = label {
-                if !*dry_run {
-                    println!();
-                    println!(
-                        "--label provided: dispatching release workflow for '{}'",
-                        tag
-                    );
-                    dispatch_release(tag, *prerelease, None, "release.yml")?;
-                } else {
-                    println!("[dry-run] Would dispatch: ta release dispatch {}", tag);
+                // If --label is provided, dispatch the GitHub Actions release workflow
+                // using the label tag. Only runs if the pipeline completed without error
+                // or abort — placing this inside the else block ensures it is skipped
+                // when the user cancels at an approval gate.
+                if let Some(tag) = label {
+                    if !*dry_run {
+                        println!();
+                        println!(
+                            "--label provided: dispatching release workflow for '{}'",
+                            tag
+                        );
+                        dispatch_release(tag, *prerelease, None, "release.yml")?;
+                    } else {
+                        println!("[dry-run] Would dispatch: ta release dispatch {}", tag);
+                    }
                 }
             }
             Ok(())
@@ -1709,6 +1711,11 @@ steps:
       echo "      or 'failed' messages without context."
       echo ""
       echo "Review the diff and audit log before proceeding."
+
+  - name: Clear stale release draft
+    run: |
+      rm -f .release-draft.md
+      echo "Cleared any stale .release-draft.md."
 
   - name: Generate release notes
     agent:
