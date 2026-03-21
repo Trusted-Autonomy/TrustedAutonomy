@@ -66,6 +66,17 @@ pub enum ReleaseCommands {
         /// tagging), use this to pin the correct base, e.g. `--from-tag v0.12.7-alpha`.
         #[arg(long)]
         from_tag: Option<String>,
+
+        /// After the pipeline completes, dispatch the GitHub Actions release workflow
+        /// using this tag label instead of the semver tag. Use for public-facing labels
+        /// that don't follow the `v*` auto-trigger pattern, e.g. `public-alpha-v0.13.1.7`.
+        /// Equivalent to running `ta release dispatch <label>` after `ta release run`.
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Mark the dispatched label release as a pre-release (only used with --label).
+        #[arg(long, default_value_t = false)]
+        prerelease: bool,
     },
     /// Show the pipeline that would be executed (without running it).
     Show {
@@ -135,6 +146,8 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             interactive,
             auto_approve,
             from_tag,
+            label,
+            prerelease,
         } => {
             if *interactive {
                 run_interactive_release(config, version)?;
@@ -152,6 +165,20 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
                 )?;
                 if *press_release {
                     generate_press_release(config, version, prompt.as_deref())?;
+                }
+            }
+            // If --label is provided, dispatch the GitHub Actions release workflow
+            // using the label tag after the pipeline completes.
+            if let Some(tag) = label {
+                if !*dry_run {
+                    println!();
+                    println!(
+                        "--label provided: dispatching release workflow for '{}'",
+                        tag
+                    );
+                    dispatch_release(tag, *prerelease, None, "release.yml")?;
+                } else {
+                    println!("[dry-run] Would dispatch: ta release dispatch {}", tag);
                 }
             }
             Ok(())
