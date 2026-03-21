@@ -169,6 +169,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "aws-lc-rs"
+version = "1.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a054912289d18629dc78375ba2c3726a3afe3ff71b4edba9dedfca0e3446d1fc"
+dependencies = [
+ "aws-lc-sys",
+ "zeroize",
+]
+
+[[package]]
+name = "aws-lc-sys"
+version = "0.39.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa7e52a4c5c547c741610a2c6f123f3881e409b714cd27e6798ef020c514f0a"
+dependencies = [
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+]
+
+[[package]]
 name = "axum"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -345,6 +367,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a0dd1ca384932ff3641c8718a02769f1698e7563dc6974ffd03346116310423"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -421,6 +445,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
 dependencies = [
  "error-code",
+]
+
+[[package]]
+name = "cmake"
+version = "0.1.57"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -649,6 +682,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -792,6 +831,12 @@ checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
 ]
+
+[[package]]
+name = "fs_extra"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "futures"
@@ -1452,6 +1497,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "jobserver"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9afb3de4395d6b3e67a780b6de64b51c978ecf11cb9a462c66be7d4ca9039d33"
+dependencies = [
+ "getrandom 0.3.4",
+ "libc",
 ]
 
 [[package]]
@@ -2258,7 +2313,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "rustls 0.21.12",
- "rustls-pemfile",
+ "rustls-pemfile 1.0.4",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -2446,6 +2501,8 @@ version = "0.23.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
 dependencies = [
+ "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -2461,6 +2518,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
 dependencies = [
  "base64 0.21.7",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -2489,6 +2555,7 @@ version = "0.103.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
 dependencies = [
+ "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted",
@@ -2938,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "ta-audit"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -2952,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "ta-build"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2964,7 +3031,7 @@ dependencies = [
 
 [[package]]
 name = "ta-changeset"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "glob",
@@ -2982,7 +3049,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3026,7 +3093,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-discord"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3040,7 +3107,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-email"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3054,7 +3121,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-fs"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3071,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-drive"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3080,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-gmail"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3089,7 +3156,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-slack"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3103,7 +3170,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-web"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3112,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "ta-credentials"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3126,7 +3193,7 @@ dependencies = [
 
 [[package]]
 name = "ta-daemon"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3139,6 +3206,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest 0.12.28",
  "rmcp",
+ "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3153,6 +3221,7 @@ dependencies = [
  "ta-policy",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-stream",
  "toml 0.8.23",
  "tower",
@@ -3165,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "ta-events"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3182,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "ta-goal"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3196,7 +3265,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mcp-gateway"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "rmcp",
@@ -3222,7 +3291,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mediation"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3237,7 +3306,7 @@ dependencies = [
 
 [[package]]
 name = "ta-memory"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "glob",
@@ -3252,7 +3321,7 @@ dependencies = [
 
 [[package]]
 name = "ta-output-schema"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -3264,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "ta-policy"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "glob",
@@ -3279,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "ta-sandbox"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -3292,7 +3361,7 @@ dependencies = [
 
 [[package]]
 name = "ta-session"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3307,7 +3376,7 @@ dependencies = [
 
 [[package]]
 name = "ta-submit"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "libc",
@@ -3324,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workflow"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3339,7 +3408,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workspace"
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 dependencies = [
  "chrono",
  "libc",

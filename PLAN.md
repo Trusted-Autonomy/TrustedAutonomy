@@ -4883,10 +4883,10 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 2. [x] **`ta` with no arguments shows dashboard**: Instead of showing help, run `ta status`. The bare command becomes the entry point.
 #### Deferred to v0.13.12
 
-- **[D] Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack). → v0.13.12 item 8
-- **[D] Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase." → v0.13.12 item 9
-- **[D] Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") translated to command sequences, shown for approval before executing. → v0.13.12 item 10
-- **[D] Reduce command surface**: Commands subsumed by the intelligent layer marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface. → v0.13.12 item 11
+- **[D] Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack). → v0.13.12 item 9
+- **[D] Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase." → v0.13.12 item 10
+- **[D] Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") translated to command sequences, shown for approval before executing. → v0.13.12 item 11
+- **[D] Reduce command surface**: Commands subsumed by the intelligent layer marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface. → v0.13.12 item 12
 
 #### Operational Runbooks
 
@@ -4913,28 +4913,46 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 #### Known issue discovered post-merge
 
-- **Release pipeline drift false positive**: When `ta release run` executes the "Generate release notes" agent step, the staging snapshot is taken after the "Version bump" shell step has already modified `Cargo.toml` in source. By the time the agent's draft is applied, source appears to have "changed" relative to the snapshot even though no meaningful content changed after the goal started — triggering the `[info] Source changed since goal start — rebasing against current source.` message. The rebase is a no-op in practice, but the message is misleading. Root cause: the drift check uses mtime or a shallow hash that doesn't account for the fact that the goal started *after* the version bump ran. Fix: record the source snapshot hash at goal-start time and compare content (not mtime) to determine true drift. → v0.13.2 or nearest maintenance phase.
+- ~~**Release pipeline drift false positive**~~: Fixed in v0.13.2. `FileSnapshot::has_changed()` now compares content hash directly instead of using mtime as the primary signal. Copy operations (`ta draft apply`) update mtime without changing content; the fix correctly ignores mtime-only changes. See `crates/ta-workspace/src/conflict.rs`.
 
 #### Version: `0.13.1-alpha.7`
 
 ---
 
 ### v0.13.2 — MCP Transport Abstraction (TCP/Unix Socket)
-<!-- status: pending -->
+<!-- status: done -->
 <!-- beta: yes — enables container isolation and remote agent execution for team deployments -->
 **Goal**: Abstract MCP transport so agents can communicate with TA over TCP or Unix sockets, not just stdio pipes. Critical enabler for container-based isolation (SecureTA) and remote agent execution.
 
 #### Items
 
-1. [ ] `TransportLayer` trait: `Stdio`, `UnixSocket`, `Tcp` variants
-2. [ ] TCP transport: MCP server listens on configurable port, agent connects over network
-3. [ ] Unix socket transport: MCP server creates socket file, agent connects locally (faster than TCP, works across container boundaries via mount)
-4. [ ] Transport selection in agent config: `transport = "stdio" | "unix" | "tcp"`
-5. [ ] TLS support for TCP transport (optional, for remote agents)
-6. [ ] Connection authentication: bearer token exchange on connect
-7. [ ] Update `ta run` to configure transport based on runtime adapter
+1. [x] `TransportLayer` trait: `Stdio`, `UnixSocket`, `Tcp` variants — `TransportMode` enum in `ta-daemon/src/config.rs`; `transport::serve()` in `ta-daemon/src/transport.rs`
+2. [x] TCP transport: MCP server listens on configurable port, agent connects over network — `serve_tcp()` in `transport.rs`
+3. [x] Unix socket transport: MCP server creates socket file, agent connects locally (faster than TCP, works across container boundaries via mount) — `serve_unix()` in `transport.rs`
+4. [x] Transport selection in agent config: `transport = "stdio" | "unix" | "tcp"` — `transport` field in `agents/generic.yaml`; `[transport]` section in `daemon.toml` via `TransportConfig`
+5. [x] TLS support for TCP transport (optional, for remote agents) — `serve_tcp_tls()` with `tokio-rustls`; configured via `[transport.tls]` cert_path/key_path
+6. [x] Connection authentication: bearer token exchange on connect — `authenticate_connection()` reads `Bearer <token>\n` header; configured via `[transport].auth_token`
+7. [x] Update `ta run` to configure transport based on runtime adapter — daemon `main.rs` now calls `transport::serve()` using `daemon_config.transport`
+
+**Also fixed**: Release pipeline drift false positive (v0.13.1.7 deferred) — `FileSnapshot::has_changed()` now uses content hash as the authoritative signal instead of mtime-first comparison. Copy operations update mtime without changing content; the old fast-path would treat identical files as "unchanged" (safe) but could miss same-second writes. The fix correctly detects content-only changes and eliminates mtime-induced false positives in sequential pipeline steps.
 
 #### Version: `0.13.2-alpha`
+
+---
+
+### v0.13.2.1 — "No changes detected" diagnostic UX
+<!-- status: done -->
+**Goal**: Interim UX improvement while `GoalBaseline` (v0.13.12 item 6) is not yet implemented. When `diff_all()` returns empty, diagnose the most likely cause and print actionable guidance instead of a bare error.
+
+**Note**: This is a symptom fix. The root fix is v0.13.12 item 6 (`GoalBaseline` trait), which eliminates the empty-diff-on-dirty-tree class of error entirely by diffing against the goal-start snapshot rather than the live working tree.
+
+#### Items
+
+1. [x] **Detect uncommitted working tree changes**: When `diff_all()` returns empty, check `git status --porcelain` on the source directory. If uncommitted changes exist, explain that the overlay mirrors the working tree so the diff is empty — and show the exact `git checkout -b / git add / git commit / gh pr create` sequence to fix it.
+2. [x] **Generic empty-diff guidance**: When no uncommitted changes exist either, list the three most common causes (already implemented, agent exited early, agent only produced text) and show `cd <staging> && ta draft build <id>` for manual recovery.
+3. [x] **`count_working_tree_changes()` helper**: Runs `git status --porcelain` in the source dir; returns 0 on non-git dirs or git errors (safe degradation).
+
+#### Version: `0.13.2.1` → semver `0.13.2-alpha.1`
 
 ---
 
@@ -5620,6 +5638,32 @@ Current releases ship archives containing a bare binary and docs. Users must man
 8. [ ] **Update USAGE.md**: macOS — run DMG/pkg; Windows — run MSI; Linux — extract tar.gz, move to `$PATH`; note Homebrew tap
 9. [ ] **Bundle USAGE.html in all packaged builds**: Generate `USAGE.html` from `docs/USAGE.md` via pandoc in the release workflow and include it in every platform artifact — macOS DMG/pkg, Windows MSI (installed to `%ProgramFiles%\TrustedAutonomy\docs\`), and Linux `.tar.gz`. The web install script (`install.sh`) already downloads `USAGE.html` to `~/.local/share/ta/`; the local build script (`install_local.sh`) generates it via pandoc. Packaged installers must deliver it to the platform-appropriate docs location so `ta help --open` can launch it offline.
 10. [ ] **Homebrew tap (stretch)**: `trustedautonomy/homebrew-ta` formula — enables `brew install trustedautonomy/ta/ta` on macOS
+11. [ ] **System requirements in USAGE.md and release notes**: Add a "System Requirements" section to USAGE.md covering minimum and recommended specs per platform, plus a section per agent framework. Include in release notes as a fixed block so users know before downloading.
+
+    **USAGE.md section** (under Installation):
+    ```
+    ## System Requirements
+
+    | Platform        | Min RAM | Recommended | Disk (TA binary) | Disk (staging) |
+    |-----------------|---------|-------------|------------------|----------------|
+    | macOS (Apple Silicon) | 8 GB  | 16 GB       | ~15 MB           | 1–5 GB per goal |
+    | macOS (Intel)   | 8 GB    | 16 GB       | ~15 MB           | 1–5 GB per goal |
+    | Linux x86_64    | 4 GB    | 8 GB        | ~12 MB           | 1–5 GB per goal |
+    | Windows x86_64  | 8 GB    | 16 GB       | ~15 MB           | 1–5 GB per goal |
+
+    Staging disk usage depends on project size. A typical Rust workspace (~500 MB with target/) uses ~600 MB per active goal. Use `ta gc` to reclaim staging space.
+
+    ### Agent Framework Requirements
+
+    | Framework        | Min RAM | Notes |
+    |-----------------|---------|-------|
+    | Claude Code (claude-sonnet-4-6) | 8 GB  | Requires `ANTHROPIC_API_KEY`; network access to api.anthropic.com |
+    | Claude Code (claude-opus-4-6)   | 8 GB  | Higher quality, slower; same API key + network requirements |
+    | Codex CLI        | 8 GB    | Requires `OPENAI_API_KEY`; network access to api.openai.com |
+    | Local model (Ollama, v0.13.8+) | 16 GB  | 7B models need ~8 GB VRAM or ~12 GB RAM (CPU fallback); 70B needs ~40 GB RAM |
+    ```
+
+    **Release notes block** (template in `pr-template.md`): Add a "System Requirements" callout box with minimums per platform and agent framework, linked to USAGE.md for full details.
 
 #### Release infrastructure fixes (landed ahead of full v0.13.11)
 10. [x] **Version stamped into USAGE.md at release time**: Release workflow now `sed`-replaces the `**Version**:` line in USAGE.md with the actual tag before packaging, so USAGE.html and the bundled USAGE.md always show the correct version. (Was hardcoded as `0.10.18-alpha.1` in all previous releases.)
@@ -5641,9 +5685,56 @@ Current releases ship archives containing a bare binary and docs. Users must man
 4. [x] **`--label` dispatches even when pipeline is aborted**: When the user cancels at an approval gate (e.g., "Proceed with 'Push'? [y/N] n"), `run_pipeline` returns early via `?` but the `--label` dispatch block was outside the else branch and ran unconditionally. Fix: moved `--label` dispatch inside the `else { run_pipeline()? ... }` block so it only executes on successful pipeline completion. (Fixed in `release.rs` during v0.13.12 planning.)
 5. [ ] **GC should not run while a release pipeline is active**: `ta gc` should check for running release pipeline processes (or a lockfile written by `ta release run`) and skip — or warn — rather than deleting staging dirs mid-pipeline. Add a `--force` flag to override.
 
+#### Overlay Baseline — `GoalBaseline` Trait
+
+6. [ ] **Replace live-source diff with `GoalBaseline` trait**: The overlay currently diffs staging vs the *live working tree*. When uncommitted changes exist in the source at goal-start time, staging mirrors them and the diff is empty — "No changes detected." The correct fix is not a warning; it is to diff against a **stable snapshot of the source captured at goal-start** rather than the live filesystem. This is also the enabling abstraction for non-VCS and non-filesystem workflows (DB records, email threads, document stores).
+
+    **`GoalBaseline` trait** (in `crates/ta-workspace/src/baseline.rs`):
+    ```rust
+    /// Defines the "before" state at goal-start. The overlay diffs staging
+    /// against this, not the live source directory.
+    pub trait GoalBaseline: Send + Sync {
+        /// Read a file's content at the baseline (None = file didn't exist).
+        fn read_file(&self, path: &Path) -> Result<Option<Vec<u8>>>;
+        /// List all paths present at the baseline.
+        fn list_files(&self) -> Result<Vec<PathBuf>>;
+        /// Stable key for this baseline (used for caching, logging, drift detection).
+        fn baseline_key(&self) -> String;
+    }
+    ```
+
+    **Implementations for v0.13.12:**
+
+    - `GitBaseline { commit: String }` — reads files via `git show <commit>:<path>`.
+      At goal-start, record `git rev-parse HEAD` into the goal record.
+      `baseline_key()` returns the commit SHA.
+      Works correctly even when the working tree is dirty — diff is always against committed state.
+
+    - `SnapshotBaseline { snapshot_dir: PathBuf }` — for non-git workspaces.
+      At goal-start, compute SHA-256 of each file and record in a lightweight manifest at `.ta/snapshots/<goal-id>/manifest.json`.
+      `read_file()` reads from the snapshot dir (files copied at goal-start) or recomputes from the manifest.
+      `baseline_key()` returns the manifest hash.
+
+    **Selection logic at goal-start:**
+    ```
+    if git repo → GitBaseline(HEAD)
+    else        → SnapshotBaseline(sha256 of each file)
+    ```
+    Stored as `GoalRun.baseline_ref: BaselineRef` (enum: `Git(sha)` | `Snapshot(path)` | `LiveSource` (legacy)).
+    `diff_all()` accepts `&dyn GoalBaseline`; `LiveSource` adapter wraps the current live-source comparison for backwards compatibility with old goal records.
+
+    **Future implementations (not in v0.13.12, defined by trait):**
+    - `DbRecordBaseline { table, pk_snapshot }` — row hashes at goal-start; diff = changed rows
+    - `EmailThreadBaseline { thread_ids, message_ids }` — message-ID list at goal-start; diff = new/modified messages
+    - `S3PrefixBaseline { bucket, prefix, etag_map }` — ETag map at goal-start; diff = changed objects
+    - `DocumentStoreBaseline { collection, doc_revision_map }` — revision IDs at goal-start
+
+    **Why this is the right fix, not the warn/adopt approach:**
+    The warn approach treats dirty-tree as user error and forces a workflow detour. The `GoalBaseline` approach eliminates the class of error entirely — the diff is always "what did the agent change relative to when the goal started," regardless of what was already in the working tree. It also unblocks the `--adopt` shortcut naturally: `ta draft apply --adopt` commits working-tree changes to a branch before starting, setting `GitBaseline(HEAD)` on the new branch — no special code path needed.
+
 #### UX & Health-Check Bugs
 
-6. [ ] **`check_stale_drafts` threshold mismatch**: The startup hint (`"N draft(s) approved/pending but not applied for 3+ days"`) uses a hardcoded 3-day cutoff, but `ta draft list --stale` uses `gc.stale_threshold_days` (default: 7). When the threshold is 7 days, the hint fires for days 3–6 but `--stale` finds nothing — a confusing false alarm. Fix: split into two configurable values in `workflow.toml`:
+7. [ ] **`check_stale_drafts` threshold mismatch**: The startup hint (`"N draft(s) approved/pending but not applied for 3+ days"`) uses a hardcoded 3-day cutoff, but `ta draft list --stale` uses `gc.stale_threshold_days` (default: 7). When the threshold is 7 days, the hint fires for days 3–6 but `--stale` finds nothing — a confusing false alarm. Fix: split into two configurable values in `workflow.toml`:
    ```toml
    [gc]
    stale_hint_days      = 3   # when the startup hint fires (informational)
@@ -5651,7 +5742,7 @@ Current releases ship archives containing a bare binary and docs. Users must man
    ```
    The hint message updates to reflect the configured value. Note: 3-day default means a Friday-evening draft hints on Monday morning — acceptable since it is informational only, not blocking. Users who find it noisy can set `stale_hint_days = 5`.
 
-7. [ ] **Browser tools off by default; enable per agent-capability profile**: The claude-flow MCP server exposes `browser_*` tools (Playwright-backed) which trigger macOS TCC permission prompts for Contacts, Reminders, iCloud, etc. on first use. These tools are legitimate for research workflows but should not be active in standard dev/QA agent profiles. Fix: add an `agent_capabilities` field to agent config (e.g., `.ta/agents/research.toml`). Standard profiles declare `capabilities = []`; a research profile declares `capabilities = ["browser"]`. The MCP tool filter in the daemon only forwards browser tool calls to agents with the capability declared. Add a `research` agent profile template to the default `ta init run` scaffold.
+8. [ ] **Browser tools off by default; enable per agent-capability profile**: The claude-flow MCP server exposes `browser_*` tools (Playwright-backed) which trigger macOS TCC permission prompts for Contacts, Reminders, iCloud, etc. on first use. These tools are legitimate for research workflows but should not be active in standard dev/QA agent profiles. Fix: add an `agent_capabilities` field to agent config (e.g., `.ta/agents/research.toml`). Standard profiles declare `capabilities = []`; a research profile declares `capabilities = ["browser"]`. The MCP tool filter in the daemon only forwards browser tool calls to agents with the capability declared. Add a `research` agent profile template to the default `ta init run` scaffold.
    ```toml
    # .ta/agents/research.toml
    [agent]
@@ -5661,14 +5752,14 @@ Current releases ship archives containing a bare binary and docs. Users must man
 
 #### Intelligent Surface (deferred from v0.13.1.6)
 
-8. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack).
-9. [ ] **Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase."
-10. [ ] **Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") are translated to command sequences by the shell agent, shown for approval before executing.
-11. [ ] **Reduce command surface**: Commands subsumed by the intelligent layer are marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface.
+9. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack).
+10. [ ] **Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase."
+11. [ ] **Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") are translated to command sequences by the shell agent, shown for approval before executing.
+12. [ ] **Reduce command surface**: Commands subsumed by the intelligent layer are marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface.
 
 #### Project Context Cache (hybrid now + AMP)
 
-12. [ ] **`.ta/project-digest.json` — inject pre-summarised project context at goal start**: Every goal invocation re-sends PLAN.md, CLAUDE.md, and Cargo.toml structure to the agent — typically 10–20k tokens of context that rarely changes between goals. Fix: build a lightweight content-addressed cache. At `ta run` time, hash the key files; if the hash matches the stored digest, inject a pre-built "Project Context" block (~150 lines) instead of the raw files.
+13. [ ] **`.ta/project-digest.json` — inject pre-summarised project context at goal start**: Every goal invocation re-sends PLAN.md, CLAUDE.md, and Cargo.toml structure to the agent — typically 10–20k tokens of context that rarely changes between goals. Fix: build a lightweight content-addressed cache. At `ta run` time, hash the key files; if the hash matches the stored digest, inject a pre-built "Project Context" block (~150 lines) instead of the raw files.
 
     **Design:**
     ```json
@@ -5699,9 +5790,9 @@ Current releases ship archives containing a bare binary and docs. Users must man
 
 #### Release Pipeline Polish (deferred from v0.13.1.x)
 
-13. [x] **Stale `.release-draft.md` poisons release notes**: If a prior release run left `.release-draft.md` in the source tree, the next release notes agent reads it as context and re-emits the old version header. Fix: added "Clear stale release draft" shell step immediately before the "Generate release notes" agent step in `DEFAULT_PIPELINE_YAML`. (Fixed in `release.rs` during v0.13.12 planning.)
-14. [ ] **Single GitHub release per build**: `ta release run --label` currently creates two GitHub release objects (one for the semver tag, one for the label tag). Redesign: one release using the label tag as the primary identifier; semver tag is a lightweight git tag only (no GH release object). Avoids duplicate entries in the GitHub releases UI.
-15. [ ] **VCS-agnostic release pipeline**: `release.rs` calls `git` and `gh` directly. Document that `ta release` requires git for now; design a path for VCS-agnostic release via `.ta/release.yaml` script hooks that project owners can override for Perforce or SVN environments.
+14. [x] **Stale `.release-draft.md` poisons release notes**: If a prior release run left `.release-draft.md` in the source tree, the next release notes agent reads it as context and re-emits the old version header. Fix: added "Clear stale release draft" shell step immediately before the "Generate release notes" agent step in `DEFAULT_PIPELINE_YAML`. (Fixed in `release.rs` during v0.13.12 planning.)
+15. [ ] **Single GitHub release per build**: `ta release run --label` currently creates two GitHub release objects (one for the semver tag, one for the label tag). Redesign: one release using the label tag as the primary identifier; semver tag is a lightweight git tag only (no GH release object). Avoids duplicate entries in the GitHub releases UI.
+16. [ ] **VCS-agnostic release pipeline**: `release.rs` calls `git` and `gh` directly. Document that `ta release` requires git for now; design a path for VCS-agnostic release via `.ta/release.yaml` script hooks that project owners can override for Perforce or SVN environments.
 
 #### Version: `0.13.12-alpha`
 

@@ -39,6 +39,9 @@ which = "7"
 libc = { workspace = true }
 async-trait = "0.1"
 notify = { workspace = true }
+# TLS transport support (v0.13.2).
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -878,6 +878,26 @@ fn close_github_pr_superseded(review_url: &str, child_display_id: &str) {
 /// the original project instructions. If nothing follows the separator, CLAUDE.md is
 /// removed (original sentinel — CLAUDE.md didn't exist before injection).
 ///
+/// Count files in the source directory that are modified or untracked in git.
+///
+/// Used to produce a diagnostic hint when `diff_all()` returns empty — if the
+/// working tree has uncommitted changes the overlay will mirror them, making the
+/// staging↔source diff empty even though real work exists.
+fn count_working_tree_changes(source_dir: &Path) -> usize {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(source_dir)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => std::str::from_utf8(&out.stdout)
+            .unwrap_or("")
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count(),
+        _ => 0,
+    }
+}
+
 /// Returns `Ok(true)` if stripping was applied, `Ok(false)` if not needed.
 fn strip_ta_injection_from_staging(staging_path: &Path) -> anyhow::Result<bool> {
     let claude_md_path = staging_path.join("CLAUDE.md");
@@ -977,7 +997,43 @@ pub(crate) fn build_package(
     let changes = overlay.diff_all().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if changes.is_empty() {
-        anyhow::bail!("No changes detected in staging workspace");
+        // Diagnose why there are no changes to produce a helpful error.
+        let uncommitted = count_working_tree_changes(source_dir);
+        if uncommitted > 0 {
+            anyhow::bail!(
+                "No changes detected in staging workspace.\n\
+                \n\
+                The agent made no changes relative to the source directory, but there \
+                are {} file(s) in the source tree that are modified or untracked and not \
+                yet committed to git. The overlay workspace copies the source as-is \
+                (including uncommitted changes), so the diff is empty.\n\
+                \n\
+                If the work is already done, commit those changes to a feature branch \
+                and open a PR:\n\
+                  git checkout -b feature/<name>\n\
+                  git add <files>\n\
+                  git commit -m \"...\"\n\
+                  git push -u origin feature/<name>\n\
+                  gh pr create",
+                uncommitted
+            );
+        }
+        anyhow::bail!(
+            "No changes detected in staging workspace.\n\
+            \n\
+            The agent ran but made no file changes relative to the source. \
+            Possible causes:\n\
+            - The goal's work is already implemented in the codebase.\n\
+            - The agent exited before writing any files.\n\
+            - The agent only produced text output (no file-write tool calls).\n\
+            \n\
+            To build a draft manually after making changes:\n\
+              cd {}\n\
+              # make your changes, then:\n\
+              ta draft build {}",
+            goal.workspace_path.display(),
+            goal_id
+        );
     }
 
     // Convert overlay changes to draft package artifacts.

@@ -70,6 +70,18 @@ env: {}
 #   MY_AGENT_MODE: "autonomous"
 #   MY_AGENT_LOG_LEVEL: "info"
 
+# MCP transport configuration (v0.13.2).
+# Controls how the agent connects to the TA MCP server.
+# Overrides the daemon-level [transport] setting for this specific agent.
+#
+# transport: stdio     # default — spawned as child, MCP over stdin/stdout
+# transport: unix      # connect via Unix socket (daemon must use mode="unix")
+# transport: tcp       # connect via TCP (daemon must use mode="tcp")
+#
+# For unix/tcp transports, set TA_MCP_SOCKET or TA_MCP_ADDR env vars
+# (or configure in daemon.toml) to tell the agent where to connect.
+transport: stdio
+
 # Agent alignment profile (v0.4.0).
 # Compiled into CapabilityManifest grants by the Policy Compiler.
 # These are enforced constraints, not self-declared promises.

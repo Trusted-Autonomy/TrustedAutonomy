@@ -82,7 +82,14 @@ impl FileSnapshot {
     }
 
     /// Check if the current file state differs from this snapshot.
-    /// Returns true if the file has changed (mtime OR content hash differs).
+    ///
+    /// Uses content hash as the authoritative signal. Mtime is intentionally
+    /// ignored as the primary comparator: copy operations (e.g., `ta draft apply`)
+    /// update file mtimes without changing content, which caused false-positive
+    /// drift reports in sequential pipeline steps (v0.13.1.7 known issue, fixed v0.13.2).
+    ///
+    /// A file is considered changed only if its SHA-256 content hash differs
+    /// from what was captured at goal-start time.
     pub fn has_changed(&self, root: &Path) -> Result<bool, WorkspaceError> {
         let abs_path = root.join(&self.path);
 
@@ -91,33 +98,17 @@ impl FileSnapshot {
             return Ok(true);
         }
 
-        let metadata = fs::metadata(&abs_path).map_err(|source| WorkspaceError::IoError {
+        // Compare content hash directly (v0.13.2: mtime is no longer the primary signal).
+        // This eliminates false positives when a file's mtime changes but content is
+        // identical — e.g., when a prior draft apply touches the file, or when the
+        // release pipeline's version-bump step updates a file that is then snapshotted
+        // and later compared against an identical on-disk state.
+        let content = fs::read(&abs_path).map_err(|source| WorkspaceError::IoError {
             path: abs_path.clone(),
             source,
         })?;
-
-        let current_mtime = metadata
-            .modified()
-            .map_err(|source| WorkspaceError::IoError {
-                path: abs_path.clone(),
-                source,
-            })?
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        // Quick mtime check first (fast path).
-        if current_mtime != self.mtime_secs {
-            // Mtime differs — check content hash to confirm (mtime can be unreliable).
-            let content = fs::read(&abs_path).map_err(|source| WorkspaceError::IoError {
-                path: abs_path.clone(),
-                source,
-            })?;
-            let current_hash = format!("{:x}", Sha256::digest(&content));
-            return Ok(current_hash != self.content_hash);
-        }
-
-        Ok(false)
+        let current_hash = format!("{:x}", Sha256::digest(&content));
+        Ok(current_hash != self.content_hash)
     }
 }
 
@@ -326,8 +317,6 @@ fn is_infra_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
-    use std::time::Duration;
     use tempfile::TempDir;
 
     fn create_test_file(dir: &Path, rel_path: &str, content: &str) {
@@ -357,12 +346,46 @@ mod tests {
         let snapshot = FileSnapshot::capture(dir.path(), "file.txt").unwrap();
         assert!(!snapshot.has_changed(dir.path()).unwrap());
 
-        // Modify content (and wait to ensure mtime changes).
-        // Note: on some file systems, mtime granularity is 1-2 seconds.
-        thread::sleep(Duration::from_secs(2));
+        // Modify content. No sleep needed: v0.13.2 uses content hash, not mtime.
         create_test_file(dir.path(), "file.txt", "modified");
 
         assert!(snapshot.has_changed(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn file_snapshot_same_mtime_different_content_is_detected() {
+        // Regression test: ensure files with the same mtime but different content
+        // are correctly detected as changed (the old mtime fast-path would miss these).
+        let dir = TempDir::new().unwrap();
+        create_test_file(dir.path(), "file.txt", "version 1");
+        let snapshot = FileSnapshot::capture(dir.path(), "file.txt").unwrap();
+
+        // Overwrite with different content. Even if mtime doesn't change (same
+        // second on coarse filesystems), the content hash must catch it.
+        create_test_file(dir.path(), "file.txt", "version 2");
+
+        assert!(
+            snapshot.has_changed(dir.path()).unwrap(),
+            "content change must be detected regardless of mtime"
+        );
+    }
+
+    #[test]
+    fn file_snapshot_same_content_not_changed() {
+        // Ensure that touching a file (updating mtime) without changing content
+        // does NOT trigger has_changed — the old mtime-fast-path would falsely
+        // flag this as changed (release pipeline drift false positive).
+        let dir = TempDir::new().unwrap();
+        create_test_file(dir.path(), "file.txt", "content unchanged");
+        let snapshot = FileSnapshot::capture(dir.path(), "file.txt").unwrap();
+
+        // Rewrite with identical content (simulates a copy/touch operation).
+        create_test_file(dir.path(), "file.txt", "content unchanged");
+
+        assert!(
+            !snapshot.has_changed(dir.path()).unwrap(),
+            "same content must not be reported as changed"
+        );
     }
 
     #[test]
@@ -412,8 +435,7 @@ mod tests {
 
         let snapshot = SourceSnapshot::capture(dir.path(), |_| false).unwrap();
 
-        // Modify one file (wait for mtime granularity).
-        thread::sleep(Duration::from_secs(2));
+        // Modify one file. No sleep needed: v0.13.2 uses content hash, not mtime.
         create_test_file(dir.path(), "a.txt", "modified A");
 
         let conflicts = snapshot.detect_conflicts(dir.path(), |_| false).unwrap();

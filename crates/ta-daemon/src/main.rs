@@ -42,12 +42,12 @@ pub mod power_manager;
 pub mod project_context;
 pub mod question_registry;
 pub mod router;
+pub mod transport;
 pub mod watchdog;
 mod web;
 
 use anyhow::Result;
 use clap::Parser;
-use rmcp::ServiceExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -277,14 +277,20 @@ async fn main() -> Result<()> {
 
         web::serve_daemon_api(project_root, daemon_config, shutdown).await?;
     } else {
-        // MCP stdio mode (default): backward-compatible with existing setup.
+        // MCP mode: use the configured transport (v0.13.2).
+        // Default: stdio — backward-compatible with existing .mcp.json setups.
+        // Alternatives: unix (Unix domain socket) or tcp (TCP with optional TLS).
         let gateway_config = GatewayConfig::for_project(&project_root);
         let pr_packages_dir = gateway_config.pr_packages_dir.clone();
         let web_port = cli.web_port.or(gateway_config.web_ui_port);
 
         let server = TaGatewayServer::new(gateway_config)?;
 
-        tracing::info!("MCP server ready, waiting for client connection");
+        let transport_mode = format!("{:?}", daemon_config.transport.mode).to_lowercase();
+        tracing::info!(
+            transport = %transport_mode,
+            "MCP server ready, waiting for client connection"
+        );
 
         // Spawn optional web UI server.
         if let Some(port) = web_port {
@@ -324,12 +330,10 @@ async fn main() -> Result<()> {
             });
         }
 
-        let service = server
-            .serve(rmcp::transport::stdio())
+        // Serve MCP using the configured transport.
+        transport::serve(server, &daemon_config.transport, &project_root)
             .await
-            .inspect_err(|e| tracing::error!("serving error: {:?}", e))?;
-
-        service.waiting().await?;
+            .inspect_err(|e| tracing::error!("MCP serve error: {:?}", e))?;
 
         tracing::info!("MCP server shutting down");
     }
