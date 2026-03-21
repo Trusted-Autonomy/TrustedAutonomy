@@ -1534,7 +1534,14 @@ agents:
 
 ## Game Engine Projects
 
-Use `ta init --template` to onboard an existing Unreal C++ or Unity C# project. The template wires up [BMAD](https://github.com/bmadcode/BMAD-METHOD) (structured planning) and [Claude Flow](https://github.com/ruvnet/claude-flow) (parallel implementation) alongside TA governance.
+Use `ta init run --template` to onboard an existing game project. Templates are provided for Unreal Engine C++, Unity C#, and Godot — and any custom or proprietary engine can be onboarded with the generic template. Each template wires up [BMAD](https://github.com/bmadcode/BMAD-METHOD) (structured AI planning roles) and [Claude Flow](https://github.com/ruvnet/claude-flow) (parallel implementation) alongside TA governance.
+
+| Engine | Template | Language |
+|---|---|---|
+| Unreal Engine 5 | `ta init run --template unreal-cpp` | C++ |
+| Unity | `ta init run --template unity-csharp` | C# |
+| Godot 4 | `ta init run --template godot-gdscript` | GDScript / C++ |
+| Custom / other | `ta init run --template game-generic` | Any |
 
 ### Prerequisites
 
@@ -1570,7 +1577,7 @@ git clone https://github.com/bmadcode/BMAD-METHOD ~/.bmad
 git clone https://github.com/bmadcode/BMAD-METHOD "$env:USERPROFILE\.bmad"
 ```
 
-TA stores the path in `.ta/bmad.toml` (set automatically by `ta init --template`). You can override it with the `TA_BMAD_HOME` environment variable:
+TA stores the path in `.ta/bmad.toml` (set automatically by `ta init run --template`). You can override it with the `TA_BMAD_HOME` environment variable:
 
 ```bash
 # If you cloned BMAD somewhere else
@@ -1591,14 +1598,20 @@ Add to your shell profile (`.zshrc`, `.bashrc`) or Windows user environment vari
 
 ### Initialize a game project
 
-Navigate to the root of your game project (the directory containing `MyGame.uproject` or the Unity `Assets/` folder) and run:
+Navigate to the root of your game project and run the template for your engine:
 
 ```bash
-# Unreal Engine C++ project
-ta init --template unreal-cpp
+# Unreal Engine C++ (directory containing *.uproject)
+ta init run --template unreal-cpp
 
-# Unity C# project
-ta init --template unity-csharp
+# Unity C# (directory containing Assets/ and ProjectSettings/)
+ta init run --template unity-csharp
+
+# Godot 4 (directory containing project.godot)
+ta init run --template godot-gdscript
+
+# Custom or proprietary engine — prompts for source dirs, build command, and VCS
+ta init run --template game-generic
 ```
 
 This writes:
@@ -1607,13 +1620,22 @@ This writes:
 |---|---|
 | `.ta/bmad.toml` | Path to your machine-local BMAD install |
 | `.ta/agents/bmad-*.toml` | PM, architect, dev, QA role configs referencing BMAD personas |
-| `.ta/workflow.toml` | TA config with Perforce/git adapter, verify commands, auto-approval policy |
-| `.ta/policy.yaml` | Protects critical files (`.uproject`, `Build.cs`, `Config/DefaultEngine.ini`) |
-| `.ta/.taignore` | Excludes build artifacts from staging (`Binaries/`, `Intermediate/`, `Library/`, etc.) |
-| `.mcp.json` | MCP server entries for both `ta` and `claude-flow` |
-| `.ta/onboarding-goal.md` | The first goal prompt to run — produces PRD, architecture doc, sprint stories |
+| `.ta/workflow.toml` | TA config with VCS adapter, verify commands, auto-approval policy |
+| `.ta/policy.yaml` | Protects critical project files from accidental agent modification |
+| `.ta/.taignore` | Excludes build artifacts from staging (Binaries/, Intermediate/, .godot/, etc.) |
+| `.mcp.json` | MCP server entries for `ta` and `claude-flow` |
+| `.ta/onboarding-goal.md` | First goal prompt — produces PRD, architecture doc, sprint stories |
 
-> **Perforce note**: None of these files need to go into the depot. Add `.ta/`, `.mcp.json`, and `ONBOARDING.md` to your `.p4ignore` (or equivalent) if you prefer to keep them local.
+Engine-specific policy protection defaults:
+
+| Engine | Protected files |
+|---|---|
+| Unreal | `*.uproject`, `Build.cs`, `Config/DefaultEngine.ini`, `Config/DefaultGame.ini` |
+| Unity | `ProjectSettings/*.asset`, `Packages/manifest.json`, `*.asmdef` |
+| Godot | `project.godot`, `export_presets.cfg`, `*.gdextension` |
+| Generic | Configured interactively during `ta init` |
+
+> **VCS note**: None of these files need to go into your depot or repo. Add `.ta/`, `.mcp.json`, and `.ta/onboarding-goal.md` to `.p4ignore`, `.gitignore`, or equivalent if you prefer to keep them local to each developer machine.
 
 ---
 
@@ -1623,15 +1645,22 @@ After `ta init`, start the daemon and run the onboarding goal:
 
 ```bash
 ta daemon start
-ta run "$(cat .ta/onboarding-goal.md)"
+ta run --objective-file .ta/onboarding-goal.md
 ```
 
-The agent will:
-1. Explore your codebase (`Source/`, `Config/`, `*.uproject` for Unreal; `Assets/`, `ProjectSettings/` for Unity)
-2. Write `docs/architecture.md` — module list, key classes, plugin deps, build targets
-3. Write `docs/bmad/prd.md` — inferred product requirements from GameMode, maps, feature flags
-4. Write `docs/bmad/stories/` — top 5 inferred work areas as BMAD story stubs
-5. Call `ta_pr_build` — packages all docs as a draft for your review
+The agent explores your codebase and writes planning documents. What it scans depends on the template:
+
+| Engine | Scanned paths |
+|---|---|
+| Unreal | `Source/`, `Config/`, `*.uproject`, `Plugins/` |
+| Unity | `Assets/Scripts/`, `ProjectSettings/`, `Packages/` |
+| Godot | `*.gd`, `*.tscn`, `*.tres`, `project.godot` |
+| Generic | Paths you configured during `ta init run --template game-generic` |
+
+It always produces:
+1. `docs/architecture.md` — module/scene/node graph, key classes, build targets
+2. `docs/bmad/prd.md` — inferred product requirements from game logic and scene structure
+3. `docs/bmad/stories/` — top 5 inferred feature areas as BMAD story stubs
 
 Review and approve the draft:
 
@@ -1642,6 +1671,208 @@ ta draft approve <id>
 ```
 
 Once approved, the docs are in your workspace and you have a BMAD-ready project.
+
+---
+
+### Walkthrough: first feature from scratch
+
+The full workflow is the same across all engines: init → discover → design → implement → QA → apply. The steps below use Unreal C++ as the example; Unity, Godot, and custom engine notes follow.
+
+#### Unreal Engine C++
+
+**Assumptions**: Unreal Engine 5.x, source or Launcher build, git or Perforce depot at project root, `ta` and `claude` both installed and on PATH, `ANTHROPIC_API_KEY` set.
+
+#### Step 1 — Open your project root
+
+Your project root is the folder containing `MyGame.uproject` (not the Engine folder). If you use Perforce this is your clientspec root for the game stream.
+
+```bash
+cd /path/to/MyGame
+```
+
+#### Step 2 — Initialize TA with the Unreal template
+
+```bash
+ta init run --template unreal-cpp
+```
+
+Expected output:
+```
+Created .ta/bmad.toml           (BMAD home: ~/.bmad)
+Created .ta/agents/bmad-pm.toml
+Created .ta/agents/bmad-architect.toml
+Created .ta/agents/bmad-dev.toml
+Created .ta/agents/bmad-qa.toml
+Created .ta/workflow.toml
+Created .ta/policy.yaml
+Created .ta/.taignore
+Created .mcp.json
+Created .ta/onboarding-goal.md
+```
+
+If you installed BMAD somewhere other than `~/.bmad`, set `TA_BMAD_HOME` first:
+
+```bash
+export TA_BMAD_HOME=/path/to/BMAD-METHOD   # then re-run ta init run --template unreal-cpp
+```
+
+> **Perforce users**: add `.ta/`, `.mcp.json`, and `ONBOARDING.md` to your `.p4ignore`. These are developer-local tooling files — they should not go into the depot.
+
+#### Step 3 — Run the discovery goal
+
+This is a one-time onboarding step. The agent reads your codebase and produces planning documents.
+
+```bash
+ta daemon start
+ta run --objective-file .ta/onboarding-goal.md
+```
+
+The agent will take a few minutes. It will:
+1. Walk `Source/`, `Config/`, and scan `*.uproject` for modules, plugins, and targets
+2. Write `docs/architecture.md` — module graph, key classes, build dependencies
+3. Write `docs/bmad/prd.md` — inferred product requirements from GameMode, levels, and feature flags
+4. Write `docs/bmad/stories/` — top 5 inferred feature areas as BMAD story stubs
+
+When the agent finishes, review and approve the draft:
+
+```bash
+ta draft list                 # find the draft ID
+ta draft view <id>            # read the proposed docs
+ta draft approve <id>         # accept and copy to your workspace
+```
+
+You now have `docs/architecture.md` and `docs/bmad/prd.md` in your project. The BMAD cycle can begin.
+
+#### Step 4 — Pick a story and design it
+
+Open `docs/bmad/stories/` and choose a story (or write your own in that folder). Then run the architect:
+
+```bash
+ta run "Design: <story title from docs/bmad/stories/story-01.md>" --agent bmad-architect
+```
+
+The architect will read the story stub and `docs/architecture.md`, then write:
+- `docs/bmad/design/<story>.md` — technical design with module breakdown, class signatures, and interface contracts
+
+Review the design draft before moving to implementation:
+
+```bash
+ta draft view <id>
+ta draft approve <id>
+```
+
+#### Step 5 — Implement the story
+
+```bash
+ta run "Implement: <story title>" --agent bmad-dev
+```
+
+The dev agent reads the design doc and story, writes C++ in `Source/`, and calls `ta_pr_build` when done.
+
+> **Compile check**: `ta init run --template unreal-cpp` sets up `verify_command` in `.ta/workflow.toml` to run `UnrealBuildTool` (or `msbuild`/`xbuild`) before the draft is approved. If the build fails, the agent is re-invoked with the error output to fix it before you ever see the draft.
+
+Review the diff:
+
+```bash
+ta draft view <id>     # see every file changed
+ta draft approve <id>  # or: ta draft deny <id> --reason "..."
+```
+
+#### Step 6 — Write tests with the QA role
+
+```bash
+ta run "Write tests for: <story title>" --agent bmad-qa
+```
+
+The QA agent writes Gauntlet/Automation test stubs in `Source/<Module>/Tests/`. Review and approve the same way.
+
+#### Step 7 — Apply and commit
+
+```bash
+ta draft apply <id> --git-commit    # or --p4-submit for Perforce
+```
+
+This copies approved changes from staging to your real workspace and creates a commit (or CL). TA never touches your working files until you explicitly apply.
+
+---
+
+#### Unity C#
+
+```bash
+# 1 — Navigate to your Unity project root (contains Assets/ and ProjectSettings/)
+cd /path/to/MyUnityProject
+
+# 2 — Initialize
+ta init run --template unity-csharp
+
+# 3 — Run discovery (scans Assets/Scripts/, ProjectSettings/, Packages/)
+ta daemon start
+ta run --objective-file .ta/onboarding-goal.md
+ta draft approve <id>
+
+# 4–6 — BMAD design → implement → QA cycle
+ta run "Design: <story>" --agent bmad-architect
+ta run "Implement: <story>" --agent bmad-dev
+ta run "Write tests for: <story>" --agent bmad-qa
+
+# 7 — Apply
+ta draft apply <id> --git-commit
+```
+
+The Unity verify command (set in `.ta/workflow.toml`) runs `dotnet build` or the Unity batch-mode compiler before any draft is approved, so you only ever see code that compiles.
+
+---
+
+#### Godot 4 (GDScript / C++)
+
+```bash
+# 1 — Navigate to your Godot project root (contains project.godot)
+cd /path/to/MyGodotProject
+
+# 2 — Initialize
+ta init run --template godot-gdscript
+
+# 3 — Run discovery (scans *.gd, *.tscn, *.tres, project.godot)
+ta daemon start
+ta run --objective-file .ta/onboarding-goal.md
+ta draft approve <id>
+
+# 4–6 — BMAD design → implement → QA cycle
+ta run "Design: <story>" --agent bmad-architect
+ta run "Implement: <story>" --agent bmad-dev
+ta run "Write tests for: <story>" --agent bmad-qa
+
+# 7 — Apply
+ta draft apply <id> --git-commit
+```
+
+For GDExtension (C++) projects the dev agent writes `.cpp`/`.h` under the extension source directory. The verify command runs `scons` (or `cmake`) to confirm the extension compiles before the draft reaches you.
+
+---
+
+#### Custom or proprietary engine
+
+```bash
+# 1 — Navigate to your project root
+cd /path/to/MyGame
+
+# 2 — Initialize interactively; you will be prompted for:
+#     - Source directories to scan
+#     - Build/verify command (e.g. "make game" or "msbuild Game.sln")
+#     - VCS type (git, perforce, or none)
+#     - Files to protect from accidental modification
+ta init run --template game-generic
+
+# 3–7 — same discovery → design → implement → QA → apply cycle as above
+ta daemon start
+ta run --objective-file .ta/onboarding-goal.md
+ta draft approve <id>
+ta run "Design: <story>" --agent bmad-architect
+ta run "Implement: <story>" --agent bmad-dev
+ta draft apply <id>
+```
+
+For engines with proprietary build systems, set the verify command in `.ta/workflow.toml` to whatever command produces a clean build error on failure (exit non-zero). TA will use it as the pre-draft gate.
 
 ---
 

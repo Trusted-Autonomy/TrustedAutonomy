@@ -468,8 +468,25 @@ pub fn execute(
         super::daemon::ensure_running(&config.workspace_root)?;
     }
 
-    let title = title.ok_or_else(|| {
-        anyhow::anyhow!("Title is required (use --resume to resume an existing session)")
+    // When --objective-file is provided without a title, derive the title from
+    // the first Markdown heading in the file (strips leading `# ` / `## `).
+    let derived_title: Option<String> = if title.is_none() {
+        objective_file.and_then(|p| {
+            std::fs::read_to_string(p).ok().and_then(|text| {
+                text.lines()
+                    .find(|l| l.starts_with('#') && !l.starts_with("##"))
+                    .map(|l| l.trim_start_matches('#').trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+        })
+    } else {
+        None
+    };
+    let title_ref = title.or(derived_title.as_deref());
+    let title = title_ref.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Title is required. Provide it as an argument, or add a `# Heading` to your --objective-file."
+        )
     })?;
 
     let agent_config = agent_launch_config(agent, source);

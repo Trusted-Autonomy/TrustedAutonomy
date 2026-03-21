@@ -157,6 +157,18 @@ download_and_install() {
     echo -e "${GREEN}✓ Installed ${name}${NC}"
 }
 
+# Download USAGE.html from the release and install to ~/.local/share/ta/.
+install_docs() {
+    local docs_url="https://github.com/$REPO/releases/download/$VERSION/USAGE.html"
+    local docs_dir="$HOME/.local/share/ta"
+    mkdir -p "$docs_dir"
+    if curl -fsSL "$docs_url" -o "$docs_dir/USAGE.html" 2>/dev/null; then
+        echo -e "${GREEN}✓ Installed USAGE.html${NC} → $docs_dir/USAGE.html"
+    else
+        echo -e "${YELLOW}Note: USAGE.html not bundled in this release — skipping${NC}"
+    fi
+}
+
 # Download and install binaries
 install_binary() {
     download_and_install "$BINARY_NAME" "true"
@@ -164,6 +176,8 @@ install_binary() {
     if [[ "$INSTALL_DAEMON" == true ]]; then
         download_and_install "$DAEMON_NAME" "false"
     fi
+
+    install_docs
 
     echo -e "${GREEN}✓ Installation complete!${NC}"
 }
@@ -220,6 +234,7 @@ print_instructions() {
     echo ""
     echo "For help: ${BINARY_NAME} --help"
     echo "Documentation: https://github.com/$REPO"
+    echo "Usage guide:   $HOME/.local/share/ta/USAGE.html"
     echo ""
 }
 

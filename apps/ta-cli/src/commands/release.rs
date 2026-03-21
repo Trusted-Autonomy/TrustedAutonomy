@@ -290,11 +290,18 @@ pub struct PipelineStep {
     #[serde(default)]
     pub agent: Option<AgentStep>,
 
-    /// If true, generate release notes from ${COMMITS} and write to .release-draft.md.
-    /// This is a built-in step type — reliable, no agent required.
+    /// Generate release notes and write to .release-draft.md.
+    /// Uses AI synthesis (configurable agent) with a mechanical fallback.
     /// Mutually exclusive with `run` and `agent`.
+    ///
+    /// Minimal form (uses defaults):
+    ///   generate_notes:
+    ///
+    /// With agent override:
+    ///   generate_notes:
+    ///     agent: claude-code
     #[serde(default)]
-    pub generate_notes: bool,
+    pub generate_notes: Option<GenerateNotesConfig>,
 
     /// Objective/description for context (used by agent steps and display).
     #[serde(default)]
@@ -333,19 +340,64 @@ fn default_agent_id() -> String {
     "claude-code".to_string()
 }
 
+/// Configuration for the built-in `generate_notes` step.
+///
+/// The step calls the configured agent in one-shot (`--print`) mode,
+/// captures its stdout as Markdown, and writes it to `.release-draft.md`.
+/// If the agent call fails or returns empty output, the step falls back to
+/// a deterministic Rust-based formatter that groups commits by category.
+///
+/// Example `.ta/release.yaml` override:
+/// ```yaml
+/// - name: Generate release notes
+///   generate_notes:
+///     agent: claude-code          # default — the primary TA agent
+///     fallback: true              # default — mechanical generation on failure
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateNotesConfig {
+    /// Agent ID to use for AI synthesis.
+    /// Supported built-ins: `"claude-code"` (Anthropic Claude Code CLI).
+    /// Any other value is tried as a raw command name.
+    #[serde(default = "default_notes_agent")]
+    pub agent: String,
+
+    /// Fall back to deterministic commit-list generation when the agent call
+    /// fails, is unavailable, or returns empty output.  Defaults to `true`.
+    #[serde(default = "default_notes_fallback")]
+    pub fallback: bool,
+}
+
+fn default_notes_agent() -> String {
+    "claude-code".to_string()
+}
+
+fn default_notes_fallback() -> bool {
+    true
+}
+
+impl Default for GenerateNotesConfig {
+    fn default() -> Self {
+        Self {
+            agent: default_notes_agent(),
+            fallback: default_notes_fallback(),
+        }
+    }
+}
+
 impl PipelineStep {
     fn validate(&self) -> anyhow::Result<()> {
         let defined = [
             self.run.is_some(),
             self.agent.is_some(),
-            self.generate_notes,
+            self.generate_notes.is_some(),
         ]
         .iter()
         .filter(|&&x| x)
         .count();
         if defined == 0 {
             anyhow::bail!(
-                "Step '{}': must have one of 'run', 'agent', or 'generate_notes: true'",
+                "Step '{}': must have one of 'run', 'agent', or 'generate_notes'",
                 self.name
             );
         }
@@ -715,12 +767,13 @@ fn run_pipeline(
                 last_tag.as_deref(),
                 i + 1,
             )?;
-        } else if step.generate_notes {
+        } else if let Some(ref notes_cfg) = step.generate_notes {
             generate_notes_step(
                 &config.workspace_root,
                 version,
                 &commits,
                 last_tag.as_deref(),
+                notes_cfg,
             )?;
         }
 
@@ -1022,13 +1075,117 @@ fn generate_notes_step(
     version: &str,
     commits: &str,
     last_tag: Option<&str>,
+    config: &GenerateNotesConfig,
 ) -> anyhow::Result<()> {
     let tag = format!("v{}", version);
     let since = last_tag.unwrap_or("the beginning of the project");
+    let commit_count = commits.lines().filter(|l| !l.trim().is_empty()).count();
 
-    let mut notes = format!("## {}\n\n", tag);
+    // ── AI synthesis (primary path) ─────────────────────────────────────────
+    println!(
+        "  Generating release notes via agent '{}' ({} commits since {})...",
+        config.agent, commit_count, since
+    );
 
-    // Group commits into rough categories based on keywords.
+    if let Some(notes) = try_ai_notes(&config.agent, &tag, since, commits) {
+        write_release_notes(root, &notes)?;
+        println!("  AI-synthesized release notes written to .release-draft.md");
+        println!();
+        println!("{}", notes);
+        return Ok(());
+    }
+
+    // ── Fallback: deterministic commit-list generation ───────────────────────
+    if !config.fallback {
+        anyhow::bail!(
+            "Release notes agent '{}' failed and fallback is disabled.\n\
+             \n\
+             Either ensure the agent is installed and ANTHROPIC_API_KEY is set,\n\
+             or enable fallback with:\n\
+             \n\
+             generate_notes:\n\
+               agent: {}\n\
+               fallback: true",
+            config.agent,
+            config.agent
+        );
+    }
+
+    println!("  Agent unavailable or returned empty output — using deterministic fallback.");
+    let notes = mechanical_release_notes(&tag, since, commits);
+    write_release_notes(root, &notes)?;
+    let total = commits.lines().filter(|l| !l.trim().is_empty()).count();
+    println!(
+        "  Generated .release-draft.md ({} changes since {})",
+        total, since
+    );
+    println!();
+    println!("{}", notes);
+    Ok(())
+}
+
+/// Resolve an agent ID to a CLI command name.
+///
+/// Built-in agent IDs map to known commands; unknown IDs are used as-is
+/// (allowing users to point at a custom binary).
+fn agent_id_to_command(agent_id: &str) -> &str {
+    match agent_id {
+        "claude-code" => "claude",
+        other => other,
+    }
+}
+
+/// Try to synthesize release notes by calling the agent in one-shot (`--print`) mode.
+///
+/// The agent receives the commit list as a structured prompt and must output
+/// only the Markdown release notes.  stdout is captured and returned as-is.
+/// Returns `None` if the agent is unavailable, exits non-zero, or produces
+/// empty/non-Markdown output.
+fn try_ai_notes(agent_id: &str, tag: &str, since: &str, commits: &str) -> Option<String> {
+    use std::process::Stdio;
+
+    let command = agent_id_to_command(agent_id);
+
+    let prompt = format!(
+        "Write user-facing release notes for {tag}.\n\
+         \n\
+         Commits since {since}:\n\
+         {commits}\n\
+         \n\
+         Requirements:\n\
+         - Format as Markdown starting with ## {tag}\n\
+         - Group into ### New Features, ### Improvements, ### Bug Fixes (omit empty sections)\n\
+         - Write from the user's perspective — what changed, not how it was implemented\n\
+         - Skip internal tooling, CI, and doc-only commits unless user-visible\n\
+         - Be concise: one line per item\n\
+         - End with: _Changes since {since}_\n\
+         \n\
+         Output ONLY the Markdown. No preamble, no explanation.",
+    );
+
+    let output = Command::new(command)
+        .args(["--print", &prompt])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let trimmed = text.trim().to_string();
+
+    // Sanity-check: must look like Markdown with a heading.
+    if trimmed.is_empty() || !trimmed.contains('#') {
+        return None;
+    }
+
+    Some(trimmed)
+}
+
+/// Deterministic fallback: groups commits by keyword category into Markdown.
+fn mechanical_release_notes(tag: &str, since: &str, commits: &str) -> String {
     let mut features: Vec<&str> = Vec::new();
     let mut fixes: Vec<&str> = Vec::new();
     let mut improvements: Vec<&str> = Vec::new();
@@ -1067,6 +1224,7 @@ fn generate_notes_step(
     }
 
     let total = features.len() + fixes.len() + improvements.len() + other.len();
+    let mut notes = format!("## {}\n\n", tag);
 
     if !features.is_empty() {
         notes.push_str("### New Features\n\n");
@@ -1101,23 +1259,19 @@ fn generate_notes_step(
     }
 
     notes.push_str(&format!("_Changes since {}_\n", since));
+    notes
+}
 
+/// Write release notes to `.release-draft.md` in the project root.
+fn write_release_notes(root: &Path, notes: &str) -> anyhow::Result<()> {
     let path = root.join(".release-draft.md");
-    std::fs::write(&path, &notes).map_err(|e| {
+    std::fs::write(&path, notes).map_err(|e| {
         anyhow::anyhow!(
             "Could not write .release-draft.md to {}: {}",
             root.display(),
             e
         )
-    })?;
-
-    println!(
-        "  Generated .release-draft.md ({} changes since {})",
-        total, since
-    );
-    println!();
-    println!("{}", notes);
-    Ok(())
+    })
 }
 
 fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_tag: Option<&str>) {
@@ -1133,9 +1287,10 @@ fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_ta
                 substitute_vars(obj, version, commits, last_tag)
             );
         }
-    } else if step.generate_notes {
-        println!("  type: generate_notes (built-in)");
+    } else if let Some(ref notes_cfg) = step.generate_notes {
+        println!("  type: generate_notes (agent: {})", notes_cfg.agent);
         println!("  output: .release-draft.md");
+        println!("  fallback: {}", notes_cfg.fallback);
     }
     if step.requires_approval {
         println!("  approval: required");
@@ -1258,7 +1413,7 @@ fn show_pipeline(config: &GatewayConfig, pipeline_path: Option<&Path>) -> anyhow
             "shell"
         } else if step.agent.is_some() {
             "agent"
-        } else if step.generate_notes {
+        } else if step.generate_notes.is_some() {
             "generate_notes"
         } else {
             "unknown"
@@ -1657,7 +1812,7 @@ fn validate_release_with_env(
             "shell"
         } else if step.agent.is_some() {
             "agent"
-        } else if step.generate_notes {
+        } else if step.generate_notes.is_some() {
             "generate_notes"
         } else {
             "unknown"
@@ -1925,7 +2080,8 @@ steps:
       echo "Cleared any stale .release-draft.md."
 
   - name: Generate release notes
-    generate_notes: true
+    generate_notes:
+      agent: claude-code
     output: .release-draft.md
 
   - name: Review release notes
@@ -2045,7 +2201,7 @@ mod tests {
             name: "bad".to_string(),
             run: None,
             agent: None,
-            generate_notes: false,
+            generate_notes: None,
             objective: None,
             requires_approval: false,
             output: None,
@@ -2064,7 +2220,7 @@ mod tests {
                 id: "claude-code".to_string(),
                 phase: None,
             }),
-            generate_notes: false,
+            generate_notes: None,
             objective: None,
             requires_approval: false,
             output: None,
@@ -2408,9 +2564,15 @@ steps:
         let notes_step = pipeline
             .steps
             .iter()
-            .find(|s| s.generate_notes)
+            .find(|s| s.generate_notes.is_some())
             .expect("default pipeline must have a generate_notes step");
         assert_eq!(notes_step.name, "Generate release notes");
+        let cfg = notes_step.generate_notes.as_ref().unwrap();
+        assert_eq!(
+            cfg.agent, "claude-code",
+            "default agent must be claude-code"
+        );
+        assert!(cfg.fallback, "fallback must default to true");
     }
 
     #[test]

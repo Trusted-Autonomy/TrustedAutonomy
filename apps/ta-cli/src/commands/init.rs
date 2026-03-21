@@ -185,7 +185,7 @@ fn run_init(
         );
         println!();
         println!("  Then run the discovery goal:");
-        println!("  ta run --goal-file .ta/onboarding-goal.md");
+        println!("  ta run --objective-file .ta/onboarding-goal.md");
     } else {
         println!("  ta setup show          — inspect configuration");
         println!("  ta setup refine <topic> — adjust specific settings");
@@ -704,7 +704,8 @@ fn generate_onboarding_goal(
     let content = format!(
         r#"# Onboarding Goal: {project} Discovery
 #
-# Run with: ta run --goal-file .ta/onboarding-goal.md
+# Run with: ta run --objective-file .ta/onboarding-goal.md
+#           (title is derived from the first heading above)
 #
 # Prerequisites (must be installed before running):
 #   - claude   : Claude Code CLI  (claude.ai/code)
