@@ -1056,6 +1056,86 @@ allowed = [
 
 By default, auto-heal is **disabled** (`enabled = false`). Opt in explicitly for the actions you trust. All corrective actions — auto-healed or manually approved — are recorded in `.ta/operations.jsonl` for audit traceability.
 
+### Operational Runbooks (`ta runbook`)
+
+Runbooks automate common recovery procedures as sequenced, approval-gated steps. TA ships with five built-in runbooks; you can add project-local runbooks as YAML files in `.ta/runbooks/`.
+
+```bash
+# List all available runbooks
+ta runbook list
+
+# Show the steps of a runbook without running it
+ta runbook show disk-pressure
+
+# Run a runbook interactively (each step requires confirmation)
+ta runbook run disk-pressure
+
+# Run with --auto to skip prompts for auto-approve steps
+ta runbook run zombie-goals --auto
+
+# Dry run: show what would execute without doing anything
+ta runbook run stale-drafts --dry-run
+```
+
+**Built-in runbooks:**
+
+| Name | Description | Trigger |
+|------|-------------|---------|
+| `disk-pressure` | Clean up staging dirs to free disk space | Disk < 2 GB |
+| `zombie-goals` | Recover goals whose agent process has died | Running goals with no heartbeat > 30m |
+| `crashed-plugins` | Detect and restart failed channel plugins | Plugin process exited |
+| `stale-drafts` | Clean up PendingReview drafts older than 7 days | Drafts > 7 days old |
+| `failed-ci` | Diagnose and re-run failed verification | `ta verify` fails |
+
+**Project-local runbooks** — create YAML files in `.ta/runbooks/`:
+
+```yaml
+# .ta/runbooks/my-procedure.yaml
+name: my-procedure
+description: Custom recovery steps for my project
+trigger:
+  condition: When X goes wrong
+  severity: warning
+steps:
+  - id: step1
+    name: Check current state
+    command: status --deep
+    auto_approve: true
+  - id: step2
+    name: Fix the issue
+    command: gc --compact
+    description: Remove stale staging directories.
+    auto_approve: false
+```
+
+### Proactive Notifications (Daemon API)
+
+The daemon exposes a `GET /api/notifications` endpoint that returns actionable items needing attention. Notifications are ordered by severity and include a `suggested_action` field:
+
+```bash
+# Poll for current notifications (example with curl)
+curl http://localhost:7700/api/notifications
+```
+
+Each notification includes: `id` (stable, for deduplication), `notification_type`, `severity`, `summary`, `suggested_action`, and optionally `detail` and `entity_id`.
+
+### Shell Intent Routing
+
+In `ta shell`, natural-language operational questions are automatically mapped to specific commands — no need to remember the exact syntax:
+
+| You type... | Runs... |
+|-------------|---------|
+| `what's stuck?` | `ta goal list` |
+| `clean up old goals` | `ta gc --dry-run` |
+| `disk space` | `ta status --deep` |
+| `daemon health` | `ta status --deep` |
+| `show notifications` | `ta operations log` |
+| `list runbooks` | `ta runbook list` |
+| `what drafts need review?` | `ta draft list` |
+| `show running goals` | `ta goal list` |
+
+Unrecognised input is forwarded to the Q&A agent as usual.
+
 ### Goal History
 
 Browse archived and completed goals, even after their JSON files have been GC'd:
@@ -1107,13 +1187,36 @@ ta doctor
 
 Reports each check as ok/warning/failed with actionable suggestions.
 
-### Deep Status (`ta status --deep`)
+### Intelligent Status Dashboard
 
-Get a combined view of daemon health, disk usage, pending questions, and recent events:
+Running `ta` with no arguments (or `ta status`) shows the unified project dashboard. Items are prioritized: urgent issues first, then active work, then recent completions, then suggested next actions.
 
 ```bash
-ta status --deep
+ta             # equivalent to ta status
+ta status      # same
+ta status --deep  # adds daemon health, disk usage, pending questions, recent events
 ```
+
+Example output:
+```
+╭─ myproject (ta v0.13.1-alpha.6)
+│  Next phase: v0.13.2 — MCP Transport Abstraction
+│
+│  ⚠ URGENT
+│    1 draft(s) awaiting your review
+│    → `ta draft view abc12345` to review
+│
+│  Active agents: 1
+│    [42m] running — "Implement v0.13.1.6"  [b4953528]
+│
+│  Goals: 1 active  1 pending drafts  47 total
+│
+│  Suggested next:
+│    `ta draft view abc12345` — review pending draft
+╰─
+```
+
+The `--deep` flag adds daemon health, disk usage, pending interaction questions, and recent events.
 
 ### Daemon Health
 
@@ -5718,6 +5821,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.12.8 | Alpha bug-fixes: Discord notification flood & draft CLI disconnect | Done |
 | v0.13.0 | Reflink/COW overlay optimization (APFS + Btrfs zero-cost staging) | Done |
 | v0.13.1 | Autonomous operations & self-healing daemon | Done |
+| v0.13.1.6 | Intelligent surface & operational runbooks | Done |
 | v0.13.2 | MCP transport abstraction (TCP/Unix socket) | Planned |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.

@@ -17,6 +17,7 @@ pub mod events;
 pub mod goal_output;
 pub mod input;
 pub mod interactions;
+pub mod notifications;
 pub mod project_new;
 pub mod status;
 pub mod workflow;
@@ -319,6 +320,8 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/office/reload", post(reload_office))
         // Project bootstrapping routes (v0.10.17).
         .route("/api/project/new", post(project_new::create_project))
+        // Proactive notifications (v0.13.1.6).
+        .route("/api/notifications", get(notifications::get_notifications))
         // Daemon lifecycle routes (v0.10.10).
         .route("/api/shutdown", post(shutdown_daemon))
         // Auth middleware on all API routes.

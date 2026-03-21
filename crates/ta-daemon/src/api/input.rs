@@ -157,8 +157,102 @@ pub fn route_input(text: &str, config: &ShellConfig) -> RouteDecision {
         }
     }
 
+    // Check for operational intent patterns (v0.13.1.6 item 5).
+    // Natural language operational queries map to specific TA commands.
+    if let Some(cmd) = resolve_operational_intent(text) {
+        return RouteDecision::Command(cmd);
+    }
+
     // No route matched — send to agent.
     RouteDecision::Agent(text.to_string())
+}
+
+/// Resolve natural-language operational intent to a concrete `ta` command.
+///
+/// Common patterns users type in the shell that have deterministic answers:
+/// "what's stuck?" → ta goal list (filtered to stuck)
+/// "clean up" / "clean old goals" → ta gc
+/// "health" / "is the daemon ok?" → ta status --deep
+/// "show notifications" → ta operations log
+/// "list runbooks" → ta runbook list
+///
+/// Unrecognised patterns return None and fall through to the agent.
+pub fn resolve_operational_intent(text: &str) -> Option<String> {
+    let lower = text.trim().to_lowercase();
+
+    // "what's stuck?" / "stuck goals" / "any stuck?"
+    if lower.contains("stuck")
+        && (lower.contains("what")
+            || lower.contains("goal")
+            || lower.contains("any")
+            || lower == "stuck?")
+    {
+        return Some("ta goal list".to_string());
+    }
+
+    // "clean up" / "clean old goals" / "cleanup"
+    if (lower.starts_with("clean") || lower.contains("clean up"))
+        && (lower.contains("goal")
+            || lower.contains("old")
+            || lower.contains("stale")
+            || lower == "clean up"
+            || lower == "cleanup")
+    {
+        return Some("ta gc --dry-run".to_string());
+    }
+
+    // "disk" / "disk space" / "disk usage"
+    if lower.contains("disk")
+        && (lower.contains("space")
+            || lower.contains("usage")
+            || lower.contains("free")
+            || lower.contains("pressure")
+            || lower == "disk")
+    {
+        return Some("ta status --deep".to_string());
+    }
+
+    // "health" / "is everything ok?" / "daemon ok?" / "daemon health"
+    if (lower.contains("health") || lower.contains("everything ok") || lower.contains("all ok"))
+        && (lower.contains("daemon")
+            || lower.contains("everything")
+            || lower.contains("all")
+            || lower == "health")
+    {
+        return Some("ta status --deep".to_string());
+    }
+
+    // "notifications" / "show notifications" / "any alerts?"
+    if lower.contains("notification") || (lower.contains("alert") && lower.contains("any")) {
+        return Some("ta operations log".to_string());
+    }
+
+    // "show runbooks" / "list runbooks" / "what runbooks"
+    if (lower.contains("runbook") || lower.contains("runbooks"))
+        && (lower.contains("list")
+            || lower.contains("show")
+            || lower.contains("what")
+            || lower.contains("available"))
+    {
+        return Some("ta runbook list".to_string());
+    }
+
+    // "pending drafts" / "drafts to review" / "what needs review?"
+    if (lower.contains("draft") || lower.contains("review"))
+        && (lower.contains("pending")
+            || lower.contains("need")
+            || lower.contains("waiting")
+            || lower.contains("what"))
+    {
+        return Some("ta draft list".to_string());
+    }
+
+    // "active goals" / "running goals" / "what's running?"
+    if (lower.contains("running") || lower.contains("active")) && lower.contains("goal") {
+        return Some("ta goal list".to_string());
+    }
+
+    None
 }
 
 fn expand_shortcut(text: &str, shortcuts: &[ShortcutEntry]) -> Option<String> {
@@ -386,6 +480,79 @@ mod tests {
         match route_input("view abc123", &config) {
             RouteDecision::Command(cmd) => assert_eq!(cmd, "ta draft view abc123"),
             _ => panic!("expected Command from 'view' shortcut"),
+        }
+    }
+
+    // -- v0.13.1.6 tests: operational intent routing --
+
+    #[test]
+    fn intent_stuck_goals() {
+        let result = resolve_operational_intent("what's stuck?");
+        assert_eq!(result, Some("ta goal list".to_string()));
+    }
+
+    #[test]
+    fn intent_stuck_goals_variant() {
+        let result = resolve_operational_intent("any stuck goals?");
+        assert_eq!(result, Some("ta goal list".to_string()));
+    }
+
+    #[test]
+    fn intent_clean_up() {
+        let result = resolve_operational_intent("clean up old goals");
+        assert_eq!(result, Some("ta gc --dry-run".to_string()));
+    }
+
+    #[test]
+    fn intent_disk_space() {
+        let result = resolve_operational_intent("how much disk space is left?");
+        assert_eq!(result, Some("ta status --deep".to_string()));
+    }
+
+    #[test]
+    fn intent_health() {
+        let result = resolve_operational_intent("daemon health");
+        assert_eq!(result, Some("ta status --deep".to_string()));
+    }
+
+    #[test]
+    fn intent_notifications() {
+        let result = resolve_operational_intent("show notifications");
+        assert_eq!(result, Some("ta operations log".to_string()));
+    }
+
+    #[test]
+    fn intent_runbook_list() {
+        let result = resolve_operational_intent("list available runbooks");
+        assert_eq!(result, Some("ta runbook list".to_string()));
+    }
+
+    #[test]
+    fn intent_pending_drafts() {
+        let result = resolve_operational_intent("what drafts need review?");
+        assert_eq!(result, Some("ta draft list".to_string()));
+    }
+
+    #[test]
+    fn intent_active_goals() {
+        let result = resolve_operational_intent("show running goals");
+        assert_eq!(result, Some("ta goal list".to_string()));
+    }
+
+    #[test]
+    fn intent_unrecognized_goes_to_agent() {
+        // Free-form questions that don't match operational patterns → None.
+        let result = resolve_operational_intent("what's the meaning of life?");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn intent_routes_via_route_input() {
+        // Verify operational intents actually get routed to Command (not Agent).
+        let config = default_config();
+        match route_input("what's stuck?", &config) {
+            RouteDecision::Command(cmd) => assert_eq!(cmd, "ta goal list"),
+            _ => panic!("expected Command from intent routing"),
         }
     }
 }

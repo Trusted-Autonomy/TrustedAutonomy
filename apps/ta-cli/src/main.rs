@@ -18,6 +18,8 @@ use clap::{Parser, Subcommand};
 use ta_mcp_gateway::GatewayConfig;
 
 /// Trusted Autonomy CLI — review and approve agent changes.
+///
+/// Run `ta` with no arguments to show the project status dashboard.
 #[derive(Parser)]
 #[command(
     name = "ta",
@@ -39,32 +41,24 @@ struct Cli {
     no_version_check: bool,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Manage goal runs.
-    Goal {
-        #[command(subcommand)]
-        command: commands::goal::GoalCommands,
+    // ── DASHBOARD ───────────────────────────────────────────────────────────
+    /// Project-wide status dashboard: active agents, pending drafts, next phase.
+    ///
+    /// Shows urgent items (stuck goals, pending approvals) first, then active work,
+    /// recent completions, and suggested next actions. Run with no arguments to
+    /// get the same view: `ta` is equivalent to `ta status`.
+    Status {
+        /// Deep status: daemon health, disk usage, pending questions, recent events.
+        #[arg(long)]
+        deep: bool,
     },
-    /// Review and manage draft packages.
-    Draft {
-        #[command(subcommand)]
-        command: commands::draft::DraftCommands,
-    },
-    /// Review and manage PR packages (deprecated: use 'draft').
-    #[command(hide = true)]
-    Pr {
-        #[command(subcommand)]
-        command: commands::pr::PrCommands,
-    },
-    /// Inspect the audit trail.
-    Audit {
-        #[command(subcommand)]
-        command: commands::audit::AuditCommands,
-    },
+
+    // ── CORE WORKFLOW ───────────────────────────────────────────────────────
     /// Run an agent in a TA-mediated staging workspace.
     ///
     /// The title can be a phase ID (e.g., "v0.9.8.1" or "0.9.8.1") — TA will
@@ -130,15 +124,111 @@ enum Commands {
         #[arg(long)]
         goal_id: Option<String>,
     },
-    /// Manage interactive sessions.
-    Session {
+    /// Review and manage draft packages.
+    Draft {
         #[command(subcommand)]
-        command: commands::session::SessionCommands,
+        command: commands::draft::DraftCommands,
+    },
+    /// Manage goal runs.
+    Goal {
+        #[command(subcommand)]
+        command: commands::goal::GoalCommands,
     },
     /// View and track the project development plan.
     Plan {
         #[command(subcommand)]
         command: commands::plan::PlanCommands,
+    },
+    /// Interactive TA Shell — opens the web shell in your browser (default).
+    ///
+    /// Use --tui or TA_SHELL_TUI=1 for the terminal-based shell.
+    Shell {
+        /// Generate default .ta/shell.toml config and exit.
+        #[arg(long)]
+        init: bool,
+        /// Use terminal TUI shell instead of web UI.
+        /// Can also be enabled with TA_SHELL_TUI=1 env var.
+        #[arg(long)]
+        tui: bool,
+        /// Use classic line-mode shell (rustyline) instead of TUI.
+        /// Implies --tui.
+        #[arg(long)]
+        classic: bool,
+        /// Attach to an existing agent session (ID or prefix). Implies --tui.
+        #[arg(long)]
+        attach: Option<String>,
+        /// Daemon URL override (default: from .ta/daemon.toml or http://127.0.0.1:7700).
+        #[arg(long)]
+        url: Option<String>,
+    },
+
+    // ── OPERATIONS ──────────────────────────────────────────────────────────
+    /// View, list, and run operational runbooks (v0.13.1.6).
+    ///
+    /// Runbooks automate common recovery procedures: disk pressure cleanup,
+    /// zombie goal recovery, stale draft cleanup, and more.
+    /// Built-in runbooks ship with TA; project-local runbooks live in .ta/runbooks/.
+    Runbook {
+        #[command(subcommand)]
+        command: commands::runbook::RunbookCommands,
+    },
+    /// View and manage autonomous daemon operations (v0.13.1).
+    ///
+    /// The daemon watchdog continuously monitors goal health, disk space,
+    /// and plugin status. Corrective action proposals are logged here.
+    Operations {
+        #[command(subcommand)]
+        command: commands::operations::OperationsCommands,
+    },
+    /// Manage the TA daemon lifecycle (start, stop, restart, status, log).
+    Daemon {
+        #[command(subcommand)]
+        command: commands::daemon::DaemonCommands,
+    },
+    /// Unified garbage collection: goals, drafts, staging directories, and event store.
+    Gc {
+        /// Show what would be cleaned without making changes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Stale threshold in days (default: 7).
+        #[arg(long, default_value = "7")]
+        threshold_days: u32,
+        /// Ignore threshold — GC everything in terminal state.
+        #[arg(long)]
+        all: bool,
+        /// Move to .ta/goals/archive/ instead of deleting.
+        #[arg(long)]
+        archive: bool,
+        /// Also prune old events from .ta/events/ (v0.11.3).
+        #[arg(long)]
+        include_events: bool,
+        /// Run lifecycle compaction: remove fat artifacts (staging, draft packages)
+        /// for applied/closed goals older than --compact-after-days (v0.13.1).
+        #[arg(long)]
+        compact: bool,
+        /// Age threshold for compaction in days (default: 30). Only used with --compact.
+        #[arg(long, default_value = "30")]
+        compact_after_days: u32,
+    },
+    /// System-wide health check: toolchain, agent binaries, daemon, plugins, .ta integrity.
+    Doctor,
+
+    // ── ADVANCED ────────────────────────────────────────────────────────────
+    /// Review and manage PR packages (deprecated: use 'draft').
+    #[command(hide = true)]
+    Pr {
+        #[command(subcommand)]
+        command: commands::pr::PrCommands,
+    },
+    /// Inspect the audit trail.
+    Audit {
+        #[command(subcommand)]
+        command: commands::audit::AuditCommands,
+    },
+    /// Manage interactive sessions.
+    Session {
+        #[command(subcommand)]
+        command: commands::session::SessionCommands,
     },
     /// Manage persistent context memory across agents and sessions.
     Context {
@@ -219,33 +309,6 @@ enum Commands {
         #[command(subcommand)]
         command: commands::release::ReleaseCommands,
     },
-    /// Interactive TA Shell — opens the web shell in your browser (default).
-    ///
-    /// Use --tui or TA_SHELL_TUI=1 for the terminal-based shell.
-    Shell {
-        /// Generate default .ta/shell.toml config and exit.
-        #[arg(long)]
-        init: bool,
-        /// Use terminal TUI shell instead of web UI.
-        /// Can also be enabled with TA_SHELL_TUI=1 env var.
-        #[arg(long)]
-        tui: bool,
-        /// Use classic line-mode shell (rustyline) instead of TUI.
-        /// Implies --tui.
-        #[arg(long)]
-        classic: bool,
-        /// Attach to an existing agent session (ID or prefix). Implies --tui.
-        #[arg(long)]
-        attach: Option<String>,
-        /// Daemon URL override (default: from .ta/daemon.toml or http://127.0.0.1:7700).
-        #[arg(long)]
-        url: Option<String>,
-    },
-    /// Manage the TA daemon lifecycle (start, stop, restart, status, log).
-    Daemon {
-        #[command(subcommand)]
-        command: commands::daemon::DaemonCommands,
-    },
     /// Multi-project office daemon management.
     Office {
         #[command(subcommand)]
@@ -271,62 +334,8 @@ enum Commands {
         #[command(subcommand)]
         command: commands::config::ConfigCommands,
     },
-    /// Unified garbage collection: goals, drafts, staging directories, and event store.
-    Gc {
-        /// Show what would be cleaned without making changes.
-        #[arg(long)]
-        dry_run: bool,
-        /// Stale threshold in days (default: 7).
-        #[arg(long, default_value = "7")]
-        threshold_days: u32,
-        /// Ignore threshold — GC everything in terminal state.
-        #[arg(long)]
-        all: bool,
-        /// Move to .ta/goals/archive/ instead of deleting.
-        #[arg(long)]
-        archive: bool,
-        /// Also prune old events from .ta/events/ (v0.11.3).
-        #[arg(long)]
-        include_events: bool,
-        /// Run lifecycle compaction: remove fat artifacts (staging, draft packages)
-        /// for applied/closed goals older than --compact-after-days (v0.13.1).
-        #[arg(long)]
-        compact: bool,
-        /// Age threshold for compaction in days (default: 30). Only used with --compact.
-        #[arg(long, default_value = "30")]
-        compact_after_days: u32,
-    },
-    /// View and manage autonomous daemon operations (v0.13.1).
-    ///
-    /// The daemon watchdog continuously monitors goal health, disk space,
-    /// and plugin status. Corrective action proposals are logged here.
-    Operations {
-        #[command(subcommand)]
-        command: commands::operations::OperationsCommands,
-    },
-    /// Project-wide status dashboard: active agents, pending drafts, next phase.
-    Status {
-        /// Deep status: daemon health, disk usage, pending questions, recent events.
-        #[arg(long)]
-        deep: bool,
-    },
     /// Start the MCP server on stdio.
     Serve,
-    /// Review and accept the terms of use.
-    AcceptTerms,
-    /// View the current terms of use.
-    ViewTerms,
-    /// Show terms acceptance status.
-    TermsStatus,
-    /// Manage per-agent terms consent (v0.10.18.4).
-    ///
-    /// Subcommands: `ta terms show <agent>`, `ta terms accept <agent>`, `ta terms status`.
-    Terms {
-        /// Action: show, accept, or status.
-        action: String,
-        /// Agent ID (required for show/accept, optional for status).
-        agent: Option<String>,
-    },
     /// Build the project using the configured build adapter.
     ///
     /// Auto-detects the build system (Cargo, npm, Make) or uses the adapter
@@ -352,8 +361,6 @@ enum Commands {
         /// Defaults to the most recent active goal.
         goal_id: Option<String>,
     },
-    /// System-wide health check: toolchain, agent binaries, daemon, plugins, .ta integrity.
-    Doctor,
     /// View the interactive conversation history for a goal.
     Conversation {
         /// Goal run ID (or prefix).
@@ -361,6 +368,27 @@ enum Commands {
         /// Output as raw JSONL instead of formatted text.
         #[arg(long)]
         json: bool,
+    },
+
+    // ── TERMS ───────────────────────────────────────────────────────────────
+    /// Review and accept the terms of use.
+    #[command(hide = true)]
+    AcceptTerms,
+    /// View the current terms of use.
+    #[command(hide = true)]
+    ViewTerms,
+    /// Show terms acceptance status.
+    #[command(hide = true)]
+    TermsStatus,
+    /// Manage per-agent terms consent (v0.10.18.4).
+    ///
+    /// Subcommands: `ta terms show <agent>`, `ta terms accept <agent>`, `ta terms status`.
+    #[command(hide = true)]
+    Terms {
+        /// Action: show, accept, or status.
+        action: String,
+        /// Agent ID (required for show/accept, optional for status).
+        agent: Option<String>,
     },
 }
 
@@ -447,43 +475,45 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Terms-related commands don't require prior acceptance.
-    match &cli.command {
-        Commands::AcceptTerms => return commands::terms::prompt_and_accept(),
-        Commands::ViewTerms => {
-            commands::terms::view_terms();
-            return Ok(());
-        }
-        Commands::TermsStatus => return commands::terms::show_status(),
-        // Per-agent terms management (v0.10.18.4).
-        Commands::Terms { action, agent } => {
-            let project_root = cli
-                .project_root
-                .canonicalize()
-                .unwrap_or_else(|_| cli.project_root.clone());
-            match action.as_str() {
-                "show" => {
-                    let agent_id = agent.as_deref().unwrap_or("claude-code");
-                    commands::consent::show_agent_terms(agent_id);
-                    return Ok(());
-                }
-                "accept" => {
-                    let agent_id = agent.as_deref().unwrap_or("claude-code");
-                    return commands::consent::prompt_and_accept(&project_root, agent_id);
-                }
-                "status" => {
-                    commands::consent::show_status(&project_root);
-                    return Ok(());
-                }
-                other => {
-                    eprintln!(
-                        "Unknown terms action '{}'. Use: show, accept, or status.",
-                        other
-                    );
-                    return Err(anyhow::anyhow!("unknown terms action: {}", other));
+    if let Some(cmd) = &cli.command {
+        match cmd {
+            Commands::AcceptTerms => return commands::terms::prompt_and_accept(),
+            Commands::ViewTerms => {
+                commands::terms::view_terms();
+                return Ok(());
+            }
+            Commands::TermsStatus => return commands::terms::show_status(),
+            // Per-agent terms management (v0.10.18.4).
+            Commands::Terms { action, agent } => {
+                let project_root = cli
+                    .project_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| cli.project_root.clone());
+                match action.as_str() {
+                    "show" => {
+                        let agent_id = agent.as_deref().unwrap_or("claude-code");
+                        commands::consent::show_agent_terms(agent_id);
+                        return Ok(());
+                    }
+                    "accept" => {
+                        let agent_id = agent.as_deref().unwrap_or("claude-code");
+                        return commands::consent::prompt_and_accept(&project_root, agent_id);
+                    }
+                    "status" => {
+                        commands::consent::show_status(&project_root);
+                        return Ok(());
+                    }
+                    other => {
+                        eprintln!(
+                            "Unknown terms action '{}'. Use: show, accept, or status.",
+                            other
+                        );
+                        return Err(anyhow::anyhow!("unknown terms action: {}", other));
+                    }
                 }
             }
+            _ => {}
         }
-        _ => {}
     }
 
     // All other commands require terms acceptance.
@@ -504,7 +534,14 @@ fn main() -> anyhow::Result<()> {
     // Startup health check: warn about stale drafts (v0.3.6).
     commands::draft::check_stale_drafts(&config);
 
-    match &cli.command {
+    // No subcommand → show status dashboard (v0.13.1.6 item 2).
+    let command = match &cli.command {
+        Some(cmd) => cmd,
+        None => return commands::status::execute(&config, false),
+    };
+
+    match command {
+        Commands::Status { deep } => commands::status::execute(&config, *deep),
         Commands::Goal { command } => commands::goal::execute(command, &config),
         Commands::Draft { command } => commands::draft::execute(command, &config),
         Commands::Pr { command } => commands::pr::execute(command, &config),
@@ -633,7 +670,7 @@ fn main() -> anyhow::Result<()> {
             *compact_after_days,
         ),
         Commands::Operations { command } => commands::operations::execute(command, &config),
-        Commands::Status { deep } => commands::status::execute(&config, *deep),
+        Commands::Runbook { command } => commands::runbook::execute(command, &config),
         Commands::Serve => commands::serve::execute(&project_root),
         Commands::Build { test } => commands::build::execute(&config, *test),
         Commands::Sync => commands::sync::execute(&config),

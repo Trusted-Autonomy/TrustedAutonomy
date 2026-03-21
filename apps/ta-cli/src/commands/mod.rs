@@ -29,6 +29,7 @@ pub mod pr;
 pub mod pty_capture;
 pub mod release;
 pub mod run;
+pub mod runbook;
 pub mod serve;
 pub mod session;
 pub mod setup;

@@ -4858,14 +4858,12 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 #### Items
 
-1. [x] **Reproduce R1**: Root cause confirmed — `AgentOutputDone` only cleared the LAST heartbeat line. When `WorkingIndicator` is pushed, then regular agent output arrives before the first `[heartbeat]` tick, the tick creates a NEW heartbeat entry. On exit only the tick was cleared; the original "Agent is working..." line remained with `is_heartbeat=true` indefinitely.
-2. [x] **Fix R1**: Changed `AgentOutputDone` to scan ALL heartbeat lines in both `app.output` and `app.agent_output`, setting each to `is_heartbeat=false`. Earlier heartbeats get blanked; the last one shows "[agent exited]". Added `r1_working_indicator_cleared_when_heartbeat_tick_arrives_before_exit` regression test that exercises the exact failure sequence (WorkingIndicator → output → [heartbeat] tick → AgentOutputDone).
-3. [x] **Reproduce R2**: `auto_scroll_if_near_bottom()` was not called on `SseEvent`, `CommandResponse`, `DaemonDown`, or `DaemonUp` output paths — only on `AgentOutput` and heartbeat paths.
-4. [x] **Fix R2**: Added `auto_scroll_if_near_bottom()` call after `push_lines` in `SseEvent` and `CommandResponse` handlers, and after `push_output` in `DaemonDown`/`DaemonUp`. Reduced `NEAR_BOTTOM_LINES` and `AGENT_NEAR_BOTTOM_LINES` from 5 to 3 to avoid surprising snaps when user is reviewing recent output. Added `r2_command_response_auto_scrolls_near_bottom`, `r2_sse_event_auto_scrolls_near_bottom`, and `r2_command_response_preserves_scroll_when_far_up` tests.
-5. [x] **Fix R3**: Code already correctly sets `app.cursor = app.input.len()` before paste insertion (added in v0.12.2). Added `r3_paste_appends_at_end_when_cursor_in_middle` test to close the open v0.12.2 verification item — confirmed the `Event::Paste` handler always moves cursor to end regardless of prior cursor position.
-6. [x] **Manual verification**: All three fixes covered by automated tests (5 new tests). v0.12.2 R3 open item resolved.
-
-#### Completed: 5 new tests, all workspace tests pass (578 ta-cli tests, 0 failures).
+1. [ ] **Reproduce R1**: Confirm the indicator state machine path that leaves `working = true` after agent exit
+2. [ ] **Fix R1**: Clear `WorkingIndicator` on `AgentExit` / `GoalCompleted` events; add state assertion in existing TUI tests
+3. [ ] **Reproduce R2**: Confirm whether `auto_scroll_if_near_bottom()` is called on all output paths (streaming tokens, tool results, heartbeat)
+4. [ ] **Fix R2**: Ensure scroll-to-bottom fires on every output-append path when the view is within N lines of the bottom (N = configurable, default 3)
+5. [ ] **Fix R3**: On paste, always move cursor to end of prompt before inserting; ignore current cursor position within the prompt line
+6. [ ] **Manual verification**: Run all three scenarios and confirm fixed; update the v0.12.2 open verification item
 
 #### Version: `0.13.1-alpha.5`
 
@@ -4879,18 +4877,24 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 #### Intelligent Surface
 
-1. [ ] **`ta status` as the one command**: Unified, prioritized view replacing `ta goal list`, `ta draft list`, `ta plan status`, `ta daemon health`, and `ta doctor`. Urgent items first (stuck goals, pending approvals, health issues), then active work, then recent completions. Details expand on demand.
-2. [ ] **`ta` with no arguments shows dashboard**: Instead of showing help, run `ta status`. The bare command becomes the entry point.
-3. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack).
-4. [ ] **Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase."
-5. [ ] **Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") are translated to command sequences by the shell agent, shown for approval before executing.
-6. [ ] **Reduce command surface**: Commands subsumed by the intelligent layer are marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface.
+1. [x] **`ta status` as the one command**: Unified, prioritized view with urgent items first (stuck goals, pending approvals, corrective actions), then active work, then recent completions, then suggested next actions. Output uses boxed format for readability.
+2. [x] **`ta` with no arguments shows dashboard**: `command: Option<Commands>` in Cli struct; `None` arm calls `status::execute()`.
+3. [x] **Proactive notifications**: `GET /api/notifications` daemon endpoint returns actionable push notifications: goal_stuck, goal_failed, draft_ready, corrective_action. Sorted by severity (critical first). Clients can poll and deduplicate by `id`.
+4. [x] **Suggested next actions**: `status.rs` calls `suggest_next_actions()` based on current state: pending drafts → review suggestion; completed goal → draft list; no work + next phase → `ta run <phase-id>`; pending ops → `ta operations log`.
+5. [x] **Intent-based interaction in `ta shell`**: `resolve_operational_intent()` in `api/input.rs` detects operational NL patterns ("what's stuck?", "clean up old goals", "disk space", "show notifications", "list runbooks") and maps them to specific `ta` commands before falling back to the Q&A agent.
+6. [x] **Reduce command surface**: All Commands variants annotated with `help_heading` grouping: "Dashboard", "Core Workflow", "Operations", "Advanced". Terms/hidden commands moved to `#[command(hide = true)]`.
 
 #### Operational Runbooks
 
-7. [ ] **Runbook definitions**: YAML files in `.ta/runbooks/` defining common procedures as corrective action sequences. Example: `disk-pressure.yaml` — identify largest staging dirs, propose cleanup, execute, verify.
-8. [ ] **Runbook triggers**: Triggered automatically by watchdog conditions or manually via `ta runbook run <name>`. Each step presented for approval unless auto-heal policy covers it.
-9. [ ] **Built-in runbooks**: Ship defaults for: disk pressure, zombie goals, crashed plugins, stale drafts, failed CI. Users can override or add their own.
+7. [x] **Runbook definitions**: `RunbookDefinition` + `RunbookStep` types with YAML serde. Project-local runbooks loaded from `.ta/runbooks/*.yaml`. `commands/runbook.rs` new module.
+8. [x] **Runbook triggers**: `ta runbook run <name>` executes each step via `ta <command>` subprocess. Steps with `auto_approve: false` require user confirmation; `--auto` flag skips confirmations for auto-approve steps; `--dry-run` shows steps without executing.
+9. [x] **Built-in runbooks**: disk-pressure (survey → dry-run compact → compact → verify), zombie-goals (list → operations log → gc dry-run → gc execute), crashed-plugins (list → check → daemon restart → status), stale-drafts (list → gc dry-run → gc execute), failed-ci (list goals → verify → run --follow-up).
+
+#### Tests added (20 new tests across 4 files)
+- `status.rs`: 7 tests (find_next_pending_phase, count_pending_drafts, list_pending_draft_ids, deep_status_no_panic, suggest_actions_pending_draft, suggest_actions_no_work_next_phase)
+- `runbook.rs`: 8 tests (builtin_runbooks_all_present, builtin_runbooks_have_steps, builtin_runbooks_steps_have_commands, load_project_runbooks_missing_dir, load_project_runbooks_valid_yaml, find_runbook_builtin, find_runbook_not_found, runbook_definition_roundtrip_yaml)
+- `api/input.rs`: 11 new tests (intent_stuck_goals, intent_clean_up, intent_disk_space, intent_health, intent_notifications, intent_runbook_list, intent_pending_drafts, intent_active_goals, intent_unrecognized_goes_to_agent, intent_routes_via_route_input, and variant tests)
+- `api/notifications.rs`: 3 tests (notification_builder, notification_serializes, count_pending_drafts_missing_dir)
 
 #### Version: `0.13.1-alpha.6`
 
