@@ -688,7 +688,15 @@ fn run_pipeline(
                 last_tag.as_deref(),
             )?;
         } else if let Some(ref agent) = step.agent {
-            execute_agent_step(config, step, agent, version, &commits, last_tag.as_deref())?;
+            execute_agent_step(
+                config,
+                step,
+                agent,
+                version,
+                &commits,
+                last_tag.as_deref(),
+                i + 1,
+            )?;
         }
 
         println!("[{}/{}] {} — done", i + 1, total, step.name);
@@ -750,6 +758,7 @@ fn execute_agent_step(
     version: &str,
     commits: &str,
     last_tag: Option<&str>,
+    step_number: usize,
 ) -> anyhow::Result<()> {
     let objective = step.objective.as_deref().unwrap_or("Execute release step");
     let objective = substitute_vars(objective, version, commits, last_tag);
@@ -757,6 +766,9 @@ fn execute_agent_step(
     let title = format!("release: {}", step.name);
 
     // Build the ta run command.
+    // --headless is required so the agent binary receives the objective via
+    // stdin pipe rather than expecting an interactive terminal. Without it,
+    // claude exits immediately when stdin is closed by the parent process.
     let mut args = vec![
         "run".to_string(),
         title,
@@ -766,6 +778,7 @@ fn execute_agent_step(
         config.workspace_root.display().to_string(),
         "--objective".to_string(),
         objective,
+        "--headless".to_string(),
     ];
 
     if let Some(ref phase) = agent.phase {
@@ -874,9 +887,18 @@ fn execute_agent_step(
         }
         println!("  Draft {} applied to working directory.", id_str);
     } else {
-        println!(
-            "  Warning: no draft found after agent step '{}'.",
-            step.name
+        anyhow::bail!(
+            "Release pipeline stopped at step '{}': agent produced no draft.\n\
+             \n\
+             The agent ran but wrote no changes to the staging workspace, or\n\
+             `ta draft build` found no differences between staging and source.\n\
+             \n\
+             Check the agent output above for errors, then re-run:\n\
+             \n\
+             ta release run {} --from-step {}",
+            step.name,
+            version,
+            step_number
         );
     }
 
