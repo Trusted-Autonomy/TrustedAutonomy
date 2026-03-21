@@ -3054,7 +3054,9 @@ fn apply_package(
 
     // Mark plan phase(s) as done in PLAN.md + record history + suggest next.
     // Supports comma-separated --phase override (v0.8.2) or falls back to goal.plan_phase.
-    // This must happen BEFORE the git commit so the status update is included in the commit.
+    // Bug D fix (v0.13.1.7): for VCS apply, plan update runs AFTER adapter.prepare() inside
+    // the submit closure so PLAN.md is not dirty when git checks out the feature branch.
+    // For non-VCS apply (!git_commit), plan update runs here before rollback.commit().
     let phase_ids: Vec<String> = if let Some(override_phases) = phase_override {
         override_phases
             .split(',')
@@ -3067,7 +3069,9 @@ fn apply_package(
         vec![]
     };
 
-    if !phase_ids.is_empty() {
+    // Non-VCS path: run plan update now, before rollback.commit().
+    // VCS path: plan update runs inside the submit closure after adapter.prepare().
+    if !git_commit && !phase_ids.is_empty() {
         let plan_path = target_dir.join("PLAN.md");
         if plan_path.exists() {
             let mut content = std::fs::read_to_string(&plan_path)?;
@@ -3236,6 +3240,89 @@ fn apply_package(
                     adapter
                         .verify_not_on_protected_target()
                         .map_err(|e| anyhow::anyhow!("{}", e))?;
+                }
+
+                // Bug D fix (v0.13.1.7): plan-phase update runs here, AFTER prepare() has
+                // checked out the feature branch. This ensures PLAN.md is not dirty at
+                // branch-checkout time. The write is included in the commit below.
+                if !phase_ids.is_empty() {
+                    let plan_path = target_dir.join("PLAN.md");
+                    if plan_path.exists() {
+                        let mut content = std::fs::read_to_string(&plan_path)?;
+                        let mut last_phase_id = String::new();
+
+                        for phase in &phase_ids {
+                            let phases_before = super::plan::parse_plan(&content);
+                            let old_status = phases_before
+                                .iter()
+                                .find(|p| super::plan::phase_ids_match(&p.id, phase))
+                                .map(|p| p.status.clone())
+                                .unwrap_or(super::plan::PlanStatus::Pending);
+
+                            eprintln!(
+                                "[plan-update] goal phase_id={:?}, matched plan id={:?}, old_status={:?}",
+                                phase,
+                                phases_before
+                                    .iter()
+                                    .find(|p| super::plan::phase_ids_match(&p.id, phase))
+                                    .map(|p| &p.id),
+                                old_status,
+                            );
+
+                            let updated = super::plan::update_phase_status(
+                                &content,
+                                phase,
+                                super::plan::PlanStatus::Done,
+                            );
+
+                            let changed = updated != content;
+                            eprintln!(
+                                "[plan-update] content changed={}, writing to {}",
+                                changed,
+                                plan_path.display()
+                            );
+
+                            content = updated;
+                            println!("Updated PLAN.md: Phase {} -> done", phase);
+
+                            let _ = super::plan::record_history(
+                                &target_dir,
+                                phase,
+                                &old_status,
+                                &super::plan::PlanStatus::Done,
+                            );
+                            last_phase_id = phase.clone();
+                        }
+
+                        std::fs::write(&plan_path, &content)?;
+
+                        for phase in &phase_ids {
+                            let phase_title = super::plan::parse_plan(&content)
+                                .into_iter()
+                                .find(|p| super::plan::phase_ids_match(&p.id, phase))
+                                .map(|p| p.title)
+                                .unwrap_or_else(|| phase.clone());
+                            capture_phase_complete_to_memory(
+                                config,
+                                phase,
+                                &phase_title,
+                                Some(&pkg.summary.what_changed),
+                            );
+                        }
+
+                        let phases_after = super::plan::parse_plan(&content);
+                        if let Some(next) = super::plan::find_next_pending(
+                            &phases_after,
+                            Some(last_phase_id.as_str()),
+                        ) {
+                            println!();
+                            println!("Next pending phase: {} — {}", next.id, next.title);
+                            println!(
+                                "  To start: {}",
+                                super::plan::suggest_next_goal_command(next)
+                            );
+                        }
+                    }
                 }
 
                 // Pre-submit verification gate: run configured checks before committing.
@@ -3513,11 +3600,27 @@ fn apply_package(
             }
 
             // Now propagate any error from the submit operations.
-            // If this returns Ok(()), VCS submit succeeded — commit the rollback
-            // guard so it does not restore files when it drops.
-            // If this returns Err, the ? propagates and the guard drops uncommitted,
-            // triggering automatic file rollback.
-            submit_result?;
+            // If Ok: VCS submit succeeded — commit the rollback guard.
+            // If Err: print a structured failure summary with actionable next steps,
+            // then return the error so the guard drops uncommitted (triggers file rollback).
+            if let Err(e) = submit_result {
+                let short_id = &pkg.package_id.to_string()[..8];
+                eprintln!(
+                    "\n[apply] VCS submit pipeline failed — {} file(s) rolled back.",
+                    applied_files.len()
+                );
+                eprintln!("  Cause: {}", e);
+                eprintln!("\nNext steps:");
+                eprintln!("  • Apply without VCS (copy files only, then commit manually):");
+                eprintln!("      ta draft apply {} --no-submit", short_id);
+                eprintln!("  • Retry once the issue is resolved:");
+                eprintln!("      ta draft apply {} --submit", short_id);
+                if !skip_verify {
+                    eprintln!("  • Skip pre-submit checks:");
+                    eprintln!("      ta draft apply {} --skip-verify", short_id);
+                }
+                return Err(e);
+            }
             rollback_guard.commit();
         } // end of non-dry-run block
     }
@@ -8382,6 +8485,137 @@ fn run() {
         assert_eq!(
             packages_after[0].goal.goal_id, goal_id,
             "The returned package should be the valid one"
+        );
+    }
+
+    /// v0.13.1.7 — Bug D regression test: plan-update ordering.
+    ///
+    /// Before the fix, `apply_plan_update()` wrote PLAN.md to disk before
+    /// `adapter.prepare()` checked out the feature branch. Git refused the
+    /// checkout because PLAN.md had unstaged changes, causing the apply to fail.
+    ///
+    /// This test verifies that a plan-phase-linked goal applies cleanly with
+    /// `--submit`, and that the commit on the feature branch includes PLAN.md.
+    #[test]
+    #[cfg(unix)]
+    fn apply_with_plan_phase_does_not_dirty_tree_before_branch_checkout() {
+        let project = TempDir::new().unwrap();
+
+        for cmd_args in &[
+            vec!["init"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            std::process::Command::new("git")
+                .args(cmd_args)
+                .current_dir(project.path())
+                .output()
+                .unwrap();
+        }
+
+        // Write a minimal PLAN.md with a pending phase.
+        // Uses the "### v<version> — Title" format matched by the default schema pattern 2.
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "# Plan\n\n### v0.99.0 — Bug D test phase\n<!-- status: pending -->\n\n#### Items\n\n1. [ ] Do the thing\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        for cmd_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
+            std::process::Command::new("git")
+                .args(cmd_args)
+                .current_dir(project.path())
+                .output()
+                .unwrap();
+        }
+
+        let config = GatewayConfig::for_project(project.path());
+
+        // Start a goal linked to the plan phase.
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Bug D fix test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test plan-update ordering".to_string(),
+                agent: "test-agent".to_string(),
+                phase: Some("v0.99.0".to_string()),
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Modify README in staging.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+
+        // Build + approve + apply with git commit.
+        // Before the Bug D fix this would fail: PLAN.md was written before
+        // adapter.prepare() ran, leaving a dirty working tree at checkout time.
+        build_package(&config, &goal_id, "Phase linked change", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester").unwrap();
+        apply_package(
+            &config,
+            &pkg_id,
+            None,
+            true,  // git_commit = true (triggers the Bug D path)
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+        )
+        .unwrap();
+
+        // A feature branch must exist.
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", "ta/*"])
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        let branch_list = String::from_utf8_lossy(&branches.stdout);
+        assert!(
+            !branch_list.trim().is_empty(),
+            "Feature branch should have been created by apply"
+        );
+        let branch_name = branch_list.trim().trim_start_matches("* ").to_string();
+
+        // The commit on the feature branch must include PLAN.md.
+        let show = std::process::Command::new("git")
+            .args(["show", "--stat", "--oneline", &branch_name])
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        let show_output = String::from_utf8_lossy(&show.stdout);
+        assert!(
+            show_output.contains("PLAN.md"),
+            "PLAN.md must be part of the feature branch commit, got:\n{}",
+            show_output
+        );
+
+        // PLAN.md on the feature branch should be updated to done.
+        // Note: after restore_state() the working tree is back on main, so we
+        // must read the file contents from the feature branch commit directly.
+        let plan_on_branch = std::process::Command::new("git")
+            .args(["show", &format!("{}:PLAN.md", branch_name)])
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        let plan_content = String::from_utf8_lossy(&plan_on_branch.stdout);
+        assert!(
+            plan_content.contains("status: done"),
+            "PLAN.md on the feature branch should be updated to done, got:\n{}",
+            plan_content
         );
     }
 }

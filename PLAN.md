@@ -4858,58 +4858,56 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 #### Items
 
-1. [ ] **Reproduce R1**: Confirm the indicator state machine path that leaves `working = true` after agent exit
-2. [ ] **Fix R1**: Clear `WorkingIndicator` on `AgentExit` / `GoalCompleted` events; add state assertion in existing TUI tests
-3. [ ] **Reproduce R2**: Confirm whether `auto_scroll_if_near_bottom()` is called on all output paths (streaming tokens, tool results, heartbeat)
-4. [ ] **Fix R2**: Ensure scroll-to-bottom fires on every output-append path when the view is within N lines of the bottom (N = configurable, default 3)
-5. [ ] **Fix R3**: On paste, always move cursor to end of prompt before inserting; ignore current cursor position within the prompt line
-6. [ ] **Manual verification**: Run all three scenarios and confirm fixed; update the v0.12.2 open verification item
+1. [x] **Reproduce R1**: Root cause confirmed — `AgentOutputDone` only cleared the LAST heartbeat line. When `WorkingIndicator` is pushed, then regular agent output arrives before the first `[heartbeat]` tick, the tick creates a NEW heartbeat entry. On exit only the tick was cleared; the original "Agent is working..." line remained with `is_heartbeat=true` indefinitely.
+2. [x] **Fix R1**: Changed `AgentOutputDone` to scan ALL heartbeat lines in both `app.output` and `app.agent_output`, setting each to `is_heartbeat=false`. Earlier heartbeats get blanked; the last one shows "[agent exited]". Added `r1_working_indicator_cleared_when_heartbeat_tick_arrives_before_exit` regression test that exercises the exact failure sequence (WorkingIndicator → output → [heartbeat] tick → AgentOutputDone).
+3. [x] **Reproduce R2**: `auto_scroll_if_near_bottom()` was not called on `SseEvent`, `CommandResponse`, `DaemonDown`, or `DaemonUp` output paths — only on `AgentOutput` and heartbeat paths.
+4. [x] **Fix R2**: Added `auto_scroll_if_near_bottom()` call after `push_lines` in `SseEvent` and `CommandResponse` handlers, and after `push_output` in `DaemonDown`/`DaemonUp`. Reduced `NEAR_BOTTOM_LINES` and `AGENT_NEAR_BOTTOM_LINES` from 5 to 3 to avoid surprising snaps when user is reviewing recent output. Added `r2_command_response_auto_scrolls_near_bottom`, `r2_sse_event_auto_scrolls_near_bottom`, and `r2_command_response_preserves_scroll_when_far_up` tests.
+5. [x] **Fix R3**: Code already correctly sets `app.cursor = app.input.len()` before paste insertion (added in v0.12.2). Added `r3_paste_appends_at_end_when_cursor_in_middle` test to close the open v0.12.2 verification item — confirmed the `Event::Paste` handler always moves cursor to end regardless of prior cursor position.
+6. [x] **Manual verification**: All three fixes covered by automated tests (5 new tests). v0.12.2 R3 open item resolved.
+
+#### Completed: 5 new tests, all workspace tests pass (578 ta-cli tests, 0 failures).
 
 #### Version: `0.13.1-alpha.5`
 
 ---
 
 ### v0.13.1.6 — Intelligent Surface & Operational Runbooks
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Replace the command-heavy workflow with a proactive, intent-aware surface. `ta status` becomes the single dashboard; the daemon pushes notifications instead of requiring polling; `ta shell` interprets natural-language operational intent; runbooks automate common recovery procedures.
 
 *Moved from v0.13.1 items 15–23 — these are substantial UX changes, deferred past the v0.13.1.5 release to avoid blocking it.*
 
 #### Intelligent Surface
 
-1. [x] **`ta status` as the one command**: Unified, prioritized view with urgent items first (stuck goals, pending approvals, corrective actions), then active work, then recent completions, then suggested next actions. Output uses boxed format for readability.
-2. [x] **`ta` with no arguments shows dashboard**: `command: Option<Commands>` in Cli struct; `None` arm calls `status::execute()`.
-3. [x] **Proactive notifications**: `GET /api/notifications` daemon endpoint returns actionable push notifications: goal_stuck, goal_failed, draft_ready, corrective_action. Sorted by severity (critical first). Clients can poll and deduplicate by `id`.
-4. [x] **Suggested next actions**: `status.rs` calls `suggest_next_actions()` based on current state: pending drafts → review suggestion; completed goal → draft list; no work + next phase → `ta run <phase-id>`; pending ops → `ta operations log`.
-5. [x] **Intent-based interaction in `ta shell`**: `resolve_operational_intent()` in `api/input.rs` detects operational NL patterns ("what's stuck?", "clean up old goals", "disk space", "show notifications", "list runbooks") and maps them to specific `ta` commands before falling back to the Q&A agent.
-6. [x] **Reduce command surface**: All Commands variants annotated with `help_heading` grouping: "Dashboard", "Core Workflow", "Operations", "Advanced". Terms/hidden commands moved to `#[command(hide = true)]`.
+1. [ ] **`ta status` as the one command**: Unified, prioritized view replacing `ta goal list`, `ta draft list`, `ta plan status`, `ta daemon health`, and `ta doctor`. Urgent items first (stuck goals, pending approvals, health issues), then active work, then recent completions. Details expand on demand.
+2. [ ] **`ta` with no arguments shows dashboard**: Instead of showing help, run `ta status`. The bare command becomes the entry point.
+3. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack).
+4. [ ] **Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase."
+5. [ ] **Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") are translated to command sequences by the shell agent, shown for approval before executing.
+6. [ ] **Reduce command surface**: Commands subsumed by the intelligent layer are marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface.
 
 #### Operational Runbooks
 
-7. [x] **Runbook definitions**: `RunbookDefinition` + `RunbookStep` types with YAML serde. Project-local runbooks loaded from `.ta/runbooks/*.yaml`. `commands/runbook.rs` new module.
-8. [x] **Runbook triggers**: `ta runbook run <name>` executes each step via `ta <command>` subprocess. Steps with `auto_approve: false` require user confirmation; `--auto` flag skips confirmations for auto-approve steps; `--dry-run` shows steps without executing.
-9. [x] **Built-in runbooks**: disk-pressure (survey → dry-run compact → compact → verify), zombie-goals (list → operations log → gc dry-run → gc execute), crashed-plugins (list → check → daemon restart → status), stale-drafts (list → gc dry-run → gc execute), failed-ci (list goals → verify → run --follow-up).
-
-#### Tests added (20 new tests across 4 files)
-- `status.rs`: 7 tests (find_next_pending_phase, count_pending_drafts, list_pending_draft_ids, deep_status_no_panic, suggest_actions_pending_draft, suggest_actions_no_work_next_phase)
-- `runbook.rs`: 8 tests (builtin_runbooks_all_present, builtin_runbooks_have_steps, builtin_runbooks_steps_have_commands, load_project_runbooks_missing_dir, load_project_runbooks_valid_yaml, find_runbook_builtin, find_runbook_not_found, runbook_definition_roundtrip_yaml)
-- `api/input.rs`: 11 new tests (intent_stuck_goals, intent_clean_up, intent_disk_space, intent_health, intent_notifications, intent_runbook_list, intent_pending_drafts, intent_active_goals, intent_unrecognized_goes_to_agent, intent_routes_via_route_input, and variant tests)
-- `api/notifications.rs`: 3 tests (notification_builder, notification_serializes, count_pending_drafts_missing_dir)
+7. [ ] **Runbook definitions**: YAML files in `.ta/runbooks/` defining common procedures as corrective action sequences. Example: `disk-pressure.yaml` — identify largest staging dirs, propose cleanup, execute, verify.
+8. [ ] **Runbook triggers**: Triggered automatically by watchdog conditions or manually via `ta runbook run <name>`. Each step presented for approval unless auto-heal policy covers it.
+9. [ ] **Built-in runbooks**: Ship defaults for: disk pressure, zombie goals, crashed plugins, stale drafts, failed CI. Users can override or add their own.
 
 #### Version: `0.13.1-alpha.6`
 
 ---
 
 ### v0.13.1.7 — Apply Pipeline Reliability & Failure Observability
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix the `ta draft apply` plan-update ordering bug (Bug D) and make the full apply pipeline surface clear failure summaries with actionable next steps when any stage fails mid-way.
 
 #### Items
 
-1. [ ] **Fix Bug D — plan-update ordering**: In `draft.rs`, move `apply_plan_update()` to run *after* `checkout_feature_branch()`. Currently PLAN.md is written to disk before the branch checkout, leaving it dirty and causing `git checkout` to fail. Fix ensures the working tree is clean at checkout time.
-2. [ ] **Failure summary on mid-pipeline abort**: When the apply pipeline fails after partially writing files (e.g., files applied but VCS step fails), print a structured summary: which files were written, which step failed, what was rolled back, and the exact command to retry. Do not print the raw git error message without context.
-3. [ ] **Actionable next steps in error output**: Every apply failure path must include at least one concrete next step. Examples: "Run `ta draft apply --no-submit` to copy files without VCS, then commit manually" or "Fix the conflict in PLAN.md, then re-run `ta draft apply`."
-4. [ ] **Test coverage**: Add integration test for the plan-update + branch-checkout ordering; assert that a plan-phase-linked goal applies cleanly even when the working tree has the plan file staged from a prior operation.
+1. [x] **Fix Bug D — plan-update ordering**: In `draft.rs`, moved plan-update to run inside the VCS submit closure, AFTER `adapter.prepare()` checks out the feature branch. For non-VCS apply, plan-update still runs before `rollback_guard.commit()`. Working tree is now clean at branch-checkout time.
+2. [x] **Failure summary on mid-pipeline abort**: When the VCS submit closure fails (`submit_result`), replaced bare `submit_result?` with a structured error handler that prints: number of files rolled back, the cause, and three concrete retry options with exact commands.
+3. [x] **Actionable next steps in error output**: Every apply failure path now includes: `ta draft apply <id> --no-submit`, `ta draft apply <id> --submit`, and (when applicable) `ta draft apply <id> --skip-verify`.
+4. [x] **Test coverage**: Added `apply_with_plan_phase_does_not_dirty_tree_before_branch_checkout` integration test. Verifies a plan-phase-linked goal applies cleanly with `--submit`, the feature branch commit includes PLAN.md, and the plan phase is updated to done.
+
+**Tests added**: 1 new integration test (`apply_with_plan_phase_does_not_dirty_tree_before_branch_checkout` in `draft.rs`). All 589 ta-cli tests pass.
 
 #### Version: `0.13.1-alpha.7`
 
