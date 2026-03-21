@@ -4909,6 +4909,10 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 **Tests added**: 1 new integration test (`apply_with_plan_phase_does_not_dirty_tree_before_branch_checkout` in `draft.rs`). All 589 ta-cli tests pass.
 
+#### Known issue discovered post-merge
+
+- **Release pipeline drift false positive**: When `ta release run` executes the "Generate release notes" agent step, the staging snapshot is taken after the "Version bump" shell step has already modified `Cargo.toml` in source. By the time the agent's draft is applied, source appears to have "changed" relative to the snapshot even though no meaningful content changed after the goal started — triggering the `[info] Source changed since goal start — rebasing against current source.` message. The rebase is a no-op in practice, but the message is misleading. Root cause: the drift check uses mtime or a shallow hash that doesn't account for the fact that the goal started *after* the version bump ran. Fix: record the source snapshot hash at goal-start time and compare content (not mtime) to determine true drift. → v0.13.2 or nearest maintenance phase.
+
 #### Version: `0.13.1-alpha.7`
 
 ---
