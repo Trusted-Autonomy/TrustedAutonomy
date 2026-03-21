@@ -544,6 +544,8 @@ fn export_solutions(
         ta_memory::ProjectType::TypeScript => Some("typescript".to_string()),
         ta_memory::ProjectType::Python => Some("python".to_string()),
         ta_memory::ProjectType::Go => Some("go".to_string()),
+        ta_memory::ProjectType::UnrealCpp => Some("cpp".to_string()),
+        ta_memory::ProjectType::UnityCsharp => Some("csharp".to_string()),
         ta_memory::ProjectType::Generic => None,
     };
 

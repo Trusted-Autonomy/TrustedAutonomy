@@ -20,6 +20,10 @@ pub enum ProjectType {
     Python,
     /// Go project (`go.mod`).
     Go,
+    /// Unreal Engine C++ project (`*.uproject`).
+    UnrealCpp,
+    /// Unity C# project (`Assets/` directory + `*.sln`).
+    UnityCsharp,
     /// Fallback for unrecognized projects.
     Generic,
 }
@@ -31,6 +35,8 @@ impl std::fmt::Display for ProjectType {
             Self::TypeScript => write!(f, "typescript"),
             Self::Python => write!(f, "python"),
             Self::Go => write!(f, "go"),
+            Self::UnrealCpp => write!(f, "unreal-cpp"),
+            Self::UnityCsharp => write!(f, "unity-csharp"),
             Self::Generic => write!(f, "generic"),
         }
     }
@@ -79,6 +85,18 @@ impl KeyDomainMap {
                 module: "package".into(),
                 type_system: "interface".into(),
                 build_tool: "go".into(),
+            },
+            ProjectType::UnrealCpp => Self {
+                module_map: "module-map".into(),
+                module: "module".into(),
+                type_system: "uclass".into(),
+                build_tool: "ubt".into(),
+            },
+            ProjectType::UnityCsharp => Self {
+                module_map: "assembly-map".into(),
+                module: "assembly".into(),
+                type_system: "monobehaviour".into(),
+                build_tool: "msbuild".into(),
             },
             ProjectType::Generic => Self {
                 module_map: "component-map".into(),
@@ -202,6 +220,8 @@ fn detect_project_type_with_config(project_root: &Path, config: &MemoryConfig) -
                 "typescript" => ProjectType::TypeScript,
                 "python" => ProjectType::Python,
                 "go" => ProjectType::Go,
+                "unreal-cpp" => ProjectType::UnrealCpp,
+                "unity-csharp" => ProjectType::UnityCsharp,
                 _ => ProjectType::Generic,
             };
         }
@@ -231,6 +251,29 @@ fn detect_project_type_with_config(project_root: &Path, config: &MemoryConfig) -
 
     if project_root.join("go.mod").exists() {
         return ProjectType::Go;
+    }
+
+    // Unreal Engine: *.uproject file in the project root.
+    if let Ok(entries) = std::fs::read_dir(project_root) {
+        for entry in entries.flatten() {
+            if let Some(ext) = entry.path().extension() {
+                if ext == "uproject" {
+                    return ProjectType::UnrealCpp;
+                }
+            }
+        }
+    }
+
+    // Unity: Assets/ directory + *.sln file in project root.
+    if project_root.join("Assets").is_dir() {
+        if let Ok(entries) = std::fs::read_dir(project_root) {
+            let has_sln = entries
+                .flatten()
+                .any(|e| e.path().extension().map(|x| x == "sln").unwrap_or(false));
+            if has_sln {
+                return ProjectType::UnityCsharp;
+            }
+        }
     }
 
     // TypeScript without tsconfig (JS project) — still use TS conventions.
@@ -362,6 +405,37 @@ mod tests {
     fn detect_generic_fallback() {
         let dir = TempDir::new().unwrap();
         assert_eq!(detect_project_type(dir.path()), ProjectType::Generic);
+    }
+
+    #[test]
+    fn detect_unreal() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("MyGame.uproject"), "{}").unwrap();
+        assert_eq!(detect_project_type(dir.path()), ProjectType::UnrealCpp);
+    }
+
+    #[test]
+    fn detect_unity() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("Assets")).unwrap();
+        std::fs::write(dir.path().join("MyGame.sln"), "").unwrap();
+        assert_eq!(detect_project_type(dir.path()), ProjectType::UnityCsharp);
+    }
+
+    #[test]
+    fn unreal_cpp_domain_map() {
+        let domains = KeyDomainMap::for_project_type(&ProjectType::UnrealCpp);
+        assert_eq!(domains.module_map, "module-map");
+        assert_eq!(domains.type_system, "uclass");
+        assert_eq!(domains.build_tool, "ubt");
+    }
+
+    #[test]
+    fn unity_csharp_domain_map() {
+        let domains = KeyDomainMap::for_project_type(&ProjectType::UnityCsharp);
+        assert_eq!(domains.module_map, "assembly-map");
+        assert_eq!(domains.type_system, "monobehaviour");
+        assert_eq!(domains.build_tool, "msbuild");
     }
 
     #[test]
