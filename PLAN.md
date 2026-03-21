@@ -5684,6 +5684,17 @@ Current releases ship archives containing a bare binary and docs. Users must man
 3. [ ] **Release notes agent should not need a full workspace copy**: The release notes agent only reads git history and writes one `.md` file — it does not need a full staging copy of the workspace. Redesign: release notes generation queries `goal-history.jsonl` (v0.13.10) for completed phases since last tag, then writes the file directly to source without staging. This eliminates the staging/drift fragility entirely for this use case. Longer term: introduce a lightweight "scribe" goal type (no workspace copy, declared write path only) for pure-write, no-compile artifacts. (Design discussion: staging is the right model for code changes that need build/test validation; it is wasteful and fragile for pure documentation/metadata outputs that don't need verification.)
 4. [x] **`--label` dispatches even when pipeline is aborted**: When the user cancels at an approval gate (e.g., "Proceed with 'Push'? [y/N] n"), `run_pipeline` returns early via `?` but the `--label` dispatch block was outside the else branch and ran unconditionally. Fix: moved `--label` dispatch inside the `else { run_pipeline()? ... }` block so it only executes on successful pipeline completion. (Fixed in `release.rs` during v0.13.12 planning.)
 5. [ ] **GC should not run while a release pipeline is active**: `ta gc` should check for running release pipeline processes (or a lockfile written by `ta release run`) and skip — or warn — rather than deleting staging dirs mid-pipeline. Add a `--force` flag to override.
+5b. [ ] **Build-tool lock files left uncommitted after verify step**: After the `[verify]` commands run (`cargo build`, `cargo test`, etc.), build tools may rewrite lock files (`Cargo.lock`, `package-lock.json`, `go.sum`, `Pipfile.lock`) in the staging directory. These are not agent-written changes — they are deterministic outputs of the build tool. The overlay diff currently includes them as changed files, which is correct, but the issue is they accumulate as uncommitted changes in the source after `ta draft apply` because:
+    1. `apply` copies `Cargo.lock` from staging → source (content matches, so source is now "correct")
+    2. User then runs a build command → cargo rewrites `Cargo.lock` again (may differ if deps resolved differently)
+    3. Nobody commits it because it "wasn't the real work"
+
+    Fix: after `ta draft apply`, if the applied diff includes a known lock file, print a reminder:
+    ```
+    ⚠ Lock file updated: Cargo.lock — commit it alongside your feature branch:
+      git add Cargo.lock && git commit --amend --no-edit
+    ```
+    Longer-term: `ta draft apply --git-commit` should automatically include lock files in the commit it creates, since they are always part of the correct source state after any dep/version change.
 
 #### Overlay Baseline — `GoalBaseline` Trait
 
