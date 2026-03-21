@@ -4840,6 +4840,10 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 **Tests added**: 12 new tests in `init.rs` (init_unreal_template, init_unity_template, taignore_unreal_has_binaries, taignore_unity_has_library, bmad_toml_created, bmad_agent_configs_created, mcp_json_created, onboarding_goal_unreal_content, onboarding_goal_unity_content) + 3 new tests in `key_schema.rs` (detect_unreal, detect_unity, unreal_cpp_domain_map).
 
+#### Deferred to v0.13.12
+
+- **[D] GSD (get-shit-done) template**: `ta init run --template gsd` — creates `.planning/` scaffold + `agents/gsd.yaml`. Low effort, completes the trio of spec-driven frameworks (BMAD, Claude Flow, GSD). → v0.13.12 item 17
+
 #### Version: `0.13.1-alpha.4`
 
 ---
@@ -5798,6 +5802,25 @@ Current releases ship archives containing a bare binary and docs. Users must man
     **Why now, not deferred to AMP (v0.14.2)**: This is ~150 lines of Rust, no new dependencies, and saves 10–20k tokens per goal invocation immediately. At v0.14.2, each digest entry maps 1:1 to an AMP context registry entry — zero rework, pure additive migration. The `context_hash` field in AMP messages already assumes a store with this exact shape.
 
     **AMP bridge at v0.14.2**: digest entries become the seed of the AMP context registry. The `source_hash` becomes the AMP `context_hash`; the `summary` becomes the stored embedding payload. Agents that have seen a goal built on the same PLAN.md hash skip retransmitting context entirely.
+
+#### Agent Framework Templates (deferred from v0.13.1.4)
+
+17. [ ] **GSD (get-shit-done) template — `ta init run --template gsd`**: Add GSD as a third supported spec-driven agent framework alongside BMAD and Claude Flow. Two files:
+
+    - **`agents/gsd.yaml`**: Launch config — `command: claude`, `pre_launch: npx get-shit-done-cc@latest install --local`, same `alignment` block as `bmad.yaml`. GSD installs into `.claude/get-shit-done/` and runs via `/gsd:*` slash commands within Claude Code — no separate binary.
+    - **`ProjectType::Gsd` in `init.rs`**: Creates `.planning/` scaffold:
+      - `PROJECT.md` — project context stub (name, stack, goals)
+      - `REQUIREMENTS.md` — empty requirements register
+      - `ROADMAP.md` — phase list keyed to TA PLAN.md phases
+      - `STATE.md` — GSD state file (initialized empty)
+      - `config.json` — GSD config (`mode: "standard"`, `model_profile: "inherit"`, `tdd: false`)
+      - `onboarding-goal.md` — TA objective file that runs `/gsd:new-project` to populate the planning files from the existing codebase
+
+    **GSD vs BMAD positioning**: BMAD = single-session phased workflow for a new feature; GSD = multi-session context engineering with wave-based parallelization for sustained development. Both wrap Claude Code and coexist in the same project. GSD is better suited to longer-running phases (v0.13.x+); BMAD for bounded feature work.
+
+    **Local model note**: GSD has no Qwen 2.5 / Ollama-specific templates. Its `inherit` model profile delegates model selection to the host runtime — it picks up TA v0.13.8 local model support automatically when available. No GSD-specific work needed for Qwen.
+
+    **Effort**: ~2–3 hours (one agent YAML + ~30 lines in `init.rs` + 5 template stubs). No new dependencies.
 
 #### Release Pipeline Polish (deferred from v0.13.1.x)
 
