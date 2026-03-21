@@ -190,6 +190,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             interactive: None,
             alignment: Some(ta_policy::AlignmentProfile::default_developer()),
             headless_args: vec![
+                "--print".to_string(),
                 "--verbose".to_string(),
                 "--output-format".to_string(),
                 "stream-json".to_string(),
@@ -3829,6 +3830,10 @@ non_interactive_env:
     fn claude_code_headless_args_include_stream_json() {
         let config = builtin_agent_config("claude-code");
         assert!(
+            config.headless_args.contains(&"--print".to_string()),
+            "claude-code headless_args must include --print for non-interactive execution"
+        );
+        assert!(
             config.headless_args.contains(&"--verbose".to_string()),
             "claude-code headless_args must include --verbose for stream-json to work"
         );
@@ -3849,15 +3854,21 @@ non_interactive_env:
         // The args must appear in the right order for the CLI to parse them.
         let config = builtin_agent_config("claude-code");
         let args = &config.headless_args;
+        let print_pos = args.iter().position(|a| a == "--print");
         let verbose_pos = args.iter().position(|a| a == "--verbose");
         let format_pos = args.iter().position(|a| a == "--output-format");
         let json_pos = args.iter().position(|a| a == "stream-json");
 
+        assert!(print_pos.is_some(), "--print must be present");
         assert!(verbose_pos.is_some(), "--verbose must be present");
         assert!(format_pos.is_some(), "--output-format must be present");
         assert!(json_pos.is_some(), "stream-json must be present");
 
-        // --output-format must come before stream-json (it's the value).
+        // --print must come first, --output-format must precede stream-json.
+        assert!(
+            print_pos.unwrap() < verbose_pos.unwrap(),
+            "--print must precede --verbose"
+        );
         assert!(
             format_pos.unwrap() < json_pos.unwrap(),
             "--output-format must precede stream-json"

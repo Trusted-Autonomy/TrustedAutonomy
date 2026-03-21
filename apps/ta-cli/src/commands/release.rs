@@ -282,13 +282,19 @@ pub struct PipelineStep {
     /// Human-readable step name.
     pub name: String,
 
-    /// Shell command to run (mutually exclusive with `agent`).
+    /// Shell command to run (mutually exclusive with `agent` and `generate_notes`).
     #[serde(default)]
     pub run: Option<String>,
 
-    /// TA agent to invoke (mutually exclusive with `run`).
+    /// TA agent to invoke (mutually exclusive with `run` and `generate_notes`).
     #[serde(default)]
     pub agent: Option<AgentStep>,
+
+    /// If true, generate release notes from ${COMMITS} and write to .release-draft.md.
+    /// This is a built-in step type — reliable, no agent required.
+    /// Mutually exclusive with `run` and `agent`.
+    #[serde(default)]
+    pub generate_notes: bool,
 
     /// Objective/description for context (used by agent steps and display).
     #[serde(default)]
@@ -329,15 +335,23 @@ fn default_agent_id() -> String {
 
 impl PipelineStep {
     fn validate(&self) -> anyhow::Result<()> {
-        if self.run.is_none() && self.agent.is_none() {
+        let defined = [
+            self.run.is_some(),
+            self.agent.is_some(),
+            self.generate_notes,
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
+        if defined == 0 {
             anyhow::bail!(
-                "Step '{}': must have either 'run' or 'agent' defined",
+                "Step '{}': must have one of 'run', 'agent', or 'generate_notes: true'",
                 self.name
             );
         }
-        if self.run.is_some() && self.agent.is_some() {
+        if defined > 1 {
             anyhow::bail!(
-                "Step '{}': cannot have both 'run' and 'agent' — pick one",
+                "Step '{}': only one of 'run', 'agent', or 'generate_notes' may be set",
                 self.name
             );
         }
@@ -701,6 +715,13 @@ fn run_pipeline(
                 last_tag.as_deref(),
                 i + 1,
             )?;
+        } else if step.generate_notes {
+            generate_notes_step(
+                &config.workspace_root,
+                version,
+                &commits,
+                last_tag.as_deref(),
+            )?;
         }
 
         println!("[{}/{}] {} — done", i + 1, total, step.name);
@@ -988,6 +1009,117 @@ fn find_latest_draft(config: &GatewayConfig) -> anyhow::Result<Option<uuid::Uuid
     Ok(newest.map(|(_, id)| id))
 }
 
+/// Built-in release notes generator.
+///
+/// Formats commit messages since the last tag into a structured Markdown file
+/// at `.release-draft.md`. This is a deterministic alternative to the `agent:`
+/// step type — no AI agent required, no stdin/headless issues.
+///
+/// The generated file uses the same format expected by the "Review release notes"
+/// approval gate and the GitHub release workflow.
+fn generate_notes_step(
+    root: &Path,
+    version: &str,
+    commits: &str,
+    last_tag: Option<&str>,
+) -> anyhow::Result<()> {
+    let tag = format!("v{}", version);
+    let since = last_tag.unwrap_or("the beginning of the project");
+
+    let mut notes = format!("## {}\n\n", tag);
+
+    // Group commits into rough categories based on keywords.
+    let mut features: Vec<&str> = Vec::new();
+    let mut fixes: Vec<&str> = Vec::new();
+    let mut improvements: Vec<&str> = Vec::new();
+    let mut other: Vec<&str> = Vec::new();
+
+    for line in commits.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_lowercase();
+        if lower.starts_with("feat")
+            || lower.contains("implement")
+            || lower.contains("add ")
+            || lower.contains("new ")
+        {
+            features.push(line);
+        } else if lower.starts_with("fix")
+            || lower.contains("fix ")
+            || lower.contains("bug")
+            || lower.contains("revert")
+        {
+            fixes.push(line);
+        } else if lower.starts_with("refactor")
+            || lower.starts_with("perf")
+            || lower.starts_with("improve")
+            || lower.contains("update")
+            || lower.contains("improve")
+            || lower.contains("enhance")
+            || lower.contains("upgrade")
+        {
+            improvements.push(line);
+        } else {
+            other.push(line);
+        }
+    }
+
+    let total = features.len() + fixes.len() + improvements.len() + other.len();
+
+    if !features.is_empty() {
+        notes.push_str("### New Features\n\n");
+        for c in &features {
+            notes.push_str(&format!("- {}\n", c));
+        }
+        notes.push('\n');
+    }
+    if !improvements.is_empty() {
+        notes.push_str("### Improvements\n\n");
+        for c in &improvements {
+            notes.push_str(&format!("- {}\n", c));
+        }
+        notes.push('\n');
+    }
+    if !fixes.is_empty() {
+        notes.push_str("### Bug Fixes\n\n");
+        for c in &fixes {
+            notes.push_str(&format!("- {}\n", c));
+        }
+        notes.push('\n');
+    }
+    if !other.is_empty() {
+        notes.push_str("### Other Changes\n\n");
+        for c in &other {
+            notes.push_str(&format!("- {}\n", c));
+        }
+        notes.push('\n');
+    }
+    if total == 0 {
+        notes.push_str("_No changes since last release._\n\n");
+    }
+
+    notes.push_str(&format!("_Changes since {}_\n", since));
+
+    let path = root.join(".release-draft.md");
+    std::fs::write(&path, &notes).map_err(|e| {
+        anyhow::anyhow!(
+            "Could not write .release-draft.md to {}: {}",
+            root.display(),
+            e
+        )
+    })?;
+
+    println!(
+        "  Generated .release-draft.md ({} changes since {})",
+        total, since
+    );
+    println!();
+    println!("{}", notes);
+    Ok(())
+}
+
 fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_tag: Option<&str>) {
     if let Some(ref cmd) = step.run {
         let resolved = substitute_vars(cmd, version, commits, last_tag);
@@ -1001,6 +1133,9 @@ fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_ta
                 substitute_vars(obj, version, commits, last_tag)
             );
         }
+    } else if step.generate_notes {
+        println!("  type: generate_notes (built-in)");
+        println!("  output: .release-draft.md");
     }
     if step.requires_approval {
         println!("  approval: required");
@@ -1123,6 +1258,8 @@ fn show_pipeline(config: &GatewayConfig, pipeline_path: Option<&Path>) -> anyhow
             "shell"
         } else if step.agent.is_some() {
             "agent"
+        } else if step.generate_notes {
+            "generate_notes"
         } else {
             "unknown"
         };
@@ -1520,6 +1657,8 @@ fn validate_release_with_env(
             "shell"
         } else if step.agent.is_some() {
             "agent"
+        } else if step.generate_notes {
+            "generate_notes"
         } else {
             "unknown"
         };
@@ -1786,21 +1925,7 @@ steps:
       echo "Cleared any stale .release-draft.md."
 
   - name: Generate release notes
-    agent:
-      id: claude-code
-    objective: |
-      Synthesize user-facing release notes for version ${TAG}.
-      Commits since ${LAST_TAG}:
-      ${COMMITS}
-
-      Write the notes to .release-draft.md in this format:
-      ## ${TAG}
-      ### New Features
-      - ...
-      ### Improvements
-      - ...
-      ### Bug Fixes
-      - ...
+    generate_notes: true
     output: .release-draft.md
 
   - name: Review release notes
@@ -1920,6 +2045,7 @@ mod tests {
             name: "bad".to_string(),
             run: None,
             agent: None,
+            generate_notes: false,
             objective: None,
             requires_approval: false,
             output: None,
@@ -1938,6 +2064,7 @@ mod tests {
                 id: "claude-code".to_string(),
                 phase: None,
             }),
+            generate_notes: false,
             objective: None,
             requires_approval: false,
             output: None,
@@ -2276,14 +2403,14 @@ steps:
     }
 
     #[test]
-    fn default_pipeline_uses_releaser_agent() {
+    fn default_pipeline_uses_generate_notes_step() {
         let pipeline: ReleasePipeline = serde_yaml::from_str(DEFAULT_PIPELINE_YAML).unwrap();
-        let agent_step = pipeline
+        let notes_step = pipeline
             .steps
             .iter()
-            .find(|s| s.agent.is_some())
-            .expect("should have an agent step");
-        assert_eq!(agent_step.agent.as_ref().unwrap().id, "releaser");
+            .find(|s| s.generate_notes)
+            .expect("default pipeline must have a generate_notes step");
+        assert_eq!(notes_step.name, "Generate release notes");
     }
 
     #[test]
