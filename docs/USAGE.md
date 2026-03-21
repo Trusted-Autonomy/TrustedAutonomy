@@ -1462,26 +1462,17 @@ BMAD is a collection of markdown persona prompts. Install it once to a home dire
 ```bash
 # macOS / Linux
 git clone https://github.com/bmadcode/BMAD-METHOD ~/.bmad
-```
 
-```powershell
-# Windows (PowerShell)
-# Use a plain folder name — dot-prefixed hidden dirs aren't conventional on Windows
-git clone https://github.com/bmadcode/BMAD-METHOD "$HOME\bmad"
+# Windows (PowerShell — run from your user home directory)
+git clone https://github.com/bmadcode/BMAD-METHOD "$env:USERPROFILE\.bmad"
 ```
-
-> **Windows pitfall**: Do not write `"$env:USERPROFILE.bmad"` (missing backslash). That resolves to `C:\Users\YourName.bmad` inside `C:\Users\`, which requires admin access. The correct form is `"$HOME\bmad"` → `C:\Users\YourName\bmad`.
 
 TA stores the path in `.ta/bmad.toml` (set automatically by `ta init --template`). You can override it with the `TA_BMAD_HOME` environment variable:
 
 ```bash
-# macOS / Linux — if you cloned BMAD somewhere other than ~/.bmad
-export TA_BMAD_HOME=/path/to/bmad
-```
-
-```powershell
-# Windows PowerShell — if you cloned BMAD somewhere other than $HOME\bmad
-$env:TA_BMAD_HOME = "C:\Users\FPS\bmad"
+# If you cloned BMAD somewhere else
+export TA_BMAD_HOME=/path/to/bmad   # Unix
+$env:TA_BMAD_HOME = "C:\tools\bmad"  # Windows PowerShell
 ```
 
 **4. Anthropic API key**
@@ -3422,8 +3413,11 @@ Input is routed through the daemon's routing table. Recognized prefixes run as c
 
 ```
 ta> ta draft list                     # Runs: ta draft list
-ta> git status                        # Runs: git status
-ta> !ls -la                           # Shell escape: sh -c ls -la
+ta> run Fix the auth bug              # Shortcut for: ta run "Fix the auth bug"
+ta> vcs status                        # Runs: git status (or configured VCS)
+ta> git log --oneline -5              # Alias for vcs — runs git
+ta> !ls -la                           # Shell escape: sh -c "ls -la"
+ta> !echo $PWD                        # Shell escape: run any shell command
 ta> approve abc123                    # Shortcut: ta draft approve abc123
 ta> status                            # Shortcut: ta status
 ta> What should we work on next?      # Sent to agent session
@@ -3433,7 +3427,10 @@ Built-in shell commands:
 
 | Command | Description |
 |---------|-------------|
-| `help` / `?` | Show shell help and CLI command summary |
+| `help` / `?` | Show shell help, keybinding reference, and CLI command summary |
+| `run <title>` | Start a new agent goal — shortcut for `ta run <title>` |
+| `vcs <cmd>` | Run VCS commands (e.g., `vcs status`, `vcs log`). `git <cmd>` is an alias. |
+| `!<cmd>` | Shell escape — run any shell command (e.g., `!ls -la`, `!echo $PWD`) |
 | `:tail [id] [--lines N]` | Attach to goal output stream (read-only, `--lines` overrides backfill count) |
 | `:attach [id]` | Bidirectional attach — stream output AND relay typed input to the agent's stdin |
 | `:detach` | Exit attach mode (also exits on Ctrl-D) |

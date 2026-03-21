@@ -4689,31 +4689,40 @@ The trust model stays the same: daemon detects and diagnoses, agent proposes cor
 10. [x] **`ta operations log`**: New `ta operations log` command in `apps/ta-cli/src/commands/operations.rs`. Shows corrective actions with `--limit`, `--all`, `--severity` filters. Actionable empty-state messages point to `ta daemon start`.
 
 #### Agent-Assisted Diagnosis
-11. [-] **Daemon-to-agent diagnostic requests** → v0.13.8: diagnostic goal spawning fits alongside pluggable agent framework work.
-12. [-] **Diagnostic goal type** → v0.13.8: read-only agent invocation is an agent framework concern.
-13. [-] **Shell agent as advisor** → v0.13.8: proactive shell agent requires agent dispatch infrastructure.
-14. [-] **Root cause correlation** → v0.13.8: multi-signal correlation via agent; depends on diagnostic goal type (item 12).
+11. [ ] **Daemon-to-agent diagnostic requests**: When the watchdog detects an issue it can't diagnose from metrics alone (e.g., goal failed with unclear error), it can spawn a lightweight diagnostic goal: "Analyze the logs for goal X and explain why it failed." The diagnostic agent has read-only access to goal state, agent logs, and daemon events.
+12. [ ] **Diagnostic goal type**: A new goal type `diagnostic` that is read-only by design — no staging copy, no draft, no apply. Just reads state and produces a text report. Policy engine enforces read-only grants. Lightweight and fast.
+13. [ ] **Shell agent as advisor**: In `ta shell`, the agent can proactively surface issues: "I notice goal abc123 has been running for 3 hours with no events in the last 45 minutes. Want me to check on it?" The agent reads daemon health data and offers to investigate.
+14. [ ] **Root cause correlation**: When multiple issues occur together (disk full + goal failed + plugin crashed), the diagnostic agent correlates them: "The goal failed because disk was full, which also crashed the Discord plugin. Recommend: clean 3 stale staging dirs (reclaim ~12GB), restart Discord plugin, retry the goal."
 
 #### Intelligent Surface (fewer commands, smarter defaults)
-15. [-] **`ta status` as the one command** → v0.13.1.6
-16. [-] **Proactive notifications** → v0.13.1.6
-17. [-] **Intent-based interaction** → v0.13.1.6
-18. [-] **Suggested next actions** → v0.13.1.6
-19. [-] **`ta` with no arguments shows dashboard** → v0.13.1.6
-20. [-] **Reduce command surface** → v0.13.1.6
+15. [ ] **`ta status` as the one command**: Replaces the need for `ta goal list`, `ta draft list`, `ta plan status`, `ta daemon health`, and `ta doctor`. Shows a unified, prioritized view: urgent items first (stuck goals, pending approvals, health issues), then active work, then recent completions. Details expand on demand.
+16. [ ] **Proactive notifications**: Instead of the user polling with commands, the daemon pushes notifications for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack).
+17. [ ] **Intent-based interaction**: In `ta shell`, instead of remembering `ta goal gc --include-staging --threshold-days 7`, the user says "clean up old goals" and the shell agent translates to the right command sequence, shows what it would do, and asks for approval.
+18. [ ] **Suggested next actions**: After any command completes, the daemon suggests what to do next based on current state. "Draft applied successfully. PR #157 created. Next: check CI status with `ta pr status` or start next phase with `ta run`." Replaces the need to memorize workflows.
+19. [ ] **`ta` with no arguments**: Instead of showing help, show `ta status` (item 15). The bare command becomes the dashboard.
+20. [ ] **Reduce command surface**: Deprecate commands that are subsumed by the intelligent layer. Mark as "advanced" in help rather than removing — power users can still use them directly, but the default path is through the intelligent surface.
 
 #### Operational Runbooks
-21. [-] **Runbook definitions** → v0.13.1.6
-22. [-] **Runbook triggers** → v0.13.1.6
-23. [-] **Built-in runbooks** → v0.13.1.6
+21. [ ] **Runbook definitions**: YAML files in `.ta/runbooks/` that define common operational procedures as sequences of corrective actions. Example: `disk-pressure.yaml` defines the steps for handling low disk space (identify largest staging, propose cleanup, execute, verify).
+22. [ ] **Runbook triggers**: Runbooks can be triggered automatically by watchdog conditions or manually via `ta run-book <name>`. Each step is presented for approval unless auto-heal policy covers it.
+23. [ ] **Built-in runbooks**: Ship with default runbooks for common scenarios: disk pressure, zombie goals, crashed plugins, stale drafts, failed CI. Users can customize or add their own.
 
 #### Auto Follow-Up on Validation Failure
-24. [-] **Validation failure event** → v0.13.9: depends on `constitution.toml [validate]` commands.
-25. [-] **Auto-follow-up proposal** → v0.13.9
-26. [-] **Follow-up consent model** → v0.13.9
-27. [-] **Follow-up goal bootstrapping** → v0.13.9
-28. [-] **Cycle guard** → v0.13.9
-29. [-] **`ta operations log` extension** → v0.13.9
+These items integrate with the per-project validation commands defined in `constitution.toml` (v0.13.9). When a draft build or apply fails its validation gate, the daemon can automatically propose — or trigger — a corrective follow-up goal.
+
+24. [ ] **Validation failure event**: When `ta draft build` or `ta draft apply` exits with a validation error (from `constitution.toml [validate]` commands), emit a `ValidationFailed { goal_id, stage, command, exit_code, output }` daemon event.
+25. [ ] **Auto-follow-up proposal**: Daemon receives `ValidationFailed` and — depending on `on_failure` policy — proposes a follow-up goal: "Validation failed at pre-apply (cargo clippy: 3 errors). Want me to start a follow-up goal to fix them?" Posted via all configured channels.
+26. [ ] **Follow-up consent model** in `constitution.toml`:
+    ```toml
+    [validate.on_failure]
+    mode = "ask"       # "ask" (default) | "always" | "off"
+    # "ask"    — surface proposal, require human approval
+    # "always" — auto-start follow-up goal without asking
+    # "off"    — no follow-up; just surface the error
+    ```
+27. [ ] **Follow-up goal bootstrapping**: When approved (or auto-fired), the follow-up goal automatically receives: (a) the validation command output as context, (b) `--follow-up <parent-goal-id>` so the draft chain is preserved, (c) a generated title like `"Fix: <validation command> errors in <parent title>"`.
+28. [ ] **Cycle guard**: If a follow-up itself fails validation, do not auto-follow-up again — surface to human with history of the chain. Prevent runaway self-healing loops.
+29. [ ] **`ta operations log`** extension: Validation failure events and follow-up launches appear in the operations log with outcome (fixed, abandoned, pending).
 
 #### Lifecycle Compaction
 
@@ -4788,16 +4797,16 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 ---
 
 ### v0.13.1.3 — Shell Help & UX Polish
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix discoverability gaps in the interactive shell: prompt prefix confusion, missing `run` shortcut, `git` command verb, undocumented `!<cmd>` escape, and hardcoded keybinding list.
 
 #### Items
 
-1. [ ] **Prompt prefix**: Change `> ` to `ta> ` so users know they're in the TA shell (not bash/zsh)
-2. [ ] **`run` shortcut**: Accept `run <prompt>` as an alias for `goal <prompt>` inside the shell
-3. [ ] **`git` → `vcs` command**: Rename the `git` shell command to `vcs` (or support both) to match multi-VCS intent
-4. [ ] **`!<cmd>` documentation**: Add `!<command>` to shell help output and USAGE.md (escape to run arbitrary shell commands)
-5. [ ] **Data-driven keybinding list**: Read available shortcuts from the same table that handles them — `?` or `help` shows live list, not a hardcoded string
+1. [x] **Prompt prefix**: Change `> ` to `ta> ` so users know they're in the TA shell (not bash/zsh) — already implemented
+2. [x] **`run` shortcut**: `run` is in `ta_subcommands`; documented in HELP_TEXT Commands section
+3. [x] **`git` → `vcs` command**: Added `vcs` route to daemon defaults + shell.toml; both `git` and `vcs` supported; HELP_TEXT updated
+4. [x] **`!<cmd>` documentation**: Documented in HELP_TEXT, shell.rs classic help, and USAGE.md
+5. [x] **Data-driven keybinding list**: `KEYBINDING_TABLE` const drives `keybinding_help_text()`; `help` renders Navigation & Text from it
 
 #### Version: `0.13.1-alpha.3`
 
@@ -4807,7 +4816,7 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 <!-- status: pending -->
 **Goal**: Make onboarding an existing Unreal C++ or Unity C# game project seamless. `ta init --template unreal-cpp` / `ta init --template unity-csharp` provisions BMAD agent configs, Claude Flow `.mcp.json`, a discovery goal, and project-appropriate `.taignore` and `policy.yaml`. First-run experience: one command starts a structured onboarding goal that produces a PRD, architecture doc, and sprint-1 stories.
 
-**BMAD integration model**: BMAD is a git repo of markdown persona prompts — it must be installed **machine-locally**, not cloned into the game project (Perforce depot or otherwise). The canonical install location is `~/.bmad/` (Unix) or `%USERPROFILE%\bmad` (Windows — no dot prefix; use `"$HOME\bmad"` in PowerShell). TA stores the path in `.ta/bmad.toml` and agent configs reference it from there. The project itself stays clean — no BMAD files are committed to VCS.
+**BMAD integration model**: BMAD is a git repo of markdown persona prompts — it must be installed **machine-locally**, not cloned into the game project (Perforce depot or otherwise). The canonical install location is `~/.bmad/` (Unix) or `%USERPROFILE%\.bmad` (Windows). TA stores the path in `.ta/bmad.toml` and agent configs reference it from there. The project itself stays clean — no BMAD files are committed to VCS.
 
 | Framework | Role | Installation |
 |---|---|---|
@@ -4822,7 +4831,7 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 1. [ ] **`ProjectType` enum**: Add `UnrealCpp` and `UnityCsharp` variants to `detect_project_type()` — detect by `*.uproject` or `*.sln` + `Assets/` presence
 2. [ ] **`ta init --template unreal-cpp`**: Write `.taignore` (excludes `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`, `*.generated.h`), `workflow.toml`, `policy.yaml` (protect `Config/DefaultEngine.ini`, `*.uproject`, `Build.cs`), `memory.toml` (pre-seed UE5 conventions: TObjectPtr, UPROPERTY, game thread rules)
 3. [ ] **`ta init --template unity-csharp`**: Write `.taignore` (excludes `Library/`, `Temp/`, `obj/`, `*.csproj.user`), `workflow.toml`, `policy.yaml` (protect `ProjectSettings/`, `*.asmdef`), `memory.toml` (pre-seed Unity conventions: MonoBehaviour lifecycle, Coroutines vs Jobs)
-4. [ ] **`.ta/bmad.toml` config**: Written by `ta init --template`; stores `bmad_home` (default: `~/.bmad` on Unix, `%USERPROFILE%\bmad` on Windows — no dot prefix). `TA_BMAD_HOME` env var takes precedence. Agent configs reference `${bmad_home}/agents/`.
+4. [ ] **`.ta/bmad.toml` config**: Written by `ta init --template`; stores `bmad_home` (default: `~/.bmad` / `%USERPROFILE%\.bmad`). `TA_BMAD_HOME` env var takes precedence. Agent configs reference `${bmad_home}/agents/`.
 5. [ ] **BMAD agent configs (`.ta/agents/`)**: Generate `bmad-pm.toml`, `bmad-architect.toml`, `bmad-dev.toml`, `bmad-qa.toml` pointing to `${bmad_home}/agents/` persona prompts. Lives under `.ta/agents/` — not in the game source tree.
 6. [ ] **Claude Flow `.mcp.json`**: Generate project-root `.mcp.json` with `claude-flow` and `ta` MCP server entries; note that `claude-flow` must be installed via npm separately.
 7. [ ] **Discovery goal template** (`.ta/onboarding-goal.md`): Describes the first TA goal to run — survey the project, produce `docs/architecture.md`, `docs/bmad/prd.md`, and `docs/bmad/stories/` using BMAD roles. Includes prerequisite checklist: Claude installed, claude-flow installed, BMAD cloned to `bmad_home`.
@@ -5365,12 +5374,6 @@ ta run "write tests" --model ollama/phi4-mini   # shorthand: model implies ta-ag
 33. [ ] Research spike: Ollama vs llama.cpp server vs vLLM vs LM Studio — API compatibility, tool-calling support, macOS/Linux support, startup time, model availability. Document in `docs/agent-framework-options.md`.
 34. [ ] End-to-end validation: Qwen2.5-Coder-7B completes a real `ta run` goal with memory write-back; memory entries visible in next goal's context
 
-**Agent-Assisted Diagnosis** *(moved from v0.13.1 items 11–14)*
-35. [ ] **Daemon-to-agent diagnostic requests**: When the watchdog detects an issue it can't diagnose from metrics alone, spawn a lightweight diagnostic goal: "Analyze the logs for goal X and explain why it failed." Diagnostic agent has read-only access to goal state, agent logs, and daemon events.
-36. [ ] **Diagnostic goal type**: A new goal type `diagnostic` — read-only by design, no staging copy, no draft, no apply. Policy engine enforces read-only grants. Lightweight and fast. Requires agent dispatch infrastructure from items 1–6.
-37. [ ] **Shell agent as advisor**: In `ta shell`, agent proactively surfaces issues: "Goal abc123 has had no events for 45 minutes. Want me to check on it?" Agent reads daemon health data and offers to investigate.
-38. [ ] **Root cause correlation**: When multiple issues occur together, diagnostic agent correlates them: "Goal failed because disk was full, which also crashed the Discord plugin. Recommend: clean 3 stale staging dirs (reclaim ~12 GB), restart plugin, retry goal."
-
 #### Version: `0.13.8-alpha`
 
 ---
@@ -5444,7 +5447,7 @@ on_failure = "ask_follow_up"  # propose a follow-up goal (pairs with v0.13.1 aut
 
 1. [ ] **`constitution.toml` schema**: Define and document the config format. Ship TA's own rules as the default template (generated by `ta init constitution`).
    - **Key design**: `[[validate]]` arrays replace TA's hardcoded `[verify]` section in `office.yaml`. Project teams define what "passing" means for their codebase — Rust projects add clippy/test, TypeScript projects add tsc/jest, etc.
-   - `on_failure = "ask_follow_up"` emits a `ValidationFailed` event; the auto-follow-up behaviour is provided by items 9–14 below (moved from v0.13.1).
+   - `on_failure = "ask_follow_up"` emits a `ValidationFailed` event; the auto-follow-up behaviour is provided by v0.13.1 items 24–29.
 2. [ ] **`ta init constitution`**: Scaffolding command. Writes `.ta/constitution.toml` with TA's default rules as a starting point. Users edit for their project's patterns.
 3. [ ] **Draft-time scanner reads `constitution.toml`**: Move the hardcoded §4 pattern scan (v0.11.5 item 8) to read inject/restore function names from `constitution.toml`. Projects with different conventions get correct scanning.
 4. [ ] **Release pipeline reads `checklist_gate`**: The release checklist gate step (v0.11.4.4 item 9) is enabled/disabled by `constitution.toml`. The checklist content is generated from the declared rules, not hardcoded.
@@ -5452,21 +5455,6 @@ on_failure = "ask_follow_up"  # propose a follow-up goal (pairs with v0.13.1 aut
 6. [ ] **`ta constitution check`**: CLI command to run the scan outside of draft build — useful for CI integration and pre-commit hooks. Exit code 0 = clean, 1 = violations found. Output is machine-readable JSON with `--json` flag.
 7. [ ] **Inheritance**: `constitution.toml` can `extends = "ta-default"` to inherit TA's rules and only override specific sections. TA ships a built-in `ta-default` profile.
 8. [ ] **Documentation**: "How to write a constitution for your project" guide in `docs/`. Includes worked example for a web service with DB migration injection patterns.
-
-**Auto Follow-Up on Validation Failure** *(moved from v0.13.1 items 24–29 — depend on `constitution.toml [validate]`)*
-9. [ ] **Validation failure event**: When `ta draft build` or `ta draft apply` exits with a validation error (from `constitution.toml [validate]` commands), emit a `ValidationFailed { goal_id, stage, command, exit_code, output }` daemon event. Print a structured summary of failures at exit with clear next-step guidance (manual fix, reopen-review, or auto-follow-up).
-10. [ ] **Auto-follow-up proposal**: Daemon receives `ValidationFailed` and — depending on `on_failure` policy — proposes a follow-up goal. Message includes the failure summary and the corrective command. Posted via all configured channels.
-11. [ ] **Follow-up consent model** in `constitution.toml`:
-    ```toml
-    [validate.on_failure]
-    mode = "ask"       # "ask" (default) | "always" | "off"
-    # "ask"    — surface proposal, require human approval
-    # "always" — auto-start follow-up without asking
-    # "off"    — surface error only, no follow-up
-    ```
-12. [ ] **Follow-up goal bootstrapping**: When approved (or auto-fired), follow-up receives: (a) validation output as context, (b) `--follow-up <parent-goal-id>` to preserve draft chain, (c) generated title `"Fix: <validation command> errors in <parent title>"`.
-13. [ ] **Cycle guard**: If a follow-up itself fails validation, do not auto-follow-up again — surface to human with chain history. Prevent runaway self-healing loops.
-14. [ ] **`ta operations log` extension**: Validation failure events and follow-up launches appear in the operations log with outcome (fixed, abandoned, pending).
 
 **Files**: `.ta/constitution.toml` (new), `apps/ta-cli/src/commands/` (init, check, draft build scan, release step), `crates/ta-workspace/src/` (scanner crate or module).
 

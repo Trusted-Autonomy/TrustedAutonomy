@@ -1751,6 +1751,8 @@ async fn handle_terminal_event(
                             }
                             "help" | ":help" | "?" => {
                                 app.push_lines(HELP_TEXT, OutputLine::info);
+                                // Keybindings from data-driven table (v0.13.1.3).
+                                app.push_lines(&keybinding_help_text(), OutputLine::info);
                                 // Also show CLI commands for discoverability.
                                 app.push_lines(CLI_HELP_TEXT, OutputLine::info);
                                 return;
@@ -4226,8 +4228,10 @@ TA Shell -- Interactive terminal for Trusted Autonomy
 
 Commands:
   ta <cmd>           Run any ta CLI command (e.g., ta draft list)
-  git <cmd>          Run git commands
-  !<cmd>             Shell escape (e.g., !ls -la)
+  run <title>        Start a new agent goal (alias for: ta run <title>)
+  vcs <cmd>          Run VCS commands (e.g., vcs status, vcs log)
+  git <cmd>          Alias for vcs — runs git commands
+  !<cmd>             Shell escape: run any shell command (e.g., !ls -la, !echo $PWD)
   approve <id>       Shortcut for: ta draft approve <id>
   deny <id>          Shortcut for: ta draft deny <id>
   view <id>          Shortcut for: ta draft view <id>
@@ -4264,28 +4268,71 @@ Shell commands:
   :status            Refresh the status bar
   :latency on|off    Toggle input latency diagnostics (log: .ta/latency.log)
   :latency dump      Show latency report now
-  clear              Clear the output pane
-  Ctrl-L             Clear the output pane
+  clear              Clear the output pane";
 
-Navigation:
-  Up / Down          Command history
-  Shift+Up / Down    Scroll output 1 line
-  PgUp / PgDn        Scroll output one full page
-  Shift+Home / End   Scroll to top / bottom of output
+/// Keybinding table — single source of truth for help output and documentation.
+/// Each entry is (key, description). Sections are separated by ("", "") blank rows.
+const KEYBINDING_TABLE: &[(&str, &str)] = &[
+    // Navigation
+    ("Up / Down", "Command history"),
+    ("Shift+Up / Down", "Scroll output 1 line"),
+    ("PgUp / PgDn", "Scroll output one full page"),
+    ("Shift+Home / End", "Scroll to top / bottom of output"),
+    ("", ""),
+    // Text editing
+    ("Ctrl-A / Ctrl-E", "Jump to start / end of input"),
+    ("Ctrl-U / Ctrl-K", "Clear input before / after cursor"),
+    ("Ctrl-W", "Toggle split pane (shell | agent side-by-side)"),
+    ("Ctrl-L", "Clear the output pane"),
+    (
+        "Tab",
+        "Auto-complete commands (or toggle paste preview when paste pending)",
+    ),
+    ("Click-drag", "Select text (native terminal selection)"),
+    ("Cmd+C", "Copy selection (native)"),
+    (
+        "Paste",
+        "Small pastes inserted verbatim; large pastes (>500 chars / >10 lines) compacted",
+    ),
+    ("", ""),
+    // Exit
+    (
+        "Ctrl-C / exit",
+        "Exit the shell (Ctrl-C detaches when tailing)",
+    ),
+    ("", ""),
+    // Scrollback
+    (
+        "Scrollback",
+        "Output is retained in a scrollback buffer (default: 50000 lines).",
+    ),
+    (
+        "",
+        "Configure via [shell] scrollback_lines in .ta/workflow.toml (minimum: 10000).",
+    ),
+    (
+        "",
+        "Status bar shows scroll position and new output indicator when scrolled up.",
+    ),
+];
 
-Text:
-  Click-drag         Select text (native terminal selection)
-  Cmd+C              Copy selection (native)
-  Paste              Small pastes inserted verbatim; large pastes (>500 chars / >10 lines)
-                     compacted — shows indicator, Tab to preview, Esc to cancel
-  Tab                Auto-complete commands (or toggle paste preview when paste pending)
-  Ctrl-W             Toggle split pane (shell | agent side-by-side)
-  Ctrl-C / exit      Exit the shell (Ctrl-C detaches when tailing)
-
-Scrollback:
-  Output is retained in a scrollback buffer (default: 50000 lines).
-  Configure via [shell] scrollback_lines in .ta/workflow.toml (minimum: 10000).
-  Status bar shows scroll position and new output indicator when scrolled up.";
+/// Generate the Navigation/Text/Scrollback section of the help text from
+/// `KEYBINDING_TABLE` — the same data that documents all active keybindings.
+fn keybinding_help_text() -> String {
+    let mut out = String::from("\nNavigation & Text:\n");
+    for (key, desc) in KEYBINDING_TABLE {
+        if key.is_empty() {
+            if !desc.is_empty() {
+                out.push_str(&format!("  {}\n", desc));
+            } else {
+                out.push('\n');
+            }
+        } else {
+            out.push_str(&format!("  {:<22} {}\n", key, desc));
+        }
+    }
+    out
+}
 
 const CLI_HELP_TEXT: &str = "\
 CLI Commands (prefix with 'ta' or use directly):

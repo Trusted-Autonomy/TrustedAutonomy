@@ -637,6 +637,12 @@ impl Default for ShellConfig {
                     strip_prefix: true,
                 },
                 RouteEntry {
+                    prefix: "vcs ".to_string(),
+                    command: "git".to_string(),
+                    args: vec![],
+                    strip_prefix: true,
+                },
+                RouteEntry {
                     prefix: "!".to_string(),
                     command: "sh".to_string(),
                     args: vec!["-c".to_string()],

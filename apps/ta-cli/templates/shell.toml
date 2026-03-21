@@ -17,6 +17,11 @@ command = "git"
 strip_prefix = true
 
 [[routes]]
+prefix = "vcs "
+command = "git"
+strip_prefix = true
+
+[[routes]]
 prefix = "!"
 command = "sh"
 args = ["-c"]

@@ -1111,8 +1111,10 @@ TA Shell -- Interactive terminal for Trusted Autonomy
 
 Commands:
   ta <cmd>           Run any ta CLI command (e.g., ta draft list)
-  git <cmd>          Run git commands
-  !<cmd>             Shell escape (e.g., !ls -la)
+  run <title>        Start a new agent goal (alias for: ta run <title>)
+  vcs <cmd>          Run VCS commands (e.g., vcs status, vcs log)
+  git <cmd>          Alias for vcs — runs git commands
+  !<cmd>             Shell escape: run any shell command (e.g., !ls -la, !echo $PWD)
   approve <id>       Shortcut for: ta draft approve <id>
   deny <id>          Shortcut for: ta draft deny <id>
   view <id>          Shortcut for: ta draft view <id>
