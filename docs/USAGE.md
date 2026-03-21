@@ -4166,6 +4166,96 @@ default_channels = ["discord"]
 
 See [Discord Channel Guide](guides/discord-channel.md) for the full setup guide including bot permissions, access control, and troubleshooting.
 
+#### Bidirectional mode: run TA goals from Discord
+
+The Discord plugin supports a persistent **listen mode** that watches your channel for `/ta` slash commands and `ta ` prefixed messages, forwarding them to the daemon. Combined with GitHub's native webhook support, this enables a complete iteration cycle — run, review, apply, merge, next goal — without leaving Discord.
+
+**One-time bot setup:**
+
+1. In the [Discord Developer Portal](https://discord.com/developers/applications), open your TA bot application:
+   - Under **Bot → Privileged Gateway Intents**, enable **Message Content Intent** (required for `ta ` prefix commands)
+   - Under **OAuth2 → URL Generator**: select `bot` + `applications.commands` scopes, with permissions: `Send Messages`, `Embed Links`, `Read Message History`, `Use Slash Commands`
+   - Reinvite the bot using the updated URL if you've already added it
+
+2. Register the `/ta` slash command (run once):
+   ```bash
+   export TA_DISCORD_TOKEN="your-bot-token"
+   export TA_DISCORD_APP_ID="your-application-id"   # from General Information tab
+   ta-channel-discord --register-commands
+   # Registered: /ta — "Run a Trusted Autonomy command"
+   ```
+
+3. Enable listen mode in `.ta/daemon.toml`:
+   ```toml
+   [channels.discord]
+   listen = true   # daemon starts ta-channel-discord --listen on startup
+   ```
+
+4. Restart the daemon:
+   ```bash
+   pkill -f ta-daemon && ta daemon start
+   ```
+
+**Commands available from Discord:**
+
+| Discord message | Equivalent CLI |
+|---|---|
+| `/ta run "Fix the auth bug"` | `ta run "Fix the auth bug"` |
+| `/ta goal list` | `ta goal list` |
+| `/ta goal status <tag>` | `ta goal status <tag>` |
+| `/ta draft list` | `ta draft list` |
+| `/ta draft approve <tag>` | `ta draft approve <tag>` |
+| `/ta draft apply <tag>` | `ta draft apply <tag>` |
+| `/ta draft deny <tag> "reason"` | `ta draft deny <tag> "reason"` |
+| `/ta pr status` | `ta pr status` |
+| `/ta status` | `ta status` |
+
+Agent approval questions are posted as button embeds — click **Approve** or **Deny** directly in Discord without typing a command.
+
+Rate limiting: 10 commands per 60 seconds per user (configurable in `channel.toml`). Command responses are posted as thread replies to keep the main channel clean.
+
+**GitHub → Discord (CI and PR status):**
+
+GitHub can push PR, push, and CI status events directly to Discord using Discord's built-in GitHub webhook format. No extra bot or app required.
+
+1. In Discord: **Server Settings → Integrations → Webhooks → New Webhook**
+   - Assign it to your TA channel
+   - Copy the webhook URL
+
+2. Append `/github` to the URL: `https://discord.com/api/webhooks/<id>/<token>/github`
+
+3. In GitHub: **Repo → Settings → Webhooks → Add webhook**
+   - Payload URL: the modified URL above
+   - Content type: `application/json`
+   - Events: select **Pull requests**, **Check runs**, **Pushes** (and optionally **Pull request reviews**)
+
+You now receive GitHub PR open/merge/close, CI pass/fail, and push events in Discord alongside TA's own approval embeds.
+
+**Complete iteration cycle from Discord:**
+
+```
+# 1. Start a goal
+/ta run "Implement feature X"
+  → TA responds in thread: "Goal started: implement-feature-x-01 (staging...)"
+  → Agent runs, posts progress updates
+
+# 2. Agent posts approval embed when draft is ready
+  → Click [Approve] in Discord
+  → Draft status: approved
+
+# 3. Apply and push
+/ta draft apply implement-feature-x-01
+  → TA creates branch, commits, opens PR with auto-merge enabled
+  → GitHub webhook fires: "PR #N opened"
+
+# 4. CI runs — GitHub webhook fires: "Check passed ✓"
+  → GitHub auto-merges the PR (auto_merge = true in workflow.toml)
+  → GitHub webhook fires: "PR #N merged"
+
+# 5. Start next goal
+/ta run "v0.13.3"
+```
+
 #### Discord bot avatar
 
 To set a custom icon for your TA Discord bot:
