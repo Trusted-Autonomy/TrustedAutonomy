@@ -36,7 +36,7 @@ members = [
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.13.1-alpha.7"
+version = "0.13.2-alpha"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
@@ -74,7 +74,12 @@ tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 
 # MCP SDK — Model Context Protocol server implementation (official Rust SDK).
-rmcp = { version = "0.14", features = ["server", "transport-io"] }
+# transport-async-rw enables serving over any AsyncRead+AsyncWrite (Unix sockets, TCP).
+rmcp = { version = "0.14", features = ["server", "transport-io", "transport-async-rw"] }
+
+# TLS support — used by ta-daemon's TCP transport for encrypted remote agents (v0.13.2).
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 
 # JSON Schema generation — used by rmcp for MCP tool parameter schemas.
 schemars = "1"

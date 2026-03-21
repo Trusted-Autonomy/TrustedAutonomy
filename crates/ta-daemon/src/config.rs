@@ -14,6 +14,11 @@ pub struct DaemonConfig {
     pub agent: AgentConfig,
     pub routing: RoutingConfig,
     pub channels: ChannelsConfig,
+    /// MCP transport configuration (v0.13.2).
+    /// Controls how agents connect to the TA MCP server.
+    /// Default: stdio (backward-compatible with existing setups).
+    #[serde(default)]
+    pub transport: TransportConfig,
     /// Shell Q&A agent configuration (v0.11.4.2).
     #[serde(default)]
     pub shell: ShellQaConfig,
@@ -377,6 +382,114 @@ impl Default for PowerConfig {
             prevent_sleep_during_active_goals: true,
             prevent_app_nap: true,
             connectivity_check_url: default_connectivity_check_url(),
+        }
+    }
+}
+
+/// MCP transport mode (v0.13.2).
+///
+/// Controls how agents connect to the TA MCP server.
+///
+/// ```toml
+/// [transport]
+/// mode = "stdio"   # default — backward-compatible, agent spawned as child process
+///
+/// # Unix socket (faster IPC, works across container boundaries via mount):
+/// mode = "unix"
+/// unix_socket_path = ".ta/mcp.sock"
+///
+/// # TCP (remote agents, optional TLS):
+/// mode = "tcp"
+/// tcp_addr = "127.0.0.1:7800"
+/// auth_token = "secret-bearer-token"
+///
+/// # Optional TLS for TCP transport:
+/// [transport.tls]
+/// cert_path = "certs/server.pem"
+/// key_path = "certs/server.key"
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportMode {
+    /// Standard I/O (default). The daemon is launched by the MCP client
+    /// as a child process; communication is over stdin/stdout.
+    #[default]
+    Stdio,
+    /// Unix domain socket. The daemon creates a socket file and listens
+    /// for MCP clients to connect. Useful for container boundary crossing
+    /// (mount the socket path into the container).
+    Unix,
+    /// TCP socket. The daemon listens on a configurable address/port.
+    /// Supports optional TLS and bearer token authentication.
+    Tcp,
+}
+
+/// TLS certificate configuration for TCP transport (v0.13.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Path to PEM-encoded TLS certificate file (server certificate + chain).
+    pub cert_path: std::path::PathBuf,
+    /// Path to PEM-encoded private key file.
+    pub key_path: std::path::PathBuf,
+}
+
+/// MCP transport configuration (v0.13.2).
+///
+/// Selects and configures the transport layer used by the TA MCP server.
+/// The default is `stdio` for full backward compatibility.
+///
+/// Place under `[transport]` in `.ta/daemon.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransportConfig {
+    /// Which transport to use (default: "stdio").
+    pub mode: TransportMode,
+
+    /// Unix socket path for `mode = "unix"` (relative to project root or absolute).
+    /// Default: `.ta/mcp.sock`
+    #[serde(default = "default_unix_socket_path")]
+    pub unix_socket_path: String,
+
+    /// TCP listen address for `mode = "tcp"`.
+    /// Default: `127.0.0.1:7800`
+    #[serde(default = "default_tcp_addr")]
+    pub tcp_addr: String,
+
+    /// TLS certificate configuration for `mode = "tcp"`.
+    /// When set, the TCP listener uses TLS (encrypted transport).
+    /// When absent, TCP is plaintext (suitable for localhost/VPN-protected deployments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
+
+    /// Bearer token for connection authentication.
+    ///
+    /// When set, the MCP client must send `Bearer <token>\n` as the first
+    /// line of the connection before any MCP messages. The server verifies
+    /// the token before proceeding.
+    ///
+    /// - For `mode = "tcp"`: strongly recommended (especially without TLS).
+    /// - For `mode = "unix"`: optional; filesystem permissions provide isolation.
+    /// - For `mode = "stdio"`: ignored (process isolation provides security).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+}
+
+fn default_unix_socket_path() -> String {
+    ".ta/mcp.sock".to_string()
+}
+
+fn default_tcp_addr() -> String {
+    "127.0.0.1:7800".to_string()
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            mode: TransportMode::Stdio,
+            unix_socket_path: default_unix_socket_path(),
+            tcp_addr: default_tcp_addr(),
+            tls: None,
+            auth_token: None,
         }
     }
 }

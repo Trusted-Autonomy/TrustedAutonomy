@@ -4913,26 +4913,28 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 #### Known issue discovered post-merge
 
-- **Release pipeline drift false positive**: When `ta release run` executes the "Generate release notes" agent step, the staging snapshot is taken after the "Version bump" shell step has already modified `Cargo.toml` in source. By the time the agent's draft is applied, source appears to have "changed" relative to the snapshot even though no meaningful content changed after the goal started — triggering the `[info] Source changed since goal start — rebasing against current source.` message. The rebase is a no-op in practice, but the message is misleading. Root cause: the drift check uses mtime or a shallow hash that doesn't account for the fact that the goal started *after* the version bump ran. Fix: record the source snapshot hash at goal-start time and compare content (not mtime) to determine true drift. → v0.13.2 or nearest maintenance phase.
+- ~~**Release pipeline drift false positive**~~: Fixed in v0.13.2. `FileSnapshot::has_changed()` now compares content hash directly instead of using mtime as the primary signal. Copy operations (`ta draft apply`) update mtime without changing content; the fix correctly ignores mtime-only changes. See `crates/ta-workspace/src/conflict.rs`.
 
 #### Version: `0.13.1-alpha.7`
 
 ---
 
 ### v0.13.2 — MCP Transport Abstraction (TCP/Unix Socket)
-<!-- status: pending -->
+<!-- status: done -->
 <!-- beta: yes — enables container isolation and remote agent execution for team deployments -->
 **Goal**: Abstract MCP transport so agents can communicate with TA over TCP or Unix sockets, not just stdio pipes. Critical enabler for container-based isolation (SecureTA) and remote agent execution.
 
 #### Items
 
-1. [ ] `TransportLayer` trait: `Stdio`, `UnixSocket`, `Tcp` variants
-2. [ ] TCP transport: MCP server listens on configurable port, agent connects over network
-3. [ ] Unix socket transport: MCP server creates socket file, agent connects locally (faster than TCP, works across container boundaries via mount)
-4. [ ] Transport selection in agent config: `transport = "stdio" | "unix" | "tcp"`
-5. [ ] TLS support for TCP transport (optional, for remote agents)
-6. [ ] Connection authentication: bearer token exchange on connect
-7. [ ] Update `ta run` to configure transport based on runtime adapter
+1. [x] `TransportLayer` trait: `Stdio`, `UnixSocket`, `Tcp` variants — `TransportMode` enum in `ta-daemon/src/config.rs`; `transport::serve()` in `ta-daemon/src/transport.rs`
+2. [x] TCP transport: MCP server listens on configurable port, agent connects over network — `serve_tcp()` in `transport.rs`
+3. [x] Unix socket transport: MCP server creates socket file, agent connects locally (faster than TCP, works across container boundaries via mount) — `serve_unix()` in `transport.rs`
+4. [x] Transport selection in agent config: `transport = "stdio" | "unix" | "tcp"` — `transport` field in `agents/generic.yaml`; `[transport]` section in `daemon.toml` via `TransportConfig`
+5. [x] TLS support for TCP transport (optional, for remote agents) — `serve_tcp_tls()` with `tokio-rustls`; configured via `[transport.tls]` cert_path/key_path
+6. [x] Connection authentication: bearer token exchange on connect — `authenticate_connection()` reads `Bearer <token>\n` header; configured via `[transport].auth_token`
+7. [x] Update `ta run` to configure transport based on runtime adapter — daemon `main.rs` now calls `transport::serve()` using `daemon_config.transport`
+
+**Also fixed**: Release pipeline drift false positive (v0.13.1.7 deferred) — `FileSnapshot::has_changed()` now uses content hash as the authoritative signal instead of mtime-first comparison. Copy operations update mtime without changing content; the old fast-path would treat identical files as "unchanged" (safe) but could miss same-second writes. The fix correctly detects content-only changes and eliminates mtime-induced false positives in sequential pipeline steps.
 
 #### Version: `0.13.2-alpha`
 
