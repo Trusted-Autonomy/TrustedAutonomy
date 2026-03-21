@@ -4881,10 +4881,12 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 1. [x] **`ta status` as the one command**: Unified, prioritized view replacing `ta goal list`, `ta draft list`, `ta plan status`, `ta daemon health`, and `ta doctor`. Urgent items first (stuck goals, pending approvals, health issues), then active work, then recent completions. Details expand on demand.
 2. [x] **`ta` with no arguments shows dashboard**: Instead of showing help, run `ta status`. The bare command becomes the entry point.
-3. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack). → v0.13.12
-4. [ ] **Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase." → v0.13.12
-5. [ ] **Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") are translated to command sequences by the shell agent, shown for approval before executing. → v0.13.12
-6. [ ] **Reduce command surface**: Commands subsumed by the intelligent layer are marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface. → v0.13.12
+#### Deferred to v0.13.12
+
+- **[D] Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack). → v0.13.12 item 5
+- **[D] Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase." → v0.13.12 item 6
+- **[D] Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") translated to command sequences, shown for approval before executing. → v0.13.12 item 7
+- **[D] Reduce command surface**: Commands subsumed by the intelligent layer marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface. → v0.13.12 item 8
 
 #### Operational Runbooks
 
@@ -5616,7 +5618,8 @@ Current releases ship archives containing a bare binary and docs. Users must man
 6. [ ] **Update required-assets validation**: Add `.msi` and `.dmg` to the asset check list in the release workflow
 7. [ ] **Update release body template**: Installers (`.dmg`, `.msi`) as primary download options; archives (`.tar.gz`, `.zip`) under "Advanced / manual install"
 8. [ ] **Update USAGE.md**: macOS — run DMG/pkg; Windows — run MSI; Linux — extract tar.gz, move to `$PATH`; note Homebrew tap
-9. [ ] **Homebrew tap (stretch)**: `trustedautonomy/homebrew-ta` formula — enables `brew install trustedautonomy/ta/ta` on macOS
+9. [ ] **Bundle USAGE.html in all packaged builds**: Generate `USAGE.html` from `docs/USAGE.md` via pandoc in the release workflow and include it in every platform artifact — macOS DMG/pkg, Windows MSI (installed to `%ProgramFiles%\TrustedAutonomy\docs\`), and Linux `.tar.gz`. The web install script (`install.sh`) already downloads `USAGE.html` to `~/.local/share/ta/`; the local build script (`install_local.sh`) generates it via pandoc. Packaged installers must deliver it to the platform-appropriate docs location so `ta help --open` can launch it offline.
+10. [ ] **Homebrew tap (stretch)**: `trustedautonomy/homebrew-ta` formula — enables `brew install trustedautonomy/ta/ta` on macOS
 
 #### Release infrastructure fixes (landed ahead of full v0.13.11)
 10. [x] **Version stamped into USAGE.md at release time**: Release workflow now `sed`-replaces the `**Version**:` line in USAGE.md with the actual tag before packaging, so USAGE.html and the bundled USAGE.md always show the correct version. (Was hardcoded as `0.10.18-alpha.1` in all previous releases.)
