@@ -154,7 +154,7 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             } else {
                 // --yes implies --auto-approve for backward compatibility.
                 let skip_approvals = *yes || *auto_approve;
-                run_pipeline(
+                let pipeline_result = run_pipeline(
                     config,
                     version,
                     skip_approvals,
@@ -162,7 +162,11 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
                     *from_step,
                     pipeline.as_deref(),
                     from_tag.as_deref(),
-                )?;
+                );
+                match pipeline_result {
+                    Err(e) if e.to_string() == "__pipeline_aborted__" => return Ok(()),
+                    other => other?,
+                }
                 if *press_release {
                     generate_press_release(config, version, prompt.as_deref())?;
                 }
@@ -667,7 +671,7 @@ fn run_pipeline(
             println!("[{}/{}] {} — requires approval", i + 1, total, step.name);
             if !prompt_approval(&step.name)? {
                 println!("Aborted at step {}.", i + 1);
-                return Ok(());
+                anyhow::bail!("__pipeline_aborted__");
             }
         }
 
