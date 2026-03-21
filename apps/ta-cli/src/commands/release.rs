@@ -870,8 +870,13 @@ fn execute_agent_step(
         }
 
         // Apply (no git commit — the release pipeline handles commits itself).
+        // --skip-verify: the pipeline's own "Build & verify" step handles
+        // pre-submit checks. Agent steps in the release pipeline generate
+        // content (release notes, press releases) — running cargo clippy/test
+        // against the staging snapshot is both unnecessary and fragile (the
+        // staging may predate recent source changes).
         let apply_status = Command::new(&ta_bin)
-            .args(["draft", "apply", &id_str])
+            .args(["draft", "apply", &id_str, "--skip-verify"])
             .current_dir(&config.workspace_root)
             .status()?;
         if !apply_status.success() {
