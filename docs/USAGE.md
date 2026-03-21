@@ -1645,6 +1645,126 @@ Once approved, the docs are in your workspace and you have a BMAD-ready project.
 
 ---
 
+### Walkthrough: first feature from scratch (Unreal C++)
+
+This is the complete sequence from a fresh Unreal project to your first AI-implemented feature, reviewed and committed.
+
+**Assumptions**: Unreal Engine 5.x, source or Launcher build, git or Perforce depot at project root, `ta` and `claude` both installed and on PATH, `ANTHROPIC_API_KEY` set.
+
+#### Step 1 — Open your project root
+
+Your project root is the folder containing `MyGame.uproject` (not the Engine folder). If you use Perforce this is your clientspec root for the game stream.
+
+```bash
+cd /path/to/MyGame
+```
+
+#### Step 2 — Initialize TA with the Unreal template
+
+```bash
+ta init --template unreal-cpp
+```
+
+Expected output:
+```
+Created .ta/bmad.toml           (BMAD home: ~/.bmad)
+Created .ta/agents/bmad-pm.toml
+Created .ta/agents/bmad-architect.toml
+Created .ta/agents/bmad-dev.toml
+Created .ta/agents/bmad-qa.toml
+Created .ta/workflow.toml
+Created .ta/policy.yaml
+Created .ta/.taignore
+Created .mcp.json
+Created .ta/onboarding-goal.md
+```
+
+If you installed BMAD somewhere other than `~/.bmad`, set `TA_BMAD_HOME` first:
+
+```bash
+export TA_BMAD_HOME=/path/to/BMAD-METHOD   # then re-run ta init --template unreal-cpp
+```
+
+> **Perforce users**: add `.ta/`, `.mcp.json`, and `ONBOARDING.md` to your `.p4ignore`. These are developer-local tooling files — they should not go into the depot.
+
+#### Step 3 — Run the discovery goal
+
+This is a one-time onboarding step. The agent reads your codebase and produces planning documents.
+
+```bash
+ta daemon start
+ta run "$(cat .ta/onboarding-goal.md)"
+```
+
+The agent will take a few minutes. It will:
+1. Walk `Source/`, `Config/`, and scan `*.uproject` for modules, plugins, and targets
+2. Write `docs/architecture.md` — module graph, key classes, build dependencies
+3. Write `docs/bmad/prd.md` — inferred product requirements from GameMode, levels, and feature flags
+4. Write `docs/bmad/stories/` — top 5 inferred feature areas as BMAD story stubs
+
+When the agent finishes, review and approve the draft:
+
+```bash
+ta draft list                 # find the draft ID
+ta draft view <id>            # read the proposed docs
+ta draft approve <id>         # accept and copy to your workspace
+```
+
+You now have `docs/architecture.md` and `docs/bmad/prd.md` in your project. The BMAD cycle can begin.
+
+#### Step 4 — Pick a story and design it
+
+Open `docs/bmad/stories/` and choose a story (or write your own in that folder). Then run the architect:
+
+```bash
+ta run "Design: <story title from docs/bmad/stories/story-01.md>" --agent bmad-architect
+```
+
+The architect will read the story stub and `docs/architecture.md`, then write:
+- `docs/bmad/design/<story>.md` — technical design with module breakdown, class signatures, and interface contracts
+
+Review the design draft before moving to implementation:
+
+```bash
+ta draft view <id>
+ta draft approve <id>
+```
+
+#### Step 5 — Implement the story
+
+```bash
+ta run "Implement: <story title>" --agent bmad-dev
+```
+
+The dev agent reads the design doc and story, writes C++ in `Source/`, and calls `ta_pr_build` when done.
+
+> **Compile check**: `ta init --template unreal-cpp` sets up `verify_command` in `.ta/workflow.toml` to run `UnrealBuildTool` (or `msbuild`/`xbuild`) before the draft is approved. If the build fails, the agent is re-invoked with the error output to fix it before you ever see the draft.
+
+Review the diff:
+
+```bash
+ta draft view <id>     # see every file changed
+ta draft approve <id>  # or: ta draft deny <id> --reason "..."
+```
+
+#### Step 6 — Write tests with the QA role
+
+```bash
+ta run "Write tests for: <story title>" --agent bmad-qa
+```
+
+The QA agent writes Gauntlet/Automation test stubs in `Source/<Module>/Tests/`. Review and approve the same way.
+
+#### Step 7 — Apply and commit
+
+```bash
+ta draft apply <id> --git-commit    # or --p4-submit for Perforce
+```
+
+This copies approved changes from staging to your real workspace and creates a commit (or CL). TA never touches your working files until you explicitly apply.
+
+---
+
 ### Start implementing with BMAD roles
 
 ```bash

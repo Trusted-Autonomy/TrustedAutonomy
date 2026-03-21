@@ -129,6 +129,44 @@ if [[ "$BUILD_DAEMON" == true ]]; then
     fi
 fi
 
+
+# Install USAGE.html — generate locally with pandoc, or download from latest release.
+install_docs() {
+    local docs_dir="$HOME/.local/share/ta"
+    mkdir -p "$docs_dir"
+
+    if command -v pandoc &>/dev/null; then
+        echo "Generating USAGE.html with pandoc..."
+        pandoc "$SCRIPT_DIR/docs/USAGE.md" \
+            -s \
+            --metadata title="Trusted Autonomy Usage Guide" \
+            -c https://cdn.simplecss.org/simple.min.css \
+            -o "$docs_dir/USAGE.html"
+        echo "Installed: $docs_dir/USAGE.html"
+    else
+        # Pandoc not available — try to download from latest GitHub release.
+        local repo="Trusted-Autonomy/TrustedAutonomy"
+        echo "pandoc not found — attempting to download USAGE.html from latest release..."
+        local latest_tag
+        latest_tag=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
+            | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+        if [ -n "$latest_tag" ]; then
+            local url="https://github.com/$repo/releases/download/$latest_tag/USAGE.html"
+            if curl -fsSL "$url" -o "$docs_dir/USAGE.html" 2>/dev/null; then
+                echo "Installed: $docs_dir/USAGE.html  (from release $latest_tag)"
+            else
+                echo "Note: Could not download USAGE.html — install pandoc to generate it locally."
+                echo "  https://pandoc.org/installing.html"
+            fi
+        else
+            echo "Note: pandoc not installed and GitHub release not reachable."
+            echo "  Install pandoc to generate USAGE.html: https://pandoc.org/installing.html"
+        fi
+    fi
+}
+
+install_docs
+
 echo ""
 
 # Check if ~/.local/bin is in PATH.
@@ -164,3 +202,5 @@ echo "Quick start:"
 echo "  ta shell    # interactive shell (starts daemon automatically)"
 echo "  ta dev      # developer loop"
 echo "  ta --help   # all commands"
+echo ""
+echo "Usage guide: $HOME/.local/share/ta/USAGE.html"
