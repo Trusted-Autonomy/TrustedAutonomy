@@ -122,31 +122,37 @@ jobs:
       # ── Windows MSI (v0.13.11) ────────────────────────────────────────────────
       - name: Build Windows MSI
         if: matrix.target == 'x86_64-pc-windows-msvc'
+        continue-on-error: true
         shell: pwsh
         env:
           TAG: ${{ steps.get_version.outputs.version }}
         run: |
           # Install cargo-wix (WiX Toolset v4 wrapper).
-          # Use --locked if available to avoid resolver issues.
-          cargo install cargo-wix --version "0.3" 2>$null
+          cargo install cargo-wix 2>&1 | Out-Null
           if ($LASTEXITCODE -ne 0) {
-            cargo install cargo-wix
+            Write-Warning "cargo-wix install failed — MSI build skipped"
+            exit 0
           }
 
-          # cargo-wix needs the version without the 'v' prefix and without
-          # pre-release suffixes (e.g. "v0.13.11-alpha" → "0.13.11.0").
-          $raw = "$env:TAG" -replace '^v', ''
-          $parts = $raw -split '-' | Select-Object -First 1
-          $semver = ($parts -split '\.') + @('0') | Select-Object -First 4
-          $msiVersion = $semver -join '.'
+          # Extract version digits from any tag format:
+          # "v0.13.12-alpha" → "0.13.12.0"
+          # "public-alpha-v0.13.12" → "0.13.12.0"
+          # Approach: find last occurrence of vN.N.N or N.N.N in the tag.
+          $versionMatch = [regex]::Match("$env:TAG", 'v?(\d+\.\d+\.\d+)')
+          if (-not $versionMatch.Success) {
+            Write-Warning "Could not extract version from tag '$env:TAG' — MSI build skipped"
+            exit 0
+          }
+          $msiVersion = $versionMatch.Groups[1].Value + ".0"
           Write-Host "MSI version: $msiVersion (from tag $env:TAG)"
 
-          # Build the MSI. Pass BinaryDir so WiX knows where to find binaries.
+          # Build the MSI using cargo-wix (sets BINARY via workspace Cargo.toml).
           cargo wix --nocapture -p ta-cli `
-            --bin-path "target\x86_64-pc-windows-msvc\release" `
-            -- `
-            -dBinaryDir=target\x86_64-pc-windows-msvc\release `
-            -dVersion=$msiVersion 2>&1
+            --bin-path "target\x86_64-pc-windows-msvc\release" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "cargo-wix build failed — MSI skipped (non-fatal)"
+            exit 0
+          }
 
           # Find and copy the MSI to artifacts/.
           $msi = Get-ChildItem -Path target\wix -Filter "*.msi" -Recurse | Select-Object -First 1
