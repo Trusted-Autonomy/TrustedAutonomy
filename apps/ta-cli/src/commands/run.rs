@@ -2888,6 +2888,13 @@ fn inject_claude_md(
     // Build solutions section from curated knowledge base (v0.8.1).
     let solutions_section = build_solutions_section_for_inject(config);
 
+    // Build community knowledge section (v0.13.6: auto_query resources).
+    let community_section = if let Some(src) = source_dir {
+        super::community::build_community_context_section(src)
+    } else {
+        String::new()
+    };
+
     let injected = format!(
         r#"# Trusted Autonomy — Mediated Goal
 
@@ -2895,7 +2902,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 **Goal:** {}
 **Goal ID:** {}
-{}{}{}{}{}{}
+{}{}{}{}{}{}{}
 ## How this works
 
 - This directory is a copy of the original project
@@ -2967,6 +2974,7 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
         interactive_section,
         memory_section,
         solutions_section,
+        community_section,
         existing_section
     );
 
