@@ -2549,6 +2549,22 @@ fn deny_package(
     // v0.12.5: Capture denial as human guidance and draft rejection into memory.
     capture_draft_denial_to_memory(config, package_goal_id, &pkg, reason);
 
+    // v0.13.10: Record velocity entry for the denied goal.
+    if let Some(goal_id) = package_goal_id {
+        use ta_goal::{GoalOutcome, VelocityEntry, VelocityStore};
+        let goal_store = ta_goal::GoalRunStore::new(&config.goals_dir);
+        if let Ok(store) = goal_store {
+            if let Ok(Some(goal)) = store.get(goal_id) {
+                let vs = VelocityStore::for_project(&config.workspace_root);
+                let entry =
+                    VelocityEntry::from_goal(&goal, GoalOutcome::Denied).with_denial_reason(reason);
+                if let Err(e) = vs.append(&entry) {
+                    tracing::warn!("Failed to record velocity entry for denied goal: {}", e);
+                }
+            }
+        }
+    }
+
     println!("Denied draft package {}: {}", package_id, reason);
     Ok(())
 }

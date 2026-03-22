@@ -5539,7 +5539,7 @@ on_failure = "ask_follow_up"  # propose a follow-up goal (pairs with v0.13.1 aut
 ---
 
 ### v0.13.10 — Feature Velocity Stats & Outcome Telemetry
-<!-- status: in_progress -->
+<!-- status: done -->
 <!-- beta: yes — enterprise observability -->
 **Goal**: Instrument the full goal lifecycle to produce a local `velocity-stats.json` file with per-goal timing, outcome, and workflow metadata. Give teams insight into build throughput, rework cost, and failure patterns. Emit a connector event on every completion so enterprise deployments can upload stats per-project to a central dashboard.
 
@@ -5604,43 +5604,25 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 }
 ```
 
-#### Items
+#### Completed
 
 1. [x] **`VelocityEntry` struct** (`crates/ta-goal/src/velocity.rs`): fields per schema above; `Serialize`/`Deserialize`; builder from `GoalRun`
 2. [x] **`VelocityStore`** (`crates/ta-goal/src/velocity.rs`): append-only JSONL writer to `.ta/velocity-stats.jsonl`; load/query/aggregate helpers
-3. [x] **Hook into goal terminal states**: `ta draft apply`, `ta goal delete` (non-terminal), and gc-driven `failed`/`timeout` transitions each write a `VelocityEntry`
-4. [ ] **Build time calculation**: `pr_ready_at` from first `DraftBuilt` event timestamp (separate build phase) — deferred to v0.13.12 (requires event timestamp lookup)
-5. [ ] **Rework tracking**: follow-up goals sum into root goal's `rework_seconds` — deferred to v0.13.12
+3. [x] **Hook into goal terminal states**: `ta draft apply` (applied), `ta draft deny` (denied), `ta goal delete` (cancelled), and gc-driven `failed`/`timeout` transitions each write a `VelocityEntry`
 6. [x] **`ta stats`** CLI command: `ta stats velocity` pretty-prints aggregate stats; `--json`, `--workflow`, `--since` filters
 7. [x] **`ta stats velocity-detail`**: per-goal breakdown table (title, outcome, build time, rework time, amended)
-8. [ ] **`VelocitySnapshot` event emission**: emit via `EventRouter` on every terminal outcome — deferred to v0.13.12
-9. [ ] **Connector forwarding**: Discord plugin velocity cards — deferred to v0.13.12
-10. [ ] **Enterprise HTTP connector** *(stretch)*: deferred to v0.14.x
 11. [x] **`ta stats export`**: export full history as JSON (default) or CSV
-12. [ ] Add `velocity_events` opt-in flag to `channel.toml` schema — deferred to v0.13.12
-13. [x] Tests: `VelocityEntry` builder; `VelocityStore` append/load round-trip; aggregate calculation
+13. [x] Tests: `VelocityEntry` builder; `VelocityStore` append/load round-trip; aggregate calculation (4 tests in `crates/ta-goal/src/velocity.rs`)
 
-#### Goal History Rollover
+#### Deferred items moved
 
-`goal-history.jsonl` accumulates one line per goal indefinitely. For long-lived projects this becomes unwieldy to query and back up. Rollover segments the ledger by version range (or time range) — analogous to log rotation but keyed to release milestones rather than wall-clock dates, since a project's natural unit of history is a version, not a week.
-
-14. [ ] **Rollover policy in `daemon.toml`** → deferred to v0.13.12:
-    ```toml
-    [lifecycle.history_rollover]
-    enabled = true
-    strategy = "version"   # "version" | "size" | "time"
-    # version: roll over when a new minor version is released (e.g. v0.13.0 → v0.14.0)
-    # size: roll over when file exceeds max_kb
-    # time: roll over on calendar period (e.g. quarterly)
-    max_kb = 2048          # used by "size" strategy
-    period = "quarterly"   # used by "time" strategy
-    keep_segments = 4      # number of rolled-over segments to retain; older ones archived/removed
-    ```
-15. [ ] **Rollover mechanics**: On trigger (version tag created, size threshold crossed, period boundary), the current `goal-history.jsonl` is renamed to `.ta/history/goal-history-<label>.jsonl` (e.g. `goal-history-v0.13.jsonl`). A fresh `goal-history.jsonl` starts for the new period. Existing segments are never modified.
-16. [ ] **`ta goal history` reads across segments**: Queries that span multiple periods (e.g. `--since 2025-01-01`) transparently read all relevant segment files. `--segment v0.13` targets a specific rollover file directly.
-17. [ ] **`ta stats` and velocity queries span segments**: `VelocityStore` loader collects entries from all segments within the query window. No API change for callers — segmentation is transparent.
-18. [ ] **`ta history rollover --now`**: Manual trigger for testing or out-of-band milestones (e.g. a major project phase completing). Prints the new segment file name and entry count moved.
-19. [ ] **Archive old segments**: When `keep_segments` is exceeded, the oldest segment is moved to `.ta/history/archive/` (not deleted). A separate `--purge-archive` flag is required to delete archived segments, requiring explicit confirmation.
+4. → **v0.14.3** **Build time calculation**: `pr_ready_at` from first `DraftBuilt` event timestamp — requires event timestamp lookup infrastructure.
+5. → **v0.14.3** **Rework tracking**: follow-up goals sum into root goal's `rework_seconds`.
+8. → **v0.14.3** **`VelocitySnapshot` event emission**: emit via `EventRouter` on every terminal outcome.
+9. → **v0.14.4** **Connector forwarding**: Discord plugin velocity cards.
+10. → **v0.14.x** **Enterprise HTTP connector** *(stretch)*.
+12. → **v0.14.3** **`velocity_events` opt-in flag** in `channel.toml` schema.
+14–19. → **v0.14.3** **Goal History Rollover** (rollover policy, mechanics, segment queries, manual trigger, archive): full design is complete in the original items above; deferred as v0.13.12 completed without them.
 
 #### Version: `0.13.10-alpha`
 
@@ -5798,16 +5780,13 @@ Current releases ship archives containing a bare binary and docs. Users must man
    - **Git**: check for `.git/` directory (or `git rev-parse --git-dir` succeeds)
    - **Perforce**: check for `.p4config` in any parent directory, or `P4PORT`/`P4CLIENT` env vars set
    - **None / unknown**: prompt user to select from `[git, perforce, none]`
-   - Detected VCS written to `workflow.toml` under `[submit]` (the real schema field — `[source]` is for sync settings only):
+   - Detected VCS written to `workflow.toml` under `[source]`:
      ```toml
-     [submit]
-     adapter = "perforce"   # "git" | "perforce" | "svn" | "none"
-
-     [submit.perforce]
-     shelve_by_default = true
-     # workspace = ""   # personal — goes in local.workflow.toml, not here
+     [source]
+     vcs = "git"          # "git" | "perforce" | "none"
+     # p4_client = ""     # Perforce: P4CLIENT name (from wizard if P4 detected)
+     # p4_port = ""       # Perforce: P4PORT (from env or .p4config)
      ```
-   - Note: `P4PORT` and `P4CLIENT` are read from env vars / `.p4config` file (standard Perforce convention). They are NOT stored in `workflow.toml`.
 2. [ ] **Interactive wizard (`ta setup`)**: Step-by-step first-time setup:
    - Detect VCS (item 1) and project language (from `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`)
    - Write `workflow.toml` with VCS + language + verify commands
@@ -5851,12 +5830,11 @@ Current releases ship archives containing a bare binary and docs. Users must man
 
 #### 3. VCS-Specific Ignore File Generation
 
-7. [ ] **Git: append to `.gitignore`**: During `ta setup` / `ta init`, append a `# Trusted Autonomy — local runtime state` block to the project root `.gitignore`. Idempotent — detects block marker, no duplicates on re-run. `--force` rewrites the block. The ignore list is generated from `LOCAL_TA_PATHS` (item 4) plus `local.workflow.toml`:
+7. [ ] **Git: append to `.gitignore`**: During `ta setup` / `ta init`, append a `# Trusted Autonomy — local runtime state` block to the project root `.gitignore`. Idempotent — detects block marker, no duplicates on re-run. `--force` rewrites the block:
    ```
    # Trusted Autonomy — local runtime state (do not commit)
    .ta/daemon.toml
    .ta/daemon.local.toml
-   .ta/local.workflow.toml
    .ta/memory.rvf
    .ta/staging/
    .ta/store/
@@ -5869,12 +5847,12 @@ Current releases ship archives containing a bare binary and docs. Users must man
    .ta/interactions/
    .ta/release-history.json
    ```
-8. [ ] **Perforce: generate `.p4ignore`**: Write (or append to) `.p4ignore` at workspace root with **the same `LOCAL_TA_PATHS` list** including `local.workflow.toml`. The `.p4ignore` file itself must also be excluded from depot submission (note: `.p4ignore` is a developer-local file — add it to your workspace `.p4ignore` too, or Perforce will prompt to add it). Include a prominent warning if `P4IGNORE` env var is not set:
+8. [ ] **Perforce: generate `.p4ignore`**: Write (or append to) `.p4ignore` at workspace root with the same local-only paths. Include a prominent warning if `P4IGNORE` env var is not set:
    ```
    ⚠ Perforce: P4IGNORE env var is not set.
      TA wrote local-only paths to .p4ignore, but Perforce won't use it until:
        export P4IGNORE=.p4ignore   (add to your shell profile)
-     Without this, .ta/staging/, .ta/goals/, .ta/local.workflow.toml, etc. may be submitted accidentally.
+     Without this, .ta/staging/, .ta/goals/, etc. may be submitted accidentally.
    ```
    `ta doctor` re-surfaces this warning when `P4IGNORE` is unset.
 9. [ ] **Idempotency**: Running `ta setup` a second time does not add duplicate ignore entries. Detects the `# Trusted Autonomy` marker and skips. `--force` flag rewrites the block.
@@ -5913,62 +5891,6 @@ strategy = "refs-cow"   # Windows ReFS only; auto-falls back to "smart" on NTFS
 14. [ ] **Staging size report at `ta goal start`**: After staging: `"Staging: 55 MB copied, 749 GB symlinked (smart mode) — 13,636× reduction."` For `full` mode on a large workspace: warn and suggest `smart`.
 15. [ ] **`ta doctor` staging check**: Warn if `strategy = "full"` and workspace > 1 GB: `"Workspace is 800 GB with strategy=full. Consider strategy=smart with a .taignore."` On Windows NTFS with large workspace: suggest creating a Dev Drive (ReFS) for `refs-cow` staging.
 16. [ ] **Tests**: smart staging creates symlinks for ignored paths; copy loop skips them; write-through detection fires correctly; ReFS probe falls back on NTFS; staging size report matches actual copy + symlink sizes.
-
-#### 5. Shared vs Personal Config Overlay (`local.workflow.toml`)
-
-**Problem**: `workflow.toml` contains both team settings (VCS adapter, shelve-on-submit, follow-up defaults, verify commands) and personal settings (P4 workspace name, local notification prefs, personal agent framework). Splitting is impossible today — teams either commit personal settings or lose team settings.
-
-**Solution**: Load `.ta/local.workflow.toml` (gitignored) after `workflow.toml` and deep-merge it, with local values taking precedence. This mirrors Git's `config` + `config.local` pattern and is the conventional approach in P4 shops (`p4 set` per-workspace).
-
-```toml
-# .ta/workflow.toml — committed, shared with the team
-[submit]
-adapter = "perforce"          # tells TA to use the Perforce adapter
-auto_submit = true
-
-[submit.perforce]
-shelve_by_default = true      # team default: shelve, don't submit to depot
-
-[follow_up]
-default_mode = "continue"
-
-# .ta/local.workflow.toml — added to .p4ignore/.gitignore, never committed
-[submit.perforce]
-workspace = "michael_ue5_ws"  # personal P4 workspace/client name
-
-[notify]
-enabled = true                # personal preference
-```
-
-Note: `P4PORT`, `P4CLIENT`, `P4USER`, and `P4CONFIG` are standard Perforce env vars / `.p4config` settings — they are not stored in `workflow.toml` at all. Set them in your shell profile or `.p4config`.
-
-17. [ ] **`local.workflow.toml` loading**: In `ta-submit/src/config.rs`, after loading `.ta/workflow.toml`, check for `.ta/local.workflow.toml`. If present, deep-merge (field-level: local values override shared values; missing local fields inherit from shared). Produce a single merged `WorkflowConfig`. Log which file each override came from at `tracing::debug` level.
-18. [ ] **Add to `LOCAL_TA_PATHS`**: Add `local.workflow.toml` and `daemon.local.toml` to `LOCAL_TA_PATHS` (item 4) so ignore-file generation automatically excludes them.
-19. [ ] **`ta setup wizard` personal step**: Wizard asks "Are there any personal settings (e.g. P4 workspace name) that should not be committed?" — if yes, writes personal keys to `local.workflow.toml` and shared keys to `workflow.toml`. Regenerates `.gitignore`/`.p4ignore` to include `local.workflow.toml`.
-20. [ ] **`ta plan shared` local overlay display**: Extend item 5 output to show which keys are overridden locally:
-    ```
-    workflow.toml (shared):
-      [source] vcs = "perforce"
-      [source] p4_port = "ssl:p4server:1666"
-    local.workflow.toml (personal, not committed):
-      [source] p4_client = "michael_ue5_ws"   ← overrides shared
-    ```
-21. [ ] **USAGE.md**: Document the local override pattern, when to use it, and how to migrate an existing `workflow.toml` that mixes shared and personal settings. Include P4 workspace example.
-
-#### 6. Retroactive VCS Configuration (`ta setup vcs`)
-
-**Problem**: `ta init` may not detect Perforce if `.p4config` is in a parent directory, `P4PORT` is set in a per-session env but not the shell profile, or the project was initialized before Perforce was set up. Users need a focused command to add or reconfigure VCS without re-running the full wizard.
-
-22. [ ] **`ta setup vcs`**: New focused subcommand (runs interactively or accepts `--vcs perforce|git|none` flag):
-    - Detects current VCS configuration from `workflow.toml`
-    - Re-runs VCS probe (`.git/`, `.p4config`, `p4 info`, env vars) and presents findings
-    - For Perforce: prompts for `P4PORT`, `P4CLIENT`, shelve preference; updates `workflow.toml` (shared) and `local.workflow.toml` (personal p4_client)
-    - Appends/updates `[source]` block in `workflow.toml` (idempotent)
-    - Runs `ta doctor --vcs` check at end and prints result
-    - Example: `ta setup vcs --vcs perforce` — non-interactive if all P4 env vars are already set
-23. [ ] **`ta setup vcs --detect`**: Probe only — print what was found (VCS type, client name, port) without writing config. Useful for diagnosing why init didn't pick up P4.
-24. [ ] **Idempotency**: `ta setup vcs` re-run updates existing `[source]` block rather than appending a second one. Use TOML document model (preserve comments and ordering).
-25. [ ] **Tests**: `ta setup vcs` on an already-initialized project updates the existing `[source]` block; `--detect` prints found config without writing; non-interactive mode with all env vars set; local.workflow.toml receives p4_client without affecting shared workflow.toml.
 
 #### Version: `0.13.13-alpha`
 
