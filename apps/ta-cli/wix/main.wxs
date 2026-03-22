@@ -4,10 +4,10 @@
   Built with cargo-wix (WiX Toolset v4 wrapper).
 
   Usage (from workspace root):
-    cargo wix --nocapture
+    cargo wix --nocapture -p ta-cli --bin-path target\x86_64-pc-windows-msvc\release
 
   The installer:
-  - Places ta.exe at %ProgramFiles%\TrustedAutonomy\ta.exe
+  - Places ta.exe and ta-daemon.exe at %ProgramFiles%\TrustedAutonomy\
   - Adds the install directory to the system PATH
   - Registers an uninstaller in Add/Remove Programs
   - Creates a Start Menu shortcut "Trusted Autonomy Shell"
@@ -49,7 +49,7 @@
           <File
             Id="TaBinary"
             Name="ta.exe"
-            Source="$(var.BinaryDir)\ta.exe"
+            Source="$(var.SourceDir)\ta.exe"
             KeyPath="yes" />
 
           <!-- Add install directory to PATH -->
@@ -67,7 +67,7 @@
           <File
             Id="TaDaemonBinary"
             Name="ta-daemon.exe"
-            Source="$(var.BinaryDir)\ta-daemon.exe"
+            Source="$(var.SourceDir)\ta-daemon.exe"
             KeyPath="yes" />
         </Component>
       </Directory>

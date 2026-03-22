@@ -5629,7 +5629,7 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 ---
 
 ### v0.13.11 — Platform Installers (macOS DMG, Windows MSI)
-<!-- status: in_progress -->
+<!-- status: done -->
 <!-- beta: yes — first-class installation experience for non-developer users -->
 **Goal**: Replace bare `.tar.gz`/`.zip` downloads with proper platform installers. macOS gets a signed pkg/DMG. Windows gets an MSI with PATH registration. Eliminates the "extract and manually place binary" step for non-developer users and team rollouts.
 

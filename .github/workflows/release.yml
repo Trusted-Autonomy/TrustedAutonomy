@@ -146,9 +146,13 @@ jobs:
           $msiVersion = $versionMatch.Groups[1].Value + ".0"
           Write-Host "MSI version: $msiVersion (from tag $env:TAG)"
 
-          # Build the MSI using cargo-wix (sets BINARY via workspace Cargo.toml).
+          # Build the MSI using cargo-wix.
+          # Pass --install-version explicitly so WiX gets a clean 4-part dotted
+          # version (e.g., "0.13.11.0") rather than having to strip the
+          # pre-release suffix from the Cargo.toml version string.
           cargo wix --nocapture -p ta-cli `
-            --bin-path "target\x86_64-pc-windows-msvc\release" 2>&1
+            --bin-path "target\x86_64-pc-windows-msvc\release" `
+            --install-version "$msiVersion" 2>&1
           if ($LASTEXITCODE -ne 0) {
             Write-Warning "cargo-wix build failed — MSI skipped (non-fatal)"
             exit 0
