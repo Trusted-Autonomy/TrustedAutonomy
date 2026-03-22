@@ -179,11 +179,11 @@ pub async fn execute_command(
                 .stdin(std::process::Stdio::piped())
                 .spawn();
 
+            use crate::api::goal_output::OutputLine;
             match result {
                 Ok(mut child) => {
                     // Stream stdout and stderr line-by-line, collecting stderr
                     // for failure context.
-                    use crate::api::goal_output::OutputLine;
                     use tokio::io::{AsyncBufReadExt, BufReader};
 
                     // Capture PID for structured logs before moving child into tasks.
@@ -510,6 +510,10 @@ pub async fn execute_command(
                 }
                 Err(e) => {
                     tracing::error!("Background command spawn error: {} — {}", cmd_str, e);
+                    let _ = tx.send(OutputLine {
+                        stream: "stderr",
+                        line: format!("\u{2717} {} failed to start: {}", cmd_str, e),
+                    });
                     emit_command_failed_event(
                         &events_dir,
                         &cmd_str,

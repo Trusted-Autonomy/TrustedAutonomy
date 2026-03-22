@@ -42,7 +42,7 @@ use crate::plugin::ExternalRuntimeAdapter;
 /// Runtime selection embedded in agent/workflow configuration.
 ///
 /// Deserialised from agent YAML or daemon.toml `[agents.<id>.runtime]` blocks.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     /// Which runtime backend to use.
     ///
@@ -188,6 +188,12 @@ impl RuntimeRegistry {
 impl Default for RuntimeRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self::bare_process()
     }
 }
 

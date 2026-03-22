@@ -3834,6 +3834,7 @@ async fn start_tail_stream(
                     msg.push_str(&format!("\n  {}", hint));
                 }
                 let _ = tx.send(TuiMessage::CommandResponse(msg));
+                let _ = tx.send(TuiMessage::AgentOutputDone(target));
                 return;
             }
             Err(_) if attempt < 4 => continue, // Retry on network error
@@ -3842,6 +3843,7 @@ async fn start_tail_stream(
                     "Error: Cannot reach daemon: {}",
                     e
                 )));
+                let _ = tx.send(TuiMessage::AgentOutputDone(target));
                 return;
             }
         }
@@ -3851,6 +3853,7 @@ async fn start_tail_stream(
         let _ = tx.send(TuiMessage::CommandResponse(
             "Error: Could not connect to output stream after retries".into(),
         ));
+        let _ = tx.send(TuiMessage::AgentOutputDone(target));
         return;
     };
 
