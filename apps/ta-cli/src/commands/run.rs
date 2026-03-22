@@ -425,19 +425,18 @@ fn resolve_smart_follow_up(
 ///
 /// Resolved from (in priority order):
 /// 1. Explicit `--workflow` flag
-/// 2. Project config `default_workflow` (future)
+/// 2. `.ta/config.yaml` `channels.default_workflow` (project-level default, v0.13.7)
 /// 3. Built-in `single-agent` (backwards-compatible default)
 #[derive(Debug, Clone)]
 enum WorkflowKind {
     /// Default: one agent, one staging directory. Backwards-compatible.
     SingleAgent,
     /// Chain phases serially: each phase as a follow-up in the same staging,
-    /// one PR at the end.
-    ///
-    /// TODO(v0.13.7.1): implement multi-phase gate evaluation and auto follow-up
-    /// chaining. For now, runs as single-agent with an informational message.
+    /// one PR at the end. Full implementation in v0.13.7.
     SerialPhases,
-    /// Future/plugin workflow name not yet implemented.
+    /// Parallel sub-goals in separate staging dirs, with optional integration agent.
+    Swarm,
+    /// Unknown/plugin workflow name.
     Unknown(String),
 }
 
@@ -446,19 +445,498 @@ impl WorkflowKind {
         match s {
             "single-agent" | "" => WorkflowKind::SingleAgent,
             "serial-phases" => WorkflowKind::SerialPhases,
+            "swarm" => WorkflowKind::Swarm,
             other => WorkflowKind::Unknown(other.to_string()),
         }
     }
 }
 
-/// Resolve the workflow kind from the explicit flag or fall back to the default.
+/// Resolve the workflow kind from the explicit flag, then from `.ta/config.yaml`,
+/// then fall back to `single-agent`.
 ///
-/// Future: check `.ta/config.yaml` `default_workflow` between explicit and default.
-fn resolve_workflow(explicit: Option<&str>) -> WorkflowKind {
+/// Resolution order (v0.13.7, item 14):
+/// 1. Explicit `--workflow` flag
+/// 2. `channels.default_workflow` in `.ta/config.yaml`
+/// 3. Built-in `single-agent`
+fn resolve_workflow(explicit: Option<&str>, workspace_root: &std::path::Path) -> WorkflowKind {
     if let Some(w) = explicit {
         return WorkflowKind::from_str(w);
     }
+    let ta_config = ta_changeset::channel_registry::load_config(workspace_root);
+    if let Some(ref wf) = ta_config.channels.default_workflow {
+        if !wf.is_empty() {
+            return WorkflowKind::from_str(wf);
+        }
+    }
     WorkflowKind::SingleAgent
+}
+
+// ── Serial phases workflow (v0.13.7) ────────────────────────────
+
+/// Execute a serial-phases workflow: run each phase in order, evaluate gates
+/// between phases, and chain each phase as a follow-up to the previous one.
+///
+/// Each phase runs the full single-agent execution loop in the same staging
+/// directory (follow-up chain). After each phase, gate commands are evaluated.
+/// If a gate fails the workflow halts with actionable error + resume instructions.
+///
+/// Workflow state is persisted to `.ta/serial-workflow-<id>.json` for resume support.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_serial_phases(
+    config: &GatewayConfig,
+    title: &str,
+    agent: &str,
+    objective: &str,
+    phases: &[String],
+    gates: &[String],
+    quiet: bool,
+) -> anyhow::Result<()> {
+    if phases.is_empty() {
+        anyhow::bail!(
+            "serial-phases workflow requires at least one phase. \
+             Use --phases v0.13.7.1,v0.13.7.2 to specify phases."
+        );
+    }
+
+    let ta_bin = std::env::current_exe().map_err(|e| {
+        anyhow::anyhow!(
+            "Could not determine ta binary path for subprocess invocation: {}",
+            e
+        )
+    })?;
+
+    let workflow_id = uuid::Uuid::new_v4().to_string();
+    let state_dir = config.workspace_root.join(".ta");
+    let gate_specs: Vec<ta_workflow::WorkflowGate> = gates
+        .iter()
+        .map(|g| ta_workflow::WorkflowGate::parse(g))
+        .collect();
+
+    let mut state =
+        ta_workflow::SerialPhasesState::new(&workflow_id, phases.to_vec(), gates.to_vec());
+    state.save(&state_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to persist workflow state to {}: {}",
+            state_dir.display(),
+            e
+        )
+    })?;
+
+    if !quiet {
+        println!(
+            "\nWorkflow: serial-phases ({} phases, {} gate{})",
+            phases.len(),
+            gates.len(),
+            if gates.len() == 1 { "" } else { "s" }
+        );
+        println!("  Workflow ID: {}", workflow_id);
+        println!("  Phases: {}", phases.join(", "));
+        if !gates.is_empty() {
+            println!("  Gates:  {}", gates.join(", "));
+        }
+        println!();
+    }
+
+    let mut prev_goal_id: Option<String> = None;
+
+    for (i, phase) in phases.iter().enumerate() {
+        if !quiet {
+            println!(
+                "── Phase [{}/{}]: {} ──────────────────────────────",
+                i + 1,
+                phases.len(),
+                phase
+            );
+        }
+
+        // Mark step as running.
+        state.steps[i] = ta_workflow::StepState::Running {
+            goal_id: String::new(),
+        };
+        state.current_step = i;
+        let _ = state.save(&state_dir);
+
+        // Build the subprocess command for this phase.
+        let mut cmd = std::process::Command::new(&ta_bin);
+        cmd.arg("run")
+            .arg(title)
+            .arg("--phase")
+            .arg(phase)
+            .arg("--agent")
+            .arg(agent);
+
+        if let Some(ref prev_id) = prev_goal_id {
+            cmd.arg("--follow-up-goal").arg(prev_id);
+        }
+
+        if !objective.is_empty() {
+            cmd.arg("--objective").arg(objective);
+        }
+
+        if quiet {
+            cmd.arg("--quiet");
+        }
+
+        cmd.current_dir(&config.workspace_root);
+
+        let status = cmd.status().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to launch agent for phase {}: {}. \
+                 Resume with: ta run --workflow serial-phases --resume-workflow {}",
+                phase,
+                e,
+                workflow_id
+            )
+        })?;
+
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            state.steps[i] = ta_workflow::StepState::AgentFailed {
+                error: format!("exit code {}", code),
+            };
+            let _ = state.save(&state_dir);
+            anyhow::bail!(
+                "Phase {} failed: agent exited with code {}.\n  \
+                 Resume with: ta run --workflow serial-phases --resume-workflow {}",
+                phase,
+                code,
+                workflow_id
+            );
+        }
+
+        // Find the most recently created goal for this phase.
+        let goal_store = GoalRunStore::new(&config.goals_dir)?;
+        let goals = goal_store.list()?;
+        let goal = goals
+            .into_iter()
+            .find(|g| g.plan_phase.as_deref() == Some(phase.as_str()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not find completed goal for phase '{}' after agent run. \
+                     Check goal store at {}.",
+                    phase,
+                    config.goals_dir.display()
+                )
+            })?;
+
+        let goal_id = goal.goal_run_id.to_string();
+        let staging_path = goal.workspace_path.clone();
+
+        // Evaluate gates in the staging directory.
+        if !gate_specs.is_empty() {
+            if !quiet {
+                println!("  Evaluating {} gate(s)...", gate_specs.len());
+            }
+            if let Err(failure) = ta_workflow::evaluate_gates(&gate_specs, &staging_path, quiet) {
+                state.steps[i] = ta_workflow::StepState::GateFailed {
+                    goal_id: goal_id.clone(),
+                    failed_gate: failure.gate_name.clone(),
+                    error: failure.to_string(),
+                };
+                let _ = state.save(&state_dir);
+                anyhow::bail!(
+                    "Gate '{}' failed after phase {}.\n  \
+                     Staging: {}\n  \
+                     Fix the issue, then resume with:\n  \
+                     ta run --workflow serial-phases --resume-workflow {}",
+                    failure.gate_name,
+                    phase,
+                    staging_path.display(),
+                    workflow_id
+                );
+            }
+        }
+
+        // Mark step as passed.
+        state.steps[i] = ta_workflow::StepState::Passed {
+            goal_id: goal_id.clone(),
+        };
+        state.last_goal_id = Some(goal_id.clone());
+        state.staging_path = Some(staging_path.clone());
+        let _ = state.save(&state_dir);
+
+        if !quiet {
+            println!(
+                "  Phase {} passed. Goal: {}  Staging: {}",
+                phase,
+                goal_id,
+                staging_path.display()
+            );
+        }
+
+        prev_goal_id = Some(goal_id);
+    }
+
+    // All phases complete — print summary.
+    let last_goal = prev_goal_id.as_deref().unwrap_or("(unknown)");
+    println!(
+        "\nserial-phases workflow complete: {} phase{} passed.",
+        phases.len(),
+        if phases.len() == 1 { "" } else { "s" }
+    );
+    println!("  Build the combined draft with:");
+    println!("    ta draft build --goal {}", last_goal);
+    println!("    # Or: ta draft build --latest");
+
+    Ok(())
+}
+
+// ── Swarm workflow (v0.13.7) ─────────────────────────────────────
+
+/// Execute a swarm workflow: run each sub-goal as an independent agent in its
+/// own staging directory, then optionally run an integration agent to merge results.
+///
+/// Sub-goals are run sequentially in this initial implementation; parallel
+/// execution (via OS threads) is planned for v0.13.7.2.
+///
+/// Each sub-goal gets its own staging directory. Per-agent gates are evaluated
+/// after each sub-goal. Failures are reported but do not stop remaining sub-goals.
+/// After all complete, if `--integrate` is set, an integration agent is launched.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_swarm(
+    config: &GatewayConfig,
+    title: &str,
+    agent: &str,
+    objective: &str,
+    sub_goals: &[String],
+    per_agent_gates: &[String],
+    integrate: bool,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    if sub_goals.is_empty() {
+        anyhow::bail!(
+            "swarm workflow requires at least one sub-goal. \
+             Use --sub-goals \"goal1\" \"goal2\" to specify sub-goals."
+        );
+    }
+
+    let ta_bin = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Could not determine ta binary path: {}", e))?;
+
+    let workflow_id = uuid::Uuid::new_v4().to_string();
+    let state_dir = config.workspace_root.join(".ta");
+
+    let sub_goal_specs: Vec<ta_workflow::SubGoalSpec> = sub_goals
+        .iter()
+        .map(ta_workflow::SubGoalSpec::new)
+        .collect();
+
+    let mut state = ta_workflow::SwarmState::new(&workflow_id, title, sub_goal_specs, integrate);
+    state.per_agent_gates = per_agent_gates.to_vec();
+    state
+        .save(&state_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to persist swarm state: {}", e))?;
+
+    let gate_specs: Vec<ta_workflow::WorkflowGate> = per_agent_gates
+        .iter()
+        .map(|g| ta_workflow::WorkflowGate::parse(g))
+        .collect();
+
+    if !quiet {
+        println!(
+            "\nWorkflow: swarm ({} sub-goal{}, {} gate{} per agent)",
+            sub_goals.len(),
+            if sub_goals.len() == 1 { "" } else { "s" },
+            per_agent_gates.len(),
+            if per_agent_gates.len() == 1 { "" } else { "s" }
+        );
+        println!("  Swarm ID: {}", workflow_id);
+        for (i, sg) in sub_goals.iter().enumerate() {
+            println!("  Sub-goal [{}/{}]: {}", i + 1, sub_goals.len(), sg);
+        }
+        println!();
+    }
+
+    let mut passed_goals: Vec<(String, std::path::PathBuf)> = Vec::new();
+
+    for (i, sub_goal_title) in sub_goals.iter().enumerate() {
+        if !quiet {
+            println!(
+                "── Sub-goal [{}/{}]: {} ──────────────────────────",
+                i + 1,
+                sub_goals.len(),
+                sub_goal_title
+            );
+        }
+
+        state.sub_goal_states[i] = ta_workflow::SubGoalStatus::Running {
+            goal_id: String::new(),
+            staging_path: std::path::PathBuf::new(),
+        };
+        let _ = state.save(&state_dir);
+
+        // Run the sub-goal as an independent agent.
+        let mut cmd = std::process::Command::new(&ta_bin);
+        cmd.arg("run").arg(sub_goal_title).arg("--agent").arg(agent);
+        if !objective.is_empty() {
+            cmd.arg("--objective").arg(objective);
+        }
+        if quiet {
+            cmd.arg("--quiet");
+        }
+        cmd.current_dir(&config.workspace_root);
+
+        let status = cmd.status().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to launch agent for sub-goal '{}': {}",
+                sub_goal_title,
+                e
+            )
+        })?;
+
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            state.sub_goal_states[i] = ta_workflow::SubGoalStatus::AgentFailed {
+                error: format!("exit code {}", code),
+            };
+            let _ = state.save(&state_dir);
+            if !quiet {
+                eprintln!(
+                    "  Sub-goal '{}' FAILED (exit {}). Continuing.",
+                    sub_goal_title, code
+                );
+            }
+            continue;
+        }
+
+        // Find the most recent goal matching this title.
+        let goal_store = GoalRunStore::new(&config.goals_dir)?;
+        let goals = goal_store.list()?;
+        let goal = match goals
+            .into_iter()
+            .find(|g| g.title.trim() == sub_goal_title.trim())
+        {
+            Some(g) => g,
+            None => {
+                state.sub_goal_states[i] = ta_workflow::SubGoalStatus::AgentFailed {
+                    error: "goal not found in store after agent run".to_string(),
+                };
+                let _ = state.save(&state_dir);
+                if !quiet {
+                    eprintln!(
+                        "  Warning: could not find goal record for '{}'. Continuing.",
+                        sub_goal_title
+                    );
+                }
+                continue;
+            }
+        };
+
+        let goal_id = goal.goal_run_id.to_string();
+        let staging_path = goal.workspace_path.clone();
+
+        // Evaluate per-agent gates.
+        if !gate_specs.is_empty() {
+            if let Err(failure) = ta_workflow::evaluate_gates(&gate_specs, &staging_path, quiet) {
+                state.sub_goal_states[i] = ta_workflow::SubGoalStatus::GateFailed {
+                    goal_id,
+                    staging_path,
+                    failed_gate: failure.gate_name.clone(),
+                    error: failure.to_string(),
+                };
+                let _ = state.save(&state_dir);
+                if !quiet {
+                    eprintln!(
+                        "  Sub-goal '{}' gate FAILED ({}). Continuing.",
+                        sub_goal_title, failure.gate_name
+                    );
+                }
+                continue;
+            }
+        }
+
+        state.sub_goal_states[i] = ta_workflow::SubGoalStatus::Passed {
+            goal_id: goal_id.clone(),
+            staging_path: staging_path.clone(),
+        };
+        let _ = state.save(&state_dir);
+        passed_goals.push((goal_id, staging_path));
+
+        if !quiet {
+            println!("  Sub-goal '{}' passed.", sub_goal_title);
+        }
+    }
+
+    // Summary.
+    let passed = state.passed_count();
+    let failed = state.failed_count();
+    println!(
+        "\nSwarm workflow complete: {}/{} sub-goals passed{}.",
+        passed,
+        sub_goals.len(),
+        if failed > 0 {
+            format!(", {} failed", failed)
+        } else {
+            String::new()
+        }
+    );
+    println!("  Swarm ID: {}", workflow_id);
+
+    if passed == 0 {
+        anyhow::bail!(
+            "All sub-goals failed. Nothing to integrate. \
+             Check sub-goal errors above."
+        );
+    }
+
+    if integrate {
+        println!(
+            "\nRunning integration agent to merge {} sub-goal(s)...",
+            passed
+        );
+        let integration_title = format!("Integrate swarm results for: {}", title);
+        let staging_list: Vec<String> = passed_goals
+            .iter()
+            .map(|(_, p)| p.display().to_string())
+            .collect();
+        let integration_objective = format!(
+            "Merge and integrate the results of {} parallel sub-goals into a single coherent output.\n\
+             Sub-goal staging directories:\n{}",
+            passed,
+            staging_list
+                .iter()
+                .map(|s| format!("  - {}", s))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        let mut cmd = std::process::Command::new(&ta_bin);
+        cmd.arg("run")
+            .arg(&integration_title)
+            .arg("--agent")
+            .arg(agent)
+            .arg("--objective")
+            .arg(&integration_objective);
+        if quiet {
+            cmd.arg("--quiet");
+        }
+        cmd.current_dir(&config.workspace_root);
+
+        let int_status = cmd
+            .status()
+            .map_err(|e| anyhow::anyhow!("Failed to launch integration agent: {}", e))?;
+
+        if int_status.success() {
+            println!("  Integration complete. Build final draft with:");
+            println!("    ta draft build --latest");
+        } else {
+            eprintln!(
+                "  Warning: integration agent exited with code {:?}.",
+                int_status.code()
+            );
+            println!("  Individual drafts can still be built with:");
+            for (goal_id, _) in &passed_goals {
+                println!("    ta draft build --goal {}", goal_id);
+            }
+        }
+    } else {
+        println!("  Build individual drafts with:");
+        for (goal_id, _) in &passed_goals {
+            println!("    ta draft build --goal {}", goal_id);
+        }
+    }
+
+    Ok(())
 }
 
 // ── Public API ──────────────────────────────────────────────────
@@ -547,18 +1025,27 @@ pub fn execute(
 
     // ── Workflow routing (v0.13.7) ───────────────────────────────
     //
-    // Resolve the workflow kind and, if non-default, print an informational
-    // message. Multi-phase chaining is a stub — full gate evaluation and
-    // auto follow-up sequencing land in v0.13.7.1.
-    let workflow_kind = resolve_workflow(workflow);
+    // Resolve the workflow kind from flag, then config, then default.
+    // serial-phases and swarm are dispatched via their dedicated execute_*
+    // functions in main.rs when --phases / --sub-goals are provided.
+    // When used without those flags (e.g. just --workflow serial-phases),
+    // fall through as single-agent for backwards compat.
+    let workflow_kind = resolve_workflow(workflow, &config.workspace_root);
     match &workflow_kind {
         WorkflowKind::SingleAgent => {}
         WorkflowKind::SerialPhases => {
             if !quiet {
                 println!(
-                    "Workflow: serial-phases \
-                     (executing as single-agent — multi-phase chaining requires --phases flag, \
-                     full implementation in v0.13.7.1)"
+                    "Workflow: serial-phases (single-agent mode — use --phases to enable \
+                     multi-phase chaining with gate evaluation)"
+                );
+            }
+        }
+        WorkflowKind::Swarm => {
+            if !quiet {
+                println!(
+                    "Workflow: swarm (single-agent mode — use --sub-goals to enable \
+                     parallel sub-goal execution)"
                 );
             }
         }

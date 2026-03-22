@@ -1,16 +1,20 @@
-// ta-workflow — Pluggable workflow engine for Trusted Autonomy (v0.9.8.2).
+// ta-workflow — Pluggable workflow engine for Trusted Autonomy (v0.9.8.2 / v0.13.7).
 //
 // Provides the `WorkflowEngine` trait that all engines implement, plus:
 //   - Built-in YAML engine for simple workflows
 //   - Process-based plugin bridge for external engines (LangGraph, CrewAI)
 //   - Verdict scoring and feedback routing
 //   - Interactive human-in-the-loop interaction requests
+//   - Serial phase chains with gate evaluation (v0.13.7)
+//   - Parallel agent swarm coordination (v0.13.7)
 
 pub mod definition;
 pub mod error;
 pub mod interaction;
 pub mod process_engine;
 pub mod scorer;
+pub mod serial_phases;
+pub mod swarm;
 pub mod validate;
 pub mod verdict;
 pub mod yaml_engine;
@@ -21,6 +25,10 @@ pub use definition::{
 };
 pub use error::WorkflowError;
 pub use interaction::{AwaitHumanConfig, InteractionRequest, InteractionResponse};
+pub use serial_phases::{
+    evaluate_gates, run_gate, GateFailure, GateResult, SerialPhasesState, StepState, WorkflowGate,
+};
+pub use swarm::{IntegrationConfig, SubGoalSpec, SubGoalStatus, SwarmState};
 pub use verdict::{Finding, Severity, Verdict, VerdictDecision};
 pub use yaml_engine::YamlWorkflowEngine;
 

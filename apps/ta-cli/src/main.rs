@@ -128,17 +128,48 @@ enum Commands {
         /// when `ta_goal_start` has already created the goal.
         #[arg(long)]
         goal_id: Option<String>,
-        /// Workflow to execute (e.g., 'serial-phases', 'single-agent').
+        /// Workflow to execute (e.g., 'serial-phases', 'swarm', 'single-agent').
         ///
         /// Resolves in priority order:
         /// 1. This flag (explicit override)
-        /// 2. Plan phase metadata (future)
-        /// 3. .ta/config.yaml default_workflow (future)
-        /// 4. Built-in "single-agent" (backwards-compatible default)
+        /// 2. .ta/config.yaml channels.default_workflow (project-level default)
+        /// 3. Built-in "single-agent" (backwards-compatible default)
+        ///
+        /// serial-phases: use with --phases to enable multi-phase gate evaluation.
+        /// swarm:         use with --sub-goals to enable parallel sub-goal execution.
         ///
         /// Run `ta workflow list --builtin` to see available workflows.
         #[arg(long)]
         workflow: Option<String>,
+        /// Phases to execute (serial-phases workflow only).
+        ///
+        /// Comma-separated phase IDs, e.g. --phases v0.13.7.1,v0.13.7.2
+        /// Each phase runs as a follow-up goal reusing the same staging directory.
+        /// Requires --workflow serial-phases.
+        #[arg(long, value_delimiter = ',')]
+        phases: Option<Vec<String>>,
+        /// Gate commands to evaluate after each phase (serial-phases) or sub-goal (swarm).
+        ///
+        /// Built-in gates: "build", "test", "clippy".
+        /// Any other string is run as a shell command in the staging directory.
+        /// Multiple gates: --gates build --gates test
+        /// Default (serial-phases): no gates (agent is trusted to leave staging correct).
+        #[arg(long)]
+        gates: Vec<String>,
+        /// Sub-goals for the swarm workflow.
+        ///
+        /// Each value is the title of one sub-goal agent. Each sub-goal runs
+        /// independently in its own staging directory.
+        /// Example: --sub-goals "Add auth endpoint" --sub-goals "Add auth tests"
+        /// Requires --workflow swarm.
+        #[arg(long)]
+        sub_goals: Vec<String>,
+        /// Run an integration agent after all swarm sub-goals complete (swarm workflow).
+        ///
+        /// The integration agent receives the list of all passed staging paths
+        /// and merges the results into a single coherent output.
+        #[arg(long)]
+        integrate: bool,
     },
     /// Review and manage draft packages.
     Draft {
@@ -649,11 +680,37 @@ fn main() -> anyhow::Result<()> {
             quiet,
             goal_id,
             workflow,
+            phases,
+            gates,
+            sub_goals,
+            integrate,
         } => {
             // Phase-aware title resolution: if the positional title looks like
             // a phase ID (e.g., "v0.9.8.1", "0.9.8.1", "phase 0.9.8.1"),
             // look it up in PLAN.md and use the phase title + set --phase.
             let (resolved_title, resolved_phase) = resolve_phase_title(title, phase, &project_root);
+
+            // serial-phases: dispatch to execute_serial_phases when --phases is provided.
+            if workflow.as_deref() == Some("serial-phases") || phases.is_some() {
+                if let Some(phase_list) = phases {
+                    if !phase_list.is_empty() {
+                        let run_title = resolved_title.as_deref().unwrap_or("Serial phases run");
+                        return commands::run::execute_serial_phases(
+                            &config, run_title, agent, objective, phase_list, gates, *quiet,
+                        );
+                    }
+                }
+            }
+
+            // swarm: dispatch to execute_swarm when --sub-goals is provided.
+            if !sub_goals.is_empty() {
+                let run_title = resolved_title.as_deref().unwrap_or("Swarm run");
+                return commands::run::execute_swarm(
+                    &config, run_title, agent, objective, sub_goals, gates, *integrate, *quiet,
+                );
+            }
+
+            // Default: single-agent execution.
             commands::run::execute(
                 &config,
                 resolved_title.as_deref(),

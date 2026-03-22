@@ -534,7 +534,8 @@ Every `ta run` uses a named *workflow* that controls how the goal is dispatched.
 ```bash
 ta run "goal"                              # default: single-agent
 ta run "goal" --workflow single-agent      # explicit (same as default)
-ta run "goal" --workflow serial-phases     # chain phases in series (stub — v0.13.7.1)
+ta run "Implement v0.13.7" --workflow serial-phases --phases v0.13.7.1,v0.13.7.2
+ta run "Big refactor" --workflow swarm --sub-goals "Refactor auth" "Refactor DB"
 ```
 
 **See available built-in workflows:**
@@ -550,16 +551,94 @@ Built-in workflows (use with: ta run "goal" --workflow <name>):
 
   single-agent         Default: one agent in one staging directory (backwards-compatible)
   serial-phases        Chain phases serially: each phase as follow-up in same staging, one PR at end
-  swarm                Parallel sub-goals with integration agent (v0.13.7.2+)
+  swarm                Parallel sub-goals with integration agent
   approval-chain       Sequential human approval steps (v0.13.7.3+)
 ```
 
 **Resolution order** (first match wins):
 
 1. `--workflow <name>` flag on `ta run`
-2. Plan phase metadata (future)
-3. `.ta/config.yaml` `default_workflow` (future)
-4. Built-in `single-agent` (backwards-compatible default)
+2. `channels.default_workflow` in `.ta/config.yaml` (project-level default)
+3. Built-in `single-agent` (backwards-compatible default)
+
+**Set a project-level default workflow:**
+
+```yaml
+# .ta/config.yaml
+channels:
+  default_workflow: serial-phases
+```
+
+### Serial Phase Chains
+
+Run multiple plan phases in sequence with automatic follow-up chaining. Each phase runs as a follow-up goal in the same staging directory. Between phases, configurable gates (build, test, clippy, custom commands) must pass. The final output is a single draft covering all phases.
+
+```bash
+# Run two phases in sequence with build+test gates between each
+ta run "Implement v0.13.7" \
+  --workflow serial-phases \
+  --phases v0.13.7.1,v0.13.7.2 \
+  --gates build \
+  --gates test
+
+# Built-in gates: build, test, clippy
+# Any other value is run as a shell command in the staging directory:
+ta run "Implement feature" \
+  --workflow serial-phases \
+  --phases v0.14.3,v0.14.4 \
+  --gates "make check" \
+  --gates clippy
+```
+
+When all phases pass, build the combined draft:
+
+```bash
+ta draft build --latest        # build draft from last phase's staging
+ta draft build --goal <id>     # build from specific goal
+```
+
+**If a gate fails**, the workflow stops with an actionable error:
+
+```
+Gate 'test' failed after phase v0.13.7.1.
+  Staging: .ta/staging/abc123/
+  Fix the issue, then resume with:
+  ta run --workflow serial-phases --resume-workflow wf-abc123
+```
+
+The workflow state is saved to `.ta/serial-workflow-<id>.json` so you can inspect which steps passed/failed.
+
+### Parallel Agent Swarms
+
+Decompose a goal into independent sub-goals. Each sub-goal runs as its own agent in a separate staging directory. After all complete, an optional integration agent merges the results.
+
+```bash
+# Run two sub-goals independently (separate staging dirs)
+ta run "Big auth refactor" \
+  --workflow swarm \
+  --sub-goals "Refactor login endpoint" \
+  --sub-goals "Refactor session management"
+
+# With per-agent gates and integration step
+ta run "Multi-area refactor" \
+  --workflow swarm \
+  --sub-goals "Update auth module" \
+  --sub-goals "Update billing module" \
+  --gates build \
+  --gates test \
+  --integrate
+```
+
+Without `--integrate`, each sub-goal's draft is built separately:
+
+```bash
+ta draft build --goal <sub-goal-1-id>
+ta draft build --goal <sub-goal-2-id>
+```
+
+With `--integrate`, an integration agent receives all passed staging paths and merges them into a single coherent draft.
+
+Swarm state is persisted to `.ta/swarm-workflow-<id>.json`. Failed sub-goals are reported but don't block the others from completing.
 
 ### Follow-Up Iterations
 
