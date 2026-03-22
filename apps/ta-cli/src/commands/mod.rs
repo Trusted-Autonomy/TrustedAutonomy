@@ -35,6 +35,7 @@ pub mod session;
 pub mod setup;
 pub mod shell;
 pub mod shell_tui;
+pub mod stats;
 pub mod status;
 pub mod sync;
 pub mod terms;

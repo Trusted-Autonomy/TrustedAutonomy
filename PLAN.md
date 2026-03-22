@@ -5533,7 +5533,7 @@ on_failure = "ask_follow_up"  # propose a follow-up goal (pairs with v0.13.1 aut
 ---
 
 ### v0.13.10 — Feature Velocity Stats & Outcome Telemetry
-<!-- status: pending -->
+<!-- status: in_progress -->
 <!-- beta: yes — enterprise observability -->
 **Goal**: Instrument the full goal lifecycle to produce a local `velocity-stats.json` file with per-goal timing, outcome, and workflow metadata. Give teams insight into build throughput, rework cost, and failure patterns. Emit a connector event on every completion so enterprise deployments can upload stats per-project to a central dashboard.
 
@@ -5600,25 +5600,25 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 
 #### Items
 
-1. [ ] **`VelocityEntry` struct** (`crates/ta-goal/src/velocity.rs`): fields per schema above; `Serialize`/`Deserialize`; builder from `GoalRun` + `DraftPackage`
-2. [ ] **`VelocityStore`** (`crates/ta-goal/src/velocity.rs`): append-only writer to `.ta/velocity-stats.json`; load/query helpers; rolling 90-day window
-3. [ ] **Hook into goal terminal states**: `ta draft apply`, `ta goal cancel`, `ta goal delete`, and gc-driven `failed` transitions each write a `VelocityEntry`
-4. [ ] **Build time calculation**: `started_at` from `GoalRun.created_at`; `pr_ready_at` from first `DraftBuilt` event timestamp
-5. [ ] **Rework tracking**: follow-up goals (`GoalRun.parent_goal_id`) sum their `build_seconds` into the root goal's `rework_seconds`
-6. [ ] **`ta stats`** CLI command: pretty-print aggregate velocity stats; `--json` for raw output; `--workflow <type>` filter; `--since <date>` filter
-7. [ ] **`ta stats velocity`**: per-goal breakdown table (title, outcome, build time, rework time, amended)
-8. [ ] **`VelocitySnapshot` event emission**: emit via `EventRouter` on every terminal outcome; include entry + rolling aggregate
-9. [ ] **Connector forwarding**: channel plugins receive `VelocitySnapshot` events; Discord plugin posts a compact summary card on `applied`/`failed` (opt-in via `channel.toml` `velocity_events = true`)
-10. [ ] **Enterprise HTTP connector** *(stretch)*: `[connectors.velocity]` in `daemon.toml` — POST snapshot JSON to a configured URL on each completion event; supports bearer token auth
-11. [ ] **`ta stats export`**: export full history as CSV or JSON for external analysis
-12. [ ] Add `velocity_events` opt-in flag to `channel.toml` schema (default `false`)
-13. [ ] Tests: `VelocityEntry` builder from mock goal/draft; `VelocityStore` append + load round-trip; aggregate calculation; rework rollup
+1. [x] **`VelocityEntry` struct** (`crates/ta-goal/src/velocity.rs`): fields per schema above; `Serialize`/`Deserialize`; builder from `GoalRun`
+2. [x] **`VelocityStore`** (`crates/ta-goal/src/velocity.rs`): append-only JSONL writer to `.ta/velocity-stats.jsonl`; load/query/aggregate helpers
+3. [x] **Hook into goal terminal states**: `ta draft apply`, `ta goal delete` (non-terminal), and gc-driven `failed`/`timeout` transitions each write a `VelocityEntry`
+4. [ ] **Build time calculation**: `pr_ready_at` from first `DraftBuilt` event timestamp (separate build phase) — deferred to v0.13.12 (requires event timestamp lookup)
+5. [ ] **Rework tracking**: follow-up goals sum into root goal's `rework_seconds` — deferred to v0.13.12
+6. [x] **`ta stats`** CLI command: `ta stats velocity` pretty-prints aggregate stats; `--json`, `--workflow`, `--since` filters
+7. [x] **`ta stats velocity-detail`**: per-goal breakdown table (title, outcome, build time, rework time, amended)
+8. [ ] **`VelocitySnapshot` event emission**: emit via `EventRouter` on every terminal outcome — deferred to v0.13.12
+9. [ ] **Connector forwarding**: Discord plugin velocity cards — deferred to v0.13.12
+10. [ ] **Enterprise HTTP connector** *(stretch)*: deferred to v0.14.x
+11. [x] **`ta stats export`**: export full history as JSON (default) or CSV
+12. [ ] Add `velocity_events` opt-in flag to `channel.toml` schema — deferred to v0.13.12
+13. [x] Tests: `VelocityEntry` builder; `VelocityStore` append/load round-trip; aggregate calculation
 
 #### Goal History Rollover
 
 `goal-history.jsonl` accumulates one line per goal indefinitely. For long-lived projects this becomes unwieldy to query and back up. Rollover segments the ledger by version range (or time range) — analogous to log rotation but keyed to release milestones rather than wall-clock dates, since a project's natural unit of history is a version, not a week.
 
-14. [ ] **Rollover policy in `daemon.toml`**:
+14. [ ] **Rollover policy in `daemon.toml`** → deferred to v0.13.12:
     ```toml
     [lifecycle.history_rollover]
     enabled = true

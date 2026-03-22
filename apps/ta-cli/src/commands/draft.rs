@@ -3712,6 +3712,16 @@ fn apply_package(
         }
     }
 
+    // §8b: record velocity entry for the applied goal.
+    {
+        use ta_goal::{GoalOutcome, VelocityEntry, VelocityStore};
+        let vs = VelocityStore::for_project(&config.workspace_root);
+        let entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied);
+        if let Err(e) = vs.append(&entry) {
+            tracing::warn!("Failed to record velocity entry: {}", e);
+        }
+    }
+
     // Auto-close parent draft on follow-up apply (v0.3.6, refined v0.4.1.2).
     // v0.4.1.2: Only auto-close the parent draft when this goal shares the same
     // staging directory (extend case). Standalone follow-ups with different staging

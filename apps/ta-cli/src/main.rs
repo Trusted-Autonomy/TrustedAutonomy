@@ -335,6 +335,15 @@ enum Commands {
         #[command(subcommand)]
         command: commands::workflow::WorkflowCommands,
     },
+    /// Feature velocity stats and outcome telemetry (v0.13.10).
+    ///
+    /// `ta stats velocity` shows aggregate build time and outcome breakdown.
+    /// `ta stats velocity-detail` shows a per-goal breakdown table.
+    /// `ta stats export` exports full history as JSON or CSV.
+    Stats {
+        #[command(subcommand)]
+        command: commands::stats::StatsCommands,
+    },
     /// Manage policy configuration and auto-approval.
     Policy {
         #[command(subcommand)]
@@ -662,6 +671,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Workflow { command } => commands::workflow::execute(command, &config),
+        Commands::Stats { command } => commands::stats::execute(command, &config),
         Commands::Policy { command } => commands::policy::execute(command, &config),
         Commands::Config { command } => commands::config::execute(command, &config),
         Commands::Gc {

@@ -3,7 +3,10 @@
 // `ta gc` runs goal GC, draft GC, staging cleanup, and event pruning
 // in one pass. Writes history entries before archiving/removing goals.
 
-use ta_goal::{GoalHistoryEntry, GoalHistoryLedger, GoalRunState, GoalRunStore};
+use ta_goal::{
+    GoalHistoryEntry, GoalHistoryLedger, GoalOutcome, GoalRunState, GoalRunStore, VelocityEntry,
+    VelocityStore,
+};
 use ta_mcp_gateway::GatewayConfig;
 
 #[allow(clippy::too_many_arguments)]
@@ -19,6 +22,7 @@ pub fn execute(
 ) -> anyhow::Result<()> {
     let store = GoalRunStore::new(&config.goals_dir)?;
     let ledger = GoalHistoryLedger::for_project(&config.workspace_root);
+    let velocity = VelocityStore::for_project(&config.workspace_root);
 
     let cutoff = if gc_all {
         chrono::Utc::now() // everything is "past" the cutoff
@@ -58,6 +62,9 @@ pub fn execute(
                 let entry = GoalHistoryEntry::from_goal(&g);
                 let _ = ledger.append(&entry);
                 history_count += 1;
+                let vel = VelocityEntry::from_goal(&g, GoalOutcome::Timeout)
+                    .with_cancel_reason(format!("gc: stale {}d", threshold_days));
+                let _ = velocity.append(&vel);
                 println!(
                     "Transitioned to failed: {} \"{}\"",
                     &goal.goal_run_id.to_string()[..8],
@@ -88,6 +95,10 @@ pub fn execute(
                 let entry = GoalHistoryEntry::from_goal(&g);
                 let _ = ledger.append(&entry);
                 history_count += 1;
+                let vel = VelocityEntry::from_goal(&g, GoalOutcome::Timeout).with_cancel_reason(
+                    format!("gc: pr_ready never reviewed, {}d", threshold_days),
+                );
+                let _ = velocity.append(&vel);
                 println!(
                     "Transitioned to failed: {} \"{}\" (pr_ready, never reviewed)",
                     &goal.goal_run_id.to_string()[..8],
@@ -118,6 +129,9 @@ pub fn execute(
                 let entry = GoalHistoryEntry::from_goal(&g);
                 let _ = ledger.append(&entry);
                 history_count += 1;
+                let vel = VelocityEntry::from_goal(&g, GoalOutcome::Failed)
+                    .with_cancel_reason("gc: missing staging workspace");
+                let _ = velocity.append(&vel);
                 println!(
                     "Marked failed (missing staging): {} \"{}\"",
                     &goal.goal_run_id.to_string()[..8],

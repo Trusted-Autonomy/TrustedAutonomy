@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use ta_goal::{GoalHistoryLedger, GoalRun, GoalRunState, GoalRunStore, HistoryFilter};
+use ta_goal::{
+    GoalHistoryLedger, GoalOutcome, GoalRun, GoalRunState, GoalRunStore, HistoryFilter,
+    VelocityEntry, VelocityStore,
+};
 use ta_mcp_gateway::GatewayConfig;
 use ta_policy::constitution::{
     AccessConstitution, ConstitutionEntry, ConstitutionStore, EnforcementMode,
@@ -406,7 +409,7 @@ pub fn execute(cmd: &GoalCommands, config: &GatewayConfig) -> anyhow::Result<()>
             *limit,
         ),
         GoalCommands::Status { id, json } => show_status(&store, config, id, *json),
-        GoalCommands::Delete { id } => delete_goal(&store, id),
+        GoalCommands::Delete { id } => delete_goal(&store, config, id),
         GoalCommands::Constitution { command } => execute_constitution(command, config, &store),
         GoalCommands::Inspect { id, json } => goal_inspect(config, &store, id, *json),
         GoalCommands::PostMortem { id } => goal_post_mortem(config, &store, id),
@@ -953,12 +956,24 @@ fn show_status(
     Ok(())
 }
 
-fn delete_goal(store: &GoalRunStore, id: &str) -> anyhow::Result<()> {
+fn delete_goal(store: &GoalRunStore, config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
     let goal_run_id = resolve_goal_id(id, store)?;
     let goal = store.get(goal_run_id)?;
 
     match goal {
         Some(g) => {
+            // Record velocity entry for non-terminal goals being deleted (cancelled).
+            let is_terminal = matches!(
+                g.state,
+                GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Failed { .. }
+            );
+            if !is_terminal {
+                let entry = VelocityEntry::from_goal(&g, GoalOutcome::Cancelled)
+                    .with_cancel_reason("user deleted goal");
+                let vs = VelocityStore::for_project(&config.workspace_root);
+                let _ = vs.append(&entry);
+            }
+
             // Remove the staging directory if it exists.
             let workspace = &g.workspace_path;
             if workspace.exists() {
@@ -2438,7 +2453,7 @@ mod tests {
         assert!(staging_path.exists());
 
         // Delete the goal.
-        delete_goal(&store, &goal_id.to_string()).unwrap();
+        delete_goal(&store, &config, &goal_id.to_string()).unwrap();
 
         // Verify metadata is removed.
         assert!(store.get(goal_id).unwrap().is_none());

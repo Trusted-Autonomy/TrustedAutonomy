@@ -6235,6 +6235,56 @@ Agent configs are resolved in priority order: `.ta/agents/` (project) → `~/.co
 
 ---
 
+## Feature Velocity Stats
+
+`ta stats` tracks per-goal timing and outcomes in `.ta/velocity-stats.jsonl`. Data is recorded automatically when goals complete (applied, denied, cancelled, or timed out by GC).
+
+### Viewing aggregate stats
+
+```bash
+ta stats velocity                      # overall summary
+ta stats velocity --since 2026-01-01   # since a date
+ta stats velocity --workflow code      # filter by workflow type
+ta stats velocity --json               # raw JSON output
+```
+
+Output example:
+
+```
+Velocity Stats
+──────────────────────────────────────────────────
+  Total goals:        42
+  Applied:            38 (90%)
+  Denied:             2 (5%)
+  Cancelled:          1 (2%)
+  Failed:             1 (2%)
+──────────────────────────────────────────────────
+  Avg build time:     14m 10s
+  P90 build time:     28m 5s
+  Avg rework time:    2m 0s
+  Total rework:       1h 24m
+```
+
+### Per-goal breakdown
+
+```bash
+ta stats velocity-detail               # latest 20 goals
+ta stats velocity-detail --limit 50    # show more
+ta stats velocity-detail --outcome applied   # filter by outcome
+ta stats velocity-detail --since 2026-03-01 --json
+```
+
+### Exporting history
+
+```bash
+ta stats export               # JSON (default)
+ta stats export --format csv  # CSV for spreadsheets
+```
+
+The velocity stats file is at `.ta/velocity-stats.jsonl` — one JSON entry per line, human-readable, and easy to query with `jq`.
+
+---
+
 ## Roadmap
 
 ### What's Done

@@ -23,6 +23,7 @@ pub mod goal_run;
 pub mod history;
 pub mod operations;
 pub mod store;
+pub mod velocity;
 
 pub use conversation::{ConversationStore, ConversationTurn, TurnRole};
 pub use error::GoalError;
@@ -31,3 +32,4 @@ pub use goal_run::{slugify_title, GoalRun, GoalRunState};
 pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
 pub use operations::{ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog};
 pub use store::GoalRunStore;
+pub use velocity::{GoalOutcome, VelocityAggregate, VelocityEntry, VelocityStore};
