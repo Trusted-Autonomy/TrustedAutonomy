@@ -393,7 +393,8 @@ pub fn check_stale_drafts(config: &GatewayConfig) {
         return;
     };
 
-    let stale_cutoff = Utc::now() - Duration::days(3);
+    let hint_days = workflow_config.gc.stale_hint_days as i64;
+    let stale_cutoff = Utc::now() - Duration::days(hint_days);
     let stale_count = packages
         .iter()
         .filter(|p| {
@@ -406,8 +407,8 @@ pub fn check_stale_drafts(config: &GatewayConfig) {
 
     if stale_count > 0 {
         eprintln!(
-            "hint: {} draft(s) approved/pending but not applied for 3+ days — run `ta draft list --stale`",
-            stale_count
+            "hint: {} draft(s) approved/pending but not applied for {}+ days — run `ta draft list --stale`",
+            stale_count, hint_days
         );
     }
 }
@@ -2971,6 +2972,28 @@ fn apply_package(
     let applied_files: Vec<String> = if let Some(ref source_dir) = goal.source_dir {
         // Overlay-based goal: diff staging vs source, copy changed files.
         eprintln!("[apply] Opening overlay workspace...");
+
+        // §1 guard: access only this goal's staging dir by ID — never enumerate the staging root.
+        // If the staging dir was deleted (e.g., by a concurrent `ta gc` or manual cleanup),
+        // give a clear error rather than cryptic I/O failures.
+        if !goal.workspace_path.exists() {
+            let short_id = &pkg.package_id.to_string()[..8];
+            anyhow::bail!(
+                "Staging workspace for goal {short_id} no longer exists: {path}\n\
+                 \n\
+                 The staging directory may have been deleted by `ta gc` or manual cleanup \
+                 while apply was running. The goal record is intact.\n\
+                 \n\
+                 Options:\n\
+                 1. Re-run the goal to regenerate the staging workspace:\n\
+                    ta run \"{title}\" --goal-id {short_id} --follow-up\n\
+                 2. If changes are already in source, skip staging and apply manually:\n\
+                    ta draft deny {short_id} --reason \"staging deleted, applied manually\"",
+                path = goal.workspace_path.display(),
+                title = goal.title,
+            );
+        }
+
         // V1 TEMPORARY: Load exclude patterns, merging VCS adapter patterns.
         let excludes = load_excludes_with_adapter(source_dir);
         let mut overlay = OverlayWorkspace::open(
@@ -3106,6 +3129,39 @@ fn apply_package(
     );
     for file in &applied_files {
         println!("  {}", file);
+    }
+
+    // §5b: Remind user to commit lock files that were part of the applied diff.
+    // Lock files are deterministic build outputs — they should be committed with the feature branch.
+    const LOCK_FILES: &[&str] = &[
+        "Cargo.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "go.sum",
+        "Pipfile.lock",
+        "poetry.lock",
+        "Gemfile.lock",
+        "composer.lock",
+        "mix.lock",
+    ];
+    let applied_locks: Vec<&str> = LOCK_FILES
+        .iter()
+        .copied()
+        .filter(|lock| {
+            applied_files
+                .iter()
+                .any(|f| f == lock || f.ends_with(&format!("/{}", lock)))
+        })
+        .collect();
+    if !applied_locks.is_empty() {
+        for lock in &applied_locks {
+            eprintln!(
+                "hint: Lock file updated: {} — commit it alongside your feature branch:",
+                lock
+            );
+            eprintln!("      git add {} && git commit --amend --no-edit", lock);
+        }
     }
 
     // Mark plan phase(s) as done in PLAN.md + record history + suggest next.

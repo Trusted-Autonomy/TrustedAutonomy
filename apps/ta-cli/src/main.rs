@@ -40,6 +40,11 @@ struct Cli {
     #[arg(long, global = true)]
     no_version_check: bool,
 
+    /// Print startup timing for each phase (config load, daemon connect, dispatch).
+    /// Useful for diagnosing slow CLI startup on Windows or cold-start environments.
+    #[arg(long, global = true)]
+    startup_profile: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -478,7 +483,9 @@ fn try_resolve_phase(candidate: &str, project_root: &std::path::Path) -> Option<
 }
 
 fn main() -> anyhow::Result<()> {
+    let startup_begin = std::time::Instant::now();
     let cli = Cli::parse();
+    let t_parse = startup_begin.elapsed();
 
     // Handle --accept-terms flag (non-interactive acceptance).
     if cli.accept_terms {
@@ -540,16 +547,58 @@ fn main() -> anyhow::Result<()> {
     }
 
     let project_root = cli.project_root.canonicalize().unwrap_or(cli.project_root);
+    let t_project_root = startup_begin.elapsed();
     let config = GatewayConfig::for_project(&project_root);
+    let t_config = startup_begin.elapsed();
+
+    if cli.startup_profile {
+        eprintln!(
+            "[startup-profile] arg parse:       {:>6.1}ms",
+            t_parse.as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "[startup-profile] project root:    {:>6.1}ms  (+{:.1}ms)",
+            t_project_root.as_secs_f64() * 1000.0,
+            (t_project_root - t_parse).as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "[startup-profile] config load:     {:>6.1}ms  (+{:.1}ms)",
+            t_config.as_secs_f64() * 1000.0,
+            (t_config - t_project_root).as_secs_f64() * 1000.0
+        );
+    }
 
     // Startup health check: warn about stale drafts (v0.3.6).
     commands::draft::check_stale_drafts(&config);
+    let t_health = startup_begin.elapsed();
+
+    if cli.startup_profile {
+        eprintln!(
+            "[startup-profile] health check:    {:>6.1}ms  (+{:.1}ms)",
+            t_health.as_secs_f64() * 1000.0,
+            (t_health - t_config).as_secs_f64() * 1000.0
+        );
+    }
 
     // No subcommand → show status dashboard (v0.13.1.6 item 2).
     let command = match &cli.command {
         Some(cmd) => cmd,
         None => return commands::status::execute(&config, false),
     };
+
+    let t_dispatch = startup_begin.elapsed();
+    if cli.startup_profile {
+        eprintln!(
+            "[startup-profile] command dispatch: {:>6.1}ms  (+{:.1}ms)",
+            t_dispatch.as_secs_f64() * 1000.0,
+            (t_dispatch - t_health).as_secs_f64() * 1000.0
+        );
+        eprintln!("[startup-profile] ---");
+        eprintln!(
+            "[startup-profile] total to dispatch: {:.1}ms",
+            t_dispatch.as_secs_f64() * 1000.0
+        );
+    }
 
     match command {
         Commands::Status { deep } => commands::status::execute(&config, *deep),

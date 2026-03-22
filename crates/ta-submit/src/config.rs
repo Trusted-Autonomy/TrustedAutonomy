@@ -447,6 +447,12 @@ pub struct GcConfig {
     #[serde(default = "default_stale_threshold_days")]
     pub stale_threshold_days: u64,
 
+    /// Number of days after which the startup hint fires for pending/approved drafts.
+    /// Default: 3 (informational only — a Friday draft hints on Monday morning).
+    /// Set higher (e.g., 5) to reduce noise. Must be ≤ stale_threshold_days.
+    #[serde(default = "default_stale_hint_days")]
+    pub stale_hint_days: u64,
+
     /// Emit a one-line warning on `ta` startup if stale drafts exist. Default: true.
     #[serde(default = "default_health_check")]
     pub health_check: bool,
@@ -456,6 +462,7 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             stale_threshold_days: default_stale_threshold_days(),
+            stale_hint_days: default_stale_hint_days(),
             health_check: default_health_check(),
         }
     }
@@ -463,6 +470,10 @@ impl Default for GcConfig {
 
 fn default_stale_threshold_days() -> u64 {
     7
+}
+
+fn default_stale_hint_days() -> u64 {
+    3
 }
 
 /// Follow-up goal behavior configuration
@@ -887,6 +898,7 @@ adapter = "git"
     fn gc_config_defaults() {
         let config = GcConfig::default();
         assert_eq!(config.stale_threshold_days, 7);
+        assert_eq!(config.stale_hint_days, 3);
         assert!(config.health_check);
     }
 
@@ -894,6 +906,7 @@ adapter = "git"
     fn workflow_config_default_has_gc_section() {
         let config = WorkflowConfig::default();
         assert_eq!(config.gc.stale_threshold_days, 7);
+        assert_eq!(config.gc.stale_hint_days, 3);
         assert!(config.gc.health_check);
     }
 
@@ -902,10 +915,12 @@ adapter = "git"
         let toml = r#"
 [gc]
 stale_threshold_days = 14
+stale_hint_days = 5
 health_check = false
 "#;
         let config: WorkflowConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.gc.stale_threshold_days, 14);
+        assert_eq!(config.gc.stale_hint_days, 5);
         assert!(!config.gc.health_check);
     }
 
