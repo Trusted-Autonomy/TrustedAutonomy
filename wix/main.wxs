@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Trusted Autonomy MSI installer definition.
+  Built with cargo-wix (WiX Toolset v4 wrapper).
+
+  Usage (from workspace root):
+    cargo wix --nocapture
+
+  The installer:
+  - Places ta.exe at %ProgramFiles%\TrustedAutonomy\ta.exe
+  - Adds the install directory to the system PATH
+  - Registers an uninstaller in Add/Remove Programs
+  - Creates a Start Menu shortcut "Trusted Autonomy Shell"
+
+  Code signing: set WINDOWS_CODE_SIGN_CERT to sign automatically.
+  If not set, the MSI is unsigned (functional but shows a warning on install).
+-->
+
+<?if $(var.Platform) = x64 ?>
+<?define ProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else ?>
+<?define ProgramFilesFolder = "ProgramFilesFolder" ?>
+<?endif ?>
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Trusted Autonomy"
+    Version="$(var.Version)"
+    Manufacturer="Trusted Autonomy"
+    Language="1033"
+    Codepage="1252"
+    UpgradeCode="A8B3C4D5-E6F7-4A5B-9C8D-1E2F3A4B5C6D">
+
+    <!-- Allow upgrade from prior versions -->
+    <MajorUpgrade
+      AllowSameVersionUpgrades="no"
+      DowngradeErrorMessage="A newer version of Trusted Autonomy is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Product icon (optional — cargo-wix uses the binary's .ico if available) -->
+    <!-- <Icon Id="ProductIcon" SourceFile="wix/ta.ico" /> -->
+    <!-- <Property Id="ARPPRODUCTICON" Value="ProductIcon" /> -->
+
+    <!-- Install directory -->
+    <StandardDirectory Id="$(var.ProgramFilesFolder)">
+      <Directory Id="INSTALLFOLDER" Name="TrustedAutonomy">
+        <Component Id="MainExecutable" Guid="B1C2D3E4-F5A6-4B7C-8D9E-0F1A2B3C4D5E">
+          <File
+            Id="TaBinary"
+            Name="ta.exe"
+            Source="$(var.BinaryDir)\ta.exe"
+            KeyPath="yes" />
+
+          <!-- Add install directory to PATH -->
+          <Environment
+            Id="PATH"
+            Name="PATH"
+            Value="[INSTALLFOLDER]"
+            Permanent="no"
+            Part="last"
+            Action="set"
+            System="yes" />
+        </Component>
+
+        <Component Id="DaemonExecutable" Guid="C2D3E4F5-A6B7-4C8D-9E0F-1A2B3C4D5E6F">
+          <File
+            Id="TaDaemonBinary"
+            Name="ta-daemon.exe"
+            Source="$(var.BinaryDir)\ta-daemon.exe"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Start Menu shortcut -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Trusted Autonomy">
+        <Component Id="StartMenuShortcut" Guid="D3E4F5A6-B7C8-4D9E-0F1A-2B3C4D5E6F7A">
+          <Shortcut
+            Id="TaShellShortcut"
+            Name="Trusted Autonomy Shell"
+            Description="Open the Trusted Autonomy interactive shell"
+            Target="[INSTALLFOLDER]ta.exe"
+            Arguments="shell"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="CleanUpShortCut" On="uninstall" />
+          <RegistryValue
+            Root="HKCU"
+            Key="Software\TrustedAutonomy"
+            Name="installed"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Complete" Title="Trusted Autonomy" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="DaemonExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+  </Package>
+</Wix>

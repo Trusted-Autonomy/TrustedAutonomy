@@ -119,14 +119,148 @@ jobs:
           }
           Compress-Archive -Path staging/* -DestinationPath "artifacts/${{ env.BINARY_NAME }}-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.zip"
 
+      # ── Windows MSI (v0.13.11) ────────────────────────────────────────────────
+      - name: Build Windows MSI
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          TAG: ${{ steps.get_version.outputs.version }}
+        run: |
+          # Install cargo-wix (WiX Toolset v4 wrapper).
+          # Use --locked if available to avoid resolver issues.
+          cargo install cargo-wix --version "0.3" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            cargo install cargo-wix
+          }
+
+          # cargo-wix needs the version without the 'v' prefix and without
+          # pre-release suffixes (e.g. "v0.13.11-alpha" → "0.13.11.0").
+          $raw = "$env:TAG" -replace '^v', ''
+          $parts = $raw -split '-' | Select-Object -First 1
+          $semver = ($parts -split '\.') + @('0') | Select-Object -First 4
+          $msiVersion = $semver -join '.'
+          Write-Host "MSI version: $msiVersion (from tag $env:TAG)"
+
+          # Build the MSI. Pass BinaryDir so WiX knows where to find binaries.
+          cargo wix --nocapture -p ta-cli `
+            --bin-path "target\x86_64-pc-windows-msvc\release" `
+            -- `
+            -dBinaryDir=target\x86_64-pc-windows-msvc\release `
+            -dVersion=$msiVersion 2>&1
+
+          # Find and copy the MSI to artifacts/.
+          $msi = Get-ChildItem -Path target\wix -Filter "*.msi" -Recurse | Select-Object -First 1
+          if ($msi) {
+            $dest = "artifacts\${{ env.BINARY_NAME }}-$env:TAG-x86_64-pc-windows-msvc.msi"
+            Copy-Item $msi.FullName $dest
+            Write-Host "MSI created: $dest"
+          } else {
+            Write-Warning "cargo-wix did not produce an MSI — skipping (non-fatal)"
+          }
+
+      # ── macOS pkg + DMG (v0.13.11) ───────────────────────────────────────────
+      # Build on ARM runner (aarch64-apple-darwin) — one DMG covers both arches.
+      - name: Build macOS pkg and DMG
+        if: matrix.target == 'aarch64-apple-darwin'
+        env:
+          TAG: ${{ steps.get_version.outputs.version }}
+          APPLE_DEVELOPER_CERT: ${{ secrets.APPLE_DEVELOPER_CERT }}
+        run: |
+          set -euo pipefail
+
+          # Ensure create-dmg is available.
+          brew install create-dmg 2>/dev/null || true
+
+          VERSION="${TAG#v}"
+          PKG_NAME="ta-${TAG}-macos"
+          PKG_ROOT="pkgbuild-root"
+          mkdir -p "${PKG_ROOT}/usr/local/bin"
+
+          # Install both binaries into the pkg root.
+          cp "target/${{ matrix.target }}/release/ta" "${PKG_ROOT}/usr/local/bin/"
+          cp "target/${{ matrix.target }}/release/ta-daemon" "${PKG_ROOT}/usr/local/bin/"
+          chmod +x "${PKG_ROOT}/usr/local/bin/ta" "${PKG_ROOT}/usr/local/bin/ta-daemon"
+
+          # Component package.
+          pkgbuild \
+            --root "${PKG_ROOT}" \
+            --identifier "io.trustedautonomy.ta" \
+            --version "${VERSION}" \
+            --install-location "/" \
+            "ta-component.pkg"
+
+          # Distribution XML for productbuild.
+          cat > distribution.xml <<'DISTEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <installer-gui-script minSpecVersion="2">
+            <title>Trusted Autonomy</title>
+            <welcome file="welcome.html" mime-type="text/html"/>
+            <options customize="never" require-scripts="false"/>
+            <choices-outline>
+              <line choice="default">
+                <line choice="io.trustedautonomy.ta"/>
+              </line>
+            </choices-outline>
+            <choice id="default"/>
+            <choice id="io.trustedautonomy.ta" visible="false">
+              <pkg-ref id="io.trustedautonomy.ta"/>
+            </choice>
+            <pkg-ref id="io.trustedautonomy.ta" version="${VERSION}" onConclusion="none">ta-component.pkg</pkg-ref>
+          </installer-gui-script>
+          DISTEOF
+
+          # Simple welcome HTML.
+          cat > welcome.html <<'EOF'
+          <html><body>
+          <h2>Trusted Autonomy</h2>
+          <p>This package installs <code>ta</code> and <code>ta-daemon</code> to <code>/usr/local/bin/</code>.</p>
+          <p>After installation, run <code>ta setup</code> to configure your agent.</p>
+          </body></html>
+          EOF
+
+          # Build flat pkg.
+          productbuild \
+            --distribution distribution.xml \
+            --package-path . \
+            "${PKG_NAME}.pkg"
+
+          # Optionally sign (if cert is present).
+          if [ -n "${APPLE_DEVELOPER_CERT:-}" ]; then
+            echo "Code signing not yet configured — add APPLE_DEVELOPER_CERT secret to enable."
+          fi
+
+          mkdir -p artifacts
+
+          # Wrap in DMG.
+          if command -v create-dmg >/dev/null 2>&1; then
+            create-dmg \
+              --volname "Trusted Autonomy ${VERSION}" \
+              --window-size 520 300 \
+              --icon-size 96 \
+              --app-drop-link 380 150 \
+              "artifacts/${PKG_NAME}.dmg" \
+              "${PKG_NAME}.pkg" || {
+                # create-dmg can exit non-zero on minor warnings; copy pkg directly.
+                echo "create-dmg exited non-zero; copying .pkg as fallback"
+                cp "${PKG_NAME}.pkg" "artifacts/${PKG_NAME}.dmg"
+              }
+          else
+            echo "create-dmg not available; using raw .pkg as DMG fallback"
+            cp "${PKG_NAME}.pkg" "artifacts/${PKG_NAME}.dmg"
+          fi
+
+          # Also ship the flat pkg alongside the DMG.
+          cp "${PKG_NAME}.pkg" "artifacts/${PKG_NAME}.pkg"
+          echo "macOS installer: artifacts/${PKG_NAME}.dmg"
+
       - name: Generate SHA256 checksums (Unix)
         if: runner.os != 'Windows'
         run: |
           cd artifacts
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum *.tar.gz > SHA256SUMS-${{ matrix.target }}.txt
+            sha256sum * > SHA256SUMS-${{ matrix.target }}.txt
           else
-            shasum -a 256 *.tar.gz > SHA256SUMS-${{ matrix.target }}.txt
+            shasum -a 256 * > SHA256SUMS-${{ matrix.target }}.txt
           fi
 
       - name: Generate SHA256 checksums (Windows)
@@ -134,7 +268,7 @@ jobs:
         shell: pwsh
         run: |
           cd artifacts
-          Get-FileHash *.zip -Algorithm SHA256 | ForEach-Object {
+          Get-FileHash * -Algorithm SHA256 | ForEach-Object {
             "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)"
           } | Out-File -Encoding ascii "SHA256SUMS-${{ matrix.target }}.txt"
 
@@ -217,8 +351,23 @@ jobs:
           "
           fi
 
+          TAG="${{ steps.get_version.outputs.version }}"
+
           # Append installation instructions
           BODY="${BODY}### Installation
+
+          **macOS** (recommended)
+          Download \`ta-${TAG}-macos.dmg\` below, open it, and run the installer. TA installs to \`/usr/local/bin/ta\`.
+
+          **Windows** (recommended)
+          Download \`ta-${TAG}-x86_64-pc-windows-msvc.msi\` below and run it. TA installs to \`%ProgramFiles%\\TrustedAutonomy\\\` and adds itself to PATH. Alternatively, use the \`.zip\` for manual installation.
+
+          **Linux**
+          \`\`\`bash
+          # x86_64
+          curl -L https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/${TAG}/ta-${TAG}-x86_64-unknown-linux-musl.tar.gz | tar xz
+          sudo mv ta /usr/local/bin/
+          \`\`\`
 
           **Cargo**
           \`\`\`bash
@@ -230,19 +379,12 @@ jobs:
           nix run github:trustedautonomy/ta
           \`\`\`
 
-          **Binary download**
-
-          Download the appropriate archive for your platform below. Each includes the \`ta\` binary, \`USAGE.md\`, \`DISCLAIMER.md\`, \`LICENSE\`, and release notes.
-
           On first run, \`ta\` will prompt you to review and accept the terms of use.
-
-          **Windows users**: Download the \`x86_64-pc-windows-msvc\` zip. PTY-dependent features (interactive agent sessions) are Unix-only; all other functionality works cross-platform.
 
           ### Documentation
 
           - [USAGE.md](https://github.com/trustedautonomy/ta/blob/main/docs/USAGE.md) — Complete usage guide
-          - [DISCLAIMER.md](https://github.com/trustedautonomy/ta/blob/main/DISCLAIMER.md) — Terms of use
-          - [Release Notes](.release-draft.md) — What's new in this version"
+          - [DISCLAIMER.md](https://github.com/trustedautonomy/ta/blob/main/DISCLAIMER.md) — Terms of use"
 
           # Write to file for the release action (handles multiline safely)
           echo "$BODY" > release-body.md
@@ -273,6 +415,19 @@ jobs:
             exit 1
           fi
           echo "All ${#REQUIRED[@]} required artifacts present locally."
+
+          # Report optional installers (non-fatal if absent).
+          OPTIONAL=(
+            "ta-${TAG}-macos.dmg"
+            "ta-${TAG}-x86_64-pc-windows-msvc.msi"
+          )
+          for f in "${OPTIONAL[@]}"; do
+            if [ -f "artifacts/$f" ]; then
+              echo "  ✓ optional: $f"
+            else
+              echo "  (skipped): $f — not present (installer build may have been skipped)"
+            fi
+          done
 
       - name: Publish GitHub Release
         id: release

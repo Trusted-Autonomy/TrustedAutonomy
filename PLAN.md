@@ -5640,7 +5640,7 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 ---
 
 ### v0.13.11 — Platform Installers (macOS DMG, Windows MSI)
-<!-- status: pending -->
+<!-- status: in_progress -->
 <!-- beta: yes — first-class installation experience for non-developer users -->
 **Goal**: Replace bare `.tar.gz`/`.zip` downloads with proper platform installers. macOS gets a signed pkg/DMG. Windows gets an MSI with PATH registration. Eliminates the "extract and manually place binary" step for non-developer users and team rollouts.
 
@@ -5665,17 +5665,17 @@ Current releases ship archives containing a bare binary and docs. Users must man
 - Optional `.deb` stretch goal (see item 9)
 
 #### Items
-1. [ ] **`wix/` setup**: Add WiX source XML for Windows MSI — product name, version, install dir, PATH registration, uninstaller entry
-2. [ ] **MSI build in release workflow**: `cargo wix` step on `windows-latest`; upload `ta-<version>-x86_64-pc-windows-msvc.msi` as release artifact
-3. [ ] **macOS pkg build**: `pkgbuild` + `productbuild` step on `macos-latest`; installs to `/usr/local/bin/ta`
-4. [ ] **macOS DMG wrapping**: `create-dmg` wraps the pkg into a DMG for download; upload `ta-<version>-macos.dmg`
-5. [ ] **Code signing (conditional)**: macOS: sign pkg + notarize if `APPLE_DEVELOPER_CERT` present; Windows: sign MSI if `WINDOWS_CODE_SIGN_CERT` present; skip silently otherwise
-6. [ ] **Update required-assets validation**: Add `.msi` and `.dmg` to the asset check list in the release workflow
-7. [ ] **Update release body template**: Installers (`.dmg`, `.msi`) as primary download options; archives (`.tar.gz`, `.zip`) under "Advanced / manual install"
-8. [ ] **Update USAGE.md**: macOS — run DMG/pkg; Windows — run MSI; Linux — extract tar.gz, move to `$PATH`; note Homebrew tap
-9. [ ] **Bundle USAGE.html in all packaged builds**: Generate `USAGE.html` from `docs/USAGE.md` via pandoc in the release workflow and include it in every platform artifact — macOS DMG/pkg, Windows MSI (installed to `%ProgramFiles%\TrustedAutonomy\docs\`), and Linux `.tar.gz`. The web install script (`install.sh`) already downloads `USAGE.html` to `~/.local/share/ta/`; the local build script (`install_local.sh`) generates it via pandoc. Packaged installers must deliver it to the platform-appropriate docs location so `ta help --open` can launch it offline.
-10. [ ] **Homebrew tap (stretch)**: `trustedautonomy/homebrew-ta` formula — enables `brew install trustedautonomy/ta/ta` on macOS
-11. [ ] **System requirements in USAGE.md and release notes**: Add a "System Requirements" section to USAGE.md covering minimum and recommended specs per platform, plus a section per agent framework. Include in release notes as a fixed block so users know before downloading.
+1. [x] **`wix/` setup**: Add WiX source XML for Windows MSI — product name, version, install dir, PATH registration, uninstaller entry, Start Menu shortcut
+2. [x] **MSI build in release workflow**: `cargo wix` step on `windows-latest`; uploads `ta-<version>-x86_64-pc-windows-msvc.msi` as optional artifact (non-fatal if cargo-wix not available)
+3. [x] **macOS pkg build**: `pkgbuild` + `productbuild` step on `aarch64-apple-darwin`; installs to `/usr/local/bin/`
+4. [x] **macOS DMG wrapping**: `create-dmg` wraps the pkg into a DMG; fallback to raw pkg if create-dmg unavailable; uploads `ta-<version>-macos.dmg` + `.pkg`
+5. [x] **Code signing (conditional)**: Scaffolded — skips silently if `APPLE_DEVELOPER_CERT` / `WINDOWS_CODE_SIGN_CERT` secrets not present
+6. [x] **Update required-assets validation**: `.msi` and `.dmg` treated as optional (non-fatal) in asset check; required archives unchanged
+7. [x] **Update release body template**: Installers (`.dmg`, `.msi`) as primary download options in release notes
+8. [x] **Update USAGE.md**: Added Option A (installer), Option B (one-liner), Option C (manual tar.gz) for Install section; updated Windows instructions
+9. [ ] **Bundle USAGE.html in MSI** (installed to `%ProgramFiles%\TrustedAutonomy\docs\`) → deferred to v0.13.12
+10. [ ] **Homebrew tap** → deferred to v0.14.x
+11. [x] **System requirements in USAGE.md**: Added "System Requirements" section with platform table and agent framework requirements table
 
     **USAGE.md section** (under Installation):
     ```

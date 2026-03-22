@@ -79,7 +79,13 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
 
 ### Install
 
-**Option A -- One-line installer (macOS / Linux)**
+**Option A -- Installer (recommended)**
+
+*macOS*: Download `ta-<version>-macos.dmg` from the [latest release](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest), open it, and run the installer. `ta` and `ta-daemon` are installed to `/usr/local/bin/`.
+
+*Windows*: Download `ta-<version>-x86_64-pc-windows-msvc.msi` from the [latest release](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest) and run it. `ta` and `ta-daemon` are installed to `%ProgramFiles%\TrustedAutonomy\` and added to your PATH automatically. An uninstaller is registered in Add/Remove Programs.
+
+**Option B -- One-line installer (macOS / Linux)**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Trusted-Autonomy/TrustedAutonomy/main/install.sh | bash
@@ -87,7 +93,7 @@ curl -fsSL https://raw.githubusercontent.com/Trusted-Autonomy/TrustedAutonomy/ma
 
 Set a specific version: `TA_VERSION=v0.10.12-alpha curl -fsSL ... | bash`
 
-**Option B -- Binary download**
+**Option C -- Binary download (manual)**
 
 Each release archive contains two binaries: `ta` (the CLI) and `ta-daemon` (the background daemon). Both must be available — `ta` spawns `ta-daemon` as a sibling process, looking for it next to the `ta` binary first, then falling back to `$PATH`.
 
@@ -107,7 +113,7 @@ curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest/dow
 tar xzf ta-x86_64-unknown-linux-musl.tar.gz
 sudo cp ta ta-daemon /usr/local/bin/
 
-# Windows (x86_64)
+# Windows (x86_64) — manual
 # Download ta-x86_64-pc-windows-msvc.zip from the latest release
 # Extract ta.exe and ta-daemon.exe into the same directory, then add that directory to your PATH
 ```
@@ -128,18 +134,38 @@ ta draft view <id>
 ta draft apply <id>
 ```
 
-**Option C -- Docker** *(Coming Soon)*
+**Option D -- Docker** *(Coming Soon)*
 
 ```bash
 docker pull ghcr.io/trustedautonomy/ta:latest
 docker run -it -v $(pwd):/workspace ta --help
 ```
 
-**Option D -- Cargo install**
+**Option E -- Cargo install**
 
 ```bash
 cargo install ta-cli  # coming soon — not yet published
 ```
+
+### System Requirements
+
+| Platform | Min RAM | Recommended | Disk (TA binary) | Staging disk |
+|---|---|---|---|---|
+| macOS (Apple Silicon) | 8 GB | 16 GB | ~15 MB | 1–5 GB per active goal |
+| macOS (Intel) | 8 GB | 16 GB | ~15 MB | 1–5 GB per active goal |
+| Linux x86_64 | 4 GB | 8 GB | ~12 MB | 1–5 GB per active goal |
+| Windows x86_64 | 8 GB | 16 GB | ~15 MB | 1–5 GB per active goal |
+
+Staging disk usage depends on project size. A typical Rust workspace (~500 MB with `target/`) uses ~600 MB per active goal. Use `ta gc` to reclaim staging space.
+
+#### Agent Framework Requirements
+
+| Framework | Min RAM | Notes |
+|---|---|---|
+| Claude Code (claude-sonnet-4-6) | 8 GB | Requires `ANTHROPIC_API_KEY`; network access to `api.anthropic.com` |
+| Claude Code (claude-opus-4-6) | 8 GB | Higher quality, slower; same API key + network |
+| Codex CLI | 8 GB | Requires `OPENAI_API_KEY`; network access to `api.openai.com` |
+| Local model (Ollama, v0.13.8+) | 16 GB | 7B models need ~8 GB VRAM or ~12 GB RAM (CPU fallback); 70B needs ~40 GB RAM |
 
 **Option E -- Nix**
 
