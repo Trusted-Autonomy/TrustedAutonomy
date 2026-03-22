@@ -1,17 +1,22 @@
-// agent.rs — CLI commands for agent config authoring (v0.10.5).
+// agent.rs — CLI commands for agent config authoring (v0.10.5) and framework
+//            management (v0.13.8).
 //
 // Commands:
 //   ta agent new <name>             — scaffold a new agent config
 //   ta agent validate <path>        — validate an agent config YAML
-//   ta agent list [--templates|--source external]  — list agents
+//   ta agent list [--templates|--source external|--frameworks]  — list agents
 //   ta agent add <name> --from <source>  — install from external source
 //   ta agent remove <name>          — remove an external agent config
+//   ta agent frameworks             — list all pluggable agent frameworks (v0.13.8)
+//   ta agent info <name>            — show framework details (v0.13.8)
+//   ta agent framework-validate <path> — validate a TOML framework manifest (v0.13.8)
 
 use std::path::PathBuf;
 
 use clap::Subcommand;
 use ta_changeset::sources::{ExternalSource, Lockfile, SourceCache};
 use ta_mcp_gateway::GatewayConfig;
+use ta_runtime::AgentFrameworkManifest;
 
 #[derive(Subcommand)]
 pub enum AgentCommands {
@@ -36,6 +41,9 @@ pub enum AgentCommands {
         /// Show only externally-sourced agents.
         #[arg(long)]
         source: Option<String>,
+        /// Show pluggable agent framework manifests instead of YAML agent configs (v0.13.8).
+        #[arg(long)]
+        frameworks: bool,
     },
     /// Install an agent config from an external source (registry, GitHub, URL).
     Add {
@@ -50,14 +58,36 @@ pub enum AgentCommands {
         /// Agent name to remove.
         name: String,
     },
+    /// List all available pluggable agent frameworks (built-in + project/user manifests).
+    ///
+    /// Frameworks define how TA launches an agent backend. Use `ta run --agent <name>`
+    /// to select a framework for a goal. Add custom frameworks as TOML files in
+    /// `.ta/agents/` or `~/.config/ta/agents/`.
+    Frameworks,
+    /// Show details about a specific agent framework (v0.13.8).
+    Info {
+        /// Framework name (e.g., "claude-code", "codex").
+        name: String,
+    },
+    /// Validate a custom TOML agent framework manifest file (v0.13.8).
+    FrameworkValidate {
+        /// Path to the TOML manifest file.
+        path: PathBuf,
+    },
 }
 
 pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match command {
         AgentCommands::New { name, r#type } => new_agent(name, r#type, config),
         AgentCommands::Validate { path } => validate_agent(path),
-        AgentCommands::List { templates, source } => {
-            if *templates {
+        AgentCommands::List {
+            templates,
+            source,
+            frameworks,
+        } => {
+            if *frameworks {
+                list_frameworks(&config.workspace_root)
+            } else if *templates {
                 list_templates()
             } else if source.as_deref() == Some("external") {
                 list_external_agents(config)
@@ -67,6 +97,9 @@ pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Resul
         }
         AgentCommands::Add { name, from } => add_agent(name, from, config),
         AgentCommands::Remove { name } => remove_agent(name, config),
+        AgentCommands::Frameworks => list_frameworks(&config.workspace_root),
+        AgentCommands::Info { name } => framework_info(name, &config.workspace_root),
+        AgentCommands::FrameworkValidate { path } => framework_validate(path),
     }
 }
 
@@ -555,6 +588,109 @@ alignment:
 "#,
         name = name
     )
+}
+
+// ── Agent Framework commands (v0.13.8) ──────────────────────────
+
+/// List all available agent framework manifests (built-in + discovered).
+fn list_frameworks(project_root: &std::path::Path) -> anyhow::Result<()> {
+    let builtins = AgentFrameworkManifest::builtins();
+    let custom = AgentFrameworkManifest::discover(project_root);
+
+    println!("Built-in agent frameworks:");
+    println!("  {:<20} DESCRIPTION", "NAME");
+    println!("  {}", "-".repeat(70));
+    for f in &builtins {
+        println!("  {:<20} {}", f.name, truncate_desc(&f.description, 50));
+    }
+
+    if !custom.is_empty() {
+        println!();
+        println!("Custom frameworks (project/user):");
+        println!("  {:<20} DESCRIPTION", "NAME");
+        println!("  {}", "-".repeat(70));
+        for f in &custom {
+            println!("  {:<20} {}", f.name, truncate_desc(&f.description, 50));
+        }
+    }
+
+    println!();
+    println!("Usage: ta run \"goal\" --agent <name>");
+    println!("       ta agent info <name>  — show details");
+
+    Ok(())
+}
+
+/// Show details about a specific agent framework.
+fn framework_info(name: &str, project_root: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(f) = AgentFrameworkManifest::resolve(name, project_root) {
+        println!("Framework:    {}", f.name);
+        println!("Version:      {}", f.version);
+        println!(
+            "Type:         {}",
+            if f.builtin { "built-in" } else { "custom" }
+        );
+        println!("Description:  {}", f.description);
+        println!("Command:      {}", f.command);
+        if !f.args.is_empty() {
+            println!("Args:         {}", f.args.join(" "));
+        }
+        println!("Context file: {}", f.context_file);
+        println!("Context mode: {:?}", f.context_inject);
+        println!("Memory mode:  {:?}", f.memory.inject);
+    } else {
+        eprintln!("Unknown framework: {}", name);
+        eprintln!("Run `ta agent frameworks` to see available frameworks.");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Validate a TOML agent framework manifest.
+fn framework_validate(path: &std::path::Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        anyhow::bail!(
+            "File not found: {}\n\
+             Provide a path to a TOML framework manifest file.",
+            path.display()
+        );
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+
+    match toml::from_str::<AgentFrameworkManifest>(&content) {
+        Ok(manifest) => {
+            println!("Manifest is valid: {}", path.display());
+            println!("  Name:    {}", manifest.name);
+            println!("  Command: {}", manifest.command);
+            // Check if command exists on PATH.
+            if which::which(&manifest.command).is_ok() {
+                println!("  Command '{}' found on PATH.", manifest.command);
+            } else {
+                println!(
+                    "  Warning: command '{}' not found on PATH.",
+                    manifest.command
+                );
+            }
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "Manifest validation failed for {}:\n  {}\n\
+                 Check the TOML syntax and required fields (name, command).",
+                path.display(),
+                e
+            );
+        }
+    }
+    Ok(())
+}
+
+fn truncate_desc(s: &str, max: usize) -> String {
+    if s.len() > max {
+        format!("{}...", &s[..max])
+    } else {
+        s.to_string()
+    }
 }
 
 #[cfg(test)]

@@ -131,5 +131,8 @@ which = "7"
 # SQLite — bundled build (no system sqlite3 required) for db proxy plugin (v0.13.5).
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+# Platform directory resolution — XDG/macOS/Windows config dir paths (v0.13.8).
+dirs = "5"
+
 # Testing utilities
 tempfile = "3"

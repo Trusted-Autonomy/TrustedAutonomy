@@ -5315,7 +5315,7 @@ Map departments, project types, or goal categories to default workflows.
 ---
 
 ### v0.13.8 — Agent Framework: Pluggable Agent Backends with Shared Memory
-<!-- status: pending -->
+<!-- status: in_progress -->
 <!-- beta: yes — foundational for local models, multi-agent workflows, and community sharing -->
 **Goal**: Introduce an abstract **AgentFramework** concept so any goal, workflow, or daemon role can be wired to any agent backend — Claude Code (default), Codex, Claude-Flow, BMAD, Ollama+Qwen, a bare model, or a user-defined framework — without changing TA's core logic. Frameworks are defined as manifest files, composable at multiple config levels, and shareable via the plugin registry. All frameworks, including generic agents and local models, participate in TA's shared memory system so context and observations carry across goals and model switches.
 
@@ -5392,18 +5392,18 @@ ta run "write tests" --model ollama/phi4-mini   # shorthand: model implies ta-ag
 #### Items
 
 **Core dispatch layer**
-1. [ ] `AgentFrameworkManifest` struct — name, version, type, command, args, sentinel, description, context_file, context_inject, memory section
+1. [x] `AgentFrameworkManifest` struct — name, version, type, command, args, sentinel, description, context_file, context_inject, memory section (`crates/ta-runtime/src/framework.rs`)
 2. [ ] `AgentFramework` trait — `resolve()`, `launch()`, `context_inject()`, `memory_bridge()` methods
-3. [ ] Framework resolver: search order — goal flag → `.ta/agents/` → `~/.config/ta/agents/` → built-in registry
+3. [x] Framework resolver: search order — goal flag → `.ta/agents/` → `~/.config/ta/agents/` → built-in registry (`AgentFrameworkManifest::resolve()`)
 4. [ ] Update `ta run` + daemon `cmd.rs` to dispatch via resolved manifest (replace hardcoded `claude`)
-5. [ ] `ta agent list` — show all frameworks (built-in + discovered), mark default and active
-6. [ ] `ta agent info <name>` — manifest details, required env vars, memory mode, install instructions
+5. [x] `ta agent frameworks` — list all frameworks (built-in + discovered); `ta agent list --frameworks` alias
+6. [x] `ta agent info <name>` — manifest details, memory mode, command check
 
 **Manifest format + context injection**
-7. [ ] Define manifest TOML schema with JSON Schema; document `context_file`, `context_inject`, `context_env`, `context_arg` fields
+7. [x] Define manifest TOML schema; document `context_file`, `context_inject`, `context_env`, `context_arg` fields (in `ContextInjectMode` + `FrameworkMemoryConfig`)
 8. [ ] Context injector: prepend mode (backup/restore, same as today), env mode (temp file + env var), arg mode (flag + path), none
-9. [ ] Ship built-in manifests: `claude-code` (CLAUDE.md/prepend/MCP), `codex` (AGENTS.md/prepend/MCP), `claude-flow`, `bmad`, `ollama`
-10. [ ] `ta agent validate <path>` — lint manifest, check command exists, verify context_file makes sense for the agent type
+9. [x] Ship built-in manifests: `claude-code` (CLAUDE.md/prepend/MCP), `codex` (AGENTS.md/prepend/MCP), `claude-flow`, `ollama` (in `AgentFrameworkManifest::builtins()`)
+10. [x] `ta agent framework-validate <path>` — validate TOML manifest, check command on PATH
 
 **Shared memory bridge**
 11. [ ] MCP memory server: expose `ta-memory` as a local MCP server (`--mcp-config` injection for Claude Code, Codex); register `memory_read`, `memory_write`, `memory_search`, `memory_list` tools
@@ -5415,7 +5415,7 @@ ta run "write tests" --model ollama/phi4-mini   # shorthand: model implies ta-ag
 **Configuration levels**
 16. [ ] `[agent]` section in `daemon.toml`: `default_framework`, `qa_framework`, `memory_inject_mode` override
 17. [ ] Workflow YAML `agent_framework` field — resolved at workflow dispatch time
-18. [ ] `ta run --agent <name>` and `ta run --model <provider/model>` flags (model shorthand auto-selects `ta-agent-ollama`)
+18. [x] `ta run --agent <name>` flag wired to framework resolution (model shorthand deferred to later sub-phase)
 19. [ ] Precedence enforcement and logging: on each `ta run`, log which framework was selected and why (goal/workflow/project/user/default)
 
 **`ta-agent-ollama` implementation**

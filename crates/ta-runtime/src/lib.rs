@@ -54,6 +54,7 @@ pub mod adapter;
 pub mod bare_process;
 pub mod config;
 pub mod credential;
+pub mod framework;
 pub mod plugin;
 
 // Re-export the most commonly used types.
@@ -64,3 +65,4 @@ pub use adapter::{
 pub use bare_process::{apply_credentials_to_env, BareProcessRuntime};
 pub use config::{RuntimeConfig, RuntimeRegistry};
 pub use credential::ScopedCredential;
+pub use framework::{AgentFrameworkManifest, ContextInjectMode, MemoryInjectMode};

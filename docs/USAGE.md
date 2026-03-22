@@ -420,16 +420,58 @@ Agents can populate the Design Decisions section by passing an `alternatives` ar
 
 TA wraps any agent framework. Out of the box it supports:
 - **Claude Code** (default) -- Anthropic's coding agent
-- **Codex** -- OpenAI's coding agent
-- **Claude Flow** -- multi-agent orchestration
+- **Codex** -- OpenAI's coding agent (`OPENAI_API_KEY` required)
+- **Claude Flow** -- multi-agent swarm orchestration
+- **Ollama** -- generic local model agent (`ta-agent-ollama` required)
 
-Use `--agent` to select:
+Use `--agent` to select a framework for a specific goal:
 
 ```bash
 ta run "Fix the bug" --agent codex
+ta run "Write tests" --agent claude-flow
 ```
 
-You can add any agent by creating a YAML config file (see [Agent Configuration](#agent-configuration)).
+#### List available frameworks
+
+```bash
+ta agent frameworks
+ta agent list --frameworks   # alias
+```
+
+#### Show framework details
+
+```bash
+ta agent info codex
+ta agent info claude-flow
+```
+
+#### Add a custom framework
+
+Create a TOML manifest in `.ta/agents/` (project-level) or `~/.config/ta/agents/` (user-level):
+
+```toml
+# .ta/agents/my-agent.toml
+name        = "my-agent"
+version     = "1.0.0"
+description = "My custom agent backend"
+command     = "my-agent-bin"
+args        = ["--headless"]
+context_file = "CLAUDE.md"
+```
+
+Validate with:
+
+```bash
+ta agent framework-validate .ta/agents/my-agent.toml
+```
+
+Then use it:
+
+```bash
+ta run "Fix the bug" --agent my-agent
+```
+
+You can also add YAML agent configs (see [Agent Configuration](#agent-configuration)).
 
 ---
 

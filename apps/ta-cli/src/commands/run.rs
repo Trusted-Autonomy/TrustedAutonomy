@@ -574,6 +574,32 @@ pub fn execute(
         }
     }
 
+    // ── Agent framework resolution (v0.13.8) ────────────────────
+    //
+    // Resolve the named agent framework manifest. Built-in frameworks are
+    // always available; custom frameworks are discovered from .ta/agents/
+    // and ~/.config/ta/agents/. When the framework is not claude-code,
+    // print an informational message so the user knows which backend is active.
+    // TODO(v0.13.8): use framework.command/args instead of hardcoded claude.
+    {
+        let framework = ta_runtime::AgentFrameworkManifest::resolve(agent, &config.workspace_root);
+        match framework {
+            Some(ref f) if f.name != "claude-code" => {
+                if !quiet {
+                    println!("Agent framework: {} ({})", f.name, f.description);
+                }
+            }
+            None => {
+                eprintln!(
+                    "Warning: unknown agent framework '{}' — falling back to claude-code.",
+                    agent
+                );
+                eprintln!("  Run `ta agent frameworks` to see available frameworks.");
+            }
+            _ => {}
+        }
+    }
+
     let agent_config = agent_launch_config(agent, source);
 
     // Disk space pre-flight (v0.11.3 item 28).
