@@ -5797,6 +5797,12 @@ Current releases ship archives containing a bare binary and docs. Users must man
    model        = "claude-opus-4-6"
    ```
 
+#### Windows Performance & Diagnostics
+
+9w. [ ] **Windows startup profiling**: `ta` commands feel slow on Windows compared to macOS. Add startup-time diagnostics (`ta --startup-profile` or always-on tracing at `RUST_LOG=ta=debug`) that report wall-clock time for each startup phase: binary load, config parse, daemon socket connect, command dispatch. Identify bottlenecks: likely candidates are (a) `which::which()` PATH scan on every command, (b) daemon IPC handshake latency, (c) missing Windows file-open shortcuts compared to macOS `O_CLOEXEC`/TCC caches. Fix the slowest path; add a CI benchmark asserting `ta --version` cold-start < 500ms on Windows runners.
+
+10w. [ ] **Lazy `which::which()` for Windows agent resolution**: `build_command()` in `bare_process.rs` calls `which::which()` on every agent spawn even on macOS/Linux where it is not needed. Move the `which` lookup behind `#[cfg(windows)]` so the PATH scan only happens on Windows, and cache the result for the lifetime of the daemon process.
+
 #### Intelligent Surface (deferred from v0.13.1.6)
 
 9. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack).
