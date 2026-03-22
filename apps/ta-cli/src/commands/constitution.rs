@@ -680,8 +680,7 @@ fn collect_scan_files(
                 for entry in entries.flatten() {
                     if entry.is_file() {
                         let rel = entry.strip_prefix(root).unwrap_or(&entry);
-                        // Normalize to forward slashes so exclude patterns work on all platforms.
-                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                        let rel_str = rel.to_string_lossy();
                         let excluded = scan.exclude.iter().any(|ex| rel_str.contains(ex.as_str()));
                         if !excluded {
                             files.push(entry);
