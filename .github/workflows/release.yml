@@ -467,7 +467,12 @@ jobs:
           gh release upload "$TAG" artifacts/* --clobber
 
           # Publish the draft (makes it visible and immutable).
-          gh release edit "$TAG" --draft=false --latest
+          # Do not pass --latest for prerelease builds — GitHub rejects it.
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            gh release edit "$TAG" --draft=false
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi
 
       - name: Validate release assets on GitHub
         env:
