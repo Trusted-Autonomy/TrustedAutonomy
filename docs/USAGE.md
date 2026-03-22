@@ -408,7 +408,7 @@ Draft lifecycle:
 ```bash
 ta draft list                   # See all drafts
 ta draft view <id>              # Review a specific draft
-ta draft approve <id>           # Mark as approved
+ta draft approve <id>           # Mark as approved (--as <identity> for multi-party)
 ta draft apply <id>             # Copy approved changes to your project
 ta draft close <id>             # Abandon without applying
 ```
@@ -3022,6 +3022,52 @@ ta audit verify-attestation --keys /path/to/keys
 Output shows `OK`, `INVALID SIGNATURE`, or `unsigned` for each event. Any `INVALID SIGNATURE` exits with code 1 — wiring this into CI catches tampering automatically.
 
 Hardware backends (TPM 2.0, Apple Secure Enclave) are community-contributed plugins that implement the `AttestationBackend` trait.
+
+### Multi-Party Approval
+
+By default, a single `ta draft approve` is enough to move a draft to `Approved`. For high-stakes projects you can require N distinct approvals before a draft can be applied.
+
+Configure in `.ta/workflow.toml`:
+
+```toml
+[governance]
+require_approvals = 2
+approvers = ["alice", "bob", "carol"]   # empty = any reviewer accepted
+
+# Optional: identity that may bypass quorum in emergencies (logged prominently)
+override_identity = "emergency-admin"
+```
+
+Each team member approves independently:
+
+```bash
+# Alice approves
+ta draft approve <id> --as alice
+# → Recorded approval from 'alice' (1/2 approvals — 1 more needed)
+
+# Bob approves — quorum reached
+ta draft approve <id> --as bob
+# → Approved draft package <id> (2/2 approvals — quorum reached)
+
+# Now the draft can be applied
+ta draft apply <id>
+```
+
+Rules:
+- Approvals accumulate on the draft. The same reviewer cannot approve twice.
+- If `approvers` is non-empty, only listed identities are accepted.
+- If `require_approvals = 1` (default), the old `--reviewer` flag continues to work.
+- Legacy `ta draft approve <id>` (no `--as`) uses `--reviewer human-reviewer` and counts as one approval.
+
+#### Emergency Override
+
+A designated `override_identity` can bypass the quorum requirement. The override is written to the audit log and printed with a `⚠` warning:
+
+```bash
+ta draft approve <id> --as emergency-admin --override
+# ⚠  Override by 'emergency-admin': quorum requirement bypassed (audit trail updated).
+# Approved draft package <id> by emergency-admin
+```
 
 ### Credential Management
 

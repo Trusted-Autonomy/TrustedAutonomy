@@ -3934,6 +3934,7 @@ pre_launch:
             tag: None,
             vcs_status: None,
             parent_draft_id: None,
+            pending_approvals: vec![],
         };
 
         // Save the draft package.
@@ -4090,6 +4091,7 @@ pre_launch:
             tag: None,
             vcs_status: None,
             parent_draft_id: None,
+            pending_approvals: vec![],
         };
 
         super::super::draft::save_package(&config, &parent_draft).unwrap();

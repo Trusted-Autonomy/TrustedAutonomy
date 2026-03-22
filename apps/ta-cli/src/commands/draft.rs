@@ -9,7 +9,7 @@ use ta_changeset::changeset::{ChangeKind, ChangeSet, CommitIntent};
 use ta_changeset::diff::DiffContent;
 use ta_changeset::diff_handlers::DiffHandlersConfig;
 use ta_changeset::draft_package::{
-    AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType, Artifact,
+    AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType, ApprovalRecord, Artifact,
     ArtifactDisposition, ChangeDependency, ChangeType, Changes, DecisionLogEntry, DependencyKind,
     DraftPackage, DraftStatus, ExplanationTiers, Goal, Iteration, Plan, Provenance,
     RequestedAction, ReviewRequests, Risk, Signatures, Summary, VerificationWarning, WorkspaceRef,
@@ -117,9 +117,16 @@ pub enum DraftCommands {
     Approve {
         /// Draft package ID, goal title, or phase (e.g., "v0.10.7"). Omit to auto-select if only one pending draft.
         id: Option<String>,
-        /// Reviewer name.
+        /// Reviewer name (legacy alias for --as).
         #[arg(long, default_value = "human-reviewer")]
         reviewer: String,
+        /// Reviewer identity for multi-party governance. Overrides --reviewer when set.
+        #[arg(long = "as")]
+        reviewer_as: Option<String>,
+        /// Override quorum requirement (requires override_identity in [governance] config).
+        /// The override is recorded in the audit trail.
+        #[arg(long = "override")]
+        force_override: bool,
     },
     /// Deny a draft package with a reason.
     Deny {
@@ -464,9 +471,15 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 )
             }
         }
-        DraftCommands::Approve { id, reviewer } => {
+        DraftCommands::Approve {
+            id,
+            reviewer,
+            reviewer_as,
+            force_override,
+        } => {
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
-            approve_package(config, &resolved, reviewer)
+            let identity = reviewer_as.as_deref().unwrap_or(reviewer.as_str());
+            approve_package(config, &resolved, identity, *force_override)
         }
         DraftCommands::Deny {
             id,
@@ -1363,6 +1376,7 @@ pub(crate) fn build_package(
         tag: goal.tag.clone().or_else(|| Some(goal.display_tag())), // Inherit from goal (v0.11.2.3).
         vcs_status: None,
         parent_draft_id: None, // Set below if this is a follow-up.
+        pending_approvals: vec![],
     };
 
     // v0.12.2.1: Track parent_draft_id and compute composited diff for follow-up chains.
@@ -2310,7 +2324,12 @@ fn view_package(
     Ok(())
 }
 
-fn approve_package(config: &GatewayConfig, id: &str, reviewer: &str) -> anyhow::Result<()> {
+fn approve_package(
+    config: &GatewayConfig,
+    id: &str,
+    reviewer: &str,
+    force_override: bool,
+) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let mut pkg = load_package(config, package_id)?;
 
@@ -2321,46 +2340,129 @@ fn approve_package(config: &GatewayConfig, id: &str, reviewer: &str) -> anyhow::
         );
     }
 
-    pkg.status = DraftStatus::Approved {
-        approved_by: reviewer.to_string(),
-        approved_at: Utc::now(),
-    };
-    save_package(config, &pkg)?;
+    // Load governance configuration.
+    let wf_path = config.workspace_root.join(".ta/workflow.toml");
+    let wf = ta_submit::WorkflowConfig::load_or_default(&wf_path);
+    let gov = &wf.governance;
 
-    // Transition the goal if we can find it.
-    let goal_store = GoalRunStore::new(&config.goals_dir)?;
-    let goals = goal_store.list()?;
-    if let Some(goal) = goals.iter().find(|g| g.pr_package_id == Some(package_id)) {
-        let _ = goal_store.transition(goal.goal_run_id, GoalRunState::UnderReview);
-        let _ = goal_store.transition(
-            goal.goal_run_id,
-            GoalRunState::Approved {
-                approved_by: reviewer.to_string(),
-            },
-        );
-    }
-
-    // §8: emit DraftApproved event so all state changes are logged with structured fields.
-    {
-        use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
-        let events_dir = config.workspace_root.join(".ta").join("events");
-        let event_store = FsEventStore::new(&events_dir);
-        let goal_id = goals
-            .iter()
-            .find(|g| g.pr_package_id == Some(package_id))
-            .map(|g| g.goal_run_id)
-            .unwrap_or_else(uuid::Uuid::new_v4);
-        let event = SessionEvent::DraftApproved {
-            goal_id,
-            draft_id: package_id,
-            approved_by: reviewer.to_string(),
-        };
-        if let Err(e) = event_store.append(&EventEnvelope::new(event)) {
-            tracing::warn!("Failed to persist DraftApproved event: {}", e);
+    // Validate reviewer identity against allowlist (if configured).
+    if !gov.approvers.is_empty() && !gov.approvers.contains(&reviewer.to_string()) {
+        if force_override {
+            // Override path: validate the override identity.
+            match &gov.override_identity {
+                Some(oid) if oid == reviewer => {
+                    tracing::warn!(
+                        reviewer = reviewer,
+                        package_id = %package_id,
+                        "Governance override used — quorum bypassed"
+                    );
+                    println!(
+                        "⚠  Override by '{}': quorum requirement bypassed (audit trail updated).",
+                        reviewer
+                    );
+                }
+                _ => {
+                    anyhow::bail!(
+                        "'{}' is not in the approvers list and is not the configured override identity.\n\
+                         Approvers: {}\n\
+                         Override identity: {}",
+                        reviewer,
+                        gov.approvers.join(", "),
+                        gov.override_identity.as_deref().unwrap_or("(none)")
+                    );
+                }
+            }
+        } else {
+            anyhow::bail!(
+                "'{}' is not in the approvers list for this project.\n\
+                 Approvers: {}\n\
+                 Tip: use --override if you are the designated override identity.",
+                reviewer,
+                gov.approvers.join(", ")
+            );
         }
     }
 
-    println!("Approved draft package {} by {}", package_id, reviewer);
+    // Prevent duplicate approval from the same reviewer.
+    if pkg.pending_approvals.iter().any(|a| a.reviewer == reviewer) {
+        anyhow::bail!("'{}' has already approved this draft.", reviewer);
+    }
+
+    // Record this approval.
+    pkg.pending_approvals.push(ApprovalRecord {
+        reviewer: reviewer.to_string(),
+        approved_at: Utc::now(),
+    });
+
+    let quorum = if force_override {
+        1
+    } else {
+        gov.require_approvals
+    };
+    let have = pkg.pending_approvals.len();
+    let quorum_reached = have >= quorum;
+
+    if quorum_reached {
+        // Quorum met — transition to Approved.
+        pkg.status = DraftStatus::Approved {
+            approved_by: reviewer.to_string(),
+            approved_at: Utc::now(),
+        };
+        save_package(config, &pkg)?;
+
+        // Transition the goal state.
+        let goal_store = GoalRunStore::new(&config.goals_dir)?;
+        let goals = goal_store.list()?;
+        if let Some(goal) = goals.iter().find(|g| g.pr_package_id == Some(package_id)) {
+            let _ = goal_store.transition(goal.goal_run_id, GoalRunState::UnderReview);
+            let _ = goal_store.transition(
+                goal.goal_run_id,
+                GoalRunState::Approved {
+                    approved_by: reviewer.to_string(),
+                },
+            );
+        }
+
+        // §8: emit DraftApproved event.
+        {
+            use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
+            let events_dir = config.workspace_root.join(".ta").join("events");
+            let event_store = FsEventStore::new(&events_dir);
+            let goal_id = goals
+                .iter()
+                .find(|g| g.pr_package_id == Some(package_id))
+                .map(|g| g.goal_run_id)
+                .unwrap_or_else(uuid::Uuid::new_v4);
+            let event = SessionEvent::DraftApproved {
+                goal_id,
+                draft_id: package_id,
+                approved_by: reviewer.to_string(),
+            };
+            if let Err(e) = event_store.append(&EventEnvelope::new(event)) {
+                tracing::warn!("Failed to persist DraftApproved event: {}", e);
+            }
+        }
+
+        if quorum == 1 {
+            println!("Approved draft package {} by {}", package_id, reviewer);
+        } else {
+            println!(
+                "Approved draft package {} ({}/{} approvals — quorum reached)",
+                package_id, have, quorum
+            );
+        }
+    } else {
+        // Quorum not yet reached — persist the partial approval and wait.
+        save_package(config, &pkg)?;
+        println!(
+            "Recorded approval from '{}' ({}/{} approvals — {} more needed before this draft can be applied).",
+            reviewer,
+            have,
+            quorum,
+            quorum - have
+        );
+    }
+
     Ok(())
 }
 
@@ -6373,7 +6475,7 @@ fn run() {
         // Approve the PR.
         let packages = load_all_packages(&config).unwrap();
         let pkg_id = packages[0].package_id.to_string();
-        approve_package(&config, &pkg_id, "tester").unwrap();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
 
         // Apply (no git).
         apply_package(
@@ -6466,7 +6568,7 @@ fn run() {
         build_package(&config, &goal_id, "Modified README", false).unwrap();
         let packages = load_all_packages(&config).unwrap();
         let pkg_id = packages[0].package_id.to_string();
-        approve_package(&config, &pkg_id, "tester").unwrap();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
         apply_package(
             &config,
             &pkg_id,
@@ -6618,7 +6720,7 @@ fn run() {
         build_package(&config, &goal_id, "Modified README and new file", false).unwrap();
         let packages = load_all_packages(&config).unwrap();
         let pkg_id = packages[0].package_id.to_string();
-        approve_package(&config, &pkg_id, "tester").unwrap();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
 
         // ── Apply with git_commit=true — verification will fail ────────────
         let result = apply_package(
@@ -8171,7 +8273,7 @@ fn run() {
         build_package(&config, &goal_id, "Default submit test", false).unwrap();
         let packages = load_all_packages(&config).unwrap();
         let pkg_id = packages[0].package_id.to_string();
-        approve_package(&config, &pkg_id, "tester").unwrap();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
 
         // Apply with git_commit=true (simulating new default when VCS detected),
         // git_push=false (no remote), git_review=false.
@@ -8276,7 +8378,7 @@ fn run() {
         build_package(&config, &goal_id, "No submit test", false).unwrap();
         let packages = load_all_packages(&config).unwrap();
         let pkg_id = packages[0].package_id.to_string();
-        approve_package(&config, &pkg_id, "tester").unwrap();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
 
         // Apply with --no-submit (git_commit=false).
         apply_package(
@@ -8684,7 +8786,7 @@ fn run() {
         build_package(&config, &goal_id, "Phase linked change", false).unwrap();
         let packages = load_all_packages(&config).unwrap();
         let pkg_id = packages[0].package_id.to_string();
-        approve_package(&config, &pkg_id, "tester").unwrap();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
         apply_package(
             &config,
             &pkg_id,

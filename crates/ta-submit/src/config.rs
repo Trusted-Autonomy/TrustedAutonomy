@@ -61,6 +61,10 @@ pub struct WorkflowConfig {
     /// Audit log attestation configuration (v0.14.1)
     #[serde(default)]
     pub audit: AuditConfig,
+
+    /// Draft approval governance configuration (v0.14.2)
+    #[serde(default)]
+    pub governance: GovernanceConfig,
 }
 
 /// Constitution / compliance checker configuration.
@@ -172,6 +176,50 @@ impl Default for AuditConfig {
         Self {
             attestation: false,
             keys_dir: default_keys_dir(),
+        }
+    }
+}
+
+/// Draft approval governance configuration (v0.14.2).
+///
+/// Controls how many approvals a draft requires before it can be applied,
+/// and which identities are permitted to approve.
+///
+/// ```toml
+/// [governance]
+/// require_approvals = 2
+/// approvers = ["alice", "bob", "charlie"]
+/// # override_identity allows emergency bypass (logged to audit trail).
+/// override_identity = "emergency-admin"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceConfig {
+    /// Minimum number of distinct approvals required before a draft can be applied.
+    /// Default: 1 (single-approver, backward-compatible).
+    #[serde(default = "default_require_approvals")]
+    pub require_approvals: usize,
+
+    /// Allowlist of reviewer identities permitted to approve.
+    /// Empty list = any reviewer is accepted (default, backward-compatible).
+    #[serde(default)]
+    pub approvers: Vec<String>,
+
+    /// Identity allowed to use `--override` to bypass the quorum requirement.
+    /// The override is recorded in the audit log for accountability.
+    #[serde(default)]
+    pub override_identity: Option<String>,
+}
+
+fn default_require_approvals() -> usize {
+    1
+}
+
+impl Default for GovernanceConfig {
+    fn default() -> Self {
+        Self {
+            require_approvals: default_require_approvals(),
+            approvers: Vec::new(),
+            override_identity: None,
         }
     }
 }
