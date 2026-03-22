@@ -604,13 +604,14 @@ fn list_goals(
     let packages = load_all_packages_silent(config);
 
     println!(
-        "{:<22} {:<22} {:<12} {:<10} {:<10} {:<14}",
-        "TAG", "TITLE", "STATE", "HEALTH", "DRAFT", "VCS"
+        "{:<24} {:<10} {:<22} {:<12} {:<10} {:<10} {:<14}",
+        "TAG", "ID", "TITLE", "STATE", "HEALTH", "DRAFT", "VCS"
     );
-    println!("{}", "-".repeat(90));
+    println!("{}", "-".repeat(102));
 
     for g in &goals {
         let tag = g.display_tag();
+        let id_short = &g.goal_run_id.to_string()[..8];
         let title_display = if g.is_macro {
             format!("[M] {}", truncate(&g.title, 18))
         } else if let Some(ref macro_id) = g.parent_macro_id {
@@ -636,8 +637,9 @@ fn list_goals(
         let (draft_col, vcs_col) = goal_draft_vcs_columns(g, &packages);
 
         println!(
-            "{:<22} {:<22} {:<12} {:<10} {:<10} {:<14}",
-            truncate(&tag, 20),
+            "{:<24} {:<10} {:<22} {:<12} {:<10} {:<10} {:<14}",
+            tag,
+            id_short,
             title_display,
             g.state.to_string(),
             health,

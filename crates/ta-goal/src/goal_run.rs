@@ -264,9 +264,9 @@ pub fn slugify_title(title: &str) -> String {
     }
     // Trim trailing hyphen.
     let trimmed = collapsed.trim_end_matches('-');
-    if trimmed.len() > 30 {
-        // Don't cut mid-word: find last hyphen before 30 chars.
-        let cut = &trimmed[..30];
+    if trimmed.len() > 20 {
+        // Don't cut mid-word: find last hyphen at or before 20 chars.
+        let cut = &trimmed[..20];
         if let Some(idx) = cut.rfind('-') {
             cut[..idx].to_string()
         } else {
@@ -624,17 +624,27 @@ mod tests {
 
     #[test]
     fn slugify_title_basic() {
+        // Titles under 20 chars slug cleanly without truncation.
+        assert_eq!(slugify_title("Fix Auth Bug"), "fix-auth-bug");
+    }
+
+    #[test]
+    fn slugify_title_long_truncates_at_word_boundary() {
+        // "Fix Authentication Bug" → slug "fix-authentication-bug" (22 chars) →
+        // capped at 20 → last hyphen before 20 is at 18 → "fix-authentication".
         assert_eq!(
             slugify_title("Fix Authentication Bug"),
-            "fix-authentication-bug"
+            "fix-authentication"
         );
     }
 
     #[test]
     fn slugify_title_special_chars() {
+        // "Add JWT (v2) & OAuth support!" → "add-jwt-v2-oauth-support" (24 chars)
+        // → capped at 20 → "add-jwt-v2-oauth-sup" → last hyphen at 16 → "add-jwt-v2-oauth".
         assert_eq!(
             slugify_title("Add JWT (v2) & OAuth support!"),
-            "add-jwt-v2-oauth-support"
+            "add-jwt-v2-oauth"
         );
     }
 
@@ -642,7 +652,7 @@ mod tests {
     fn slugify_title_truncates_long_names() {
         let long = "implement-the-very-long-feature-that-needs-many-words";
         let slug = slugify_title(long);
-        assert!(slug.len() <= 30, "slug len {} > 30: {}", slug.len(), slug);
+        assert!(slug.len() <= 20, "slug len {} > 20: {}", slug.len(), slug);
     }
 
     #[test]
