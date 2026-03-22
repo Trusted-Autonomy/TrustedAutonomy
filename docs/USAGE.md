@@ -69,6 +69,7 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [Add TA to an Existing Project](#add-ta-to-an-existing-project)
    - [Framework Registry](#framework-registry)
    - [Workflow Engine](#workflow-engine)
+   - [Community Knowledge Hub](#community-knowledge-hub)
 6. [Roadmap](#roadmap)
 7. [Troubleshooting](#troubleshooting)
 8. [Getting Help](#getting-help)
@@ -6402,6 +6403,126 @@ Agent configs are resolved in priority order: `.ta/agents/` (project) → `~/.co
 
 ---
 
+## Community Knowledge Hub
+
+The Community Knowledge Hub gives every TA agent access to curated, community-maintained knowledge. Agents can search documentation before making API calls, check threat intelligence before security decisions, and contribute discovered gaps back as draft artifacts that you review before they're submitted upstream.
+
+### Configuration
+
+Create `.ta/community-resources.toml` in your project to configure knowledge resources:
+
+```toml
+[[resources]]
+name = "api-docs"
+intent = "api-integration"
+description = "Curated API documentation to reduce hallucinations when integrating third-party services"
+source = "github:andrewyng/context-hub"
+content_path = "content/"
+access = "read-write"        # "read-only" | "read-write" | "disabled"
+auto_query = true            # Agent auto-consults before API calls
+languages = ["python", "javascript", "rust"]
+
+[[resources]]
+name = "security-threats"
+intent = "security-intelligence"
+description = "Known threats, CVEs, and secure coding patterns"
+source = "local:.ta/security-kb/"
+access = "read-only"
+auto_query = true
+update_frequency = "weekly"
+
+[[resources]]
+name = "project-local"
+intent = "project-knowledge"
+description = "Project-specific knowledge base"
+source = "local:.ta/community/"
+access = "read-write"
+auto_query = true
+```
+
+**Access levels:**
+- `read-only` — agent can search and fetch, but cannot annotate, suggest, or rate content
+- `read-write` — agent can also stage annotations, feedback, and new document proposals
+- `disabled` — resource exists in config but is never queried
+
+### Listing resources
+
+```bash
+ta community list             # table view with sync status
+ta community list --json      # machine-readable output
+```
+
+Output shows each resource's name, intent, access level, and cache status (synced/stale/not synced with document count).
+
+### Syncing the local cache
+
+```bash
+ta community sync             # sync all enabled resources
+ta community sync api-docs    # sync a specific resource
+```
+
+For `local:` sources, TA scans the directory for `.md` files and indexes them locally.
+
+For `github:` sources, TA uses the GitHub API via `curl` to download markdown files from the configured `content_path`. Set `GITHUB_TOKEN` to avoid rate limits:
+
+```bash
+GITHUB_TOKEN=ghp_xxx ta community sync
+```
+
+### Searching
+
+```bash
+ta community search "stripe payment intents"
+ta community search "CVE-2026" --intent security-intelligence
+ta community search "postgres" --resource api-docs --json
+```
+
+### Fetching a document
+
+```bash
+ta community get api-docs/stripe
+ta community get project-local/architecture
+```
+
+Documents older than 90 days get a staleness warning with a `ta community sync` hint.
+
+### Agent integration
+
+When resources with `auto_query = true` are configured, TA automatically injects a section into the agent's CLAUDE.md context at goal start:
+
+```
+## Community Knowledge Resources (auto-query enabled)
+- api-docs (intent: api-integration): Curated API documentation...
+  → Before calling a third-party API, search:
+    community_search { query: "<service> <operation>", intent: "api-integration" }
+...
+Always attribute community sources in your output: [community: <resource>/<doc-id>]
+```
+
+The agent then calls the plugin's tools during goal execution:
+- `community_search { query, intent?, resource? }` — keyword search across cached docs
+- `community_get { id }` — fetch a specific document
+- `community_annotate { id, note }` — stage a gap annotation for review
+- `community_feedback { id, rating }` — stage an upvote/downvote for review
+- `community_suggest { title, content, intent, resource }` — stage a new doc proposal
+
+All write operations are staged to `.ta/community-staging/<resource>/` and appear in the draft for your review — you approve or reject community contributions independently from code changes.
+
+### Attribution
+
+When an agent uses community knowledge, it attributes the source in its output:
+
+```
+[community: api-docs/stripe] Using Stripe PaymentIntents API...
+```
+
+Staged contribution artifacts use the `community://` URI scheme:
+```
+community://api-docs/stripe-payment-intents
+```
+
+---
+
 ## Feature Velocity Stats
 
 `ta stats` tracks per-goal timing and outcomes in `.ta/velocity-stats.jsonl`. Data is recorded automatically when goals complete (applied, denied, cancelled, or timed out by GC).
@@ -6631,6 +6752,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.13.2 | MCP transport abstraction (TCP/Unix socket) | Done |
 | v0.13.3 | Runtime adapter trait & pluggable agent runtimes | Done |
 | v0.13.4 | External action governance framework (policy, capture, rate limiting, dry-run) | Done |
+| v0.13.6 | Community Knowledge Hub plugin (Context Hub integration, `ta community` CLI) | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

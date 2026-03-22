@@ -352,6 +352,18 @@ enum Commands {
         #[command(subcommand)]
         command: commands::stats::StatsCommands,
     },
+    /// Access and manage community knowledge resources (v0.13.6).
+    ///
+    /// `ta community list` shows configured resources with sync status.
+    /// `ta community sync` refreshes the local cache from GitHub or local sources.
+    /// `ta community search <query>` searches across all enabled resources.
+    /// `ta community get <id>` fetches and displays a specific document.
+    ///
+    /// Configure resources in `.ta/community-resources.toml`.
+    Community {
+        #[command(subcommand)]
+        command: commands::community::CommunityCommands,
+    },
     /// Manage policy configuration and auto-approval.
     Policy {
         #[command(subcommand)]
@@ -724,6 +736,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Workflow { command } => commands::workflow::execute(command, &config),
         Commands::Stats { command } => commands::stats::execute(command, &config),
+        Commands::Community { command } => commands::community::execute(command, &config),
         Commands::Policy { command } => commands::policy::execute(command, &config),
         Commands::Config { command } => commands::config::execute(command, &config),
         Commands::Gc {

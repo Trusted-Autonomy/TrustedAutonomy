@@ -1,0 +1,26 @@
+name = "community-hub"
+version = "0.1.0"
+type = "knowledge"
+command = "ta-community-hub"
+protocol = "json-stdio"
+capabilities = [
+    "community_search",
+    "community_get",
+    "community_annotate",
+    "community_feedback",
+    "community_suggest",
+    "list_resources",
+    "sync",
+]
+description = "Community Knowledge Hub — gives agents access to curated, community-maintained knowledge (Context Hub integration). Agents search by intent, fetch docs, and contribute gaps back as staged draft artifacts."
+timeout_secs = 30
+
+# Configuration: .ta/community-resources.toml in the project root
+# Cache: .ta/community-cache/<resource-name>/
+# Staging: .ta/community-staging/<resource-name>/
+#
+# Auto-query injection is handled by the TA daemon injecting a CLAUDE.md section
+# when resources with auto_query = true are configured.
+#
+# Environment variables (optional):
+#   GITHUB_TOKEN — for higher API rate limits when syncing GitHub-sourced resources

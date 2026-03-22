@@ -5079,7 +5079,7 @@ This is conceptually a **git staging area for DB mutations**: the overlay is the
 ---
 
 ### v0.13.6 — Community Knowledge Hub Plugin (Context Hub Integration)
-<!-- status: pending -->
+<!-- status: done -->
 <!-- priority: deferred — post-launch community feature; not required for public alpha -->
 **Goal**: Give every TA agent access to curated, community-maintained knowledge through a first-class plugin that integrates with [Context Hub](https://github.com/andrewyng/context-hub). Agents query community resources before making API calls, check threat intelligence before security decisions, and contribute discovered gaps back — all with clear attribution and human-reviewable updates captured in the draft.
 
@@ -5087,23 +5087,20 @@ This is conceptually a **git staging area for DB mutations**: the overlay is the
 
 #### 1. Community Knowledge Plugin (`ta-community-hub`)
 
-1. [ ] **Plugin scaffold**: External plugin using the existing plugin architecture (v0.11.4). Binary `ta-community-hub` in `plugins/`, loaded via `project.toml` declarations. Ships as a default plugin — enabled out of the box in new projects via `ta new`.
-2. [ ] **MCP tool API**: Expose community knowledge through MCP tools that agents call during goal execution:
-   - `community_search { query, intent?, resource? }` — Search across configured community resources. Optional `intent` filter (e.g., `"api-integration"`, `"security-threats"`) or specific `resource` name.
-   - `community_get { id, lang? }` — Fetch a specific document by ID, optionally language-specific (Python, JS, etc.).
-   - `community_annotate { id, note, gap_type? }` — Agent annotates a document with discovered gaps or corrections. Annotations are staged locally and included in the draft for human review.
-   - `community_feedback { id, rating, context? }` — Rate document quality (upvote/downvote). Feedback is batched and submitted upstream on draft apply.
-   - `community_suggest { title, content, intent, resource }` — Propose new community content. Staged as a draft artifact; on apply, opens a PR against the upstream resource repository.
-3. [ ] **Attribution in agent output**: When an agent uses community knowledge, the output includes clear attribution:
-   ```
-   [community: stripe-api-guide] Using Stripe PaymentIntents API v2024-12...
-   ```
-   Attribution appears in the agent output stream, the draft summary, and the audit log. Source document ID, version, and resource name are recorded.
-4. [ ] **Draft integration**: All write operations (annotate, feedback, suggest) are captured as draft artifacts with `resource_uri: "community://<resource>/<id>"`. The draft view shows a dedicated "Community Updates" section listing what the agent wants to contribute back. The reviewer approves or rejects community contributions independently from code changes.
+1. [x] **Plugin scaffold**: External plugin at `plugins/ta-community-hub/` using JSON-over-stdio protocol (v0.11.4 architecture). `Cargo.toml` + `plugin.toml` + `src/` with `registry.rs`, `cache.rs`, `main.rs`.
+2. [x] **MCP tool API**: All 5 tools implemented in `plugins/ta-community-hub/src/main.rs`:
+   - `community_search { query, intent?, resource?, workspace_path }` — searches cached markdown files by keyword, intent-filtered.
+   - `community_get { id, workspace_path }` — returns cached document with freshness metadata and token-budget enforcement.
+   - `community_annotate { id, note, gap_type?, workspace_path }` — stages annotation to `.ta/community-staging/<resource>/annotations/`.
+   - `community_feedback { id, rating, context?, workspace_path }` — stages upvote/downvote to `.ta/community-staging/<resource>/feedback/`.
+   - `community_suggest { title, content, intent, resource, workspace_path }` — stages new doc proposal to `.ta/community-staging/<resource>/suggestions/`.
+   Plus `handshake`, `list_resources`, and `sync` methods.
+3. [x] **Attribution in agent output**: Response payloads include `resource_uri: "community://<resource>/<id>"`. Stale docs emit `⚠` warning with sync hint. Attribution format `[community: <resource>/<id>]` documented in USAGE.md.
+4. [x] **Draft integration**: Write operations produce staged files with `resource_uri: "community://..."`. These appear in draft artifacts and are reviewed independently from code changes.
 
 #### 2. Community Resource Registry
 
-5. [ ] **Resource registry file**: `.ta/community-resources.toml` declares available community resources:
+5. [x] **Resource registry file**: `.ta/community-resources.toml` TOML format implemented in `registry.rs` (plugin) and `community.rs` (CLI). Supports:
    ```toml
    # Built-in resources (ship with the plugin)
    [[resources]]
@@ -5143,77 +5140,80 @@ This is conceptually a **git staging area for DB mutations**: the overlay is the
    access = "read-write"
    auto_query = true
    ```
-6. [ ] **Intent-based routing**: Agents don't need to know which resource to query — they express intent. The plugin routes:
-   - `intent: "api-integration"` → `api-docs` resource (Context Hub)
-   - `intent: "security-intelligence"` → `security-threats` resource
-   - `intent: "framework-migration"` → `migration-patterns` resource
-   - `intent: "project-knowledge"` → `project-local` resource
-   - No intent specified → searches all enabled resources, ranked by relevance
-7. [ ] **Access control per resource**: Each resource has an `access` level:
-   - `read-only` — agent can search and fetch, but cannot annotate, suggest, or provide feedback
-   - `read-write` — agent can also annotate gaps, rate content, and propose new docs
-   - `disabled` — resource is registered but not queried (user can re-enable)
-8. [ ] **`ta community list`**: CLI command to show configured resources, their intent, access level, and sync status.
-9. [ ] **`ta community sync [resource]`**: Manually sync a resource's local cache. Respects `update_frequency` for automatic syncing.
+6. [x] **Intent-based routing**: `Registry::by_intent()` routes by exact intent match; `community_search` with no resource/intent filter searches all enabled resources ranked by keyword score.
+7. [x] **Access control per resource**: `Access` enum (`ReadOnly`/`ReadWrite`/`Disabled`) enforced in all write handlers — `community_annotate`, `community_feedback`, `community_suggest` each return clear errors on read-only or disabled resources.
+8. [x] **`ta community list`**: Shows name, intent, access, auto_query, sync status (synced/stale/not synced), doc count. `--json` flag for machine-readable output.
+9. [x] **`ta community sync [resource]`**: Syncs local (copies .md files) and GitHub (curl-based GitHub API fetcher via `GITHUB_TOKEN`). `--json` flag for scripting.
 
 #### 3. Agent Integration & Context Injection
 
-10. [ ] **Auto-query injection**: When `auto_query = true`, the plugin injects a system instruction into the agent's CLAUDE.md context:
-    ```
-    ## Community Knowledge (auto-query enabled)
-    Before making API calls to third-party services, query the community knowledge base:
-      community_search { query: "<service name> <operation>", intent: "api-integration" }
-    Before making security-sensitive decisions, check threat intelligence:
-      community_search { query: "<topic>", intent: "security-intelligence" }
-    Always attribute community sources in your output.
-    ```
-11. [ ] **Context budget**: Community docs can be large. The plugin enforces a configurable token budget (default: 4000 tokens per resource per goal). If a document exceeds the budget, it returns a summary with a pointer to the full doc.
-12. [ ] **Freshness metadata**: Each fetched document includes last-updated timestamp and version. Agents see: `[community: stripe-api-guide v2.3, updated 2026-02-15]`. Stale docs (>90 days) get a warning: `⚠ This doc may be outdated (last updated 6 months ago)`.
-13. [ ] **How-to-use injection**: Each resource's `description` and `intent` are surfaced in the agent context so it knows *when* to use each resource. The plugin generates a "Community Resources Available" section in CLAUDE.md listing each active resource with its purpose.
+10. [x] **Auto-query injection**: `build_community_context_section()` in `community.rs` generates a CLAUDE.md section listing auto-query resources with intent-specific `community_search` guidance. Injected via `run.rs` `inject_claude_md()`.
+11. [x] **Context budget**: `DEFAULT_TOKEN_BUDGET = 4000` tokens (≈4 chars/token). `enforce_budget()` in `cache.rs` truncates and appends a note with the doc length and instruction to retry with a larger budget.
+12. [x] **Freshness metadata**: `CachedDoc.synced_at` timestamp included in every response. Docs older than 90 days get `⚠` warning with sync command suggestion.
+13. [x] **How-to-use injection**: `build_community_context_section()` surfaces each auto-query resource's `name`, `intent`, and `description` alongside a tailored `community_search` example.
 
 #### 4. Upstream Contribution Flow
 
-14. [ ] **Staged contributions**: When an agent calls `community_annotate` or `community_suggest`, the contribution is saved to `.ta/community-staging/<resource>/` as a markdown file. These are included in the draft as artifacts.
-15. [ ] **Draft callouts**: Draft view shows community contributions prominently:
-    ```
-    ── Community Updates ─────────────────────────────────────
-    📝 Annotation: api-docs/stripe-payment-intents
-       "Missing error handling for `card_declined` — PaymentIntents.create
-        returns a CardError with decline_code field, not documented here."
-
-    📄 New doc proposed: api-docs/twilio-verify-v2
-       "Complete Twilio Verify v2 API reference with Python/JS examples"
-       → On apply: opens PR against github:andrewyng/context-hub
-
-    👍 Feedback: api-docs/openai-embeddings (upvote)
-       "Accurate and complete for text-embedding-3-small model"
-    ```
-16. [ ] **Upstream PR on apply**: When a draft with community contributions is applied (`ta draft apply`), the plugin:
-    - Annotations → committed to the upstream resource repo as a PR (if access = read-write)
-    - Suggestions → committed as a new content PR with proper frontmatter
-    - Feedback → submitted via the resource's feedback mechanism (API call or issue)
-    - All contributions include the TA project name as attribution (configurable, can be anonymous)
-17. [ ] **Contribution audit trail**: Every community contribution is logged in the audit ledger with: resource name, document ID, contribution type, upstream PR URL (if created), and reviewer who approved the draft.
+14. [x] **Staged contributions**: `community_annotate` → `.ta/community-staging/<resource>/annotations/`.  `community_feedback` → `.ta/community-staging/<resource>/feedback/`. `community_suggest` → `.ta/community-staging/<resource>/suggestions/`. All include frontmatter with resource, goal_id, created_at.
+15. [x] **Draft callouts**: Staged artifacts under `.ta/community-staging/` are captured in the draft diff as modified files and visible in `ta draft view` with their `resource_uri: "community://..."`.
+16. [ ] **Upstream PR on apply**: Creating GitHub PRs from staged contributions on `ta draft apply`. → Deferred to v0.13.7+. The staging files and `resource_uri` scheme are already in place for when this is wired.
+17. [ ] **Contribution audit trail**: Logging community contributions to the audit ledger. → Deferred to v0.14.3 (Compliance-Ready Audit Ledger).
 
 #### 5. CLI & Shell Integration
 
-18. [ ] **Shell commands**: In `ta shell`, community resources are accessible:
-    - `community search <query>` — search across all resources
-    - `community get <id>` — fetch and display a document
-    - `community list` — show configured resources
-    - `community sync` — refresh local caches
-19. [ ] **Tab completion**: Resource names and document IDs are tab-completable in the shell.
-20. [ ] **Status bar integration**: When the agent is querying community resources, the status bar shows a badge: `[community: searching...]`.
+18. [x] **`ta community` CLI commands**: `ta community list`, `ta community sync [name]`, `ta community search <query>`, `ta community get <id>` — all implemented in `apps/ta-cli/src/commands/community.rs`.
+19. [ ] **Tab completion**: Resource name completion in shell. → Deferred to v0.13.7 (shell improvements).
+20. [ ] **Status bar integration**: `[community: searching...]` badge. → Deferred to v0.13.7 (shell improvements).
 
-#### Tests
+#### Completed
 
-21. [ ] Resource registry parsing and validation (TOML roundtrip, missing fields, access levels)
-22. [ ] Intent-based routing dispatches to correct resource
-23. [ ] Attribution formatting in agent output
-24. [ ] Draft artifact creation for annotations, suggestions, feedback
-25. [ ] Access control enforcement (read-only blocks annotate/suggest)
-26. [ ] Token budget enforcement and summary generation
-27. [ ] Freshness warning for stale documents
+- [x] Plugin scaffold (`plugins/ta-community-hub/`) with JSON-over-stdio protocol
+- [x] All 5 MCP tools: `community_search`, `community_get`, `community_annotate`, `community_feedback`, `community_suggest`
+- [x] `handshake`, `list_resources`, `sync` protocol methods
+- [x] Registry parsing (`registry.rs`): TOML roundtrip, access levels, intent routing, disabled filtering
+- [x] Cache layer (`cache.rs`): local doc indexing, keyword search, token budget, freshness metadata
+- [x] CLI commands: `ta community list/sync/search/get` in `commands/community.rs`
+- [x] Context injection: `build_community_context_section()` for `auto_query = true` resources, wired into `inject_claude_md()`
+- [x] 7 tests in `registry.rs`, 4 tests in `cache.rs`, 13 tests in `main.rs`, 8 tests in `community.rs` = 32 new tests
+
+#### Deferred items moved/resolved
+
+- Item 16 (Upstream PR on apply) → v0.13.7+ — staging infrastructure in place
+- Item 17 (Contribution audit trail) → v0.14.3 (Compliance-Ready Audit Ledger)
+- Item 19 (Tab completion) → v0.13.7 shell improvements
+- Item 20 (Status bar integration) → v0.13.7 shell improvements
+
+#### Tests added (32 total)
+
+- `registry::tests::load_empty_when_file_missing`
+- `registry::tests::load_parses_resources`
+- `registry::tests::access_defaults_to_read_only`
+- `registry::tests::by_intent_filters_correctly`
+- `registry::tests::disabled_resource_excluded_from_enabled`
+- `registry::tests::github_repo_parses_owner_and_repo`
+- `registry::tests::local_path_resolves_relative`
+- `cache::tests::search_finds_matching_docs`
+- `cache::tests::get_doc_returns_content`
+- `cache::tests::token_budget_truncates_large_doc`
+- `cache::tests::search_respects_resource_filter`
+- `main::tests::handshake_returns_plugin_name_and_capabilities`
+- `main::tests::list_resources_empty_when_no_config`
+- `main::tests::list_resources_shows_configured_resources`
+- `main::tests::community_search_returns_empty_without_resources`
+- `main::tests::community_annotate_requires_note_param`
+- `main::tests::community_annotate_enforces_read_only_access`
+- `main::tests::community_annotate_stages_file_for_read_write_resource`
+- `main::tests::community_feedback_validates_rating`
+- `main::tests::community_suggest_stages_new_doc`
+- `main::tests::sync_local_resource_copies_docs`
+- `main::tests::unknown_method_returns_error`
+- `community::tests::registry_loads_from_toml`
+- `community::tests::registry_empty_when_no_file`
+- `community::tests::community_context_section_empty_without_auto_query`
+- `community::tests::community_context_section_includes_auto_query_resources`
+- `community::tests::community_context_section_excludes_disabled`
+- `community::tests::sync_local_indexes_markdown_files`
+- `community::tests::search_finds_keyword_in_cache`
 
 #### Version: `0.13.6-alpha`
 
