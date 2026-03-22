@@ -225,6 +225,9 @@ enum Commands {
         /// Age threshold for compaction in days (default: 30). Only used with --compact.
         #[arg(long, default_value = "30")]
         compact_after_days: u32,
+        /// Run GC even if a release pipeline lockfile is present.
+        #[arg(long)]
+        force: bool,
     },
     /// System-wide health check: toolchain, agent binaries, daemon, plugins, .ta integrity.
     Doctor,
@@ -731,6 +734,7 @@ fn main() -> anyhow::Result<()> {
             include_events,
             compact,
             compact_after_days,
+            force,
         } => commands::gc::execute(
             &config,
             *dry_run,
@@ -740,6 +744,7 @@ fn main() -> anyhow::Result<()> {
             *include_events,
             *compact,
             *compact_after_days,
+            *force,
         ),
         Commands::Operations { command } => commands::operations::execute(command, &config),
         Commands::Runbook { command } => commands::runbook::execute(command, &config),

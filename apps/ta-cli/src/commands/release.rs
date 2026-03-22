@@ -681,6 +681,29 @@ fn apply_version_template(template: &str, parts: &[&str], prerelease: &str) -> S
     result
 }
 
+/// RAII guard that writes `.ta/release.lock` on creation and removes it on drop.
+/// `ta gc` checks for this file and skips staging deletion while a pipeline is active.
+struct ReleaseLockGuard {
+    path: std::path::PathBuf,
+}
+
+impl ReleaseLockGuard {
+    fn acquire(workspace_root: &std::path::Path) -> anyhow::Result<Self> {
+        let ta_dir = workspace_root.join(".ta");
+        std::fs::create_dir_all(&ta_dir)?;
+        let path = ta_dir.join("release.lock");
+        let pid = std::process::id();
+        std::fs::write(&path, format!("{}\n", pid))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for ReleaseLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn run_pipeline(
     config: &GatewayConfig,
     version: &str,
@@ -690,6 +713,13 @@ fn run_pipeline(
     pipeline_path: Option<&Path>,
     from_tag: Option<&str>,
 ) -> anyhow::Result<()> {
+    // Acquire a release lockfile so `ta gc` knows not to delete staging dirs mid-pipeline.
+    let _lock = if !dry_run {
+        Some(ReleaseLockGuard::acquire(&config.workspace_root)?)
+    } else {
+        None
+    };
+
     let pipeline = load_pipeline(config, pipeline_path)?;
 
     // Normalize plan phase IDs to semver using the pipeline's version policy.

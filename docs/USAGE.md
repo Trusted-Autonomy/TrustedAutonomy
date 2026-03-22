@@ -1149,6 +1149,8 @@ ta gc --archive
 - **Orphaned draft cleanup**: draft package JSON files whose goal no longer exists → removed
 - **History ledger writes**: every GC'd goal gets a compact summary appended to `.ta/goal-history.jsonl`
 
+**Release pipeline protection**: `ta gc` checks for a `.ta/release.lock` file written by `ta release run`. If the lock exists, GC skips staging deletion and prints a warning — this prevents accidentally deleting active release staging dirs mid-pipeline. Once the release pipeline completes (or is interrupted), the lock is removed automatically. Use `ta gc --force` to override.
+
 #### Lifecycle Compaction (`ta gc --compact`)
 
 Compaction removes "fat" artifacts — staging copies and draft packages — from applied/completed goals that are older than a configurable age threshold. Unlike standard GC (which handles zombie and orphaned records), compaction specifically targets successfully completed work where the VCS record is the source of truth and the staging copy is no longer needed.

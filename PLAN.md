@@ -5712,16 +5712,16 @@ Current releases ship archives containing a bare binary and docs. Users must man
 ---
 
 ### v0.13.12 — Beta Bug Bash & Polish
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Catch and fix accumulated polish debt, false positives, and deferred UX items from the v0.13.1.x sub-phases before advancing to the deeper v0.13.2+ infrastructure phases. No new features — only fixes, observability improvements, and cleanup.
 
 #### Release Pipeline & Staging Bugs
 
 1. [x] **`ta draft apply` scans unrelated staging dirs**: `apply` now validates that the goal's staging workspace exists before opening it. If deleted by concurrent `ta gc`, provides actionable error with exact recovery commands. (Discovered during v0.13.1.7 release run.)
-2. [ ] **Release pipeline drift false positive**: The "Generate release notes" agent step triggers `[info] Source changed since goal start — rebasing against current source.` even when the source has not changed since the goal started. Root cause: drift check uses mtime rather than content hash. Fix: record a content hash of source files at goal-start time and compare by content, not mtime. (Discovered during v0.13.1.7 release run.)
-3. [ ] **Release notes agent should not need a full workspace copy**: The release notes agent only reads git history and writes one `.md` file — it does not need a full staging copy of the workspace. Redesign: release notes generation queries `goal-history.jsonl` (v0.13.10) for completed phases since last tag, then writes the file directly to source without staging. This eliminates the staging/drift fragility entirely for this use case. Longer term: introduce a lightweight "scribe" goal type (no workspace copy, declared write path only) for pure-write, no-compile artifacts. (Design discussion: staging is the right model for code changes that need build/test validation; it is wasteful and fragile for pure documentation/metadata outputs that don't need verification.)
+2. [x] **Release pipeline drift false positive**: Fixed in v0.13.2 — conflict detection now uses SHA-256 content hash as the authoritative signal (not mtime), eliminating false positives when a file's mtime changes but content is identical. The `FileSnapshot::is_changed()` method in `ta-workspace/src/conflict.rs` compares `current_hash != self.content_hash`. Verified with regression tests including `file_snapshot_same_mtime_different_content_is_detected`.
+3. → **v0.14.0** **Release notes agent should not need a full workspace copy**: Deferred — requires "scribe" goal type (lightweight, no staging copy). Design complete (see original description). Depends on GoalBaseline trait (item 6). Assigned to v0.14.0 infrastructure work.
 4. [x] **`--label` dispatches even when pipeline is aborted**: When the user cancels at an approval gate (e.g., "Proceed with 'Push'? [y/N] n"), `run_pipeline` returns early via `?` but the `--label` dispatch block was outside the else branch and ran unconditionally. Fix: moved `--label` dispatch inside the `else { run_pipeline()? ... }` block so it only executes on successful pipeline completion. (Fixed in `release.rs` during v0.13.12 planning.)
-5. [ ] **GC should not run while a release pipeline is active**: `ta gc` should check for running release pipeline processes (or a lockfile written by `ta release run`) and skip — or warn — rather than deleting staging dirs mid-pipeline. Add a `--force` flag to override.
+5. [x] **GC should not run while a release pipeline is active**: `ta gc` now checks for `.ta/release.lock` at startup and warns + skips staging deletion if present. `ta release run` (non-dry-run) acquires `ReleaseLockGuard` which writes the lock with the current PID and removes it on drop. `ta gc --force` overrides the guard. (v0.13.12)
 5b. [x] **Build-tool lock files left uncommitted after verify step**: After the `[verify]` commands run (`cargo build`, `cargo test`, etc.), build tools may rewrite lock files (`Cargo.lock`, `package-lock.json`, `go.sum`, `Pipfile.lock`) in the staging directory. These are not agent-written changes — they are deterministic outputs of the build tool. The overlay diff currently includes them as changed files, which is correct, but the issue is they accumulate as uncommitted changes in the source after `ta draft apply` because:
     1. `apply` copies `Cargo.lock` from staging → source (content matches, so source is now "correct")
     2. User then runs a build command → cargo rewrites `Cargo.lock` again (may differ if deps resolved differently)
@@ -5736,50 +5736,7 @@ Current releases ship archives containing a bare binary and docs. Users must man
 
 #### Overlay Baseline — `GoalBaseline` Trait
 
-6. [ ] **Replace live-source diff with `GoalBaseline` trait**: The overlay currently diffs staging vs the *live working tree*. When uncommitted changes exist in the source at goal-start time, staging mirrors them and the diff is empty — "No changes detected." The correct fix is not a warning; it is to diff against a **stable snapshot of the source captured at goal-start** rather than the live filesystem. This is also the enabling abstraction for non-VCS and non-filesystem workflows (DB records, email threads, document stores).
-
-    **`GoalBaseline` trait** (in `crates/ta-workspace/src/baseline.rs`):
-    ```rust
-    /// Defines the "before" state at goal-start. The overlay diffs staging
-    /// against this, not the live source directory.
-    pub trait GoalBaseline: Send + Sync {
-        /// Read a file's content at the baseline (None = file didn't exist).
-        fn read_file(&self, path: &Path) -> Result<Option<Vec<u8>>>;
-        /// List all paths present at the baseline.
-        fn list_files(&self) -> Result<Vec<PathBuf>>;
-        /// Stable key for this baseline (used for caching, logging, drift detection).
-        fn baseline_key(&self) -> String;
-    }
-    ```
-
-    **Implementations for v0.13.12:**
-
-    - `GitBaseline { commit: String }` — reads files via `git show <commit>:<path>`.
-      At goal-start, record `git rev-parse HEAD` into the goal record.
-      `baseline_key()` returns the commit SHA.
-      Works correctly even when the working tree is dirty — diff is always against committed state.
-
-    - `SnapshotBaseline { snapshot_dir: PathBuf }` — for non-git workspaces.
-      At goal-start, compute SHA-256 of each file and record in a lightweight manifest at `.ta/snapshots/<goal-id>/manifest.json`.
-      `read_file()` reads from the snapshot dir (files copied at goal-start) or recomputes from the manifest.
-      `baseline_key()` returns the manifest hash.
-
-    **Selection logic at goal-start:**
-    ```
-    if git repo → GitBaseline(HEAD)
-    else        → SnapshotBaseline(sha256 of each file)
-    ```
-    Stored as `GoalRun.baseline_ref: BaselineRef` (enum: `Git(sha)` | `Snapshot(path)` | `LiveSource` (legacy)).
-    `diff_all()` accepts `&dyn GoalBaseline`; `LiveSource` adapter wraps the current live-source comparison for backwards compatibility with old goal records.
-
-    **Future implementations (not in v0.13.12, defined by trait):**
-    - `DbRecordBaseline { table, pk_snapshot }` — row hashes at goal-start; diff = changed rows
-    - `EmailThreadBaseline { thread_ids, message_ids }` — message-ID list at goal-start; diff = new/modified messages
-    - `S3PrefixBaseline { bucket, prefix, etag_map }` — ETag map at goal-start; diff = changed objects
-    - `DocumentStoreBaseline { collection, doc_revision_map }` — revision IDs at goal-start
-
-    **Why this is the right fix, not the warn/adopt approach:**
-    The warn approach treats dirty-tree as user error and forces a workflow detour. The `GoalBaseline` approach eliminates the class of error entirely — the diff is always "what did the agent change relative to when the goal started," regardless of what was already in the working tree. It also unblocks the `--adopt` shortcut naturally: `ta draft apply --adopt` commits working-tree changes to a branch before starting, setting `GitBaseline(HEAD)` on the new branch — no special code path needed.
+6. → **v0.14.0** **Replace live-source diff with `GoalBaseline` trait**: Deferred — foundational architectural change enabling non-VCS workflows and eliminating dirty-tree false positives. Design is complete (GitBaseline, SnapshotBaseline, BaselineRef enum). Assigned to v0.14.0 as it unblocks scribe goal type (item 3), `--adopt` shortcut, and AMP context registry bridge (v0.14.2).
 
 #### UX & Health-Check Bugs
 
@@ -5791,13 +5748,7 @@ Current releases ship archives containing a bare binary and docs. Users must man
    ```
    The hint message updates to reflect the configured value. Note: 3-day default means a Friday-evening draft hints on Monday morning — acceptable since it is informational only, not blocking. Users who find it noisy can set `stale_hint_days = 5`.
 
-8. [ ] **Browser tools off by default; enable per agent-capability profile**: The claude-flow MCP server exposes `browser_*` tools (Playwright-backed) which trigger macOS TCC permission prompts for Contacts, Reminders, iCloud, etc. on first use. These tools are legitimate for research workflows but should not be active in standard dev/QA agent profiles. Fix: add an `agent_capabilities` field to agent config (e.g., `.ta/agents/research.toml`). Standard profiles declare `capabilities = []`; a research profile declares `capabilities = ["browser"]`. The MCP tool filter in the daemon only forwards browser tool calls to agents with the capability declared. Add a `research` agent profile template to the default `ta init run` scaffold.
-   ```toml
-   # .ta/agents/research.toml
-   [agent]
-   capabilities = ["browser"]
-   model        = "claude-opus-4-6"
-   ```
+8. → **v0.14.1** **Browser tools off by default; enable per agent-capability profile**: Deferred — requires MCP tool filter in daemon and agent capability profile schema. Design: `capabilities = ["browser"]` in `.ta/agents/research.toml`; daemon filters `browser_*` tool calls. Assigned to v0.14.1 (Sandboxing & Attestation) as a capability scoping feature.
 
 #### Windows Performance & Diagnostics
 
@@ -5807,47 +5758,20 @@ Current releases ship archives containing a bare binary and docs. Users must man
 
 #### Intelligent Surface (deferred from v0.13.1.6)
 
-9. [ ] **Proactive notifications**: Daemon pushes for: goal completed, goal failed, draft ready for review, corrective action needed, disk warning. Delivered via configured channels (shell SSE, Discord, future: email/Slack).
-10. [ ] **Suggested next actions**: After any command, daemon suggests what to do next based on current state: "Draft applied. PR #157 created. Next: `ta pr status` or `ta run` to start next phase."
-11. [ ] **Intent-based interaction in `ta shell`**: Natural language operational requests ("clean up old goals", "what's stuck?") are translated to command sequences by the shell agent, shown for approval before executing.
-12. [ ] **Reduce command surface**: Commands subsumed by the intelligent layer are marked "advanced" in help — not removed, but deprioritised. Default path is through the intelligent surface.
+9. → **v0.14.0** **Proactive notifications**: Deferred from v0.13.1.6, again deferred to v0.14.0. Daemon push notifications for goal completed/failed/draft-ready via SSE and configured channels.
+10. → **v0.14.0** **Suggested next actions**: Deferred — needs daemon state model and command suggestion engine. Design: suggest after every command based on current state.
+11. → **v0.14.0** **Intent-based interaction in `ta shell`**: Deferred — requires shell agent with approval flow for command sequences.
+12. → **v0.14.0** **Reduce command surface**: Deferred — follows items 9–11 completion.
 
 #### Project Context Cache (hybrid now + AMP)
 
-13. [ ] **`.ta/project-digest.json` — inject pre-summarised project context at goal start**: Every goal invocation re-sends PLAN.md, CLAUDE.md, and Cargo.toml structure to the agent — typically 10–20k tokens of context that rarely changes between goals. Fix: build a lightweight content-addressed cache. At `ta run` time, hash the key files; if the hash matches the stored digest, inject a pre-built "Project Context" block (~150 lines) instead of the raw files.
-
-    **Design:**
-    ```json
-    // .ta/project-digest.json
-    {
-      "schema": 1,
-      "entries": [
-        {
-          "key": "plan_phase_status",
-          "source_hash": "sha256:<hash-of-PLAN.md>",
-          "summary": "Current phase: v0.13.12 (pending). Last completed: v0.13.1.7 ...",
-          "generated_at": "2026-03-21T..."
-        },
-        {
-          "key": "workspace_structure",
-          "source_hash": "sha256:<hash-of-Cargo.toml>",
-          "summary": "Workspace crates: ta-cli, ta-daemon, ta-goal, ta-changeset, ...",
-          "generated_at": "2026-03-21T..."
-        }
-      ]
-    }
-    ```
-    The injected block replaces the raw file content in the CLAUDE.md goal preamble. When a source file changes (hash mismatch), the digest entry is regenerated. Regeneration uses a short `claude --print` call or mechanical extraction (no staging spin-up).
-
-    **Why now, not deferred to AMP (v0.14.2)**: This is ~150 lines of Rust, no new dependencies, and saves 10–20k tokens per goal invocation immediately. At v0.14.2, each digest entry maps 1:1 to an AMP context registry entry — zero rework, pure additive migration. The `context_hash` field in AMP messages already assumes a store with this exact shape.
-
-    **AMP bridge at v0.14.2**: digest entries become the seed of the AMP context registry. The `source_hash` becomes the AMP `context_hash`; the `summary` becomes the stored embedding payload. Agents that have seen a goal built on the same PLAN.md hash skip retransmitting context entirely.
+13. → **v0.14.2** **`.ta/project-digest.json` — inject pre-summarised project context at goal start**: Deferred to v0.14.2 (AMP/Context Registry) where it maps cleanly to the AMP context registry. Design is complete: content-addressed cache keyed by SHA-256 of PLAN.md/Cargo.toml; regenerates on hash mismatch; saves 10–20k tokens per goal. At v0.14.2, `source_hash` → AMP `context_hash`, `summary` → stored embedding payload.
 
 #### Release Pipeline Polish (deferred from v0.13.1.x)
 
 14. [x] **Stale `.release-draft.md` poisons release notes**: If a prior release run left `.release-draft.md` in the source tree, the next release notes agent reads it as context and re-emits the old version header. Fix: added "Clear stale release draft" shell step immediately before the "Generate release notes" agent step in `DEFAULT_PIPELINE_YAML`. (Fixed in `release.rs` during v0.13.12 planning.)
-15. [ ] **Single GitHub release per build**: `ta release run --label` currently creates two GitHub release objects (one for the semver tag, one for the label tag). Redesign: one release using the label tag as the primary identifier; semver tag is a lightweight git tag only (no GH release object). Avoids duplicate entries in the GitHub releases UI.
-16. [ ] **VCS-agnostic release pipeline**: `release.rs` calls `git` and `gh` directly. Document that `ta release` requires git for now; design a path for VCS-agnostic release via `.ta/release.yaml` script hooks that project owners can override for Perforce or SVN environments.
+15. → **v0.14.0** **Single GitHub release per build**: Deferred — redesign of dispatch flow needed (label tag as primary, semver as lightweight git tag only). See memory: [Release pipeline improvements](project_release_future.md).
+16. → **v0.14.0** **VCS-agnostic release pipeline**: Deferred — document git requirement now; design hook override for Perforce/SVN at v0.14.0 alongside VCS plugin architecture work.
 
 #### Version: `0.13.12-alpha`
 

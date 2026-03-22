@@ -19,7 +19,25 @@ pub fn execute(
     include_events: bool,
     compact: bool,
     compact_after_days: u32,
+    force: bool,
 ) -> anyhow::Result<()> {
+    // Refuse to delete staging dirs while a release pipeline is active, unless --force.
+    let lock_path = config.workspace_root.join(".ta/release.lock");
+    if !force && lock_path.exists() {
+        let pid_hint = std::fs::read_to_string(&lock_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .map(|p| format!(" (PID {})", p))
+            .unwrap_or_default();
+        eprintln!(
+            "warning: release pipeline is active{} — skipping staging GC to prevent data loss.",
+            pid_hint
+        );
+        eprintln!("         Wait for `ta release run` to complete, then re-run `ta gc`.");
+        eprintln!("         To override: ta gc --force");
+        return Ok(());
+    }
+
     let store = GoalRunStore::new(&config.goals_dir)?;
     let ledger = GoalHistoryLedger::for_project(&config.workspace_root);
     let velocity = VelocityStore::for_project(&config.workspace_root);
