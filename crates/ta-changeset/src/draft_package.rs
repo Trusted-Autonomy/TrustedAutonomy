@@ -445,6 +445,21 @@ pub struct Signatures {
     pub gateway_attestation: Option<String>,
 }
 
+// ---- Approval Record ----
+
+/// Records a single reviewer's approval of a draft package (v0.14.2).
+///
+/// Multiple `ApprovalRecord`s accumulate in `DraftPackage::pending_approvals`
+/// until the governance quorum is reached, at which point the draft transitions
+/// to `DraftStatus::Approved`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRecord {
+    /// Reviewer identity (name or email).
+    pub reviewer: String,
+    /// When this approval was recorded.
+    pub approved_at: DateTime<Utc>,
+}
+
 // ---- Draft Package (top level) ----
 
 /// The Draft Package — a complete, reviewable milestone deliverable.
@@ -497,6 +512,14 @@ pub struct DraftPackage {
     /// display (`ta draft view` combined impact) and chain apply (`ta draft apply --chain`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_draft_id: Option<Uuid>,
+
+    /// Accumulated reviewer approvals for multi-party governance (v0.14.2).
+    /// Empty for single-approver workflows (legacy / require_approvals = 1).
+    /// Grows as each reviewer calls `ta draft approve --as <identity>`.
+    /// When `pending_approvals.len() >= require_approvals` the draft transitions
+    /// to `DraftStatus::Approved`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_approvals: Vec<ApprovalRecord>,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -694,6 +717,7 @@ mod tests {
             tag: None,
             vcs_status: None,
             parent_draft_id: None,
+            pending_approvals: vec![],
         }
     }
 

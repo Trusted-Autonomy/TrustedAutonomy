@@ -161,6 +161,8 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
         PrCommands::Approve { id, reviewer } => draft::DraftCommands::Approve {
             id: Some(id.clone()),
             reviewer: reviewer.clone(),
+            reviewer_as: None,
+            force_override: false,
         },
         PrCommands::Deny {
             id,

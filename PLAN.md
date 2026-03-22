@@ -5839,7 +5839,7 @@ These are addressed across v0.14.4–v0.14.5.
 ---
 
 ### v0.14.1 — Hardware Attestation & Verifiable Audit Trails
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Bind audit log entries to the hardware that produced them via TPM attestation or Apple Secure Enclave signing. Enables cryptographic proof that audit records were produced on the declared machine and not retroactively fabricated.
 
 **Trust metric alignment**: Implements the "complete accounting of behavior" requirement in Self-Reflexive Meta Control (§15) and the traceability requirement in Reliability (§3) from *Suggested Metrics for Trusted Autonomy* (NIST-2023-0009-0002). A tamper-evident log cryptographically bound to hardware is the infrastructure that makes the accounting trustworthy rather than self-reported. See `docs/trust-metrics.md`.
@@ -5858,17 +5858,22 @@ These are addressed across v0.14.4–v0.14.5.
 ---
 
 ### v0.14.2 — Multi-Party Approval & Threshold Governance
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Require N-of-M human approvals before a draft can be applied. Configurable per-project and per-action-type. Prevents any single person (including the TA operator) from autonomously applying high-stakes changes.
 
 #### Items
 
-1. [ ] **`[governance]` section in `workflow.toml`**: `require_approvals = 2`, `approvers = ["alice", "bob", "carol"]`. Defaults: 1 approver (current behavior).
-2. [ ] **Multi-approver draft state machine**: `PendingReview` waits for N distinct approvals before transitioning to `Approved`. Each approval is timestamped and logged.
-3. [ ] **Approval request routing**: When a draft requires N approvals, notify all listed approvers via their configured channels (Discord DM, Slack, email).
-4. [ ] **`ta draft approve --as <identity>`**: Approve a draft as a named approver. Daemon validates identity against the approver list.
-5. [ ] **Threshold signatures (optional)**: For cryptographic enforcement, use Shamir's Secret Sharing to require N-of-M keyholders to co-sign the apply operation.
-6. [ ] **Override with audit trail**: Designated override identity can apply with 1 approval but the override is prominently logged and flagged in compliance reports.
+1. [x] **`[governance]` section in `workflow.toml`**: `require_approvals = 2`, `approvers = ["alice", "bob", "carol"]`, `override_identity = "admin"`. Defaults: 1 approver (current behavior, backward-compatible). `GovernanceConfig` added to `crates/ta-submit/src/config.rs`.
+2. [x] **Multi-approver draft state machine**: `pending_approvals: Vec<ApprovalRecord>` field on `DraftPackage`. `PendingReview` waits for N distinct approvals before transitioning to `Approved`. Each approval is timestamped and linked to a reviewer identity. Duplicate approvals from the same reviewer rejected.
+3. → **v0.14.4** **Approval request routing**: Notify all listed approvers via configured channels (Discord DM, Slack, email) when a draft requires their approval. Deferred — requires Central Daemon multi-user identity routing.
+4. [x] **`ta draft approve --as <identity>`**: Approve a draft as a named reviewer. Validates identity against `approvers` list (if non-empty). Also accepts `--reviewer` as legacy alias.
+5. → **community** **Threshold signatures**: Shamir's Secret Sharing N-of-M co-signing. Deferred — requires dedicated cryptography work beyond the `AttestationBackend` trait. Community contribution point.
+6. [x] **Override with audit trail**: `ta draft approve --override` allows the configured `override_identity` to bypass quorum. Override is logged via `tracing::warn` and printed with `⚠` prefix for audit visibility.
+
+#### Deferred items resolved
+
+- Item 3 → v0.14.4 (Central Daemon): requires multi-user identity routing and channel delivery infrastructure
+- Item 5 → community: Shamir's Secret Sharing is a significant independent cryptography module
 
 #### Version: `0.14.2-alpha`
 

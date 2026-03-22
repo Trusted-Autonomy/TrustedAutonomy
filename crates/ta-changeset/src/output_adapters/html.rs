@@ -308,6 +308,7 @@ mod tests {
             tag: None,
             vcs_status: None,
             parent_draft_id: None,
+            pending_approvals: vec![],
         };
         pkg.status = DraftStatus::PendingReview;
 
