@@ -5445,7 +5445,7 @@ ta run "write tests" --model ollama/phi4-mini   # shorthand: model implies ta-ag
 ---
 
 ### v0.13.9 — Product Constitution Framework
-<!-- status: in_progress -->
+<!-- status: done -->
 <!-- beta: yes — project-level behavioral contracts and release governance -->
 **Goal**: Make the constitution a first-class, configurable artifact that downstream projects declare, extend, and enforce — not a TA-internal concept hard-wired to `docs/TA-CONSTITUTION.md`. A project using TA can define its own invariants (what functions inject, what functions restore, what the rules are), and TA's draft-build scan and release checklist gate read from that config.
 

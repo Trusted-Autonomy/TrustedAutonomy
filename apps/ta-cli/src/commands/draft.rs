@@ -1521,12 +1521,42 @@ pub(crate) fn build_package(
         pkg.display_id = Some(format!("{}-{:02}", goal_prefix, seq));
     }
 
-    // v0.12.0 §16.6: Constitution §4 pattern scan is now project-specific.
-    // Only runs when `[constitution] s4_scan = true` in .ta/workflow.toml.
-    // Default: false — external projects (Python, C++, content drafts, etc.) are
-    // never given TA-internal Rust checks. The TA repo enables this via its own
-    // workflow.toml. See §16.6 of the TA project constitution.
-    if workflow_config.constitution.s4_scan {
+    // v0.13.9: Project constitution scan — reads inject/restore rules from
+    // `.ta/constitution.toml` if present, giving project-specific scanning
+    // instead of TA's hardcoded inject_*/restore_* patterns.
+    // Falls back to the old §4 scan when constitution.toml is absent and
+    // `[constitution] s4_scan = true` in .ta/workflow.toml.
+    let constitution_config =
+        super::constitution::ProjectConstitutionConfig::load(&config.workspace_root)
+            .unwrap_or_default();
+    if let Some(ref cc) = constitution_config {
+        // Project has a constitution.toml — use it to drive the scan.
+        if cc.scan.on_violation != "off" {
+            match super::constitution::scan_for_violations(&goal.workspace_path, cc) {
+                Ok(violations) if !violations.is_empty() => {
+                    eprintln!(
+                        "[constitution] {} violation(s) found — review before approving",
+                        violations.len()
+                    );
+                    for v in &violations {
+                        pkg.verification_warnings.push(VerificationWarning {
+                            command: format!("[constitution:{}]", v.rule),
+                            exit_code: None,
+                            output: format!(
+                                "{}: line {} — {} (severity: {})",
+                                v.file, v.line, v.message, v.severity
+                            ),
+                        });
+                    }
+                }
+                Ok(_) => {} // clean
+                Err(e) => {
+                    tracing::warn!(error = %e, "constitution scan failed");
+                }
+            }
+        }
+    } else if workflow_config.constitution.s4_scan {
+        // No constitution.toml — fall back to TA's hardcoded §4 scan.
         let s4_warnings = scan_s4_violations(&pkg.changes.artifacts, &goal.workspace_path);
         if !s4_warnings.is_empty() {
             eprintln!(
