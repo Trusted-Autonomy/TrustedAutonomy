@@ -444,15 +444,30 @@ jobs:
 
       - name: Publish GitHub Release
         id: release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.get_version.outputs.version }}
-          name: Release ${{ steps.get_version.outputs.version }}
-          draft: false
-          prerelease: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease == 'true' }}
-          files: artifacts/*
-          body_path: release-body.md
-          make_latest: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.get_version.outputs.version }}
+          IS_PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease == 'true' }}
+        run: |
+          # Create as draft first so assets can be uploaded before the release is
+          # immutably published (repositories with "immutable releases" enabled reject
+          # asset uploads after a release is published).
+          PRERELEASE_FLAG=""
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          gh release create "$TAG" \
+            --title "Release $TAG" \
+            --notes-file release-body.md \
+            --draft \
+            $PRERELEASE_FLAG
+
+          # Upload all artifacts to the draft release.
+          gh release upload "$TAG" artifacts/* --clobber
+
+          # Publish the draft (makes it visible and immutable).
+          gh release edit "$TAG" --draft=false --latest
 
       - name: Validate release assets on GitHub
         env:
