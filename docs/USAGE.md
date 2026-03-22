@@ -2118,6 +2118,40 @@ health_check = true
 
 Without this file, TA auto-detects your VCS (Git > SVN > Perforce > none) and uses sensible defaults. When VCS is detected, `ta draft apply` runs the full submit workflow automatically — no flags needed.
 
+### Agent Sandboxing (`[sandbox]`)
+
+Restrict the agent's filesystem and network access using OS-level sandboxing. Disabled by default — enable when you want to confine what an agent can read, write, or reach:
+
+```toml
+[sandbox]
+enabled = true
+provider = "native"        # "native" (macOS sandbox-exec / Linux bwrap) | "openshell" | "oci"
+
+# Paths the agent may read beyond its staging workspace and system libraries.
+# The staging workspace root is always readable/writable.
+allow_read = ["/usr/local/share", "/opt/homebrew"]
+
+# Additional writable paths (staging workspace is always writable).
+allow_write = []
+
+# Network destinations the agent may reach. Empty = block all outbound network.
+# Use ["*"] to allow all network (equivalent to no sandboxing).
+allow_network = ["api.anthropic.com", "api.github.com"]
+```
+
+**Platform support:**
+- **macOS**: Uses built-in `sandbox-exec` (Seatbelt). No installation required.
+- **Linux**: Uses `bwrap` (bubblewrap). Install via `apt install bubblewrap` or equivalent. If unavailable, TA warns and runs without sandboxing.
+- **Windows**: Sandboxing not yet supported — `enabled = true` is silently ignored.
+
+**What is always allowed** (regardless of `allow_read`):
+- The staging workspace (agent's working directory)
+- OS system libraries (`/usr`, `/System`, `/Library`, `/nix`, `/lib`)
+- `/tmp` (tmpfs on Linux)
+- `/dev/null`, `/dev/tty`
+
+**Network filtering note**: On macOS, `allow_network` is a declaration (used for auditing) but the sandbox profile currently allows all outbound when any host is listed. Hostname-level network filtering (L7 proxy) is planned for v0.14.1.
+
 ### Commit Co-Authorship
 
 Every commit made through `ta draft apply` includes a `Co-Authored-By` trailer. This gives TA shared credit alongside the human author in GitHub's contribution graph, PR history, and `git log`.

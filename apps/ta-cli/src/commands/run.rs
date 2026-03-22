@@ -2088,13 +2088,57 @@ fn launch_agent_via_runtime(
         StdoutMode::Inherited
     };
 
-    let request = SpawnRequest {
+    let raw_request = SpawnRequest {
         command: config.command.clone(),
         args,
         env,
         working_dir: staging_path.to_path_buf(),
         stdin_mode,
         stdout_mode,
+    };
+
+    // Apply sandbox policy from workflow.toml [sandbox] section (v0.14.0).
+    // The policy wraps the spawn request in sandbox-exec (macOS) or bwrap (Linux)
+    // when `sandbox.enabled = true`. Disabled by default — no behaviour change on upgrade.
+    let request = {
+        use ta_runtime::{SandboxPolicy, SandboxProvider};
+        let wf_toml = staging_path.join(".ta/workflow.toml");
+        let wf = ta_submit::WorkflowConfig::load_or_default(&wf_toml);
+        if wf.sandbox.enabled {
+            let provider = SandboxPolicy::detect_provider();
+            if provider == SandboxProvider::None {
+                tracing::warn!(
+                    "sandbox.enabled=true but no sandbox provider available on this platform — \
+                     running agent without sandboxing"
+                );
+                raw_request
+            } else {
+                let policy = SandboxPolicy {
+                    enabled: true,
+                    provider,
+                    allow_read: wf
+                        .sandbox
+                        .allow_read
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect(),
+                    allow_write: wf
+                        .sandbox
+                        .allow_write
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect(),
+                    allow_network: wf.sandbox.allow_network.clone(),
+                };
+                tracing::info!(
+                    provider = ?policy.provider,
+                    "Applying sandbox policy to agent process"
+                );
+                policy.apply(raw_request)
+            }
+        } else {
+            raw_request
+        }
     };
 
     // Resolve the runtime (default: "process").

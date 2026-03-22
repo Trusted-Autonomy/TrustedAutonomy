@@ -5810,7 +5810,7 @@ Key design questions to resolve in v0.14:
 These are addressed across v0.14.4–v0.14.5.
 
 ### v0.14.0 — Agent Sandboxing & Process Isolation
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Run agent processes in hardened sandboxes that limit filesystem access, network reach, and syscall surface. TA manages the sandbox lifecycle; agents work inside it transparently.
 
 **Trust metric alignment**: Directly satisfies Security (§11), Risk Mitigation (§1), and Robustness & Resilience (§10) from *Suggested Metrics for Trusted Autonomy* (NIST-2023-0009-0002). Sandboxing reduces the consequence term in the risk formula: even a misbehaving agent cannot affect production without explicit approval. See `docs/trust-metrics.md`.
@@ -5819,19 +5819,14 @@ These are addressed across v0.14.4–v0.14.5.
 
 #### Items
 
-1. [ ] **Sandbox policy DSL**: Per-goal or per-project sandbox config in `constitution.toml` declaring allowed paths, blocked domains, and syscall allowlist. Format aligns with OpenShell's YAML policy schema so policies are portable between the two systems.
-2. [ ] **macOS sandbox-exec integration**: Wrap agent process with `sandbox-exec` profile derived from the goal's allowed paths and declared resource URIs.
-3. [ ] **Linux seccomp/landlock integration**: Apply seccomp-bpf filter + landlock filesystem restrictions to agent process on Linux.
-4. [ ] **Container fallback**: When sandbox-exec/landlock unavailable, fall back to OCI container via the RuntimeAdapter (v0.13.3).
-5. [ ] **OpenShell runtime adapter**: When `openshell` is installed, delegate runtime confinement to OpenShell instead of TA's native sandbox. SA generates an OpenShell-compatible policy from `constitution.toml`; launches agent via `openshell sandbox create --policy ... -- <agent>`. TA still owns the output layer (staging → draft → approve → apply).
-    ```toml
-    [sandbox]
-    provider = "openshell"    # "native" | "openshell" | "oci"
-    policy = ".ta/sandbox-policy.yaml"
-    ```
-6. [ ] **Credential injection via environment** *(earlier than full sandboxing is fine)*: API keys injected as env vars by the daemon at agent launch — never written to staging, agent config files, or the sandbox filesystem. Mirrors OpenShell's Providers model.
-7. [ ] **Sandbox violation audit events**: Blocked syscall or filesystem access attempt captured as an audit event and surfaced to the user.
-8. [ ] **Test harness**: Integration tests that verify blocked paths are actually blocked and allowed paths are accessible.
+1. [x] **Sandbox policy DSL**: `[sandbox]` section in `.ta/workflow.toml`. Fields: `enabled`, `provider` ("native"/"openshell"/"oci"), `allow_read`, `allow_write`, `allow_network`. Defaults: `enabled = false` (no breakage on upgrade). Implemented in `ta-submit/src/config.rs::SandboxConfig`. 3 tests. (v0.14.0)
+2. [x] **macOS sandbox-exec integration**: `SandboxPolicy::apply()` wraps the `SpawnRequest` in `sandbox-exec -p <profile> -- <cmd>`. Profile generated in `generate_macos_profile()`: `(deny default)`, allows system libs, workspace, declared `allow_read`/`allow_write`, optional outbound network. Agent sandbox activated automatically when `sandbox.enabled = true` in workflow.toml. 5 tests in `ta-runtime/src/sandbox.rs`. (v0.14.0)
+3. [x] **Linux bwrap integration**: `apply_linux_bwrap()` wraps agent in `bwrap` with ro-bind for system paths, rw-bind for workspace, tmpfs for /tmp, optional `--unshare-net`. Available when `bwrap` is on PATH. (v0.14.0)
+4. [ ] **Container fallback (OCI)**: When sandbox-exec/bwrap unavailable, fall back to OCI container via the RuntimeAdapter (v0.13.3). Blocked by OCI plugin implementation (external).
+5. [ ] **OpenShell runtime adapter**: When `openshell` is installed, delegate confinement. TA still owns staging → draft → approve → apply.
+6. [x] **Credential injection via environment**: Already implemented as `ScopedCredential` + `apply_credentials_to_env()` in `ta-runtime` (v0.13.3). `SpawnRequest.env` carries the credential; never written to staging or config files.
+7. [ ] **Sandbox violation audit events**: Blocked syscall or filesystem access attempt captured as an audit event. Requires parsing sandbox-exec/bwrap stderr output. Deferred to v0.14.1 (attestation infrastructure).
+8. [ ] **Test harness**: Integration tests that verify blocked paths are actually blocked. Requires privileged CI environment. Deferred.
 
 #### Version: `0.14.0-alpha`
 

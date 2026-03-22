@@ -53,6 +53,10 @@ pub struct WorkflowConfig {
     /// Constitution / compliance checker configuration (v0.12.0)
     #[serde(default)]
     pub constitution: ConstitutionConfig,
+
+    /// Agent sandboxing configuration (v0.14.0)
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 }
 
 /// Constitution / compliance checker configuration.
@@ -73,6 +77,65 @@ pub struct ConstitutionConfig {
     /// External projects should leave this unset.
     #[serde(default)]
     pub s4_scan: bool,
+}
+
+/// Agent sandboxing configuration (v0.14.0).
+///
+/// Controls whether agents run in a sandboxed process environment that limits
+/// filesystem access, network reach, and syscall surface.
+///
+/// ```toml
+/// [sandbox]
+/// enabled = true
+/// provider = "native"   # "native" (OS sandbox-exec/landlock) | "openshell" | "oci"
+///
+/// # Paths the agent is allowed to read (in addition to its working dir)
+/// allow_read = ["/usr/lib", "/etc/ssl"]
+///
+/// # Paths the agent is allowed to write (staging workspace is always included)
+/// allow_write = []
+///
+/// # Hostnames/CIDR ranges the agent may connect to. Empty = block all network.
+/// allow_network = ["api.anthropic.com", "api.github.com"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Whether sandboxing is enabled. Default: false (safe default — no breakage on upgrade).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Sandbox provider. Default: "native" (macOS sandbox-exec or Linux landlock/seccomp).
+    #[serde(default = "default_sandbox_provider")]
+    pub provider: String,
+
+    /// Additional paths the agent may read (beyond its working dir and /usr, /lib, /etc/ssl).
+    #[serde(default)]
+    pub allow_read: Vec<String>,
+
+    /// Additional writable paths (the staging workspace root is always writable).
+    #[serde(default)]
+    pub allow_write: Vec<String>,
+
+    /// Network destinations the agent is allowed to reach. Empty = block all outbound.
+    /// Entries may be hostnames, IPs, or CIDR blocks (e.g., "api.anthropic.com", "10.0.0.0/8").
+    #[serde(default)]
+    pub allow_network: Vec<String>,
+}
+
+fn default_sandbox_provider() -> String {
+    "native".to_string()
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_sandbox_provider(),
+            allow_read: Vec::new(),
+            allow_write: Vec::new(),
+            allow_network: Vec::new(),
+        }
+    }
 }
 
 /// Submit adapter configuration
@@ -1315,5 +1378,39 @@ auto_merge = true
 "#;
         let config: WorkflowConfig = toml::from_str(toml).unwrap();
         assert!(config.submit.git.auto_merge);
+    }
+
+    #[test]
+    fn sandbox_config_defaults() {
+        let config = SandboxConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.provider, "native");
+        assert!(config.allow_read.is_empty());
+        assert!(config.allow_write.is_empty());
+        assert!(config.allow_network.is_empty());
+    }
+
+    #[test]
+    fn sandbox_config_from_toml() {
+        let toml = r#"
+[sandbox]
+enabled = true
+provider = "native"
+allow_read = ["/usr/lib"]
+allow_write = ["/tmp/scratch"]
+allow_network = ["api.anthropic.com"]
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert!(config.sandbox.enabled);
+        assert_eq!(config.sandbox.provider, "native");
+        assert_eq!(config.sandbox.allow_read, vec!["/usr/lib"]);
+        assert_eq!(config.sandbox.allow_write, vec!["/tmp/scratch"]);
+        assert_eq!(config.sandbox.allow_network, vec!["api.anthropic.com"]);
+    }
+
+    #[test]
+    fn workflow_config_default_has_sandbox_section() {
+        let config = WorkflowConfig::default();
+        assert!(!config.sandbox.enabled, "sandbox disabled by default");
     }
 }
