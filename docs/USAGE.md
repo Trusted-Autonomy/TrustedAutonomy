@@ -2375,6 +2375,57 @@ For multi-channel routing (sending reviews to multiple channels simultaneously),
 
 ## Advanced Features
 
+### Runtime Adapter
+
+By default, TA launches agents as bare OS child processes. The **runtime adapter** system lets you select an alternative execution environment per agent — for example, an OCI container or VM.
+
+#### Selecting a runtime in agent config
+
+Add a `runtime` field to your agent YAML file:
+
+```yaml
+# agents/claude.yaml
+command: claude
+args: ["--output-format", "stream-json"]
+
+# Use the default bare-process runtime (no extra config needed)
+runtime: process
+
+# Or specify a container runtime (requires ta-runtime-oci plugin)
+runtime: oci
+runtime_options:
+  image: "ghcr.io/myorg/agent-sandbox:latest"
+  pull_policy: if_not_present
+```
+
+#### Built-in runtimes
+
+| Name | Description |
+|------|-------------|
+| `process` | Bare OS child process (default). No isolation. |
+
+#### Installing runtime plugins
+
+External runtimes are provided as plugin binaries named `ta-runtime-<name>`. TA discovers them in order:
+
+1. `.ta/plugins/runtimes/` — project-local
+2. `~/.config/ta/plugins/runtimes/` — user-global
+3. Directories on `$PATH`
+
+The plugin binary speaks a JSON-over-stdio protocol. See `crates/ta-runtime/src/plugin.rs` for the protocol specification.
+
+#### Runtime lifecycle events
+
+When an agent is launched, TA emits structured events that appear in `ta events`:
+
+```
+agent_spawned   goal started, runtime=process pid=12345
+agent_exited    goal finished exit_code=0 duration_secs=42
+runtime_error   spawn failed: command not found
+```
+
+These events are also surfaced in the shell TUI and dashboard.
+
 ### Selective Approval
 
 Approve, reject, or discuss individual files using glob patterns:
@@ -6143,7 +6194,8 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.13.0 | Reflink/COW overlay optimization (APFS + Btrfs zero-cost staging) | Done |
 | v0.13.1 | Autonomous operations & self-healing daemon | Done |
 | v0.13.1.6 | Intelligent surface & operational runbooks | Done |
-| v0.13.2 | MCP transport abstraction (TCP/Unix socket) | Planned |
+| v0.13.2 | MCP transport abstraction (TCP/Unix socket) | Done |
+| v0.13.3 | Runtime adapter trait & pluggable agent runtimes | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

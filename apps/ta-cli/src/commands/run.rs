@@ -93,6 +93,15 @@ struct AgentLaunchConfig {
     /// this file instead. Example: `.ta/agent_context.md`. Ignored when absent.
     #[serde(default)]
     context_file: Option<String>,
+    /// Which RuntimeAdapter backend to use for spawning this agent (v0.13.3).
+    ///
+    /// Accepted values: "process" (default), "oci", "vm", or the name of any
+    /// installed `ta-runtime-<name>` plugin.
+    ///
+    /// Example in agent YAML:
+    ///   runtime = "process"
+    #[serde(default)]
+    runtime: ta_runtime::RuntimeConfig,
 }
 
 /// Auto-answer configuration for interactive prompts (v0.10.18.5).
@@ -198,6 +207,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             non_interactive_env: Default::default(),
             auto_answers: Vec::new(),
             context_file: None,
+            runtime: Default::default(),
         },
         "codex" => AgentLaunchConfig {
             command: "codex".to_string(),
@@ -219,6 +229,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             non_interactive_env: Default::default(),
             auto_answers: Vec::new(),
             context_file: None,
+            runtime: Default::default(),
         },
         "claude-flow" => AgentLaunchConfig {
             command: "npx".to_string(),
@@ -273,6 +284,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
                 },
             ],
             context_file: None,
+            runtime: Default::default(),
         },
         _ => AgentLaunchConfig {
             command: agent_id.to_string(),
@@ -290,6 +302,7 @@ fn builtin_agent_config(agent_id: &str) -> AgentLaunchConfig {
             non_interactive_env: Default::default(),
             auto_answers: Vec::new(),
             context_file: None,
+            runtime: Default::default(),
         },
     }
 }
@@ -806,7 +819,19 @@ pub fn execute(
         }
     };
 
+    // Events directory for lifecycle event emission (v0.13.3).
+    let events_dir_for_launch = config.workspace_root.join(".ta").join("events");
+
     // Choose launch mode: headless (piped), PTY-interactive, or simple.
+    //
+    // Non-interactive paths (headless, quiet, simple) go through
+    // launch_agent_via_runtime which uses the RuntimeAdapter from the agent
+    // config.  This emits AgentSpawned/AgentExited lifecycle events and
+    // supports non-"process" runtimes (OCI, VM) when configured.
+    //
+    // PTY interactive mode falls back to the direct launch_agent_interactive
+    // path because PTY allocation requires direct OS child process control.
+    //
     // quiet=true uses headless launch to suppress streaming output (item 21).
     // Type alias for the guidance log — on Unix this contains captured human inputs
     // from PTY sessions; on Windows the Vec is always empty.
@@ -814,8 +839,16 @@ pub fn execute(
     let launch_result: std::io::Result<(std::process::ExitStatus, GuidanceLog)> = if headless
         || quiet
     {
-        launch_agent_headless(&agent_config, &staging_path, &prompt, Some(&save_pid))
-            .map(|exit| (exit, Vec::new()))
+        launch_agent_via_runtime(
+            &agent_config,
+            &staging_path,
+            &prompt,
+            true,
+            Some(&save_pid),
+            goal.goal_run_id,
+            &events_dir_for_launch,
+        )
+        .map(|exit| (exit, Vec::new()))
     } else if interactive {
         #[cfg(unix)]
         {
@@ -833,12 +866,28 @@ pub fn execute(
         #[cfg(not(unix))]
         {
             eprintln!("Warning: interactive PTY mode is not available on Windows. Falling back to simple mode.");
-            launch_agent(&agent_config, &staging_path, &prompt, Some(&save_pid))
-                .map(|exit| (exit, Vec::new()))
+            launch_agent_via_runtime(
+                &agent_config,
+                &staging_path,
+                &prompt,
+                false,
+                Some(&save_pid),
+                goal.goal_run_id,
+                &events_dir_for_launch,
+            )
+            .map(|exit| (exit, Vec::new()))
         }
     } else {
-        launch_agent(&agent_config, &staging_path, &prompt, Some(&save_pid))
-            .map(|exit| (exit, Vec::new()))
+        launch_agent_via_runtime(
+            &agent_config,
+            &staging_path,
+            &prompt,
+            false,
+            Some(&save_pid),
+            goal.goal_run_id,
+            &events_dir_for_launch,
+        )
+        .map(|exit| (exit, Vec::new()))
     };
 
     match launch_result {
@@ -1583,6 +1632,7 @@ fn execute_resume(
             non_interactive_env: Default::default(),
             auto_answers: Vec::new(),
             context_file: None,
+            runtime: Default::default(),
         };
 
         launch_agent_interactive(&resume_config, staging_path, "", &mut session_store)
@@ -1691,6 +1741,9 @@ fn launch_agent(
 ///
 /// If `pid_callback` is provided, it is called with the child PID immediately
 /// after spawning (before waiting for exit) for watchdog liveness checks (v0.11.2.4).
+// Retained for documentation and potential direct use in inner-loop paths
+// that bypass the RuntimeAdapter (e.g., macro-goal re-launch).
+#[allow(dead_code)]
 fn launch_agent_headless(
     config: &AgentLaunchConfig,
     staging_path: &Path,
@@ -1822,6 +1875,167 @@ fn launch_agent_interactive(
     }
 
     Ok((result.exit_status, guidance_log))
+}
+
+/// Launch an agent via the RuntimeAdapter and wait for it to exit (v0.13.3).
+///
+/// This is the non-interactive, non-PTY path.  It replaces `launch_agent` and
+/// `launch_agent_headless` for runtimes other than "process".  For the
+/// built-in "process" runtime it produces identical behaviour.
+///
+/// Events emitted:
+/// - `AgentSpawned` immediately after spawn (carries PID, runtime name, command)
+/// - `AgentExited` after the process exits (carries exit code, duration)
+/// - `RuntimeError` (instead of returning Err) on spawn failure, so callers
+///   always get a structured event even when the agent never starts.
+fn launch_agent_via_runtime(
+    config: &AgentLaunchConfig,
+    staging_path: &std::path::Path,
+    prompt: &str,
+    headless: bool,
+    pid_callback: Option<&dyn Fn(u32)>,
+    goal_id: uuid::Uuid,
+    events_dir: &std::path::Path,
+) -> std::io::Result<std::process::ExitStatus> {
+    use std::io::{BufRead, BufReader};
+    use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
+    use ta_runtime::{RuntimeRegistry, SpawnRequest, StdinMode, StdoutMode};
+
+    // Build the environment map with template variables already applied.
+    let mut env = config.env.clone();
+    if headless {
+        env.extend(config.non_interactive_env.clone());
+    }
+
+    // Expand args (replace {prompt} template variable).
+    let mut args: Vec<String> = config
+        .args_template
+        .iter()
+        .map(|t| t.replace("{prompt}", prompt))
+        .collect();
+    if headless {
+        args.extend_from_slice(&config.headless_args);
+    }
+
+    let stdin_mode = if headless {
+        StdinMode::Null
+    } else {
+        StdinMode::Inherited
+    };
+    let stdout_mode = if headless {
+        StdoutMode::Piped
+    } else {
+        StdoutMode::Inherited
+    };
+
+    let request = SpawnRequest {
+        command: config.command.clone(),
+        args,
+        env,
+        working_dir: staging_path.to_path_buf(),
+        stdin_mode,
+        stdout_mode,
+    };
+
+    // Resolve the runtime (default: "process").
+    let registry = RuntimeRegistry::new();
+    let runtime = match registry.resolve(&config.runtime.name) {
+        Ok(rt) => rt,
+        Err(e) => {
+            // Emit RuntimeError event so the problem is observable.
+            let event_store = FsEventStore::new(events_dir);
+            let _ = event_store.append(&EventEnvelope::new(SessionEvent::RuntimeError {
+                goal_id: Some(goal_id),
+                runtime: config.runtime.name.clone(),
+                error: format!(
+                    "Failed to resolve runtime '{}': {}. \
+                     Check that ta-runtime-{} is installed in .ta/plugins/runtimes/ or on $PATH.",
+                    config.runtime.name, e, config.runtime.name
+                ),
+            }));
+            return Err(std::io::Error::other(format!(
+                "Runtime '{}' not available: {}",
+                config.runtime.name, e
+            )));
+        }
+    };
+
+    let agent_start = std::time::Instant::now();
+
+    // Spawn the agent.
+    let mut handle = match runtime.spawn(request) {
+        Ok(h) => h,
+        Err(e) => {
+            let event_store = FsEventStore::new(events_dir);
+            let _ = event_store.append(&EventEnvelope::new(SessionEvent::RuntimeError {
+                goal_id: Some(goal_id),
+                runtime: runtime.name().to_string(),
+                error: format!(
+                    "Agent spawn failed (runtime: {}, command: {}): {}",
+                    runtime.name(),
+                    config.command,
+                    e
+                ),
+            }));
+            return Err(std::io::Error::other(format!("Spawn failed: {}", e)));
+        }
+    };
+
+    // Report PID for watchdog liveness tracking.
+    if let Some(pid) = handle.pid() {
+        if let Some(cb) = pid_callback {
+            cb(pid);
+        }
+    }
+
+    // Emit AgentSpawned event.
+    {
+        let event_store = FsEventStore::new(events_dir);
+        let _ = event_store.append(&EventEnvelope::new(SessionEvent::AgentSpawned {
+            goal_id,
+            pid: handle.pid(),
+            runtime: runtime.name().to_string(),
+            agent_command: config.command.clone(),
+        }));
+    }
+
+    // If headless, stream stdout lines to parent stdout.
+    if headless {
+        if let Some(stdout) = handle.take_stdout() {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                println!("{}", line);
+            }
+        }
+    }
+
+    // Wait for the agent to finish.
+    let exit_status = match handle.wait() {
+        Ok(s) => s,
+        Err(e) => {
+            let event_store = FsEventStore::new(events_dir);
+            let _ = event_store.append(&EventEnvelope::new(SessionEvent::RuntimeError {
+                goal_id: Some(goal_id),
+                runtime: runtime.name().to_string(),
+                error: format!("Agent wait() failed: {}", e),
+            }));
+            return Err(std::io::Error::other(format!("Wait failed: {}", e)));
+        }
+    };
+
+    // Emit AgentExited event.
+    {
+        let event_store = FsEventStore::new(events_dir);
+        let _ = event_store.append(&EventEnvelope::new(SessionEvent::AgentExited {
+            goal_id,
+            pid: handle.pid(),
+            runtime: runtime.name().to_string(),
+            exit_code: exit_status.code(),
+            duration_secs: agent_start.elapsed().as_secs(),
+        }));
+    }
+
+    Ok(exit_status)
 }
 
 /// Find the most recent draft ID for a goal (headless output).

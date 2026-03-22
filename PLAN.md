@@ -4840,10 +4840,6 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 **Tests added**: 12 new tests in `init.rs` (init_unreal_template, init_unity_template, taignore_unreal_has_binaries, taignore_unity_has_library, bmad_toml_created, bmad_agent_configs_created, mcp_json_created, onboarding_goal_unreal_content, onboarding_goal_unity_content) + 3 new tests in `key_schema.rs` (detect_unreal, detect_unity, unreal_cpp_domain_map).
 
-#### Deferred to v0.13.12
-
-- **[D] GSD (get-shit-done) template**: `ta init run --template gsd` — creates `.planning/` scaffold + `agents/gsd.yaml`. Low effort, completes the trio of spec-driven frameworks (BMAD, Claude Flow, GSD). → v0.13.12 item 17
-
 #### Version: `0.13.1-alpha.4`
 
 ---
@@ -4961,7 +4957,7 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 ---
 
 ### v0.13.3 — Runtime Adapter Trait
-<!-- status: pending -->
+<!-- status: done -->
 <!-- beta: yes — prerequisite for local model support (v0.13.8) -->
 **Goal**: Abstract how TA spawns and manages agent processes. Today it's hardcoded as a bare child process. A `RuntimeAdapter` trait enables container, VM, and remote execution backends — TA provides BareProcess, SecureTA provides OCI/VM.
 
@@ -4969,12 +4965,21 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 #### Items
 
-1. [ ] `RuntimeAdapter` trait with `spawn()`, `stop()`, `status()`, `attach_transport()` methods
-2. [ ] `BareProcessRuntime`: extract current process spawning into this adapter (no behavior change)
-3. [ ] Runtime selection in agent/workflow config: `runtime = "process" | "oci" | "vm"`
-4. [ ] Plugin-based runtime loading: SecureTA registers OCI/VM runtimes as plugins
-5. [ ] Runtime lifecycle events: `AgentSpawned`, `AgentExited`, `RuntimeError` fed into event system
-6. [ ] Credential injection API: `RuntimeAdapter::inject_credentials()` for scoped secret injection into runtime environment
+1. [x] `RuntimeAdapter` trait with `spawn()`, `stop()`, `status()`, `attach_transport()` methods
+2. [x] `BareProcessRuntime`: extract current process spawning into this adapter (no behavior change)
+3. [x] Runtime selection in agent/workflow config: `runtime = "process" | "oci" | "vm"`
+4. [x] Plugin-based runtime loading: SecureTA registers OCI/VM runtimes as plugins
+5. [x] Runtime lifecycle events: `AgentSpawned`, `AgentExited`, `RuntimeError` fed into event system
+6. [x] Credential injection API: `RuntimeAdapter::inject_credentials()` for scoped secret injection into runtime environment
+
+#### Completed
+
+- [x] New `crates/ta-runtime/` crate: `RuntimeAdapter` trait, `AgentHandle` trait, `BareProcessRuntime`, `RuntimeRegistry` with plugin discovery, `ExternalRuntimeAdapter` (JSON-over-stdio plugin protocol), `ScopedCredential`, `RuntimeConfig`, `SpawnRequest`/`SpawnHandle`
+- [x] `runtime: RuntimeConfig` field added to `AgentLaunchConfig` in `run.rs` (serde default = "process")
+- [x] `launch_agent_via_runtime()` integrates `RuntimeAdapter` into all non-PTY agent launch paths (headless, quiet, simple), emitting lifecycle events
+- [x] `AgentSpawned`, `AgentExited`, `RuntimeError` variants added to `ta-events::SessionEvent` with `event_type()`, `goal_id()`, and `suggested_actions()` support
+- [x] 20 new tests across `ta-runtime` (adapter, bare_process, config, credential) and `ta-events` (schema)
+- [x] `ta-runtime` added to workspace members and `ta-cli` dependencies
 
 #### Version: `0.13.3-alpha`
 
@@ -5802,62 +5807,6 @@ Current releases ship archives containing a bare binary and docs. Users must man
     **Why now, not deferred to AMP (v0.14.2)**: This is ~150 lines of Rust, no new dependencies, and saves 10–20k tokens per goal invocation immediately. At v0.14.2, each digest entry maps 1:1 to an AMP context registry entry — zero rework, pure additive migration. The `context_hash` field in AMP messages already assumes a store with this exact shape.
 
     **AMP bridge at v0.14.2**: digest entries become the seed of the AMP context registry. The `source_hash` becomes the AMP `context_hash`; the `summary` becomes the stored embedding payload. Agents that have seen a goal built on the same PLAN.md hash skip retransmitting context entirely.
-
-#### Agent Framework Templates (deferred from v0.13.1.4)
-
-17. [ ] **External template system — `~/.config/ta/templates/` and project-local `.ta/templates/`**: Currently all `ta init` templates are hardcoded in the binary (`TEMPLATES` const + `ProjectType` enum + `match` arms scattered through `init.rs`). Adding a new template requires a code change and a new TA release. This is a blocker for community templates and makes GSD (item 18 below) heavier than it needs to be.
-
-    **Design**: Templates become directories of files that TA reads at runtime, same pattern as `agents/*.yaml`:
-
-    ```
-    # Discovery order (later overrides earlier):
-    <binary built-ins>                        # embedded via include_str! / baked manifest
-    ~/.config/ta/templates/<name>/            # user-global installs
-    .ta/templates/<name>/                     # project-local overrides
-
-    # Each template directory contains:
-    template.toml           # metadata + behaviour
-    workflow.toml           # copied to .ta/workflow.toml
-    policy.yaml             # copied to .ta/policy.yaml
-    taignore                # copied to .taignore
-    memory.toml             # copied to .ta/memory.toml
-    onboarding-goal.md      # optional: copied to .ta/onboarding-goal.md
-    files/                  # arbitrary files scaffolded into project root
-    ```
-
-    **`template.toml` format**:
-    ```toml
-    name        = "gsd"
-    description = "GSD context-engineering workflow (get-shit-done)"
-    aliases     = ["get-shit-done"]
-    detect      = [".planning/config.json"]     # auto-detect signals
-    prerequisites = ["npx get-shit-done-cc@latest --version"]
-    post_init   = "npx get-shit-done-cc@latest install --local"
-    ```
-
-    **`ta init templates`** lists built-ins first, then external templates found in discovery dirs with a `(user)` or `(project)` tag. **Community templates**: share as a git repo — users do `git clone <url> ~/.config/ta/templates/<name>`. No TA release needed.
-
-    **Migration**: built-in templates become files in `templates/` at the repo root, embedded via `include_dir!` or a manifest. `ProjectType` enum shrinks to `External(String)` for loaded templates; the individual variants stay for templates that need custom Rust logic (e.g., `RustWorkspace` runs `cargo init`).
-
-    **Effort**: ~1 day. Unblocks all future template additions without code changes.
-
-18. [ ] **GSD (get-shit-done) template — `ta init run --template gsd`**: Once item 17 lands, GSD is just a template directory committed to the `templates/gsd/` folder in the TA repo — no Rust code changes needed. Pre-item-17: two files (`agents/gsd.yaml` + `ProjectType::Gsd` in `init.rs`) as described previously.
-
-    **Template contents** (`.planning/` scaffold):
-    - **`agents/gsd.yaml`**: Launch config — `command: claude`, `pre_launch: npx get-shit-done-cc@latest install --local`, same `alignment` block as `bmad.yaml`. GSD installs into `.claude/get-shit-done/` and runs via `/gsd:*` slash commands within Claude Code — no separate binary.
-    - **`ProjectType::Gsd` in `init.rs`** (pre-item-17 only): Creates `.planning/` scaffold:
-      - `PROJECT.md` — project context stub (name, stack, goals)
-      - `REQUIREMENTS.md` — empty requirements register
-      - `ROADMAP.md` — phase list keyed to TA PLAN.md phases
-      - `STATE.md` — GSD state file (initialized empty)
-      - `config.json` — GSD config (`mode: "standard"`, `model_profile: "inherit"`, `tdd: false`)
-      - `onboarding-goal.md` — TA objective file that runs `/gsd:new-project` to populate the planning files from the existing codebase
-
-    **GSD vs BMAD positioning**: BMAD = single-session phased workflow for a new feature; GSD = multi-session context engineering with wave-based parallelization for sustained development. Both wrap Claude Code and coexist in the same project. GSD is better suited to longer-running phases (v0.13.x+); BMAD for bounded feature work.
-
-    **Local model note**: GSD has no Qwen 2.5 / Ollama-specific templates. Its `inherit` model profile delegates model selection to the host runtime — it picks up TA v0.13.8 local model support automatically when available. No GSD-specific work needed for Qwen.
-
-    **Effort**: ~2–3 hours (one agent YAML + ~30 lines in `init.rs` + 5 template stubs). No new dependencies.
 
 #### Release Pipeline Polish (deferred from v0.13.1.x)
 

@@ -306,6 +306,53 @@ pub enum SessionEvent {
         /// The URL that is now reachable.
         checked_url: String,
     },
+
+    /// An agent process was successfully spawned by a RuntimeAdapter (v0.13.3).
+    ///
+    /// Emitted immediately after the agent process starts, before it begins work.
+    /// Carries the runtime name so operators can distinguish bare-process agents
+    /// from container or VM agents.
+    AgentSpawned {
+        /// Goal this agent is working on.
+        goal_id: Uuid,
+        /// OS process ID (None for remote/VM runtimes where PID is not accessible).
+        pid: Option<u32>,
+        /// Name of the RuntimeAdapter that spawned this agent (e.g., "process", "oci").
+        runtime: String,
+        /// The agent command that was launched (e.g., "claude").
+        agent_command: String,
+    },
+
+    /// An agent process exited after completing (or failing) its work (v0.13.3).
+    ///
+    /// Distinct from `GoalProcessExited` (which is emitted by the watchdog on
+    /// unexpected mid-goal exits).  `AgentExited` is the expected lifecycle event
+    /// emitted by the RuntimeAdapter when the agent finishes.
+    AgentExited {
+        /// Goal this agent was working on.
+        goal_id: Uuid,
+        /// OS process ID (None for remote/VM runtimes).
+        pid: Option<u32>,
+        /// Name of the RuntimeAdapter that managed this agent.
+        runtime: String,
+        /// Exit code returned by the agent; None if killed by signal.
+        exit_code: Option<i32>,
+        /// Wall-clock seconds from spawn to exit.
+        duration_secs: u64,
+    },
+
+    /// A RuntimeAdapter encountered an error spawning or managing an agent (v0.13.3).
+    ///
+    /// Emitted on spawn failures, unexpected plugin crashes, or transport errors.
+    /// Always actionable: includes what failed and what the user can do about it.
+    RuntimeError {
+        /// Goal that was being executed when the error occurred (None if pre-spawn).
+        goal_id: Option<Uuid>,
+        /// Which runtime backend failed.
+        runtime: String,
+        /// Human-readable error message including context and suggested remediation.
+        error: String,
+    },
 }
 
 /// A single issue found during a watchdog health check (v0.11.2.4).
@@ -354,6 +401,9 @@ impl SessionEvent {
             Self::SystemWoke { .. } => "system_woke",
             Self::ApiConnectionLost { .. } => "api_connection_lost",
             Self::ApiConnectionRestored { .. } => "api_connection_restored",
+            Self::AgentSpawned { .. } => "agent_spawned",
+            Self::AgentExited { .. } => "agent_exited",
+            Self::RuntimeError { .. } => "runtime_error",
         }
     }
 
@@ -376,6 +426,10 @@ impl SessionEvent {
             | Self::GoalProcessExited { goal_id, .. }
             | Self::QuestionStale { goal_id, .. } => Some(*goal_id),
             Self::PolicyViolation { goal_id, .. } => *goal_id,
+            Self::AgentSpawned { goal_id, .. } | Self::AgentExited { goal_id, .. } => {
+                Some(*goal_id)
+            }
+            Self::RuntimeError { goal_id, .. } => *goal_id,
             _ => None,
         }
     }
@@ -483,6 +537,41 @@ impl SessionEvent {
                     "ta status --deep",
                     "Check daemon and network status",
                 )]
+            }
+            Self::RuntimeError {
+                goal_id, runtime, ..
+            } => {
+                let mut actions = vec![EventAction::new(
+                    "status",
+                    "ta status --deep",
+                    format!("Check {} runtime status", runtime),
+                )];
+                if let Some(gid) = goal_id {
+                    let short_id = &gid.to_string()[..8];
+                    actions.push(EventAction::new(
+                        "inspect",
+                        format!("ta goal status {}", short_id),
+                        format!("Inspect goal {}", short_id),
+                    ));
+                }
+                actions
+            }
+            Self::AgentExited {
+                goal_id, exit_code, ..
+            } if exit_code.is_some_and(|c| c != 0) => {
+                let short_id = &goal_id.to_string()[..8];
+                vec![
+                    EventAction::new(
+                        "view",
+                        format!("ta draft list --goal {}", short_id),
+                        "View draft for failed agent".to_string(),
+                    ),
+                    EventAction::new(
+                        "inspect",
+                        format!("ta goal status {}", short_id),
+                        format!("Inspect goal {}", short_id),
+                    ),
+                ]
             }
             // All other events have no suggested actions.
             _ => vec![],
@@ -767,11 +856,29 @@ mod tests {
                 question_preview: "Which DB?".into(),
                 pending_secs: 7200,
             },
+            SessionEvent::AgentSpawned {
+                goal_id: gid,
+                pid: Some(12345),
+                runtime: "process".into(),
+                agent_command: "claude".into(),
+            },
+            SessionEvent::AgentExited {
+                goal_id: gid,
+                pid: Some(12345),
+                runtime: "process".into(),
+                exit_code: Some(0),
+                duration_secs: 42,
+            },
+            SessionEvent::RuntimeError {
+                goal_id: Some(gid),
+                runtime: "oci".into(),
+                error: "Container failed to start".into(),
+            },
         ];
         for e in &events {
             assert!(!e.event_type().is_empty());
         }
-        assert_eq!(events.len(), 26);
+        assert_eq!(events.len(), 29);
     }
 
     #[test]
@@ -913,5 +1020,108 @@ mod tests {
         let envelope = EventEnvelope::new(event);
         assert_eq!(envelope.event_type, "api_connection_restored");
         assert!(envelope.actions.is_empty());
+    }
+
+    // v0.13.3 runtime lifecycle event tests ─────────────────────────────────
+
+    #[test]
+    fn agent_spawned_event_type_and_goal_id() {
+        let gid = Uuid::new_v4();
+        let event = SessionEvent::AgentSpawned {
+            goal_id: gid,
+            pid: Some(9001),
+            runtime: "process".into(),
+            agent_command: "claude".into(),
+        };
+        assert_eq!(event.event_type(), "agent_spawned");
+        assert_eq!(event.goal_id(), Some(gid));
+        // No suggested actions for successful spawns.
+        let envelope = EventEnvelope::new(event);
+        assert!(envelope.actions.is_empty());
+    }
+
+    #[test]
+    fn agent_exited_success_no_actions() {
+        let gid = Uuid::new_v4();
+        let event = SessionEvent::AgentExited {
+            goal_id: gid,
+            pid: Some(9001),
+            runtime: "process".into(),
+            exit_code: Some(0),
+            duration_secs: 120,
+        };
+        assert_eq!(event.event_type(), "agent_exited");
+        assert_eq!(event.goal_id(), Some(gid));
+        let envelope = EventEnvelope::new(event);
+        assert!(
+            envelope.actions.is_empty(),
+            "Successful exits have no actions"
+        );
+    }
+
+    #[test]
+    fn agent_exited_failure_has_actions() {
+        let gid = Uuid::new_v4();
+        let event = SessionEvent::AgentExited {
+            goal_id: gid,
+            pid: Some(9001),
+            runtime: "process".into(),
+            exit_code: Some(1),
+            duration_secs: 30,
+        };
+        let envelope = EventEnvelope::new(event);
+        assert!(
+            !envelope.actions.is_empty(),
+            "Failed exits should have suggested actions"
+        );
+        let verbs: Vec<&str> = envelope.actions.iter().map(|a| a.verb.as_str()).collect();
+        assert!(
+            verbs.contains(&"inspect") || verbs.contains(&"view"),
+            "Should suggest inspecting or viewing the failed goal"
+        );
+    }
+
+    #[test]
+    fn runtime_error_has_status_action() {
+        let gid = Uuid::new_v4();
+        let event = SessionEvent::RuntimeError {
+            goal_id: Some(gid),
+            runtime: "oci".into(),
+            error: "Container image pull failed: rate limited".into(),
+        };
+        assert_eq!(event.event_type(), "runtime_error");
+        assert_eq!(event.goal_id(), Some(gid));
+        let envelope = EventEnvelope::new(event);
+        assert!(!envelope.actions.is_empty());
+        assert!(envelope.actions.iter().any(|a| a.verb == "status"));
+        // Also includes inspect action when goal_id is present.
+        assert!(envelope.actions.iter().any(|a| a.verb == "inspect"));
+    }
+
+    #[test]
+    fn runtime_error_no_goal_id_has_only_status_action() {
+        let event = SessionEvent::RuntimeError {
+            goal_id: None,
+            runtime: "vm".into(),
+            error: "VM hypervisor not found".into(),
+        };
+        let envelope = EventEnvelope::new(event);
+        assert_eq!(envelope.actions.len(), 1);
+        assert_eq!(envelope.actions[0].verb, "status");
+    }
+
+    #[test]
+    fn agent_spawned_serialization_roundtrip() {
+        let gid = Uuid::new_v4();
+        let event = SessionEvent::AgentSpawned {
+            goal_id: gid,
+            pid: None,
+            runtime: "oci".into(),
+            agent_command: "claude".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: SessionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.event_type(), "agent_spawned");
+        assert_eq!(restored.goal_id(), Some(gid));
     }
 }

@@ -1,0 +1,22 @@
+[package]
+name = "ta-runtime"
+version.workspace = true
+edition = "2021"
+description = "Runtime Adapter Trait for Trusted Autonomy agent process management"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+which = "7"
+
+ta-credentials = { path = "../ta-credentials" }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
