@@ -3180,21 +3180,36 @@ pub(crate) fn restore_mcp_server_config(staging_path: &Path) -> anyhow::Result<(
     let mcp_json_path = staging_path.join(MCP_JSON_PATH);
     let backup_path = staging_path.join(MCP_JSON_BACKUP);
 
-    if !backup_path.exists() {
-        return Ok(());
-    }
-
-    let original = std::fs::read_to_string(&backup_path)?;
-
-    if original == NO_ORIGINAL_SENTINEL {
-        if mcp_json_path.exists() {
-            std::fs::remove_file(&mcp_json_path)?;
+    if backup_path.exists() {
+        let original = std::fs::read_to_string(&backup_path)?;
+        if original == NO_ORIGINAL_SENTINEL {
+            if mcp_json_path.exists() {
+                std::fs::remove_file(&mcp_json_path)?;
+            }
+        } else {
+            std::fs::write(&mcp_json_path, original)?;
         }
+        std::fs::remove_file(&backup_path)?;
     } else {
-        std::fs::write(&mcp_json_path, original)?;
+        // No TA-server backup, but ta-memory may still have been injected.
+        // Remove the ta-memory key if present so it doesn't pollute the source.
+        if mcp_json_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&mcp_json_path) {
+                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let removed = val
+                        .get_mut("mcpServers")
+                        .and_then(|s| s.as_object_mut())
+                        .map(|s| s.remove("ta-memory").is_some())
+                        .unwrap_or(false);
+                    if removed {
+                        if let Ok(cleaned) = serde_json::to_string_pretty(&val) {
+                            let _ = std::fs::write(&mcp_json_path, cleaned);
+                        }
+                    }
+                }
+            }
+        }
     }
-
-    std::fs::remove_file(&backup_path)?;
     Ok(())
 }
 
