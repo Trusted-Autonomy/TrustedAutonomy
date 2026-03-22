@@ -672,6 +672,59 @@ The scan is static and grep-based (no agent), runs in under a second, and is non
 
 The scanner counts `inject_*` and `restore_*` call sites in each changed `.rs` file. If a file has more inject calls than restore calls and contains early `return` statements, it is flagged as a candidate for review.
 
+### Constitution Config (`constitution.toml`)
+
+You can define project-specific invariants, inject/restore rules, and validation steps in `.ta/constitution.toml`. This makes TA's scanner and release gate aware of your codebase's conventions — not just TA's own internal patterns.
+
+#### Scaffold a starter config
+
+```bash
+ta constitution init-toml
+```
+
+Creates `.ta/constitution.toml` pre-populated with TA's default inject/restore rules and validation steps. Edit it for your project's patterns.
+
+#### Config format
+
+```toml
+[rules.injection_cleanup]
+# Functions that must be paired: every file calling an inject_fn must also
+# call the corresponding restore_fn, or the scanner flags a violation.
+inject_fns = ["inject_config", "inject_credentials"]
+restore_fns = ["restore_config", "restore_credentials"]
+severity = "high"   # "high" | "medium" | "low"
+
+[scan]
+include = ["src/"]          # relative dirs to scan for .rs files
+exclude = ["src/tests/"]    # skip these paths
+on_violation = "warn"       # "warn" | "block" | "off"
+
+[release]
+checklist_gate = true   # require constitution sign-off in release pipeline
+agent_review = false    # fan out a parallel constitution reviewer (opt-in)
+
+# Per-project validation commands at each draft stage.
+# These run inside the staging directory before the draft is packaged/applied.
+[[validate]]
+stage = "pre_draft_build"
+commands = ["cargo clippy --workspace --all-targets -- -D warnings"]
+on_failure = "block"   # "block" | "warn" | "ask_follow_up" | "auto_follow_up"
+
+[[validate]]
+stage = "pre_draft_apply"
+commands = ["cargo test --workspace", "cargo fmt --all -- --check"]
+on_failure = "warn"
+```
+
+#### Run the scanner manually
+
+```bash
+ta constitution check-toml            # human-readable output
+ta constitution check-toml --json     # JSON output for CI/scripts
+```
+
+If `.ta/constitution.toml` is absent, the scanner uses TA's built-in `ta-default` rules (inject/restore pairs from `run.rs`). Exit code 1 is returned only when `on_violation = "block"`.
+
 ### Desktop Notifications
 
 TA sends a system notification when a draft is ready for review, so you don't have to watch the terminal. On macOS this uses Notification Center (via `osascript`); on Linux it uses `notify-send`.
