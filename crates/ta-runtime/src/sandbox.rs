@@ -136,6 +136,7 @@ impl SandboxPolicy {
     }
 
     /// Generate a macOS Seatbelt (.sb) profile string.
+    #[cfg(target_os = "macos")]
     fn generate_macos_profile(&self, working_dir: &Path) -> String {
         let mut lines = vec![
             // Deny everything by default.
@@ -280,6 +281,7 @@ impl SandboxPolicy {
 }
 
 /// Escape a path for inclusion in a macOS sandbox profile string.
+#[cfg(target_os = "macos")]
 fn sandbox_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -318,6 +320,7 @@ mod tests {
         assert_eq!(wrapped.args, req.args);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn sandbox_escape_handles_quotes() {
         assert_eq!(
@@ -326,6 +329,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn sandbox_escape_handles_backslash() {
         assert_eq!(sandbox_escape(r#"C:\path"#), r#"C:\\path"#);
