@@ -5798,13 +5798,16 @@ Current releases ship archives containing a bare binary and docs. Users must man
    - **Git**: check for `.git/` directory (or `git rev-parse --git-dir` succeeds)
    - **Perforce**: check for `.p4config` in any parent directory, or `P4PORT`/`P4CLIENT` env vars set
    - **None / unknown**: prompt user to select from `[git, perforce, none]`
-   - Detected VCS written to `workflow.toml` under `[source]`:
+   - Detected VCS written to `workflow.toml` under `[submit]` (the real schema field — `[source]` is for sync settings only):
      ```toml
-     [source]
-     vcs = "git"          # "git" | "perforce" | "none"
-     # p4_client = ""     # Perforce: P4CLIENT name (from wizard if P4 detected)
-     # p4_port = ""       # Perforce: P4PORT (from env or .p4config)
+     [submit]
+     adapter = "perforce"   # "git" | "perforce" | "svn" | "none"
+
+     [submit.perforce]
+     shelve_by_default = true
+     # workspace = ""   # personal — goes in local.workflow.toml, not here
      ```
+   - Note: `P4PORT` and `P4CLIENT` are read from env vars / `.p4config` file (standard Perforce convention). They are NOT stored in `workflow.toml`.
 2. [ ] **Interactive wizard (`ta setup`)**: Step-by-step first-time setup:
    - Detect VCS (item 1) and project language (from `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`)
    - Write `workflow.toml` with VCS + language + verify commands
@@ -5848,11 +5851,12 @@ Current releases ship archives containing a bare binary and docs. Users must man
 
 #### 3. VCS-Specific Ignore File Generation
 
-7. [ ] **Git: append to `.gitignore`**: During `ta setup` / `ta init`, append a `# Trusted Autonomy — local runtime state` block to the project root `.gitignore`. Idempotent — detects block marker, no duplicates on re-run. `--force` rewrites the block:
+7. [ ] **Git: append to `.gitignore`**: During `ta setup` / `ta init`, append a `# Trusted Autonomy — local runtime state` block to the project root `.gitignore`. Idempotent — detects block marker, no duplicates on re-run. `--force` rewrites the block. The ignore list is generated from `LOCAL_TA_PATHS` (item 4) plus `local.workflow.toml`:
    ```
    # Trusted Autonomy — local runtime state (do not commit)
    .ta/daemon.toml
    .ta/daemon.local.toml
+   .ta/local.workflow.toml
    .ta/memory.rvf
    .ta/staging/
    .ta/store/
@@ -5865,12 +5869,12 @@ Current releases ship archives containing a bare binary and docs. Users must man
    .ta/interactions/
    .ta/release-history.json
    ```
-8. [ ] **Perforce: generate `.p4ignore`**: Write (or append to) `.p4ignore` at workspace root with the same local-only paths. Include a prominent warning if `P4IGNORE` env var is not set:
+8. [ ] **Perforce: generate `.p4ignore`**: Write (or append to) `.p4ignore` at workspace root with **the same `LOCAL_TA_PATHS` list** including `local.workflow.toml`. The `.p4ignore` file itself must also be excluded from depot submission (note: `.p4ignore` is a developer-local file — add it to your workspace `.p4ignore` too, or Perforce will prompt to add it). Include a prominent warning if `P4IGNORE` env var is not set:
    ```
    ⚠ Perforce: P4IGNORE env var is not set.
      TA wrote local-only paths to .p4ignore, but Perforce won't use it until:
        export P4IGNORE=.p4ignore   (add to your shell profile)
-     Without this, .ta/staging/, .ta/goals/, etc. may be submitted accidentally.
+     Without this, .ta/staging/, .ta/goals/, .ta/local.workflow.toml, etc. may be submitted accidentally.
    ```
    `ta doctor` re-surfaces this warning when `P4IGNORE` is unset.
 9. [ ] **Idempotency**: Running `ta setup` a second time does not add duplicate ignore entries. Detects the `# Trusted Autonomy` marker and skips. `--force` flag rewrites the block.
@@ -5918,21 +5922,25 @@ strategy = "refs-cow"   # Windows ReFS only; auto-falls back to "smart" on NTFS
 
 ```toml
 # .ta/workflow.toml — committed, shared with the team
-[source]
-vcs = "perforce"
-p4_port = "ssl:p4server:1666"
-shelve_on_submit = true
+[submit]
+adapter = "perforce"          # tells TA to use the Perforce adapter
+auto_submit = true
+
+[submit.perforce]
+shelve_by_default = true      # team default: shelve, don't submit to depot
 
 [follow_up]
 default_mode = "continue"
 
-# .ta/local.workflow.toml — gitignored, personal only
-[source]
-p4_client = "michael_ue5_ws"          # personal workspace name
+# .ta/local.workflow.toml — added to .p4ignore/.gitignore, never committed
+[submit.perforce]
+workspace = "michael_ue5_ws"  # personal P4 workspace/client name
 
 [notify]
-enabled = true                         # personal preference
+enabled = true                # personal preference
 ```
+
+Note: `P4PORT`, `P4CLIENT`, `P4USER`, and `P4CONFIG` are standard Perforce env vars / `.p4config` settings — they are not stored in `workflow.toml` at all. Set them in your shell profile or `.p4config`.
 
 17. [ ] **`local.workflow.toml` loading**: In `ta-submit/src/config.rs`, after loading `.ta/workflow.toml`, check for `.ta/local.workflow.toml`. If present, deep-merge (field-level: local values override shared values; missing local fields inherit from shared). Produce a single merged `WorkflowConfig`. Log which file each override came from at `tracing::debug` level.
 18. [ ] **Add to `LOCAL_TA_PATHS`**: Add `local.workflow.toml` and `daemon.local.toml` to `LOCAL_TA_PATHS` (item 4) so ignore-file generation automatically excludes them.
