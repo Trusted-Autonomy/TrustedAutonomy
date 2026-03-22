@@ -2426,6 +2426,92 @@ runtime_error   spawn failed: command not found
 
 These events are also surfaced in the shell TUI and dashboard.
 
+### External Action Governance
+
+When an agent needs to perform an action with real-world side effects — sending an email, posting to social media, calling an external API, or running a database query — TA intercepts the request, applies your policy, and captures a full audit log regardless of outcome.
+
+TA provides the governance layer (policy, approval, capture, rate limiting). The actual implementations live in your connectors and plugins.
+
+#### Built-in action types
+
+| Action type | Description |
+|-------------|-------------|
+| `email` | Send an email message (requires `to`, `subject`) |
+| `social_post` | Post to a social media platform (requires `platform`, `content`) |
+| `api_call` | Make an HTTP API request (requires `url`, `method`) |
+| `db_query` | Execute a database query (requires `query`) |
+
+#### Configuring action policies
+
+Add an `[actions]` section to `.ta/workflow.toml`:
+
+```toml
+[actions.email]
+policy = "review"        # auto | review | block (default: review)
+rate_limit = 10          # max per goal (omit for unlimited)
+allowed_domains = ["@mycompany.com"]
+
+[actions.social_post]
+policy = "block"         # never allow
+
+[actions.api_call]
+policy = "auto"          # execute immediately without review
+rate_limit = 50
+
+[actions.db_query]
+policy = "review"
+rate_limit = 100
+```
+
+**Policy values:**
+- `auto` — execute immediately (stub returns result; real connector needed)
+- `review` — capture for human review; surfaces in `ta draft view` alongside file changes
+- `block` — always reject; agent receives a clear refusal
+
+Unknown action types default to `review`.
+
+#### How agents use it
+
+Agents call the `ta_external_action` MCP tool:
+
+```json
+{
+  "action_type": "email",
+  "payload": {
+    "to": "alice@example.com",
+    "subject": "Weekly report",
+    "body": "..."
+  },
+  "dry_run": false
+}
+```
+
+TA applies policy, logs the attempt, and returns a structured response the agent can act on.
+
+#### Dry-run mode
+
+Pass `"dry_run": true` to preview what would happen without any side effects. The action is logged with outcome `dry_run` and the agent receives a description of what would have been sent.
+
+#### Rate limiting
+
+Rate limits are per-goal, per-action-type and reset when the daemon restarts. Once the limit is reached, the agent receives a `rate_limited` response with the current count and configured limit.
+
+#### Action capture log
+
+Every action attempt — regardless of outcome — is appended to `.ta/action-log.jsonl`. Each entry includes:
+
+- `capture_id` — unique identifier
+- `action_type` — e.g. `email`
+- `payload` — the full request payload
+- `goal_run_id` — which goal triggered it
+- `timestamp` — ISO 8601
+- `policy` — the policy that was applied
+- `outcome` — `executed`, `captured_for_review`, `blocked`, `dry_run`, or `rate_limited`
+
+#### Reviewing captured actions
+
+Actions with `policy = "review"` appear in `ta draft view` alongside file changes. Approve or deny them as part of the normal draft review flow.
+
 ### Selective Approval
 
 Approve, reject, or discuss individual files using glob patterns:
@@ -6196,6 +6282,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.13.1.6 | Intelligent surface & operational runbooks | Done |
 | v0.13.2 | MCP transport abstraction (TCP/Unix socket) | Done |
 | v0.13.3 | Runtime adapter trait & pluggable agent runtimes | Done |
+| v0.13.4 | External action governance framework (policy, capture, rate limiting, dry-run) | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

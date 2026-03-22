@@ -24,6 +24,7 @@ members = [
     "crates/ta-build",
     "crates/ta-output-schema",
     "crates/ta-runtime",
+    "crates/ta-actions",
     "crates/ta-connectors/fs",
     "crates/ta-connectors/web",
     "crates/ta-connectors/mock-drive",
@@ -37,7 +38,7 @@ members = [
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.13.3-alpha"
+version = "0.13.4-alpha"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
@@ -120,6 +121,9 @@ crossterm = { version = "0.28", features = ["bracketed-paste"] }
 
 # File system notifications — config hot-reload (v0.10.18).
 notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
+
+# Binary discovery — resolves .cmd/.bat wrappers on Windows (v0.13.4).
+which = "7"
 
 # Testing utilities
 tempfile = "3"

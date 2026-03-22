@@ -34,6 +34,7 @@ use ta_policy::{
 };
 use ta_workspace::{JsonFileStore, StagingWorkspace};
 
+use ta_actions::RateLimiter;
 use ta_changeset::draft_package::PendingAction;
 
 use crate::config::GatewayConfig;
@@ -260,6 +261,28 @@ pub struct AgentStatusParams {
     pub agent_id: Option<String>,
 }
 
+/// Parameters for `ta_external_action` (v0.13.4).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExternalActionParams {
+    /// The action type to request (e.g., "email", "api_call", "social_post", "db_query").
+    pub action_type: String,
+    /// The action payload. Fields vary by action type — use the schema returned
+    /// by querying the action type's registry entry.
+    pub payload: serde_json::Value,
+    /// The UUID of the goal run this action is associated with (optional).
+    /// When provided, rate limits and pending actions are scoped to this goal.
+    #[serde(default)]
+    pub goal_run_id: Option<String>,
+    /// Optional URI identifying the resource this action targets
+    /// (e.g., "mailto://alice@example.com", "https://api.stripe.com/charges").
+    #[serde(default)]
+    pub target_uri: Option<String>,
+    /// Dry-run mode: log the action but do not execute or capture for review.
+    /// Use this to test workflow definitions without side effects.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 /// Tracks an active agent session within the gateway (v0.9.6).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
@@ -299,6 +322,8 @@ pub struct ProjectState {
     pub review_channel: Option<Box<dyn ReviewChannel>>,
     /// Pending actions for this project.
     pub pending_actions: HashMap<Uuid, Vec<PendingAction>>,
+    /// Rate limiter for external actions scoped to this project (v0.13.4).
+    pub action_rate_limiter: RateLimiter,
 }
 
 impl ProjectState {
@@ -322,6 +347,7 @@ impl ProjectState {
             memory_store,
             review_channel: None,
             pending_actions: HashMap::new(),
+            action_rate_limiter: RateLimiter::new(),
         })
     }
 }
@@ -340,6 +366,8 @@ pub struct GatewayState {
     pub auto_capture_config: ta_memory::AutoCaptureConfig,
     pub interceptor: ToolCallInterceptor,
     pub pending_actions: HashMap<Uuid, Vec<PendingAction>>,
+    /// v0.13.4: Rate limiter for external actions (ta_external_action).
+    pub action_rate_limiter: RateLimiter,
     /// v0.9.3: Caller mode.
     pub caller_mode: CallerMode,
     /// v0.9.3: Dev session ID for audit correlation.
@@ -462,6 +490,7 @@ impl GatewayState {
             auto_capture_config,
             interceptor: ToolCallInterceptor::new(),
             pending_actions: HashMap::new(),
+            action_rate_limiter: RateLimiter::new(),
             caller_mode: CallerMode::from_env(),
             dev_session_id: std::env::var("TA_DEV_SESSION_ID").ok(),
             active_agents: HashMap::new(),
@@ -1024,6 +1053,28 @@ impl TaGatewayServer {
         self.audit("ta_ask_human", None, None);
         tools::human::handle_ask_human(&self.state, params)
     }
+
+    // ── External Action Governance (v0.13.4) ─────────────────────
+
+    #[tool(
+        description = "Request an external action (email, API call, social post, DB query) through TA's governance pipeline. \
+        TA applies the action policy from .ta/workflow.toml: 'review' captures the action for human approval before execution, \
+        'auto' executes immediately, 'block' rejects outright. Rate limits are enforced per goal. \
+        Set dry_run=true to test workflows without side effects. \
+        Built-in action types: email, social_post, api_call, db_query. \
+        Plugins can register additional types."
+    )]
+    fn ta_external_action(
+        &self,
+        Parameters(params): Parameters<ExternalActionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ta_external_action",
+            params.target_uri.as_deref(),
+            params.goal_run_id.as_deref().and_then(|id| id.parse().ok()),
+        );
+        tools::action::handle_external_action(&self.state, params)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────────
@@ -1093,14 +1144,15 @@ mod tests {
     fn tool_count_matches_expected() {
         let (server, _dir) = test_server();
         let tools = server.tool_router.list_all();
-        // 17 tools: goal_start, goal_status, goal_list,
+        // 18 tools: goal_start, goal_status, goal_list,
         //           fs_read, fs_write, fs_list, fs_diff,
         //           pr_build, pr_status,
         //           ta_draft, ta_goal_inner, ta_plan, ta_context,
         //           ta_agent_status (v0.9.6), ta_event_subscribe (v0.9.4),
-        //           ta_workflow (v0.9.8.2), ta_ask_human (v0.9.9.1)
+        //           ta_workflow (v0.9.8.2), ta_ask_human (v0.9.9.1),
+        //           ta_external_action (v0.13.4)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 17, "expected 17 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 18, "expected 18 tools, got: {:?}", names);
     }
 
     #[test]

@@ -981,7 +981,12 @@ pub fn execute(
                 let _ = store.save(session);
             }
 
-            if e.kind() == std::io::ErrorKind::NotFound {
+            // Detect command-not-found regardless of error path:
+            // - Direct spawn (legacy launch_agent): e.kind() == NotFound
+            // - RuntimeAdapter path: kind() is Other but message says "Spawn failed:"
+            let is_not_found = e.kind() == std::io::ErrorKind::NotFound
+                || e.to_string().contains("Spawn failed:");
+            if is_not_found {
                 // Restore injected files before returning — agent won't run.
                 if agent_config.injects_context_file {
                     restore_claude_md(&staging_path)?;
@@ -1000,6 +1005,22 @@ pub fn execute(
                 println!("  cd {}", staging_path.display());
                 println!("  {} {}", agent_config.command, shell_quote(&prompt));
                 println!();
+                // Windows-specific diagnostic: Claude Code is installed as claude.cmd
+                // via npm. If which resolves claude.cmd, the fix is to update TA.
+                #[cfg(windows)]
+                {
+                    let found = which::which(&agent_config.command)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "not found on PATH".to_string());
+                    println!("Windows diagnostic:");
+                    println!("  Searching for '{}': {}", agent_config.command, found);
+                    if found.to_lowercase().ends_with(".cmd") || found.to_lowercase().ends_with(".bat") {
+                        println!("  Found as .cmd batch file — update TA to v0.13.4+ which handles this automatically.");
+                    } else {
+                        println!("  PATH: {}", std::env::var("PATH").unwrap_or_else(|_| "(not set)".to_string()));
+                    }
+                    println!();
+                }
                 println!("When done, build the draft:");
                 println!("  ta draft build {}", goal_id);
                 return Ok(());
@@ -1714,15 +1735,14 @@ fn launch_agent(
     prompt: &str,
     pid_callback: Option<&dyn Fn(u32)>,
 ) -> std::io::Result<std::process::ExitStatus> {
-    let mut cmd = std::process::Command::new(&config.command);
+    let args: Vec<String> = config
+        .args_template
+        .iter()
+        .map(|t| t.replace("{prompt}", prompt))
+        .collect();
+    let mut cmd = resolve_agent_command(&config.command, &args);
     cmd.current_dir(staging_path);
 
-    for arg_template in &config.args_template {
-        let arg = arg_template.replace("{prompt}", prompt);
-        cmd.arg(arg);
-    }
-
-    // Set agent-specific environment variables from config.
     for (key, value) in &config.env {
         cmd.env(key, value);
     }

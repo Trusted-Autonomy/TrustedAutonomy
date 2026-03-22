@@ -4986,7 +4986,7 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 ---
 
 ### v0.13.4 — External Action Governance Framework
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Provide the governance framework for agents performing external actions — sending emails, posting on social media, making API calls, executing financial transactions. TA doesn't implement the actions; it provides the policy, approval, capture, and audit layer so projects like SecureTA or custom workflows can govern them.
 
 **Design**:
@@ -4996,16 +4996,18 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 - `ActionReview`: captured actions go through the same draft review flow (approve/deny/modify before send)
 - Plugins register action types; TA provides the governance pipeline
 
-#### Items
+#### Completed
 
-1. [ ] `ExternalAction` trait: `action_type()`, `payload_schema()`, `validate()`, `execute()` — plugins implement this
-2. [ ] `ActionPolicy` config in `.ta/workflow.toml`: per-action-type rules (auto, review, block, rate-limit)
-3. [ ] `ActionCapture` log: every attempted action logged with full payload, timestamp, goal context
-4. [ ] Review flow integration: captured actions surface in `ta draft view` as "pending external actions" alongside file changes
-5. [ ] MCP tool `ta_external_action`: agent calls this to request an external action; TA applies policy before execution
-6. [ ] Rate limiting: configurable per-action-type limits (e.g., max 5 emails per goal, max 1 social post per hour)
-7. [ ] Dry-run mode: capture and log actions without executing, for testing workflows
-8. [ ] Built-in action type stubs: `email`, `social_post`, `api_call`, `db_query` — schema only, no implementation (plugins provide the actual send/post/call logic)
+1. [x] `ExternalAction` trait: `action_type()`, `payload_schema()`, `validate()`, `execute()` — in `crates/ta-actions/src/action.rs`. `ActionRegistry` holds the built-in stubs and supports plugin registration.
+2. [x] `ActionPolicy` config in `.ta/workflow.toml`: per-action-type rules (auto, review, block) plus `rate_limit`, `allowed_domains`, `auto_approve_reads` — parsed via `ActionPolicies::load()` in `crates/ta-actions/src/policy.rs`.
+3. [x] `ActionCapture` log: every attempted action logged to `.ta/action-log.jsonl` with full payload, outcome, policy, timestamp, and goal context. Queryable by goal ID. Implemented in `crates/ta-actions/src/capture.rs`.
+4. [x] Review flow integration: actions with `policy=review` are added to `state.pending_actions[goal_id]` and merged into the draft package in `handle_pr_build` / `handle_draft_build`. They surface under "Pending Actions" in `ta draft view`.
+5. [x] MCP tool `ta_external_action`: registered in `TaGatewayServer`. Validates payload schema, applies rate limits, loads policy from `workflow.toml`, captures all attempts, and returns structured outcome to the agent.
+6. [x] Rate limiting: `RateLimiter` (in-memory, per-goal, per-action-type) in `crates/ta-actions/src/rate_limit.rs`. Configurable via `rate_limit` in `workflow.toml`. Exceeded limit returns `rate_limited` outcome.
+7. [x] Dry-run mode: `dry_run: true` in `ta_external_action` params — action is logged with `DryRun` outcome, no execution, no review capture.
+8. [x] Built-in action type stubs: `email`, `social_post`, `api_call`, `db_query` — schema + validation only, `execute()` returns `ActionError::StubOnly`. Plugins call `ActionRegistry::register()` to override.
+
+**Tests**: 24 new tests in `ta-actions` (action, policy, capture, rate_limit modules) + 6 new integration tests in `ta-mcp-gateway/tools/action.rs` + 1 server tool-count update.
 
 **Config example**:
 ```toml

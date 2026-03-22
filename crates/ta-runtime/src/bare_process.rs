@@ -132,12 +132,8 @@ impl RuntimeAdapter for BareProcessRuntime {
             "BareProcessRuntime: spawning agent"
         );
 
-        let mut cmd = Command::new(&request.command);
+        let mut cmd = build_command(&request.command, &request.args);
         cmd.current_dir(&request.working_dir);
-
-        for arg in &request.args {
-            cmd.arg(arg);
-        }
 
         for (key, value) in &request.env {
             cmd.env(key, value);
@@ -177,6 +173,49 @@ impl RuntimeAdapter for BareProcessRuntime {
         // This is a no-op — callers should pass credentials in SpawnRequest.env.
         Ok(())
     }
+}
+
+// ── Helper: build a Command, handling Windows .cmd/.bat wrappers ─────────────
+
+/// Build a `std::process::Command` for the given command and args.
+///
+/// On Windows, tools installed via npm (e.g., Claude Code, npx) are `.cmd`
+/// batch-file wrappers.  `Command::new("claude")` only finds `claude.exe`,
+/// not `claude.cmd`, so spawn fails with NotFound even when the tool is
+/// on `PATH`.  We resolve via `which::which()` (which respects `PATHEXT`)
+/// and wrap `.cmd`/`.bat` files in `cmd.exe /c` so they execute correctly.
+///
+/// On non-Windows, or when `which` doesn't find the command, falls back to
+/// `Command::new(command)` (original behaviour — unchanged).
+fn build_command(command: &str, args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        if let Ok(resolved) = which::which(command) {
+            let ext = resolved
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "cmd" || ext == "bat" {
+                tracing::debug!(
+                    command = command,
+                    resolved = %resolved.display(),
+                    "Wrapping .cmd/.bat in cmd.exe /c"
+                );
+                let mut cmd = Command::new("cmd");
+                cmd.arg("/c").arg(resolved);
+                for arg in args {
+                    cmd.arg(arg);
+                }
+                return cmd;
+            }
+        }
+    }
+    let mut cmd = Command::new(command);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd
 }
 
 // ── Helper: build env map with credentials ───────────────────────────────────

@@ -27,6 +27,7 @@ ta-goal = { path = "../ta-goal" }
 ta-policy = { path = "../ta-policy" }
 ta-workspace = { path = "../ta-workspace" }
 ta-workflow = { path = "../ta-workflow" }
+ta-actions = { path = "../ta-actions" }
 
 
 [dev-dependencies]

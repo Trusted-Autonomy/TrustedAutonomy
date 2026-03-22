@@ -42,6 +42,17 @@ pub fn handle_pr_build(
         .build_pr_package(&goal.title, &goal.objective, &params.summary, &params.title)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+    // Merge external actions captured for review into the PR package (v0.13.4).
+    // Agents that called ta_external_action with policy=review have their captured
+    // actions stored in state.pending_actions. Include them here so they surface
+    // in `ta draft view` alongside file changes.
+    if let Some(actions) = state.pending_actions.get(&goal_run_id) {
+        pr_package
+            .changes
+            .pending_actions
+            .extend(actions.iter().cloned());
+    }
+
     // Populate design alternatives if provided (v0.9.5).
     if let Some(alts) = &params.alternatives {
         pr_package.summary.alternatives_considered = alts
@@ -233,9 +244,17 @@ fn handle_draft_build(
             _ => goal.objective.clone(),
         }
     };
-    let pr_package = connector
+    let mut pr_package = connector
         .build_pr_package(&goal.title, &goal.objective, summary, &summary_why)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+    // Merge external actions captured for review (v0.13.4).
+    if let Some(actions) = state.pending_actions.get(&goal_run_id) {
+        pr_package
+            .changes
+            .pending_actions
+            .extend(actions.iter().cloned());
+    }
 
     let package_id = pr_package.package_id;
     state
