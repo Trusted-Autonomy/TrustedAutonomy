@@ -570,19 +570,29 @@ fn is_process_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        // Use OpenProcess(SYNCHRONIZE, FALSE, pid) — O(1) kernel call, no subprocess.
-        // A non-null handle means the process exists; CloseHandle releases it.
-        // On access-denied (0x5) the process is still alive but we lack permission.
+        // OpenProcess(SYNCHRONIZE, FALSE, pid) is an O(1) kernel call — no subprocess.
+        // A non-null non-invalid handle means the process exists; CloseHandle releases it.
+        // ERROR_ACCESS_DENIED (5) means the process exists but we lack permission.
+        //
         // Previously used `tasklist.exe` which is notoriously slow (1–3 s per call)
-        // and was blocking the Tokio runtime during the watchdog cycle.
-        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-        use windows_sys::Win32::System::Threading::{OpenProcess, SYNCHRONIZE};
+        // and was blocking the Tokio runtime thread during the watchdog cycle, which
+        // delayed the HTTP server binding and caused "active but not ready" on startup.
+        //
+        // Raw extern declarations avoid needing a windows-sys crate dependency.
+        #[allow(non_upper_case_globals)]
+        const SYNCHRONIZE: u32 = 0x00100000;
+        #[allow(non_upper_case_globals)]
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        extern "system" {
+            fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
+            fn CloseHandle(hObject: isize) -> i32;
+            fn GetLastError() -> u32;
+        }
         unsafe {
             let handle = OpenProcess(SYNCHRONIZE, 0, pid);
-            if handle == 0 || handle == INVALID_HANDLE_VALUE {
-                let err = windows_sys::Win32::Foundation::GetLastError();
-                // ERROR_ACCESS_DENIED (5) means the process exists but we can't open it.
-                err == 5
+            if handle == 0 || handle == -1isize {
+                // NULL or INVALID_HANDLE_VALUE — check error code.
+                GetLastError() == ERROR_ACCESS_DENIED
             } else {
                 CloseHandle(handle);
                 true

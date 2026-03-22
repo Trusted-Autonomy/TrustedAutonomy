@@ -43,9 +43,6 @@ notify = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }
-
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = { workspace = true }
