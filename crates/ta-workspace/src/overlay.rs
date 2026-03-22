@@ -867,8 +867,6 @@ fn resolve_staging_mode(mode: OverlayStagingMode, _staging_dir: &Path) -> Overla
 fn is_refs_volume(path: &Path) -> bool {
     #[cfg(windows)]
     {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
         // GetVolumeInformationW: if FILE_SUPPORTS_BLOCK_REFCOUNTING (0x08000000) is set, it's ReFS.
         // For now this is a stub — full ReFS IOCTL support is deferred to a later phase.
         // Return false until the full DeviceIoControl path is implemented.
