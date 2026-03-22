@@ -25,7 +25,9 @@
 // - Creates tmpfs for /tmp
 // - Network: unshared by default (--unshare-net) unless allow_network is non-empty
 
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::path::PathBuf;
 
 use crate::adapter::SpawnRequest;
 
