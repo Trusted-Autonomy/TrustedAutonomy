@@ -218,7 +218,7 @@ timeout = 300
 
 # VCS submit adapter
 [submit.git]
-branch_prefix = "ta/"
+branch_prefix = "feature/"
 auto_review = true
 "#
         }
@@ -235,7 +235,7 @@ on_failure = "block"
 timeout = 300
 
 [submit.git]
-branch_prefix = "ta/"
+branch_prefix = "feature/"
 auto_review = true
 "#
         }
@@ -252,7 +252,7 @@ on_failure = "block"
 timeout = 300
 
 [submit.git]
-branch_prefix = "ta/"
+branch_prefix = "feature/"
 auto_review = true
 "#
         }
@@ -269,7 +269,7 @@ on_failure = "block"
 timeout = 300
 
 [submit.git]
-branch_prefix = "ta/"
+branch_prefix = "feature/"
 auto_review = true
 "#
         }
@@ -284,7 +284,7 @@ auto_review = true
 # timeout = 300
 
 [submit.git]
-branch_prefix = "ta/"
+branch_prefix = "feature/"
 auto_review = true
 "#
         }

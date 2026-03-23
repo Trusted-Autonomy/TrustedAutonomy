@@ -36,6 +36,18 @@ pub struct DaemonConfig {
     /// Power & sleep management configuration (v0.13.1.1).
     #[serde(default)]
     pub power: PowerConfig,
+    /// Experimental feature flags (v0.13.17).
+    ///
+    /// Features gated here are incomplete, unstable, or untested in production.
+    /// All flags default to `false` — opt in explicitly in `.ta/config.toml`:
+    ///
+    /// ```toml
+    /// [experimental]
+    /// ollama_agent = true   # ta-agent-ollama (preview — untested against real models)
+    /// sandbox = true        # macOS sandbox-exec / Linux bwrap (preview)
+    /// ```
+    #[serde(default)]
+    pub experimental: ExperimentalConfig,
 }
 
 /// Shell Q&A agent configuration (v0.11.4.2).
@@ -197,6 +209,16 @@ pub struct OperationsConfig {
     /// stays visible (fail-open).
     #[serde(default = "default_prompt_verify_timeout")]
     pub prompt_verify_timeout_secs: u64,
+
+    /// Maximum seconds a goal may spend in `Finalizing` state with a dead
+    /// `ta run` process before the watchdog declares it stuck and transitions
+    /// to `Failed` (v0.13.17).
+    ///
+    /// Default: 1800s (30 min). If the `ta run` process is still alive, the
+    /// watchdog never fires — this timeout only catches interrupted builds.
+    /// Increase for very large workspaces where the file diff takes longer.
+    #[serde(default = "default_finalize_timeout")]
+    pub finalize_timeout_secs: u64,
 }
 
 /// Auto-heal policy: which low-risk corrective actions the daemon can take without asking.
@@ -245,6 +267,10 @@ fn default_prompt_verify_timeout() -> u64 {
     10
 }
 
+fn default_finalize_timeout() -> u64 {
+    1800
+}
+
 impl Default for OperationsConfig {
     fn default() -> Self {
         Self {
@@ -255,6 +281,7 @@ impl Default for OperationsConfig {
             stale_question_threshold_secs: default_stale_question_threshold(),
             prompt_dismiss_after_output_secs: default_prompt_dismiss_after_output(),
             prompt_verify_timeout_secs: default_prompt_verify_timeout(),
+            finalize_timeout_secs: default_finalize_timeout(),
             auto_heal: AutoHealConfig::default(),
         }
     }
@@ -1227,6 +1254,40 @@ impl TokenStore {
         } else {
             Ok(false)
         }
+    }
+}
+
+/// Experimental feature flags — all default `false`.
+///
+/// Add `[experimental]` to `.ta/config.toml` to opt in:
+///
+/// ```toml
+/// [experimental]
+/// ollama_agent = true
+/// sandbox = true
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentalConfig {
+    /// Enable the `ta-agent-ollama` agent backend (v0.13.16 preview).
+    ///
+    /// ta-agent-ollama is an experimental local model agent. Tool call
+    /// parsing and CoT fallback behavior have not been validated against
+    /// real Ollama instances. Expect rough edges.
+    pub ollama_agent: bool,
+
+    /// Enable macOS sandbox-exec / Linux bwrap sandbox enforcement (v0.14.0 preview).
+    ///
+    /// Sandbox profiles are coarse and may block legitimate agent operations
+    /// (e.g., network to localhost:11434 for Ollama). Test thoroughly before
+    /// enabling in workflows where agent actions must reach local services.
+    pub sandbox: bool,
+}
+
+impl ExperimentalConfig {
+    /// Returns true if any experimental feature is enabled.
+    pub fn any_enabled(&self) -> bool {
+        self.ollama_agent || self.sandbox
     }
 }
 

@@ -70,11 +70,20 @@ pub enum GoalRunState {
     /// watchdog will not mark the goal `Failed` while the build is ongoing.
     ///
     /// The watchdog skips `Finalizing` goals unless `finalize_timeout_secs`
-    /// (default 300s) is exceeded, at which point it transitions to `Failed`
+    /// (default 1800s) is exceeded, at which point it transitions to `Failed`
     /// with a message directing the user to `ta goal recover`.
+    ///
+    /// `run_pid` is the PID of the `ta run` process performing the draft build.
+    /// If the watchdog can confirm this process is still alive, it extends the
+    /// deadline indefinitely — the timeout only fires when the process is dead
+    /// and the state is still stuck (v0.13.17).
     Finalizing {
         exit_code: i32,
         finalize_started_at: DateTime<Utc>,
+        /// PID of the `ta run` process building the draft. Watchdog uses this
+        /// to distinguish "still building" from "interrupted and stuck".
+        #[serde(default)]
+        run_pid: Option<u32>,
     },
 
     /// Goal failed at some point.
@@ -724,6 +733,7 @@ mod tests {
         gr.transition(GoalRunState::Finalizing {
             exit_code: 0,
             finalize_started_at: now,
+            run_pid: None,
         })
         .unwrap();
         assert!(matches!(
@@ -740,6 +750,7 @@ mod tests {
         gr.transition(GoalRunState::Finalizing {
             exit_code: 0,
             finalize_started_at: chrono::Utc::now(),
+            run_pid: None,
         })
         .unwrap();
         gr.transition(GoalRunState::PrReady).unwrap();
@@ -754,6 +765,7 @@ mod tests {
         gr.transition(GoalRunState::Finalizing {
             exit_code: 0,
             finalize_started_at: chrono::Utc::now(),
+            run_pid: None,
         })
         .unwrap();
         gr.transition(GoalRunState::Failed {
@@ -770,6 +782,7 @@ mod tests {
         gr.state = GoalRunState::Finalizing {
             exit_code: 0,
             finalize_started_at: start,
+            run_pid: None,
         };
         let json = serde_json::to_string_pretty(&gr).unwrap();
         assert!(json.contains("\"finalizing\""), "state tag missing");
@@ -786,6 +799,7 @@ mod tests {
         let state = GoalRunState::Finalizing {
             exit_code: 0,
             finalize_started_at: chrono::Utc::now(),
+            run_pid: None,
         };
         assert_eq!(state.to_string(), "finalizing");
     }

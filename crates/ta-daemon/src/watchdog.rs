@@ -69,7 +69,7 @@ impl WatchdogConfig {
             stale_question_threshold_secs: ops.stale_question_threshold_secs,
             wake_grace_secs: power.wake_grace_secs,
             connectivity_check_url: power.connectivity_check_url.clone(),
-            finalize_timeout_secs: 300,
+            finalize_timeout_secs: ops.finalize_timeout_secs,
         }
     }
 
@@ -81,7 +81,7 @@ impl WatchdogConfig {
             stale_question_threshold_secs: ops.stale_question_threshold_secs,
             wake_grace_secs: 60,
             connectivity_check_url: "https://api.anthropic.com".to_string(),
-            finalize_timeout_secs: 300,
+            finalize_timeout_secs: ops.finalize_timeout_secs,
         }
     }
 }
@@ -315,13 +315,16 @@ fn watchdog_cycle(
             }
             GoalRunState::Finalizing {
                 finalize_started_at,
+                run_pid,
                 ..
             } => {
-                // v0.13.14: Skip Finalizing goals unless timeout exceeded.
+                // v0.13.14/v0.13.17: Skip Finalizing goals unless timeout exceeded
+                // and the ta run process is no longer alive.
                 goals_checked += 1;
                 check_finalizing_goal(
                     goal,
                     *finalize_started_at,
+                    *run_pid,
                     config,
                     &store,
                     &now,
@@ -594,11 +597,26 @@ fn check_running_goal(
 fn check_finalizing_goal(
     goal: &GoalRun,
     finalize_started_at: chrono::DateTime<Utc>,
+    run_pid: Option<u32>,
     config: &WatchdogConfig,
     store: &GoalRunStore,
     now: &chrono::DateTime<Utc>,
     issues: &mut Vec<HealthIssue>,
 ) {
+    // If the ta run process is still alive, it is actively building the draft.
+    // Never fire the timeout while the builder process is running — only catch
+    // the case where ta run died mid-build and the state is stuck (v0.13.17).
+    if let Some(pid) = run_pid {
+        if is_process_alive(pid) {
+            tracing::debug!(
+                goal_id = %goal.goal_run_id,
+                run_pid = pid,
+                "Goal in Finalizing — ta run process is alive, skipping timeout check"
+            );
+            return;
+        }
+    }
+
     let elapsed_secs = (*now - finalize_started_at).num_seconds().unsigned_abs();
 
     if elapsed_secs < config.finalize_timeout_secs {
@@ -1143,10 +1161,11 @@ mod tests {
             PathBuf::from("/tmp/a"),
             PathBuf::from("/tmp/b"),
         );
-        // Finalizing started 30 seconds ago — well within 300s timeout.
+        // Finalizing started 30 seconds ago — well within 1800s timeout.
         goal.state = ta_goal::GoalRunState::Finalizing {
             exit_code: 0,
             finalize_started_at: Utc::now() - chrono::Duration::seconds(30),
+            run_pid: None,
         };
         store.save(&goal).unwrap();
 
@@ -1180,10 +1199,12 @@ mod tests {
             PathBuf::from("/tmp/a"),
             PathBuf::from("/tmp/b"),
         );
-        // Finalizing started 400 seconds ago — exceeds default 300s timeout.
+        // Finalizing started 2000 seconds ago — exceeds default 1800s timeout.
+        // run_pid = None means no live process to defer to.
         goal.state = ta_goal::GoalRunState::Finalizing {
             exit_code: 0,
-            finalize_started_at: Utc::now() - chrono::Duration::seconds(400),
+            finalize_started_at: Utc::now() - chrono::Duration::seconds(2000),
+            run_pid: None,
         };
         store.save(&goal).unwrap();
 

@@ -430,9 +430,9 @@ max_context_entries = 10
 # VCS submit adapter: controls branch naming and PR creation.
 # `ta draft apply` (without --no-submit) uses this to create the branch and PR.
 [submit.git]
-# Branch prefix for agent-created branches. Change to "feature/" to align with
-# your team's branch naming convention. Default: "ta/"
-branch_prefix = "ta/"
+# Branch prefix for agent-created branches. Default: "feature/"
+# Change to "ta/" if your team prefers a TA-namespaced convention.
+branch_prefix = "feature/"
 # Auto-create a pull request when the branch is pushed.
 auto_review = true
 "#;

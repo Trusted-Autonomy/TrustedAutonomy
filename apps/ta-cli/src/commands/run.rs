@@ -1692,9 +1692,12 @@ pub fn execute(
                 if let Ok(Some(mut g)) = store.get(goal.goal_run_id) {
                     g.agent_pid = None;
                     if matches!(g.state, ta_goal::GoalRunState::Running) {
+                        // Store our own PID so the watchdog can confirm we're
+                        // still alive and skip the finalize timeout (v0.13.17).
                         let _ = g.transition(ta_goal::GoalRunState::Finalizing {
                             exit_code: exit.code().unwrap_or(-1),
                             finalize_started_at: chrono::Utc::now(),
+                            run_pid: Some(std::process::id()),
                         });
                     }
                     let _ = store.save(&g);

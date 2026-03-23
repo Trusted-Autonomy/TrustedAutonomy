@@ -978,7 +978,7 @@ auto_submit = true
 auto_review = true
 
 [submit.git]
-branch_prefix = "ta/"
+branch_prefix = "feature/"
 target_branch = "main"
 merge_strategy = "squash"
 remote = "origin"

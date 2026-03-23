@@ -1176,9 +1176,10 @@ fn diagnose_goal(
             ..
         } => {
             let elapsed = (*now - *finalize_started_at).num_seconds().unsigned_abs();
-            if elapsed > 300 {
+            if elapsed > 1800 {
                 return Some(format!(
-                    "Draft creation has been in progress for {}s (threshold: 300s) — may be stuck.",
+                    "Draft creation has been in progress for {}s (threshold: 1800s) — may be stuck. \
+                     Run: ta goal recover <id>",
                     elapsed
                 ));
             }
