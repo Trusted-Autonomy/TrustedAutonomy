@@ -437,8 +437,24 @@ fn load_pipeline(
         return Ok(pipeline);
     }
 
-    // 3. Built-in default pipeline.
-    let pipeline: ReleasePipeline = serde_yaml::from_str(DEFAULT_PIPELINE_YAML)?;
+    // 3. Built-in default pipeline — apply constitution.toml overrides.
+    let mut pipeline: ReleasePipeline = serde_yaml::from_str(DEFAULT_PIPELINE_YAML)?;
+
+    // v0.13.15: Read checklist_gate from .ta/constitution.toml.
+    // When checklist_gate = false, remove the "Constitution compliance sign-off" step
+    // so projects that manage compliance separately can opt out of the blocking gate.
+    let constitution_cfg =
+        super::constitution::ProjectConstitutionConfig::load(&config.workspace_root)
+            .unwrap_or_default();
+    if let Some(ref cc) = constitution_cfg {
+        if !cc.release.checklist_gate {
+            pipeline.steps.retain(|step| {
+                // Matches by substring to avoid fragile exact-string dependency.
+                !step.name.to_lowercase().contains("constitution")
+            });
+        }
+    }
+
     validate_pipeline(&pipeline)?;
     Ok(pipeline)
 }

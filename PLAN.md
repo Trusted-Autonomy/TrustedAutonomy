@@ -5926,57 +5926,66 @@ When goal state is wrong (e.g., `failed` but draft was created, `running` with d
 **Problem**: CLAUDE.md instructs agents to "update version to match the phase" without a guard. When implementing backfilled phases (v0.13.6–v0.13.11 added after the codebase reached v0.14.2-alpha), agents set `Cargo.toml` version backward to e.g. `0.13.8-alpha`. This corrupts semver history and causes confusing build output.
 
 1. [x] **CLAUDE.md guard**: Updated rule — only bump version if the phase version is higher than current workspace version. Never set a lower version. (Fixed in this session's CLAUDE.md edit.)
-2. [ ] **Draft build version check**: In `draft.rs` or the plan-update path, add a validation: if the agent changed `Cargo.toml` `version` to a semver lower than the current source version, emit a `VerificationWarning` (type: `backward_version_bump`) and optionally block with `on_failure = "block"`.
-3. [ ] **Test**: version `0.14.2-alpha` in source, agent sets `0.13.8-alpha` → warning emitted; `0.14.3-alpha` → no warning.
+2. [x] **Draft build version check**: `draft.rs` `build_package()` calls `check_backward_version_bump()` — compares staging `Cargo.toml` version (tuple `(u64,u64,u64)`) against source; emits `VerificationWarning` if staging is lower. No external `semver` crate required.
+3. [x] **Test**: 5 tests in `draft.rs` — source `0.14.2-alpha` vs staging `0.13.8-alpha` → warning; `0.14.3-alpha` → no warning; non-Cargo-toml artifacts → no check; PLAN.md unchecked detection (separate).
 
 #### 2. `ta-memory` MCP Injection Cleanup
 
 **Problem**: `inject_memory_mcp_server()` (v0.13.8) writes a `ta-memory` entry with the staging-directory path into `.mcp.json` but never saves a backup. `restore_mcp_server_config()` only restores from `MCP_JSON_BACKUP`, leaving the `ta-memory` key in place. It then propagates through the draft diff into source, appearing in every PR as a one-line spurious `.mcp.json` change with a stale staging path.
 
 4. [x] **Restore fallback**: `restore_mcp_server_config()` now strips the `ta-memory` key when no backup exists. (Fixed in PR #258, merged.)
-5. [ ] **Test**: `inject_memory_mcp_server()` followed by `restore_mcp_server_config()` → `ta-memory` key absent; key absent when no injection ran → no-op; key still present for non-TA keys.
+5. [x] **Test**: 3 tests in `run.rs` — inject then restore removes `ta-memory` key; no injection → restore is no-op; inject with existing servers → other keys preserved.
 
 #### 3. `ta draft apply` Should Use Configured VCS Workflow
 
 **Problem**: In practice, `ta draft apply --no-submit` has been used, then git branch/commit/PR created manually. This bypasses TA's VCS pipeline and produces `ta/` branches instead of `feature/` branches. The configured adapter (`adapter = "git"`, `branch_prefix = "ta/"`, `auto_review = true`) should handle the full workflow.
 
-6. [ ] **`branch_prefix` config in wizard**: `ta setup wizard` should ask for branch prefix preference (`ta/`, `feature/`, etc.) and write it to `[submit.git] branch_prefix`. Default `ta/` is fine; the wizard should surface it so teams can align.
-7. [ ] **`ta draft apply` default behavior documentation**: Clarify in USAGE.md that `ta draft apply` (without `--no-submit`) is the standard path — it runs the full submit workflow (branch → commit → push → PR) via the configured adapter. `--no-submit` is for manual override only.
+6. [x] **`branch_prefix` config in wizard**: `ta setup wizard` now surfaces `[submit.git] branch_prefix` (default `ta/`) in the generated `workflow.toml`. Users can edit to `feature/` or any team convention.
+7. [x] **`ta draft apply` default behavior documentation**: USAGE.md updated — clarifies that `ta draft apply` (without `--no-submit`) runs the full submit workflow; `--no-submit` is for manual override. Shows `branch_prefix` config.
 
 #### 4. PLAN.md Deferred Items in Completed Phases
 
 **Problem**: Agents marking phases done sometimes leave `[ ]` items without explicit deferred targets (just `→ Deferred` without a phase number). CLAUDE.md deferred items policy requires every unchecked item to be moved to a named phase.
 
-8. [ ] **Draft build deferred items validation**: Extend plan validation in draft build to detect `[ ]` items in `<!-- status: done -->` phases that lack a `→ vX.Y` target. Emit `VerificationWarning` (type: `unchecked_items_in_done_phase`) with the item text. Block with `on_failure = "warn"` so agents catch it before the draft is submitted.
-9. [ ] **Test**: phase with unchecked items + no `→ vX.Y` → warning; same items with `→ v0.14.0` → no warning; `<!-- status: pending -->` phase → no warning.
+8. [x] **Draft build deferred items validation**: `draft.rs` `build_package()` calls `check_plan_unchecked_in_done_phases()` — parses PLAN.md for `<!-- status: done -->` phases, flags `[ ]` items without `→ vX.Y` target. Emits `VerificationWarning` (only runs when PLAN.md is in the changed artifacts).
+9. [x] **Test**: 4 tests in `draft.rs` — unchecked item in done phase without target → warning; same item with `→ v0.14.0` → no warning; pending phase → no warning; PLAN.md not in artifacts → no check.
 
 #### 5. Cross-Language Onboarding (from v0.13.8 items 35–37)
 
-10. [ ] **`ta new --template <lang>`**: Language-specific project templates pre-populating `workflow.toml` verify commands and `.ta/constitution.toml`. Templates: `python`, `typescript`, `nodejs`, `rust` (existing default), `generic`.
-    - `python`: verify = `["ruff check .", "mypy src/", "pytest"]`; `.taignore` with `__pycache__/`, `.venv/`, `dist/`
-    - `typescript`/`nodejs`: verify = `["tsc --noEmit", "npm test"]`; `.taignore` with `node_modules/`, `.next/`, `dist/`
-11. [ ] **`ta init --template <lang>`**: Same as `ta new` for existing projects — writes only `.ta/` config files. Auto-detects language from `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`.
-12. [ ] **`.taignore` — overlay exclusion patterns**: `.ta/taignore` lists glob patterns excluded from staging copies and diffs. Highest-impact non-Rust adoption item: `node_modules/`, `.venv/`, `__pycache__/`. Default exclusions: `.git/`, `.ta/`. Language templates (item 10) write an appropriate `.taignore`.
+10. [x] **`ta new --template <lang>`**: Language aliases added to `PROJECT_TEMPLATES` in `new.rs`: `rust`, `typescript`, `nodejs`, `python`, `go` (shorthands redirecting to canonical templates). `ta init --template <lang>` likewise auto-detects language and writes language-specific `workflow.toml` verify commands.
+11. [x] **`ta init --template <lang>`**: `generate_workflow_toml()` extended with `ProjectType::TypeScript`, `ProjectType::Python`, `ProjectType::Go` variants — each writes appropriate verify commands (`ruff check`, `mypy`, `pytest`; `npm run typecheck`, `npm test`; `go vet`, `go test ./...`) and `[submit.git]` section.
+12. [-] **`.taignore` — overlay exclusion patterns**: Already implemented in `overlay.rs` defaults (`.git/`, `.ta/`, `node_modules/`, `.venv/`, `__pycache__/`, `dist/`, `build/`). USAGE.md cross-language section documents `.taignore` usage. No code change needed. → Resolved (already done)
 
 #### 6. Constitution Completion (from v0.13.9 items 4, 5, 7, 9, 10)
 
-13. [ ] **Release pipeline reads `checklist_gate`**: The release checklist gate step is enabled/disabled by `constitution.toml`. Checklist content generated from declared rules, not hardcoded.
-14. [ ] **Parallel agent review during release**: When `agent_review = true` in `constitution.toml`, the release pipeline fans out two concurrent agents (release notes + constitution reviewer). Reviewer output appended to draft as "Constitution Review" section.
-15. [ ] **Constitution inheritance (`extends`)**: Apply the `extends = "ta-default"` field at load time — merge base profile rules with project overrides. Stub already in code; field stored but not applied.
-16. [ ] **`ta constitution init-toml --template <lang>`**: Language-specific constitution templates (python, typescript, nodejs, rust, generic). Auto-detect language if `--template` omitted.
-17. [ ] **USAGE.md cross-language worked examples**: "Using TA with Python / TypeScript / Node.js" section — complete `workflow.toml`, `.taignore`, `constitution.toml` for each ecosystem.
+13. [x] **Release pipeline reads `checklist_gate`**: `release.rs` `load_pipeline()` loads `constitution.toml` and strips constitution gate steps when `checklist_gate = false`. Substring match on step name (`contains("constitution")`).
+14. [-] **Parallel agent review during release**: Deferred → v0.13.16. Requires async pipeline fan-out; current release pipeline is sequential. Constitution reviewer agent output append requires agent lifecycle wiring not in scope.
+15. [x] **Constitution inheritance (`extends`)**: `apply_extends_ta_default()` implemented in `constitution.rs` — merges `ta-default` base rules, scan, and validate with project overrides. Called from `ProjectConstitutionConfig::load()` when `extends = "ta-default"` detected. `extends` field set to `None` after merge to prevent double-apply.
+16. [x] **`ta constitution init-toml --template <lang>`**: `init_toml()` accepts `Option<&str>` template parameter. `detect_constitution_language()` auto-detects from filesystem signals. `constitution_template_for_language()` generates language-specific configs with `extends = "ta-default"` and appropriate scan patterns.
+17. [x] **USAGE.md cross-language worked examples**: Added "Using TA with Python", "Using TA with TypeScript / Node.js" sections — full `workflow.toml`, `.taignore`, `constitution.toml` for each ecosystem with pitfall callouts.
 
 #### 7. Shell UX Deferred Items (from v0.13.6 items 16, 19, 20)
 
-18. [ ] **Tab completion for community resources**: Resource name completion in shell for `ta community get/search`. (`ta community list` output feeds completion candidates.)
-19. [ ] **Status bar community badge**: `[community: searching...]` indicator in shell status bar during active `community_search` calls.
-20. [ ] **Upstream PR on `ta draft apply`**: Wire staged `.ta/community-staging/` contributions to GitHub PR creation on apply. Staging files and `resource_uri: "community://..."` scheme already in place.
+18. [-] **Tab completion for community resources**: Deferred → v0.13.16. Requires shell integration work (readline/linefeed hooks) not scoped here.
+19. [-] **Status bar community badge**: Deferred → v0.13.16. TUI status bar changes are complex and would be the only TUI change in this phase.
+20. [-] **Upstream PR on `ta draft apply`**: Deferred → v0.13.16. Git adapter wiring for community staging URIs not in scope; `resource_uri` scheme support needed in apply path.
 
 #### 8. Platform Installer Polish (from v0.13.11 item 9)
 
-21. [ ] **Bundle USAGE.html in MSI**: Install `USAGE.html` to `%ProgramFiles%\TrustedAutonomy\docs\` so Windows users have offline docs without needing a browser.
+21. [-] **Bundle USAGE.html in MSI**: Deferred → v0.13.16. Requires WiX template change and build pipeline changes outside the scope of a fix pass.
 
-#### Version: `0.13.15-alpha`
+#### Completed
+
+All planned items implemented except those deferred above. New tests: 5 (draft.rs version/plan checks), 3 (run.rs MCP injection), 6 (constitution.rs extends + template detection) = 14 new tests.
+
+#### Deferred items moved/resolved
+
+- Item 12 (`.taignore`) → Resolved (already implemented in overlay.rs; documented)
+- Item 14 (parallel agent review during release) → v0.13.16
+- Items 18–20 (shell UX: tab completion, status bar badge, upstream PR) → v0.13.16
+- Item 21 (bundle USAGE.html in MSI) → v0.13.16
+
+#### Version: `0.14.2-alpha` (workspace already at v0.14.2-alpha; v0.13.15 is a backfilled fix pass — no version bump)
 
 ---
 

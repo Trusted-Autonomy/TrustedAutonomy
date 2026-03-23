@@ -1567,6 +1567,33 @@ pub(crate) fn build_package(
         }
     }
 
+    // v0.13.15: Version backward bump check.
+    // If the agent changed Cargo.toml and set a version lower than the source,
+    // emit a VerificationWarning so reviewers notice the regression.
+    let version_warnings =
+        check_backward_version_bump(&pkg.changes.artifacts, source_dir, &goal.workspace_path);
+    if !version_warnings.is_empty() {
+        eprintln!(
+            "[version] {} backward version bump(s) detected — review before approving",
+            version_warnings.len()
+        );
+        pkg.verification_warnings.extend(version_warnings);
+    }
+
+    // v0.13.15: PLAN.md deferred items validation.
+    // If PLAN.md was changed and any `<!-- status: done -->` phase has unchecked
+    // `[ ]` items without a `→ vX.Y` deferred target, emit a VerificationWarning.
+    let plan_warnings =
+        check_plan_unchecked_in_done_phases(&pkg.changes.artifacts, &goal.workspace_path);
+    if !plan_warnings.is_empty() {
+        eprintln!(
+            "[plan] {} unchecked item(s) in done phase(s) without deferred target — \
+             add `→ vX.Y` or drop the item per Deferred Items Policy",
+            plan_warnings.len()
+        );
+        pkg.verification_warnings.extend(plan_warnings);
+    }
+
     // Save the draft package.
     save_package(config, &pkg)?;
 
@@ -6276,6 +6303,168 @@ fn count_call_sites(content: &str, prefix: &str) -> usize {
     count
 }
 
+// ── v0.13.15: Version backward bump check ─────────────────────────────────
+
+/// Check if any artifact is a workspace Cargo.toml that sets a version lower
+/// than the source workspace version.  Returns VerificationWarnings.
+///
+/// The check is intentionally loose: it only fires when both the staging and
+/// source workspace Cargo.toml carry a `version = "..."` line that can be
+/// parsed as (major, minor, patch).  Any parse error is silently skipped.
+fn check_backward_version_bump(
+    artifacts: &[Artifact],
+    source_dir: &std::path::Path,
+    staging_dir: &std::path::Path,
+) -> Vec<VerificationWarning> {
+    let mut warnings = Vec::new();
+
+    for artifact in artifacts {
+        let uri = &artifact.resource_uri;
+        // Only look at Cargo.toml files (workspace or crate-level).
+        if !uri.ends_with("Cargo.toml") {
+            continue;
+        }
+        let rel_path = uri.strip_prefix("fs://workspace/").unwrap_or(uri.as_str());
+
+        let source_path = source_dir.join(rel_path);
+        let staging_path = staging_dir.join(rel_path);
+
+        let source_ver = read_toml_version(&source_path);
+        let staging_ver = read_toml_version(&staging_path);
+
+        if let (Some((src_str, src_tuple)), Some((staged_str, staged_tuple))) =
+            (source_ver, staging_ver)
+        {
+            if staged_tuple < src_tuple {
+                warnings.push(VerificationWarning {
+                    command: "[version]".to_string(),
+                    exit_code: None,
+                    output: format!(
+                        "{}: agent set version to {} but source is {} — \
+                         per CLAUDE.md, only bump forward (never set a lower version). \
+                         Revert this change or update to a higher version.",
+                        rel_path, staged_str, src_str,
+                    ),
+                });
+            }
+        }
+    }
+
+    warnings
+}
+
+/// Parse `version = "X.Y.Z..."` from a Cargo.toml file.
+/// Returns the raw version string and a (major, minor, patch) tuple for ordering.
+/// Returns None if the file doesn't exist, can't be read, or has no parseable version line.
+fn read_toml_version(path: &std::path::Path) -> Option<(String, (u64, u64, u64))> {
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("version") {
+            let rest = rest.trim();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let ver_str = rest.trim().trim_matches('"');
+                // Strip pre-release suffix (e.g. "-alpha", "-alpha.2") for ordering.
+                let numeric_part = ver_str.split('-').next().unwrap_or(ver_str);
+                let parts: Vec<&str> = numeric_part.split('.').collect();
+                if parts.len() >= 3 {
+                    if let (Ok(major), Ok(minor), Ok(patch)) = (
+                        parts[0].parse::<u64>(),
+                        parts[1].parse::<u64>(),
+                        parts[2].parse::<u64>(),
+                    ) {
+                        return Some((ver_str.to_string(), (major, minor, patch)));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// ── v0.13.15: PLAN.md deferred items validation ───────────────────────────
+
+/// Check staging PLAN.md for unchecked `[ ]` items in `<!-- status: done -->`
+/// phases that lack a `→ vX.Y` forward-deferred target.
+///
+/// Returns one VerificationWarning per offending item, so reviewers can see
+/// the exact items that need to be resolved.
+fn check_plan_unchecked_in_done_phases(
+    artifacts: &[Artifact],
+    staging_dir: &std::path::Path,
+) -> Vec<VerificationWarning> {
+    // Only run if PLAN.md is among the changed artifacts.
+    let plan_uri = artifacts.iter().find(|a| {
+        a.resource_uri == "fs://workspace/PLAN.md" || a.resource_uri.ends_with("/PLAN.md")
+    });
+    if plan_uri.is_none() {
+        return Vec::new();
+    }
+
+    let plan_path = staging_dir.join("PLAN.md");
+    let content = match std::fs::read_to_string(&plan_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    detect_unchecked_in_done_phases(&content)
+}
+
+/// Core parsing logic for PLAN.md deferred items validation (extracted for testing).
+fn detect_unchecked_in_done_phases(content: &str) -> Vec<VerificationWarning> {
+    let mut warnings = Vec::new();
+    let mut in_done_phase = false;
+    let mut phase_title = String::new();
+
+    for line in content.lines() {
+        // Detect phase status markers.
+        if line.trim_start().starts_with("<!-- status:") {
+            in_done_phase = line.contains("status: done");
+            continue;
+        }
+
+        // Detect phase headings (### or ##) to update the current phase title.
+        if line.starts_with("### ") || line.starts_with("## ") {
+            phase_title = line.trim_start_matches('#').trim().to_string();
+            // Reset done status — it will be set by the following <!-- status: --> marker.
+            in_done_phase = false;
+            continue;
+        }
+
+        if !in_done_phase {
+            continue;
+        }
+
+        // Look for unchecked items: lines matching `- [ ] ...`
+        let trimmed = line.trim();
+        if trimmed.starts_with("- [ ]") || trimmed.starts_with("* [ ]") {
+            // Check if it has a forward-deferred target: `→ vX.Y` or `-> vX.Y`
+            let has_deferred_target = trimmed.contains("→ v") || trimmed.contains("-> v");
+            if !has_deferred_target {
+                let item_text = trimmed
+                    .trim_start_matches("- [ ]")
+                    .trim_start_matches("* [ ]")
+                    .trim();
+                let short = if item_text.len() > 120 {
+                    format!("{}…", &item_text[..120])
+                } else {
+                    item_text.to_string()
+                };
+                warnings.push(VerificationWarning {
+                    command: "[plan]".to_string(),
+                    exit_code: None,
+                    output: format!(
+                        "Phase '{}' is done but has unchecked item without `→ vX.Y` target: {}",
+                        phase_title, short,
+                    ),
+                });
+            }
+        }
+    }
+
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8888,5 +9077,110 @@ fn run() {
             "PLAN.md on the feature branch should be updated to done, got:\n{}",
             plan_content
         );
+    }
+
+    // ── v0.13.15: version backward bump check ─────────────────────
+
+    #[test]
+    fn read_toml_version_parses_basic() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &path,
+            "[package]\nname = \"foo\"\nversion = \"0.14.2-alpha\"\n",
+        )
+        .unwrap();
+        let result = read_toml_version(&path);
+        assert!(result.is_some());
+        let (s, tuple) = result.unwrap();
+        assert_eq!(s, "0.14.2-alpha");
+        assert_eq!(tuple, (0, 14, 2));
+    }
+
+    #[test]
+    fn read_toml_version_missing_file_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let result = read_toml_version(&dir.path().join("nonexistent.toml"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn check_backward_version_bump_lower_version_warns() {
+        let source = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+
+        std::fs::write(
+            source.path().join("Cargo.toml"),
+            "[workspace]\nversion = \"0.14.2-alpha\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            staging.path().join("Cargo.toml"),
+            "[workspace]\nversion = \"0.13.8-alpha\"\n",
+        )
+        .unwrap();
+
+        let artifacts = vec![make_test_artifact("fs://workspace/Cargo.toml")];
+        let warnings = check_backward_version_bump(&artifacts, source.path(), staging.path());
+        assert_eq!(warnings.len(), 1, "expected 1 warning for backward bump");
+        assert!(warnings[0].output.contains("0.13.8-alpha"));
+        assert!(warnings[0].output.contains("0.14.2-alpha"));
+    }
+
+    #[test]
+    fn check_backward_version_bump_forward_version_no_warn() {
+        let source = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+
+        std::fs::write(
+            source.path().join("Cargo.toml"),
+            "[workspace]\nversion = \"0.14.2-alpha\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            staging.path().join("Cargo.toml"),
+            "[workspace]\nversion = \"0.14.3-alpha\"\n",
+        )
+        .unwrap();
+
+        let artifacts = vec![make_test_artifact("fs://workspace/Cargo.toml")];
+        let warnings = check_backward_version_bump(&artifacts, source.path(), staging.path());
+        assert!(warnings.is_empty(), "forward bump should not warn");
+    }
+
+    // ── v0.13.15: PLAN.md deferred items validation ───────────────
+
+    #[test]
+    fn plan_unchecked_in_done_phase_warns() {
+        let content = "### v0.13.9 — Phase Title\n\
+<!-- status: done -->\n\
+- [x] Item completed\n\
+- [ ] Item not done without deferred target\n";
+        let warnings = detect_unchecked_in_done_phases(content);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].output.contains("v0.13.9"));
+        assert!(warnings[0].output.contains("Item not done"));
+    }
+
+    #[test]
+    fn plan_unchecked_with_deferred_target_no_warn() {
+        let content = "### v0.13.9 — Phase Title\n\
+<!-- status: done -->\n\
+- [x] Item completed\n\
+- [ ] Item → v0.14.0 (deferred)\n";
+        let warnings = detect_unchecked_in_done_phases(content);
+        assert!(
+            warnings.is_empty(),
+            "item with → vX.Y target should not warn"
+        );
+    }
+
+    #[test]
+    fn plan_unchecked_in_pending_phase_no_warn() {
+        let content = "### v0.13.9 — Phase Title\n\
+<!-- status: pending -->\n\
+- [ ] Item not done\n";
+        let warnings = detect_unchecked_in_done_phases(content);
+        assert!(warnings.is_empty(), "pending phase should not warn");
     }
 }

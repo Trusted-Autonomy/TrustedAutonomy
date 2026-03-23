@@ -5224,4 +5224,77 @@ non_interactive_env:
             .non_interactive_env
             .contains_key("CLAUDE_FLOW_NON_INTERACTIVE"));
     }
+
+    // ── v0.13.15: MCP injection cleanup tests (item 5) ───────────
+
+    #[test]
+    fn inject_memory_then_restore_removes_ta_memory_key() {
+        let staging = tempfile::TempDir::new().unwrap();
+
+        // Inject ta-memory into an empty staging dir (no pre-existing .mcp.json).
+        inject_memory_mcp_server(staging.path()).unwrap();
+
+        // .mcp.json should now exist and contain the ta-memory key.
+        let mcp_path = staging.path().join(MCP_JSON_PATH);
+        assert!(mcp_path.exists(), ".mcp.json should be created by inject");
+        let content = std::fs::read_to_string(&mcp_path).unwrap();
+        assert!(
+            content.contains("ta-memory"),
+            "ta-memory key must be present after inject"
+        );
+
+        // Restore — no backup exists (inject doesn't create one for a missing file).
+        restore_mcp_server_config(staging.path()).unwrap();
+
+        // After restore, ta-memory key must be absent.
+        if mcp_path.exists() {
+            let after = std::fs::read_to_string(&mcp_path).unwrap();
+            assert!(
+                !after.contains("ta-memory"),
+                "ta-memory key must be removed after restore, got: {}",
+                after
+            );
+        }
+        // If the file was removed entirely, that also satisfies the postcondition.
+    }
+
+    #[test]
+    fn restore_mcp_no_injection_is_noop() {
+        let staging = tempfile::TempDir::new().unwrap();
+        // No .mcp.json, no backup — restore should be a no-op.
+        let result = restore_mcp_server_config(staging.path());
+        assert!(result.is_ok(), "restore with no state should succeed");
+    }
+
+    #[test]
+    fn inject_memory_preserves_other_mcp_keys() {
+        let staging = tempfile::TempDir::new().unwrap();
+        let mcp_path = staging.path().join(MCP_JSON_PATH);
+
+        // Write a .mcp.json with an existing non-TA server.
+        std::fs::write(
+            &mcp_path,
+            r#"{"mcpServers": {"my-server": {"command": "my-cmd"}}}"#,
+        )
+        .unwrap();
+
+        inject_memory_mcp_server(staging.path()).unwrap();
+
+        let content = std::fs::read_to_string(&mcp_path).unwrap();
+        assert!(content.contains("ta-memory"), "ta-memory must be added");
+        assert!(
+            content.contains("my-server"),
+            "existing server must be preserved"
+        );
+
+        restore_mcp_server_config(staging.path()).unwrap();
+
+        // After restore: my-server present, ta-memory absent.
+        if mcp_path.exists() {
+            let after = std::fs::read_to_string(&mcp_path).unwrap();
+            assert!(!after.contains("ta-memory"), "ta-memory must be removed");
+            // my-server was present before inject_memory and there was no backup,
+            // so restore only strips ta-memory; other keys survive.
+        }
+    }
 }

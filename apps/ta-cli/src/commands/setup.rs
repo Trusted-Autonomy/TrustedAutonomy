@@ -426,6 +426,15 @@ on_human_guidance = true
 on_repeated_correction = true
 correction_threshold = 3
 max_context_entries = 10
+
+# VCS submit adapter: controls branch naming and PR creation.
+# `ta draft apply` (without --no-submit) uses this to create the branch and PR.
+[submit.git]
+# Branch prefix for agent-created branches. Change to "feature/" to align with
+# your team's branch naming convention. Default: "ta/"
+branch_prefix = "ta/"
+# Auto-create a pull request when the branch is pushed.
+auto_review = true
 "#;
     std::fs::write(&path, content)?;
     println!("  Created .ta/workflow.toml");

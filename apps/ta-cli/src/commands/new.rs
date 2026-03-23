@@ -23,7 +23,31 @@ use ta_mcp_gateway::GatewayConfig;
 use super::init;
 
 /// Available project scaffolding templates for `ta new --template`.
+/// Format: (template-name, description, init-template-name)
 const PROJECT_TEMPLATES: &[(&str, &str, &str)] = &[
+    // Language shorthand aliases (v0.13.15 cross-language onboarding)
+    (
+        "rust",
+        "Rust workspace (shorthand for rust-cli)",
+        "rust-workspace",
+    ),
+    (
+        "typescript",
+        "TypeScript project (shorthand for ts-api)",
+        "typescript-monorepo",
+    ),
+    (
+        "nodejs",
+        "Node.js project with npm/Jest (shorthand for ts-api)",
+        "typescript-monorepo",
+    ),
+    (
+        "python",
+        "Python project (shorthand for python-api)",
+        "python-ml",
+    ),
+    ("go", "Go project (shorthand for go-service)", "go-service"),
+    // Full names
     (
         "rust-cli",
         "Rust CLI application with clap and workspace structure",

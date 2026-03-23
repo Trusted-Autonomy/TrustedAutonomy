@@ -50,7 +50,16 @@ pub enum ConstitutionCommands {
     /// Writes a starter `.ta/constitution.toml` with TA's default injection/cleanup
     /// rules, scan config, and validation steps. Edit it to match your project's
     /// patterns, then run `ta constitution check-toml` to validate.
-    InitToml,
+    ///
+    /// Use `--template` to get language-specific verify commands pre-populated.
+    /// Available templates: rust (default), python, typescript, nodejs, go, generic.
+    /// Auto-detects language if `--template` is omitted.
+    InitToml {
+        /// Language template: rust, python, typescript, nodejs, go, generic.
+        /// Auto-detected from Cargo.toml, pyproject.toml, package.json, go.mod if omitted.
+        #[arg(long)]
+        template: Option<String>,
+    },
     /// Run the constitution scanner against the project source (v0.13.9).
     ///
     /// Reads `.ta/constitution.toml` (or uses ta-default rules if not present).
@@ -73,7 +82,9 @@ pub fn execute(command: &ConstitutionCommands, config: &GatewayConfig) -> anyhow
         } => run_init(config, agent, from.as_deref(), *non_interactive),
         ConstitutionCommands::Show => show_constitution(config),
         ConstitutionCommands::Check { draft_id } => check_constitution(config, draft_id.as_deref()),
-        ConstitutionCommands::InitToml => init_toml(&config.workspace_root),
+        ConstitutionCommands::InitToml { template } => {
+            init_toml(&config.workspace_root, template.as_deref())
+        }
         ConstitutionCommands::CheckToml { json } => check_toml(&config.workspace_root, *json),
     }
 }
@@ -508,6 +519,10 @@ impl Default for ProjectConstitutionConfig {
 impl ProjectConstitutionConfig {
     /// Load from `.ta/constitution.toml` in the project root.
     /// Returns `Ok(None)` if the file does not exist.
+    ///
+    /// If the loaded config declares `extends = "ta-default"`, the ta-default
+    /// profile is merged in as a base: project rules are layered on top so that
+    /// project-specific settings win while the base provides the standard rule set.
     pub fn load(project_root: &Path) -> anyhow::Result<Option<ProjectConstitutionConfig>> {
         let path = project_root.join(".ta/constitution.toml");
         if !path.exists() {
@@ -515,8 +530,15 @@ impl ProjectConstitutionConfig {
         }
         let content = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
-        let config: ProjectConstitutionConfig = toml::from_str(&content)
+        let mut config: ProjectConstitutionConfig = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("constitution.toml parse error: {}", e))?;
+
+        // v0.13.15: Apply `extends` inheritance at load time.
+        // Currently only "ta-default" is supported as a base profile.
+        if config.extends.as_deref() == Some("ta-default") {
+            config = apply_extends_ta_default(config);
+        }
+
         Ok(Some(config))
     }
 
@@ -586,6 +608,51 @@ impl ProjectConstitutionConfig {
     #[allow(dead_code)]
     pub fn validate_steps_for_stage(&self, stage: &str) -> Vec<&ValidationStep> {
         self.validate.iter().filter(|v| v.stage == stage).collect()
+    }
+}
+
+// ── v0.13.15: extends inheritance ────────────────────────────────────────────
+
+/// Merge a project config on top of `ta-default`.
+///
+/// Merge strategy:
+/// - `rules`: base rules included by default; project rules override/extend them.
+/// - `scan.include/exclude`: project values win if non-empty; else base values.
+/// - `scan.on_violation`: project value wins.
+/// - `release`: project values win.
+/// - `validate`: project steps replace base steps entirely (project knows best).
+/// - `extends`: cleared after merging (no double-inheritance).
+fn apply_extends_ta_default(project: ProjectConstitutionConfig) -> ProjectConstitutionConfig {
+    let base = ProjectConstitutionConfig::ta_default();
+
+    // Merge rules: base first, project rules override by key.
+    let mut merged_rules = base.rules;
+    for (k, v) in project.rules {
+        merged_rules.insert(k, v);
+    }
+
+    // scan: project wins if its include is non-empty; otherwise inherit base.
+    let merged_scan = if !project.scan.include.is_empty() {
+        project.scan
+    } else {
+        let mut scan = base.scan;
+        scan.on_violation = project.scan.on_violation;
+        scan
+    };
+
+    // validate: project steps replace base entirely when non-empty.
+    let merged_validate = if !project.validate.is_empty() {
+        project.validate
+    } else {
+        base.validate
+    };
+
+    ProjectConstitutionConfig {
+        extends: None, // consumed
+        rules: merged_rules,
+        scan: merged_scan,
+        release: project.release,
+        validate: merged_validate,
     }
 }
 
@@ -699,26 +766,125 @@ fn collect_scan_files(
 
 // ── CLI handlers for v0.13.9 commands ────────────────────────────────────────
 
-fn init_toml(project_root: &Path) -> anyhow::Result<()> {
+fn init_toml(project_root: &Path, template: Option<&str>) -> anyhow::Result<()> {
     let path = project_root.join(".ta/constitution.toml");
     if path.exists() {
         println!("constitution.toml already exists at {}.", path.display());
         println!("  Delete it first if you want to regenerate.");
         return Ok(());
     }
-    let config = ProjectConstitutionConfig::ta_default();
+
+    // Resolve template: explicit > auto-detected > rust (default).
+    let lang = template
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| detect_constitution_language(project_root));
+
+    let config = constitution_template_for_language(&lang);
     let toml_str = toml::to_string_pretty(&config)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize default constitution config: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to serialize constitution config: {}", e))?;
     std::fs::create_dir_all(
         path.parent()
             .ok_or_else(|| anyhow::anyhow!("constitution.toml has no parent directory"))?,
     )?;
     std::fs::write(&path, toml_str)
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", path.display(), e))?;
-    println!("Created {}.", path.display());
+    println!("Created {} (template: {}).", path.display(), lang);
     println!("  Edit to define your project's invariants.");
     println!("  Run `ta constitution check-toml` to validate.");
     Ok(())
+}
+
+/// Auto-detect the project language from filesystem signals.
+fn detect_constitution_language(project_root: &Path) -> String {
+    if project_root.join("Cargo.toml").exists() {
+        return "rust".to_string();
+    }
+    if project_root.join("pyproject.toml").exists()
+        || project_root.join("setup.py").exists()
+        || project_root.join("requirements.txt").exists()
+    {
+        return "python".to_string();
+    }
+    if project_root.join("package.json").exists() {
+        // Distinguish TypeScript vs plain Node.js by tsconfig presence.
+        if project_root.join("tsconfig.json").exists() {
+            return "typescript".to_string();
+        }
+        return "nodejs".to_string();
+    }
+    if project_root.join("go.mod").exists() {
+        return "go".to_string();
+    }
+    "generic".to_string()
+}
+
+/// Build a language-specific ProjectConstitutionConfig.
+///
+/// Each template inherits TA's default injection/cleanup rules and adds
+/// language-specific validate steps appropriate for the ecosystem.
+fn constitution_template_for_language(lang: &str) -> ProjectConstitutionConfig {
+    let mut config = ProjectConstitutionConfig::ta_default();
+    // All templates extend ta-default (inheritance stub — field stored, applied at load time).
+    config.extends = Some("ta-default".to_string());
+
+    match lang {
+        "python" => {
+            config.scan.include = vec!["src/".to_string()];
+            config.validate = vec![
+                ValidationStep {
+                    stage: "pre_draft_build".to_string(),
+                    commands: vec!["ruff check .".to_string(), "mypy src/".to_string()],
+                    on_failure: "block".to_string(),
+                },
+                ValidationStep {
+                    stage: "pre_draft_apply".to_string(),
+                    commands: vec!["pytest".to_string()],
+                    on_failure: "warn".to_string(),
+                },
+            ];
+        }
+        "typescript" | "nodejs" => {
+            config.scan.include = vec!["src/".to_string()];
+            config.scan.exclude = vec!["node_modules/".to_string(), "dist/".to_string()];
+            let check_cmd = if lang == "typescript" {
+                "npm run typecheck"
+            } else {
+                "node --check src/index.js"
+            };
+            config.validate = vec![
+                ValidationStep {
+                    stage: "pre_draft_build".to_string(),
+                    commands: vec![check_cmd.to_string(), "npm run lint".to_string()],
+                    on_failure: "block".to_string(),
+                },
+                ValidationStep {
+                    stage: "pre_draft_apply".to_string(),
+                    commands: vec!["npm test".to_string()],
+                    on_failure: "warn".to_string(),
+                },
+            ];
+        }
+        "go" => {
+            config.scan.include = vec![".".to_string()];
+            config.validate = vec![
+                ValidationStep {
+                    stage: "pre_draft_build".to_string(),
+                    commands: vec!["go vet ./...".to_string()],
+                    on_failure: "block".to_string(),
+                },
+                ValidationStep {
+                    stage: "pre_draft_apply".to_string(),
+                    commands: vec!["go test ./...".to_string()],
+                    on_failure: "warn".to_string(),
+                },
+            ];
+        }
+        "generic" => {
+            config.validate = vec![];
+        }
+        _ => {} // "rust" — ta_default() already has the right validate steps
+    }
+    config
 }
 
 fn check_toml(project_root: &Path, json: bool) -> anyhow::Result<()> {
@@ -1028,7 +1194,7 @@ severity = "high"
     #[test]
     fn init_toml_creates_file() {
         let dir = TempDir::new().unwrap();
-        let result = init_toml(dir.path());
+        let result = init_toml(dir.path(), None);
         assert!(result.is_ok());
         let path = dir.path().join(".ta/constitution.toml");
         assert!(path.exists(), "constitution.toml should be created");
@@ -1043,7 +1209,7 @@ severity = "high"
         std::fs::create_dir_all(&ta_dir).unwrap();
         let existing = "# existing content";
         std::fs::write(ta_dir.join("constitution.toml"), existing).unwrap();
-        init_toml(dir.path()).unwrap();
+        init_toml(dir.path(), None).unwrap();
         let content = std::fs::read_to_string(ta_dir.join("constitution.toml")).unwrap();
         assert_eq!(content, existing, "existing file should not be overwritten");
     }
@@ -1057,5 +1223,81 @@ severity = "high"
         assert!(!apply_steps.is_empty());
         assert!(build_steps.iter().all(|s| s.stage == "pre_draft_build"));
         assert!(apply_steps.iter().all(|s| s.stage == "pre_draft_apply"));
+    }
+
+    // ── v0.13.15: extends inheritance + template tests ────────────
+
+    #[test]
+    fn init_toml_python_template_has_ruff() {
+        let dir = TempDir::new().unwrap();
+        init_toml(dir.path(), Some("python")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".ta/constitution.toml")).unwrap();
+        assert!(
+            content.contains("ruff"),
+            "python template should include ruff"
+        );
+        assert!(content.contains("ta-default"), "should extend ta-default");
+    }
+
+    #[test]
+    fn init_toml_typescript_template_has_typecheck() {
+        let dir = TempDir::new().unwrap();
+        init_toml(dir.path(), Some("typescript")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".ta/constitution.toml")).unwrap();
+        assert!(
+            content.contains("typecheck"),
+            "typescript template should include typecheck"
+        );
+    }
+
+    #[test]
+    fn init_toml_auto_detects_rust_from_cargo_toml() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        // No explicit template — should auto-detect rust.
+        let lang = detect_constitution_language(dir.path());
+        assert_eq!(lang, "rust");
+    }
+
+    #[test]
+    fn init_toml_auto_detects_python_from_pyproject() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]\n").unwrap();
+        let lang = detect_constitution_language(dir.path());
+        assert_eq!(lang, "python");
+    }
+
+    #[test]
+    fn extends_ta_default_merges_rules() {
+        let mut project = ProjectConstitutionConfig {
+            extends: Some("ta-default".to_string()),
+            ..Default::default()
+        };
+        project.rules.insert(
+            "my_rule".to_string(),
+            ConstitutionRule {
+                inject_fns: vec!["my_inject".to_string()],
+                restore_fns: vec!["my_restore".to_string()],
+                patterns: vec![],
+                severity: "low".to_string(),
+            },
+        );
+
+        let merged = apply_extends_ta_default(project);
+        // Base rules from ta-default should be present.
+        assert!(
+            merged.rules.contains_key("injection_cleanup"),
+            "ta-default rule should be inherited"
+        );
+        // Project rule should also be present.
+        assert!(
+            merged.rules.contains_key("my_rule"),
+            "project rule should be preserved"
+        );
+        // extends should be consumed.
+        assert!(
+            merged.extends.is_none(),
+            "extends should be None after merging"
+        );
     }
 }

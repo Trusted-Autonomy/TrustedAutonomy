@@ -6876,6 +6876,226 @@ See [PLAN.md](../PLAN.md) for full details on each phase.
 
 ---
 
+## Using TA with Python, TypeScript, and Node.js
+
+TA works with any language ecosystem. This section shows complete onboarding examples for Python, TypeScript, and Node.js projects, with language-specific `workflow.toml`, `.taignore`, and `constitution.toml`.
+
+### Why `.taignore` matters for non-Rust projects
+
+Without `.taignore`, staging copies `node_modules/` (200MB+) or `.venv/` into every staging directory, making first-time staging extremely slow. TA applies default excludes automatically (`target/`, `node_modules/`, `__pycache__/`, `.venv/`, `dist/`, `build/`, `.next/`, `.cache/`) but you can customize them via `.taignore` at the project root.
+
+```
+# .taignore — place at project root
+# Lines starting with # are comments; blank lines ignored.
+# dirname/   — exclude any directory with this name at any depth
+# *.ext      — exclude files with this extension
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+```
+
+`ta init` generates a pre-populated `.taignore` automatically. For existing projects, create it manually at the project root or run:
+
+```bash
+ta init run --detect    # auto-detects language, writes .taignore + .ta/ config
+```
+
+---
+
+### Python
+
+**1. Initialize TA** in an existing Python project:
+
+```bash
+ta init run --template python
+```
+
+This writes:
+- `.ta/workflow.toml` with `ruff`, `mypy`, and `pytest` verify commands
+- `.taignore` excluding `__pycache__/`, `.venv/`, `*.pyc`, `*.egg-info/`
+- `.ta/constitution.toml` extending `ta-default` with Python validate steps
+
+**2. Verify configuration** (`.ta/workflow.toml`):
+
+```toml
+# TA Workflow Configuration
+
+[memory.auto_capture]
+on_goal_complete = true
+on_draft_reject  = true
+
+[verify]
+commands = [
+    "ruff check .",
+    "mypy src/",
+    "pytest",
+]
+on_failure = "block"
+timeout    = 300
+
+[submit.git]
+branch_prefix = "ta/"
+auto_review   = true
+```
+
+**3. Constitution** (`.ta/constitution.toml`):
+
+```toml
+extends = "ta-default"   # inherits TA's injection/cleanup rules
+
+[scan]
+include      = ["src/"]
+on_violation = "warn"
+
+[[validate]]
+stage      = "pre_draft_build"
+commands   = ["ruff check .", "mypy src/"]
+on_failure = "block"
+
+[[validate]]
+stage      = "pre_draft_apply"
+commands   = ["pytest"]
+on_failure = "warn"
+```
+
+**4. First goal**:
+
+```bash
+ta run "Add FastAPI health endpoint"
+```
+
+**Common pitfalls**:
+- Ensure `.venv/` is in `.taignore` (default) so the virtual environment is never staged.
+- Run `mypy` with `--ignore-missing-imports` if the project uses untyped third-party packages.
+- If `pytest` needs `PYTHONPATH`, set it in `[verify]` env: `commands = ["PYTHONPATH=src pytest"]`.
+
+---
+
+### TypeScript
+
+**1. Initialize TA** in an existing TypeScript project:
+
+```bash
+ta init run --template typescript
+```
+
+This writes:
+- `.ta/workflow.toml` with `npm run typecheck`, `npm test`, `npm run lint`
+- `.taignore` excluding `node_modules/`, `dist/`, `.next/`, `build/`
+
+**2. Workflow config** (`.ta/workflow.toml`):
+
+```toml
+[verify]
+commands = [
+    "npm run typecheck",
+    "npm test",
+    "npm run lint",
+]
+on_failure = "block"
+timeout    = 300
+
+[submit.git]
+branch_prefix = "ta/"
+auto_review   = true
+```
+
+**3. `.taignore`**:
+
+```
+# TypeScript/JavaScript
+node_modules/
+dist/
+build/
+.next/
+.cache/
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+```
+
+**Common pitfalls**:
+- `node_modules/` exclusion is critical — without it, staging a typical Next.js project copies hundreds of MB.
+- Map `npm run typecheck` to `tsc --noEmit` in `package.json` for consistent behavior.
+- If tests require a running server, use `vitest` or `jest --passWithNoTests` to avoid hangs.
+
+---
+
+### Node.js (JavaScript, no TypeScript)
+
+**1. Initialize TA**:
+
+```bash
+ta init run --template nodejs
+```
+
+**2. Workflow config** (`.ta/workflow.toml`):
+
+```toml
+[verify]
+commands = [
+    "node --check src/index.js",
+    "npm run lint",
+    "npm test",
+]
+on_failure = "block"
+timeout    = 300
+```
+
+**3. Constitution with `extends`**:
+
+```toml
+extends = "ta-default"
+
+[scan]
+include      = ["src/"]
+exclude      = ["node_modules/"]
+on_violation = "warn"
+```
+
+---
+
+### Cross-language `.ta/constitution.toml` with language template
+
+Instead of writing the constitution config by hand, use:
+
+```bash
+ta constitution init-toml --template python      # Python verify steps
+ta constitution init-toml --template typescript  # TypeScript verify steps
+ta constitution init-toml --template nodejs      # Node.js verify steps
+ta constitution init-toml --template go          # Go verify steps
+ta constitution init-toml                        # auto-detects language
+```
+
+Each template extends `ta-default` (inheriting injection/cleanup rules) and pre-populates language-appropriate `validate` steps.
+
+### VCS submit workflow
+
+By default, `ta draft apply` (without `--no-submit`) creates a branch and pull request using the configured adapter. To align with your team's branch naming:
+
+```toml
+# .ta/workflow.toml
+[submit.git]
+branch_prefix = "feature/"   # or "ta/", "agent/", etc.
+auto_review   = true         # automatically open a PR
+```
+
+`ta setup wizard` generates this section automatically with `branch_prefix = "ta/"`. Adjust it to match your team's convention.
+
+---
+
 ## Setting Up TA for Your Team
 
 TA distinguishes between **shared configuration** (checked into VCS, reviewed as normal PRs) and **local runtime state** (machine-specific, should be ignored by your VCS). This section explains the split, how to configure your VCS ignore rules, and how to optimize staging for large workspaces.

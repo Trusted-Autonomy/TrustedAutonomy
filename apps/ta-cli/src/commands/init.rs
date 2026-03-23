@@ -201,7 +201,7 @@ fn generate_workflow_toml(ta_dir: &Path, project_type: &ProjectType) -> anyhow::
     let verify_section = match project_type {
         ProjectType::RustWorkspace => {
             r#"
-# Pre-draft verification gate (v0.10.8)
+# Pre-draft verification gate
 # Commands run after agent exits, before draft is created.
 # All must pass (exit 0) for the draft to be created.
 [verify]
@@ -215,6 +215,62 @@ commands = [
 on_failure = "block"
 # Timeout per command in seconds
 timeout = 300
+
+# VCS submit adapter
+[submit.git]
+branch_prefix = "ta/"
+auto_review = true
+"#
+        }
+        ProjectType::TypeScript => {
+            r#"
+# Pre-draft verification gate
+[verify]
+commands = [
+    "npm run typecheck",
+    "npm test",
+    "npm run lint",
+]
+on_failure = "block"
+timeout = 300
+
+[submit.git]
+branch_prefix = "ta/"
+auto_review = true
+"#
+        }
+        ProjectType::Python => {
+            r#"
+# Pre-draft verification gate
+[verify]
+commands = [
+    "ruff check .",
+    "mypy src/",
+    "pytest",
+]
+on_failure = "block"
+timeout = 300
+
+[submit.git]
+branch_prefix = "ta/"
+auto_review = true
+"#
+        }
+        ProjectType::Go => {
+            r#"
+# Pre-draft verification gate
+[verify]
+commands = [
+    "go build ./...",
+    "go test ./...",
+    "go vet ./...",
+]
+on_failure = "block"
+timeout = 300
+
+[submit.git]
+branch_prefix = "ta/"
+auto_review = true
 "#
         }
         _ => {
@@ -226,6 +282,10 @@ timeout = 300
 # commands = ["make test", "make lint"]
 # on_failure = "block"
 # timeout = 300
+
+[submit.git]
+branch_prefix = "ta/"
+auto_review = true
 "#
         }
     };
