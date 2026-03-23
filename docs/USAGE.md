@@ -472,6 +472,54 @@ ta agent info codex
 ta agent info claude-flow
 ```
 
+#### Running goals with a local model (ta-agent-ollama)
+
+`ta-agent-ollama` is a standalone binary that drives any OpenAI-compatible local model endpoint (Ollama, llama.cpp server, LM Studio, vLLM) through a full tool-use loop.
+
+**Quick start with Ollama:**
+
+```bash
+# 1. Install Ollama and pull a model
+brew install ollama          # macOS
+ollama pull qwen2.5-coder:7b
+
+# 2. Generate a manifest
+ta agent new --model ollama/qwen2.5-coder:7b
+
+# 3. Run a goal
+ta run "refactor the auth module" --agent qwen-coder
+```
+
+**Quick start with llama.cpp server:**
+
+```bash
+# 1. Install and start the server
+brew install llama.cpp
+llama-server -m ~/models/qwen2.5-coder-7b-Q4_K_M.gguf \
+  --port 8080 --ctx-size 8192 --jinja
+
+# 2. Run a goal pointing at the server
+ta run "refactor the auth module" \
+  --agent ta-agent-ollama \
+  -- --model qwen2.5-coder-7b --base-url http://localhost:8080
+```
+
+`ta-agent-ollama` validates model function-calling support on startup. If the model doesn't support native tool calling, it automatically falls back to Chain-of-Thought mode (the model describes tool calls in text which are then parsed and executed). Use `--skip-validation` to bypass the startup probe for offline use.
+
+**Memory write-back:** the agent reads memory from `$TA_MEMORY_PATH` and writes new entries to `$TA_MEMORY_OUT`; TA ingests those entries after the agent exits, making them available to future goals.
+
+**Supported models** (verified with Ollama 0.6.x and llama.cpp server):
+
+| Model | Tool calling | Notes |
+|-------|-------------|-------|
+| `qwen2.5-coder:7b` | Full | Recommended default |
+| `qwen2.5-coder:14b` | Full | Best coding quality |
+| `phi4-mini` | Full | Fast on Apple Silicon |
+| `llama3.1:8b` | Full | Good general use |
+| `mistral:7b-instruct-v0.3` | Full | Reliable, fast |
+
+See `docs/agent-framework-options.md` for a full comparison of Ollama, llama.cpp server, vLLM, and LM Studio.
+
 #### Add a custom framework
 
 The fastest way is `ta agent new`:
@@ -516,6 +564,28 @@ Then use it:
 ```bash
 ta run "Fix the bug" --agent my-agent
 ```
+
+#### Install a framework from the registry
+
+Download a community-published manifest and install it locally:
+
+```bash
+# Install by registry name (writes to .ta/agents/ by default)
+ta agent install qwen-coder
+
+# Install globally (writes to ~/.config/ta/agents/)
+ta agent install qwen-coder --global
+```
+
+`ta agent install` fetches the manifest from `$TA_AGENT_REGISTRY_URL` (or the default TA registry), verifies the SHA-256 checksum, validates the TOML, and writes the manifest to the local or global agents directory.
+
+#### Publish a framework to the registry
+
+```bash
+ta agent publish ~/.config/ta/agents/my-agent.toml
+```
+
+TA validates the manifest, computes its SHA-256 checksum, and submits it to the registry. If the registry is unreachable, the command prints the checksum and instructions for opening a PR manually.
 
 #### Default framework
 
@@ -674,6 +744,36 @@ ta draft build --goal <sub-goal-2-id>
 With `--integrate`, an integration agent receives all passed staging paths and merges them into a single coherent draft.
 
 Swarm state is persisted to `.ta/swarm-workflow-<id>.json`. Failed sub-goals are reported but don't block the others from completing.
+
+#### Sub-goal dependencies
+
+Use `depends_on` in a YAML swarm definition to declare execution order:
+
+```yaml
+# .ta/workflows/my-swarm.yaml
+workflow: swarm
+sub_goals:
+  - title: "Write unit tests"
+    objective: "Add unit tests for auth module"
+
+  - title: "Refactor auth module"
+    objective: "Refactor auth.rs to use the new session API"
+    depends_on:
+      - "Write unit tests"
+
+  - title: "Update API docs"
+    objective: "Update OpenAPI spec for the changed endpoints"
+    depends_on:
+      - "Refactor auth module"
+```
+
+Sub-goals run as soon as all their dependencies have passed. If a dependency fails, all dependents are automatically skipped (marked with `[skipped due to failed dependency]` in the summary).
+
+Use `ta workflow validate` to check a swarm definition for unknown dependencies and cycles before running:
+
+```bash
+ta workflow validate .ta/workflows/my-swarm.yaml
+```
 
 ### Follow-Up Iterations
 
@@ -3360,6 +3460,27 @@ When `ta run` launches an agent, it queries the memory store and injects relevan
 
 **Semantic ranking**: With the ruvector backend (now default), injection uses semantic similarity to rank entries by relevance to the goal title.
 
+#### Memory relevance tuning (agent manifests)
+
+When using a context-mode agent (e.g., `ta-agent-ollama`), you can tune which memory entries are injected by adding a `[memory]` section to the agent's TOML manifest:
+
+```toml
+# ~/.config/ta/agents/qwen-coder.toml
+name    = "qwen-coder"
+command = "ta-agent-ollama"
+args    = ["--model", "qwen2.5-coder:7b"]
+context_inject = "env"
+
+[memory]
+inject      = "context"     # context | mcp | env | none
+write_back  = "exit-file"   # exit-file | mcp | none
+max_entries = 10            # max entries to inject (default: unlimited)
+recency_days = 30           # ignore entries older than N days (default: no limit)
+tags        = ["architecture", "conventions"]  # inject only entries with these tags
+```
+
+All three filters are applied together. If `tags` is empty, all categories are considered. Entries are sorted by category priority (Architecture first) before truncation to `max_entries`.
+
 #### Project-Aware Key Schema
 
 Memory keys use `{domain}:{topic}` format with domains auto-detected from your project type:
@@ -4112,6 +4233,31 @@ tags:
 | `POST` | `/api/office/reload` | Reload office config |
 
 Existing endpoints accept an optional `?project=<name>` query parameter to scope operations to a specific project.
+
+#### Department → workflow mapping
+
+Map team departments to their default workflow in `office.yaml`. Goals routed to a department automatically use that workflow unless `--workflow` is explicitly passed.
+
+```yaml
+departments:
+  engineering:
+    default_workflow: swarm
+    description: "Backend platform team"
+    projects:
+      - inventory-service
+
+  marketing:
+    default_workflow: serial-phases
+    description: "Content and growth"
+
+  design:
+    default_workflow: single-agent
+    description: "UX and visual design"
+```
+
+Supported workflow values: `single-agent` (default), `serial-phases`, `swarm`, `approval-chain`.
+
+When a channel message or API call routes to a department and no explicit `--workflow` is given, the department's `default_workflow` is used. If the department has no `default_workflow` set, it falls back to `single-agent`.
 
 #### Config Hot-Reload
 

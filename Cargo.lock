@@ -3123,6 +3123,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ta-agent-ollama"
+version = "0.14.2-alpha"
+dependencies = [
+ "anyhow",
+ "clap",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ta-audit"
 version = "0.14.2-alpha"
 dependencies = [
