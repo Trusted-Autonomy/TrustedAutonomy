@@ -1,0 +1,14 @@
+[
+  {
+    "version": "0.12.8-alpha",
+    "tag": "v0.12.8-alpha",
+    "commit": "2eee23845433575cc097efd24180d6591f487dad",
+    "released_at": "2026-03-20T01:03:42Z"
+  },
+  {
+    "version": "0.13.1-alpha.7",
+    "tag": "v0.13.1-alpha.7",
+    "commit": "aa519b38ad344af2474155695b6dd6e2ead46c86",
+    "released_at": "2026-03-21T06:58:17Z"
+  }
+]

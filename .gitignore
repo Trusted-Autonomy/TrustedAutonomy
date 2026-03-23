@@ -31,34 +31,73 @@ result-*
 # macOS
 .DS_Store
 
-# Trusted Autonomy — runtime state (not committed)
+# ── Trusted Autonomy ──────────────────────────────────────────────────────────
+#
+# COMMITTED (team-shared config):
+#   .ta/workflow.toml           — verify commands, git-submit settings
+#   .ta/workflow.local.toml     — personal overrides (gitignored, see below)
+#   .ta/config.toml             — project-level daemon config
+#   .ta/config.local.toml       — personal overrides incl. [experimental] (gitignored)
+#   .ta/agents/*.toml           — agent framework manifests
+#   .ta/plugins/*/channel.toml  — channel plugin config
+#   .ta/pr-template.md          — PR body template
+#   .ta/release-history.json    — project release changelog
+#   .ta/plan_history.jsonl      — timeline of plan phase completions
+#
+# IGNORED (ephemeral / machine-specific):
+#   .ta/staging/      — per-goal source copies (can be GBs with compiled target/)
+#   .ta/goals/        — live goal state JSON (changes every run)
+#   .ta/store/        — internal KV store
+#   .ta/backups/      — CLAUDE.md backup during goal injection
+#   .ta/memory/       — per-goal agent memory entries
+#   .ta/events/       — structured event log shards (grows daily)
+#   .ta/audit.jsonl   — local audit trail (aggregated by Central Daemon in v0.14.4)
+#   .ta/goal-history.jsonl   — machine-specific timing, incomplete fields until v0.14.6
+#   .ta/velocity-stats.jsonl — CPU/disk-dependent build timing, meaningless cross-machine
+#   .ta/pr_packages/  — draft artifact packages
+#   *.local.toml      — personal local overrides (never committed)
+#
+# SMART MERGE NOTE:
+#   release-history.json and plan_history.jsonl are append-only by convention.
+#   Git's line-merge handles concurrent appends cleanly (no special merge driver needed
+#   for a single-developer project). For team aggregation, Central Daemon (v0.14.4)
+#   will provide server-side merge across contributors.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Ephemeral state — never committed
 .ta/staging/
 .ta/goals/
 .ta/store/
 .ta/backups/
+.ta/pr_packages/
+.ta/interactive_sessions/
+
+# Runtime / machine-specific files
 .ta/*.log
 .ta/*.lock
+.ta/*.pid
+.ta/daemon.toml
 .ta/change_summary.json
+.ta/consent.json
+.ta/mcp_json_original
+
 # Local operational data — machine-specific, not team-shared
 .ta/audit.jsonl
-.ta/consent.json
-.ta/daemon.toml
-.ta/*.pid
 .ta/events.jsonl
 .ta/events/
 .ta/goal-history.jsonl
-.ta/mcp_json_original
 .ta/memory.rvf
 .ta/memory/
-.ta/plan_history.jsonl
-.ta/pr_packages/
-.ta/release-history.json
 .ta/velocity-stats.jsonl
-.ta/interactive_sessions/
-# Plugin binaries are built artifacts — only config files (channel.toml) are committed
+
+# Local override files — personal settings, never team-shared
+.ta/*.local.toml
+.ta/config.local.toml
+.ta/workflow.local.toml
+
+# Plugin binaries — built artifacts (only channel.toml config is committed)
 .ta/plugins/**/ta-channel-*
 .ta/plugins/**/ta-plugin-*
-# .ta/agents/, .ta/plugins/*/channel.toml, .ta/config.toml, .ta/workflow.toml — committed (team-shared)
 
 # Claude Code local settings
 .claude/
