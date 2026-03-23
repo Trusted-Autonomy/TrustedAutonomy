@@ -5033,7 +5033,7 @@ auto_approve_reads = true  # SELECT is fine, INSERT/UPDATE/DELETE needs review
 ---
 
 ### v0.13.5 — Database Proxy Plugins
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Plugin-based database proxies that intercept agent DB operations. The agent connects to a local proxy thinking it's a real database; TA captures every query, enforces read/write policies, and logs mutations for review. Plugins provide wire protocol implementations; TA provides the governance framework (v0.13.4).
 
 **Depends on**: v0.13.4 (External Action Governance — DB proxy extends the `ExternalAction` trait)
@@ -5917,7 +5917,7 @@ When goal state is wrong (e.g., `failed` but draft was created, `running` with d
 ---
 
 ### v0.13.15 — Fix Pass, Cross-Language Onboarding & Constitution Completion
-<!-- status: pending -->
+<!-- status: done -->
 <!-- beta: yes — correctness fixes + unlocking non-Rust project support -->
 **Goal**: Fix correctness and reliability bugs observed during the v0.13.x implementation run, and ship the cross-language onboarding items and constitution features that were deferred from v0.13.8 and v0.13.9. Collected deferred items: v0.13.6 items 16/19/20, v0.13.8 items 35–37, v0.13.9 items 4/5/7/9/10, v0.13.11 item 9.
 
@@ -5990,7 +5990,7 @@ All planned items implemented except those deferred above. New tests: 5 (draft.r
 ---
 
 ### v0.13.16 — Local Model Agent (`ta-agent-ollama`) & Advanced Swarm
-<!-- status: in_progress -->
+<!-- status: done -->
 <!-- beta: yes — local model support and advanced swarm orchestration -->
 **Goal**: Implement the `ta-agent-ollama` binary (full tool-use loop against any OpenAI-compatible endpoint), validate local models end-to-end (Qwen2.5-Coder, Phi-4, Kimi K2.5, Llama3.1), add framework manifest registry publishing, and complete the advanced swarm features deferred from v0.13.7. Collected deferred items: v0.13.7 items 11–13, v0.13.8 items 14–15/20–25/30–34.
 
