@@ -6093,6 +6093,50 @@ All items implemented except items 5 and 13 (deferred). New tests: 5 (main.rs) +
 
 ---
 
+### v0.13.17.1 — v0.13.17 Complete Implementation
+<!-- status: pending -->
+**Goal**: Implement all remaining v0.13.17 items not included in the v0.13.17 scaffold PR. The scaffold (PR #264) added the struct/config changes and PLAN.md — this phase wires them end-to-end.
+
+#### 1. Finalize-Phase Observability (from v0.13.17 items 1–3)
+
+1. [ ] **Finalize heartbeat in `ta run`**: During the draft-build phase (after agent exits), write `progress_note` into the goal JSON at each step: "diffing N files", "running required_checks: cargo build --workspace", "packing N artifacts". Use `GoalRunStore::update_progress_note()` (new helper). Watchdog and `ta goal status` read this field.
+2. [ ] **`ValidationLog` in `DraftPackage`**: After the agent exits, `ta run` runs the project's `required_checks` from `[workflow].required_checks` config (default: four checks from CLAUDE.md). Each entry: `ValidationEntry { command, exit_code, duration_secs, stdout_tail }`. Embed as `pkg.validation_log`. Skip if `--skip-validation` flag is set.
+3. [ ] **`ta draft view` shows validation log**: After the summary section, print validation evidence: `✓ cargo build (47s)` or `✗ cargo test (exit 1)`. Warn if any check failed.
+4. [ ] **`ta draft approve` validation gate**: Refuse approval if `validation_log` contains a non-zero `exit_code`, unless `--override` is passed. Error: "Draft has failed validation checks — use `--override` to approve anyway."
+
+#### 2. Experimental Flag Gates (from v0.13.17 items 13–15)
+
+5. [ ] **Ollama agent gate**: In the framework resolution in `run.rs`, after resolving framework to `ollama`, read `ExperimentalConfig` from daemon config. If `ollama_agent = false`, bail with: "ta-agent-ollama is an experimental preview. Enable with `[experimental]\nollama_agent = true` in .ta/config.toml. See docs/USAGE.md for known limitations."
+6. [ ] **Sandbox gate**: In sandbox apply path, if `experimental.sandbox = false`, print warning banner but proceed (don't block — sandbox is opt-in from config anyway). If `experimental.sandbox = true`, proceed silently.
+7. [ ] **Personal dev `.ta/config.toml`**: Add `[experimental]\nollama_agent = true\nsandbox = true` to the committed `.ta/config.toml` for this repo, so the TrustedAutonomy repo itself can test both features.
+
+#### 3. Community Context — Full Agent Coverage (from v0.13.17 items 17–20)
+
+8. [ ] **Community section in `inject_agent_context_file()`**: Pass `source_dir` into the function and call `build_community_context_section()`. Codex (AGENTS.md) and other `context_file`-based agents now receive the community knowledge section.
+9. [ ] **Community section in `inject_context_env()`**: Append community context to the content written to `TA_GOAL_CONTEXT`. Ollama and env-mode agents now receive community context.
+10. [ ] **`ta-community-hub` MCP server**: New crate `crates/ta-community-hub-mcp` (or module in `ta-mcp-gateway`) exposing two tools: `community_search(query: str, intent: Option<str>) → Vec<SearchResult>` and `community_get(id: str) → String`. Backed by the local cache in `.ta/community-cache/`. Register in injected `.mcp.json` alongside `ta-memory`. Claude Code and Codex can now actually call these tools.
+11. [ ] **Agent observation write-back**: On agent exit, if `.ta/community_feedback.json` exists in staging, parse it as `Vec<{resource, doc_id, observation, severity}>` and append entries to the local community cache with `source: "agent-observed"` and current timestamp. Emit count in `ta run` exit summary.
+
+#### 4. Perforce VCS Plugin (from v0.13.17 items 7–11)
+
+12. [ ] **`plugins/vcs-perforce`**: Python 3 script implementing the JSON-over-stdio VCS protocol. Uses `p4` CLI as backend. Operations: `capabilities` (returns supported ops list), `status` (p4 status), `diff` (p4 diff -du), `submit` (p4 submit -d "<description>"), `shelve` (p4 shelve). Reads `P4PORT`, `P4USER`, `P4CLIENT` from environment. Exits with structured error JSON if `p4` not found or env not set.
+13. [ ] **`plugins/vcs-perforce.toml`**: Manifest with name, version, description, protocol_version, required_env, supported_operations.
+14. [ ] **Integration test with mock `p4`**: `tests/fixtures/mock-p4` script that returns canned responses for status/diff/submit. Test creates workspace, wires mock, verifies round-trip via `ExternalVcsAdapter`.
+15. [ ] **USAGE.md "Using TA with Perforce"**: P4 env setup, plugin install (`cp plugins/vcs-perforce ~/.config/ta/plugins/vcs/`), `ta submit` with Perforce, shelving workflow, depot path scoping.
+16. [ ] **Release bundle includes plugin**: `release.yml` copies `plugins/vcs-perforce` into tarball and DMG. Windows MSI: install to `%PROGRAMFILES%\TrustedAutonomy\plugins\vcs\`.
+
+#### 5. E2E Pre-Release Test Suite (from v0.13.17 items 21–25)
+
+17. [ ] **`tests/e2e/mod.rs`**: E2E test harness. Starts a real daemon in a temp workspace, provides `wait_for_goal_state()` helper. `#[ignore]` on all tests — run with `cargo test -- --ignored`.
+18. [ ] **`test_dependency_graph_e2e`**: Workflow with 3 sub-goals and a `depends_on` chain. Verify execution order from goal event log.
+19. [ ] **`test_ollama_agent_mock_e2e`**: Mock HTTP Ollama server (wiremock crate) returning one tool_call response then `stop`. Runs `ta run --agent ollama --experimental`. Verifies draft built.
+20. [ ] **`test_draft_validation_log_e2e`**: Goal with `required_checks = ["echo validation-ok"]`. Verifies `DraftPackage.validation_log` has one entry with `exit_code: 0` and `stdout_tail` contains "validation-ok".
+21. [ ] **USAGE.md pre-release checklist**: `./dev "cargo test -- --ignored --test-threads=1"` listed as required step before public releases.
+
+#### Version: `0.13.17.1-alpha`
+
+---
+
 > **⬇ PUBLIC BETA** — v0.13.x complete: runtime flexibility (local models, containers), enterprise governance (audit ledger, action governance, compliance), community ecosystem, and goal workflow automation. TA is ready for team and enterprise deployments.
 
 ---
