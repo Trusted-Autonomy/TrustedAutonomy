@@ -6093,7 +6093,7 @@ All items implemented except items 5 and 13 (deferred). New tests: 5 (main.rs) +
 
 ---
 
-### v0.13.17.1 — v0.13.17 Complete Implementation
+### v0.13.17.1 — Complete v0.13.17 Implementation
 <!-- status: pending -->
 **Goal**: Implement all remaining v0.13.17 items not included in the v0.13.17 scaffold PR. The scaffold (PR #264) added the struct/config changes and PLAN.md — this phase wires them end-to-end.
 
