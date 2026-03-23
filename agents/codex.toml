@@ -1,0 +1,33 @@
+# OpenAI Codex — TA agent framework manifest
+#
+# Runs OpenAI's codex CLI as the agent backend. Codex supports headless
+# execution and is particularly strong at code generation tasks.
+#
+# Prerequisites:
+#   npm install -g @openai/codex
+#   export OPENAI_API_KEY=...
+#
+# Usage:
+#   ta run "title" --framework codex
+
+[agent]
+name        = "codex"
+description = "OpenAI Codex CLI agent (headless, code-focused)"
+binary      = "codex"
+launch_args = [
+  "--approval-mode", "full-auto",
+  "--quiet",
+]
+sentinel    = "[goal started]"
+heartbeat_required = false
+
+[capabilities]
+bash_exec  = true
+file_write = true
+file_read  = true
+web_fetch  = false
+
+[memory]
+max_entries  = 30
+recency_days = 7
+tags         = ["convention", "architecture", "preference"]

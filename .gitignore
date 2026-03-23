@@ -31,8 +31,15 @@ result-*
 # macOS
 .DS_Store
 
-# Trusted Autonomy internal state
-.ta/
+# Trusted Autonomy — runtime state (not committed)
+.ta/staging/
+.ta/goals/
+.ta/store/
+.ta/backups/
+.ta/*.log
+.ta/*.lock
+.ta/change_summary.json
+# .ta/agents/, .ta/plugins/, .ta/config.toml — these ARE committed (team-shared config)
 
 # Claude Code local settings
 .claude/

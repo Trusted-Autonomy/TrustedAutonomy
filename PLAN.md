@@ -6249,15 +6249,19 @@ The current `.ta/goal-history.jsonl` is a compact index written only on the happ
 The current `MemoryStore` in `crates/ta-memory` is file-backed only (`.ta/memory/`). Memory is local to one machine and one developer. There is no way to share relevant memory entries across a team or between cloud agents. The `MemoryBridge` in `ta-agent-ollama` uses the same flat-file snapshot pattern. Neither supports semantic vector search across a large corpus.
 
 #### Architecture
+
+`MemoryStore` is **already a trait** in `crates/ta-memory/src/store.rs` with two existing implementations (`FsMemoryStore`, `RuVectorStore`). The missing piece is **config dispatch** — every call site today does `FsMemoryStore::new(...)` directly (~10 places). This phase adds a factory function and a Supermemory backend:
+
 ```
-ta-memory/src/lib.rs
-  └── MemoryStore
-        ├── FileMemoryBackend     (current, always available)
-        └── ExternalMemoryBackend (trait, dispatched from config)
-              └── SupermemoryBackend  (crates/ta-memory-supermemory)
+crates/ta-memory/src/lib.rs
+  └── MemoryStore (trait — already exists)
+        ├── FsMemoryStore        (already exists)
+        ├── RuVectorStore        (already exists, feature-gated)
+        └── SupermemoryBackend   (new — crates/ta-memory-supermemory)
+              └── memory_store_from_config() → Box<dyn MemoryStore>  (new factory)
 ```
 
-Config:
+Config (`.ta/config.toml`):
 ```toml
 [memory]
 backend = "supermemory"
@@ -6267,19 +6271,21 @@ supermemory_base_url = "https://api.supermemory.ai"   # or self-hosted
 
 #### Items
 
-1. [ ] **`ExternalMemoryBackend` trait** in `crates/ta-memory/src/lib.rs`: methods `add(entry)`, `search(query, limit)`, `delete(id)`, `list(filter)`. `MemoryStore` dispatches to the configured backend when set; falls back to file backend when unset.
+1. [ ] **`memory_store_from_config()` factory**: Reads `[memory] backend` from `.ta/config.toml` and returns `Box<dyn MemoryStore>`. Default: `FsMemoryStore` (zero behaviour change). Replace the ~10 hardcoded `FsMemoryStore::new(...)` call sites in `run.rs`, `memory.rs`, `draft.rs`, `context.rs` with the factory.
 
-2. [ ] **New crate `crates/ta-memory-supermemory`**: `SupermemoryClient` wrapping Supermemory REST API (`POST /v1/memories`, `GET /v1/search`, `DELETE /v1/memories/{id}`) via `reqwest`. Bearer token auth from config or `$SUPERMEMORY_API_KEY`. Implements `ExternalMemoryBackend`.
+2. [ ] **New crate `crates/ta-memory-supermemory`**: `SupermemoryBackend` implementing `MemoryStore`. `SupermemoryClient` wraps the REST API (`POST /v1/memories` add, `GET /v1/search` lookup, `DELETE /v1/memories/{id}` forget) via `reqwest`. Bearer token from `$SUPERMEMORY_API_KEY` or config. `semantic_search()` delegates to Supermemory's hybrid search.
 
-3. [ ] **Config dispatch**: `MemoryBackendConfig` enum in `.ta/config.toml` (`[memory] backend`). `MemoryStore::new_from_config()` reads config and constructs the right backend. Default: `file` (no breakage for existing users).
+3. [ ] **`ta-agent-ollama` `MemoryBridge` update**: When `TA_MEMORY_BACKEND=supermemory`, the bridge calls the daemon's memory REST API (already running) instead of reading a flat snapshot file. Agent context injection path unchanged — agents don't see the difference.
 
-4. [ ] **`ta-agent-ollama` `MemoryBridge` update**: When `TA_MEMORY_BACKEND=supermemory`, the bridge calls the daemon's memory REST API instead of reading a flat snapshot file. Goal context injection path unchanged.
+4. [ ] **`ta memory sync`**: Push all local `FsMemoryStore` entries to the configured external backend. Used when teams migrate from file to Supermemory. `--dry-run` shows what would be pushed.
 
-5. [ ] **`ta memory sync`**: One-shot command that pushes all local file-backed memory entries to the configured external backend. Useful for teams onboarding from file to Supermemory.
+5. [ ] **`.gitignore` fix**: Replace blanket `.ta/` exclusion with surgical per-subdir rules — exclude `.ta/staging/`, `.ta/goals/`, `.ta/store/`, `.ta/*.log`, `.ta/*.lock`; allow `.ta/agents/`, `.ta/plugins/`, `.ta/config.toml` to be committed. Done in this phase.
 
-6. [ ] **Tests**: `SupermemoryClient` unit tests with `mockito`. `ExternalMemoryBackend` dispatch integration tests. `ta memory sync` dry-run test.
+6. [ ] **`agents/` bundled manifest dir**: Top-level `agents/` directory in the TA repo for first-party agent manifests (committed, shipped with install). Start with `agents/gsd.toml` (get-shit-done), `agents/codex.toml`. `ta agent install` checks the bundled dir before the remote registry.
 
-7. [ ] **USAGE.md**: "Using Supermemory as a shared memory backend" section — API key setup, config, `ta memory sync`, team sharing workflow.
+7. [ ] **Tests**: `SupermemoryBackend` unit tests with `mockito`. Config dispatch test (`backend="file"` → `FsMemoryStore`, `backend="supermemory"` → `SupermemoryBackend`). `ta memory sync` dry-run test.
+
+8. [ ] **USAGE.md**: "Using Supermemory as a shared memory backend" section — API key setup, config, `ta memory sync`, team sharing workflow. "Bundled agent manifests" section explaining `agents/` dir and `ta agent install`.
 
 #### Version: `0.14.3-alpha.5`
 

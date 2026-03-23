@@ -1,0 +1,78 @@
+# get-shit-done (GSD) — TA agent framework manifest
+#
+# GSD is a multi-agent meta-prompting system for Claude Code that provides
+# structured phase-based execution: research → plan → execute (wave-based) → verify → ship.
+#
+# Prerequisites:
+#   npx get-shit-done-cc@latest --claude   # installs gsd slash commands
+#
+# Usage:
+#   ta run "title" --framework gsd
+#   ta run "title" --framework gsd --phase 13.17
+
+[agent]
+name        = "get-shit-done"
+description = "GSD multi-agent orchestration via Claude Code (research → plan → execute → verify)"
+binary      = "claude"
+
+# GSD is a Claude Code slash-command system — we launch claude with gsd's
+# CLAUDE.md bootstrap injected so /gsd:* commands are available.
+launch_args = [
+  "--output-format", "stream-json",
+  "--verbose",
+  "--print",
+]
+
+# GSD creates .planning/ state files; TA's overlay will capture these in staging.
+# The agent signals readiness via the standard "[goal started]" sentinel.
+sentinel = "[goal started]"
+
+# GSD's wave-based executor can run long — give it generous time before the
+# watchdog considers it stale.
+heartbeat_required = false
+
+# GSD produces many intermediate artifacts in .planning/; skip them in diffs.
+staging_excludes = [
+  ".planning/",
+]
+
+[capabilities]
+bash_exec  = true
+file_write = true
+file_read  = true
+web_fetch  = true
+
+[memory]
+# GSD phases inject their own context via .planning/STATE.md.
+# Limit TA memory injection to avoid conflicting with GSD's internal state.
+max_entries  = 20
+recency_days = 14
+tags         = ["project", "architecture", "decisions"]
+
+# Inject TA memory as a preamble before GSD takes over.
+inject_before_goal = true
+
+[claude_md_bootstrap]
+# When ta run --framework gsd is used, this content is prepended to the
+# injected CLAUDE.md so GSD slash commands are immediately available.
+# GSD's own README suggests running /gsd:new-project to start — here we
+# auto-trigger the equivalent flow based on whether a .planning/STATE.md exists.
+content = """
+## GSD Framework Active
+
+This session is running under the **get-shit-done** agent framework.
+GSD provides structured multi-agent execution phases:
+
+- `/gsd:new-project`   — capture requirements, generate roadmap
+- `/gsd:discuss`       — deliberate on approach and decisions
+- `/gsd:plan`          — generate atomic task plan
+- `/gsd:execute`       — parallel wave execution (fresh 200k context per task)
+- `/gsd:verify`        — user acceptance + test validation
+- `/gsd:ship`          — commit and PR creation
+
+**Auto-start**: If `.planning/STATE.md` does not exist, begin with `/gsd:new-project`.
+If it exists, resume from the current phase shown in STATE.md.
+
+All changes stay within the TA staging directory — GSD's commits will be
+captured in the draft diff and reviewed via `ta draft view`.
+"""
