@@ -474,6 +474,13 @@ ta agent info claude-flow
 
 #### Running goals with a local model (ta-agent-ollama)
 
+> **Experimental preview** — `ta-agent-ollama` is an experimental feature. To enable it, add the following to your `.ta/config.toml`:
+> ```toml
+> [experimental]
+> ollama_agent = true
+> ```
+> Local model support is off by default. Tool-calling quality varies by model; results may be less reliable than Claude Code or Codex.
+
 `ta-agent-ollama` is a standalone binary that drives any OpenAI-compatible local model endpoint (Ollama, llama.cpp server, LM Studio, vLLM) through a full tool-use loop.
 
 **Quick start with Ollama:**
@@ -6837,7 +6844,7 @@ The velocity stats file is at `.ta/velocity-stats.jsonl` — one JSON entry per 
 
 ### What's Done
 
-TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, decision observability, credential management, MCP tool call interception, web review UI, webhook review channels, persistent context memory with semantic search, session lifecycle management, unified policy configuration (6-layer cascade), resource mediation (extensible by URI scheme), pluggable channel registry, API mediation for MCP tool calls, agent-guided project setup, project template initialization, interactive developer loop (`ta dev`), extensible agent framework registry with auto-detection, daemon HTTP API with SSE events and agent session management, an interactive terminal shell (`ta shell`), and a pluggable workflow engine for multi-stage, multi-role orchestration with verdict scoring and human-in-the-loop interaction, multi-project office management, channel plugin system (Discord, Slack, Email), external workflow and agent definitions, release pipeline hardening with interactive mode, conversational project bootstrapping via interactive mode, external channel delivery, and multi-language plugin builds.
+TA has a working end-to-end workflow: staging isolation, agent wrapping, draft review with per-artifact approval, follow-up iterations, macro goals with inner-loop review, interactive sessions, plan tracking, release pipelines, behavioral drift detection, access constitutions, alignment profiles, decision observability, credential management, MCP tool call interception, web review UI, webhook review channels, persistent context memory with semantic search, session lifecycle management, unified policy configuration (6-layer cascade), resource mediation (extensible by URI scheme), pluggable channel registry, API mediation for MCP tool calls, agent-guided project setup, project template initialization, interactive developer loop (`ta dev`), extensible agent framework registry with auto-detection, daemon HTTP API with SSE events and agent session management, an interactive terminal shell (`ta shell`), and a pluggable workflow engine for multi-stage, multi-role orchestration with verdict scoring and human-in-the-loop interaction, multi-project office management, channel plugin system (Discord, Slack, Email), external workflow and agent definitions, release pipeline hardening with interactive mode, conversational project bootstrapping via interactive mode, external channel delivery, multi-language plugin builds, platform installers (macOS DMG, Windows MSI), feature velocity telemetry, local model agent support (ta-agent-ollama, experimental), advanced swarm orchestration with sub-goals and department routing, VCS-aware team setup with large-workspace staging, watchdog/exit-handler race fixes with goal recovery, product constitution framework with cross-language templates, agent sandboxing (macOS sandbox-exec, Linux bwrap, experimental), hardware attestation with Ed25519 verifiable audit trails, and multi-party approval governance.
 
 ### Phase Status
 
@@ -7017,6 +7024,24 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.13.8 | Agent framework: pluggable backends with shared memory | Done |
 | v0.13.9 | Product constitution framework | Done |
 | v0.13.10 | Feature velocity stats & outcome telemetry (`ta stats velocity/velocity-detail/export`) | Done |
+| v0.13.11 | Platform installers — macOS DMG, Windows MSI, WiX v4 | Done |
+| v0.13.12 | Beta bug bash & polish — staging guard, startup profiler, GC lockfile | Done |
+| v0.13.13 | VCS-aware team setup & large-workspace staging | Done |
+| v0.13.14 | Watchdog/exit-handler race & goal recovery (`ta goal recover`) | Done |
+| v0.13.15 | Fix pass, cross-language onboarding & constitution completion | Done |
+| v0.13.16 | Local model agent (ta-agent-ollama, experimental) & advanced swarm orchestration | Done |
+| v0.14.0 | Agent sandboxing — macOS sandbox-exec, Linux bwrap (experimental) | Done |
+| v0.14.1 | Hardware attestation & verifiable audit trails (Ed25519, `ta audit verify-attestation`) | Done |
+| v0.14.2 | Multi-party approval & threshold governance (`ta draft approve --as`, `--override`) | Done |
+| v0.14.3 | Compliance-ready audit ledger (cloud/multi-user context) | Pending |
+| v0.14.4 | Central daemon & multi-user deployment | Pending |
+| v0.14.5 | Enterprise identity & SSO integration | Pending |
+| v0.15.0 | VS Code extension | Pending |
+| v0.15.1 | JetBrains plugin (PyCharm / WebStorm / IntelliJ) | Pending |
+| v0.15.2 | Neovim plugin | Pending |
+| v0.16.0 | Stable & nightly release channels | Pending |
+| v0.16.1 | Homebrew tap | Pending |
+| v0.16.2 | VCS-agnostic release pipeline | Pending |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 

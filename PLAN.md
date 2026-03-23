@@ -6424,6 +6424,74 @@ VS Code Extension
 
 ---
 
+## v0.16 — Distribution Maturity & Release Channels
+
+> **Focus**: Release channel infrastructure (stable vs nightly), Homebrew distribution, and VCS-agnostic release pipeline. Makes TA production-grade for teams who need a predictable upgrade path and a simple `brew install` experience.
+
+### v0.16.0 — Stable & Nightly Release Channels
+<!-- status: pending -->
+**Goal**: Add a first-class release channel model so users can choose between a stable channel (manually promoted, tested releases) and a nightly/prerelease channel. Channels show up on GitHub Releases so users can self-select without needing to know semver pre-release conventions.
+
+#### Why this phase exists
+Currently all releases are prerelease with no clear "this is the one to use in production" signal. Teams evaluating TA need a stable channel they can point to in documentation and a nightly channel for early testers. GitHub's native "Mark as latest" toggle is too coarse — we need explicit channel labels.
+
+#### Architecture
+
+```
+ta release dispatch <tag> --channel stable      # promote to stable channel
+ta release dispatch <tag> --channel nightly     # nightly/beta (default for alpha tags)
+ta release dispatch <tag> --channel lts         # future: long-term support
+```
+
+Channel labels appear in GitHub Release titles and as release asset naming suffixes. The release workflow publishes a `channels.json` file to the release that downstream package managers can consume.
+
+#### Items
+
+1. [ ] **Channel enum in release config**: `ReleaseChannel` enum (`Stable`, `Nightly`, `Lts`) in `ta-release`. Stored in `.ta/release.toml` as `default_channel = "nightly"`.
+2. [ ] **`ta release dispatch --channel`**: New `--channel` flag on `ta release dispatch`. Validates channel vs tag (e.g., `v*` with no prerelease suffix → can only be `stable` or `lts`; `-alpha`/`-beta` tags → `nightly` only unless explicitly overridden with `--force`).
+3. [ ] **GitHub Release label**: Release title prefixed with `[Stable]` / `[Nightly]` / `[LTS]`. GitHub topic tags on the release: `channel:stable`, `channel:nightly`.
+4. [ ] **`--latest` guard uses channel**: Replace the current `IS_PRERELEASE` guard with channel-aware logic: only `stable` channel releases get `--latest`. Nightly releases never get `--latest`.
+5. [ ] **`channels.json` release asset**: Each release publishes a `channels.json` at `https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/<tag>/channels.json` listing the current stable/nightly tag, checksums, and a `recommended` field. Homebrew tap and `install.sh` can consume this.
+6. [ ] **`ta upgrade --channel`**: `ta upgrade --channel stable` fetches the latest stable tag from `channels.json`. Default remains `nightly` (current behaviour) until stable exists.
+7. [ ] **Release workflow updates**: Update `.github/workflows/release.yml` to accept `channel` as a `workflow_dispatch` input and pass through to asset metadata.
+8. [ ] **Documentation**: Update `docs/USAGE.md` with release channel table (stable / nightly / LTS), upgrade instructions, and how to subscribe to GitHub release notifications filtered by channel.
+
+#### Version: `0.16.0-alpha`
+
+---
+
+### v0.16.1 — Homebrew Tap
+<!-- status: pending -->
+**Goal**: Publish TA to a Homebrew tap (`trusted-autonomy/tap`) so macOS users can install with `brew install trusted-autonomy/tap/ta`. Linux support via Homebrew on Linux (Linuxbrew) is a stretch goal.
+
+#### Items
+
+1. [ ] **Create `homebrew-tap` repo**: `github.com/Trusted-Autonomy/homebrew-tap` with `Formula/ta.rb`.
+2. [ ] **Formula**: Downloads the macOS release asset (`.tar.gz`), verifies SHA-256, installs `ta` binary to `bin/`. Depends on nothing (single statically-linked binary).
+3. [ ] **CI auto-update**: On every stable channel release, the release workflow opens a PR in `homebrew-tap` updating the version and SHA-256 checksum. Uses `gh pr create` from the release workflow.
+4. [ ] **`brew tap trusted-autonomy/tap && brew install ta`**: Verify end-to-end install on macOS 14 (Sonoma) and macOS 15 (Sequoia) in CI.
+5. [ ] **Documentation**: Add `brew install` as the primary macOS install option in `docs/USAGE.md` Quick Start.
+
+#### Version: `0.16.1-alpha`
+
+---
+
+### v0.16.2 — VCS-Agnostic Release Pipeline
+<!-- status: pending -->
+**Goal**: Remove the hard git dependency from the release pipeline. Perforce and SVN users should be able to trigger releases from their VCS without needing a git mirror. Builds on the VCS plugin architecture from v0.12.0.2.
+
+#### Items
+
+1. [ ] **`ReleaseAdapter` trait**: `tag(version, commit_ref) → Result<()>`, `changelog(from, to) → String`. Git implementation stays built-in; Perforce/SVN via external plugin.
+2. [ ] **Perforce release plugin**: `plugins/release/p4-release` — `p4 tag` equivalent, label-based versioning, depot path for asset upload.
+3. [ ] **`ta release dispatch` VCS detection**: Reads `[vcs]` section from `.ta/config.toml` to select adapter. Falls back to git.
+4. [ ] **Single GitHub release per build**: Redesign dispatch flow — label tag as the primary release trigger, semver tag as a lightweight git alias only. Eliminates duplicate release entries when both are pushed. (Deferred from v0.13.12.)
+5. [ ] **Documentation**: Add Perforce release workflow to `docs/USAGE.md` alongside the git workflow.
+
+#### Version: `0.16.2-alpha`
+
+---
+
 ## Future Work — Potentially Deferred or Dropped
 
 > Items in this section are under active consideration for deferral, scoping reduction, or removal. Review before each release cycle.
