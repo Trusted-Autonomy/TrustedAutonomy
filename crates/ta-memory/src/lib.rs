@@ -23,8 +23,9 @@ pub mod solutions;
 pub mod store;
 
 pub use auto_capture::{
-    capture_plan_phase_complete, index_constitution_rules, slug_from_text_pub, AutoCapture,
-    AutoCaptureConfig, DraftRejectEvent, GoalCompleteEvent, HumanGuidanceEvent,
+    build_memory_context_section_with_manifest_filter, capture_plan_phase_complete,
+    index_constitution_rules, slug_from_text_pub, AutoCapture, AutoCaptureConfig, DraftRejectEvent,
+    GoalCompleteEvent, HumanGuidanceEvent,
 };
 pub use error::MemoryError;
 pub use fs_store::FsMemoryStore;

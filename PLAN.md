@@ -5990,35 +5990,44 @@ All planned items implemented except those deferred above. New tests: 5 (draft.r
 ---
 
 ### v0.13.16 — Local Model Agent (`ta-agent-ollama`) & Advanced Swarm
-<!-- status: pending -->
+<!-- status: in_progress -->
 <!-- beta: yes — local model support and advanced swarm orchestration -->
 **Goal**: Implement the `ta-agent-ollama` binary (full tool-use loop against any OpenAI-compatible endpoint), validate local models end-to-end (Qwen2.5-Coder, Phi-4, Kimi K2.5, Llama3.1), add framework manifest registry publishing, and complete the advanced swarm features deferred from v0.13.7. Collected deferred items: v0.13.7 items 11–13, v0.13.8 items 14–15/20–25/30–34.
 
 #### 1. `ta-agent-ollama` Implementation (from v0.13.8 items 20–25)
 
-1. [ ] **New crate `crates/ta-agent-ollama`**: Binary implementing a tool-use loop against any OpenAI-compat endpoint (`/v1/chat/completions` with `tools`). Accepts `--model`, `--base-url`, `--context-file`. Emits `[goal started]` sentinel on stderr.
-2. [ ] **Core tool set**: `bash_exec`, `file_read`, `file_write`, `file_list`, `web_fetch`, `memory_read`, `memory_write`, `memory_search` — backed by TA's local REST API.
-3. [ ] **Startup sequence**: Read context from `--context-file` or `$TA_GOAL_CONTEXT`; include in system prompt. Validate model supports function-calling (`/v1/models` probe + test call); emit clear error if not.
-4. [ ] **Graceful degradation**: If model has no function calling, fall back to CoT-with-parsing mode with a warning. Best-effort tool extraction from plain text output.
-5. [ ] **End-to-end validation**: Qwen2.5-Coder-7B, Phi-4-mini, Kimi K2.5, Llama3.1-8B complete a real `ta run` goal with memory write-back; memory entries visible in next goal's context.
+1. [x] **New crate `crates/ta-agent-ollama`**: Binary implementing a tool-use loop against any OpenAI-compat endpoint (`/v1/chat/completions` with `tools`). Accepts `--model`, `--base-url`, `--context-file`, `--memory-path`, `--memory-out`, `--workdir`, `--max-turns`, `--temperature`, `--skip-validation`, `--verbose`. Emits `[goal started]` sentinel on stderr. 5 unit tests.
+2. [x] **Core tool set**: `bash_exec`, `file_read`, `file_write`, `file_list`, `web_fetch`, `memory_read`, `memory_write`, `memory_search` — implemented in `crates/ta-agent-ollama/src/tools.rs`. `ToolSet` dispatches to each tool with workdir scoping. 11 tests.
+3. [x] **Startup sequence**: Read context from `--context-file` or `$TA_GOAL_CONTEXT`; include in system prompt. Validate model supports function-calling (`/v1/models` probe + test call); emit clear error if not. `--skip-validation` flag for offline use. `OllamaClient` with `list_models()` + `chat_with_tools()`. 2 client tests.
+4. [x] **Graceful degradation**: If model has no function calling, fall back to CoT-with-parsing mode with a warning. `TOOL_CALL:` prefix line parsing with JSON extraction. `run_cot_loop()` in `main.rs`.
+5. [-] **End-to-end validation**: Qwen2.5-Coder-7B, Phi-4-mini, Kimi K2.5, Llama3.1-8B complete a real `ta run` goal with memory write-back; memory entries visible in next goal's context. → Deferred (requires live Ollama instance; model validation matrix documented in `docs/agent-framework-options.md`)
 
 #### 2. Memory Bridge for Ollama (from v0.13.8 items 14–15)
 
-6. [ ] **`ta-agent-ollama` memory tools**: `memory_read`/`memory_write`/`memory_search` in the native tool set, backed by TA's memory REST API.
-7. [ ] **Memory relevance tuning**: `[memory]` manifest section supports `max_entries`, `recency_days`, `tags` filter to control what gets injected into context-mode agents.
+6. [x] **`ta-agent-ollama` memory tools**: `memory_read`/`memory_write`/`memory_search` in the native tool set. `MemoryBridge` in `crates/ta-agent-ollama/src/memory.rs` reads snapshot from `$TA_MEMORY_PATH`, queues writes to `$TA_MEMORY_OUT`. 9 tests.
+7. [x] **Memory relevance tuning**: `[memory]` manifest section supports `max_entries`, `recency_days`, `tags` filter. `build_memory_context_section_with_manifest_filter()` in `crates/ta-memory/src/auto_capture.rs` applies all three filters. Wired in `inject_memory_context()` in `run.rs`. 4 new tests in ta-memory.
 
 #### 3. Framework Manifest Registry (from v0.13.8 items 30–34)
 
-8. [ ] **Framework manifests in plugin registry**: Manifest TOML files publishable to the v0.12.4 plugin registry — same install flow as VCS plugins.
-9. [ ] **`ta agent install <registry-name>`**: Fetch manifest + companion binary, verify SHA-256, run `ta agent test`.
-10. [ ] **`ta agent publish <path>`**: Validate manifest + submit to registry.
-11. [ ] **Research spike**: Ollama vs llama.cpp server vs vLLM vs LM Studio — API compatibility, tool-calling support, macOS/Linux support, startup time. Document in `docs/agent-framework-options.md`.
+8. [x] **Framework manifests in plugin registry**: `ta agent publish` validates + submits manifest TOML to registry endpoint. SHA-256 checksum computed and included. Graceful fallback to manual PR instructions if registry unreachable.
+9. [x] **`ta agent install <registry-name>`**: Fetch manifest from `$TA_AGENT_REGISTRY_URL` or default registry, verify SHA-256, validate TOML, write to `.ta/agents/` (local) or `~/.config/ta/agents/` (global with `--global`). 4 new tests in `agent.rs`.
+10. [x] **`ta agent publish <path>`**: Validate manifest TOML + submit to registry via HTTP POST. Prints computed SHA-256 and next steps. 2 new tests.
+11. [x] **Research spike**: Ollama vs llama.cpp server vs vLLM vs LM Studio — API compatibility, tool-calling support, macOS/Linux support, startup time, model availability. Documented in `docs/agent-framework-options.md`. Model validation matrix with 9 models across both backends.
 
 #### 4. Advanced Swarm Orchestration (from v0.13.7 items 11–13)
 
-12. [ ] **Sub-goal dependency graph**: Declare `depends_on: [goal2]` in swarm sub-goals; scheduler runs dependents after dependencies complete. Current implementation runs all sub-goals sequentially.
-13. [ ] **Live swarm progress dashboard**: Real-time swarm status in `ta shell` status bar — per-agent state, gate results, overall progress. `SwarmState.print_summary()` provides CLI summary today.
-14. [ ] **Department → workflow mapping in office config**: `.ta/office.yaml` `departments[].default_workflow` field. Maps department names (e.g., `engineering`, `marketing`) to default workflow types.
+12. [x] **Sub-goal dependency graph**: `depends_on: Vec<String>` field on `SubGoalSpec` in `ta-workflow/src/swarm.rs`. `ready_indices()` scheduler, `mark_dependency_failed_skips()`, `validate_dependencies()` (cycle detection via DFS). `print_summary()` shows `[after: ...]`. 9 new tests.
+13. [-] **Live swarm progress dashboard**: Real-time swarm status in `ta shell` status bar. → Deferred (TUI status bar changes require dedicated phase; `SwarmState.print_summary()` provides CLI summary today)
+14. [x] **Department → workflow mapping in office config**: `departments` section in `office.yaml`. `DepartmentConfig` struct with `default_workflow`, `description`, `projects`. `department_workflow()` on `OfficeConfig`. `resolved_workflow()` falls back to "single-agent". 5 new tests in `office.rs`.
+
+#### Completed
+
+All items implemented except items 5 and 13 (deferred). New tests: 5 (main.rs) + 11 (tools.rs) + 9 (memory.rs) + 2 (client.rs) + 4 (ta-memory/auto_capture) + 9 (swarm.rs) + 5 (office.rs) + 4 (agent.rs) = 49 new tests.
+
+#### Deferred items moved/resolved
+
+- Item 5 (end-to-end validation with live models) → user-facing validation step; code path verified via unit tests; model matrix in `docs/agent-framework-options.md`
+- Item 13 (live swarm progress dashboard in ta shell status bar) → v0.14.4 (Central Daemon phase; TUI status bar requires dedicated work)
 
 #### Version: `0.13.16-alpha`
 

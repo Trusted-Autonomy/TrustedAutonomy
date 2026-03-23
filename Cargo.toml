@@ -36,6 +36,7 @@ members = [
     "crates/ta-connectors/discord",
     "crates/ta-connectors/email",
     "apps/ta-cli",
+    "crates/ta-agent-ollama",
 ]
 
 # Single source of truth for all crate versions.

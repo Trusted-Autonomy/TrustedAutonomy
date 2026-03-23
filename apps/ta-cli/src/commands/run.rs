@@ -1419,11 +1419,15 @@ pub fn execute(
             if matches!(fw.memory.inject, MemoryInjectMode::Context) {
                 let context_file_name = &fw.context_file;
                 let max_entries = fw.memory.max_entries;
+                let tags_filter = fw.memory.tags.clone();
+                let recency_days = fw.memory.recency_days;
                 inject_memory_context(
                     &staging_path,
                     context_file_name,
                     max_entries,
                     goal.plan_phase.as_deref(),
+                    &tags_filter,
+                    recency_days,
                     config,
                 );
             }
@@ -3929,6 +3933,123 @@ pub fn build_memory_context_section_for_inject(
     .unwrap_or_default()
 }
 
+/// Like `build_memory_context_section_for_inject` but uses the manifest's `max_entries`
+/// override instead of the workflow.toml global config (v0.13.16 memory relevance tuning).
+fn build_memory_context_section_for_inject_with_limit(
+    config: &GatewayConfig,
+    goal_title: &str,
+    phase_id: Option<&str>,
+    max_entries: usize,
+) -> String {
+    let memory_config = ta_memory::key_schema::load_memory_config(&config.workspace_root);
+    let backend = memory_config.backend.as_deref().unwrap_or("ruvector");
+
+    let constitution_content = {
+        let p = config.workspace_root.join(".ta").join("constitution.md");
+        if p.exists() {
+            std::fs::read_to_string(&p).ok()
+        } else {
+            None
+        }
+    };
+
+    #[cfg(feature = "ruvector")]
+    if backend != "fs" {
+        let rvf_path = config.workspace_root.join(".ta").join("memory.rvf");
+        if let Ok(mut store) = ta_memory::RuVectorStore::open(&rvf_path) {
+            let fs_dir = config.workspace_root.join(".ta").join("memory");
+            if fs_dir.exists() {
+                let _ = store.migrate_from_fs(&fs_dir);
+            }
+            if let Some(ref content) = constitution_content {
+                let _ = ta_memory::index_constitution_rules(&mut store, content);
+            }
+            return ta_memory::auto_capture::build_memory_context_section_with_phase(
+                &store,
+                goal_title,
+                max_entries,
+                phase_id,
+            )
+            .unwrap_or_default();
+        }
+    }
+
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let mut fs_store = ta_memory::FsMemoryStore::new(&memory_dir);
+    if let Some(ref content) = constitution_content {
+        let _ = ta_memory::index_constitution_rules(&mut fs_store, content);
+    }
+    ta_memory::auto_capture::build_memory_context_section_with_phase(
+        &fs_store,
+        goal_title,
+        max_entries,
+        phase_id,
+    )
+    .unwrap_or_default()
+}
+
+/// Build a filtered memory context section using manifest-level relevance tuning (v0.13.16).
+///
+/// Applies tag and recency filters on top of the standard memory lookup, respecting
+/// the framework manifest's `[memory]` section config.
+fn build_memory_context_section_filtered(
+    config: &GatewayConfig,
+    phase_id: Option<&str>,
+    max_entries: usize,
+    tags_filter: &[String],
+    recency_days: u32,
+) -> String {
+    let memory_config = ta_memory::key_schema::load_memory_config(&config.workspace_root);
+    let backend = memory_config.backend.as_deref().unwrap_or("ruvector");
+
+    let constitution_content = {
+        let p = config.workspace_root.join(".ta").join("constitution.md");
+        if p.exists() {
+            std::fs::read_to_string(&p).ok()
+        } else {
+            None
+        }
+    };
+
+    #[cfg(feature = "ruvector")]
+    if backend != "fs" {
+        let rvf_path = config.workspace_root.join(".ta").join("memory.rvf");
+        if let Ok(mut store) = ta_memory::RuVectorStore::open(&rvf_path) {
+            let fs_dir = config.workspace_root.join(".ta").join("memory");
+            if fs_dir.exists() {
+                let _ = store.migrate_from_fs(&fs_dir);
+            }
+            if let Some(ref content) = constitution_content {
+                let _ = ta_memory::index_constitution_rules(&mut store, content);
+            }
+            return ta_memory::build_memory_context_section_with_manifest_filter(
+                &store,
+                "",
+                max_entries,
+                phase_id,
+                tags_filter,
+                recency_days,
+            )
+            .unwrap_or_default();
+        }
+    }
+
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let mut fs_store = ta_memory::FsMemoryStore::new(&memory_dir);
+    if let Some(ref content) = constitution_content {
+        let _ = ta_memory::index_constitution_rules(&mut fs_store, content);
+    }
+    ta_memory::build_memory_context_section_with_manifest_filter(
+        &fs_store,
+        "",
+        max_entries,
+        phase_id,
+        tags_filter,
+        recency_days,
+    )
+    .unwrap_or_default()
+}
+
 /// Build the solutions section for CLAUDE.md injection (v0.8.1).
 ///
 /// Reads from `.ta/solutions/solutions.toml` and includes relevant entries
@@ -4142,13 +4263,24 @@ fn inject_memory_context(
     context_file: &str,
     max_entries: usize,
     plan_phase: Option<&str>,
+    tags_filter: &[String],
+    recency_days: u32,
     config: &GatewayConfig,
 ) {
-    // max_entries from manifest controls how many entries to serialize.
-    // build_memory_context_section_for_inject uses capture_config.max_context_entries
-    // internally; we pass our override via a custom path when it differs.
-    let _ = max_entries; // passed as manifest config; full tuning deferred to later sub-phase
-    let memory_section = build_memory_context_section_for_inject(config, "", plan_phase);
+    // If no manifest-level filters are active, delegate to the standard builder
+    // which reads max_entries from workflow.toml.  When filters ARE set, use the
+    // filtered builder that respects the manifest's max_entries, tags, and recency.
+    let memory_section = if !tags_filter.is_empty() || recency_days > 0 {
+        build_memory_context_section_filtered(
+            config,
+            plan_phase,
+            max_entries,
+            tags_filter,
+            recency_days,
+        )
+    } else {
+        build_memory_context_section_for_inject_with_limit(config, "", plan_phase, max_entries)
+    };
     if memory_section.is_empty() {
         return;
     }

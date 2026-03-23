@@ -28,6 +28,45 @@ pub struct OfficeConfig {
     /// Channel routing configuration.
     #[serde(default)]
     pub channels: HashMap<String, ChannelRouting>,
+    /// Department → workflow mapping (v0.13.16 item 14).
+    ///
+    /// Maps department names (e.g., `engineering`, `marketing`) to their
+    /// default workflow. Goals routed to a department use this workflow
+    /// unless an explicit `--workflow` flag is provided.
+    ///
+    /// Example in `office.yaml`:
+    /// ```yaml
+    /// departments:
+    ///   engineering:
+    ///     default_workflow: swarm
+    ///   marketing:
+    ///     default_workflow: serial-phases
+    ///   design:
+    ///     default_workflow: single-agent
+    /// ```
+    #[serde(default)]
+    pub departments: HashMap<String, DepartmentConfig>,
+}
+
+/// Per-department configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DepartmentConfig {
+    /// Default workflow for goals routed to this department.
+    /// Values: "single-agent" (default), "serial-phases", "swarm", "approval-chain".
+    pub default_workflow: Option<String>,
+    /// Human-readable description of the department.
+    pub description: Option<String>,
+    /// Comma-separated list of project names this department focuses on.
+    /// If empty, all office projects are in scope.
+    pub projects: Vec<String>,
+}
+
+impl DepartmentConfig {
+    /// Resolved default_workflow, falling back to "single-agent" if not set.
+    pub fn resolved_workflow(&self) -> &str {
+        self.default_workflow.as_deref().unwrap_or("single-agent")
+    }
 }
 
 /// Office-level metadata.
@@ -285,6 +324,18 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+impl OfficeConfig {
+    /// Resolve the default workflow for a given department name (v0.13.16).
+    ///
+    /// Returns the department's `default_workflow` if configured, or `None`
+    /// if the department is unknown (caller should fall back to project-level defaults).
+    pub fn department_workflow(&self, department: &str) -> Option<&str> {
+        self.departments
+            .get(department)
+            .map(|d| d.resolved_workflow())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +477,62 @@ channels:
             .unwrap();
         let names = registry.names();
         assert_eq!(names, vec!["alpha"]);
+    }
+
+    // ── Department workflow mapping tests (v0.13.16) ──────────────────────
+
+    #[test]
+    fn department_config_default_workflow_fallback() {
+        let dept = DepartmentConfig::default();
+        assert_eq!(dept.resolved_workflow(), "single-agent");
+    }
+
+    #[test]
+    fn department_config_custom_workflow() {
+        let dept = DepartmentConfig {
+            default_workflow: Some("swarm".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(dept.resolved_workflow(), "swarm");
+    }
+
+    #[test]
+    fn office_config_department_workflow_lookup() {
+        let yaml = r#"
+office:
+  name: TestCo
+departments:
+  engineering:
+    default_workflow: swarm
+    description: "Backend team"
+  marketing:
+    default_workflow: serial-phases
+"#;
+        let config: OfficeConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.department_workflow("engineering"), Some("swarm"));
+        assert_eq!(
+            config.department_workflow("marketing"),
+            Some("serial-phases")
+        );
+        assert!(config.department_workflow("unknown-dept").is_none());
+    }
+
+    #[test]
+    fn office_config_department_defaults_to_single_agent() {
+        let yaml = r#"
+office:
+  name: TestCo
+departments:
+  design: {}
+"#;
+        let config: OfficeConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.department_workflow("design"), Some("single-agent"));
+    }
+
+    #[test]
+    fn office_config_empty_departments() {
+        let config: OfficeConfig = serde_yaml::from_str("office:\n  name: X").unwrap();
+        assert!(config.departments.is_empty());
+        assert!(config.department_workflow("engineering").is_none());
     }
 }
