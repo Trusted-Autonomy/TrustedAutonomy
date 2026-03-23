@@ -7033,9 +7033,12 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.14.0 | Agent sandboxing — macOS sandbox-exec, Linux bwrap (experimental) | Done |
 | v0.14.1 | Hardware attestation & verifiable audit trails (Ed25519, `ta audit verify-attestation`) | Done |
 | v0.14.2 | Multi-party approval & threshold governance (`ta draft approve --as`, `--override`) | Done |
-| v0.14.3 | Compliance-ready audit ledger (cloud/multi-user context) | Pending |
+| v0.14.3 | Constitution dedup via agent review (`ta constitution review`) | Pending |
 | v0.14.4 | Central daemon & multi-user deployment | Pending |
 | v0.14.5 | Enterprise identity & SSO integration | Pending |
+| v0.14.6 | Compliance-ready audit ledger (builds on v0.14.4 Central Daemon) | Pending |
+| v0.14.6.5 | Pluggable memory backends (ExternalMemoryAdapter, Supermemory plugin) | Pending |
+| v0.14.7 | Draft view polish — agent decision log, collapsible HTML | Pending |
 | v0.15.0 | VS Code extension | Pending |
 | v0.15.1 | JetBrains plugin (PyCharm / WebStorm / IntelliJ) | Pending |
 | v0.15.2 | Neovim plugin | Pending |

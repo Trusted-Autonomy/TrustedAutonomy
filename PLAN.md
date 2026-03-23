@@ -5157,7 +5157,7 @@ This is conceptually a **git staging area for DB mutations**: the overlay is the
 14. [x] **Staged contributions**: `community_annotate` → `.ta/community-staging/<resource>/annotations/`.  `community_feedback` → `.ta/community-staging/<resource>/feedback/`. `community_suggest` → `.ta/community-staging/<resource>/suggestions/`. All include frontmatter with resource, goal_id, created_at.
 15. [x] **Draft callouts**: Staged artifacts under `.ta/community-staging/` are captured in the draft diff as modified files and visible in `ta draft view` with their `resource_uri: "community://..."`.
 16. [-] **Upstream PR on apply**: Creating GitHub PRs from staged contributions on `ta draft apply`. → v0.13.15 (fix pass) — staging files and `resource_uri` scheme are in place; needs git adapter wiring in `apply`.
-17. [-] **Contribution audit trail**: Logging community contributions to the audit ledger. → v0.14.3 (Compliance-Ready Audit Ledger).
+17. [-] **Contribution audit trail**: Logging community contributions to the audit ledger. → v0.14.6 (Compliance-Ready Audit Ledger).
 
 #### 5. CLI & Shell Integration
 
@@ -5179,7 +5179,7 @@ This is conceptually a **git staging area for DB mutations**: the overlay is the
 #### Deferred items moved/resolved
 
 - Item 16 (Upstream PR on apply) → v0.13.15 (staging infrastructure in place, git adapter wiring needed)
-- Item 17 (Contribution audit trail) → v0.14.3 (Compliance-Ready Audit Ledger)
+- Item 17 (Contribution audit trail) → v0.14.6 (Compliance-Ready Audit Ledger)
 - Item 19 (Tab completion) → v0.13.15 (not implemented in v0.13.7)
 - Item 20 (Status bar integration) → v0.13.15 (not implemented in v0.13.7)
 
@@ -5465,7 +5465,7 @@ ta run "write tests" --model ollama/phi4-mini   # shorthand: model implies ta-ag
 
 **Theoretical basis**: The constitution is TA's implementation of the "Value Judgment module" (§13) and "Self-Reflexive Meta Control System" (§15) described in *Suggested Metrics for Trusted Autonomy* (Finkelstein, NIST docket NIST-2023-0009-0002, Jan 2024). See `docs/trust-metrics.md` for the full mapping of TA architecture to that paper's 15 trust variables.
 
-*(Moved forward from v0.14.3 — constitution tooling is a natural capstone to beta governance, not a post-beta concern. Compliance audit ledger moves to v0.14.3 as an enterprise-tier feature requiring cloud deployment context.)*
+*(Moved forward from v0.14.3 — constitution tooling is a natural capstone to beta governance, not a post-beta concern. Compliance audit ledger moves to v0.14.6 as an enterprise-tier feature requiring cloud deployment context.)*
 
 **Problem**: Currently the constitution is TA-specific. The §4 injection/cleanup rules, the pattern scanner, and the release checklist all reference TA's own codebase conventions. A downstream project using TA (e.g., a web service or a data pipeline) has different injection patterns, different error paths, and different invariants. They get no constitution enforcement at all.
 
@@ -5637,13 +5637,13 @@ This data exists ephemerally in goal JSON and draft packages, but is never aggre
 
 #### Deferred items moved
 
-4. → **v0.14.3** **Build time calculation**: `pr_ready_at` from first `DraftBuilt` event timestamp — requires event timestamp lookup infrastructure.
-5. → **v0.14.3** **Rework tracking**: follow-up goals sum into root goal's `rework_seconds`.
-8. → **v0.14.3** **`VelocitySnapshot` event emission**: emit via `EventRouter` on every terminal outcome.
+4. → **v0.14.6** **Build time calculation**: `pr_ready_at` from first `DraftBuilt` event timestamp — requires event timestamp lookup infrastructure.
+5. → **v0.14.6** **Rework tracking**: follow-up goals sum into root goal's `rework_seconds`.
+8. → **v0.14.6** **`VelocitySnapshot` event emission**: emit via `EventRouter` on every terminal outcome.
 9. → **v0.14.4** **Connector forwarding**: Discord plugin velocity cards.
 10. → **v0.14.x** **Enterprise HTTP connector** *(stretch)*.
-12. → **v0.14.3** **`velocity_events` opt-in flag** in `channel.toml` schema.
-14–19. → **v0.14.3** **Goal History Rollover** (rollover policy, mechanics, segment queries, manual trigger, archive): full design is complete in the original items above; deferred as v0.13.12 completed without them.
+12. → **v0.14.6** **`velocity_events` opt-in flag** in `channel.toml` schema.
+14–19. → **v0.14.6** **Goal History Rollover** (rollover policy, mechanics, segment queries, manual trigger, archive): full design is complete in the original items above; deferred as v0.13.12 completed without them.
 
 #### Version: `0.13.10-alpha`
 
@@ -6102,7 +6102,7 @@ These are addressed across v0.14.4–v0.14.5.
 
 #### Items
 
-1. [x] **`AttestationBackend` trait**: `sign(payload) → attestation`, `verify(payload, attestation) → bool`. Implemented in `crates/ta-audit/src/attestation.rs`. Plugin registry from `~/.config/ta/plugins/attestation/` deferred to v0.14.3 (Constitution). (v0.14.1)
+1. [x] **`AttestationBackend` trait**: `sign(payload) → attestation`, `verify(payload, attestation) → bool`. Implemented in `crates/ta-audit/src/attestation.rs`. Plugin registry from `~/.config/ta/plugins/attestation/` deferred to v0.14.3 (Constitution Dedup). (v0.14.1)
 2. [x] **Software fallback backend**: `SoftwareAttestationBackend` — Ed25519 key pair auto-generated in `.ta/keys/attestation.pkcs8` on first use. Public key exported to `.ta/keys/attestation.pub`. 5 tests. (v0.14.1)
 3. → **community** **TPM 2.0 backend plugin**: Deferred — requires `tss2-rs` and TPM hardware. Community contribution; will be a plugin when the `AttestationBackend` trait is stable.
 4. → **community** **Apple Secure Enclave backend plugin**: Deferred — requires macOS Keychain + CryptoKit integration. Community contribution; the `AttestationBackend` trait is the stable plugin point.
@@ -6214,12 +6214,12 @@ roles = ["run-goals", "approve-drafts", "admin"]
 
 ---
 
-### v0.14.3 — Compliance-Ready Audit Ledger
+### v0.14.6 — Compliance-Ready Audit Ledger
 <!-- status: pending -->
 <!-- enterprise: yes — compliance capstone, builds on cloud deployment (v0.14.4) -->
 **Goal**: Replace the lightweight goal history index with a compliance-ready audit ledger that captures full decision context, covers all goal lifecycle paths, and supports pluggable storage backends including cloud object stores and databases suitable for enterprise compliance requirements.
 
-*(Moved from v0.13.9 — audit ledger is most useful in the cloud/multi-user context introduced in v0.14.4, where multiple teams need a central compliance record.)*
+*(Moved from v0.13.9 → originally numbered v0.14.3 but placed after v0.14.4/v0.14.5 due to dependency on the Central Daemon's multi-user context. Renumbered v0.14.6 to match physical order and dependency sequence.)*
 
 #### Problem
 The current `.ta/goal-history.jsonl` is a compact index written only on the happy path (`ta draft apply`). It records *what* happened but not *why*. Multiple lifecycle paths produce no audit record at all: `ta goal delete`, `ta goal gc`, `ta draft deny`, agent crash/timeout. Even on the happy path, `GoalHistoryEntry` lacks intent, AI summary, reviewer identity, denial reason, artifact manifest, and policy evaluation results.
@@ -6245,11 +6245,11 @@ The current `.ta/goal-history.jsonl` is a compact index written only on the happ
 11. [ ] **Structured agent output logging**: Optional `[agent].output_log = "structured"` captures full JSON agent output to the audit ledger for compliance and reproducibility.
 12. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new format on first run.
 
-#### Version: `0.14.3-alpha`
+#### Version: `0.14.6-alpha`
 
 ---
 
-### v0.14.3.5 — Pluggable Memory Backends (External Plugin Protocol)
+### v0.14.6.5 — Pluggable Memory Backends (External Plugin Protocol)
 <!-- status: pending -->
 <!-- enterprise: yes — semantic memory sync across teams and sessions -->
 **Goal**: Add an external binary plugin protocol for memory backends — the same pattern as VCS plugins — so anyone can ship a memory backend (Supermemory, Redis, Notion, Postgres, …) as a standalone binary without modifying or recompiling TA. Ship `ta-memory-supermemory` as the first reference implementation. Also add config dispatch so the right backend is selected at runtime.
