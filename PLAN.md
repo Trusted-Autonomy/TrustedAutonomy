@@ -6142,6 +6142,115 @@ All items implemented except items 5 and 13 (deferred). New tests: 5 (main.rs) +
 
 ---
 
+### v0.13.17.2 — Finalizing Phase Display, Draft Safety Checks & GC Cleanup
+<!-- status: pending -->
+**Goal**: Fix the UX gap where `Finalizing` goals show a red "no heartbeat" banner; make `ta draft build` and `ta goal recover` accept `Finalizing` goals; emit progress notes during the finalize pipeline; fix the stale-draft hint/`--stale` threshold mismatch; add `ta draft close --stale`; and add pre-apply safety checks that catch destructive artifact changes before they reach the filesystem.
+
+#### Items
+
+1. [ ] **`GoalRunState::Finalizing` progress notes**: In the finalize pipeline (`run.rs`), emit structured `progress_note` events at each step: "Running validation checks", "Building draft package", "Draft ready — ID: `<draft-id>`". Daemon stores the latest progress note in the goal state; `ta goal status` and `ta goal list` display it.
+
+2. [ ] **"TA Building Draft" display in `ta goal list`**: When a goal is in `Finalizing` state, display `[TA Building Draft]` with elapsed time instead of the red `[Agent is working (no heartbeat)]` banner. Three display sites to update: `ta goal list`, `ta goal status`, and the shell TUI goal row.
+
+3. [ ] **`ta draft build` accepts `Finalizing` state**: Remove the `if !matches!(goal.state, GoalRunState::Running)` guard at `draft.rs:987` (or equivalent). Accept both `Running` and `Finalizing` states. This directly fixes the manual recovery workaround required for goal `0e21daea` (had to edit goal JSON to `running` before `ta draft build` would proceed).
+
+4. [ ] **`ta goal recover` option 1 handles `Finalizing`**: The "rebuild draft" option in `ta goal recover` should accept goals in `Finalizing` state without requiring a state transition. Currently fails with "must be running to build PR".
+
+5. [ ] **`finalize_timeout_secs` observability**: When the finalize watchdog fires, emit a structured event with: which operation was in progress (validation vs. draft build), elapsed time, configured timeout, and the `run_pid` value that was checked. Print this context in `ta goal status` for failed goals.
+
+6. [ ] **Align stale-draft hint threshold with `--stale` flag**: The startup hint fires at 3 days but `ta draft list --stale` uses a different threshold and reports "No stale drafts found". Verify the two-value config (`gc.stale_hint_days` / `gc.stale_threshold_days` from v0.13.2) is wired end-to-end; the hint text should only suggest `ta draft list --stale` when `--stale` would actually return results.
+
+7. [ ] **`ta draft close --stale` and `ta draft gc --drafts`**: `ta draft gc` only removes staging directories — it never closes stale draft *records*, so the stale hint fires forever after gc runs. Add:
+   - `ta draft close --stale [--older-than <days>]`: closes all `Approved` and `PendingReview` drafts exceeding the stale threshold, with a confirmation prompt. Prints a summary: "Closed 3 stale drafts."
+   - `ta draft gc --drafts`: closes stale draft records as part of gc (non-interactive). Integrates with `ta goal gc` so one pass handles both staging dirs and stale draft records.
+
+8. [ ] **Pre-apply artifact safety checks**: Before `ta draft apply` copies any file to the source tree, run a set of sanity checks on each artifact in the draft package:
+   - **Dramatic shrinkage**: If an existing file shrinks by more than 80% in line count (e.g. `.gitignore` going from 109 → 1 line), block apply and print: `"Artifact .gitignore shrank 99% (109 → 1 lines). This looks destructive — use --force-apply to override."` *(Root cause of v0.13.17.1 incident where agent replaced .gitignore with a single `.git` line.)*
+   - **Critical file replacement**: Flag if a known-critical file (`.gitignore`, `Cargo.toml`, `flake.nix`, `CLAUDE.md`) loses >50% of its content.
+   - **Goal alignment check** (supervisor review): Before building the draft, compare the set of changed files against the goal's stated objective. If files outside the stated scope are substantially modified (e.g., `.gitignore` when the goal was "implement ValidationLog"), emit a `WARNING` in the validation log and `ta draft view` output: `"Out-of-scope change: .gitignore was modified but is unrelated to goal objective 'Implement v0.13.17.1'. Review carefully."` This is the lightweight "is this chain aligned with the project and goal objectives?" supervisor pass — not a blocking gate (user may override), but a visible signal.
+   - Configurable in `[workflow] apply_safety_checks = true` (default on).
+
+#### Version: `0.13.17.2-alpha`
+
+---
+
+### v0.13.17.3 — VCS Environment Isolation for Spawned Agents
+<!-- status: pending -->
+**Goal**: Give every spawned agent a fully isolated VCS environment scoped to its staging directory. Agents should be able to use git, p4, and other VCS tools naturally inside the staging copy without ever touching the developer's real repository or workspace. Prevents index-lock collisions, accidental commits to main, and P4 submit-to-wrong-workspace bugs.
+
+#### Problem
+
+When TA spawns an agent inside `.ta/staging/<id>/`, the agent inherits the developer's full VCS environment:
+
+- **Git**: The staging dir has no `.git` of its own, so git commands traverse *up* to the parent project's `.git`. The agent can accidentally `git add`, `git commit`, or `git push` to the real repo. Worse, concurrent `git index` operations (agent + developer) cause `index.lock` collisions that kill either process. (Observed in practice — v0.13.17 work hit this directly.)
+- **Perforce**: Agent inherits the developer's `P4CLIENT` workspace. An agent that runs `p4 submit` as part of a "commit and verify" workflow submits to the developer's live changelist — not a staging shelve.
+- **`ta draft apply --submit` uses `git add .`**: The submit pipeline runs `git add .` from the project root instead of staging the specific artifact paths from the draft package. When the staging dir has an embedded `.git` (from the index-lock workaround), this causes git to try indexing the entire staging `target/` directory. Fix: use `git add <artifact-path-1> <artifact-path-2> ...` with explicit paths from the draft manifest.
+
+#### Design
+
+Each VCS adapter exposes a `stage_env(staging_dir: &Path, config: &VcsAgentConfig) → HashMap<String, String>` method. TA calls this before spawning the agent and merges the returned vars into the agent's environment. External VCS plugins declare their staging vars in a `[staging_env]` manifest section.
+
+```
+VcsAdapter::stage_env()
+  ├── GitAdapter:   GIT_DIR, GIT_WORK_TREE, GIT_CEILING_DIRECTORIES
+  │   (+ optional: git init in staging with baseline commit)
+  ├── PerforceAdapter: P4CLIENT (staging workspace), P4PORT override
+  └── ExternalVcsAdapter: reads [staging_env] from plugin manifest
+```
+
+**Git isolation modes** (configured in `[vcs.git]` in `workflow.toml`):
+
+| Mode | Behaviour | When to use |
+|------|-----------|-------------|
+| `isolated` (default) | `git init` in staging with a baseline "pre-agent" commit. Agent gets its own `.git`. Can use git normally — diff, log, add, commit — against isolated history. `GIT_CEILING_DIRECTORIES` blocks upward traversal. | Most projects |
+| `inherit-read` | Sets `GIT_CEILING_DIRECTORIES` only. Agent can read parent git history (log, blame) but not write. | Read-heavy agents |
+| `none` | `GIT_DIR=/dev/null`. All git operations fail immediately. | Strict sandboxing |
+
+**Perforce isolation modes** (configured in `[vcs.p4]` in `workflow.toml`):
+
+| Mode | Behaviour |
+|------|-----------|
+| `shelve` (default) | Agent uses a dedicated staging P4 workspace. Submit blocked; shelve allowed. |
+| `read-only` | Injects `P4CLIENT=` (empty). No P4 writes possible. |
+| `inherit` | Agent uses developer's P4CLIENT. Only for workflows that explicitly need it. |
+
+#### Items
+
+1. [ ] **`ta draft apply --submit` uses explicit artifact paths**: Replace `git add .` in the VCS submit pipeline with `git add <path1> <path2> ...` using the artifact list from the draft package. This eliminates the embedded-git and unrelated-file-staging problems without requiring VCS isolation to be complete first. *(High priority — directly caused the PR #265 apply failures.)*
+
+2. [ ] **`VcsAgentConfig` struct**: New `[vcs.agent]` section in `workflow.toml`. Fields: `git_mode = "isolated" | "inherit-read" | "none"` (default `"isolated"`), `p4_mode = "shelve" | "read-only" | "inherit"` (default `"shelve"`), `init_baseline_commit = true`, `ceiling_always = true`.
+
+3. [ ] **`VcsAdapter::stage_env()` trait method**: New method returning `HashMap<String, String>`. Called in `run.rs` before `SpawnRequest` is built. Applied to `agent_env`.
+
+4. [ ] **Git isolation implementation** in `GitAdapter`:
+   - `isolated` mode: `git init <staging_dir>`, baseline commit. Returns `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CEILING_DIRECTORIES`.
+   - `inherit-read` mode: `GIT_CEILING_DIRECTORIES` only.
+   - `none` mode: `GIT_DIR=/dev/null`.
+   - All modes: `GIT_AUTHOR_NAME="TA Agent"`, `GIT_AUTHOR_EMAIL="ta-agent@local"`.
+
+5. [ ] **Perforce isolation implementation** in `PerforceAdapter`.
+
+6. [ ] **VCS plugin manifest `[staging_env]` section** for external plugins.
+
+7. [ ] **`workflow.toml` `[vcs.agent]` config** with `workflow.local.toml` override examples.
+
+8. [ ] **`ta goal status` shows VCS mode**: Add `vcs_isolation: "isolated (git)"` to output.
+
+9. [ ] **Cleanup on goal exit**: Remove staging `.git` dir and P4 staging workspace on `applied`, `denied`, `failed`, and `gc`. *(Prevents the embedded-git problem from recurring even before item 1 is shipped.)*
+
+10. [ ] **Tests**: `test_git_isolated_blocks_parent_commit`, `test_git_ceiling_prevents_lock`, `test_p4_shelve_mode_blocks_submit`, `test_external_plugin_staging_env_static`, `test_external_plugin_staging_env_command`.
+
+11. [ ] **USAGE.md "VCS Isolation for Agents"**: Three git modes decision table, P4 staging workspace pattern, `workflow.local.toml` override guidance.
+
+#### Deferred items
+
+- **SVN isolation**: Static env var injection documented; deeper workspace scoping deferred to v0.14.x.
+- **OCI-based isolation**: Deferred to v0.14.4 (container fallback).
+
+#### Version: `0.13.17.3-alpha`
+
+---
+
 > **⬇ PUBLIC BETA** — v0.13.x complete: runtime flexibility (local models, containers), enterprise governance (audit ledger, action governance, compliance), community ecosystem, and goal workflow automation. TA is ready for team and enterprise deployments.
 
 ---
