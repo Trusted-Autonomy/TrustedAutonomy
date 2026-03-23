@@ -1,0 +1,45 @@
+#!/bin/sh
+# Mock p4 CLI for TA Perforce plugin tests.
+# Returns canned responses for each p4 subcommand.
+
+cmd="$1"
+case "$cmd" in
+  info)
+    echo "Server address: perforce:1666"
+    exit 0
+    ;;
+  status)
+    echo "//depot/foo.rs#1 - reconcile to add"
+    echo "//depot/bar.rs#2 - reconcile to edit"
+    exit 0
+    ;;
+  diff)
+    echo "==== //depot/foo.rs#1 ===="
+    echo "--- foo.rs  2024-01-01"
+    echo "+++ foo.rs  2024-01-02"
+    echo "@@ -1 +1 @@"
+    echo "-old line"
+    echo "+new line"
+    exit 0
+    ;;
+  submit)
+    echo "Change 12345 submitted."
+    exit 0
+    ;;
+  shelve)
+    echo "Change 12345 shelved."
+    exit 0
+    ;;
+  changes)
+    echo "Change 12345 on 2024/01/01 by user@client 'Latest submit'"
+    exit 0
+    ;;
+  sync)
+    echo "//depot/foo.rs#1 - added as /client/foo.rs"
+    exit 0
+    ;;
+  *)
+    echo "Unknown p4 command: $cmd" >&2
+    exit 1
+    ;;
+esac

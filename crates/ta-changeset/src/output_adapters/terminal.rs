@@ -516,6 +516,7 @@ mod tests {
             },
             status: PRStatus::PendingReview,
             verification_warnings: vec![],
+            validation_log: vec![],
             display_id: None,
             tag: None,
             vcs_status: None,

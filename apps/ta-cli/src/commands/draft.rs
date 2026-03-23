@@ -1372,6 +1372,7 @@ pub(crate) fn build_package(
         },
         status: DraftStatus::PendingReview,
         verification_warnings: vec![],
+        validation_log: vec![],
         display_id: None, // Will be set below after counting existing drafts.
         tag: goal.tag.clone().or_else(|| Some(goal.display_tag())), // Inherit from goal (v0.11.2.3).
         vcs_status: None,
@@ -2354,6 +2355,40 @@ fn view_package(
         }
     }
 
+    // Show validation log if any (v0.13.17).
+    if !pkg.validation_log.is_empty() {
+        println!();
+        println!("VALIDATION LOG ({} checks):", pkg.validation_log.len());
+        println!("{}", "=".repeat(60));
+        let failed_count = pkg
+            .validation_log
+            .iter()
+            .filter(|e| e.exit_code != 0)
+            .count();
+        if failed_count > 0 {
+            println!(
+                "Warning: {} check(s) FAILED — use --override to approve anyway.",
+                failed_count
+            );
+        }
+        println!();
+        for entry in &pkg.validation_log {
+            let symbol = if entry.exit_code == 0 { "+" } else { "x" };
+            println!(
+                "  [{}] {} (exit {}, {}s)",
+                symbol, entry.command, entry.exit_code, entry.duration_secs
+            );
+            if entry.exit_code != 0
+                && !entry.stdout_tail.is_empty()
+                && effective_detail != DetailLevel::Top
+            {
+                for line in entry.stdout_tail.lines().take(10) {
+                    println!("     {}", line);
+                }
+            }
+        }
+    }
+
     // Show pending actions if any (v0.5.1).
     if !pkg.changes.pending_actions.is_empty() {
         println!();
@@ -2394,6 +2429,25 @@ fn approve_package(
         anyhow::bail!(
             "Cannot approve package in {:?} state (must be PendingReview)",
             pkg.status
+        );
+    }
+
+    // Block approval if any required check failed, unless --override (v0.13.17).
+    if !force_override && pkg.validation_log.iter().any(|e| e.exit_code != 0) {
+        let failed: Vec<&str> = pkg
+            .validation_log
+            .iter()
+            .filter(|e| e.exit_code != 0)
+            .map(|e| e.command.as_str())
+            .collect();
+        anyhow::bail!(
+            "Draft has failed validation checks — use `--override` to approve anyway.\n\
+             Failed checks:\n{}",
+            failed
+                .iter()
+                .map(|c| format!("  x {}", c))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 

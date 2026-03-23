@@ -65,6 +65,19 @@ pub struct WorkflowConfig {
     /// Draft approval governance configuration (v0.14.2)
     #[serde(default)]
     pub governance: GovernanceConfig,
+
+    /// Commands to run after agent exit to produce hard validation evidence (v0.13.17).
+    ///
+    /// Each command is run in the staging workspace. Results are embedded in the
+    /// DraftPackage as `validation_log`. Non-zero exit code blocks `ta draft approve`
+    /// unless `--override` is passed.
+    ///
+    /// Default (empty): no required checks. Set in `.ta/workflow.toml`:
+    /// ```toml
+    /// required_checks = ["cargo build --workspace", "cargo test --workspace"]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_checks: Vec<String>,
 }
 
 /// Constitution / compliance checker configuration.

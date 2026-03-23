@@ -43,7 +43,7 @@ pub use diff::DiffContent;
 pub use diff_handlers::{DiffHandlerError, DiffHandlersConfig, HandlerRule};
 pub use draft_package::{
     ActionKind, ApprovalRecord, DesignAlternative, DraftPackage, DraftStatus, ExplanationTiers,
-    PendingAction, VcsTrackingInfo,
+    PendingAction, ValidationEntry, VcsTrackingInfo,
 };
 pub use error::ChangeSetError;
 pub use explanation::ExplanationSidecar;

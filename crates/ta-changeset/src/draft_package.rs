@@ -491,6 +491,12 @@ pub struct DraftPackage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verification_warnings: Vec<VerificationWarning>,
 
+    /// Hard evidence that required checks passed/failed (v0.13.17).
+    /// Each entry records the outcome of one required_check command.
+    /// Non-zero exit_code blocks `ta draft approve` unless --override is passed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_log: Vec<ValidationEntry>,
+
     /// Human-friendly display ID derived from the goal ID (v0.10.11).
     /// Format: `<goal-id-prefix>-NN` (e.g., `511e0465-01`).
     /// Falls back to `package_id` short prefix for legacy drafts.
@@ -552,6 +558,19 @@ pub struct VerificationWarning {
     pub exit_code: Option<i32>,
     /// Captured stderr/stdout output (truncated to 2000 chars).
     pub output: String,
+}
+
+/// Result of one `required_checks` entry run after agent exit (v0.13.17).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidationEntry {
+    /// The command that was run.
+    pub command: String,
+    /// Exit code (0 = success).
+    pub exit_code: i32,
+    /// How long the command took.
+    pub duration_secs: u64,
+    /// Last 20 lines of combined stdout+stderr output.
+    pub stdout_tail: String,
 }
 
 /// Execution plan included in the PR package.
@@ -713,6 +732,7 @@ mod tests {
             },
             status: DraftStatus::Draft,
             verification_warnings: vec![],
+            validation_log: vec![],
             display_id: None,
             tag: None,
             vcs_status: None,

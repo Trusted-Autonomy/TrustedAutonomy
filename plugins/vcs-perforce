@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""
+Perforce VCS plugin for Trusted Autonomy.
+Implements the TA JSON-over-stdio VCS plugin protocol using the p4 CLI.
+
+Usage:
+  Install to .ta/plugins/vcs/ or ~/.config/ta/plugins/vcs/ alongside vcs-perforce.toml.
+  Requires: P4PORT, P4USER, P4CLIENT environment variables.
+  Requires: p4 CLI on PATH.
+"""
+import json
+import os
+import subprocess
+import sys
+
+PROTOCOL_VERSION = 1
+PLUGIN_VERSION = "0.1.0"
+ADAPTER_NAME = "perforce"
+SUPPORTED_OPS = [
+    "status", "diff", "submit", "shelve",
+    "save_state", "restore_state", "revision_id",
+    "protected_targets", "verify_target",
+]
+
+
+def p4_env():
+    return os.environ.copy()
+
+
+def run_p4(*args):
+    try:
+        result = subprocess.run(
+            ["p4"] + list(args),
+            capture_output=True,
+            text=True,
+            env=p4_env(),
+            timeout=60,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except FileNotFoundError:
+        return -1, "", "p4 command not found. Install Perforce CLI (p4) and ensure it is in PATH."
+    except subprocess.TimeoutExpired:
+        return -1, "", "p4 command timed out after 60 seconds."
+
+
+def check_env():
+    missing = []
+    for var in ("P4PORT", "P4USER", "P4CLIENT"):
+        if not os.environ.get(var):
+            missing.append(var)
+    return missing
+
+
+def handle(request):
+    method = request.get("method", "")
+    params = request.get("params", {})
+
+    if method == "handshake":
+        return {
+            "ok": True,
+            "result": {
+                "plugin_version": PLUGIN_VERSION,
+                "protocol_version": PROTOCOL_VERSION,
+                "adapter_name": ADAPTER_NAME,
+                "capabilities": SUPPORTED_OPS,
+            },
+        }
+
+    if method == "detect":
+        missing = check_env()
+        if missing:
+            return {
+                "ok": True,
+                "result": {
+                    "detected": False,
+                    "reason": "Missing env vars: {}".format(", ".join(missing)),
+                },
+            }
+        rc, _out, _err = run_p4("info")
+        return {"ok": True, "result": {"detected": rc == 0}}
+
+    if method == "exclude_patterns":
+        return {"ok": True, "result": {"patterns": [".p4config", ".p4ignore"]}}
+
+    if method == "prepare":
+        return {"ok": True, "result": {}}
+
+    if method == "status":
+        missing = check_env()
+        if missing:
+            return {"ok": False, "error": "Missing Perforce env vars: {}".format(", ".join(missing))}
+        rc, out, err = run_p4("status")
+        if rc != 0:
+            return {"ok": False, "error": err.strip() or "p4 status failed"}
+        changed = [line for line in out.strip().splitlines() if line]
+        return {"ok": True, "result": {"changed_files": changed, "raw": out}}
+
+    if method == "diff":
+        missing = check_env()
+        if missing:
+            return {"ok": False, "error": "Missing Perforce env vars: {}".format(", ".join(missing))}
+        rc, out, err = run_p4("diff", "-du")
+        if rc != 0 and not out:
+            return {"ok": False, "error": err.strip() or "p4 diff failed"}
+        return {"ok": True, "result": {"diff": out}}
+
+    if method == "submit":
+        missing = check_env()
+        if missing:
+            return {"ok": False, "error": "Missing Perforce env vars: {}".format(", ".join(missing))}
+        description = params.get("message", "TA-mediated change")
+        rc, out, err = run_p4("submit", "-d", description)
+        if rc != 0:
+            return {"ok": False, "error": err.strip() or "p4 submit failed"}
+        change_id = ""
+        for line in out.splitlines():
+            if "Change" in line and "submitted" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    change_id = parts[1]
+                    break
+        return {
+            "ok": True,
+            "result": {"commit_id": change_id, "message": out.strip(), "metadata": {}},
+        }
+
+    if method == "shelve":
+        missing = check_env()
+        if missing:
+            return {"ok": False, "error": "Missing Perforce env vars: {}".format(", ".join(missing))}
+        description = params.get("message", "TA draft shelve")
+        rc, out, err = run_p4("shelve", "-d", description)
+        if rc != 0:
+            return {"ok": False, "error": err.strip() or "p4 shelve failed"}
+        return {"ok": True, "result": {"message": out.strip(), "metadata": {}}}
+
+    if method == "save_state":
+        rc, out, _err = run_p4("changes", "-m1", "-s", "pending")
+        parts = out.strip().split() if out.strip() else []
+        rev = parts[1] if len(parts) >= 2 else "unknown"
+        return {"ok": True, "result": {"state": {"changelist": rev}}}
+
+    if method == "restore_state":
+        return {"ok": True, "result": {}}
+
+    if method == "revision_id":
+        rc, out, _err = run_p4("changes", "-m1", "-s", "submitted")
+        rev = ""
+        if rc == 0 and out.strip():
+            parts = out.strip().split()
+            if len(parts) >= 2:
+                rev = parts[1]
+        return {"ok": True, "result": {"revision_id": rev}}
+
+    if method == "protected_targets":
+        return {"ok": True, "result": {"targets": []}}
+
+    if method == "verify_target":
+        return {"ok": True, "result": {}}
+
+    if method == "sync_upstream":
+        missing = check_env()
+        if missing:
+            return {"ok": False, "error": "Missing Perforce env vars: {}".format(", ".join(missing))}
+        rc, out, err = run_p4("sync")
+        if rc != 0:
+            return {"ok": False, "error": err.strip() or "p4 sync failed"}
+        return {
+            "ok": True,
+            "result": {
+                "updated": True,
+                "conflicts": [],
+                "new_commits": 0,
+                "message": out.strip(),
+                "metadata": {},
+            },
+        }
+
+    if method == "check_review":
+        return {
+            "ok": True,
+            "result": {"found": False, "state": "unknown", "checks_passing": False},
+        }
+
+    if method == "merge_review":
+        return {
+            "ok": True,
+            "result": {"merged": False, "merge_commit": "", "message": "Not implemented", "metadata": {}},
+        }
+
+    if method == "open_review":
+        missing = check_env()
+        if missing:
+            return {"ok": False, "error": "Missing Perforce env vars: {}".format(", ".join(missing))}
+        description = params.get("message", "TA draft shelve")
+        rc, out, err = run_p4("shelve", "-d", description)
+        if rc != 0:
+            return {"ok": False, "error": err.strip() or "p4 shelve failed"}
+        change_id = ""
+        for line in out.splitlines():
+            if "Change" in line and "shelved" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    change_id = parts[1]
+                    break
+        review_url = "perforce://changelist/{}".format(change_id) if change_id else "perforce://shelve"
+        return {
+            "ok": True,
+            "result": {
+                "review_url": review_url,
+                "review_id": change_id,
+                "message": out.strip(),
+                "metadata": {},
+            },
+        }
+
+    if method == "push":
+        # Push is the same as submit for Perforce.
+        missing = check_env()
+        if missing:
+            return {"ok": False, "error": "Missing Perforce env vars: {}".format(", ".join(missing))}
+        description = params.get("message", "TA-mediated change")
+        rc, out, err = run_p4("submit", "-d", description)
+        if rc != 0:
+            return {"ok": False, "error": err.strip() or "p4 submit failed"}
+        return {
+            "ok": True,
+            "result": {
+                "remote_ref": "perforce://depot",
+                "message": out.strip(),
+                "metadata": {},
+            },
+        }
+
+    if method == "commit":
+        # Perforce commit: reconcile open files into a changelist and shelve.
+        missing = check_env()
+        if missing:
+            return {"ok": False, "error": "Missing Perforce env vars: {}".format(", ".join(missing))}
+        description = params.get("message", "TA-mediated change")
+        rc, out, err = run_p4("shelve", "-d", description)
+        if rc != 0:
+            return {"ok": False, "error": err.strip() or "p4 shelve failed"}
+        change_id = ""
+        for line in out.splitlines():
+            if "Change" in line and "shelved" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    change_id = parts[1]
+                    break
+        return {
+            "ok": True,
+            "result": {
+                "commit_id": change_id,
+                "message": out.strip(),
+                "metadata": {},
+            },
+        }
+
+    return {"ok": False, "error": "Unknown method: {}".format(method)}
+
+
+def main():
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    try:
+        request = json.loads(line.strip())
+    except json.JSONDecodeError as e:
+        print(json.dumps({"ok": False, "error": "Invalid JSON: {}".format(e)}), flush=True)
+        sys.exit(1)
+
+    response = handle(request)
+    print(json.dumps(response), flush=True)
+
+
+if __name__ == "__main__":
+    main()

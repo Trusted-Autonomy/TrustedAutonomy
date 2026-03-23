@@ -276,6 +276,12 @@ pub struct GoalRun {
     /// The PR package ID, if one has been built.
     pub pr_package_id: Option<Uuid>,
 
+    /// Short status note written during draft-build phase (v0.13.17).
+    /// Written by `ta run` at each major step: "diffing N files", "packing N artifacts".
+    /// Watchdog and `ta goal status` display this so the user can see progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_note: Option<String>,
+
     /// When this goal run was created.
     pub created_at: DateTime<Utc>,
 
@@ -357,6 +363,7 @@ impl GoalRun {
             heartbeat_required: false,
             pr_url: None,
             pr_package_id: None,
+            progress_note: None,
             created_at: now,
             updated_at: now,
         }

@@ -1125,6 +1125,27 @@ pub fn execute(
     let resolved_framework =
         ta_runtime::AgentFrameworkManifest::resolve(agent, &config.workspace_root);
 
+    // Gate ollama agent behind experimental flag (v0.13.17).
+    if agent == "ollama" {
+        let daemon_toml = config.workspace_root.join(".ta").join("daemon.toml");
+        let experimental_enabled = if daemon_toml.exists() {
+            std::fs::read_to_string(&daemon_toml)
+                .ok()
+                .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                .and_then(|v| v.get("experimental")?.get("ollama_agent")?.as_bool())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !experimental_enabled {
+            anyhow::bail!(
+                "ta-agent-ollama is an experimental preview. Enable with:\n\n  \
+                 [experimental]\n  ollama_agent = true\n\nin .ta/daemon.toml. \
+                 See docs/USAGE.md for known limitations."
+            );
+        }
+    }
+
     let agent_config = {
         let framework_source = if agent != "claude-code" {
             "goal --agent flag"
@@ -1331,6 +1352,7 @@ pub fn execute(
             goal.plan_phase.as_deref(),
             config,
             ctx_file,
+            goal.source_dir.as_deref(),
         )?;
     }
     if agent_config.injects_settings {
@@ -1351,8 +1373,13 @@ pub fn execute(
                     ContextInjectMode::Prepend | ContextInjectMode::None
                 )
             {
-                let context_text =
-                    build_goal_context_text(title, &goal_id, goal.plan_phase.as_deref(), config);
+                let context_text = build_goal_context_text(
+                    title,
+                    &goal_id,
+                    goal.plan_phase.as_deref(),
+                    config,
+                    goal.source_dir.as_deref(),
+                );
                 match fw.context_inject {
                     ContextInjectMode::Env => {
                         match inject_context_env(&staging_path, &context_text) {
@@ -2211,6 +2238,81 @@ pub fn execute(
         Vec::new()
     };
 
+    // 6c. Run required_checks and build validation_log (v0.13.17).
+    //     These are hard-evidence checks embedded in the DraftPackage.
+    //     Non-zero exit code blocks `ta draft approve` unless --override is passed.
+    let validation_log = {
+        let workflow_toml = staging_path.join(".ta/workflow.toml");
+        let workflow_config = ta_submit::WorkflowConfig::load_or_default(&workflow_toml);
+
+        if workflow_config.required_checks.is_empty() {
+            vec![]
+        } else {
+            // Helper: update progress note without blocking on errors (v0.13.17).
+            let update_note_required = |note: &str| {
+                if let Ok(store) = GoalRunStore::new(&config.goals_dir) {
+                    let _ = store.update_progress_note(goal.goal_run_id, note);
+                }
+            };
+            let checks = &workflow_config.required_checks;
+            update_note_required(&format!(
+                "running required_checks ({} checks)",
+                checks.len()
+            ));
+            println!();
+            println!("Running required_checks ({} checks)...", checks.len());
+            let mut entries = Vec::new();
+            for cmd_str in checks {
+                let started = std::time::Instant::now();
+                // Split command into program + args.
+                let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+                if parts.is_empty() {
+                    continue;
+                }
+                let output = std::process::Command::new(parts[0])
+                    .args(&parts[1..])
+                    .current_dir(&staging_path)
+                    .output();
+                let duration_secs = started.elapsed().as_secs();
+                let (exit_code, stdout_tail) = match output {
+                    Ok(out) => {
+                        let combined = format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        );
+                        let lines: Vec<&str> = combined.lines().collect();
+                        let tail_start = lines.len().saturating_sub(20);
+                        let tail = lines[tail_start..].join("\n");
+                        (out.status.code().unwrap_or(-1), tail)
+                    }
+                    Err(e) => (-1, format!("Failed to run command: {}", e)),
+                };
+                let pass = if exit_code == 0 { "+" } else { "x" };
+                println!("  [{}] {} ({}s)", pass, cmd_str, duration_secs);
+                entries.push(ta_changeset::draft_package::ValidationEntry {
+                    command: cmd_str.clone(),
+                    exit_code,
+                    duration_secs,
+                    stdout_tail,
+                });
+            }
+            let failed_count = entries.iter().filter(|e| e.exit_code != 0).count();
+            if failed_count > 0 {
+                println!(
+                    "  {} of {} required_checks FAILED.",
+                    failed_count,
+                    entries.len()
+                );
+                println!("  Draft will be created but `ta draft approve` will be blocked.");
+                println!("  Use `ta draft approve --override` to bypass.");
+            } else {
+                println!("  All required_checks passed.");
+            }
+            entries
+        }
+    };
+
     // 7. Build draft package from the diff.
     //    In macro sessions, the agent may have already submitted/applied drafts
     //    via MCP tools, transitioning the goal out of Running state. Only build
@@ -2223,6 +2325,11 @@ pub fn execute(
         goal_current.state,
         ta_goal::GoalRunState::Running | ta_goal::GoalRunState::Finalizing { .. }
     ) {
+        // Write progress note before diffing (v0.13.17).
+        if let Ok(store) = GoalRunStore::new(&config.goals_dir) {
+            let _ = store.update_progress_note(goal.goal_run_id, "diffing workspace files");
+        }
+
         super::draft::execute(
             &super::draft::DraftCommands::Build {
                 goal_id: goal_id.clone(),
@@ -2238,6 +2345,18 @@ pub fn execute(
                 if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
                     if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
                         pkg.verification_warnings = verification_warnings;
+                        let _ = super::draft::save_package(config, &pkg);
+                    }
+                }
+            }
+        }
+
+        // 7b. Attach validation_log to the draft (v0.13.17).
+        if !validation_log.is_empty() {
+            if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
+                    if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                        pkg.validation_log = validation_log;
                         let _ = super::draft::save_package(config, &pkg);
                     }
                 }
@@ -2821,37 +2940,60 @@ fn launch_agent_via_runtime(
         let wf_toml = staging_path.join(".ta/workflow.toml");
         let wf = ta_submit::WorkflowConfig::load_or_default(&wf_toml);
         if wf.sandbox.enabled {
-            let provider = SandboxPolicy::detect_provider();
-            if provider == SandboxProvider::None {
+            // Check experimental.sandbox flag (v0.13.17).
+            // If not enabled in [experimental], print a warning and skip sandboxing.
+            let daemon_toml = staging_path.join(".ta").join("daemon.toml");
+            let sandbox_experimental = if daemon_toml.exists() {
+                std::fs::read_to_string(&daemon_toml)
+                    .ok()
+                    .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                    .and_then(|v| v.get("experimental")?.get("sandbox")?.as_bool())
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if !sandbox_experimental {
+                println!(
+                    "Warning: Sandbox is experimental — set [experimental]\nsandbox = true \
+                     in .ta/daemon.toml to enable. Running without sandbox."
+                );
                 tracing::warn!(
-                    "sandbox.enabled=true but no sandbox provider available on this platform — \
-                     running agent without sandboxing"
+                    "sandbox.enabled=true but experimental.sandbox=false — skipping sandbox"
                 );
                 raw_request
             } else {
-                let policy = SandboxPolicy {
-                    enabled: true,
-                    provider,
-                    allow_read: wf
-                        .sandbox
-                        .allow_read
-                        .iter()
-                        .map(std::path::PathBuf::from)
-                        .collect(),
-                    allow_write: wf
-                        .sandbox
-                        .allow_write
-                        .iter()
-                        .map(std::path::PathBuf::from)
-                        .collect(),
-                    allow_network: wf.sandbox.allow_network.clone(),
-                };
-                tracing::info!(
-                    provider = ?policy.provider,
-                    "Applying sandbox policy to agent process"
+                let provider = SandboxPolicy::detect_provider();
+                if provider == SandboxProvider::None {
+                    tracing::warn!(
+                    "sandbox.enabled=true but no sandbox provider available on this platform — \
+                     running agent without sandboxing"
                 );
-                policy.apply(raw_request)
-            }
+                    raw_request
+                } else {
+                    let policy = SandboxPolicy {
+                        enabled: true,
+                        provider,
+                        allow_read: wf
+                            .sandbox
+                            .allow_read
+                            .iter()
+                            .map(std::path::PathBuf::from)
+                            .collect(),
+                        allow_write: wf
+                            .sandbox
+                            .allow_write
+                            .iter()
+                            .map(std::path::PathBuf::from)
+                            .collect(),
+                        allow_network: wf.sandbox.allow_network.clone(),
+                    };
+                    tracing::info!(
+                        provider = ?policy.provider,
+                        "Applying sandbox policy to agent process"
+                    );
+                    policy.apply(raw_request)
+                }
+            } // end sandbox_experimental else
         } else {
             raw_request
         }
@@ -3245,15 +3387,19 @@ pub(crate) fn restore_mcp_server_config(staging_path: &Path) -> anyhow::Result<(
         }
         std::fs::remove_file(&backup_path)?;
     } else {
-        // No TA-server backup, but ta-memory may still have been injected.
-        // Remove the ta-memory key if present so it doesn't pollute the source.
+        // No TA-server backup, but ta-memory / ta-community-hub may still have been injected.
+        // Remove injected keys if present so they don't pollute the source.
         if mcp_json_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&mcp_json_path) {
                 if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
                     let removed = val
                         .get_mut("mcpServers")
                         .and_then(|s| s.as_object_mut())
-                        .map(|s| s.remove("ta-memory").is_some())
+                        .map(|s| {
+                            let r1 = s.remove("ta-memory").is_some();
+                            let r2 = s.remove("ta-community-hub").is_some();
+                            r1 || r2
+                        })
                         .unwrap_or(false);
                     if removed {
                         if let Ok(cleaned) = serde_json::to_string_pretty(&val) {
@@ -3725,6 +3871,7 @@ fn inject_agent_context_file(
     plan_phase: Option<&str>,
     config: &GatewayConfig,
     context_file: &str,
+    source_dir: Option<&Path>,
 ) -> anyhow::Result<()> {
     let memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
 
@@ -3741,9 +3888,16 @@ fn inject_agent_context_file(
         .map(|p| format!("\n## Plan\n\n{}\n", truncate_str(p, 8_000)))
         .unwrap_or_default();
 
+    // Build community knowledge section (v0.13.17).
+    let community_section = if let Some(src) = source_dir {
+        super::community::build_community_context_section(src)
+    } else {
+        String::new()
+    };
+
     let content = format!(
-        "# TA Agent Context\n\n**Goal:** {}\n**Goal ID:** {}{}{}\n",
-        title, goal_id, plan_section, memory_section,
+        "# TA Agent Context\n\n**Goal:** {}\n**Goal ID:** {}{}{}{}\n",
+        title, goal_id, plan_section, memory_section, community_section,
     );
 
     let target = if std::path::Path::new(context_file).is_absolute() {
@@ -3850,6 +4004,42 @@ fn auto_capture_goal_completion(
     let mut store = ta_memory::FsMemoryStore::new(&memory_dir);
     if let Err(e) = capture.on_goal_complete(&mut store, &event) {
         tracing::warn!("failed to auto-capture goal completion: {}", e);
+    }
+
+    // Ingest community feedback written by the agent (v0.13.17).
+    // If the agent wrote .ta/community_feedback.json, parse and store each entry
+    // in the local community cache with source: "agent-observed".
+    let feedback_path = staging_path.join(".ta").join("community_feedback.json");
+    if feedback_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&feedback_path) {
+            if let Ok(serde_json::Value::Array(arr)) =
+                serde_json::from_str::<serde_json::Value>(&content)
+            {
+                let cache_dir = config.workspace_root.join(".ta").join("community-cache");
+                if std::fs::create_dir_all(&cache_dir).is_ok() {
+                    let ts = chrono::Utc::now().to_rfc3339();
+                    let mut ingested = 0usize;
+                    for entry in &arr {
+                        let mut e = entry.clone();
+                        if let Some(obj) = e.as_object_mut() {
+                            obj.insert("source".to_string(), serde_json::json!("agent-observed"));
+                            obj.insert("observed_at".to_string(), serde_json::json!(ts));
+                        }
+                        let id = uuid::Uuid::new_v4();
+                        let out_path = cache_dir.join(format!("feedback-{}.json", id));
+                        let _ = std::fs::write(
+                            &out_path,
+                            serde_json::to_string_pretty(&e).unwrap_or_default(),
+                        );
+                        ingested += 1;
+                    }
+                    if ingested > 0 {
+                        println!("Community feedback: {} observation(s) ingested.", ingested);
+                        tracing::info!(count = ingested, "Ingested agent community feedback");
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -4198,14 +4388,20 @@ fn build_goal_context_text(
     goal_id: &str,
     plan_phase: Option<&str>,
     config: &GatewayConfig,
+    source_dir: Option<&Path>,
 ) -> String {
     let phase_line = plan_phase
         .map(|p| format!("\n**Plan Phase:** {}", p))
         .unwrap_or_default();
     let memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
+    let community_section = if let Some(src) = source_dir {
+        super::community::build_community_context_section(src)
+    } else {
+        String::new()
+    };
     format!(
-        "# TA Goal Context\n\n**Goal:** {}\n**Goal ID:** {}{}\n{}",
-        title, goal_id, phase_line, memory_section
+        "# TA Goal Context\n\n**Goal:** {}\n**Goal ID:** {}{}\n{}{}",
+        title, goal_id, phase_line, memory_section, community_section
     )
 }
 
@@ -4238,14 +4434,24 @@ fn inject_memory_mcp_server(staging_path: &Path) -> anyhow::Result<()> {
         serde_json::json!({ "mcpServers": {} })
     };
 
+    let community_hub_entry = serde_json::json!({
+        "command": ta_binary,
+        "args": ["community", "serve"],
+        "env": {
+            "TA_PROJECT_ROOT": staging_path.display().to_string()
+        }
+    });
+
     if let Some(servers) = mcp_config
         .get_mut("mcpServers")
         .and_then(|s| s.as_object_mut())
     {
         servers.insert("ta-memory".to_string(), memory_server_entry);
+        servers.insert("ta-community-hub".to_string(), community_hub_entry);
     } else {
         mcp_config["mcpServers"] = serde_json::json!({
-            "ta-memory": memory_server_entry
+            "ta-memory": memory_server_entry,
+            "ta-community-hub": community_hub_entry,
         });
     }
 
@@ -4253,7 +4459,7 @@ fn inject_memory_mcp_server(staging_path: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&mcp_json_path, serde_json::to_string_pretty(&mcp_config)?)?;
-    tracing::debug!("Injected ta-memory MCP server into .mcp.json");
+    tracing::debug!("Injected ta-memory and ta-community-hub MCP servers into .mcp.json");
     Ok(())
 }
 
@@ -4959,6 +5165,7 @@ pre_launch:
             },
             status: DraftStatus::PendingReview,
             verification_warnings: vec![],
+            validation_log: vec![],
             display_id: None,
             tag: None,
             vcs_status: None,
@@ -5116,6 +5323,7 @@ pre_launch:
             },
             status: DraftStatus::PendingReview,
             verification_warnings: vec![],
+            validation_log: vec![],
             display_id: None,
             tag: None,
             vcs_status: None,

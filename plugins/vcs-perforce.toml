@@ -1,0 +1,17 @@
+name = "perforce"
+version = "0.1.0"
+description = "Perforce VCS adapter — uses the p4 CLI to submit, shelve, and diff changelists."
+protocol_version = 1
+required_env = ["P4PORT", "P4USER", "P4CLIENT"]
+supported_operations = ["status", "diff", "submit", "shelve", "save_state", "restore_state", "revision_id"]
+
+# Installation:
+# 1. Copy `plugins/vcs-perforce` to ~/.config/ta/plugins/vcs/ (make it executable)
+# 2. Copy this file alongside it as vcs-perforce.toml (or plugin.toml in a subdirectory)
+# 3. Set [submit] adapter = "perforce" in .ta/workflow.toml
+# 4. Set P4PORT, P4USER, P4CLIENT environment variables
+#
+# Required environment variables:
+#   P4PORT   — Perforce server address (e.g., ssl:perforce:1666)
+#   P4USER   — Perforce username
+#   P4CLIENT — Perforce client workspace name (depot path mapping)

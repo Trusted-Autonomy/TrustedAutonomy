@@ -443,6 +443,42 @@ ta draft view <id> --json
 
 Agents can populate the Design Decisions section by passing an `alternatives` array to the `ta_pr_build` MCP tool. Each entry has `option`, `rationale`, and `chosen` fields.
 
+### Validation Log
+
+When `required_checks` are configured in your workflow, TA runs them automatically after the agent exits and embeds the results in the draft as a validation log.
+
+```toml
+# .ta/workflow.toml
+[workflow]
+required_checks = [
+    "cargo build --workspace",
+    "cargo test --workspace",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo fmt --all -- --check",
+]
+```
+
+After each check runs, `ta draft view` shows:
+
+```
+VALIDATION LOG (4 checks):
+  [+] cargo build --workspace (12s)
+  [+] cargo test --workspace (47s)
+  [+] cargo clippy --workspace --all-targets -- -D warnings (8s)
+  [x] cargo fmt --all -- --check (1s, exit 1)
+     --- src/main.rs	+++ src/main.rs	@@ -1,4 +1,4 @@ ...
+  WARNING: 1 validation check(s) failed — review before approving
+```
+
+**Approval gate**: `ta draft approve` refuses to approve a draft with failed validation checks unless you pass `--override`:
+
+```bash
+ta draft approve <id>              # blocked if any check failed
+ta draft approve <id> --override   # approve anyway (adds audit note)
+```
+
+Each check captures: the command, exit code, duration in seconds, and the last 20 lines of output for context.
+
 ### Agents
 
 TA wraps any agent framework. Out of the box it supports:
@@ -474,7 +510,7 @@ ta agent info claude-flow
 
 #### Running goals with a local model (ta-agent-ollama)
 
-> **Experimental preview** — `ta-agent-ollama` is an experimental feature. To enable it, add the following to your `.ta/config.toml`:
+> **Experimental preview** — `ta-agent-ollama` is an experimental feature. To enable it, add the following to your `.ta/daemon.toml`:
 > ```toml
 > [experimental]
 > ollama_agent = true
@@ -2433,6 +2469,78 @@ Each adapter contributes VCS-specific exclude patterns that are merged with your
 
 **SVN and Perforce adapters are stubs** — they implement the correct protocol but have not been tested against real servers. If you use SVN or Perforce, please test and report issues.
 
+#### Using TA with Perforce
+
+The Perforce VCS plugin (`plugins/vcs-perforce`) is a Python 3 script that wraps the `p4` CLI using TA's JSON-over-stdio plugin protocol.
+
+**Prerequisites:**
+- `p4` CLI installed and on `PATH`
+- Environment variables set: `P4PORT`, `P4USER`, `P4CLIENT`
+
+**Install the plugin:**
+
+```bash
+# Copy to user plugin directory
+cp plugins/vcs-perforce ~/.config/ta/plugins/vcs/vcs-perforce
+chmod +x ~/.config/ta/plugins/vcs/vcs-perforce
+
+# Copy the manifest
+cp plugins/vcs-perforce.toml ~/.config/ta/plugins/vcs/vcs-perforce.toml
+```
+
+**Configure your project to use Perforce:**
+
+```toml
+# .ta/workflow.toml
+[submit]
+adapter = "perforce"
+workspace = "my-workspace"   # P4CLIENT value
+```
+
+Set up your environment:
+
+```bash
+export P4PORT=ssl:perforce.example.com:1666
+export P4USER=alice
+export P4CLIENT=alice-workspace
+```
+
+**Workflow with Perforce:**
+
+```bash
+# Start a goal — TA stages to .ta/staging/, agent works normally
+ta run "Implement feature X"
+
+# Review the draft — includes any validation log
+ta draft view <id>
+
+# Approve and apply — shelves a changelist in Perforce
+ta draft apply <id>
+
+# For direct submission (bypassing Swarm review):
+ta draft apply <id> --no-review
+```
+
+**Shelving workflow**: By default, `ta draft apply` shelves the pending changelist (`p4 shelve`) so your team can review it in Helix Swarm before submission. When the review is approved, run `ta draft apply <id> --submit` to run `p4 submit`.
+
+**Depot path scoping**: Add depot path patterns to your workflow config to limit what TA can touch:
+
+```toml
+[submit]
+adapter = "perforce"
+protected_paths = ["//depot/main/src/...", "//depot/main/tests/..."]
+```
+
+TA checks these patterns before submitting — any artifact outside the listed paths is blocked.
+
+**Ignore file**: Add TA-local files to `.p4ignore`:
+
+```
+.ta/
+.mcp.json
+ONBOARDING.md
+```
+
 To explicitly select an adapter (bypassing auto-detection):
 
 ```toml
@@ -3151,6 +3259,23 @@ Examples for other projects:
 - **No prerelease**: set `three_segment: "{0}.{1}.{2}"` and `prerelease_suffix: ""`
 - **Beta channel**: set `prerelease_suffix: "beta"`
 - **RC numbering**: set `four_segment: "{0}.{1}.{2}-rc.{3}"`
+
+#### Pre-Release Checklist
+
+Before publishing a public release, run the full verification suite including integration and E2E tests:
+
+```bash
+# Standard verification (required)
+./dev cargo build --workspace
+./dev cargo test --workspace
+./dev cargo clippy --workspace --all-targets -- -D warnings
+./dev cargo fmt --all -- --check
+
+# Integration and E2E tests (recommended before public releases)
+./dev cargo test -- --ignored --test-threads=1
+```
+
+The `--ignored` flag runs tests marked `#[ignore]` — these include E2E tests that require a live daemon and integration tests with real external tools. Run them with `--test-threads=1` to avoid port conflicts between daemon instances.
 
 ### Versioning and Release Lifecycle
 
@@ -7030,10 +7155,6 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.13.14 | Watchdog/exit-handler race & goal recovery (`ta goal recover`) | Done |
 | v0.13.15 | Fix pass, cross-language onboarding & constitution completion | Done |
 | v0.13.16 | Local model agent (ta-agent-ollama, experimental) & advanced swarm orchestration | Done |
-| v0.13.17 | Draft evidence, Perforce plugin & pre-release hardening (scaffold) | Done |
-| v0.13.17.1 | Complete v0.13.17 — validation log, community MCP, E2E tests | Pending |
-| v0.13.17.2 | Finalizing phase display & progress observability ("TA Building Draft", `ta draft build` fix) | Pending |
-| v0.13.17.3 | VCS environment isolation for spawned agents (git isolated mode, P4 staging workspace) | Pending |
 | v0.14.0 | Agent sandboxing — macOS sandbox-exec, Linux bwrap (experimental) | Done |
 | v0.14.1 | Hardware attestation & verifiable audit trails (Ed25519, `ta audit verify-attestation`) | Done |
 | v0.14.2 | Multi-party approval & threshold governance (`ta draft approve --as`, `--override`) | Done |
@@ -7278,150 +7399,32 @@ auto_review   = true         # automatically open a PR
 
 TA distinguishes between **shared configuration** (checked into VCS, reviewed as normal PRs) and **local runtime state** (machine-specific, should be ignored by your VCS). This section explains the split, how to configure your VCS ignore rules, and how to optimize staging for large workspaces.
 
-### Configuration Files Reference
+### Shared vs Local Files
 
-TA uses a layered configuration model. Settings resolve from most-general to most-specific; later layers win. The split between **committed** and **local** files is deliberate: committed files encode team policy, local files are personal or machine-specific overrides that should never land in a PR.
+**Commit these to VCS** — they encode team policy and agent definitions:
 
-#### Resolution order
-
-1. Built-in defaults
-2. `~/.config/ta/config.toml` — user-global settings (preferred model, default port)
-3. `.ta/config.toml` — project-level committed config
-4. `.ta/config.local.toml` — machine-local overrides (gitignored)
-5. `.ta/workflow.toml` — workflow settings (committed)
-6. `.ta/workflow.local.toml` — machine-local workflow overrides (gitignored)
-7. CLI flags — always win
-
-#### Files to commit
-
-These encode team policy and belong in version control:
-
-| File | Purpose |
-|------|---------|
-| `.ta/config.toml` | Project-level daemon config: model, timeouts, `[experimental]` for team-wide features |
-| `.ta/workflow.toml` | Verify commands, VCS adapter (`git` or `perforce`), branch prefix, target branch |
-| `.ta/agents/*.toml` | Agent framework manifests (claude-code, codex, gsd, ta-agent-ollama, …) |
-| `.ta/plugins/*/channel.toml` | Channel plugin config (Discord server ID, Slack workspace — **not** tokens) |
-| `.ta/pr-template.md` | PR body template with `{summary}`, `{why}`, `{test_plan}` placeholders |
+| File / Directory | Purpose |
+|---|---|
+| `.ta/workflow.toml` | Staging strategy, verify commands, channel config |
 | `.ta/policy.yaml` | Action governance and auto-approval rules |
 | `.ta/constitution.toml` | Behavioral contract for agents |
-| `.ta/release-history.json` | Release changelog — appended on each `ta release dispatch`, small and append-only |
-| `.ta/plan_history.jsonl` | Timeline of PLAN.md phase completions — project record, append-only |
+| `.ta/memory.toml` | Persistent memory backend config |
+| `.ta/agents/` | Agent configuration files |
+| `.ta/constitutions/` | Constitution documents |
+| `.ta/templates/` | Project templates |
 
-#### Files to gitignore — personal / machine-local
+**Never commit these** — they are local runtime state and change on every machine:
 
-These are personal or machine-specific; never commit them:
+| File / Directory | Why not commit |
+|---|---|
+| `.ta/staging/` | Agent workspaces (gigabytes on game projects) |
+| `.ta/goals/` | Goal run history and state files |
+| `.ta/events/` | Event stream log |
+| `.ta/daemon.toml` | Machine-local daemon configuration |
+| `.ta/audit-ledger.jsonl` | Audit log (environment-specific) |
+| `.ta/velocity-stats.jsonl` | Per-machine velocity stats |
 
-| File | Purpose |
-|------|---------|
-| `.ta/config.local.toml` | Personal overrides: `[experimental]` flags, local port, API keys |
-| `.ta/workflow.local.toml` | Machine-specific workflow: P4 workspace name, local depot path |
-| `.ta/daemon.toml` | Runtime daemon state auto-generated on start |
-| `.ta/consent.json` | Local user consent record |
-| `.ta/audit.jsonl` | Local audit trail (team aggregation planned for v0.14.4 Central Daemon) |
-| `.ta/velocity-stats.jsonl` | Build/review timing — machine-specific, meaningless cross-machine |
-| `.ta/goal-history.jsonl` | Active goal records — machine-specific, aggregated in v0.14.4 |
-
-#### Files to gitignore — ephemeral state
-
-| File / Directory | Why |
-|-----------------|-----|
-| `.ta/staging/` | Per-goal source copies — can be gigabytes on projects with compiled dependencies |
-| `.ta/goals/` | Live goal state JSON, changes every run |
-| `.ta/events/`, `.ta/events.jsonl` | Structured event log shards |
-| `.ta/memory/`, `.ta/memory.rvf` | Agent memory entries and vector store |
-| `.ta/store/` | Internal KV store |
-| `.ta/backups/` | CLAUDE.md backup during goal injection |
-| `.ta/interactive_sessions/` | PTY session state |
-| `.ta/pr_packages/` | Draft artifact packages |
-
-#### `config.toml` vs `workflow.toml`
-
-**`config.toml`** is about *what TA does* — the daemon, the agent, the project defaults:
-
-```toml
-# .ta/config.toml — committed, project-level
-[daemon]
-model = "claude-opus-4-6"
-port = 7700
-
-[operations]
-finalize_timeout_secs = 1800
-
-# [experimental] — use config.local.toml for personal flags, not here
-# Enable an experimental feature for everyone on the team:
-# [experimental]
-# ollama_agent = true
-```
-
-**`workflow.toml`** is about *how a goal is delivered* — verified, submitted, reviewed:
-
-```toml
-# .ta/workflow.toml — committed, team-shared
-[verify]
-commands = [
-  "./dev 'cargo fmt --all -- --check'",
-  "./dev 'cargo clippy --workspace --all-targets -- -D warnings'",
-  "./dev 'cargo test --workspace'",
-]
-on_failure = "block"
-timeout = 600
-
-[submit]
-adapter = "git"          # "git" or "perforce"
-auto_commit = true
-auto_push = true
-auto_review = true
-
-[submit.git]
-branch_prefix = "feature/"
-target_branch = "main"
-merge_strategy = "squash"
-```
-
-#### Personal local overrides
-
-Create `.ta/config.local.toml` for settings that should never be committed:
-
-```toml
-# .ta/config.local.toml — gitignored, personal
-[experimental]
-ollama_agent = true   # enable ta-agent-ollama preview on this machine
-sandbox = true        # enable macOS sandbox-exec / Linux bwrap preview
-
-[daemon]
-port = 7701           # use a different port if 7700 is taken
-```
-
-#### Perforce projects: shared + local split
-
-For a Perforce project, `workflow.toml` holds the depot path and team P4 settings. Machine-specific workspace/client names and any local P4PORT override go in `workflow.local.toml` (gitignored):
-
-```toml
-# .ta/workflow.toml — committed, team-shared
-[submit]
-adapter = "perforce"
-
-[submit.p4]
-port    = "ssl:perforce.studio.com:1666"   # team P4 server (or set via P4PORT env var)
-depot   = "//depot/GameProject/"           # shared depot root
-```
-
-```toml
-# .ta/workflow.local.toml — gitignored, machine-specific
-[submit.p4]
-workspace = "michael-mbp-GameProject"    # your local P4 client workspace name
-# port = "ssl:localhost:1666"            # optional: override for local P4 proxy
-```
-
-Set `P4IGNORE` to prevent Perforce from checking in TA runtime state:
-
-```bash
-export P4IGNORE=.p4ignore    # add to your shell profile
-ta setup vcs                  # writes the correct entries to .p4ignore
-```
-
-To audit the current committed/ignored split for your project:
+To audit the current split for your project:
 
 ```bash
 ta plan shared
@@ -7437,7 +7440,19 @@ ta setup vcs --dry-run  # preview what would change without writing
 ta setup vcs --force    # rewrite the TA block (e.g. after upgrading TA)
 ```
 
-For Git projects, this appends a block to `.gitignore`. For Perforce projects, it writes the same entries to `.p4ignore`. If `P4IGNORE` is not set, TA prints a reminder:
+For Git projects, this appends a block to `.gitignore`:
+
+```
+# Trusted Autonomy — local runtime state (do not commit)
+.ta/daemon.toml
+.ta/daemon.local.toml
+.ta/staging/
+.ta/goals/
+.ta/events/
+...
+```
+
+For Perforce projects, it writes the same entries to `.p4ignore`. If `P4IGNORE` is not set, TA prints a reminder:
 
 ```
 ⚠ Perforce: P4IGNORE env var is not set.

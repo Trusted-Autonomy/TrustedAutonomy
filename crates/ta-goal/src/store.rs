@@ -190,6 +190,15 @@ impl GoalRunStore {
         }
     }
 
+    /// Update the progress_note for a goal without changing state (v0.13.17).
+    pub fn update_progress_note(&self, goal_run_id: Uuid, note: &str) -> Result<(), GoalError> {
+        if let Some(mut goal) = self.get(goal_run_id)? {
+            goal.progress_note = Some(note.to_string());
+            self.save(&goal)?;
+        }
+        Ok(())
+    }
+
     /// Delete a GoalRun from the store.
     pub fn delete(&self, goal_run_id: Uuid) -> Result<bool, GoalError> {
         let path = self.goal_file(goal_run_id);
