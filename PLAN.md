@@ -6097,17 +6097,13 @@ All items implemented except items 5 and 13 (deferred). New tests: 5 (main.rs) +
 <!-- status: pending -->
 **Goal**: Implement all remaining v0.13.17 items not included in the v0.13.17 scaffold PR. The scaffold (PR #264) added the struct/config changes and PLAN.md — this phase wires them end-to-end.
 
-#### 1. Finalize-Phase Observability (from v0.13.17 items 1–3)
+#### 1. Draft Evidence (ValidationLog)
 
-1. [ ] **Finalize heartbeat in `ta run`**: During the draft-build phase (after agent exits), write `progress_note` into the goal JSON at each step: "diffing N files", "running required_checks: cargo build --workspace", "packing N artifacts". Use `GoalRunStore::update_progress_note()` (new helper). Watchdog and `ta goal status` read this field.
-2. [ ] **"TA Building Draft" display for Finalizing goals**: Currently `ta goal list`, the shell status bar, and the daemon health display all show the goal as if the agent is still running — including a red "Agent is working (no heartbeat)" banner with an ever-growing elapsed time. Fix three sites:
-   - **`process_health_label()`** (`goal.rs`): Return `"building"` instead of treating `Finalizing` like `Running`. The HEALTH column shows `building` in yellow instead of `unknown`/`dead` in red.
-   - **Shell status bar** (`shell_tui.rs` / web shell): When the goal is `Finalizing`, replace "Agent is working" with "TA Building Draft" and source the elapsed time from `finalize_started_at`, not from the goal's original start time. Show in yellow (in-progress), not red (error). Include the `progress_note` if set: `TA Building Draft draft-abc — diffing 42 files (14s)`.
-   - **`ta goal status` / `ta goal list`**: Show `finalize_started_at` as a separate row ("Build started:") and the `progress_note` as "Build step:". Do not show the "no heartbeat" stale warning for Finalizing goals — the `run_pid` liveness check already handles timeout; the display should not cry wolf.
-   - **Relationship to item 1**: Item 1 writes the `progress_note` field; this item reads it and surfaces it everywhere the user sees goal status.
-3. [ ] **`ValidationLog` in `DraftPackage`**: After the agent exits, `ta run` runs the project's `required_checks` from `[workflow].required_checks` config (default: four checks from CLAUDE.md). Each entry: `ValidationEntry { command, exit_code, duration_secs, stdout_tail }`. Embed as `pkg.validation_log`. Skip if `--skip-validation` flag is set.
-3. [ ] **`ta draft view` shows validation log**: After the summary section, print validation evidence: `✓ cargo build (47s)` or `✗ cargo test (exit 1)`. Warn if any check failed.
-4. [ ] **`ta draft approve` validation gate**: Refuse approval if `validation_log` contains a non-zero `exit_code`, unless `--override` is passed. Error: "Draft has failed validation checks — use `--override` to approve anyway."
+1. [ ] **`ValidationLog` in `DraftPackage`**: After the agent exits, `ta run` runs the project's `required_checks` from `[workflow].required_checks` config (default: four checks from CLAUDE.md). Each entry: `ValidationEntry { command, exit_code, duration_secs, stdout_tail }`. Embed as `pkg.validation_log`. Skip if `--skip-validation` flag is set.
+2. [ ] **`ta draft view` shows validation log**: After the summary section, print validation evidence: `✓ cargo build (47s)` or `✗ cargo test (exit 1)`. Warn if any check failed.
+3. [ ] **`ta draft approve` validation gate**: Refuse approval if `validation_log` contains a non-zero `exit_code`, unless `--override` is passed. Error: "Draft has failed validation checks — use `--override` to approve anyway."
+
+*(Items for finalize progress notes and "TA Building Draft" display moved to v0.13.17.2.)*
 
 #### 2. Experimental Flag Gates (from v0.13.17 items 13–15)
 
@@ -6142,7 +6138,27 @@ All items implemented except items 5 and 13 (deferred). New tests: 5 (main.rs) +
 
 ---
 
-### v0.13.17.2 — VCS Environment Isolation for Spawned Agents
+### v0.13.17.2 — Finalizing Phase Display & Progress Observability
+<!-- status: pending -->
+**Goal**: Fix the UX gap where a goal in `Finalizing` state shows a red "Agent is working (no heartbeat)" banner, make `ta draft build` and `ta goal recover` accept `Finalizing` goals, and emit progress notes during the finalize pipeline so users can see what TA is doing.
+
+#### Items
+
+1. [ ] **`GoalRunState::Finalizing` progress notes**: In the finalize pipeline (`run.rs`), emit structured `progress_note` events at each step: "Running validation checks", "Building draft package", "Draft ready — ID: `<draft-id>`". Daemon stores the latest progress note in the goal state; `ta goal status` and `ta goal list` display it.
+
+2. [ ] **"TA Building Draft" display in `ta goal list`**: When a goal is in `Finalizing` state, display `[TA Building Draft]` with elapsed time instead of the red `[Agent is working (no heartbeat)]` banner. Three display sites to update: `ta goal list`, `ta goal status`, and the shell TUI goal row.
+
+3. [ ] **`ta draft build` accepts `Finalizing` state**: Remove the `if !matches!(goal.state, GoalRunState::Running)` guard at `draft.rs:987` (or equivalent). Accept both `Running` and `Finalizing` states. This directly fixes the manual recovery workaround required for goal `0e21daea` (had to edit goal JSON to `running` before `ta draft build` would proceed).
+
+4. [ ] **`ta goal recover` option 1 handles `Finalizing`**: The "rebuild draft" option in `ta goal recover` should accept goals in `Finalizing` state without requiring a state transition. Currently fails with "must be running to build PR".
+
+5. [ ] **`finalize_timeout_secs` observability**: When the finalize watchdog fires, emit a structured event with: which operation was in progress (validation vs. draft build), elapsed time, configured timeout, and the `run_pid` value that was checked. Print this context in `ta goal status` for failed goals.
+
+#### Version: `0.13.17.2-alpha`
+
+---
+
+### v0.13.17.3 — VCS Environment Isolation for Spawned Agents
 <!-- status: pending -->
 **Goal**: Give every spawned agent a fully isolated VCS environment scoped to its staging directory. Agents should be able to use git, p4, and other VCS tools naturally inside the staging copy without ever touching the developer's real repository or workspace. Prevents index-lock collisions, accidental commits to main, and P4 submit-to-wrong-workspace bugs.
 
@@ -6259,7 +6275,7 @@ The **staging baseline commit** in `isolated` mode is `git init && git add -A &&
 - **OCI-based isolation**: Staging inside a container makes VCS isolation trivial (container has no VCS config). Deferred to v0.14.4 (container fallback).
 - **Mercurial/Fossil**: Static env var injection (`HGPLAIN=1`, no commit hook injection) documented in plugin manifest guide; no built-in adapter.
 
-#### Version: `0.13.17.2-alpha`
+#### Version: `0.13.17.3-alpha`
 
 ---
 
