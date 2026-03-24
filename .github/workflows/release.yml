@@ -98,9 +98,26 @@ jobs:
           cp DISCLAIMER.md staging/ 2>/dev/null || true
           cp LICENSE staging/ 2>/dev/null || true
           cp .release-draft.md staging/RELEASE-NOTES.md 2>/dev/null || true
+          # Include vcs-perforce plugin
+          mkdir -p staging/plugins/vcs
+          if [ -f plugins/vcs-perforce ]; then
+            cp plugins/vcs-perforce staging/plugins/vcs/
+            chmod +x staging/plugins/vcs/vcs-perforce
+          fi
+          if [ -f plugins/vcs-perforce.toml ]; then
+            cp plugins/vcs-perforce.toml staging/plugins/vcs/
+          fi
           mkdir -p artifacts
           cd staging
           tar czf ../artifacts/${{ env.BINARY_NAME }}-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.tar.gz *
+
+      - name: Validate tarball contains vcs-perforce (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          tarball=$(ls artifacts/*.tar.gz 2>/dev/null | head -1)
+          if [ -n "$tarball" ]; then
+            tar tzf "$tarball" | grep -q "plugins/vcs/vcs-perforce" && echo "✓ vcs-perforce found in tarball" || echo "⚠ vcs-perforce not found in tarball (non-fatal)"
+          fi
 
       - name: Package binary with docs (Windows)
         if: runner.os == 'Windows'
@@ -145,6 +162,25 @@ jobs:
           }
           $msiVersion = $versionMatch.Groups[1].Value + ".0"
           Write-Host "MSI version: $msiVersion (from tag $env:TAG)"
+
+          # Generate USAGE.html from docs/USAGE.md for bundling in the MSI.
+          $releaseDir = "target\x86_64-pc-windows-msvc\release"
+          if (Get-Command pandoc -ErrorAction SilentlyContinue) {
+            pandoc docs/USAGE.md -s --metadata title="Trusted Autonomy Usage Guide" -o "$releaseDir\USAGE.html"
+          } else {
+            # Minimal HTML fallback if pandoc is not available.
+            $md = Get-Content docs/USAGE.md -Raw
+            "<html><body><pre>$md</pre></body></html>" | Out-File -Encoding utf8 "$releaseDir\USAGE.html"
+          }
+
+          # Copy vcs-perforce plugin files for MSI bundling.
+          New-Item -ItemType Directory -Force -Path "$releaseDir\plugins\vcs" | Out-Null
+          if (Test-Path "plugins\vcs-perforce") {
+            Copy-Item "plugins\vcs-perforce" "$releaseDir\plugins\vcs\vcs-perforce"
+          }
+          if (Test-Path "plugins\vcs-perforce.toml") {
+            Copy-Item "plugins\vcs-perforce.toml" "$releaseDir\plugins\vcs\vcs-perforce.toml"
+          }
 
           # Build the MSI using cargo-wix.
           # Pass --install-version explicitly so WiX gets a clean 4-part dotted

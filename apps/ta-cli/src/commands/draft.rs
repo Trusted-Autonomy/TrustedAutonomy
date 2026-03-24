@@ -3542,6 +3542,80 @@ fn apply_package(
         println!("  {}", file);
     }
 
+    // v0.13.17.7: Wire upstream community PRs for community:// artifacts.
+    {
+        let community_artifacts: Vec<_> = pkg
+            .changes
+            .artifacts
+            .iter()
+            .filter(|a| a.resource_uri.starts_with("community://"))
+            .collect();
+        if !community_artifacts.is_empty() {
+            println!(
+                "\n[community] {} community artifact(s) detected — checking for upstream PR opportunities...",
+                community_artifacts.len()
+            );
+            let has_gh_token =
+                std::env::var("GITHUB_TOKEN").is_ok() || std::env::var("GH_TOKEN").is_ok();
+            if !has_gh_token {
+                println!("[community] No GITHUB_TOKEN found — skipping upstream PR creation.");
+                println!("[community] Set GITHUB_TOKEN to automatically open PRs against upstream community repos.");
+            } else {
+                for artifact in &community_artifacts {
+                    let uri = &artifact.resource_uri;
+                    let after_scheme = uri.trim_start_matches("community://");
+                    if after_scheme.starts_with("local:") {
+                        continue; // Skip local-only resources.
+                    }
+                    if let Some(github_path) = after_scheme.strip_prefix("github:") {
+                        let parts: Vec<&str> = github_path.splitn(3, '/').collect();
+                        if parts.len() >= 2 {
+                            let repo = format!("{}/{}", parts[0], parts[1]);
+                            println!(
+                                "[community] Opening upstream PR against {} for: {}",
+                                repo, uri
+                            );
+                            let gh_result = std::process::Command::new("gh")
+                                .args([
+                                    "pr",
+                                    "create",
+                                    "--repo",
+                                    &repo,
+                                    "--title",
+                                    "Community feedback from TA draft",
+                                    "--body",
+                                    &format!(
+                                        "Upstream contribution from TA-mediated goal.\n\nArtifact: {}",
+                                        uri
+                                    ),
+                                ])
+                                .output();
+                            match gh_result {
+                                Ok(out) if out.status.success() => {
+                                    let pr_url = String::from_utf8_lossy(&out.stdout);
+                                    println!("[community] PR created: {}", pr_url.trim());
+                                }
+                                Ok(out) => {
+                                    let err = String::from_utf8_lossy(&out.stderr);
+                                    println!(
+                                        "[community] PR creation failed (non-fatal): {}",
+                                        err.trim()
+                                    );
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "[community] gh CLI not available — PR creation skipped: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // §5b: Remind user to commit lock files that were part of the applied diff.
     // Lock files are deterministic build outputs — they should be committed with the feature branch.
     const LOCK_FILES: &[&str] = &[

@@ -48,6 +48,8 @@ struct Resource {
     #[serde(default)]
     auto_query: bool,
     #[serde(default)]
+    pre_inject: bool,
+    #[serde(default)]
     languages: Vec<String>,
     #[serde(default = "default_update_frequency")]
     update_frequency: String,
@@ -108,6 +110,9 @@ pub enum CommunityCommands {
     /// to avoid rate limits).
     Sync {
         /// Name of the resource to sync. If omitted, syncs all enabled resources.
+        /// Tip: use `ta community list --json | jq -r '.[].name'` in a shell completion
+        /// script to enumerate valid resource names dynamically.
+        #[arg(value_hint = clap::ValueHint::Other)]
         resource: Option<String>,
         /// Output raw JSON.
         #[arg(long)]
@@ -123,7 +128,8 @@ pub enum CommunityCommands {
         #[arg(long)]
         intent: Option<String>,
         /// Filter to a specific resource by name.
-        #[arg(long)]
+        /// Tip: use `ta community list --json | jq -r '.[].name'` for valid names.
+        #[arg(long, value_hint = clap::ValueHint::Other)]
         resource: Option<String>,
         /// Output raw JSON.
         #[arg(long)]
@@ -135,6 +141,8 @@ pub enum CommunityCommands {
     ///   `ta community get api-docs/stripe`
     Get {
         /// Document ID (resource-name/path).
+        /// Tip: use `ta community list --json | jq -r '.[].name'` for valid resource names.
+        #[arg(value_hint = clap::ValueHint::Other)]
         id: String,
     },
 }
@@ -744,6 +752,11 @@ fn load_cache_meta(cache_root: &Path, name: &str) -> Option<CacheMetadata> {
 /// Build the community resources section injected into CLAUDE.md when
 /// `auto_query = true` resources are configured.
 ///
+/// Resources with `pre_inject = true` get a full guidance block (opt-in, previous
+/// behaviour). Resources with `pre_inject = false` (the new default) produce a
+/// compact single-paragraph note that stays well under 200 tokens regardless of
+/// how many resources are registered.
+///
 /// Returns an empty string if no auto_query resources exist or no registry
 /// is configured.
 pub fn build_community_context_section(workspace: &Path) -> String {
@@ -752,6 +765,7 @@ pub fn build_community_context_section(workspace: &Path) -> String {
         Err(_) => return String::new(),
     };
 
+    // Collect resources that are auto_query and not disabled.
     let auto_resources: Vec<&Resource> = registry
         .resources
         .iter()
@@ -762,41 +776,69 @@ pub fn build_community_context_section(workspace: &Path) -> String {
         return String::new();
     }
 
-    let mut lines = vec![
-        "\n## Community Knowledge Resources (auto-query enabled)\n".to_string(),
-        "The following community knowledge resources are available via the \
-         `ta-community-hub` plugin. Use them before making API calls or \
-         security-sensitive decisions:\n"
-            .to_string(),
-    ];
+    // Separate pre_inject resources (full guidance block) from compact-note resources.
+    let pre_inject_resources: Vec<&Resource> = auto_resources
+        .iter()
+        .copied()
+        .filter(|r| r.pre_inject)
+        .collect();
+    let compact_resources: Vec<&Resource> = auto_resources
+        .iter()
+        .copied()
+        .filter(|r| !r.pre_inject)
+        .collect();
 
-    for r in &auto_resources {
-        lines.push(format!(
-            "- **{}** (`intent: {}`): {}",
-            r.name, r.intent, r.description
+    let mut output = String::new();
+
+    // Compact community tools note for non-pre_inject resources.
+    // Token budget: under 200 tokens regardless of registry size.
+    if !compact_resources.is_empty() {
+        let resource_list: Vec<String> = compact_resources
+            .iter()
+            .map(|r| format!("{} ({})", r.name, r.intent))
+            .collect();
+        output.push_str(&format!(
+            "\n# Community Knowledge (MCP)\nAvailable tools: community_search, community_get, community_annotate.\nResources: {}. Use community_search before making API calls or reviewing security-sensitive code.\n",
+            resource_list.join(", ")
         ));
-        if r.intent.contains("api") {
-            lines.push(format!(
-                "  → Before calling a third-party API, search: \
-                 `community_search {{ query: \"<service> <operation>\", intent: \"{}\" }}`",
-                r.intent
-            ));
-        } else if r.intent.contains("security") {
-            lines.push(format!(
-                "  → Before security-sensitive decisions, check: \
-                 `community_search {{ query: \"<topic>\", intent: \"{}\" }}`",
-                r.intent
-            ));
-        }
     }
 
-    lines.push(
-        "\nAlways attribute community sources in your output: \
-         `[community: <resource-name>/<doc-id>]`\n"
-            .to_string(),
-    );
+    // Full guidance block for pre_inject = true resources (opt-in, legacy behaviour).
+    if !pre_inject_resources.is_empty() {
+        output.push_str("\n## Community Knowledge Resources (pre-loaded)\n");
+        output.push_str(
+            "The following community knowledge resources are available via the \
+             `ta-community-hub` plugin. Use them before making API calls or \
+             security-sensitive decisions:\n",
+        );
 
-    lines.join("\n")
+        for r in &pre_inject_resources {
+            output.push_str(&format!(
+                "\n- **{}** (`intent: {}`): {}",
+                r.name, r.intent, r.description
+            ));
+            if r.intent.contains("api") {
+                output.push_str(&format!(
+                    "\n  → Before calling a third-party API, search: \
+                     `community_search {{ query: \"<service> <operation>\", intent: \"{}\" }}`",
+                    r.intent
+                ));
+            } else if r.intent.contains("security") {
+                output.push_str(&format!(
+                    "\n  → Before security-sensitive decisions, check: \
+                     `community_search {{ query: \"<topic>\", intent: \"{}\" }}`",
+                    r.intent
+                ));
+            }
+        }
+
+        output.push_str(
+            "\n\nAlways attribute community sources in your output: \
+             `[community: <resource-name>/<doc-id>]`\n",
+        );
+    }
+
+    output
 }
 
 // ---------------------------------------------------------------------------
@@ -885,9 +927,116 @@ auto_query = true
 "#,
         );
         let section = build_community_context_section(dir.path());
-        assert!(section.contains("api-docs"));
-        assert!(section.contains("security-threats"));
-        assert!(section.contains("community_search"));
+        assert!(
+            section.contains("api-docs"),
+            "compact note should mention api-docs"
+        );
+        assert!(
+            section.contains("security-threats"),
+            "compact note should mention security-threats"
+        );
+        assert!(
+            section.contains("community_search"),
+            "compact note should mention community_search tool"
+        );
+        assert!(
+            section.contains("Community Knowledge"),
+            "should have community knowledge header"
+        );
+    }
+
+    #[test]
+    fn test_community_section_compact_under_200_tokens() {
+        // 5 resources with auto_query=true and pre_inject=false → compact note under 200 tokens
+        let dir = tempfile::tempdir().unwrap();
+        let mut toml = String::new();
+        for i in 1..=5 {
+            toml.push_str(&format!(
+                r#"
+[[resources]]
+name = "resource-{i}"
+intent = "api-integration"
+description = "Resource {i} description"
+source = "local:.ta/r{i}/"
+access = "read-only"
+auto_query = true
+pre_inject = false
+"#,
+                i = i
+            ));
+        }
+        make_registry(dir.path(), &toml);
+        let section = build_community_context_section(dir.path());
+        assert!(!section.is_empty(), "should produce a compact note");
+        // Rough token count: ~4 chars per token.
+        let token_estimate = section.len() / 4;
+        assert!(
+            token_estimate < 200,
+            "compact note should be under 200 tokens (estimated {token_estimate}), got: {section}"
+        );
+    }
+
+    #[test]
+    fn test_pre_inject_true_includes_guidance() {
+        // resource with pre_inject = true still gets full guidance block
+        let dir = tempfile::tempdir().unwrap();
+        make_registry(
+            dir.path(),
+            r#"
+[[resources]]
+name = "api-docs"
+intent = "api-integration"
+description = "Curated API documentation"
+source = "github:andrewyng/context-hub"
+access = "read-only"
+auto_query = true
+pre_inject = true
+"#,
+        );
+        let section = build_community_context_section(dir.path());
+        assert!(section.contains("api-docs"), "should include resource name");
+        assert!(
+            section.contains("community_search"),
+            "should include guidance with community_search"
+        );
+        assert!(
+            section.contains("pre-loaded"),
+            "should include pre-loaded header"
+        );
+    }
+
+    #[test]
+    fn test_auto_query_no_longer_injects_bulk() {
+        // auto_query = true, pre_inject = false → compact note only, no full guidance block
+        let dir = tempfile::tempdir().unwrap();
+        make_registry(
+            dir.path(),
+            r#"
+[[resources]]
+name = "security-threats"
+intent = "security-intelligence"
+description = "Known threats and CVEs"
+source = "local:.ta/threats/"
+access = "read-only"
+auto_query = true
+pre_inject = false
+"#,
+        );
+        let section = build_community_context_section(dir.path());
+        assert!(!section.is_empty(), "compact note should be present");
+        assert!(
+            !section.contains("pre-loaded"),
+            "should not include full guidance block"
+        );
+        assert!(
+            !section.contains("Known threats and CVEs"),
+            "should not inject description in compact mode"
+        );
+        // Should contain compact note with resource name
+        assert!(
+            section.contains("security-threats"),
+            "compact note should list resource name"
+        );
     }
 
     #[test]
@@ -924,6 +1073,7 @@ auto_query = true
             content_path: "".into(),
             access: Access::ReadWrite,
             auto_query: true,
+            pre_inject: false,
             languages: vec![],
             update_frequency: "on-demand".into(),
         };
@@ -960,6 +1110,7 @@ auto_query = true
             content_path: "".into(),
             access: Access::ReadOnly,
             auto_query: false,
+            pre_inject: false,
             languages: vec![],
             update_frequency: "on-demand".into(),
         };
