@@ -6769,6 +6769,34 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 
 ---
 
+### v0.14.3.3 — Release Pipeline Polish
+<!-- status: pending -->
+**Goal**: Fix the friction points discovered during the v0.13.17.7 public beta release. The constitution sign-off step should run the supervisor programmatically and show its verdict — not present a manual checklist. Approval gates should default Y where "proceed" is the safe default. `--yes` / `--auto-approve` should fully skip all gates for CI use.
+
+#### Problems Observed (v0.13.17.7 release)
+
+1. **Constitution sign-off is a manual checklist**: Step 6 shows a list of invariants and asks the user to verify them manually. This puts the burden on the user to know what each means. The supervisor should run against the release diff instead — the step becomes informational (show verdict) with approval defaulting Y on pass/warn, N on block.
+
+2. **Release notes review defaults N**: Step 9 waits for explicit "Y" input. For notes the user just watched generate, this is pure friction. Should default Y (Enter = proceed, `n` = abort).
+
+3. **`--yes` / `--auto-approve` does not skip constitution gate**: The constitution gate ignores `--yes`, causing CI/scripted releases to time out at 600s. Both flags must skip all gates including constitution sign-off.
+
+#### Items
+
+1. [ ] **Constitution gate runs supervisor programmatically**: Replace the static checklist display with a call to `invoke_supervisor_agent()` scoped to the release diff (changed files since last tag). Display verdict (pass/warn/block) with findings summary. Gate defaults: Y on pass/warn (Enter proceeds), prompts with default N on block (user must type Y to override). Show which constitution file was used, or "no constitution — skipping check".
+
+2. [ ] **Release notes review defaults Y**: Change the approval prompt from require-Y to require-N. Display as `Release notes look good? [Y/n]` — Enter proceeds, `n` aborts.
+
+3. [ ] **`--yes` / `--auto-approve` skips all gates**: Both flags must bypass constitution sign-off, release notes review, and all other approval gates in the pipeline. Document in `ta release run --help`.
+
+4. [ ] **`ta release show` surfaces the base tag**: Add a line to the dry-run output showing which previous tag the notes generator will use as its `Changes since ...` base, so a stale base is visible before running (`--from-tag` already exists to override it).
+
+5. [ ] **Fix duplicate v0.14.6 phase number**: PLAN.md has two phases numbered `v0.14.6` — `Compliance-Ready Audit Ledger` and `Constitution Deduplication via Agent Review`. Renumber `Constitution Deduplication` to `v0.14.6.1` and update all cross-references.
+
+#### Version: `0.14.3.3-alpha`
+
+---
+
 ### v0.14.4 — Central Daemon & Multi-User Deployment
 <!-- status: pending -->
 <!-- enterprise: yes — team and cloud deployment topology -->
