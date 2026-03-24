@@ -6479,7 +6479,7 @@ api_key_env = "OPENAI_API_KEY"   # checked but not required — binary handles i
 #### 3. Shell UX Polish (from v0.13.15 → v0.13.16, orphaned)
 
 8. [x] **Tab completion for community resource names**: Added `#[arg(value_hint = clap::ValueHint::Other)]` annotations to `Get.id` and `Sync.resource` args; documented in USAGE.md that users can use `ta community list --json | jq -r '.[].name'` for dynamic completion scripts. Core clap completion hints wired.
-9. [ ] **Status bar community badge**: Deferred — TUI status-bar integration requires significant ratatui widget changes. Moved to v0.14.7 (Draft View Polish & Agent Decision Log) where TUI rework is planned.
+9. [x] **Status bar community badge**: Deferred → v0.14.7 item 9. TUI status-bar integration requires significant ratatui widget changes; moved to the TUI rework phase.
 
 #### 4. E2E Test Harness (from v0.13.17 items 21–25)
 
@@ -6497,7 +6497,7 @@ api_key_env = "OPENAI_API_KEY"   # checked but not required — binary handles i
 - Item 2 (USAGE.html in MSI): orphaned from v0.13.12 item 9 → v0.13.15 → v0.13.16 ✓
 - Items 3–7 (community hub redesign): user-requested design change (surgical vs pre-slurp) ✓
 - Items 8 (tab completion): ValueHint annotations + docs ✓
-- Item 9 (status bar badge): → deferred to v0.14.7 (TUI rework phase)
+- Item 9 (status bar badge): → moved to v0.14.7 item 9 (TUI rework phase) ✓
 - Items 10–14 (E2E harness): from v0.13.17 items 21–25 — DaemonHandle infrastructure + real test bodies ✓
 
 #### Version: `0.13.17-alpha.7`
@@ -7091,6 +7091,7 @@ In future GUI: native collapse via the same JSON structure.
 6. [ ] **`ta draft view --section <section>`**: Filter to one section: `summary`, `decisions`, `validation`, `files`. Useful for scripting and automation.
 7. [ ] **Tests**: Decision log round-trip (unit). HTML output contains `<details>` and collapsible file sections (unit). JSON output structure (unit). `--section` filter (unit).
 8. [ ] **USAGE.md**: Updated "Reviewing a Draft" section. Screenshot-style example of the hierarchical terminal output.
+9. [ ] **Status bar community badge** *(from v0.13.17.7 item 9)*: Add a community hub badge to the TUI status bar — shows unread community updates, new plugin versions, or pending constitution suggestions. Deferred from v0.13.17.7 because TUI status-bar integration requires significant ratatui widget work, which belongs here alongside the broader TUI rework.
 
 #### Version: `0.14.7-alpha`
 
