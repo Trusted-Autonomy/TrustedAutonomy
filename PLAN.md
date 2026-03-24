@@ -6793,6 +6793,8 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 
 5. [ ] **Fix duplicate v0.14.6 phase number**: PLAN.md has two phases numbered `v0.14.6` — `Compliance-Ready Audit Ledger` and `Constitution Deduplication via Agent Review`. Renumber `Constitution Deduplication` to `v0.14.6.1` and update all cross-references.
 
+6. [ ] **`.ta/release-history.json` left uncommitted after release**: `record_release()` in `release.rs` is called after step 12 (push) completes — after the release commit has already been pushed. The file is written to disk but never staged or committed, leaving the working tree dirty. Fix: move `record_release()` to before the step 10 commit (or amend the step 11 commit to include it), so the history file is part of the release commit that gets pushed.
+
 #### Version: `0.14.3.3-alpha`
 
 ---
