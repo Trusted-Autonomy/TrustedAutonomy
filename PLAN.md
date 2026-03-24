@@ -6637,6 +6637,92 @@ These are addressed across v0.14.4–v0.14.5.
 
 ---
 
+### v0.14.3.1 — CLAUDE.md Context Budget & Injection Trim
+<!-- status: pending -->
+**Goal**: Keep the injected CLAUDE.md under a configurable character budget (default 40k) so agents don't hit context-size warnings from Claude Code or other LLM runners. The current injection is unbounded — plan checklists, memory entries, solutions, and community sections all accumulate without any ceiling.
+
+#### Problem
+
+`inject_claude_md()` in `run.rs` assembles six sections before writing to staging:
+
+| Section | Typical size | Cap? |
+|---|---|---|
+| TA header + goal + change-summary instructions | ~3k | — |
+| Plan checklist (`format_plan_checklist`) | 10–20k (all ~200 phases, one line each) | None |
+| Memory context + solutions | 5–15k (up to 15 solutions, unbounded entries) | `take(15)` only |
+| Community section (`build_community_context_section`) | 0–10k (v0.13.17.7 redesign reduces this) | None |
+| Parent/follow-up context | 2–5k | None |
+| Original `CLAUDE.md` | ~10k for this repo | None |
+
+**Total**: 30–63k before the repo CLAUDE.md is even appended. After appending, 40–76k+.
+
+The biggest single win is the plan checklist: all 200+ phase titles are emitted even though the agent only needs to know about the phases near the current one.
+
+#### Design
+
+**Section priority** (highest kept when budget is tight):
+1. TA header + goal + change-summary instructions (never trimmed)
+2. Original `CLAUDE.md` (never trimmed — it's the project's rules)
+3. Plan context — **trimmed to windowed view** (see item 1)
+4. Memory context — **capped at N entries**
+5. Parent/follow-up context — truncated if needed
+6. Community section — already compact after v0.13.17.7
+7. Solutions section — trimmed last
+
+**Plan checklist windowing** (item 1 — biggest win):
+```
+[x] Phases 0 – v0.13.16 complete (152 phases)  ← single summary line
+[x] v0.13.17 — Draft Evidence, Perforce Plugin
+[x] v0.13.17.1 — Complete v0.13.17 Implementation
+...
+[x] v0.13.17.6 — Supervisor Agent Auth           ← last 5 done phases shown individually
+**v0.13.17.7 — Release Engineering** <-- current
+[ ] v0.14.0 — Agent Sandboxing                   ← next 5 pending phases
+[ ] v0.14.1 — Attestation
+```
+Rule: show last `N_DONE_WINDOW` (default 5) done phases + current + next `N_PENDING_WINDOW` (default 5) pending phases. Collapsed done phases → single summary line with count.
+
+#### Items
+
+1. [ ] **`format_plan_checklist_windowed(phases, current, done_window, pending_window) -> String`**: New function in `plan.rs`. Collapses all done phases before the window into one summary line `"[x] Phases 0 – vX.Y.Z complete (N phases)"`. Shows individual lines for: last `done_window` done phases + current phase (bolded) + next `pending_window` pending phases. Falls back to full list when `current_phase` is None (backward compat). Replace `format_plan_checklist` call in `build_plan_section()` with windowed version.
+
+2. [ ] **Total context budget enforcement in `inject_claude_md()`**: After assembling all sections, check total char length. If over `context_budget_chars` (default 40_000), trim in priority order: solutions first (reduce `take(15)` → `take(5)`), then parent context (truncate to first 2k), then memory entries (reduce), then plan window (reduce `done_window` to 1). Log a `tracing::warn!` message listing which sections were trimmed and by how much.
+
+3. [ ] **`[workflow] context_budget_chars`** config field in `DaemonConfig`/`GatewayConfig`. Default `40_000`. Configurable per-project. Document in USAGE.md.
+
+4. [ ] **`ta context size [goal-id]`** diagnostic subcommand**: Reads the injected CLAUDE.md from staging (or the last goal's staging) and prints a breakdown:
+   ```
+   Section                  Chars    % of budget
+   ─────────────────────────────────────────────
+   TA header + instructions  2,847    7%
+   Plan checklist            1,943    5%   (windowed: 5 done + current + 5 pending)
+   Memory context            4,201   11%
+   Solutions                 3,102    8%
+   Community                   412    1%
+   Original CLAUDE.md        9,732   24%
+   ─────────────────────────────────────────────
+   Total                    22,237   56% of 40k budget
+   ```
+   If staging doesn't exist, re-runs the section builders in dry-run mode and prints the same table.
+
+5. [ ] **Warn at goal start when projected context > budget**: Before agent launch, compute context size and if > 80% of budget, print: `"[warn] Injected context is X chars (budget: 40k). Run 'ta context size' for a breakdown. Set [workflow] context_budget_chars to adjust."`.
+
+6. [ ] **Tests**:
+   - `test_windowed_checklist_collapses_done_phases`: 20 done + 1 current + 10 pending → summary line + 5 done + current + 5 pending.
+   - `test_windowed_checklist_no_current_returns_full`: `current_phase = None` → full list (backward compat).
+   - `test_budget_trims_solutions_first`: Inject with large solutions → solutions reduced before memory.
+   - `test_budget_warn_logged_when_over_limit`: Total over budget → `tracing::warn!` message emitted.
+   - `test_context_budget_config_respected`: `context_budget_chars = 20_000` → trim triggered at lower threshold.
+
+#### Deferred
+
+- **MCP-based lazy plan loading**: Agent calls `ta_plan` MCP tool to get phase details on demand, rather than having it injected. This eliminates plan context from CLAUDE.md entirely. Deferred — requires MCP tool design; windowing (item 1) gives most of the benefit now.
+- **Section-level streaming**: Stream context sections as separate MCP tool responses rather than one concatenated file. Requires MCP protocol changes. Post-v1.
+
+#### Version: `0.14.3.1-alpha`
+
+---
+
 ### v0.14.4 — Central Daemon & Multi-User Deployment
 <!-- status: pending -->
 <!-- enterprise: yes — team and cloud deployment topology -->
