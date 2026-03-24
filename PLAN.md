@@ -6716,10 +6716,55 @@ Rule: show last `N_DONE_WINDOW` (default 5) done phases + current + next `N_PEND
 
 #### Deferred
 
-- **MCP-based lazy plan loading**: Agent calls `ta_plan` MCP tool to get phase details on demand, rather than having it injected. This eliminates plan context from CLAUDE.md entirely. Deferred — requires MCP tool design; windowing (item 1) gives most of the benefit now.
+- **MCP-based lazy plan + community loading** → v0.14.3.2. Agent calls `ta_plan` and community MCP tools on demand; no plan or community injection in CLAUDE.md at all. Windowing (item 1) gives most of the benefit first.
 - **Section-level streaming**: Stream context sections as separate MCP tool responses rather than one concatenated file. Requires MCP protocol changes. Post-v1.
 
 #### Version: `0.14.3.1-alpha`
+
+---
+
+### v0.14.3.2 — Full MCP Lazy Context (Zero-Injection Plan & Community)
+<!-- status: pending -->
+**Goal**: Eliminate plan and community context from the injected CLAUDE.md entirely. Instead of pre-loading any plan state or community resource guidance, agents call dedicated MCP tools (`ta_plan`, `community_search`, `community_get`) when they need context. This completes the context trimming started in v0.14.3.1 and fulfills the surgical community hub design from v0.13.17.7.
+
+#### Why now (after v0.14.3.1)
+
+v0.14.3.1 reduces the plan checklist from ~15k to ~2k via windowing. v0.13.17.7 reduces community injection from ~8k to a ~200-token note. The remaining step is eliminating both sections entirely for workspaces with large plans or many community resources — removing the ceiling rather than just raising it. MCP tool discovery already works; agents in Claude Code and Codex can see registered tools without any CLAUDE.md hints. This phase is about trusting that discovery and removing the pre-load scaffolding.
+
+#### Design
+
+**Current flow (after v0.14.3.1)**:
+```
+inject_claude_md() → [header 3k] + [plan 2k windowed] + [community 200 tokens] + [memory 5k] + [CLAUDE.md 10k]
+```
+
+**Target flow (v0.14.3.2 opt-in)**:
+```
+inject_claude_md() → [header 3k] + [memory 5k] + [CLAUDE.md 10k]
+  → .mcp.json registers: ta_plan, community_search, community_get, ta_memory
+  → agent calls ta_plan({phase: "v0.14.3.2"}) when it needs plan context
+  → agent calls community_search({query: "..."}) when it needs community data
+```
+
+The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mcp"`, default `"inject"`). This avoids breaking agents that rely on the injected context (e.g., agents not using Claude Code's tool calling).
+
+#### Items
+
+1. [ ] **`ta_plan` MCP tool in `ta-mcp-gateway`**: New tool `ta_plan_status` — returns the windowed plan checklist (same output as `build_plan_section()` but on demand). Parameters: `{ phase: Option<String>, done_window: u8, pending_window: u8 }`. Registered in `.mcp.json` injection when `context_mode = "mcp"`.
+
+2. [ ] **`[workflow] context_mode`** config: `"inject"` (default, current behavior) | `"mcp"` (zero-injection, tools only) | `"hybrid"` (inject CLAUDE.md + memory only, register plan/community as MCP tools). Update `GatewayConfig`.
+
+3. [ ] **`context_mode = "mcp"` skips plan + community injection**: In `inject_claude_md()`, when `context_mode == "mcp"`, skip `build_plan_section()` and `build_community_context_section()` calls. Register `ta_plan_status` and `ta-community-hub` in `.mcp.json` instead (already registered for community; plan is new).
+
+4. [ ] **`context_mode = "hybrid"` (recommended default for future)**: Skip plan + community from CLAUDE.md, but still inject memory context and original CLAUDE.md. Adds a one-line note: `"# Context tools: ta_plan_status, community_search, community_get — call these when you need plan or API context."` (~100 tokens).
+
+5. [ ] **`ta_plan_status` response format**: Returns the same windowed checklist text as `format_plan_checklist_windowed()`. Also supports `{ format: "json" }` for structured output (list of phases with id/title/status). Tests: windowed text round-trip, JSON format structure.
+
+6. [ ] **Documentation**: USAGE.md "Context Mode" section explaining inject/mcp/hybrid tradeoffs. Recommendation: `hybrid` for projects with large plans (>50 phases); `inject` for small projects and agents that don't support tool calling. Note that `community_search` / `community_get` are already available regardless of mode.
+
+7. [ ] **Tests**: `test_mcp_mode_skips_plan_injection`, `test_mcp_mode_registers_ta_plan_tool`, `test_hybrid_mode_includes_memory_not_plan`, `test_ta_plan_status_tool_returns_windowed_checklist`.
+
+#### Version: `0.14.3.2-alpha`
 
 ---
 
@@ -7017,6 +7062,92 @@ In future GUI: native collapse via the same JSON structure.
 8. [ ] **USAGE.md**: Updated "Reviewing a Draft" section. Screenshot-style example of the hierarchical terminal output.
 
 #### Version: `0.14.7-alpha`
+
+---
+
+### v0.14.8 — Creator Access: Web UI, Creative Templates & Guided Onboarding
+<!-- status: pending -->
+**Goal**: Make TA usable by people who aren't CLI engineers — artists, writers, game designers, researchers. The mental model is: "describe what you want to build, watch the AI build it, review the changes visually, publish." No terminal required after initial install. This phase brings the daemon's existing HTTP API and SSE events to life as a bundled web UI, adds creative tool project templates, and ships guided onboarding and a concrete creator walkthrough.
+
+#### Persona
+
+> An artist using Blender who writes Python scripts. Comfortable installing apps, uploading files, and reading simple instructions. Has never used git from the command line but has pushed to GitHub Desktop. Wants to build a Blender addon that auto-applies a material library, describe it conversationally, and publish it to GitHub.
+
+**Gap analysis** (after public v0.13.17 release):
+
+| Step | Current | Gap |
+|---|---|---|
+| Install | macOS DMG / Windows MSI ✓ | None |
+| Initial setup | `ta setup wizard` (terminal) | No GUI — terminal required |
+| Create project | `ta new --template python` (terminal) | No Blender template; terminal only |
+| Build plan | Write PLAN.md manually | Opaque format; no guided wizard |
+| Run agent | `ta run "..."` (terminal) | Terminal barrier; TUI intimidating |
+| Review draft | `ta draft view` (terminal) | Most alien UX; no visual diff |
+| Publish | git + gh CLI | Requires git knowledge |
+
+The Web UI was scoped as a "separate project" in the PLAN.md future section, but the daemon HTTP API and SSE events it depends on are fully implemented. Serving a bundled SPA from `localhost:PORT/ui` requires only static file serving from the daemon — a minor addition. This phase pulls it into the mainline.
+
+#### 1. Bundled Web UI (daemon serves at `/ui`)
+
+1. [ ] **Static file serving from `ta-daemon`**: Add `GET /ui` → serve embedded SPA from Rust (include_dir or axum static files). The SPA bundle is compiled into the binary — no separate install step. `[daemon] web_ui = true` (default true) enables it. Opens browser automatically on first launch.
+
+2. [ ] **Dashboard page**: Active goals, pending reviews, pending agent questions. One-glance status. Real-time updates via SSE (already implemented). Language: "Active work", "Ready to review", "Agent has a question" — not "goal", "draft", "interactive mode".
+
+3. [ ] **Start a Goal page**: Form: title (text), description (textarea), project template dropdown (pre-populated from installed templates), optional PLAN.md upload. "Advanced" toggle reveals: agent selector, phase ID, flags. Submits `POST /api/goals/run`.
+
+4. [ ] **Goal Detail page**: Live agent output via SSE with progress bar. State transitions shown as timeline. "Ask agent a question" input when in interactive mode. "Stop" button.
+
+5. [ ] **Draft Review page**: Side-by-side diff viewer per file. File tree sidebar. AI summary at top. Approve / Deny / Comment buttons per file and for the whole draft. Supervisor review verdict shown inline. Validation log collapsible. Maps directly to `ta draft approve/deny` API calls.
+
+6. [ ] **Agent Questions page**: Lists pending `ta_ask_human` questions with response input. Browser notification when a new question arrives (Notifications API).
+
+7. [ ] **Tech stack**: Single-file Svelte or Preact SPA (< 150kb gzipped). Inline CSS — no external CDN. Compiled to static files embedded in the Rust binary via `include_dir!`. No Node.js required at runtime.
+
+#### 2. Creative Tool Project Templates
+
+8. [ ] **Blender addon template** (`ta new --template blender-addon`): Python package with `__init__.py` containing `bl_info` dict, `register()`/`unregister()` stubs, a `panels.py` with a sample UI panel, `operators.py` with a sample operator, and a `tests/` dir. `workflow.toml` uses Python verify commands (`python -m py_compile`, `blender --background --python-expr`). USAGE.md: "TA with Blender" section.
+
+9. [ ] **Godot GDScript template** (`ta new --template godot-gdscript`): `project.godot`, `addons/<name>/plugin.cfg`, main scene, `res://` paths in `workflow.toml`. Verify: `gdscript --check *.gd`.
+
+10. [ ] **Unity C# template** (`ta new --template unity-csharp`): `.asmdef`, `Editor/` and `Runtime/` directories, Unity package manifest (`package.json`). Verify: `dotnet build`.
+
+11. [ ] **Plain Python library template** (`ta new --template python-library`): `pyproject.toml`, `src/<name>/`, `tests/`, `ruff.toml`. Verify: `ruff check .`, `pytest`.
+
+#### 3. Guided Plan Creation Wizard
+
+12. [ ] **`ta plan wizard`** (CLI + web): Conversational plan builder. Asks: "What are you building?" → "What should it do in plain language?" → "Are there phases (first do X, then Y)?" → generates PLAN.md draft. Uses a short agent call to structure natural language into plan items. Web UI has this as a step in the "Start a Goal" flow.
+
+13. [ ] **Plan import from text**: `ta plan import --from <file>` accepts a free-form description or a bulleted list and converts it to PLAN.md format via the same agent call. Useful for importing an existing design doc.
+
+#### 4. Simplified Publish Workflow
+
+14. [ ] **`ta publish` command**: One-step "apply draft + push + create PR" for users who don't want to manage git manually. Wraps `ta draft apply --submit`. Asks for a commit message (defaults to goal title). If no VCS configured, offers to initialize git and set up GitHub via `gh auth login`.
+
+15. [ ] **Web UI "Publish" button**: On an approved draft's review page, a "Publish" button calls `ta publish`. Shows progress (creating branch, pushing, PR link). Handles `gh auth` prompt inline if not authenticated.
+
+#### 5. Creator Walkthrough Documentation
+
+16. [ ] **`docs/tutorials/blender-plugin-walkthrough.md`**: Complete end-to-end guide:
+    - Install TA (DMG/MSI)
+    - Open Web UI
+    - Create project with Blender addon template
+    - Use Plan Wizard to describe the addon
+    - Run the agent, watch progress in browser
+    - Review the diff visually, approve changes
+    - Publish to GitHub
+    - Screenshots/screen recordings embedded as static images in `docs/assets/`
+
+17. [ ] **`docs/tutorials/README.md`**: Index of tutorials by audience (creators, developers, enterprise). Links from main USAGE.md "Tutorials" section.
+
+18. [ ] **USAGE.md "Getting Started (No Terminal)"**: Brief section with a link to the web UI + tutorials for non-CLI users. Placed prominently near the top.
+
+#### Deferred
+
+- **Native desktop app** (Electron/Tauri wrapper around the web UI): Post-v0.15. The bundled web UI covers most of the non-terminal need; a native wrapper adds taskbar icon, notifications, OS integration. Deferred to after web UI is validated.
+- **Itch.io / Blender Market publish targets**: `ta publish --target itch` or `--target blender-market`. Requires per-platform OAuth and upload API wrappers. Community plugin opportunity post-launch.
+- **Visual plan editor** (drag-and-drop phase ordering in web UI): Deferred — the wizard covers creation; editing is less critical initially.
+
+#### Version: `0.14.8-alpha`
 
 ---
 
