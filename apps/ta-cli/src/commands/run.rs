@@ -3682,7 +3682,10 @@ fn build_plan_section(plan_phase: Option<&str>, source_dir: Option<&Path>) -> St
     let checklist = plan::format_plan_checklist(&phases, plan_phase);
 
     let current_line = if let Some(phase_id) = plan_phase {
-        if let Some(phase) = phases.iter().find(|p| p.id == phase_id) {
+        if let Some(phase) = phases
+            .iter()
+            .find(|p| plan::phase_ids_match(&p.id, phase_id))
+        {
             format!(
                 "\n**You are working on Phase {} — {}.**\n",
                 phase.id, phase.title

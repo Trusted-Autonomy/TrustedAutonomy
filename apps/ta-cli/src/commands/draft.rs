@@ -4373,7 +4373,10 @@ fn apply_package(
         if plan_path.exists() {
             let content = std::fs::read_to_string(&plan_path).unwrap_or_default();
             let phases = super::plan::parse_plan(&content);
-            if let Some(p) = phases.iter().find(|p| p.id == *phase) {
+            if let Some(p) = phases
+                .iter()
+                .find(|p| super::plan::phase_ids_match(&p.id, phase))
+            {
                 let status_str = match p.status {
                     super::plan::PlanStatus::Done => "done",
                     super::plan::PlanStatus::InProgress => "in_progress",

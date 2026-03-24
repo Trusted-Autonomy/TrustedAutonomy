@@ -88,7 +88,7 @@ struct LlmSupervisorResponse {
 /// Unified supervisor agent dispatcher.
 ///
 /// Dispatches on `config.agent`:
-/// - `"builtin"` | `"claude-code"` → spawn `claude --print --output-format stream-json`
+/// - `"builtin"` | `"claude-code"` → spawn `claude --print --verbose --output-format stream-json`
 ///   (delegates auth entirely to the `claude` binary — supports subscription OAuth, API key, etc.)
 /// - `"codex"` → spawn `codex --approval-mode full-auto --quiet`
 /// - `"ollama"` → spawn `ta agent run ollama --headless`
@@ -152,15 +152,22 @@ pub fn invoke_supervisor_agent(
 
 /// Invoke the `claude` CLI in headless stream-json mode.
 ///
-/// Uses `claude --print --output-format stream-json <prompt>`. Auth is handled entirely
-/// by the `claude` binary (subscription OAuth, API key from env or config).
+/// Uses `claude --print --verbose --output-format stream-json <prompt>`. Auth is handled
+/// entirely by the `claude` binary (subscription OAuth, API key from env or config).
+/// `--verbose` is required when combining `--print` with `--output-format stream-json`.
 fn invoke_claude_cli_supervisor(
     prompt: &str,
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
     let stdout = spawn_with_timeout(
         "claude",
-        &["--print", "--output-format", "stream-json", prompt],
+        &[
+            "--print",
+            "--verbose",
+            "--output-format",
+            "stream-json",
+            prompt,
+        ],
         config.timeout_secs,
         "Claude Code CLI",
     )?;
@@ -851,6 +858,65 @@ mod tests {
         assert!(
             review.findings[0].contains("OPENAI_API_KEY"),
             "finding should mention the missing env var"
+        );
+    }
+
+    /// Verify that the claude CLI invocation includes `--verbose`.
+    ///
+    /// Creates a mock `claude` script on PATH that exits with an error if `--verbose` is absent
+    /// and emits a plain-text JSON pass verdict if `--verbose` is present.  The supervisor
+    /// picks up the JSON via its raw-stdout fallback path.  The test fails if the verdict is
+    /// not `pass`, which would mean `--verbose` was dropped (mock exits 1, returns fallback Warn).
+    #[test]
+    #[cfg(unix)]
+    fn test_claude_cli_supervisor_passes_verbose_flag() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_path = tmp.path().join("claude");
+        {
+            let mut f = std::fs::File::create(&claude_path).unwrap();
+            // The script checks that --verbose is in $@ and emits a plain JSON verdict.
+            // Using echo so there are no printf escaping issues with nested JSON.
+            f.write_all(
+                b"#!/bin/sh\n\
+                  found=''\n\
+                  for arg in \"$@\"; do [ \"$arg\" = \"--verbose\" ] && found=1; done\n\
+                  if [ -z \"$found\" ]; then echo 'Error: --verbose missing' >&2; exit 1; fi\n\
+                  echo '{\"verdict\":\"pass\",\"scope_ok\":true,\"findings\":[],\"summary\":\"ok\"}'\n",
+            )
+            .unwrap();
+        }
+        let mut perms = std::fs::metadata(&claude_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&claude_path, perms).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        // Prepend temp dir so our mock `claude` takes precedence.
+        std::env::set_var("PATH", format!("{}:{}", tmp.path().display(), old_path));
+
+        let config = SupervisorRunConfig {
+            enabled: true,
+            agent: "builtin".to_string(),
+            verdict_on_block: "warn".to_string(),
+            constitution_path: None,
+            skip_if_no_constitution: true,
+            timeout_secs: 10,
+            api_key_env: None,
+            staging_path: None,
+        };
+
+        let review = invoke_supervisor_agent("test objective", &[], None, &config);
+
+        // Restore PATH before any assertions that might panic.
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(
+            review.verdict,
+            SupervisorVerdict::Pass,
+            "Supervisor must pass --verbose to claude CLI; got findings: {:?}",
+            review.findings
         );
     }
 }

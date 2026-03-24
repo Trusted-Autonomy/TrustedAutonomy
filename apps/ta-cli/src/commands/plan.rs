@@ -590,7 +590,7 @@ pub fn format_plan_checklist(phases: &[PlanPhase], current_phase: Option<&str>) 
             PlanStatus::Deferred => "[-]",
             _ => "[ ]",
         };
-        let current_marker = if current_phase == Some(phase.id.as_str()) {
+        let current_marker = if current_phase.is_some_and(|cp| phase_ids_match(&phase.id, cp)) {
             " <-- current"
         } else {
             ""
@@ -600,7 +600,7 @@ pub fn format_plan_checklist(phases: &[PlanPhase], current_phase: Option<&str>) 
         } else {
             ""
         };
-        let bold = if current_phase == Some(phase.id.as_str()) {
+        let bold = if current_phase.is_some_and(|cp| phase_ids_match(&phase.id, cp)) {
             format!("**Phase {} — {}**", phase.id, phase.title)
         } else {
             format!("Phase {} — {}", phase.id, phase.title)
@@ -624,7 +624,7 @@ pub fn find_next_pending<'a>(
 ) -> Option<&'a PlanPhase> {
     if let Some(after) = after_phase {
         // Find the current phase's position and search forward from there.
-        if let Some(idx) = phases.iter().position(|p| p.id == after) {
+        if let Some(idx) = phases.iter().position(|p| phase_ids_match(&p.id, after)) {
             // Search forward from the phase after the current one.
             if let Some(next) = phases[idx + 1..].iter().find(|p| p.status.is_actionable()) {
                 return Some(next);
@@ -2935,5 +2935,34 @@ Build it.
         let result = truncate_title(&long, 20);
         assert_eq!(result.len(), 20);
         assert!(result.ends_with("..."));
+    }
+
+    /// format_plan_checklist marks the current phase even when the caller passes the
+    /// phase ID without the 'v' prefix (e.g. "0.13.17.7" vs parsed "v0.13.17.7").
+    #[test]
+    fn checklist_current_marker_normalises_v_prefix() {
+        let plan_text = "### v0.13.17.7 — Test Phase\n<!-- status: pending -->\n\n1. [ ] item\n";
+        let phases = parse_plan(plan_text);
+        assert_eq!(phases.len(), 1);
+        assert_eq!(phases[0].id, "v0.13.17.7");
+
+        // Pass without 'v' prefix — should still mark as current.
+        let checklist = format_plan_checklist(&phases, Some("0.13.17.7"));
+        assert!(
+            checklist.contains("<-- current"),
+            "Expected '<-- current' marker but got: {}",
+            checklist
+        );
+    }
+
+    /// find_next_pending works when the after_phase id omits the 'v' prefix.
+    #[test]
+    fn find_next_pending_normalises_v_prefix() {
+        let plan_text = "### v0.1.0 — First\n<!-- status: done -->\n\n### v0.2.0 — Second\n<!-- status: pending -->\n";
+        let phases = parse_plan(plan_text);
+        // Pass "0.1.0" (no 'v') — should find v0.2.0 as next.
+        let next = find_next_pending(&phases, Some("0.1.0"));
+        assert!(next.is_some(), "Expected a next phase");
+        assert_eq!(next.unwrap().id, "v0.2.0");
     }
 }
