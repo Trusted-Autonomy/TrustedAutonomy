@@ -6795,8 +6795,6 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 
 6. [ ] **`.ta/release-history.json` left uncommitted after release**: `record_release()` in `release.rs` is called after step 12 (push) completes — after the release commit has already been pushed. The file is written to disk but never staged or committed, leaving the working tree dirty. Fix: move `record_release()` to before the step 10 commit (or amend the step 11 commit to include it), so the history file is part of the release commit that gets pushed.
 
-7. [ ] **`USAGE.html` missing from all platform tarballs/zips**: `USAGE.html` is currently generated only on `x86_64-apple-darwin` and uploaded as a standalone release asset. All other platform archives (Linux musl tarballs, macOS ARM tarball, Windows zip) bundle only `USAGE.md` — the rendered HTML is absent. The Windows MSI generates USAGE.html internally for its installer UI but doesn't include it in the zip artifact. Fix: generate USAGE.html in every platform's build step (pandoc if available, otherwise a simple markdown-to-HTML fallback) and include it in every `.tar.gz` and `.zip` alongside the binary and `USAGE.md`.
-
 #### Version: `0.14.3.3-alpha`
 
 ---

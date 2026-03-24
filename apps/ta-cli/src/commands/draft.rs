@@ -7029,6 +7029,17 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Clear TA agent VCS isolation env vars on a git command so test git
+    /// operations target the test's temp directory, not the staging repo.
+    /// The TA agent environment sets GIT_DIR/GIT_WORK_TREE/GIT_CEILING_DIRECTORIES
+    /// (v0.13.17.3) which causes bare `git` invocations to operate on the
+    /// wrong repository when tests run inside a goal session.
+    fn clear_git_env(cmd: &mut std::process::Command) -> &mut std::process::Command {
+        cmd.env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+    }
+
     // ── Constitution §4 scan tests (v0.11.5 item 8) ──────────────
 
     fn make_test_artifact(uri: &str) -> Artifact {
@@ -7305,34 +7316,31 @@ fn run() {
         let project = TempDir::new().unwrap();
 
         // Initialize git repo.
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(project.path())
+        for git_args in &[
+            vec!["init"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(git_args)
+                    .current_dir(project.path()),
+            )
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        }
 
         std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
 
-        std::process::Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(project.path())
+        for git_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(git_args)
+                    .current_dir(project.path()),
+            )
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        }
 
         let config = GatewayConfig::for_project(project.path());
 
@@ -7382,32 +7390,38 @@ fn run() {
 
         // Verify git log on the feature branch has the new commit.
         // After apply, we're back on the original branch; check --all.
-        let log = std::process::Command::new("git")
-            .args(["log", "--all", "--oneline", "-5"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let log = clear_git_env(
+            std::process::Command::new("git")
+                .args(["log", "--all", "--oneline", "-5"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let log_output = String::from_utf8_lossy(&log.stdout);
         // Subject line is the goal title; summary is in the commit body.
         assert!(log_output.contains("Git test"));
 
         // Find the feature branch to read the full commit message.
-        let branches = std::process::Command::new("git")
-            .args(["branch", "--list", "ta/*"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let branches = clear_git_env(
+            std::process::Command::new("git")
+                .args(["branch", "--list", "ta/*"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let branch_name = String::from_utf8_lossy(&branches.stdout)
             .trim()
             .trim_start_matches("* ")
             .to_string();
 
         // Verify full commit message matches ta draft view format.
-        let full_log = std::process::Command::new("git")
-            .args(["log", "-1", "--format=%B", &branch_name])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let full_log = clear_git_env(
+            std::process::Command::new("git")
+                .args(["log", "-1", "--format=%B", &branch_name])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let full_msg = String::from_utf8_lossy(&full_log.stdout);
         // First line is the goal title (subject).
         assert!(full_msg.starts_with("Git test\n"));
@@ -7431,22 +7445,26 @@ fn run() {
             vec!["config", "user.email", "test@test.com"],
             vec!["config", "user.name", "Test"],
         ] {
-            std::process::Command::new("git")
-                .args(cmd_args)
-                .current_dir(project.path())
-                .output()
-                .unwrap();
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
         }
 
         std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
         std::fs::write(project.path().join("lib.rs"), "// original\n").unwrap();
 
         for cmd_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
-            std::process::Command::new("git")
-                .args(cmd_args)
-                .current_dir(project.path())
-                .output()
-                .unwrap();
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
         }
 
         let config = GatewayConfig::for_project(project.path());
@@ -7562,11 +7580,13 @@ fn run() {
         // ── Tracked git files must show no modifications ───────────────────
         // Use -uno to ignore untracked files (e.g. the .ta/ config dir we
         // created for this test — it was never committed to the test repo).
-        let status = std::process::Command::new("git")
-            .args(["status", "--porcelain", "--untracked-files=no"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let status = clear_git_env(
+            std::process::Command::new("git")
+                .args(["status", "--porcelain", "--untracked-files=no"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let status_output = String::from_utf8_lossy(&status.stdout);
         assert!(
             status_output.trim().is_empty(),
@@ -9017,34 +9037,31 @@ fn run() {
         let project = TempDir::new().unwrap();
 
         // Initialize git repo.
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(project.path())
+        for git_args in &[
+            vec!["init"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(git_args)
+                    .current_dir(project.path()),
+            )
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        }
 
         std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
 
-        std::process::Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(project.path())
+        for git_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(git_args)
+                    .current_dir(project.path()),
+            )
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        }
 
         let config = GatewayConfig::for_project(project.path());
 
@@ -9096,20 +9113,24 @@ fn run() {
         .unwrap();
 
         // Verify a commit was created on a ta/ branch.
-        let log = std::process::Command::new("git")
-            .args(["log", "--all", "--oneline", "-5"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let log = clear_git_env(
+            std::process::Command::new("git")
+                .args(["log", "--all", "--oneline", "-5"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let log_output = String::from_utf8_lossy(&log.stdout);
         assert!(log_output.contains("Default submit test"));
 
         // Verify ta/ branch exists.
-        let branches = std::process::Command::new("git")
-            .args(["branch", "--list", "ta/*"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let branches = clear_git_env(
+            std::process::Command::new("git")
+                .args(["branch", "--list", "ta/*"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let branch_list = String::from_utf8_lossy(&branches.stdout);
         assert!(
             !branch_list.trim().is_empty(),
@@ -9123,34 +9144,31 @@ fn run() {
         let project = TempDir::new().unwrap();
 
         // Initialize git repo.
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(project.path())
+        for git_args in &[
+            vec!["init"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(git_args)
+                    .current_dir(project.path()),
+            )
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        }
 
         std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
 
-        std::process::Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(project.path())
+        for git_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(git_args)
+                    .current_dir(project.path()),
+            )
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        }
 
         let config = GatewayConfig::for_project(project.path());
 
@@ -9205,11 +9223,13 @@ fn run() {
         assert_eq!(readme, "# No submit\n");
 
         // No ta/ branches should exist — only the initial main branch.
-        let branches = std::process::Command::new("git")
-            .args(["branch", "--list", "ta/*"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let branches = clear_git_env(
+            std::process::Command::new("git")
+                .args(["branch", "--list", "ta/*"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let branch_list = String::from_utf8_lossy(&branches.stdout);
         assert!(
             branch_list.trim().is_empty(),
@@ -9535,11 +9555,13 @@ fn run() {
             vec!["config", "user.email", "test@test.com"],
             vec!["config", "user.name", "Test"],
         ] {
-            std::process::Command::new("git")
-                .args(cmd_args)
-                .current_dir(project.path())
-                .output()
-                .unwrap();
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
         }
 
         // Write a minimal PLAN.md with a pending phase.
@@ -9552,11 +9574,13 @@ fn run() {
         std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
 
         for cmd_args in &[vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
-            std::process::Command::new("git")
-                .args(cmd_args)
-                .current_dir(project.path())
-                .output()
-                .unwrap();
+            clear_git_env(
+                std::process::Command::new("git")
+                    .args(cmd_args)
+                    .current_dir(project.path()),
+            )
+            .output()
+            .unwrap();
         }
 
         let config = GatewayConfig::for_project(project.path());
@@ -9608,11 +9632,13 @@ fn run() {
         .unwrap();
 
         // A feature branch must exist.
-        let branches = std::process::Command::new("git")
-            .args(["branch", "--list", "ta/*"])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let branches = clear_git_env(
+            std::process::Command::new("git")
+                .args(["branch", "--list", "ta/*"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let branch_list = String::from_utf8_lossy(&branches.stdout);
         assert!(
             !branch_list.trim().is_empty(),
@@ -9621,11 +9647,13 @@ fn run() {
         let branch_name = branch_list.trim().trim_start_matches("* ").to_string();
 
         // The commit on the feature branch must include PLAN.md.
-        let show = std::process::Command::new("git")
-            .args(["show", "--stat", "--oneline", &branch_name])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let show = clear_git_env(
+            std::process::Command::new("git")
+                .args(["show", "--stat", "--oneline", &branch_name])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let show_output = String::from_utf8_lossy(&show.stdout);
         assert!(
             show_output.contains("PLAN.md"),
@@ -9636,11 +9664,13 @@ fn run() {
         // PLAN.md on the feature branch should be updated to done.
         // Note: after restore_state() the working tree is back on main, so we
         // must read the file contents from the feature branch commit directly.
-        let plan_on_branch = std::process::Command::new("git")
-            .args(["show", &format!("{}:PLAN.md", branch_name)])
-            .current_dir(project.path())
-            .output()
-            .unwrap();
+        let plan_on_branch = clear_git_env(
+            std::process::Command::new("git")
+                .args(["show", &format!("{}:PLAN.md", branch_name)])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         let plan_content = String::from_utf8_lossy(&plan_on_branch.stdout);
         assert!(
             plan_content.contains("status: done"),

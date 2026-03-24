@@ -61,9 +61,14 @@ impl VcsBackend {
             return Self::Git;
         }
         // Try git rev-parse (handles worktrees and submodules).
+        // Clear TA agent VCS isolation env vars (set by v0.13.17.3) so we
+        // detect VCS based on project_root's own repo, not the staging dir.
         let git_ok = std::process::Command::new("git")
             .args(["rev-parse", "--git-dir"])
             .current_dir(project_root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);

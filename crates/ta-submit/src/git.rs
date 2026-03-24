@@ -62,9 +62,15 @@ impl GitAdapter {
 
     /// Run a git command in the working directory
     fn git_cmd(&self, args: &[&str]) -> Result<String> {
+        // Clear TA agent VCS isolation env vars so git operates on the
+        // work_dir's own repo, not the staging directory's repo (v0.13.17.3
+        // sets GIT_DIR/GIT_WORK_TREE/GIT_CEILING_DIRECTORIES for agents).
         let output = Command::new("git")
             .args(args)
             .current_dir(&self.work_dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
             .output()?;
 
         if !output.status.success() {
@@ -191,10 +197,15 @@ impl GitAdapter {
         }
 
         // Run `git check-ignore --stdin` — prints only the ignored paths.
+        // Clear TA agent VCS isolation env vars so the check uses the work_dir
+        // repo, not the staging workspace repo (v0.13.17.3).
         let input = paths.join("\n");
         let output = Command::new("git")
             .args(["check-ignore", "--stdin"])
             .current_dir(&self.work_dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -723,6 +734,8 @@ impl SourceAdapter for GitAdapter {
             }
             _ => {
                 // "isolated" (default): init a fresh git repo in the staging dir.
+                // Clear TA agent VCS env vars so git init creates .git in staging_dir,
+                // not the workspace repo (GIT_DIR may be set by the outer agent env).
                 let git_dir = staging_dir.join(".git");
                 if !git_dir.exists() {
                     // Init the repo — try with -b main first, fall back without it
@@ -730,12 +743,18 @@ impl SourceAdapter for GitAdapter {
                     let init_output = std::process::Command::new("git")
                         .args(["init", "-b", "main"])
                         .current_dir(staging_dir)
+                        .env_remove("GIT_DIR")
+                        .env_remove("GIT_WORK_TREE")
+                        .env_remove("GIT_CEILING_DIRECTORIES")
                         .output()
                         .map_err(|e| SubmitError::VcsError(format!("git init failed: {}", e)))?;
                     if !init_output.status.success() {
                         let init2 = std::process::Command::new("git")
                             .args(["init"])
                             .current_dir(staging_dir)
+                            .env_remove("GIT_DIR")
+                            .env_remove("GIT_WORK_TREE")
+                            .env_remove("GIT_CEILING_DIRECTORIES")
                             .output()
                             .map_err(|e| {
                                 SubmitError::VcsError(format!("git init failed: {}", e))
@@ -752,10 +771,16 @@ impl SourceAdapter for GitAdapter {
                     let _ = std::process::Command::new("git")
                         .args(["config", "user.name", "TA Agent"])
                         .current_dir(staging_dir)
+                        .env_remove("GIT_DIR")
+                        .env_remove("GIT_WORK_TREE")
+                        .env_remove("GIT_CEILING_DIRECTORIES")
                         .output();
                     let _ = std::process::Command::new("git")
                         .args(["config", "user.email", "ta-agent@local"])
                         .current_dir(staging_dir)
+                        .env_remove("GIT_DIR")
+                        .env_remove("GIT_WORK_TREE")
+                        .env_remove("GIT_CEILING_DIRECTORIES")
                         .output();
 
                     if config.init_baseline_commit {
@@ -764,10 +789,16 @@ impl SourceAdapter for GitAdapter {
                         let _ = std::process::Command::new("git")
                             .args(["add", "-A"])
                             .current_dir(staging_dir)
+                            .env_remove("GIT_DIR")
+                            .env_remove("GIT_WORK_TREE")
+                            .env_remove("GIT_CEILING_DIRECTORIES")
                             .output();
                         let _ = std::process::Command::new("git")
                             .args(["commit", "--allow-empty", "-m", "pre-agent baseline"])
                             .current_dir(staging_dir)
+                            .env_remove("GIT_DIR")
+                            .env_remove("GIT_WORK_TREE")
+                            .env_remove("GIT_CEILING_DIRECTORIES")
                             .env("GIT_AUTHOR_NAME", "TA Agent")
                             .env("GIT_AUTHOR_EMAIL", "ta-agent@local")
                             .env("GIT_COMMITTER_NAME", "TA Agent")
@@ -1047,29 +1078,44 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_git_repo(dir: &Path) -> Result<()> {
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(dir)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(dir)
-            .output()?;
+        // Clear TA agent VCS isolation env vars so test git operations target
+        // the temp dir, not the staging directory's repo.
+        let clear_git_env = |cmd: &mut Command| {
+            cmd.env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_CEILING_DIRECTORIES");
+        };
+
+        let mut cmd = Command::new("git");
+        cmd.args(["init"]).current_dir(dir);
+        clear_git_env(&mut cmd);
+        cmd.output()?;
+
+        let mut cmd = Command::new("git");
+        cmd.args(["config", "user.name", "Test User"])
+            .current_dir(dir);
+        clear_git_env(&mut cmd);
+        cmd.output()?;
+
+        let mut cmd = Command::new("git");
+        cmd.args(["config", "user.email", "test@example.com"])
+            .current_dir(dir);
+        clear_git_env(&mut cmd);
+        cmd.output()?;
 
         // Create initial commit
         std::fs::write(dir.join("README.md"), "# Test\n")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(dir)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "Initial commit"])
-            .current_dir(dir)
-            .output()?;
+
+        let mut cmd = Command::new("git");
+        cmd.args(["add", "."]).current_dir(dir);
+        clear_git_env(&mut cmd);
+        cmd.output()?;
+
+        let mut cmd = Command::new("git");
+        cmd.args(["commit", "-m", "Initial commit"])
+            .current_dir(dir);
+        clear_git_env(&mut cmd);
+        cmd.output()?;
 
         Ok(())
     }
@@ -1334,6 +1380,9 @@ mod tests {
         Command::new("git")
             .args(["clone", &remote_dir.path().to_string_lossy(), "."])
             .current_dir(local_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
 
@@ -1341,6 +1390,9 @@ mod tests {
         let branch_output = Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(local_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
         let branch_name = String::from_utf8_lossy(&branch_output.stdout)
@@ -1366,11 +1418,17 @@ mod tests {
         Command::new("git")
             .args(["add", "."])
             .current_dir(remote_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
         Command::new("git")
             .args(["commit", "-m", "Remote commit"])
             .current_dir(remote_dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
             .output()
             .unwrap();
 

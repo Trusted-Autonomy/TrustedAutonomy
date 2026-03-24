@@ -2215,6 +2215,11 @@ mod tests {
             let out = Command::new("git")
                 .args(args)
                 .current_dir(dir)
+                // Clear TA agent VCS isolation env vars (set by v0.13.17.3) so
+                // git operates on the test's temp directory, not the staging repo.
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_CEILING_DIRECTORIES")
                 .output()
                 .unwrap();
             assert!(

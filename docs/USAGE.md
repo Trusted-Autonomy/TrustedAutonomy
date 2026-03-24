@@ -70,8 +70,6 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
    - [Framework Registry](#framework-registry)
    - [Workflow Engine](#workflow-engine)
    - [Community Knowledge Hub](#community-knowledge-hub)
-   - [Setting Up TA for Your Team](#setting-up-ta-for-your-team)
-   - [Perforce (P4) Project Setup](#perforce-p4-project-setup)
 6. [Roadmap](#roadmap)
 7. [Troubleshooting](#troubleshooting)
 8. [Getting Help](#getting-help)
@@ -2255,7 +2253,7 @@ If you installed BMAD somewhere other than `~/.bmad`, set `TA_BMAD_HOME` first:
 export TA_BMAD_HOME=/path/to/BMAD-METHOD   # then re-run ta init run --template unreal-cpp
 ```
 
-> **Perforce users**: don't blanket-ignore `.ta/` — TA's shared config files (`workflow.toml`, `policy.yaml`, `constitution.toml`, `agents/`, etc.) should live in the depot so your team shares them. Only runtime state needs ignoring. See [Perforce (P4) Project Setup](#perforce-p4-project-setup) for the correct granular `.p4ignore` entries and workspace configuration.
+> **Perforce users**: add `.ta/`, `.mcp.json`, and `ONBOARDING.md` to your `.p4ignore`. These are developer-local tooling files — they should not go into the depot.
 
 #### Step 3 — Run the discovery goal
 
@@ -7781,121 +7779,6 @@ strategy = "refs-cow"   # Windows ReFS only; auto-falls back to "smart" on NTFS
 ```
   Staging strategy... full (workspace is 42 GB — consider strategy=smart with a .taignore)
     Add to .ta/workflow.toml: [staging]\nstrategy = "smart"
-```
-
----
-
-## Perforce (P4) Project Setup
-
-This section covers everything you need to get TA working with a Perforce depot — the right `.p4ignore`, environment variable wiring, and workspace configuration.
-
-### What belongs in the depot vs what stays local
-
-TA separates **shared team config** from **local runtime state**. The shared files live inside `.ta/` and must be submitted to your depot so every team member gets them. Only the runtime state should be excluded.
-
-**Submit to depot** (shared config — treat like any other code):
-
-| Path | Purpose |
-|---|---|
-| `.ta/workflow.toml` | Staging strategy, submit adapter, channel config |
-| `.ta/policy.yaml` | Action governance rules |
-| `.ta/constitution.toml` | Agent behavioral contract |
-| `.ta/memory.toml` | Persistent memory backend config |
-| `.ta/agents/` | Agent definition files |
-| `.ta/constitutions/` | Constitution documents |
-| `.ta/templates/` | Project templates |
-
-**Exclude from depot** (local runtime state — changes per machine, never shared):
-
-```
-# .p4ignore — TA runtime state (do not submit)
-.ta/staging/
-.ta/goals/
-.ta/events/
-.ta/daemon.toml
-.ta/daemon.local.toml
-.ta/audit-ledger.jsonl
-.ta/velocity-stats.jsonl
-.ta/release-history.json
-workflow.local.toml
-.mcp.json
-settings.local.json
-```
-
-> Do **not** add `.ta/` as a single entry — that would exclude the shared config files and your team won't receive them.
-
-### Setting up `.p4ignore`
-
-Run the TA VCS setup command to write the correct entries automatically:
-
-```bash
-ta setup vcs            # auto-detects Perforce, writes .p4ignore entries
-ta setup vcs --dry-run  # preview without writing
-ta setup vcs --force    # rewrite the TA block (e.g. after upgrading TA)
-```
-
-Then tell Perforce to use the ignore file by setting `P4IGNORE` in your shell profile:
-
-```bash
-export P4IGNORE=.p4ignore
-```
-
-TA prints a reminder if `P4IGNORE` is not set when it writes the file. Without this env var, Perforce ignores `.p4ignore` entirely.
-
-### Environment variables — no extra TA config needed
-
-TA invokes the `p4` CLI directly and inherits your existing Perforce environment. If these variables are set, TA picks them up automatically:
-
-| Variable | Purpose |
-|---|---|
-| `P4PORT` | Depot server address (e.g. `ssl:perforce.example.com:1666`) |
-| `P4USER` | Your Perforce username |
-| `P4CLIENT` | Your workspace/client name |
-| `P4CONFIG` | Path to a `.p4config` file (TA also uses this for auto-detection) |
-
-You do not need to duplicate these in any TA config file. If they are set in your environment or in a `.p4config` file at the project root, TA uses them as-is.
-
-### Setting your workspace name
-
-If your workspace name differs from `P4CLIENT` in your environment — for example on a machine where you work on multiple depots — you can override it per-project in a local config file that is never committed:
-
-```toml
-# workflow.local.toml  (add this to .p4ignore / .gitignore — never commit it)
-[submit.perforce]
-workspace = "michael-game-dev-ws"
-```
-
-`workflow.local.toml` sits next to `.ta/workflow.toml` in your project root and takes precedence over the shared config for any keys it defines. Use the shared `workflow.toml` for team-wide settings like `shelve_by_default`; use `workflow.local.toml` for anything that is specific to your machine.
-
-```toml
-# .ta/workflow.toml  (commit this — shared by the whole team)
-[submit]
-adapter = "perforce"
-
-[submit.perforce]
-shelve_by_default = true   # team default: shelve rather than submit directly
-```
-
-> **Planned**: `ta setup vcs` will automatically generate a `workflow.local.toml` stub with your current `P4CLIENT` value in a future 0.14.x release, eliminating this manual step.
-
-### Auto-detection
-
-TA detects Perforce automatically when:
-- `P4CONFIG` env var is set, **or**
-- a `.p4config` file exists at the project root
-
-If neither is true, set `P4CONFIG` or `P4CLIENT` before running `ta daemon start` and TA will pick up Perforce as the submit adapter without any explicit `adapter = "perforce"` in `workflow.toml`.
-
-### Onboarding a new team member (Perforce)
-
-```bash
-p4 sync //depot/MyGame/...    # sync workspace from depot
-cd MyGame
-ta setup vcs                  # write .p4ignore entries
-export P4IGNORE=.p4ignore     # add to shell profile
-ta setup wizard               # generate .ta/workflow.toml, policy.yaml, etc.
-ta doctor                     # verify setup looks healthy
-ta daemon start               # start the local TA daemon
 ```
 
 ---

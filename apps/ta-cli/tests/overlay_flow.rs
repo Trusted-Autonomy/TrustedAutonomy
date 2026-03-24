@@ -32,21 +32,21 @@ fn overlay_flow_goal_to_apply() {
     let project = TempDir::new().unwrap();
 
     // Initialize git repo for the project.
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
+    // Clear TA agent VCS isolation env vars (set by v0.13.17.3) so git
+    // operates on the test's temp directory, not the staging repo.
+    let git = |args: &[&str], dir: &std::path::Path| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .unwrap()
+    };
+    git(&["init"], project.path());
+    git(&["config", "user.email", "test@test.com"], project.path());
+    git(&["config", "user.name", "Test"], project.path());
 
     // Create project files.
     fs::write(
@@ -71,16 +71,8 @@ fn overlay_flow_goal_to_apply() {
     fs::write(project.path().join(".ta/config.toml"), "internal").unwrap();
 
     // Initial git commit.
-    std::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "initial commit"])
-        .current_dir(project.path())
-        .output()
-        .unwrap();
+    git(&["add", "-A"], project.path());
+    git(&["commit", "-m", "initial commit"], project.path());
 
     let config = GatewayConfig::for_project(project.path());
 
@@ -242,22 +234,17 @@ fn overlay_flow_goal_to_apply() {
     // 7. Git commit (simulates --git-commit)
     // =========================================================
 
-    let add_result = std::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(&source_dir)
-        .output()
-        .unwrap();
+    let add_result = git(&["add", "-A"], &source_dir);
     assert!(add_result.status.success());
 
-    let commit_result = std::process::Command::new("git")
-        .args([
+    let commit_result = git(
+        &[
             "commit",
             "-m",
             "Fix greeting\n\nApplied via Trusted Autonomy",
-        ])
-        .current_dir(&source_dir)
-        .output()
-        .unwrap();
+        ],
+        &source_dir,
+    );
     assert!(
         commit_result.status.success(),
         "git commit failed: {}",
@@ -265,11 +252,7 @@ fn overlay_flow_goal_to_apply() {
     );
 
     // Verify git log.
-    let log = std::process::Command::new("git")
-        .args(["log", "--oneline"])
-        .current_dir(&source_dir)
-        .output()
-        .unwrap();
+    let log = git(&["log", "--oneline"], &source_dir);
     let log_output = String::from_utf8_lossy(&log.stdout);
     assert!(log_output.contains("Fix greeting"));
     assert!(log_output.contains("initial commit"));

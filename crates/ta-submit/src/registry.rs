@@ -304,13 +304,19 @@ mod tests {
     use std::process::Command;
     use tempfile::tempdir;
 
+    /// Clear TA agent VCS isolation env vars so test git operations target
+    /// the temp dir, not the staging repo (see v0.13.17.3).
+    fn clear_git_env(cmd: &mut Command) -> &mut Command {
+        cmd.env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+    }
+
     #[test]
     fn test_detect_adapter_git() {
         let dir = tempdir().unwrap();
         // Initialize a git repo
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
+        clear_git_env(Command::new("git").args(["init"]).current_dir(dir.path()))
             .output()
             .unwrap();
 
@@ -350,9 +356,7 @@ mod tests {
     fn test_detect_adapter_git_takes_priority_over_svn() {
         let dir = tempdir().unwrap();
         // Both .git and .svn present — Git should win
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
+        clear_git_env(Command::new("git").args(["init"]).current_dir(dir.path()))
             .output()
             .unwrap();
         std::fs::create_dir(dir.path().join(".svn")).unwrap();
@@ -398,9 +402,7 @@ mod tests {
     fn test_select_adapter_none_auto_detects() {
         let dir = tempdir().unwrap();
         // Initialize git repo with default "none" config — should auto-detect to git
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
+        clear_git_env(Command::new("git").args(["init"]).current_dir(dir.path()))
             .output()
             .unwrap();
 
