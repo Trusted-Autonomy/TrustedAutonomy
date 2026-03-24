@@ -495,16 +495,35 @@ After `required_checks` run, an AI supervisor reviews the staged changes for goa
 ```toml
 [supervisor]
 enabled = true                         # default: true
-agent = "builtin"                      # "builtin" (Anthropic API) | custom agent name
+agent = "builtin"                      # see agent options below
 verdict_on_block = "warn"              # "warn" = show only | "block" = refuse approve
 constitution_path = ".ta/constitution.toml"  # optional; also checks docs/TA-CONSTITUTION.md
 skip_if_no_constitution = true         # don't fail if no constitution file
 timeout_secs = 120
+# api_key_env = "OPENAI_API_KEY"       # optional: pre-flight env var check for codex/custom agents
 ```
 
-**Built-in supervisor** (`agent = "builtin"`) uses your `ANTHROPIC_API_KEY` to call the Anthropic API. It reviews scope (did the agent modify only files relevant to the goal?) and constitution compliance in a single pass.
+**Supervisor agent options**
 
-If the API key is not set, the network call fails, or the response cannot be parsed, the supervisor falls back to a `warn` verdict automatically — it never blocks a draft due to its own failure.
+| `agent` value | Invocation | Credential |
+|---|---|---|
+| `"builtin"` (default) | `claude --print --output-format stream-json` | Delegated to the `claude` binary — subscription OAuth or API key |
+| `"claude-code"` | Same as `"builtin"` | Same |
+| `"codex"` | `codex --approval-mode full-auto --quiet` | `OPENAI_API_KEY` or Codex subscription (handled by Codex binary) |
+| `"ollama"` | `ta agent run ollama --headless` | Local — no key required |
+| `"<manifest-name>"` | Reads `.ta/agents/<name>.toml`, spawns command | Whatever the manifest specifies |
+
+TA **never reads or forwards API keys** — it delegates authentication entirely to the agent binary. Subscription users of Claude Code (OAuth) can use `agent = "builtin"` without setting `ANTHROPIC_API_KEY`.
+
+For agents that do require a key (e.g., codex), set `api_key_env` to get a clear pre-flight message if the variable is missing:
+
+```toml
+[supervisor]
+agent = "codex"
+api_key_env = "OPENAI_API_KEY"   # TA checks this exists before spawning; codex reads it
+```
+
+If the binary is not found, times out, or the response cannot be parsed, the supervisor falls back to a `warn` verdict automatically — it never blocks a draft due to its own failure.
 
 **Draft view output**:
 

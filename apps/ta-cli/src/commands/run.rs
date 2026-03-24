@@ -2413,7 +2413,7 @@ pub fn execute(
             println!();
             println!("Running supervisor review...");
 
-            // Build run config.
+            // Build run config — staging_path enables manifest-based custom agents.
             let run_config = ta_changeset::SupervisorRunConfig {
                 enabled: true,
                 agent: sup_cfg.agent.clone(),
@@ -2421,6 +2421,8 @@ pub fn execute(
                 constitution_path: sup_cfg.constitution_path.clone(),
                 skip_if_no_constitution: sup_cfg.skip_if_no_constitution,
                 timeout_secs: sup_cfg.timeout_secs,
+                api_key_env: sup_cfg.api_key_env.clone(),
+                staging_path: Some(staging_path.to_path_buf()),
             };
 
             // Load constitution text.
@@ -2434,24 +2436,13 @@ pub fn execute(
             // Collect changed files from staging dir via change_summary.json or file walk.
             let changed_files: Vec<String> = collect_changed_files(&staging_path);
 
-            // Run the built-in or custom supervisor.
-            let review = if sup_cfg.agent == "builtin" {
-                ta_changeset::run_builtin_supervisor(
-                    title,
-                    &changed_files,
-                    constitution_text.as_deref(),
-                    &run_config,
-                )
-            } else {
-                // Custom supervisor: spawn agent, read result from .ta/supervisor_result.json.
-                run_custom_supervisor(
-                    &staging_path,
-                    &sup_cfg.agent,
-                    title,
-                    &changed_files,
-                    &run_config,
-                )
-            };
+            // Dispatch to the appropriate supervisor agent (builtin/claude-code/codex/ollama/manifest).
+            let review = ta_changeset::invoke_supervisor_agent(
+                title,
+                &changed_files,
+                constitution_text.as_deref(),
+                &run_config,
+            );
 
             // Print summary.
             let verdict_label = match review.verdict {
@@ -3383,169 +3374,6 @@ fn collect_source_files(
                 }
             }
         }
-    }
-}
-
-/// Run a custom supervisor agent by spawning it and reading its result file.
-fn run_custom_supervisor(
-    staging_path: &std::path::Path,
-    agent_name: &str,
-    objective: &str,
-    changed_files: &[String],
-    config: &ta_changeset::SupervisorRunConfig,
-) -> ta_changeset::SupervisorReview {
-    use std::time::Instant;
-    let started = Instant::now();
-
-    // Write input context for the custom agent.
-    let input = serde_json::json!({
-        "objective": objective,
-        "changed_files": changed_files,
-    });
-    let input_path = staging_path.join(".ta/supervisor_input.json");
-    if let Err(e) = std::fs::write(
-        &input_path,
-        serde_json::to_string_pretty(&input).unwrap_or_default(),
-    ) {
-        tracing::warn!(error = %e, "Failed to write supervisor input file");
-    }
-
-    // Look up agent manifest.
-    let agent_manifest = staging_path
-        .join(".ta/agents")
-        .join(format!("{}.toml", agent_name));
-    if !agent_manifest.exists() {
-        tracing::warn!(
-            agent = agent_name,
-            "Custom supervisor agent manifest not found — falling back to warn"
-        );
-        return fallback_supervisor_review(
-            agent_name,
-            &format!(
-                "Custom supervisor agent '{}' manifest not found at .ta/agents/{}.toml",
-                agent_name, agent_name
-            ),
-            started.elapsed().as_secs_f32(),
-        );
-    }
-
-    // The custom agent must write .ta/supervisor_result.json after running.
-    let result_path = staging_path.join(".ta/supervisor_result.json");
-    let _ = std::fs::remove_file(&result_path);
-
-    // Read command from agent manifest.
-    let manifest_content = match std::fs::read_to_string(&agent_manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to read supervisor agent manifest");
-            return fallback_supervisor_review(
-                agent_name,
-                &format!("Failed to read agent manifest: {}", e),
-                started.elapsed().as_secs_f32(),
-            );
-        }
-    };
-    let manifest: toml::Value = match toml::from_str(&manifest_content) {
-        Ok(v) => v,
-        Err(e) => {
-            return fallback_supervisor_review(
-                agent_name,
-                &format!("Failed to parse agent manifest: {}", e),
-                started.elapsed().as_secs_f32(),
-            );
-        }
-    };
-    let cmd_str = manifest
-        .get("agent")
-        .and_then(|a| a.get("command"))
-        .and_then(|c| c.as_str())
-        .unwrap_or("");
-    if cmd_str.is_empty() {
-        return fallback_supervisor_review(
-            agent_name,
-            "Agent manifest missing [agent] command",
-            started.elapsed().as_secs_f32(),
-        );
-    }
-
-    let parts: Vec<&str> = cmd_str.split_whitespace().collect();
-    let timeout = std::time::Duration::from_secs(config.timeout_secs);
-    let child = std::process::Command::new(parts[0])
-        .args(&parts[1..])
-        .current_dir(staging_path)
-        .env("TA_SUPERVISOR_INPUT", input_path.to_str().unwrap_or(""))
-        .env("TA_SUPERVISOR_OUTPUT", result_path.to_str().unwrap_or(""))
-        .spawn();
-
-    match child {
-        Err(e) => fallback_supervisor_review(
-            agent_name,
-            &format!("Failed to spawn agent: {}", e),
-            started.elapsed().as_secs_f32(),
-        ),
-        Ok(mut child) => {
-            let deadline = std::time::Instant::now() + timeout;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => {
-                        if std::time::Instant::now() >= deadline {
-                            let _ = child.kill();
-                            return fallback_supervisor_review(
-                                agent_name,
-                                &format!("Agent timed out after {}s", config.timeout_secs),
-                                started.elapsed().as_secs_f32(),
-                            );
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                    }
-                    Err(e) => {
-                        return fallback_supervisor_review(
-                            agent_name,
-                            &format!("Agent wait error: {}", e),
-                            started.elapsed().as_secs_f32(),
-                        );
-                    }
-                }
-            }
-
-            match std::fs::read_to_string(&result_path) {
-                Ok(content) => {
-                    match serde_json::from_str::<ta_changeset::SupervisorReview>(&content) {
-                        Ok(mut review) => {
-                            review.agent = agent_name.to_string();
-                            review.duration_secs = started.elapsed().as_secs_f32();
-                            review
-                        }
-                        Err(e) => fallback_supervisor_review(
-                            agent_name,
-                            &format!("Failed to parse result JSON: {}", e),
-                            started.elapsed().as_secs_f32(),
-                        ),
-                    }
-                }
-                Err(e) => fallback_supervisor_review(
-                    agent_name,
-                    &format!("Agent did not write result file: {}", e),
-                    started.elapsed().as_secs_f32(),
-                ),
-            }
-        }
-    }
-}
-
-fn fallback_supervisor_review(
-    agent: &str,
-    reason: &str,
-    duration_secs: f32,
-) -> ta_changeset::SupervisorReview {
-    ta_changeset::SupervisorReview {
-        verdict: ta_changeset::SupervisorVerdict::Warn,
-        scope_ok: true,
-        findings: vec![format!("Supervisor review incomplete: {}", reason)],
-        summary: "Supervisor could not complete review (fallback to warn).".to_string(),
-        agent: agent.to_string(),
-        duration_secs,
     }
 }
 

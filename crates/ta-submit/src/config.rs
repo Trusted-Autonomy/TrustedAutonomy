@@ -335,11 +335,12 @@ pub struct VcsConfig {
 /// ```toml
 /// [supervisor]
 /// enabled = true
-/// agent = "builtin"              # "builtin" | custom agent name in .ta/agents/
+/// agent = "builtin"              # "builtin" | "claude-code" | "codex" | "ollama" | manifest name
 /// verdict_on_block = "warn"      # "warn" | "block"
 /// constitution_path = ".ta/constitution.toml"
 /// skip_if_no_constitution = true
 /// timeout_secs = 120
+/// # api_key_env = "OPENAI_API_KEY"  # optional: pre-flight check for codex / custom agents
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisorConfig {
@@ -347,7 +348,11 @@ pub struct SupervisorConfig {
     #[serde(default = "default_supervisor_enabled")]
     pub enabled: bool,
 
-    /// Which agent runs the review. "builtin" uses the Anthropic API directly.
+    /// Which agent runs the review.
+    /// - "builtin" / "claude-code": spawns the `claude` CLI (uses its own auth).
+    /// - "codex": spawns `codex --approval-mode full-auto --quiet`.
+    /// - "ollama": invokes via `ta agent run ollama --headless`.
+    /// - any other string: looks up `.ta/agents/<name>.toml` manifest.
     #[serde(default = "default_supervisor_agent")]
     pub agent: String,
 
@@ -368,6 +373,13 @@ pub struct SupervisorConfig {
     /// Supervisor timeout in seconds (default 120 — short review, not implementation).
     #[serde(default = "default_supervisor_timeout")]
     pub timeout_secs: u64,
+
+    /// Optional env var name to pre-flight check before spawning the supervisor agent.
+    /// When set, TA verifies the var is present and prints an actionable message if missing.
+    /// The agent binary handles the credential itself — TA never reads or forwards the value.
+    /// Example: `api_key_env = "OPENAI_API_KEY"` for the codex agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
 }
 
 fn default_supervisor_enabled() -> bool {
@@ -395,6 +407,7 @@ impl Default for SupervisorConfig {
             constitution_path: None,
             skip_if_no_constitution: default_supervisor_skip_no_constitution(),
             timeout_secs: default_supervisor_timeout(),
+            api_key_env: None,
         }
     }
 }

@@ -72,8 +72,8 @@ pub use supervisor::{
     DependencyGraph, SupervisorAgent, ValidationError, ValidationResult, ValidationWarning,
 };
 pub use supervisor_review::{
-    build_supervisor_prompt, load_constitution, run_builtin_supervisor, SupervisorReview,
-    SupervisorRunConfig, SupervisorVerdict,
+    build_supervisor_prompt, fallback_supervisor_review, invoke_supervisor_agent,
+    load_constitution, SupervisorReview, SupervisorRunConfig, SupervisorVerdict,
 };
 pub use terminal_channel::{AutoApproveChannel, TerminalChannel, TerminalSessionChannel};
 pub use uri_pattern::{filter_uris, matches_uri};

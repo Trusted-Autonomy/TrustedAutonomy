@@ -6036,62 +6036,58 @@ All items implemented except items 5 and 13 (deferred). New tests: 5 (main.rs) +
 ---
 
 ### v0.13.17 — Draft Evidence, Perforce Plugin & Pre-Release Hardening
-<!-- status: done -->
+<!-- status: pending -->
 **Goal**: Harden the path from agent exit to draft review: make `ta run` inject live progress into the daemon during the draft phase, embed hard validation evidence in every draft package, ship a working Perforce VCS plugin for the game-project release, add an experimental feature flag system, fix the finalize timeout, and gate E2E pre-release tests.
 
 #### 1. `ta run` Draft-Phase Progress Injection
 
-1. [x] **Finalize heartbeat**: During the draft phase, `ta run` writes progress into the goal's `progress_note` field. → implemented in v0.13.17.1
-2. [x] **`run_pid` in `Finalizing` state**: Store `ta run`'s PID in the `Finalizing { run_pid: Option<u32> }` field. → implemented in v0.13.17.1
-3. [x] **`finalize_timeout_secs` in `[operations]` config**: Bump default from 300s to 1800s. → implemented in v0.13.17.1
+1. [ ] **Finalize heartbeat**: During the draft phase, `ta run` writes progress into the goal's `progress_note` field (goal JSON) at each major step: "diffing N files", "running required_checks: cargo build", "packing artifacts". The watchdog reads this and includes it in `ta goal status` output — no more black box.
+2. [ ] **`run_pid` in `Finalizing` state**: Store `ta run`'s PID in the `Finalizing { run_pid: Option<u32> }` field. Watchdog: if PID is alive, never time out — only fire when the builder process is dead AND elapsed > threshold. *(Struct change and watchdog logic — landed in v0.13.17 branch.)*
+3. [ ] **`finalize_timeout_secs` in `[operations]` config**: Bump default from 300s to 1800s. Expose in `.ta/config.toml` template so teams with large workspaces can tune it. *(Wired in v0.13.17 branch.)*
 
 #### 2. Validation Evidence in Draft Package
 
-4. [x] **`ValidationLog` in `DraftPackage`**: Embed validation evidence in every draft. → implemented in v0.13.17.1
-5. [x] **`ta draft view <id>`** includes the validation log section. → implemented in v0.13.17.1
-6. [x] **`ta draft approve`** refuses to approve if validation_log contains a non-zero exit code. → implemented in v0.13.17.1
+4. [ ] **`ValidationLog` in `DraftPackage`**: After the agent exits, `ta run` runs the project's `required_checks` (from `[workflow].required_checks` in config, or the four checks from CLAUDE.md if unset). Each result: `{ command, exit_code, duration_secs, stdout_tail: last 20 lines }`. Embed as `draft.validation_log`.
+5. [ ] **`ta draft view <id>`** includes the validation log section: commands, pass/fail, duration. Non-zero exit → warning banner. The log is hard evidence from `ta run` infrastructure, not self-reported by the agent.
+6. [ ] **`ta draft approve`** refuses to approve if validation_log contains a non-zero exit code, unless `--override` is passed (mirrors governance `--override` precedent).
 
 #### 3. Perforce VCS Plugin (Game Project)
 
-7. [x] **`plugins/vcs-perforce` script**: → implemented in v0.13.13 (full Perforce VCS plugin with JSON-over-stdio protocol)
-8. [x] **`plugins/vcs-perforce.toml` manifest**: → implemented in v0.13.13
-9. [x] **Integration test with mock `p4`**: → implemented in v0.13.13
-10. [x] **USAGE.md "Using TA with Perforce" section**: → implemented in v0.13.13
-11. [ ] **Release bundle includes plugin**: `release.yml` copies `plugins/vcs-perforce` into release tarball. → deferred, still open
+7. [ ] **`plugins/vcs-perforce` script**: A Python 3 script implementing the JSON-over-stdio VCS plugin protocol. Uses the `p4` CLI as its backend. Supports operations: `status` (p4 status), `diff` (p4 diff), `submit` (p4 submit with description), `shelve` (p4 shelve for draft-mode). Read `P4PORT`, `P4USER`, `P4CLIENT` from environment.
+8. [ ] **`plugins/vcs-perforce.toml` manifest**: Name, description, protocol version, required env vars, supported operations list.
+9. [ ] **Integration test with mock `p4`**: A mock `p4` script in `tests/fixtures/` that returns canned responses. The adapter test creates a workspace, wires the mock, verifies `status` → diff → submit round-trip.
+10. [ ] **USAGE.md "Using TA with Perforce" section**: P4 environment setup, plugin install path, `ta submit` with Perforce, shelving vs submitting, depot path scoping.
+11. [ ] **Release bundle includes plugin**: `release.yml` copies `plugins/vcs-perforce` into the release tarball; macOS `.dmg` and Windows `.msi` include it at the configured plugin path.
 
 #### 4. Experimental Feature Flag System
 
-12. [x] **`[experimental]` config section** in `DaemonConfig`: → implemented in v0.13.17.1
-13. [x] **`ta run --agent ollama` gate**: → implemented in v0.13.17.1
-14. [x] **Sandbox gate**: → implemented in v0.13.17.1
-15. [x] **Personal dev `.ta/config.toml`**: → implemented in v0.13.17.1
+12. [ ] **`[experimental]` config section** in `DaemonConfig` (landed in v0.13.17 branch): `ollama_agent = false`, `sandbox = false`. All experimental features default off.
+13. [ ] **`ta run --agent ollama` gate**: If `experimental.ollama_agent = false`, emit a clear error: "ta-agent-ollama is an experimental preview. Enable with `experimental.ollama_agent = true` in .ta/config.toml". No silent fallback.
+14. [ ] **Sandbox gate**: `ta run --sandbox` (or sandbox auto-applied from config) emits a warning banner if `experimental.sandbox = false`: "Sandbox is experimental — see docs/sandbox-experimental.md for known limitations." Sandbox still runs if `experimental.sandbox = true`.
+15. [ ] **Personal dev `.ta/config.toml`**: Committed personal config that enables `ollama_agent = true` and `sandbox = true` for the TrustedAutonomy repo itself.
 
 #### 5. Branch Prefix Default Fix
 
-16. [x] **Default `branch_prefix = "feature/"`**: → implemented in v0.13.17.1
+16. [ ] **Default `branch_prefix = "feature/"`**: Changed from `ta/` in init.rs, new.rs, setup.rs templates. *(Landed in v0.13.17 branch.)*
 
 #### 6. Community Context — Full Agent Coverage & MCP Tool
 
-17. [x] **Community section in `inject_agent_context_file()`**: → implemented in v0.13.17.1
-18. [x] **Community section in `inject_context_env()`**: → implemented in v0.13.17.1
-19. [x] **`ta-community-hub` MCP server**: Community hub plugin implemented, MCP server registered in `.mcp.json` injection. → implemented in v0.13.17.1
-20. [x] **Agent observation write-back**: `community_feedback.json` ingested on agent exit. Upstream PR contribution → deferred to v0.14.3.5. → implemented in v0.13.17.1
+17. [ ] **Community section in `inject_agent_context_file()`**: Pass `community_section` into the generic context writer used by Codex (AGENTS.md) and other `context_file`-based agents. Currently missing — Codex gets no community context at all.
+18. [ ] **Community section in `inject_context_env()`**: Append community context to the `TA_GOAL_CONTEXT` env var written for Ollama and `Env`-mode agents. Currently missing.
+19. [ ] **`ta-community-hub` MCP server**: Expose `community_search(query, intent)` and `community_get(id)` as actual MCP tools backed by the local cache. Without this, the CLAUDE.md injection tells Claude to call a function that doesn't exist — agents can't actually query community resources via tool use. Register this MCP server in the injected `.mcp.json` (alongside `ta-memory`).
+20. [ ] **Agent observation write-back**: When the agent writes `.ta/community_feedback.json` (structured observations: `{resource, doc_id, observation: "endpoint deprecated", severity: "warning"}`), `ingest_memory_out`-style collector picks it up on agent exit and appends entries to the local cache with `source: "agent-observed"`. Feeds into future `ta community sync --push` for upstream contribution. Deferred write-back to external systems → v0.14.3.5.
 
 #### 7. E2E Pre-Release Test Suite
 
-21. [ ] **`tests/e2e/` directory**: Integration tests against live daemon. → deferred, still open
-22. [ ] **`test_dependency_graph_e2e`**: → deferred, still open
-23. [ ] **`test_ollama_agent_mock_e2e`**: → deferred, still open
-24. [ ] **`test_draft_validation_log_e2e`**: → deferred, still open
-25. [ ] **Pre-release checklist in USAGE.md**: → deferred, still open
+21. [ ] **`tests/e2e/` directory**: Integration tests that run against a live daemon and real filesystem. Marked `#[ignore]` by default — run with `cargo test -- --ignored --test-threads=1`.
+22. [ ] **`test_dependency_graph_e2e`**: Creates a real workflow with `depends_on` graph (3 sub-goals, one dependency chain, one parallel), runs `ta workflow run`, verifies ordering from goal events.
+23. [ ] **`test_ollama_agent_mock_e2e`**: Spins up a mock HTTP server (wiremock) at localhost that returns canned tool_call responses. Runs `ta run --agent ollama` against it. Verifies `[goal started]` is emitted, at least one tool call is dispatched, draft is built.
+24. [ ] **`test_draft_validation_log_e2e`**: Runs a real goal with `required_checks = ["echo ok"]`. Verifies the draft package contains a `validation_log` entry with `exit_code: 0`.
+25. [ ] **Pre-release checklist in USAGE.md**: `./dev "cargo test -- --ignored"` listed as required before any public release.
 
 #### Deferred items moved/resolved
-- Items 1–6, 12–20: implemented in v0.13.17.1
-- Items 7–10 (Perforce plugin): implemented in v0.13.13
-- Item 11 (release bundle includes vcs-perforce): still open — add to a release engineering phase
-- Items 21–25 (E2E test suite): still open — add to a dedicated testing phase before public release
-- Community upstream PR write-back → v0.14.3.5
-- Live Ollama E2E with real models → still deferred
+- Community read-write write-back to external systems → v0.14.3.5 (same phase as Supermemory — natural fit)
+- Live Ollama E2E with real models (v0.13.16 item 5) → still deferred; E2E mock test (item 23 above) covers the code path without requiring a live instance
 
 #### Version: `0.13.17-alpha`
 
@@ -6392,7 +6388,7 @@ Draft artifact list
 ---
 
 ### v0.13.17.6 — Supervisor Agent Auth & Multi-Agent Support
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make the supervisor work for all users regardless of credential method, and support the same agent types (claude-code, codex, ollama, custom manifest) that the main goal agent supports. The supervisor should feel like a first-class agent configuration, not a special case.
 
 #### Problem
@@ -6426,30 +6422,34 @@ api_key_env = "OPENAI_API_KEY"   # checked but not required — binary handles i
 
 #### Items
 
-1. [ ] **Refactor `run_builtin_supervisor()` → `invoke_supervisor_agent(config, prompt)`**: Dispatch on `config.agent`:
+1. [x] **Refactor `run_builtin_supervisor()` → `invoke_supervisor_agent(config, prompt)`**: Dispatch on `config.agent`:
    - `"builtin"` | `"claude-code"` → spawn `claude --print --output-format stream-json "<prompt>"`, read stdout, parse last JSON object with `verdict`/`findings`/`summary` keys.
-   - `"codex"` → spawn `codex --approval-mode full-auto "<prompt>"`, parse output similarly.
-   - `"ollama"` → invoke via `ta agent run` headless path.
-   - Any other string → treat as agent manifest name, use existing `run_custom_supervisor()` path.
+   - `"codex"` → spawn `codex --approval-mode full-auto --quiet "<prompt>"`, parse output similarly.
+   - `"ollama"` → invoke via `ta agent run ollama --headless` path.
+   - Any other string → look up `.ta/agents/<name>.toml` manifest (logic moved from `run_custom_supervisor()` in run.rs into `run_manifest_supervisor()` in supervisor_review.rs).
 
-2. [ ] **Remove `reqwest` direct API call and `ANTHROPIC_API_KEY` check**: Delete `call_anthropic_supervisor()` and the `reqwest` blocking client. Remove `reqwest` from `ta-changeset/Cargo.toml` if unused elsewhere.
+2. [x] **Remove `reqwest` direct API call and `ANTHROPIC_API_KEY` check**: Deleted `call_anthropic_supervisor()`. `reqwest` kept in ta-changeset/Cargo.toml as it is still used by `plugin_resolver.rs`, `registry_client.rs`, and `webhook_channel.rs`.
 
-3. [ ] **`claude` CLI response parsing**: The `--output-format stream-json` stdout is a stream of JSON events. Parse the final `result` event (type: `"result"`, subtype: `"success"`) and extract the text content. If the text contains a JSON object with `verdict`/`findings`/`summary`, use it; otherwise treat the full text as `summary` with `verdict: warn`.
+3. [x] **`claude` CLI response parsing**: `extract_claude_stream_json_text()` scans stream-json lines in reverse for the final `result` event (type = `"result"`) and extracts text. Falls back to `assistant` content blocks. `parse_supervisor_response_or_text()` wraps plain-text responses as `summary` with `verdict: warn`.
 
-4. [ ] **`[supervisor] api_key_env`** config field: Optional. When set, TA checks that env var exists before spawning the agent and prints a clear message if missing: `"Supervisor agent 'codex' requires OPENAI_API_KEY — set it or change [supervisor] agent."`. Does not pass the key to the binary (the binary reads it itself); this is purely a pre-flight check for better UX.
+4. [x] **`[supervisor] api_key_env`** config field: Added to both `SupervisorConfig` (workflow.toml) and `SupervisorRunConfig`. Pre-flight check logs actionable message and returns warn immediately if env var missing.
 
-5. [ ] **`[supervisor] agent = "codex"` support**: Wire up the codex headless invocation. Codex outputs text; wrap the full response as `summary`, attempt JSON extraction for structured verdict.
+5. [x] **`[supervisor] agent = "codex"` support**: Wired via `invoke_codex_supervisor()` — spawns `codex --approval-mode full-auto --quiet`, parses output with `parse_supervisor_response_or_text()`.
 
-6. [ ] **Fallback behavior unchanged**: Any invocation failure (binary not found, timeout, parse error, non-zero exit) still falls back to `SupervisorVerdict::Warn` with a descriptive finding. Never block a draft build on supervisor failure.
+6. [x] **Fallback behavior unchanged**: All failure paths (binary not found, timeout, parse error, non-zero exit) pass through `fallback_supervisor_review()` returning `SupervisorVerdict::Warn` with descriptive finding. Never blocks a draft build.
 
-7. [ ] **Update USAGE.md "Supervisor Agent"**: Document all supported `agent` values, the credential model (TA delegates to the binary — no API key configuration needed for subscription users), and the optional `api_key_env` pre-flight check.
+7. [x] **Update USAGE.md "Supervisor Agent"**: Documented all supported `agent` values, credential delegation model, and `api_key_env` pre-flight check.
 
-8. [ ] **Tests**:
-   - `test_builtin_invokes_claude_cli`: Mock `claude` binary in PATH returning valid stream-json, verify `SupervisorVerdict::Pass` parsed correctly.
-   - `test_builtin_no_api_key_env_required`: Verify no `ANTHROPIC_API_KEY` check in the claude path.
-   - `test_codex_agent_dispatch`: `agent = "codex"` → codex binary invoked (not claude).
-   - `test_missing_binary_falls_back_to_warn`: `claude` not in PATH → `SupervisorVerdict::Warn`, finding describes the error.
-   - `test_api_key_env_preflight_warn`: `api_key_env = "OPENAI_API_KEY"` and var not set → warn with actionable message before spawn attempt.
+8. [x] **Tests** (10 new tests in `supervisor_review.rs`):
+   - `test_fallback_supervisor_review_structure`: validates fallback review structure
+   - `test_extract_claude_stream_json_result_event`: stream-json result event parsing
+   - `test_extract_claude_stream_json_fallback_to_assistant`: fallback to assistant content
+   - `test_parse_supervisor_response_or_text_plain_text`: plain text → warn verdict
+   - `test_parse_supervisor_response_or_text_structured_json`: JSON → pass verdict
+   - `test_invoke_supervisor_agent_api_key_preflight_fails`: missing env var → warn before spawn
+   - `test_invoke_supervisor_agent_custom_agent_no_staging_path`: no staging_path → warn
+   - `test_fallback_review_no_api_key_message`: missing OPENAI_API_KEY → finding mentions var
+   - Plus retained: `test_parse_supervisor_response_*`, `test_extract_json_*`, `test_build_supervisor_prompt_*`, `test_supervisor_verdict_*`
 
 #### Version: `0.13.17-alpha.6`
 
