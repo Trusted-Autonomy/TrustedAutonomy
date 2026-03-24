@@ -30,6 +30,7 @@ pub mod review_session_store;
 pub mod session_channel;
 pub mod sources;
 pub mod supervisor;
+pub mod supervisor_review;
 pub mod terminal_channel;
 pub mod uri_pattern;
 pub mod webhook_channel;
@@ -69,6 +70,10 @@ pub use sources::{
 };
 pub use supervisor::{
     DependencyGraph, SupervisorAgent, ValidationError, ValidationResult, ValidationWarning,
+};
+pub use supervisor_review::{
+    build_supervisor_prompt, load_constitution, run_builtin_supervisor, SupervisorReview,
+    SupervisorRunConfig, SupervisorVerdict,
 };
 pub use terminal_channel::{AutoApproveChannel, TerminalChannel, TerminalSessionChannel};
 pub use uri_pattern::{filter_uris, matches_uri};

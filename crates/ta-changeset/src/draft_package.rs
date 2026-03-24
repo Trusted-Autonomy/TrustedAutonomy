@@ -526,6 +526,11 @@ pub struct DraftPackage {
     /// to `DraftStatus::Approved`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_approvals: Vec<ApprovalRecord>,
+
+    /// AI supervisor review embedded after agent exit (v0.13.17.4).
+    /// Present when supervisor is enabled; `None` when disabled or skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_review: Option<crate::supervisor_review::SupervisorReview>,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -738,6 +743,7 @@ mod tests {
             vcs_status: None,
             parent_draft_id: None,
             pending_approvals: vec![],
+            supervisor_review: None,
         }
     }
 

@@ -113,6 +113,7 @@ mod tests {
             vcs_status: None,
             parent_draft_id: None,
             pending_approvals: vec![],
+            supervisor_review: None,
         };
 
         let adapter = JsonAdapter::new();

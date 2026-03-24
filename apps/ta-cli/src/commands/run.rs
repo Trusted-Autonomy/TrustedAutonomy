@@ -2365,6 +2365,88 @@ pub fn execute(
         }
     };
 
+    // 6d. Run supervisor agent for goal alignment and constitution review (v0.13.17.4).
+    //     Runs after required_checks, before draft build. Falls back to warn on failure.
+    let supervisor_review = {
+        let workflow_toml = staging_path.join(".ta/workflow.toml");
+        let wf = ta_submit::WorkflowConfig::load_or_default(&workflow_toml);
+        let sup_cfg = wf.supervisor.clone();
+
+        if !sup_cfg.enabled {
+            println!("  Supervisor review: disabled.");
+            None
+        } else {
+            // Update progress note.
+            if let Ok(store) = GoalRunStore::new(&config.goals_dir) {
+                let _ = store.update_progress_note(goal.goal_run_id, "running supervisor review");
+            }
+
+            println!();
+            println!("Running supervisor review...");
+
+            // Build run config.
+            let run_config = ta_changeset::SupervisorRunConfig {
+                enabled: true,
+                agent: sup_cfg.agent.clone(),
+                verdict_on_block: sup_cfg.verdict_on_block.clone(),
+                constitution_path: sup_cfg.constitution_path.clone(),
+                skip_if_no_constitution: sup_cfg.skip_if_no_constitution,
+                timeout_secs: sup_cfg.timeout_secs,
+            };
+
+            // Load constitution text.
+            let constitution_text = ta_changeset::load_constitution(&staging_path, &run_config);
+            if constitution_text.is_some() {
+                println!("  Constitution: loaded.");
+            } else if !run_config.skip_if_no_constitution {
+                println!("  Warning: no constitution file found.");
+            }
+
+            // Collect changed files from staging dir via change_summary.json or file walk.
+            let changed_files: Vec<String> = collect_changed_files(&staging_path);
+
+            // Run the built-in or custom supervisor.
+            let review = if sup_cfg.agent == "builtin" {
+                ta_changeset::run_builtin_supervisor(
+                    title,
+                    &changed_files,
+                    constitution_text.as_deref(),
+                    &run_config,
+                )
+            } else {
+                // Custom supervisor: spawn agent, read result from .ta/supervisor_result.json.
+                run_custom_supervisor(
+                    &staging_path,
+                    &sup_cfg.agent,
+                    title,
+                    &changed_files,
+                    &run_config,
+                )
+            };
+
+            // Print summary.
+            let verdict_label = match review.verdict {
+                ta_changeset::SupervisorVerdict::Pass => "[PASS]",
+                ta_changeset::SupervisorVerdict::Warn => "[WARN]",
+                ta_changeset::SupervisorVerdict::Block => "[BLOCK]",
+            };
+            println!("  Supervisor: {} {}", verdict_label, review.summary);
+            if !review.findings.is_empty() {
+                for finding in review.findings.iter().take(3) {
+                    println!("    - {}", finding);
+                }
+            }
+
+            // Update progress note with verdict.
+            if let Ok(store) = GoalRunStore::new(&config.goals_dir) {
+                let note = format!("Supervisor review: {}", review.verdict);
+                let _ = store.update_progress_note(goal.goal_run_id, &note);
+            }
+
+            Some(review)
+        }
+    };
+
     // 7. Build draft package from the diff.
     //    In macro sessions, the agent may have already submitted/applied drafts
     //    via MCP tools, transitioning the goal out of Running state. Only build
@@ -2415,6 +2497,18 @@ pub fn execute(
                 if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
                     if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
                         pkg.validation_log = validation_log;
+                        let _ = super::draft::save_package(config, &pkg);
+                    }
+                }
+            }
+        }
+
+        // 7c. Attach supervisor_review to the draft (v0.13.17.4).
+        if let Some(ref sup_review) = supervisor_review {
+            if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
+                    if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                        pkg.supervisor_review = Some(sup_review.clone());
                         let _ = super::draft::save_package(config, &pkg);
                     }
                 }
@@ -3194,6 +3288,235 @@ fn shell_quote(s: &str) -> String {
         format!("\"{}\"", s.replace('\"', "\\\""))
     } else {
         s.to_string()
+    }
+}
+
+// ── Supervisor helpers (v0.13.17.4) ────────────────────────────
+
+/// Collect changed file paths by reading `.ta/change_summary.json` written by the agent,
+/// or falling back to a recursive walk of source files in the staging directory.
+fn collect_changed_files(staging_path: &std::path::Path) -> Vec<String> {
+    // Prefer reading from change_summary.json — more accurate than a directory walk.
+    let summary_path = staging_path.join(".ta/change_summary.json");
+    if summary_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&summary_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(changes) = json.get("changes").and_then(|c| c.as_array()) {
+                    let paths: Vec<String> = changes
+                        .iter()
+                        .filter_map(|c| c.get("path").and_then(|p| p.as_str()))
+                        .map(|s| s.to_string())
+                        .collect();
+                    if !paths.is_empty() {
+                        return paths;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: collect source files from staging directory.
+    let mut files = Vec::new();
+    collect_source_files(staging_path, staging_path, &mut files, 0);
+    files.truncate(50);
+    files
+}
+
+/// Recursively collect source file paths relative to `root`.
+fn collect_source_files(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    files: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > 8 || files.len() >= 50 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_source_files(root, &path, files, depth + 1);
+        } else {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(
+                ext,
+                "rs" | "toml" | "md" | "json" | "yaml" | "ts" | "js" | "py"
+            ) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    files.push(rel.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Run a custom supervisor agent by spawning it and reading its result file.
+fn run_custom_supervisor(
+    staging_path: &std::path::Path,
+    agent_name: &str,
+    objective: &str,
+    changed_files: &[String],
+    config: &ta_changeset::SupervisorRunConfig,
+) -> ta_changeset::SupervisorReview {
+    use std::time::Instant;
+    let started = Instant::now();
+
+    // Write input context for the custom agent.
+    let input = serde_json::json!({
+        "objective": objective,
+        "changed_files": changed_files,
+    });
+    let input_path = staging_path.join(".ta/supervisor_input.json");
+    if let Err(e) = std::fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&input).unwrap_or_default(),
+    ) {
+        tracing::warn!(error = %e, "Failed to write supervisor input file");
+    }
+
+    // Look up agent manifest.
+    let agent_manifest = staging_path
+        .join(".ta/agents")
+        .join(format!("{}.toml", agent_name));
+    if !agent_manifest.exists() {
+        tracing::warn!(
+            agent = agent_name,
+            "Custom supervisor agent manifest not found — falling back to warn"
+        );
+        return fallback_supervisor_review(
+            agent_name,
+            &format!(
+                "Custom supervisor agent '{}' manifest not found at .ta/agents/{}.toml",
+                agent_name, agent_name
+            ),
+            started.elapsed().as_secs_f32(),
+        );
+    }
+
+    // The custom agent must write .ta/supervisor_result.json after running.
+    let result_path = staging_path.join(".ta/supervisor_result.json");
+    let _ = std::fs::remove_file(&result_path);
+
+    // Read command from agent manifest.
+    let manifest_content = match std::fs::read_to_string(&agent_manifest) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read supervisor agent manifest");
+            return fallback_supervisor_review(
+                agent_name,
+                &format!("Failed to read agent manifest: {}", e),
+                started.elapsed().as_secs_f32(),
+            );
+        }
+    };
+    let manifest: toml::Value = match toml::from_str(&manifest_content) {
+        Ok(v) => v,
+        Err(e) => {
+            return fallback_supervisor_review(
+                agent_name,
+                &format!("Failed to parse agent manifest: {}", e),
+                started.elapsed().as_secs_f32(),
+            );
+        }
+    };
+    let cmd_str = manifest
+        .get("agent")
+        .and_then(|a| a.get("command"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    if cmd_str.is_empty() {
+        return fallback_supervisor_review(
+            agent_name,
+            "Agent manifest missing [agent] command",
+            started.elapsed().as_secs_f32(),
+        );
+    }
+
+    let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+    let timeout = std::time::Duration::from_secs(config.timeout_secs);
+    let child = std::process::Command::new(parts[0])
+        .args(&parts[1..])
+        .current_dir(staging_path)
+        .env("TA_SUPERVISOR_INPUT", input_path.to_str().unwrap_or(""))
+        .env("TA_SUPERVISOR_OUTPUT", result_path.to_str().unwrap_or(""))
+        .spawn();
+
+    match child {
+        Err(e) => fallback_supervisor_review(
+            agent_name,
+            &format!("Failed to spawn agent: {}", e),
+            started.elapsed().as_secs_f32(),
+        ),
+        Ok(mut child) => {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = child.kill();
+                            return fallback_supervisor_review(
+                                agent_name,
+                                &format!("Agent timed out after {}s", config.timeout_secs),
+                                started.elapsed().as_secs_f32(),
+                            );
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                    Err(e) => {
+                        return fallback_supervisor_review(
+                            agent_name,
+                            &format!("Agent wait error: {}", e),
+                            started.elapsed().as_secs_f32(),
+                        );
+                    }
+                }
+            }
+
+            match std::fs::read_to_string(&result_path) {
+                Ok(content) => {
+                    match serde_json::from_str::<ta_changeset::SupervisorReview>(&content) {
+                        Ok(mut review) => {
+                            review.agent = agent_name.to_string();
+                            review.duration_secs = started.elapsed().as_secs_f32();
+                            review
+                        }
+                        Err(e) => fallback_supervisor_review(
+                            agent_name,
+                            &format!("Failed to parse result JSON: {}", e),
+                            started.elapsed().as_secs_f32(),
+                        ),
+                    }
+                }
+                Err(e) => fallback_supervisor_review(
+                    agent_name,
+                    &format!("Agent did not write result file: {}", e),
+                    started.elapsed().as_secs_f32(),
+                ),
+            }
+        }
+    }
+}
+
+fn fallback_supervisor_review(
+    agent: &str,
+    reason: &str,
+    duration_secs: f32,
+) -> ta_changeset::SupervisorReview {
+    ta_changeset::SupervisorReview {
+        verdict: ta_changeset::SupervisorVerdict::Warn,
+        scope_ok: true,
+        findings: vec![format!("Supervisor review incomplete: {}", reason)],
+        summary: "Supervisor could not complete review (fallback to warn).".to_string(),
+        agent: agent.to_string(),
+        duration_secs,
     }
 }
 
@@ -5235,6 +5558,7 @@ pre_launch:
             vcs_status: None,
             parent_draft_id: None,
             pending_approvals: vec![],
+            supervisor_review: None,
         };
 
         // Save the draft package.
@@ -5393,6 +5717,7 @@ pre_launch:
             vcs_status: None,
             parent_draft_id: None,
             pending_approvals: vec![],
+            supervisor_review: None,
         };
 
         super::super::draft::save_package(&config, &parent_draft).unwrap();

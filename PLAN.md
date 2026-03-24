@@ -6252,7 +6252,7 @@ VcsAdapter::stage_env()
 ---
 
 ### v0.13.17.4 — Supervisor Agent (Goal Alignment & Constitution Review)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Add a configurable supervisor agent that runs automatically after the main agent exits but before `ta draft build`. The supervisor reviews the staged changes against the goal's stated objective and the project constitution, producing a structured `SupervisorReview` embedded in the draft package. This is the AI-powered "is this work aligned with what was asked?" check — distinct from the static file-shrinkage guards in v0.13.17.2 item 8.
 
 #### Design
@@ -6288,31 +6288,33 @@ skip_if_no_constitution = true    # don't fail if constitution file is absent
 **Built-in supervisor prompt** (condensed):
 > "You are a supervisor reviewing an AI agent's work. The agent was given this goal: `{objective}`. It modified these files: `{changed_files}`. The project constitution is: `{constitution}`. Answer: (1) Did the agent stay within the goal scope? (2) Are any changes surprising or potentially harmful? (3) Does the work appear to satisfy the objective? Output JSON: `{verdict: pass|warn|block, scope_ok: bool, findings: [str], summary: str}`."
 
-#### Items
+#### Completed
 
-1. [ ] **`SupervisorReview` struct in `ta-changeset`**: Fields: `verdict: SupervisorVerdict` (`Pass | Warn | Block`), `scope_ok: bool`, `findings: Vec<String>`, `summary: String`, `agent: String` (which supervisor ran), `duration_secs: f32`. Serializes to/from JSON.
+1. [x] **`SupervisorReview` struct in `ta-changeset`**: Fields: `verdict: SupervisorVerdict` (`Pass | Warn | Block`), `scope_ok: bool`, `findings: Vec<String>`, `summary: String`, `agent: String` (which supervisor ran), `duration_secs: f32`. Serializes to/from JSON. Implemented in `crates/ta-changeset/src/supervisor_review.rs`.
 
-2. [ ] **`DraftPackage.supervisor_review: Option<SupervisorReview>`**: Embed alongside `validation_log`. `None` when supervisor is disabled or skipped.
+2. [x] **`DraftPackage.supervisor_review: Option<SupervisorReview>`**: Embed alongside `validation_log`. `None` when supervisor is disabled or skipped. All `DraftPackage` constructors updated.
 
-3. [ ] **Supervisor invocation in `run.rs` finalize pipeline**: After agent exits, if `[supervisor] enabled = true`, spawn the supervisor agent with a read-only staging view. Timeout: `supervisor_timeout_secs` (default 120s — short, it's a review not an implementation). Write result to goal's progress notes: "Supervisor review: pass / warn / block".
+3. [x] **Supervisor invocation in `run.rs` finalize pipeline**: Step 6d after required_checks. Reads `[supervisor]` from workflow.toml, runs supervisor, writes verdict to goal progress notes. Falls back to `warn` on any failure.
 
-4. [ ] **Built-in supervisor**: `crates/ta-supervisor/` (or module in `ta-agent`). Renders the review prompt, calls the configured LLM (same API key as the main agent), parses structured JSON output. Falls back to `warn` if the LLM call fails (never block on supervisor failure).
+4. [x] **Built-in supervisor**: Implemented in `crates/ta-changeset/src/supervisor_review.rs` as `run_builtin_supervisor()`. Calls Anthropic API with review prompt, parses structured JSON. Falls back to `warn` if LLM call fails.
 
-5. [ ] **Custom supervisor agent**: If `[supervisor] agent = "my-reviewer"`, resolve agent from `.ta/agents/my-reviewer.toml` and spawn it the same way as a goal agent. The agent must write `.ta/supervisor_result.json` in staging; `run.rs` reads it after exit.
+5. [x] **Custom supervisor agent**: `run_custom_supervisor()` in `run.rs`. Reads `[agent] command` from `.ta/agents/<name>.toml`, spawns process with `TA_SUPERVISOR_INPUT` / `TA_SUPERVISOR_OUTPUT` env vars, reads `.ta/supervisor_result.json`. Timeout enforced, falls back to `warn` on failure.
 
-6. [ ] **`ta draft view` shows supervisor review**: After validation log, print supervisor summary. Verdict color-coded: green `[PASS]`, yellow `[WARN]`, red `[BLOCK]`. Show `scope_ok` and top 3 findings. Full findings available with `ta draft view --full`.
+6. [x] **`ta draft view` shows supervisor review**: After validation log, prints supervisor summary with `[PASS]`/`[WARN]`/`[BLOCK]` verdict, scope_ok, summary, findings (top 3 by default, all with `--detail full`), and duration.
 
-7. [ ] **`ta draft approve` respects `block` verdict**: If `supervisor_review.verdict == Block` and `workflow.verdict_on_block == "block"`, refuse approval with: "Supervisor review blocked this draft: `<summary>`. Use `--override` to approve anyway." (Same pattern as validation gate.)
+7. [x] **`ta draft approve` respects `block` verdict**: If `supervisor_review.verdict == Block` and `workflow.verdict_on_block == "block"`, refuses approval with clear error and `--override` suggestion.
 
-8. [ ] **`ta constitution check` integration**: If `constitution.toml` exists, pass its content to the built-in supervisor. The supervisor checks both goal alignment AND constitution compliance in a single pass — no separate tool call needed.
+8. [x] **Constitution loading**: `load_constitution()` checks configured path, then `.ta/constitution.toml`, then `docs/TA-CONSTITUTION.md`. Passed to built-in supervisor prompt.
 
-9. [ ] **Tests**:
-   - `test_supervisor_pass_when_changes_match_objective`: Mock LLM returns `{verdict: "pass"}`, verify embedded in draft.
-   - `test_supervisor_warn_on_out_of_scope_file`: Changes include `.gitignore` but goal is "add feature X", verify `scope_ok: false, verdict: "warn"`.
-   - `test_supervisor_block_respected_by_approve`: Draft with `verdict: "block"`, verify `ta draft approve` returns error without `--override`.
-   - `test_supervisor_timeout_falls_back_to_warn`: Supervisor times out, verify verdict is `warn` not `block` and draft still builds.
+9. [x] **Tests (16 new)**: `test_build_supervisor_prompt_*` (4), `test_supervisor_verdict_*` (2), `test_parse_supervisor_response_*` (5), `test_extract_json_*` (2), `test_run_builtin_supervisor_fallback_no_api_key` (1), `test_supervisor_verdict_serde` (1), `test_supervisor_verdict_display` (1).
 
-10. [ ] **USAGE.md "Supervisor Agent"**: Explain the built-in vs custom supervisor, `verdict_on_block` modes, how to write a custom supervisor agent manifest, and how to read the review output in `ta draft view`.
+10. [x] **USAGE.md "Supervisor Agent"**: Section added covering built-in vs custom supervisor, `verdict_on_block` modes, custom supervisor agent manifest, and reading the review output in `ta draft view`.
+
+#### Deferred
+
+- **Supervisor-to-agent feedback loop**: If supervisor blocks, optionally re-spawn the main agent with the supervisor findings as context. → v0.14.x workflow engine.
+- **Multi-supervisor consensus**: Run 3 supervisors in parallel and aggregate verdicts. → v0.14.x parallel workflow execution.
+- **Verdict color-coding in terminal output**: `[PASS]` green / `[WARN]` yellow / `[BLOCK]` red. → Deferred; current output uses text labels only.
 
 #### Deferred
 

@@ -479,6 +479,98 @@ ta draft approve <id> --override   # approve anyway (adds audit note)
 
 Each check captures: the command, exit code, duration in seconds, and the last 20 lines of output for context.
 
+### Supervisor Agent
+
+After `required_checks` run, an AI supervisor reviews the staged changes for goal alignment and constitution compliance before the draft is built. The supervisor is a short-lived review — not an implementation agent.
+
+**How it works**
+
+1. Agent exits and `required_checks` run.
+2. Supervisor reads: the goal's stated objective, the list of changed files (from `.ta/change_summary.json`), and the project constitution (if present).
+3. Supervisor calls the LLM and returns a structured verdict: `pass`, `warn`, or `block`.
+4. The verdict is embedded in the draft package and shown in `ta draft view`.
+
+**Configuration** (`.ta/workflow.toml`):
+
+```toml
+[supervisor]
+enabled = true                         # default: true
+agent = "builtin"                      # "builtin" (Anthropic API) | custom agent name
+verdict_on_block = "warn"              # "warn" = show only | "block" = refuse approve
+constitution_path = ".ta/constitution.toml"  # optional; also checks docs/TA-CONSTITUTION.md
+skip_if_no_constitution = true         # don't fail if no constitution file
+timeout_secs = 120
+```
+
+**Built-in supervisor** (`agent = "builtin"`) uses your `ANTHROPIC_API_KEY` to call the Anthropic API. It reviews scope (did the agent modify only files relevant to the goal?) and constitution compliance in a single pass.
+
+If the API key is not set, the network call fails, or the response cannot be parsed, the supervisor falls back to a `warn` verdict automatically — it never blocks a draft due to its own failure.
+
+**Draft view output**:
+
+```
+SUPERVISOR REVIEW (builtin):
+============================================================
+  Verdict:  [PASS]
+  Scope OK: yes
+  Summary:  Changes are well-scoped to the authentication feature.
+  Duration: 3.2s
+```
+
+With `[WARN]` or `[BLOCK]`:
+
+```
+SUPERVISOR REVIEW (builtin):
+============================================================
+  Verdict:  [WARN]
+  Scope OK: no
+  Summary:  Most changes are relevant but two unrelated files were modified.
+  Findings (2/2):
+    - CHANGELOG.md was updated but the goal did not mention documentation.
+    - .env.example contains a new placeholder key unrelated to the feature.
+  Duration: 4.1s
+```
+
+**Approval gate** (when `verdict_on_block = "block"`):
+
+```bash
+ta draft approve <id>              # blocked if supervisor verdict is Block
+ta draft approve <id> --override   # approve despite block verdict (logged to audit trail)
+```
+
+**Custom supervisor agent**
+
+For full control, point `agent` to a custom agent manifest in `.ta/agents/`:
+
+```toml
+# .ta/workflow.toml
+[supervisor]
+agent = "my-reviewer"
+```
+
+```toml
+# .ta/agents/my-reviewer.toml
+[agent]
+command = "python3 scripts/supervisor.py"
+```
+
+TA passes two environment variables to the process:
+- `TA_SUPERVISOR_INPUT` — path to a JSON file with `{"objective": "...", "changed_files": [...]}`
+- `TA_SUPERVISOR_OUTPUT` — path where the agent must write a `SupervisorReview` JSON
+
+The output file must match:
+
+```json
+{
+  "verdict": "pass",
+  "scope_ok": true,
+  "findings": [],
+  "summary": "Changes look aligned with the stated goal.",
+  "agent": "my-reviewer",
+  "duration_secs": 1.5
+}
+```
+
 ### Agents
 
 TA wraps any agent framework. Out of the box it supports:

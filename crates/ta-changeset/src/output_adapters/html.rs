@@ -310,6 +310,7 @@ mod tests {
             vcs_status: None,
             parent_draft_id: None,
             pending_approvals: vec![],
+            supervisor_review: None,
         };
         pkg.status = DraftStatus::PendingReview;
 

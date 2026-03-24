@@ -70,6 +70,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub vcs: VcsConfig,
 
+    /// Supervisor agent configuration (v0.13.17.4)
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
+
     /// Commands to run after agent exit to produce hard validation evidence (v0.13.17).
     ///
     /// Each command is run in the staging workspace. Results are embedded in the
@@ -320,6 +324,79 @@ pub struct VcsConfig {
     /// Agent environment isolation settings.
     #[serde(default)]
     pub agent: VcsAgentConfig,
+}
+
+/// Supervisor agent configuration (v0.13.17.4).
+///
+/// Controls the AI-powered review that runs after the main agent exits
+/// but before `ta draft build`. The supervisor checks goal alignment
+/// and constitution compliance.
+///
+/// ```toml
+/// [supervisor]
+/// enabled = true
+/// agent = "builtin"              # "builtin" | custom agent name in .ta/agents/
+/// verdict_on_block = "warn"      # "warn" | "block"
+/// constitution_path = ".ta/constitution.toml"
+/// skip_if_no_constitution = true
+/// timeout_secs = 120
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupervisorConfig {
+    /// Enable the supervisor agent. Default: true when any agent is configured.
+    #[serde(default = "default_supervisor_enabled")]
+    pub enabled: bool,
+
+    /// Which agent runs the review. "builtin" uses the Anthropic API directly.
+    #[serde(default = "default_supervisor_agent")]
+    pub agent: String,
+
+    /// Behavior when verdict is Block. "warn" = show in draft view only.
+    /// "block" = refuse `ta draft approve` without `--override`.
+    #[serde(default = "default_verdict_on_block")]
+    pub verdict_on_block: String,
+
+    /// Path to the project constitution file (relative to workspace root).
+    /// If absent, falls back to `.ta/constitution.toml`, then `docs/TA-CONSTITUTION.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constitution_path: Option<std::path::PathBuf>,
+
+    /// Don't fail if the constitution file is absent.
+    #[serde(default = "default_supervisor_skip_no_constitution")]
+    pub skip_if_no_constitution: bool,
+
+    /// Supervisor timeout in seconds (default 120 — short review, not implementation).
+    #[serde(default = "default_supervisor_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_supervisor_enabled() -> bool {
+    true
+}
+fn default_supervisor_agent() -> String {
+    "builtin".to_string()
+}
+fn default_verdict_on_block() -> String {
+    "warn".to_string()
+}
+fn default_supervisor_timeout() -> u64 {
+    120
+}
+fn default_supervisor_skip_no_constitution() -> bool {
+    true
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_supervisor_enabled(),
+            agent: default_supervisor_agent(),
+            verdict_on_block: default_verdict_on_block(),
+            constitution_path: None,
+            skip_if_no_constitution: default_supervisor_skip_no_constitution(),
+            timeout_secs: default_supervisor_timeout(),
+        }
+    }
 }
 
 /// Submit adapter configuration

@@ -1442,6 +1442,7 @@ pub(crate) fn build_package(
         vcs_status: None,
         parent_draft_id: None, // Set below if this is a follow-up.
         pending_approvals: vec![],
+        supervisor_review: None,
     };
 
     // v0.12.2.1: Track parent_draft_id and compute composited diff for follow-up chains.
@@ -2454,6 +2455,49 @@ fn view_package(
         }
     }
 
+    // Show supervisor review (v0.13.17.4).
+    if let Some(ref review) = pkg.supervisor_review {
+        println!();
+        println!("SUPERVISOR REVIEW ({}):", review.agent);
+        println!("{}", "=".repeat(60));
+        let verdict_label = match review.verdict {
+            ta_changeset::SupervisorVerdict::Pass => "[PASS]",
+            ta_changeset::SupervisorVerdict::Warn => "[WARN]",
+            ta_changeset::SupervisorVerdict::Block => "[BLOCK]",
+        };
+        println!("  Verdict:  {}", verdict_label);
+        println!("  Scope OK: {}", if review.scope_ok { "yes" } else { "no" });
+        println!("  Summary:  {}", review.summary);
+        if !review.findings.is_empty() {
+            let show_full = effective_detail != DetailLevel::Top;
+            let max_findings = if show_full {
+                review.findings.len()
+            } else {
+                3.min(review.findings.len())
+            };
+            println!("  Findings ({}/{}):", max_findings, review.findings.len());
+            for finding in review.findings.iter().take(max_findings) {
+                println!("    - {}", finding);
+            }
+            if review.findings.len() > 3 && !show_full {
+                println!(
+                    "    (use --detail full to show all {} findings)",
+                    review.findings.len()
+                );
+            }
+        }
+        println!("  Duration: {:.1}s", review.duration_secs);
+        if matches!(review.verdict, ta_changeset::SupervisorVerdict::Block) {
+            println!();
+            println!(
+                "  Note: Supervisor verdict is BLOCK. Check workflow.toml [supervisor] verdict_on_block."
+            );
+            println!(
+                "  Use `ta draft approve --override` if you want to approve despite the block verdict."
+            );
+        }
+    }
+
     // Show pending actions if any (v0.5.1).
     if !pkg.changes.pending_actions.is_empty() {
         println!();
@@ -2516,9 +2560,33 @@ fn approve_package(
         );
     }
 
-    // Load governance configuration.
+    // Block approval if supervisor verdict is Block and verdict_on_block = "block" (v0.13.17.4).
+    // Load workflow config here for supervisor check (reused below for governance).
     let wf_path = config.workspace_root.join(".ta/workflow.toml");
     let wf = ta_submit::WorkflowConfig::load_or_default(&wf_path);
+
+    if !force_override {
+        if let Some(ref review) = pkg.supervisor_review {
+            if matches!(review.verdict, ta_changeset::SupervisorVerdict::Block)
+                && wf.supervisor.verdict_on_block == "block"
+            {
+                anyhow::bail!(
+                    "Supervisor review blocked this draft: {}\n\
+                     Findings:\n{}\n\
+                     Use `ta draft approve --override` to approve despite the block verdict.",
+                    review.summary,
+                    review
+                        .findings
+                        .iter()
+                        .map(|f| format!("  - {}", f))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
+        }
+    }
+
+    // Load governance configuration.
     let gov = &wf.governance;
 
     // Validate reviewer identity against allowlist (if configured).
