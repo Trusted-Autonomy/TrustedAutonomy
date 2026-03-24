@@ -6252,7 +6252,7 @@ VcsAdapter::stage_env()
 ---
 
 ### v0.13.17.4 — Supervisor Agent (Goal Alignment & Constitution Review)
-<!-- status: done -->
+<!-- status: pending -->
 **Goal**: Add a configurable supervisor agent that runs automatically after the main agent exits but before `ta draft build`. The supervisor reviews the staged changes against the goal's stated objective and the project constitution, producing a structured `SupervisorReview` embedded in the draft package. This is the AI-powered "is this work aligned with what was asked?" check — distinct from the static file-shrinkage guards in v0.13.17.2 item 8.
 
 #### Design
@@ -6288,54 +6288,110 @@ skip_if_no_constitution = true    # don't fail if constitution file is absent
 **Built-in supervisor prompt** (condensed):
 > "You are a supervisor reviewing an AI agent's work. The agent was given this goal: `{objective}`. It modified these files: `{changed_files}`. The project constitution is: `{constitution}`. Answer: (1) Did the agent stay within the goal scope? (2) Are any changes surprising or potentially harmful? (3) Does the work appear to satisfy the objective? Output JSON: `{verdict: pass|warn|block, scope_ok: bool, findings: [str], summary: str}`."
 
-#### Completed
+#### Items
 
-1. [x] **`SupervisorReview` struct in `ta-changeset`**: Fields: `verdict: SupervisorVerdict` (`Pass | Warn | Block`), `scope_ok: bool`, `findings: Vec<String>`, `summary: String`, `agent: String` (which supervisor ran), `duration_secs: f32`. Serializes to/from JSON. Implemented in `crates/ta-changeset/src/supervisor_review.rs`.
+1. [ ] **`SupervisorReview` struct in `ta-changeset`**: Fields: `verdict: SupervisorVerdict` (`Pass | Warn | Block`), `scope_ok: bool`, `findings: Vec<String>`, `summary: String`, `agent: String` (which supervisor ran), `duration_secs: f32`. Serializes to/from JSON.
 
-2. [x] **`DraftPackage.supervisor_review: Option<SupervisorReview>`**: Embed alongside `validation_log`. `None` when supervisor is disabled or skipped. All `DraftPackage` constructors updated.
+2. [ ] **`DraftPackage.supervisor_review: Option<SupervisorReview>`**: Embed alongside `validation_log`. `None` when supervisor is disabled or skipped.
 
-3. [x] **Supervisor invocation in `run.rs` finalize pipeline**: Step 6d after required_checks. Reads `[supervisor]` from workflow.toml, runs supervisor, writes verdict to goal progress notes. Falls back to `warn` on any failure.
+3. [ ] **Supervisor invocation in `run.rs` finalize pipeline**: After agent exits, if `[supervisor] enabled = true`, spawn the supervisor agent with a read-only staging view. Timeout: `supervisor_timeout_secs` (default 120s — short, it's a review not an implementation). Write result to goal's progress notes: "Supervisor review: pass / warn / block".
 
-4. [x] **Built-in supervisor**: Implemented in `crates/ta-changeset/src/supervisor_review.rs` as `run_builtin_supervisor()`. Calls Anthropic API with review prompt, parses structured JSON. Falls back to `warn` if LLM call fails.
+4. [ ] **Built-in supervisor**: `crates/ta-supervisor/` (or module in `ta-agent`). Renders the review prompt, calls the configured LLM (same API key as the main agent), parses structured JSON output. Falls back to `warn` if the LLM call fails (never block on supervisor failure).
 
-5. [x] **Custom supervisor agent**: `run_custom_supervisor()` in `run.rs`. Reads `[agent] command` from `.ta/agents/<name>.toml`, spawns process with `TA_SUPERVISOR_INPUT` / `TA_SUPERVISOR_OUTPUT` env vars, reads `.ta/supervisor_result.json`. Timeout enforced, falls back to `warn` on failure.
+5. [ ] **Custom supervisor agent**: If `[supervisor] agent = "my-reviewer"`, resolve agent from `.ta/agents/my-reviewer.toml` and spawn it the same way as a goal agent. The agent must write `.ta/supervisor_result.json` in staging; `run.rs` reads it after exit.
 
-6. [x] **`ta draft view` shows supervisor review**: After validation log, prints supervisor summary with `[PASS]`/`[WARN]`/`[BLOCK]` verdict, scope_ok, summary, findings (top 3 by default, all with `--detail full`), and duration.
+6. [ ] **`ta draft view` shows supervisor review**: After validation log, print supervisor summary. Verdict color-coded: green `[PASS]`, yellow `[WARN]`, red `[BLOCK]`. Show `scope_ok` and top 3 findings. Full findings available with `ta draft view --full`.
 
-7. [x] **`ta draft approve` respects `block` verdict**: If `supervisor_review.verdict == Block` and `workflow.verdict_on_block == "block"`, refuses approval with clear error and `--override` suggestion.
+7. [ ] **`ta draft approve` respects `block` verdict**: If `supervisor_review.verdict == Block` and `workflow.verdict_on_block == "block"`, refuse approval with: "Supervisor review blocked this draft: `<summary>`. Use `--override` to approve anyway." (Same pattern as validation gate.)
 
-8. [x] **Constitution loading**: `load_constitution()` checks configured path, then `.ta/constitution.toml`, then `docs/TA-CONSTITUTION.md`. Passed to built-in supervisor prompt.
+8. [ ] **`ta constitution check` integration**: If `constitution.toml` exists, pass its content to the built-in supervisor. The supervisor checks both goal alignment AND constitution compliance in a single pass — no separate tool call needed.
 
-9. [x] **Tests (16 new)**: `test_build_supervisor_prompt_*` (4), `test_supervisor_verdict_*` (2), `test_parse_supervisor_response_*` (5), `test_extract_json_*` (2), `test_run_builtin_supervisor_fallback_no_api_key` (1), `test_supervisor_verdict_serde` (1), `test_supervisor_verdict_display` (1).
+9. [ ] **Tests**:
+   - `test_supervisor_pass_when_changes_match_objective`: Mock LLM returns `{verdict: "pass"}`, verify embedded in draft.
+   - `test_supervisor_warn_on_out_of_scope_file`: Changes include `.gitignore` but goal is "add feature X", verify `scope_ok: false, verdict: "warn"`.
+   - `test_supervisor_block_respected_by_approve`: Draft with `verdict: "block"`, verify `ta draft approve` returns error without `--override`.
+   - `test_supervisor_timeout_falls_back_to_warn`: Supervisor times out, verify verdict is `warn` not `block` and draft still builds.
 
-10. [x] **USAGE.md "Supervisor Agent"**: Section added covering built-in vs custom supervisor, `verdict_on_block` modes, custom supervisor agent manifest, and reading the review output in `ta draft view`.
-
-#### Deferred
-
-- **Supervisor-to-agent feedback loop**: If supervisor blocks, optionally re-spawn the main agent with the supervisor findings as context. → v0.14.x workflow engine.
-- **Multi-supervisor consensus**: Run 3 supervisors in parallel and aggregate verdicts. → v0.14.x parallel workflow execution.
-- **Verdict color-coding in terminal output**: `[PASS]` green / `[WARN]` yellow / `[BLOCK]` red. → Deferred; current output uses text labels only.
+10. [ ] **USAGE.md "Supervisor Agent"**: Explain the built-in vs custom supervisor, `verdict_on_block` modes, how to write a custom supervisor agent manifest, and how to read the review output in `ta draft view`.
 
 #### Deferred
 
 - **Supervisor-to-agent feedback loop**: If supervisor blocks, optionally re-spawn the main agent with the supervisor findings as context ("here's what was wrong, fix it"). Deferred — this is the retry loop in `code-project-workflow.md` and needs the workflow engine (v0.14.x).
 - **Multi-supervisor consensus**: Run 3 supervisors in parallel (code quality, security, constitution) and aggregate verdicts. Deferred to v0.14.x workflow parallel execution.
 
-#### Version: `0.13.17.4-alpha`
+#### Version: `0.13.17-alpha.4`
+
+---
+
+### v0.13.17.5 — Gitignored Artifact Detection & Human Review Gate
+<!-- status: pending -->
+**Goal**: Before `ta draft apply` runs `git add`, check every artifact path in the draft manifest against `.gitignore`. For each gitignored path: silently drop it from the `git add` list if it is known-safe (see below), or surface it to the human reviewer if the file has meaningful content changes. Never let a gitignored artifact silently fail the entire `git add` command.
+
+#### Problem
+
+`ta draft apply --submit` builds a `git add <path1> <path2> ...` command from the draft's artifact list. If any path is gitignored, `git add` prints an error and aborts — even if every other path would have staged correctly. This caused the v0.13.17.4 PR creation to fail because `.mcp.json` (gitignored) was in the artifact list.
+
+The silent failure is the real bug: apply said "complete" but no PR was created.
+
+#### Design
+
+```
+Draft artifact list
+       │
+       ▼
+[gitignore filter]  ← new step before git add
+       │
+       ├── not ignored → git add (as before)
+       │
+       └── gitignored → classify:
+              │
+              ├── known-safe-to-drop (e.g. .mcp.json, *.local.toml)
+              │       → drop silently, log at debug level
+              │
+              └── unexpected-ignored (e.g. a source file that got gitignored by mistake)
+                      → print warning in apply output
+                      → show in `ta draft view` under a new "Ignored Artifacts" section
+                      → require human acknowledgement before apply completes
+```
+
+**Known-safe-to-drop list** (hardcoded, extendable via `[submit.ignored_artifact_patterns]`):
+- `.mcp.json` — daemon runtime config, always gitignored
+- `*.local.toml` — personal overrides, always gitignored
+- `.ta/daemon.toml`, `.ta/*.pid`, `.ta/*.lock` — runtime state
+
+#### Items
+
+1. [ ] **`filter_gitignored_artifacts(paths, workspace_root) -> (to_add, ignored)`**: Use `git check-ignore --stdin` to classify each artifact path. Returns two lists: paths to add, and paths that are gitignored.
+
+2. [ ] **Known-safe drop list**: Hardcode the patterns above. Paths matching known-safe patterns are silently dropped. Log at `tracing::debug` level: `"Dropping gitignored artifact (known safe): {path}"`.
+
+3. [ ] **Unexpected-ignored warning**: For gitignored paths NOT on the known-safe list, print a warning during apply: `"Warning: artifact {path} is gitignored — dropping from git add. Was this intentional?"`. Record in the apply output so it's visible to the user.
+
+4. [ ] **`ta draft view` "Ignored Artifacts" section**: If any artifacts were gitignored (safe or unexpected), show them under a collapsible section. Unexpected-ignored artifacts are highlighted in yellow with a note: "This file is gitignored — it was NOT committed. Check if the .gitignore entry is correct."
+
+5. [ ] **Never fail git add due to gitignored path**: The filter runs before `git add`. The `git add` command only receives non-ignored paths. If the filtered list is empty (all artifacts were gitignored), complete with a warning rather than an error: `"All artifacts were gitignored — nothing was committed. Check the draft's artifact list."`.
+
+6. [ ] **Test coverage**:
+   - `test_known_safe_dropped_silently`: Draft with `.mcp.json` artifact → drops from git add, no warning printed.
+   - `test_unexpected_ignored_warns`: Draft with a source file that happens to be gitignored → warning printed, shown in draft view.
+   - `test_all_ignored_completes_with_warning`: All artifacts gitignored → apply completes (no panic/error), user sees clear message.
+   - `test_gitignore_filter_does_not_affect_non_ignored`: Normal artifacts pass through unchanged.
+
+#### Version: `0.13.17-alpha.5`
 
 ---
 
 > **⬇ PUBLIC BETA** — v0.13.x complete: runtime flexibility (local models, containers), enterprise governance (audit ledger, action governance, compliance), community ecosystem, and goal workflow automation. TA is ready for team and enterprise deployments.
 
-### Public Release: `public-alpha-v0.13.17.3`
+### Public Release: `public-alpha-v0.13.17.5`
 
-**Trigger**: After v0.13.17.3 merges and all v0.13.17.x phases are `<!-- status: done -->`.
+**Trigger**: After all v0.13.17.x phases (through v0.13.17.5) are `<!-- status: done -->`.
 
 **Steps**:
-1. Pin binary version to `0.13.17.3` in `apps/ta-cli/Cargo.toml` and `CLAUDE.md`
-2. Push tag `public-alpha-v0.13.17.3` → triggers release workflow
+1. Pin binary version to `0.13.17-alpha.5` in `Cargo.toml` and `CLAUDE.md`
+2. Push tag `public-alpha-v0.13.17.5` → triggers release workflow
 3. Verify assets: macOS DMG, Linux tarball, Windows MSI, checksums
-4. Re-bump to `0.14.3-alpha` for ongoing development
+4. Re-bump to `0.13.17-alpha.6` (or `0.14.0-alpha` if v0.14.x begins) for ongoing development
 
 **Note on version divergence**: Binary was at `0.14.2-alpha` when this milestone is reached (v0.14.0–v0.14.2 were implemented mid-v0.13.x series). The public release intentionally pins to `0.13.17.3` to signal the v0.13 series completion. See CLAUDE.md "Plan Phase Numbers vs Binary Semver" for rationale.
 
@@ -6452,6 +6508,8 @@ These are addressed across v0.14.4–v0.14.5.
 3. [ ] **Phase dependency declarations**: Allow phases to declare `depends_on = ["v0.13.17.3"]` in PLAN.md frontmatter or a companion `plan-deps.toml`. `ta plan status` shows dependency chains. `ta run` blocks if a declared dependency is not done (regardless of version order).
 
 4. [ ] **Version-phase sync check**: `ta plan status --check-versions` verifies the workspace binary version matches the highest completed phase. If `0.13.17.3` is done but binary is `0.14.2-alpha`, print: `"Binary version (0.14.2-alpha) is ahead of highest sequential completed phase (0.13.17.3). Consider pinning for release — see CLAUDE.md 'Public Release Process'."`.
+
+5. [ ] **Remove deprecated `auto_commit`/`auto_push` fields from `SubmitConfig`**: Delete the two deprecated bool fields from `crates/ta-submit/src/config.rs`, remove the backward-compat branches from `effective_auto_submit()`, and update `workflow.toml` to use `auto_submit = true` instead. Update docs and any test fixtures using the old keys. The new canonical form is `auto_submit = true` (or rely on the default: submit when adapter ≠ "none").
 
 #### Version: `0.14.3-alpha`
 
