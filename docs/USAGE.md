@@ -3490,6 +3490,20 @@ Before publishing a public release, run the full verification suite including in
 
 The `--ignored` flag runs tests marked `#[ignore]` — these include E2E tests that require a live daemon and integration tests with real external tools. Run them with `--test-threads=1` to avoid port conflicts between daemon instances.
 
+**E2E test descriptions** (in `crates/ta-changeset/tests/validation_log.rs`):
+
+| Test | What it exercises |
+|------|------------------|
+| `test_draft_validation_log_e2e` | Starts a live `ta-daemon`, writes a workflow with `required_checks = ["echo validation-ok"]`, verifies the daemon socket is reachable and the workflow TOML parses correctly. Full `validation_log` assertion requires an MCP client session. |
+| `test_dependency_graph_e2e` | Starts a live daemon, writes a two-step workflow with `depends_on = ["step-1"]`, validates structure: two steps, correct dependency reference. Full ordering assertion requires an MCP client session. |
+| `test_ollama_agent_mock_e2e` | Starts a live daemon, validates a canned Ollama API response fixture (model, done fields). Full test with mock HTTP server on `localhost:11434` requires additional setup. |
+
+To run a single E2E test:
+
+```bash
+./dev cargo test -p ta-changeset test_dependency_graph_e2e -- --ignored
+```
+
 ### Versioning and Release Lifecycle
 
 TA uses [semver](https://semver.org/): `MAJOR.MINOR.PATCH-prerelease`.
@@ -7024,7 +7038,8 @@ description = "Curated API documentation to reduce hallucinations when integrati
 source = "github:andrewyng/context-hub"
 content_path = "content/"
 access = "read-write"        # "read-only" | "read-write" | "disabled"
-auto_query = true            # Agent auto-consults before API calls
+auto_query = true            # Register in compact community note (default behavior)
+pre_inject = false           # Set true to inject full guidance block into CLAUDE.md
 languages = ["python", "javascript", "rust"]
 
 [[resources]]
@@ -7093,18 +7108,36 @@ Documents older than 90 days get a staleness warning with a `ta community sync` 
 
 ### Agent integration
 
-When resources with `auto_query = true` are configured, TA automatically injects a section into the agent's CLAUDE.md context at goal start:
+When resources with `auto_query = true` are configured, TA injects a compact note into the agent's CLAUDE.md context at goal start:
 
 ```
-## Community Knowledge Resources (auto-query enabled)
+# Community Knowledge (MCP)
+Available tools: community_search, community_get, community_annotate.
+Resources: api-docs (api-integration), security-threats (security-intelligence). Use community_search before making API calls or reviewing security-sensitive code.
+```
+
+This compact note stays under 200 tokens regardless of how many resources are registered. Agents use the tools on demand rather than having all guidance pre-loaded.
+
+**Opt-in pre-injection**: For resources where you want full per-resource guidance injected at goal start (for known heavy integration work), set `pre_inject = true`:
+
+```toml
+[[resources]]
+name = "api-docs"
+auto_query = true
+pre_inject = true   # Full guidance block injected into CLAUDE.md
+```
+
+With `pre_inject = true`, the agent receives:
+```
+## Community Knowledge Resources (pre-loaded)
 - api-docs (intent: api-integration): Curated API documentation...
   → Before calling a third-party API, search:
     community_search { query: "<service> <operation>", intent: "api-integration" }
-...
-Always attribute community sources in your output: [community: <resource>/<doc-id>]
 ```
 
-The agent then calls the plugin's tools during goal execution:
+The tradeoff: `pre_inject = false` (default) is surgical — agents pull context on demand, preserving context budget. `pre_inject = true` is pre-loaded — full guidance available without an extra tool call, but consumes more context tokens.
+
+The agent calls the plugin's tools during goal execution:
 - `community_search { query, intent?, resource? }` — keyword search across cached docs
 - `community_get { id }` — fetch a specific document
 - `community_annotate { id, note }` — stage a gap annotation for review
@@ -7112,6 +7145,31 @@ The agent then calls the plugin's tools during goal execution:
 - `community_suggest { title, content, intent, resource }` — stage a new doc proposal
 
 All write operations are staged to `.ta/community-staging/<resource>/` and appear in the draft for your review — you approve or reject community contributions independently from code changes.
+
+### Shell completion for resource names
+
+The `sync`, `search --resource`, and `get` commands accept resource names. To enable dynamic shell completion, add this to your shell config:
+
+```bash
+# bash
+complete -W "$(ta community list --json 2>/dev/null | jq -r '.[].name' | tr '\n' ' ')" ta-community-sync
+
+# zsh (add to .zshrc)
+_ta_community_resources() { compadd $(ta community list --json 2>/dev/null | jq -r '.[].name'); }
+compdef _ta_community_resources 'ta community sync' 'ta community get'
+```
+
+### Upstream PR wiring
+
+When a draft contains `community://github:*` artifacts (annotations or suggestions staged against a GitHub-hosted knowledge resource), `ta draft apply` automatically opens a pull request against the upstream repo using the `gh` CLI:
+
+```
+[community] 1 community artifact(s) detected — checking for upstream PR opportunities...
+[community] Opening upstream PR against andrewyng/context-hub for: community://github:andrewyng/context-hub/stripe.md
+[community] PR created: https://github.com/andrewyng/context-hub/pull/42
+```
+
+This requires `GITHUB_TOKEN` or `GH_TOKEN` to be set. Local-only resources (`community://local:*`) are skipped automatically.
 
 ### Attribution
 

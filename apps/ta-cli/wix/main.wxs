@@ -70,6 +70,35 @@
             Source="$(var.SourceDir)\ta-daemon.exe"
             KeyPath="yes" />
         </Component>
+
+        <Directory Id="DocsDir" Name="docs">
+          <Component Id="UsageDoc" Guid="E4F5A6B7-C8D9-4E0F-1A2B-3C4D5E6F7A8B">
+            <File
+              Id="UsageHtml"
+              Name="USAGE.html"
+              Source="$(var.SourceDir)\USAGE.html"
+              KeyPath="yes" />
+          </Component>
+        </Directory>
+
+        <Directory Id="PluginsDir" Name="plugins">
+          <Directory Id="VcsPluginsDir" Name="vcs">
+            <Component Id="VcsPerforce" Guid="F5A6B7C8-D9E0-4F1A-2B3C-4D5E6F7A8B9C">
+              <File
+                Id="VcsPerforceScript"
+                Name="vcs-perforce"
+                Source="$(var.SourceDir)\plugins\vcs\vcs-perforce"
+                KeyPath="yes" />
+            </Component>
+            <Component Id="VcsPerforceManifest" Guid="A6B7C8D9-E0F1-4A2B-3C4D-5E6F7A8B9C0D">
+              <File
+                Id="VcsPerforceToml"
+                Name="vcs-perforce.toml"
+                Source="$(var.SourceDir)\plugins\vcs\vcs-perforce.toml"
+                KeyPath="yes" />
+            </Component>
+          </Directory>
+        </Directory>
       </Directory>
     </StandardDirectory>
 
@@ -83,6 +112,12 @@
             Description="Open the Trusted Autonomy interactive shell"
             Target="[INSTALLFOLDER]ta.exe"
             Arguments="shell"
+            WorkingDirectory="INSTALLFOLDER" />
+          <Shortcut
+            Id="TaDocShortcut"
+            Name="TA Documentation"
+            Description="View Trusted Autonomy documentation"
+            Target="[DocsDir]USAGE.html"
             WorkingDirectory="INSTALLFOLDER" />
           <RemoveFolder Id="CleanUpShortCut" On="uninstall" />
           <RegistryValue
@@ -100,6 +135,9 @@
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="DaemonExecutable" />
       <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="UsageDoc" />
+      <ComponentRef Id="VcsPerforce" />
+      <ComponentRef Id="VcsPerforceManifest" />
     </Feature>
 
   </Package>
