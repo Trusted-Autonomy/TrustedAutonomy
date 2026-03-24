@@ -9748,6 +9748,162 @@ fn run() {
         assert!(warnings.is_empty(), "forward bump should not warn");
     }
 
+    // ── v0.14.2: Multi-Party Approval & Threshold Governance ─────
+
+    /// Scaffold a minimal project with a .ta/workflow.toml and a staged change.
+    /// Returns (config, pkg_id).
+    fn setup_governance_test(workflow_toml_content: &str) -> (GatewayConfig, String, TempDir) {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let ta_dir = project.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(ta_dir.join("workflow.toml"), workflow_toml_content).unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        // Start goal + make a change.
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Governance test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test governance".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+
+        build_package(&config, &goal_id, "Governance test change", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+
+        (config, pkg_id, project)
+    }
+
+    #[test]
+    fn governance_single_approver_default_behavior() {
+        // Default config: require_approvals = 1, no approvers list — classic single-reviewer flow.
+        let (config, pkg_id, _project) = setup_governance_test("");
+        // A single approve with no --as flag (using "tester" identity) should fully approve.
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+        let pkg = load_package(&config, pkg_id.parse().unwrap()).unwrap();
+        assert!(
+            matches!(pkg.status, DraftStatus::Approved { .. }),
+            "expected Approved, got {:?}",
+            pkg.status
+        );
+        assert_eq!(pkg.pending_approvals.len(), 1);
+    }
+
+    #[test]
+    fn governance_two_of_three_quorum() {
+        // require_approvals = 2: first approval does NOT transition to Approved.
+        let toml =
+            "[governance]\nrequire_approvals = 2\napprovers = [\"alice\", \"bob\", \"carol\"]\n";
+        let (config, pkg_id, _project) = setup_governance_test(toml);
+
+        // First approval — quorum not yet reached.
+        approve_package(&config, &pkg_id, "alice", false).unwrap();
+        let pkg = load_package(&config, pkg_id.parse().unwrap()).unwrap();
+        assert_eq!(
+            pkg.status,
+            DraftStatus::PendingReview,
+            "should still be PendingReview after 1/2 approvals"
+        );
+        assert_eq!(pkg.pending_approvals.len(), 1);
+
+        // Second approval — quorum reached.
+        approve_package(&config, &pkg_id, "bob", false).unwrap();
+        let pkg = load_package(&config, pkg_id.parse().unwrap()).unwrap();
+        assert!(
+            matches!(pkg.status, DraftStatus::Approved { .. }),
+            "expected Approved after 2/2 approvals, got {:?}",
+            pkg.status
+        );
+        assert_eq!(pkg.pending_approvals.len(), 2);
+    }
+
+    #[test]
+    fn governance_duplicate_approval_rejected() {
+        let toml = "[governance]\nrequire_approvals = 2\napprovers = [\"alice\", \"bob\"]\n";
+        let (config, pkg_id, _project) = setup_governance_test(toml);
+
+        approve_package(&config, &pkg_id, "alice", false).unwrap();
+        let result = approve_package(&config, &pkg_id, "alice", false);
+        assert!(
+            result.is_err(),
+            "duplicate approval from same reviewer must fail"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("already approved"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn governance_unlisted_reviewer_rejected() {
+        // approvers list is non-empty; reviewer not in list → error.
+        let toml = "[governance]\nrequire_approvals = 1\napprovers = [\"alice\", \"bob\"]\n";
+        let (config, pkg_id, _project) = setup_governance_test(toml);
+
+        let result = approve_package(&config, &pkg_id, "eve", false);
+        assert!(result.is_err(), "unlisted reviewer must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not in the approvers list"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn governance_override_bypasses_quorum() {
+        // require_approvals = 3, but override_identity can bypass with --override.
+        let toml = "[governance]\nrequire_approvals = 3\napprovers = [\"alice\", \"bob\", \"carol\"]\noverride_identity = \"admin\"\n";
+        let (config, pkg_id, _project) = setup_governance_test(toml);
+
+        approve_package(&config, &pkg_id, "admin", true).unwrap();
+        let pkg = load_package(&config, pkg_id.parse().unwrap()).unwrap();
+        assert!(
+            matches!(pkg.status, DraftStatus::Approved { .. }),
+            "override should transition to Approved immediately, got {:?}",
+            pkg.status
+        );
+    }
+
+    #[test]
+    fn governance_override_wrong_identity_rejected() {
+        // --override with an identity that is not the configured override_identity → error.
+        let toml = "[governance]\nrequire_approvals = 2\napprovers = [\"alice\", \"bob\"]\noverride_identity = \"admin\"\n";
+        let (config, pkg_id, _project) = setup_governance_test(toml);
+
+        let result = approve_package(&config, &pkg_id, "eve", true);
+        assert!(result.is_err(), "wrong override identity must fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not in the approvers list") || msg.contains("override identity"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn governance_empty_approvers_list_accepts_any_reviewer() {
+        // Empty approvers list means no identity restriction.
+        let toml = "[governance]\nrequire_approvals = 1\napprovers = []\n";
+        let (config, pkg_id, _project) = setup_governance_test(toml);
+
+        approve_package(&config, &pkg_id, "anyone", false).unwrap();
+        let pkg = load_package(&config, pkg_id.parse().unwrap()).unwrap();
+        assert!(matches!(pkg.status, DraftStatus::Approved { .. }));
+    }
+
     // ── v0.13.15: PLAN.md deferred items validation ───────────────
 
     #[test]

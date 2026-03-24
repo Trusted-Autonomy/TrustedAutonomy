@@ -6597,7 +6597,7 @@ These are addressed across v0.14.4–v0.14.5.
 ---
 
 ### v0.14.2 — Multi-Party Approval & Threshold Governance
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Require N-of-M human approvals before a draft can be applied. Configurable per-project and per-action-type. Prevents any single person (including the TA operator) from autonomously applying high-stakes changes.
 
 #### Items
