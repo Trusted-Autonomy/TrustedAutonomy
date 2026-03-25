@@ -74,6 +74,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub supervisor: SupervisorConfig,
 
+    /// Workflow behavior configuration (v0.14.3)
+    #[serde(default)]
+    pub workflow: WorkflowSection,
+
     /// Commands to run after agent exit to produce hard validation evidence (v0.13.17).
     ///
     /// Each command is run in the staging workspace. Results are embedded in the
@@ -412,6 +416,39 @@ impl Default for SupervisorConfig {
     }
 }
 
+/// Workflow behavior configuration (v0.14.3).
+///
+/// Controls plan phase ordering enforcement and related guardrails.
+///
+/// ```toml
+/// [workflow]
+/// enforce_phase_order = "warn"  # "warn" | "block" | "off"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowSection {
+    /// Phase ordering enforcement mode.
+    ///
+    /// - `"warn"` (default): Print a warning when starting a goal for a phase
+    ///   that has an earlier pending phase, but allow the goal to proceed.
+    /// - `"block"`: Prompt the user to confirm before proceeding. In
+    ///   non-interactive (headless) mode, behaves like `"warn"`.
+    /// - `"off"`: Skip the check entirely.
+    #[serde(default = "default_enforce_phase_order")]
+    pub enforce_phase_order: String,
+}
+
+fn default_enforce_phase_order() -> String {
+    "warn".to_string()
+}
+
+impl Default for WorkflowSection {
+    fn default() -> Self {
+        Self {
+            enforce_phase_order: default_enforce_phase_order(),
+        }
+    }
+}
+
 /// Submit adapter configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitConfig {
@@ -429,15 +466,6 @@ pub struct SubmitConfig {
     /// Default: true when adapter != "none".
     #[serde(default)]
     pub auto_review: Option<bool>,
-
-    /// **Deprecated**: Use `auto_submit` instead. Kept for backward compat.
-    /// If `auto_submit` is not set, `auto_commit` is used as fallback.
-    #[serde(default)]
-    pub auto_commit: bool,
-
-    /// **Deprecated**: Use `auto_submit` instead. Kept for backward compat.
-    #[serde(default)]
-    pub auto_push: bool,
 
     /// Co-author trailer appended to every commit made through TA.
     /// Format: "Name <email>". The email should match a GitHub account's
@@ -464,24 +492,9 @@ impl SubmitConfig {
     ///
     /// Resolution order:
     /// 1. `auto_submit` if explicitly set
-    /// 2. `auto_commit && auto_push` (deprecated fallback)
-    /// 3. `true` when adapter is not "none" (new default behavior)
+    /// 2. `true` when adapter is not "none" (default behavior)
     pub fn effective_auto_submit(&self) -> bool {
-        if let Some(v) = self.auto_submit {
-            return v;
-        }
-        // Backward compat: if the old auto_commit/auto_push were both set,
-        // treat that as auto_submit = true.
-        if self.auto_commit && self.auto_push {
-            return true;
-        }
-        // Legacy: if only auto_commit was set (no auto_push), preserve
-        // commit-only behavior by NOT defaulting to full submit.
-        if self.auto_commit {
-            return false;
-        }
-        // New default: submit when VCS adapter is configured or detected.
-        self.adapter != "none"
+        self.auto_submit.unwrap_or(self.adapter != "none")
     }
 
     /// Whether review should be opened after submit.
@@ -498,8 +511,6 @@ impl Default for SubmitConfig {
             adapter: default_adapter(),
             auto_submit: None,
             auto_review: None,
-            auto_commit: false,
-            auto_push: false,
             co_author: default_co_author(),
             git: GitConfig::default(),
             perforce: PerforceConfig::default(),
@@ -1533,30 +1544,6 @@ adapter = "git"
     }
 
     #[test]
-    fn effective_auto_submit_backward_compat_both_auto() {
-        // Legacy: auto_commit + auto_push = auto_submit.
-        let config = SubmitConfig {
-            adapter: "none".to_string(),
-            auto_commit: true,
-            auto_push: true,
-            ..Default::default()
-        };
-        assert!(config.effective_auto_submit());
-    }
-
-    #[test]
-    fn effective_auto_submit_backward_compat_commit_only() {
-        // Legacy: only auto_commit (no auto_push) = commit-only, not full submit.
-        let config = SubmitConfig {
-            adapter: "none".to_string(),
-            auto_commit: true,
-            auto_push: false,
-            ..Default::default()
-        };
-        assert!(!config.effective_auto_submit());
-    }
-
-    #[test]
     fn effective_auto_review_defaults_true_when_adapter_set() {
         let config = SubmitConfig {
             adapter: "git".to_string(),
@@ -1596,18 +1583,15 @@ auto_review = false
 
     #[test]
     fn parse_toml_with_deprecated_auto_commit_auto_push() {
-        // Old-style config should still work.
+        // Old-style config with removed fields should still parse (fields are ignored).
+        // With adapter = "none", effective_auto_submit() defaults to false.
         let toml = r#"
 [submit]
 adapter = "none"
-auto_commit = true
-auto_push = true
 auto_review = true
 "#;
         let config: WorkflowConfig = toml::from_str(toml).unwrap();
-        assert!(config.submit.effective_auto_submit());
-        // auto_review was a bool before; now Option<bool>. Explicit true in TOML
-        // should be parsed as Some(true).
+        assert!(!config.submit.effective_auto_submit());
         assert!(config.submit.effective_auto_review());
     }
 
@@ -1725,5 +1709,34 @@ allow_network = ["api.anthropic.com"]
     fn workflow_config_default_has_sandbox_section() {
         let config = WorkflowConfig::default();
         assert!(!config.sandbox.enabled, "sandbox disabled by default");
+    }
+
+    #[test]
+    fn workflow_section_defaults_to_warn() {
+        let config = WorkflowConfig::default();
+        assert_eq!(
+            config.workflow.enforce_phase_order, "warn",
+            "enforce_phase_order should default to 'warn'"
+        );
+    }
+
+    #[test]
+    fn workflow_section_parse_toml() {
+        let toml = r#"
+[workflow]
+enforce_phase_order = "block"
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.workflow.enforce_phase_order, "block");
+    }
+
+    #[test]
+    fn workflow_section_parse_toml_off() {
+        let toml = r#"
+[workflow]
+enforce_phase_order = "off"
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.workflow.enforce_phase_order, "off");
     }
 }

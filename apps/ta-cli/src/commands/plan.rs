@@ -39,6 +39,12 @@ pub enum PlanCommands {
         /// Validate plan items against TA-CONSTITUTION.md (v0.11.3).
         #[arg(long)]
         check_constitution: bool,
+        /// Check for out-of-order phases: warn when a Done phase appears after a Pending phase (v0.14.3).
+        #[arg(long)]
+        check_order: bool,
+        /// Check whether the binary version is ahead of the highest sequential completed phase (v0.14.3).
+        #[arg(long)]
+        check_versions: bool,
     },
     /// Show the next pending phase and suggest creating a goal for it.
     Next,
@@ -187,11 +193,31 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
         PlanCommands::Status {
             json,
             check_constitution,
+            check_order,
+            check_versions,
         } => {
             let result = show_status(config, *json);
-            if *check_constitution {
+            if *check_constitution || *check_order || *check_versions {
                 if let Ok(phases) = load_plan(&config.workspace_root) {
-                    let _ = check_plan_constitution(config, &phases);
+                    if *check_constitution {
+                        let _ = check_plan_constitution(config, &phases);
+                    }
+                    if *check_order {
+                        let warnings = check_phase_order(&phases);
+                        for w in &warnings {
+                            println!("WARNING: {}", w);
+                        }
+                        if warnings.is_empty() {
+                            println!("Phase order check: OK (no out-of-order phases detected)");
+                        }
+                    }
+                    if *check_versions {
+                        if let Some(warning) = check_version_sync(&phases) {
+                            println!("WARNING: {}", warning);
+                        } else {
+                            println!("Version sync check: OK");
+                        }
+                    }
                 }
             }
             result
@@ -291,6 +317,8 @@ pub struct PlanPhase {
     pub title: String,
     /// Current status.
     pub status: PlanStatus,
+    /// Explicit dependencies declared via `<!-- depends_on: v0.13.17.3 -->` comment (v0.14.3).
+    pub depends_on: Vec<String>,
 }
 
 // ── Schema-driven parsing ────────────────────────────────────────
@@ -450,7 +478,13 @@ pub fn parse_plan_with_schema(content: &str, schema: &PlanSchema) -> Vec<PlanPha
                 let title = title.trim_end_matches(['*', '(', ')']).trim().to_string();
 
                 let status = find_status_in_lookahead(&lines, i + 1, &status_re);
-                phases.push(PlanPhase { id, title, status });
+                let depends_on = find_depends_on_in_lookahead(&lines, i + 1);
+                phases.push(PlanPhase {
+                    id,
+                    title,
+                    status,
+                    depends_on,
+                });
                 break; // First pattern match wins.
             }
         }
@@ -483,6 +517,37 @@ fn find_status_in_lookahead(lines: &[&str], start: usize, status_re: &Regex) -> 
         }
     }
     PlanStatus::Pending
+}
+
+/// Look ahead from `start` for a `<!-- depends_on: ... -->` comment.
+/// Scans up to 5 lines ahead, stopping if another phase header is detected.
+fn find_depends_on_in_lookahead(lines: &[&str], start: usize) -> Vec<String> {
+    let dep_re = match Regex::new(r"<!--\s*depends_on:\s*([^>]+?)\s*-->") {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    // Phase header patterns to detect the next phase boundary.
+    let header_re = match Regex::new(r"^(?:##\s+Phase|###\s+v[\d.]+[a-z]?\s+[—\-])") {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let limit = std::cmp::min(start + 5, lines.len());
+    for (offset, line) in lines[start..limit].iter().enumerate() {
+        let line = line.trim();
+        // Stop if we've hit the next phase header (but not on the first lookahead line).
+        if offset > 0 && header_re.is_match(line) {
+            break;
+        }
+        if let Some(caps) = dep_re.captures(line) {
+            let raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            return raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+    vec![]
 }
 
 fn parse_status_str(s: &str) -> PlanStatus {
@@ -861,7 +926,136 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
         println!("Next:    Phase {} — {}", next.id, next.title);
     }
 
+    // Show dependency warnings for phases with unmet depends_on.
+    let dep_warnings = collect_dependency_warnings(&phases);
+    if !dep_warnings.is_empty() {
+        println!();
+        for w in &dep_warnings {
+            println!("DEPENDENCY WARNING: {}", w);
+        }
+    }
+
     Ok(())
+}
+
+/// Collect dependency warnings for all phases whose declared `depends_on` phases are not Done.
+pub fn collect_dependency_warnings(phases: &[PlanPhase]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for phase in phases {
+        if phase.depends_on.is_empty() {
+            continue;
+        }
+        for dep_id in &phase.depends_on {
+            let dep_done = phases
+                .iter()
+                .any(|p| phase_ids_match(&p.id, dep_id) && p.status == PlanStatus::Done);
+            if !dep_done {
+                warnings.push(format!(
+                    "Phase {} depends on {} which is not yet done.",
+                    phase.id, dep_id,
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+/// Returns the binary version string at compile time.
+pub fn binary_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Parse a semver-style phase ID like "v0.14.3" or "v0.13.17.1" into a comparable tuple of u32s.
+///
+/// Only phases whose ID starts with `v` followed by digits are considered.
+/// Returns `None` for non-semver IDs (e.g., "4b", "Phase 1").
+fn parse_semver_id(id: &str) -> Option<Vec<u32>> {
+    let stripped = id.strip_prefix('v')?;
+    // Must start with a digit after the 'v'
+    if !stripped.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let parts: Option<Vec<u32>> = stripped.split('.').map(|s| s.parse::<u32>().ok()).collect();
+    parts
+}
+
+/// Check for out-of-order phases: a `Done` phase appears after a `Pending` phase
+/// in document order (for phases with semver-style IDs only).
+///
+/// Returns a list of human-readable warning strings.
+pub fn check_phase_order(phases: &[PlanPhase]) -> Vec<String> {
+    // Collect (index, id, status) for semver phases only.
+    let semver_phases: Vec<(usize, &PlanPhase)> = phases
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| parse_semver_id(&p.id).is_some())
+        .collect();
+
+    let mut warnings = Vec::new();
+
+    // Walk document order: find the first Pending phase, then check if any
+    // later (higher-index) phase is Done.
+    let mut first_pending: Option<&PlanPhase> = None;
+    for (_, phase) in &semver_phases {
+        if first_pending.is_none() && phase.status == PlanStatus::Pending {
+            first_pending = Some(phase);
+        } else if let Some(pending) = first_pending {
+            if phase.status == PlanStatus::Done {
+                warnings.push(format!(
+                    "Phase {} is done but {} is still pending — phases are out of order.",
+                    phase.id, pending.id,
+                ));
+            }
+        }
+    }
+
+    warnings
+}
+
+/// Check whether the binary version is ahead of the highest sequential completed phase.
+///
+/// Returns `Some(warning)` if the binary is ahead, `None` if in sync.
+pub fn check_version_sync(phases: &[PlanPhase]) -> Option<String> {
+    // Find the last phase in the sequential completed chain (no gaps from the first done).
+    // A gap means a Pending phase was encountered before a Done one.
+    let mut last_sequential_done: Option<&PlanPhase> = None;
+    let mut gap_seen = false;
+
+    for phase in phases {
+        if parse_semver_id(&phase.id).is_none() {
+            continue;
+        }
+        match phase.status {
+            PlanStatus::Done => {
+                if !gap_seen {
+                    last_sequential_done = Some(phase);
+                }
+            }
+            PlanStatus::Pending | PlanStatus::InProgress => {
+                gap_seen = true;
+            }
+            PlanStatus::Deferred => {}
+        }
+    }
+
+    let highest_phase = last_sequential_done?;
+    let binary = binary_version();
+
+    // Compare binary version vs highest sequential done phase.
+    // Parse both as semver tuples. Strip pre-release suffixes from binary version.
+    let binary_base = binary.split('-').next().unwrap_or(binary);
+    let binary_parts = parse_semver_id(&format!("v{}", binary_base))?;
+    let phase_parts = parse_semver_id(&highest_phase.id)?;
+
+    if binary_parts > phase_parts {
+        Some(format!(
+            "Binary version ({}) is ahead of highest sequential completed phase ({}). \
+             Consider pinning for release — see CLAUDE.md 'Public Release Process'.",
+            binary, highest_phase.id,
+        ))
+    } else {
+        None
+    }
 }
 
 fn show_next(config: &GatewayConfig) -> anyhow::Result<()> {
@@ -2250,16 +2444,19 @@ Release automation.
                 id: "0".to_string(),
                 title: "Done Phase".to_string(),
                 status: PlanStatus::Done,
+                depends_on: vec![],
             },
             PlanPhase {
                 id: "1".to_string(),
                 title: "Deferred Phase".to_string(),
                 status: PlanStatus::Deferred,
+                depends_on: vec![],
             },
             PlanPhase {
                 id: "2".to_string(),
                 title: "Pending Phase".to_string(),
                 status: PlanStatus::Pending,
+                depends_on: vec![],
             },
         ];
         let checklist = format_plan_checklist(&phases, None);
@@ -2283,6 +2480,7 @@ Release automation.
             id: "v0.3.2".to_string(),
             title: "Release Pipeline".to_string(),
             status: PlanStatus::Pending,
+            depends_on: vec![],
         };
         let cmd = suggest_next_goal_command(&phase);
         assert_eq!(cmd, "ta run \"implement Release Pipeline\" --phase v0.3.2");
@@ -2964,5 +3162,149 @@ Build it.
         let next = find_next_pending(&phases, Some("0.1.0"));
         assert!(next.is_some(), "Expected a next phase");
         assert_eq!(next.unwrap().id, "v0.2.0");
+    }
+
+    // ── Phase order / version sync tests (v0.14.3) ──────────────
+
+    #[test]
+    fn check_phase_order_no_violations() {
+        let phases = vec![
+            PlanPhase {
+                id: "v0.1.0".to_string(),
+                title: "First".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+            },
+            PlanPhase {
+                id: "v0.2.0".to_string(),
+                title: "Second".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+            },
+            PlanPhase {
+                id: "v0.3.0".to_string(),
+                title: "Third".to_string(),
+                status: PlanStatus::Pending,
+                depends_on: vec![],
+            },
+        ];
+        assert!(
+            check_phase_order(&phases).is_empty(),
+            "No out-of-order phases expected"
+        );
+    }
+
+    #[test]
+    fn check_phase_order_detects_violation() {
+        let phases = vec![
+            PlanPhase {
+                id: "v0.1.0".to_string(),
+                title: "First".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+            },
+            PlanPhase {
+                id: "v0.2.0".to_string(),
+                title: "Second".to_string(),
+                status: PlanStatus::Pending,
+                depends_on: vec![],
+            },
+            PlanPhase {
+                id: "v0.3.0".to_string(),
+                title: "Third".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+            },
+        ];
+        let warnings = check_phase_order(&phases);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("v0.3.0"),
+            "Warning should mention the out-of-order done phase"
+        );
+        assert!(
+            warnings[0].contains("v0.2.0"),
+            "Warning should mention the blocking pending phase"
+        );
+    }
+
+    #[test]
+    fn check_phase_order_skips_non_semver_ids() {
+        let phases = vec![
+            PlanPhase {
+                id: "4b".to_string(),
+                title: "Old-style phase".to_string(),
+                status: PlanStatus::Pending,
+                depends_on: vec![],
+            },
+            PlanPhase {
+                id: "v0.3.0".to_string(),
+                title: "New phase".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+            },
+        ];
+        // Non-semver "4b" should be skipped, no violations.
+        assert!(
+            check_phase_order(&phases).is_empty(),
+            "Non-semver phases should be ignored"
+        );
+    }
+
+    #[test]
+    fn depends_on_parsed_from_comment() {
+        let plan_text = "### v0.14.3 — Phase\n<!-- status: pending -->\n<!-- depends_on: v0.13.17.3, v0.14.0 -->\n";
+        let phases = parse_plan(plan_text);
+        assert_eq!(phases.len(), 1);
+        assert_eq!(phases[0].depends_on, vec!["v0.13.17.3", "v0.14.0"]);
+    }
+
+    #[test]
+    fn depends_on_empty_when_no_comment() {
+        let plan_text = "### v0.14.3 — Phase\n<!-- status: pending -->\n";
+        let phases = parse_plan(plan_text);
+        assert_eq!(phases.len(), 1);
+        assert!(phases[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn collect_dependency_warnings_unmet() {
+        let phases = vec![
+            PlanPhase {
+                id: "v0.1.0".to_string(),
+                title: "Dep".to_string(),
+                status: PlanStatus::Pending,
+                depends_on: vec![],
+            },
+            PlanPhase {
+                id: "v0.2.0".to_string(),
+                title: "Needs dep".to_string(),
+                status: PlanStatus::Pending,
+                depends_on: vec!["v0.1.0".to_string()],
+            },
+        ];
+        let warnings = collect_dependency_warnings(&phases);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("v0.2.0"));
+        assert!(warnings[0].contains("v0.1.0"));
+    }
+
+    #[test]
+    fn collect_dependency_warnings_met() {
+        let phases = vec![
+            PlanPhase {
+                id: "v0.1.0".to_string(),
+                title: "Dep".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+            },
+            PlanPhase {
+                id: "v0.2.0".to_string(),
+                title: "Needs dep".to_string(),
+                status: PlanStatus::Pending,
+                depends_on: vec!["v0.1.0".to_string()],
+            },
+        ];
+        assert!(collect_dependency_warnings(&phases).is_empty());
     }
 }

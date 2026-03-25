@@ -6619,20 +6619,20 @@ These are addressed across v0.14.4–v0.14.5.
 ---
 
 ### v0.14.3 — Plan Phase Ordering Enforcement
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Prevent the version divergence that occurred when v0.14.0–v0.14.2 were implemented before completing v0.13.17.x. TA should warn (or block) when a goal targets a phase that is numerically later than an incomplete earlier phase.
 
 #### Items
 
-1. [ ] **`ta plan status --check-order`**: Walk all plan phases in numeric order. If a phase with a higher version number is `<!-- status: done -->` while a lower-numbered phase is still `<!-- status: pending -->`, print a warning: `"Phase v0.14.2 is done but v0.13.17.2 is still pending — phases are out of order."` Exit code 0 (warn only, not blocking).
+1. [x] **`ta plan status --check-order`**: Walk all plan phases in numeric order. If a phase with a higher version number is `<!-- status: done -->` while a lower-numbered phase is still `<!-- status: pending -->`, print a warning: `"Phase v0.14.2 is done but v0.13.17.2 is still pending — phases are out of order."` Exit code 0 (warn only, not blocking).
 
-2. [ ] **`ta run` phase-order guard**: Before starting a goal with `--phase X`, run the order check. If out-of-order, print the warning and prompt: `"Start anyway? [y/N]"`. Configurable: `[workflow] enforce_phase_order = "warn" | "block" | "off"` (default `"warn"`).
+2. [x] **`ta run` phase-order guard**: Before starting a goal with `--phase X`, run the order check. If out-of-order, print the warning and prompt: `"Start anyway? [y/N]"`. Configurable: `[workflow] enforce_phase_order = "warn" | "block" | "off"` (default `"warn"`).
 
-3. [ ] **Phase dependency declarations**: Allow phases to declare `depends_on = ["v0.13.17.3"]` in PLAN.md frontmatter or a companion `plan-deps.toml`. `ta plan status` shows dependency chains. `ta run` blocks if a declared dependency is not done (regardless of version order).
+3. [x] **Phase dependency declarations**: Allow phases to declare `depends_on = ["v0.13.17.3"]` via `<!-- depends_on: v0.13.17.3 -->` comment in PLAN.md. `ta plan status` shows dependency warnings. `ta run` blocks if a declared dependency is not done (regardless of version order).
 
-4. [ ] **Version-phase sync check**: `ta plan status --check-versions` verifies the workspace binary version matches the highest completed phase. If `0.13.17.3` is done but binary is `0.14.2-alpha`, print: `"Binary version (0.14.2-alpha) is ahead of highest sequential completed phase (0.13.17.3). Consider pinning for release — see CLAUDE.md 'Public Release Process'."`.
+4. [x] **Version-phase sync check**: `ta plan status --check-versions` verifies the workspace binary version matches the highest completed phase. If `0.13.17.3` is done but binary is `0.14.2-alpha`, print: `"Binary version (0.14.2-alpha) is ahead of highest sequential completed phase (0.13.17.3). Consider pinning for release — see CLAUDE.md 'Public Release Process'."`.
 
-5. [ ] **Remove deprecated `auto_commit`/`auto_push` fields from `SubmitConfig`**: Delete the two deprecated bool fields from `crates/ta-submit/src/config.rs`, remove the backward-compat branches from `effective_auto_submit()`, and update `workflow.toml` to use `auto_submit = true` instead. Update docs and any test fixtures using the old keys. The new canonical form is `auto_submit = true` (or rely on the default: submit when adapter ≠ "none").
+5. [x] **Remove deprecated `auto_commit`/`auto_push` fields from `SubmitConfig`**: Deleted the two deprecated bool fields from `crates/ta-submit/src/config.rs`, removed the backward-compat branches from `effective_auto_submit()`, and simplified to `auto_submit.unwrap_or(adapter != "none")`. Updated test fixtures. New canonical form is `auto_submit = true` (or rely on the default: submit when adapter ≠ "none"). Added `WorkflowSection` struct with `enforce_phase_order` to `WorkflowConfig`.
 
 #### Version: `0.14.3-alpha`
 
@@ -6797,12 +6797,6 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 
 7. [ ] **`.ta/plan_history.jsonl` dirtied after every `ta draft apply`**: `record_history()` in `plan.rs` appends a phase-transition entry when `draft apply` marks a phase done. The file is never staged or committed, leaving the working tree dirty after every apply. Decision: this is per-machine runtime state (timestamps differ per developer) — add `.ta/plan_history.jsonl` to the VCS ignore block written by `ta setup vcs` (both `.gitignore` and `.p4ignore`). Also add it to the shared-vs-local table in USAGE.md.
 
-8. [ ] **`--from-step` on a step with an existing Approved draft must retry the apply, not re-run the agent**: When `ta release run --from-step N` is used and there is already an Approved draft for step N, the pipeline should skip agent spawn entirely and jump directly to `ta draft apply`. This makes `--from-step` idempotent — a failed apply is fixed by resolving the root cause and re-running, not by regenerating the content from scratch.
-
-9. [ ] **New agent run for a step with an existing Approved draft must close the prior draft first**: If the user explicitly re-runs a step that has an existing Approved draft (e.g. to regenerate rather than retry), the pipeline must close the old Approved draft (with reason "superseded by re-run") before spawning the new agent. Without this, orphaned Approved drafts accumulate silently.
-
-10. [ ] **Apply failure message must offer two distinct recovery paths**: When `ta draft apply` fails inside the release pipeline, the error message must clearly distinguish: (a) "retry the apply" — root cause is fixed, run `ta draft apply <id>` directly; (b) "regenerate" — the draft content itself is wrong, run `ta release run --from-step N` (which will close this draft and re-run the agent). Currently the message says only "re-run `ta release run`" which triggers regeneration when the user likely just needs to retry the apply.
-
 #### Version: `0.14.3.3-alpha`
 
 ---
@@ -6828,34 +6822,6 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 6. [ ] **Staging size warning threshold config**: Move the `ta doctor` 1 GB staging warning threshold to `[staging] warn_above_gb = 1` in `workflow.toml`, defaulting to 1 GB. Projects with intentionally large workspaces (game art pipelines) can raise or silence the warning.
 
 #### Version: `0.14.3.4-alpha`
-
----
-
-### v0.14.3.6 — Supervisor Streaming & Activity-Aware Timeout
-<!-- status: pending -->
-**Goal**: Replace the wall-clock timeout in `spawn_with_timeout` with an activity-based deadline that resets on every new line of stdout received from the supervisor LLM. Emit supervisor heartbeat events to the daemon during long reviews so the shell shows progress and the daemon doesn't treat the goal as stale. Fix the timeout error message to surface what actually happened.
-
-#### Problem
-
-`spawn_with_timeout` in `supervisor_review.rs` polls `child.try_wait()` every 200ms and kills the process when the wall-clock deadline is reached. It does not read stdout until after the process exits — so it cannot distinguish between "LLM is actively streaming tokens" and "LLM has completely stalled." A large diff reviewed against a detailed constitution may stream steadily for 150–300s and still be killed at 120s.
-
-The correct mental model is: the supervisor is not hung if bytes are arriving. It is only stuck if *no bytes have arrived* for some inactivity window (e.g., 60s). The overall session duration should be uncapped (or capped at something generous like 600s) while the inactivity window stays tight.
-
-Additionally, the supervisor runs synchronously inside `ta draft build`, which is inside the agent goal lifecycle. The daemon has no visibility into supervisor progress — the shell shows nothing during the review, and the stale-goal watchdog will fire on long-running goals because no heartbeat is emitted.
-
-#### Items
-
-1. [ ] **Stream stdout in `spawn_with_timeout`**: Spawn a reader thread that drains the child stdout pipe line-by-line and sends each line over a `mpsc::channel` to the main poll loop. The main loop resets `last_activity = Instant::now()` on each received line. Kill the child only when `last_activity.elapsed() > inactivity_secs` (default 60s), not when wall-clock > timeout_secs. Add a separate `max_timeout_secs` (default 600s, configurable) as an absolute ceiling. Update the `[supervisor]` config section: `inactivity_secs = 60`, `max_timeout_secs = 600`.
-
-2. [ ] **Supervisor heartbeat to daemon**: During `spawn_with_timeout`, emit a `SupervisorHeartbeat` event (via a callback or channel passed in from the call site) every time `last_activity` is updated or every 10s, whichever comes first. The heartbeat carries `{ agent, elapsed_secs, lines_received }`. `ta draft build` (the call site) wires this to `GoalEventEmitter` so the daemon receives it and the stale-goal watchdog knows the goal is active.
-
-3. [ ] **TUI progress during supervisor review**: The shell TUI subscribes to `SupervisorHeartbeat` events and displays a live indicator during draft build: `Supervisor reviewing… ⠿ (47s, 12 stream events)`. Replaces the current silence during what can be a 2–5 minute review.
-
-4. [ ] **Improved timeout error message**: When inactivity timeout fires, the error message must include: how long the process ran total, how long since the last output line, and the configurable knobs. Example: `Supervisor stalled after 47s with no output (ran for 380s total) — increase [supervisor] inactivity_secs in workflow.toml (current: 60)`.
-
-5. [ ] **Tests**: Unit test for the streaming poll loop — inject a mock child that writes lines with delays, verify deadline resets; inject a mock that goes silent for > inactivity_secs, verify kill. Unit test for heartbeat emission cadence.
-
-#### Version: `0.14.3.6-alpha`
 
 ---
 
@@ -7154,41 +7120,6 @@ In future GUI: native collapse via the same JSON structure.
 9. [ ] **Status bar community badge** *(from v0.13.17.7 item 9)*: Add a community hub badge to the TUI status bar — shows unread community updates, new plugin versions, or pending constitution suggestions. Deferred from v0.13.17.7 because TUI status-bar integration requires significant ratatui widget work, which belongs here alongside the broader TUI rework.
 
 #### Version: `0.14.7-alpha`
-
----
-
-### v0.14.7.1 — Shell UX Fixes
-<!-- status: pending -->
-**Goal**: Fix two persistent shell UX regressions: cursor-aware paste (smarter than the v0.12.2 "always force to end" behaviour), and the agent working indicator that continues showing after the agent exits and the draft is built.
-
-#### Problems
-
-**1. Paste always forces to end — user wants cursor-aware insert (regression from v0.12.2)**
-
-v0.12.2 implemented "force cursor to end before paste" as a blunt fix for the common case where the user had scrolled up and forgotten where the cursor was. The actual desired behaviour is:
-
-- If the cursor is **on the input/prompt line** → insert the pasted text at the cursor position (normal text-editor behaviour).
-- If the cursor is **anywhere outside the input line** (e.g., in the scrollable output area after clicking or scrolling) → move cursor to end of input, then append.
-
-The current fix handles the second case but breaks the first: users who deliberately position their cursor mid-prompt to insert text (e.g., editing a long command) find paste always jumps to the end instead.
-
-**2. "Agent is working" indicator persists after agent exits and draft is built**
-
-v0.12.3 item 7 claimed this fixed: `AgentOutputDone` replaces the working indicator with `[agent exited <id>]`. However users still observe the `Agent is working ⠿` line persisting after the agent completes and `ta draft build` finishes. Root cause is likely that the `AgentOutputDone` event is emitted before `DraftBuilt`, and either (a) the TUI re-enters a working state when the draft build step runs, or (b) `active_tailing_goals` is not cleared when the goal moves to `PrReady` state.
-
-#### Items
-
-1. [ ] **Cursor-aware paste in TUI shell**: Track whether the TUI input widget has "input focus" (cursor is in the input row) vs "scroll focus" (cursor is in the output pane). On paste event: if input-focused, insert at current cursor position; if scroll-focused, move cursor to `input_buffer.len()` and append. Update bracketed-paste handler accordingly. 4 unit tests: paste-at-start, paste-at-middle, paste-at-end, paste-while-scroll-focused.
-
-2. [ ] **Cursor-aware paste in web shell**: `shell.html` `paste` listener: if the `<input>` has focus and `selectionStart != selectionEnd || selectionStart != value.length`, insert at `selectionStart` rather than forcing to end. If the input does not have focus, set focus + append.
-
-3. [ ] **Fix working indicator persisting after draft built**: Audit the event sequence from `GoalRunning` → `AgentOutputDone` → `DraftBuilt` → `GoalPrReady` in `shell_tui.rs`. The "Agent is working" line must be cleared on `DraftBuilt` (or `GoalPrReady` at the latest), not only on `AgentOutputDone`. Ensure `active_tailing_goals` is removed for the goal ID on any terminal state transition. Add a test that simulates the full event sequence and asserts the working indicator is absent after `DraftBuilt`.
-
-4. [ ] **Working indicator cleared on goal cancel / error too**: Extend the fix to `GoalFailed`, `GoalCancelled`, and `GoalDenied` terminal states — the indicator should never persist past any terminal event regardless of the code path that triggered it.
-
-5. [ ] **Regression test**: Integration test in `shell_tui.rs` that drives the TUI through a simulated agent run (inject `GoalRunning`, `AgentHeartbeat`, `AgentOutputDone`, `DraftBuilt`) and asserts: (a) indicator shows during run, (b) indicator absent after `DraftBuilt`, (c) `[draft ready]` hint visible.
-
-#### Version: `0.14.7.1-alpha`
 
 ---
 

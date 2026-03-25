@@ -1326,6 +1326,8 @@ Plan commands:
 ta plan list                         # List all phases with status
 ta plan status                       # Progress summary
 ta plan status --json                # Machine-readable progress (includes deferred count)
+ta plan status --check-order         # Warn if any Done phase appears after a Pending phase
+ta plan status --check-versions      # Warn if binary version is ahead of highest completed phase
 ta plan next                         # Next pending phase with suggested command
 ta plan validate v0.3.1              # Phase details, linked goals, draft summaries
 ta plan history                      # Status transition history
@@ -1392,6 +1394,47 @@ Deferred phases are:
 - Skipped when finding the "next pending" phase
 - Included in status counts (`ta plan status --json`)
 - Not candidates for `ta plan next` suggestions
+
+#### Phase Ordering Enforcement
+
+TA can detect and warn when phases are implemented out of order — for example, when a `Done` phase appears after a `Pending` phase in your plan.
+
+```bash
+# Check for out-of-order phases (Done phase appearing after a Pending phase)
+ta plan status --check-order
+
+# Check whether the binary version is ahead of the highest sequentially completed phase
+ta plan status --check-versions
+```
+
+`--check-order` walks all semver-style phase IDs (e.g., `v0.14.3`) in document order. If a `Done` phase appears later in the document than a `Pending` phase, a warning is printed. This is informational only — exit code is always 0.
+
+`--check-versions` compares the running binary version against the last phase in the sequential completed chain (the last `Done` phase with no pending gaps before it). If the binary version is ahead, you are prompted to pin the version before tagging a release.
+
+**Phase order guard in `ta run`**
+
+When you start a goal with `--phase X`, TA automatically checks for ordering violations. Behavior is controlled by `[workflow].enforce_phase_order` in `.ta/workflow.toml`:
+
+```toml
+[workflow]
+enforce_phase_order = "warn"   # "warn" | "block" | "off"
+```
+
+- `"warn"` (default): Print a warning and continue.
+- `"block"`: Print a warning and prompt `"Start anyway? [y/N]"` in interactive mode. Headless runs behave like `"warn"`.
+- `"off"`: Skip the check entirely.
+
+**Phase dependency declarations**
+
+A phase can declare explicit dependencies using an HTML comment in PLAN.md, placed immediately after the `<!-- status: ... -->` line:
+
+```markdown
+### v0.14.3 — Plan Phase Ordering Enforcement
+<!-- status: pending -->
+<!-- depends_on: v0.14.0, v0.14.2 -->
+```
+
+`ta plan status` shows a warning for phases whose declared dependencies are not yet `Done`. When running `ta run --phase v0.14.3`, TA blocks the goal if any declared dependency is not done — regardless of the `enforce_phase_order` mode.
 
 #### Batch Phase Marking
 

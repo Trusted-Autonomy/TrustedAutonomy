@@ -969,6 +969,7 @@ mod tests {
             id: "v0.10.9".to_string(),
             title: "Smart Follow-Up".to_string(),
             status: PlanStatus::Pending,
+            depends_on: vec![],
         };
         assert!(phase_to_candidate(&pending, &[], &[], Utc::now()).is_none());
 
@@ -976,6 +977,7 @@ mod tests {
             id: "v0.10.8".to_string(),
             title: "Pre-Draft Verification".to_string(),
             status: PlanStatus::Done,
+            depends_on: vec![],
         };
         assert!(phase_to_candidate(&done, &[], &[], Utc::now()).is_none());
 
@@ -983,6 +985,7 @@ mod tests {
             id: "v0.10.9".to_string(),
             title: "Smart Follow-Up".to_string(),
             status: PlanStatus::InProgress,
+            depends_on: vec![],
         };
         let result = phase_to_candidate(&in_progress, &[], &[], Utc::now());
         assert!(result.is_some());

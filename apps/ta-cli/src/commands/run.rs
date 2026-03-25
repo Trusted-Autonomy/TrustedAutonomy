@@ -1039,6 +1039,99 @@ pub fn execute(
     let phase = phase.as_deref();
     let follow_up = follow_up.as_ref();
 
+    // ── Phase-order guard (v0.14.3) ──────────────────────────────
+    //
+    // When a target phase is specified, check that earlier pending phases
+    // don't exist (ordering violation) and that declared depends_on phases
+    // are all Done. The check respects `[workflow].enforce_phase_order` in
+    // `.ta/workflow.toml`: "off" skips it, "warn" prints and continues,
+    // "block" prompts in interactive mode.
+    if let Some(target_phase) = phase {
+        let source_root = source
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| config.workspace_root.clone());
+        if let Ok(phases) = plan::load_plan(&source_root) {
+            // 1. Check declared depends_on for target phase — always enforced
+            //    regardless of enforce_phase_order setting.
+            let target = phases
+                .iter()
+                .find(|p| plan::phase_ids_match(&p.id, target_phase));
+            if let Some(t) = target {
+                let unmet_deps: Vec<String> = t
+                    .depends_on
+                    .iter()
+                    .filter(|dep_id| {
+                        !phases.iter().any(|p| {
+                            plan::phase_ids_match(&p.id, dep_id)
+                                && p.status == plan::PlanStatus::Done
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                if !unmet_deps.is_empty() {
+                    anyhow::bail!(
+                        "Cannot start phase {}: required dependencies are not done: {}.\n\
+                         Complete those phases first, or remove the depends_on declaration.",
+                        target_phase,
+                        unmet_deps.join(", ")
+                    );
+                }
+            }
+
+            // 2. Check phase ordering (configurable).
+            let wf_config = ta_submit::WorkflowConfig::load_or_default(
+                &config.workspace_root.join(".ta/workflow.toml"),
+            );
+            let enforce_mode = wf_config.workflow.enforce_phase_order.as_str();
+            if enforce_mode != "off" {
+                // Collect ordering warnings relevant to the target phase:
+                // only warn about pending phases that come before the target phase
+                // in document order.
+                let target_idx = phases
+                    .iter()
+                    .position(|p| plan::phase_ids_match(&p.id, target_phase));
+                if let Some(target_pos) = target_idx {
+                    let ordering_warnings: Vec<String> = plan::check_phase_order(&phases)
+                        .into_iter()
+                        .filter(|w| {
+                            // Only show warnings for pending phases that appear
+                            // before the target phase.
+                            phases[..target_pos]
+                                .iter()
+                                .any(|p| p.status == plan::PlanStatus::Pending && w.contains(&p.id))
+                        })
+                        .collect();
+
+                    if !ordering_warnings.is_empty() {
+                        eprintln!(
+                            "WARNING: Phase ordering violation detected for phase {}:",
+                            target_phase
+                        );
+                        for w in &ordering_warnings {
+                            eprintln!("  {}", w);
+                        }
+
+                        if enforce_mode == "block" && !headless && !no_launch {
+                            eprint!("Start anyway? [y/N] ");
+                            use std::io::BufRead;
+                            let stdin = std::io::stdin();
+                            let mut line = String::new();
+                            let _ = stdin.lock().read_line(&mut line);
+                            let answer = line.trim().to_lowercase();
+                            if answer != "y" {
+                                anyhow::bail!(
+                                    "Goal creation cancelled due to phase ordering violation. \
+                                     Complete pending phases first, or set \
+                                     [workflow].enforce_phase_order = \"warn\" in .ta/workflow.toml."
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ── Daemon connectivity (v0.11.2.6) ─────────────────────────
     //
     // In non-headless mode, ensure the daemon is running before creating the
