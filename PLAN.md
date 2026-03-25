@@ -7129,6 +7129,41 @@ In future GUI: native collapse via the same JSON structure.
 
 ---
 
+### v0.14.7.1 — Shell UX Fixes
+<!-- status: pending -->
+**Goal**: Fix two persistent shell UX regressions: cursor-aware paste (smarter than the v0.12.2 "always force to end" behaviour), and the agent working indicator that continues showing after the agent exits and the draft is built.
+
+#### Problems
+
+**1. Paste always forces to end — user wants cursor-aware insert (regression from v0.12.2)**
+
+v0.12.2 implemented "force cursor to end before paste" as a blunt fix for the common case where the user had scrolled up and forgotten where the cursor was. The actual desired behaviour is:
+
+- If the cursor is **on the input/prompt line** → insert the pasted text at the cursor position (normal text-editor behaviour).
+- If the cursor is **anywhere outside the input line** (e.g., in the scrollable output area after clicking or scrolling) → move cursor to end of input, then append.
+
+The current fix handles the second case but breaks the first: users who deliberately position their cursor mid-prompt to insert text (e.g., editing a long command) find paste always jumps to the end instead.
+
+**2. "Agent is working" indicator persists after agent exits and draft is built**
+
+v0.12.3 item 7 claimed this fixed: `AgentOutputDone` replaces the working indicator with `[agent exited <id>]`. However users still observe the `Agent is working ⠿` line persisting after the agent completes and `ta draft build` finishes. Root cause is likely that the `AgentOutputDone` event is emitted before `DraftBuilt`, and either (a) the TUI re-enters a working state when the draft build step runs, or (b) `active_tailing_goals` is not cleared when the goal moves to `PrReady` state.
+
+#### Items
+
+1. [ ] **Cursor-aware paste in TUI shell**: Track whether the TUI input widget has "input focus" (cursor is in the input row) vs "scroll focus" (cursor is in the output pane). On paste event: if input-focused, insert at current cursor position; if scroll-focused, move cursor to `input_buffer.len()` and append. Update bracketed-paste handler accordingly. 4 unit tests: paste-at-start, paste-at-middle, paste-at-end, paste-while-scroll-focused.
+
+2. [ ] **Cursor-aware paste in web shell**: `shell.html` `paste` listener: if the `<input>` has focus and `selectionStart != selectionEnd || selectionStart != value.length`, insert at `selectionStart` rather than forcing to end. If the input does not have focus, set focus + append.
+
+3. [ ] **Fix working indicator persisting after draft built**: Audit the event sequence from `GoalRunning` → `AgentOutputDone` → `DraftBuilt` → `GoalPrReady` in `shell_tui.rs`. The "Agent is working" line must be cleared on `DraftBuilt` (or `GoalPrReady` at the latest), not only on `AgentOutputDone`. Ensure `active_tailing_goals` is removed for the goal ID on any terminal state transition. Add a test that simulates the full event sequence and asserts the working indicator is absent after `DraftBuilt`.
+
+4. [ ] **Working indicator cleared on goal cancel / error too**: Extend the fix to `GoalFailed`, `GoalCancelled`, and `GoalDenied` terminal states — the indicator should never persist past any terminal event regardless of the code path that triggered it.
+
+5. [ ] **Regression test**: Integration test in `shell_tui.rs` that drives the TUI through a simulated agent run (inject `GoalRunning`, `AgentHeartbeat`, `AgentOutputDone`, `DraftBuilt`) and asserts: (a) indicator shows during run, (b) indicator absent after `DraftBuilt`, (c) `[draft ready]` hint visible.
+
+#### Version: `0.14.7.1-alpha`
+
+---
+
 ### v0.14.8 — Creator Access: Web UI, Creative Templates & Guided Onboarding
 <!-- status: pending -->
 **Goal**: Make TA usable by people who aren't CLI engineers — artists, writers, game designers, researchers. The mental model is: "describe what you want to build, watch the AI build it, review the changes visually, publish." No terminal required after initial install. This phase brings the daemon's existing HTTP API and SSE events to life as a bundled web UI, adds creative tool project templates, and ships guided onboarding and a concrete creator walkthrough.
