@@ -416,6 +416,34 @@ impl Default for SupervisorConfig {
     }
 }
 
+/// Context injection mode for CLAUDE.md (v0.14.3.2).
+///
+/// Controls how plan and community context are delivered to the agent:
+///
+/// - `inject` (default): Inject plan + community context directly into CLAUDE.md.
+/// - `mcp`: Zero-injection — skip plan + community from CLAUDE.md entirely.
+///   Register `ta_plan_status` and community hub as MCP tools instead.
+///   Recommended for projects with large plans (>50 phases) or many community resources.
+/// - `hybrid`: Skip plan + community from CLAUDE.md, still inject memory context and
+///   the original CLAUDE.md. Adds a one-line note pointing to the MCP tools.
+///   Recommended for projects with large plans where agents support tool calling.
+///
+/// ```toml
+/// [workflow]
+/// context_mode = "inject"  # "inject" | "mcp" | "hybrid"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextMode {
+    /// Inject plan + community context into CLAUDE.md (default, current behavior).
+    #[default]
+    Inject,
+    /// Zero-injection: skip plan + community from CLAUDE.md; register as MCP tools instead.
+    Mcp,
+    /// Inject memory + CLAUDE.md only; skip plan + community. Add a one-line tool hint.
+    Hybrid,
+}
+
 /// Workflow behavior configuration (v0.14.3).
 ///
 /// Controls plan phase ordering enforcement and related guardrails.
@@ -464,6 +492,20 @@ pub struct WorkflowSection {
     /// Default: 5
     #[serde(default = "default_plan_pending_window")]
     pub plan_pending_window: usize,
+
+    /// Context injection mode (v0.14.3.2).
+    ///
+    /// Controls whether plan + community context are injected into CLAUDE.md
+    /// or served exclusively via MCP tools (`ta_plan_status`, `community_search`).
+    ///
+    /// Default: `inject` (current behavior — no change for existing projects).
+    ///
+    /// ```toml
+    /// [workflow]
+    /// context_mode = "hybrid"
+    /// ```
+    #[serde(default)]
+    pub context_mode: ContextMode,
 }
 
 fn default_enforce_phase_order() -> String {
@@ -489,6 +531,7 @@ impl Default for WorkflowSection {
             context_budget_chars: default_context_budget_chars(),
             plan_done_window: default_plan_done_window(),
             plan_pending_window: default_plan_pending_window(),
+            context_mode: ContextMode::default(),
         }
     }
 }

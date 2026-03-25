@@ -1422,6 +1422,7 @@ pub fn execute(
         let context_budget_chars = ctx_wf.workflow.context_budget_chars;
         let done_window = ctx_wf.workflow.plan_done_window;
         let pending_window = ctx_wf.workflow.plan_pending_window;
+        let context_mode = ctx_wf.workflow.context_mode.clone();
 
         tracing::info!(
             goal_id = %goal.goal_run_id,
@@ -1443,6 +1444,7 @@ pub fn execute(
             context_budget_chars,
             done_window,
             pending_window,
+            &context_mode,
         )?;
         tracing::info!(goal_id = %goal.goal_run_id, "CLAUDE.md injected");
 
@@ -4159,6 +4161,7 @@ fn inject_claude_md(
     context_budget_chars: usize,
     done_window: usize,
     pending_window: usize,
+    context_mode: &ta_submit::config::ContextMode,
 ) -> anyhow::Result<()> {
     let claude_md_path = staging_path.join("CLAUDE.md");
     let backup_path = staging_path.join(CLAUDE_MD_BACKUP);
@@ -4197,7 +4200,13 @@ fn inject_claude_md(
     };
 
     // Build plan context section if PLAN.md exists in source (windowed, v0.14.3.1).
-    let plan_section = build_plan_section(plan_phase, source_dir, done_window, pending_window);
+    // v0.14.3.2: Skip plan injection when context_mode is "mcp" or "hybrid".
+    let use_inject_mode = *context_mode == ta_submit::config::ContextMode::Inject;
+    let plan_section = if use_inject_mode {
+        build_plan_section(plan_phase, source_dir, done_window, pending_window)
+    } else {
+        String::new()
+    };
 
     // Build parent context section if this is a follow-up goal.
     // v0.10.9: Prefer smart follow-up context when available (richer context
@@ -4229,8 +4238,20 @@ fn inject_claude_md(
     let mut solutions_section = build_solutions_section_for_inject(config);
 
     // Build community knowledge section (v0.13.6: auto_query resources).
-    let community_section = if let Some(src) = source_dir {
-        super::community::build_community_context_section(src)
+    // v0.14.3.2: Skip community injection when context_mode is "mcp" or "hybrid".
+    let community_section = if use_inject_mode {
+        if let Some(src) = source_dir {
+            super::community::build_community_context_section(src)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    // v0.14.3.2: For hybrid/mcp modes, add a one-line hint about available context tools.
+    let context_tools_hint = if !use_inject_mode {
+        "\n# Context tools: ta_plan_status, community_search, community_get — call these when you need plan or community context.\n".to_string()
     } else {
         String::new()
     };
@@ -4308,7 +4329,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 **Goal:** {}
 **Goal ID:** {}
-{}{}{}{}{}{}{}
+{}{}{}{}{}{}{}{}
 ## How this works
 
 - This directory is a copy of the original project
@@ -4381,6 +4402,7 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
         memory_section,
         solutions_section,
         community_section,
+        context_tools_hint,
         existing_section
     );
 
@@ -5263,6 +5285,7 @@ mod tests {
             0,
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -5307,6 +5330,7 @@ mod tests {
             0,
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -5346,6 +5370,7 @@ mod tests {
             0,
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -5378,6 +5403,7 @@ mod tests {
             0,
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -5411,6 +5437,7 @@ mod tests {
             0,
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -5450,6 +5477,7 @@ mod tests {
             0,
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -5957,6 +5985,7 @@ pre_launch:
             0,
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -5981,6 +6010,7 @@ pre_launch:
             0,
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -6393,6 +6423,7 @@ non_interactive_env:
             1_000, // very tight budget
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -6426,6 +6457,7 @@ non_interactive_env:
             0, // budget disabled
             5,
             5,
+            &ta_submit::config::ContextMode::default(),
         )
         .unwrap();
 
@@ -6453,5 +6485,205 @@ plan_pending_window = 7
         assert_eq!(wf.workflow.context_budget_chars, 20_000);
         assert_eq!(wf.workflow.plan_done_window, 3);
         assert_eq!(wf.workflow.plan_pending_window, 7);
+    }
+
+    #[test]
+    fn test_mcp_mode_skips_plan_injection() {
+        // In "mcp" context mode, inject_claude_md should omit the Plan Context section.
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        // Write a PLAN.md so build_plan_section would normally produce content.
+        let plan_dir = staging.path();
+        std::fs::write(
+            plan_dir.join("PLAN.md"),
+            "### v0.1 — Test Phase\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+
+        inject_claude_md(
+            staging.path(),
+            "MCP mode goal",
+            "goal-mcp-001",
+            Some("v0.1"),
+            Some(staging.path()),
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            0,
+            5,
+            5,
+            &ta_submit::config::ContextMode::Mcp,
+        )
+        .unwrap();
+
+        let claude_md = std::fs::read_to_string(staging.path().join("CLAUDE.md")).unwrap();
+        assert!(claude_md.contains("Trusted Autonomy"), "header present");
+        assert!(
+            !claude_md.contains("## Plan Context"),
+            "plan section omitted in mcp mode"
+        );
+        assert!(
+            claude_md.contains("ta_plan_status"),
+            "tool hint present in mcp mode"
+        );
+    }
+
+    #[test]
+    fn test_mcp_mode_registers_ta_plan_tool_hint() {
+        // The hint line must mention ta_plan_status and community tools.
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        inject_claude_md(
+            staging.path(),
+            "MCP hint goal",
+            "goal-mcp-hint",
+            None,
+            None,
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            0,
+            5,
+            5,
+            &ta_submit::config::ContextMode::Mcp,
+        )
+        .unwrap();
+
+        let claude_md = std::fs::read_to_string(staging.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            claude_md.contains("ta_plan_status"),
+            "mcp mode hint mentions ta_plan_status"
+        );
+        assert!(
+            claude_md.contains("community_search"),
+            "mcp mode hint mentions community_search"
+        );
+    }
+
+    #[test]
+    fn test_hybrid_mode_includes_memory_not_plan() {
+        // In "hybrid" context mode, plan section is omitted but the tool hint is present.
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        std::fs::write(
+            staging.path().join("PLAN.md"),
+            "### v0.1 — Test Phase\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+
+        inject_claude_md(
+            staging.path(),
+            "Hybrid mode goal",
+            "goal-hybrid-001",
+            Some("v0.1"),
+            Some(staging.path()),
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            0,
+            5,
+            5,
+            &ta_submit::config::ContextMode::Hybrid,
+        )
+        .unwrap();
+
+        let claude_md = std::fs::read_to_string(staging.path().join("CLAUDE.md")).unwrap();
+        assert!(claude_md.contains("Trusted Autonomy"), "header present");
+        assert!(
+            !claude_md.contains("## Plan Context"),
+            "plan section omitted in hybrid mode"
+        );
+        assert!(
+            claude_md.contains("ta_plan_status"),
+            "tool hint present in hybrid mode"
+        );
+    }
+
+    #[test]
+    fn test_inject_mode_includes_plan_section() {
+        // Default "inject" mode should include Plan Context when PLAN.md exists.
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        std::fs::write(
+            staging.path().join("PLAN.md"),
+            "### v0.1 — Test Phase\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+
+        inject_claude_md(
+            staging.path(),
+            "Inject mode goal",
+            "goal-inject-001",
+            Some("v0.1"),
+            Some(staging.path()),
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            0,
+            5,
+            5,
+            &ta_submit::config::ContextMode::Inject,
+        )
+        .unwrap();
+
+        let claude_md = std::fs::read_to_string(staging.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            claude_md.contains("## Plan Context"),
+            "plan section present in inject mode"
+        );
+        assert!(
+            !claude_md.contains("ta_plan_status"),
+            "no tool hint in inject mode"
+        );
+    }
+
+    #[test]
+    fn test_context_mode_config_defaults_to_inject() {
+        let section = ta_submit::config::WorkflowSection::default();
+        assert_eq!(section.context_mode, ta_submit::config::ContextMode::Inject);
+    }
+
+    #[test]
+    fn test_context_mode_config_from_toml() {
+        let toml_mcp = "[workflow]\ncontext_mode = \"mcp\"\n";
+        let wf: ta_submit::WorkflowConfig = toml::from_str(toml_mcp).unwrap();
+        assert_eq!(
+            wf.workflow.context_mode,
+            ta_submit::config::ContextMode::Mcp
+        );
+
+        let toml_hybrid = "[workflow]\ncontext_mode = \"hybrid\"\n";
+        let wf2: ta_submit::WorkflowConfig = toml::from_str(toml_hybrid).unwrap();
+        assert_eq!(
+            wf2.workflow.context_mode,
+            ta_submit::config::ContextMode::Hybrid
+        );
+
+        let toml_inject = "[workflow]\ncontext_mode = \"inject\"\n";
+        let wf3: ta_submit::WorkflowConfig = toml::from_str(toml_inject).unwrap();
+        assert_eq!(
+            wf3.workflow.context_mode,
+            ta_submit::config::ContextMode::Inject
+        );
     }
 }

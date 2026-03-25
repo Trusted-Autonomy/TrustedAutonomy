@@ -1512,6 +1512,42 @@ Context Budget Report
   Context is within budget.
 ```
 
+#### Context Mode
+
+By default, TA pre-loads plan and community context into CLAUDE.md before each goal. For projects with large plans (>50 phases) or many community resources, this can consume significant context budget. The `context_mode` setting gives you control over how context is delivered.
+
+**Modes:**
+
+| Mode | Behavior | Best for |
+|------|----------|----------|
+| `inject` (default) | Plan + community injected into CLAUDE.md | Small projects, agents without tool calling |
+| `hybrid` | Memory + CLAUDE.md injected; plan + community available as MCP tools | Large plans, Claude Code agents |
+| `mcp` | Only header + memory; all context via MCP tools | Maximum savings, agents with full tool support |
+
+**Configure in `.ta/workflow.toml`:**
+
+```toml
+[workflow]
+context_mode = "hybrid"   # "inject" | "mcp" | "hybrid"
+```
+
+**On-demand plan status:**
+
+In `hybrid` or `mcp` mode, agents call `ta_plan_status` to fetch the windowed plan checklist when they need it:
+
+```json
+{
+  "phase": "v0.14.3.2",
+  "done_window": 5,
+  "pending_window": 5,
+  "format": "text"
+}
+```
+
+The response is identical to the injected plan section. Use `format: "json"` for a structured list of phases with id/title/status fields.
+
+**Note:** `community_search` and `community_get` are always registered as MCP tools regardless of mode. The `context_mode` only controls whether their guidance is also pre-loaded into CLAUDE.md.
+
 #### Batch Phase Marking
 
 When a single draft covers multiple plan phases:
@@ -7551,10 +7587,10 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.14.2 | Multi-party approval & threshold governance (`ta draft approve --as`, `--override`) | Done |
 | v0.14.3 | Plan phase ordering enforcement (`ta plan status --check-order`) | Done |
 | v0.14.3.1 | CLAUDE.md context budget & injection trim (`ta context size`, windowed plan checklist) | Done |
-| v0.14.3.2 | Full MCP lazy context (zero-injection plan & community) | Pending |
-| v0.14.4 | Daemon extension points — plugin surface for transport, auth, and queue backends | Pending |
-| v0.14.5 | Reserved for Secure Autonomy | Pending |
-| v0.14.6 | Rich audit ledger — complete lifecycle coverage, hash chaining, pluggable storage backends | Pending |
+| v0.14.3.2 | Full MCP lazy context (`context_mode = "mcp"/"hybrid"`, `ta_plan_status` tool) | Done |
+| v0.14.4 | Central daemon & multi-user deployment | Pending |
+| v0.14.5 | Enterprise identity & SSO integration | Pending |
+| v0.14.6 | Compliance-ready audit ledger (builds on v0.14.4 Central Daemon) | Pending |
 | v0.14.6.5 | Pluggable memory backends (ExternalMemoryAdapter, Supermemory plugin) | Pending |
 | v0.14.7 | Draft view polish — agent decision log, collapsible HTML | Pending |
 | v0.15.0 | VS Code extension | Pending |

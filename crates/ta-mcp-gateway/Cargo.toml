@@ -16,6 +16,7 @@ rmcp = { workspace = true }
 schemars = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
+regex = { workspace = true }
 
 # Internal crates
 ta-audit = { path = "../ta-audit" }

@@ -129,7 +129,7 @@ Hardening for security-conscious single-node deployments. Multi-user and enterpr
 
 - v0.13.7 — Goal Workflows: Serial Chains, Parallel Swarms & Office Routing
 - v0.13.8 — Agent Framework: Pluggable Agent Backends (Claude Code, Codex, Claude-Flow, Ollama+Qwen, user-defined)
-- v0.14.x — Hardened Autonomy (sandboxing, attestation, multi-party governance, extension-point surface for team tooling)
+- v0.14.x — Enterprise Readiness (sandboxing, attestation, multi-party governance, cloud/multi-user deployment)
 
 ---
 
@@ -6539,14 +6539,14 @@ api_key_env = "OPENAI_API_KEY"   # checked but not required — binary handles i
 1. [x] **Sandbox policy DSL**: `[sandbox]` section in `.ta/workflow.toml`. Fields: `enabled`, `provider` ("native"/"openshell"/"oci"), `allow_read`, `allow_write`, `allow_network`. Defaults: `enabled = false` (no breakage on upgrade). Implemented in `ta-submit/src/config.rs::SandboxConfig`. 3 tests. (v0.14.0)
 2. [x] **macOS sandbox-exec integration**: `SandboxPolicy::apply()` wraps the `SpawnRequest` in `sandbox-exec -p <profile> -- <cmd>`. Profile generated in `generate_macos_profile()`: `(deny default)`, allows system libs, workspace, declared `allow_read`/`allow_write`, optional outbound network. Agent sandbox activated automatically when `sandbox.enabled = true` in workflow.toml. 5 tests in `ta-runtime/src/sandbox.rs`. (v0.14.0)
 3. [x] **Linux bwrap integration**: `apply_linux_bwrap()` wraps agent in `bwrap` with ro-bind for system paths, rw-bind for workspace, tmpfs for /tmp, optional `--unshare-net`. Available when `bwrap` is on PATH. (v0.14.0)
-4. → **Secure Autonomy** **Container fallback (OCI/gVisor)**: OCI container runtime and gVisor kernel isolation are implemented in Secure Autonomy as a `RuntimeAdapter` plugin. The `RuntimeAdapter` trait (v0.13.3) is the extension point.
+4. → **v0.14.4** **Container fallback (OCI)**: Deferred — blocked by OCI plugin implementation (external). v0.14.4 (Central Daemon) is the natural home as it requires containerised agent isolation.
 5. → **community** **OpenShell runtime adapter**: Deferred — blocked on NVIDIA OpenShell public availability. Community contribution once the API stabilises.
 6. [x] **Credential injection via environment**: Already implemented as `ScopedCredential` + `apply_credentials_to_env()` in `ta-runtime` (v0.13.3). `SpawnRequest.env` carries the credential; never written to staging or config files.
 7. → **v0.14.1** **Sandbox violation audit events**: Deferred — requires parsing sandbox-exec/bwrap stderr output. Requires attestation infrastructure (v0.14.1) and is naturally implemented alongside audit trail work.
 8. → **v0.14.1** **Test harness**: Deferred — integration tests for blocked paths require privileged CI environment. Will be implemented as part of v0.14.1 attestation test infrastructure.
 
 #### Deferred items resolved
-- Item 4 → Secure Autonomy (OCI/gVisor runtime plugin built on `RuntimeAdapter` trait)
+- Item 4 → v0.14.4 (Central Daemon, requires OCI runtime plugin)
 - Item 5 → community (depends on NVIDIA OpenShell public API)
 - Item 7 → v0.14.1 (attestation infrastructure enables audit event parsing)
 - Item 8 → v0.14.1 (privileged CI test harness grouped with attestation tests)
@@ -6582,14 +6582,14 @@ api_key_env = "OPENAI_API_KEY"   # checked but not required — binary handles i
 
 1. [x] **`[governance]` section in `workflow.toml`**: `require_approvals = 2`, `approvers = ["alice", "bob", "carol"]`, `override_identity = "admin"`. Defaults: 1 approver (current behavior, backward-compatible). `GovernanceConfig` added to `crates/ta-submit/src/config.rs`.
 2. [x] **Multi-approver draft state machine**: `pending_approvals: Vec<ApprovalRecord>` field on `DraftPackage`. `PendingReview` waits for N distinct approvals before transitioning to `Approved`. Each approval is timestamped and linked to a reviewer identity. Duplicate approvals from the same reviewer rejected.
-3. → **Secure Autonomy** **Approval request routing**: Notify all listed approvers via configured channels when a draft requires their approval. Requires multi-user identity infrastructure — implemented in Secure Autonomy, which registers a `ReviewQueueBackend` plugin (see v0.14.4-oss extension points).
+3. → **v0.14.4** **Approval request routing**: Notify all listed approvers via configured channels (Discord DM, Slack, email) when a draft requires their approval. Deferred — requires Central Daemon multi-user identity routing.
 4. [x] **`ta draft approve --as <identity>`**: Approve a draft as a named reviewer. Validates identity against `approvers` list (if non-empty). Also accepts `--reviewer` as legacy alias.
 5. → **community** **Threshold signatures**: Shamir's Secret Sharing N-of-M co-signing. Deferred — requires dedicated cryptography work beyond the `AttestationBackend` trait. Community contribution point.
 6. [x] **Override with audit trail**: `ta draft approve --override` allows the configured `override_identity` to bypass quorum. Override is logged via `tracing::warn` and printed with `⚠` prefix for audit visibility.
 
 #### Deferred items resolved
 
-- Item 3 → Secure Autonomy: approval routing requires multi-user identity infrastructure outside TA OSS scope
+- Item 3 → v0.14.4 (Central Daemon): requires multi-user identity routing and channel delivery infrastructure
 - Item 5 → community: Shamir's Secret Sharing is a significant independent cryptography module
 
 #### Version: `0.14.2-alpha`
@@ -6693,7 +6693,7 @@ Rule: show last `N_DONE_WINDOW` (default 5) done phases + current + next `N_PEND
 ---
 
 ### v0.14.3.2 — Full MCP Lazy Context (Zero-Injection Plan & Community)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Eliminate plan and community context from the injected CLAUDE.md entirely. Instead of pre-loading any plan state or community resource guidance, agents call dedicated MCP tools (`ta_plan`, `community_search`, `community_get`) when they need context. This completes the context trimming started in v0.14.3.1 and fulfills the surgical community hub design from v0.13.17.7.
 
 #### Why now (after v0.14.3.1)
@@ -6719,19 +6719,19 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 
 #### Items
 
-1. [ ] **`ta_plan` MCP tool in `ta-mcp-gateway`**: New tool `ta_plan_status` — returns the windowed plan checklist (same output as `build_plan_section()` but on demand). Parameters: `{ phase: Option<String>, done_window: u8, pending_window: u8 }`. Registered in `.mcp.json` injection when `context_mode = "mcp"`.
+1. [x] **`ta_plan` MCP tool in `ta-mcp-gateway`**: New tool `ta_plan_status` — returns the windowed plan checklist (same output as `build_plan_section()` but on demand). Parameters: `{ phase: Option<String>, done_window: u8, pending_window: u8, format: Option<String> }`. Added `PlanStatusParams` in `server.rs`, `handle_plan_status` in `tools/plan.rs` with inline plan parser, `ta_plan_status` `#[tool]` method on `TaGatewayServer`. 4 new tests.
 
-2. [ ] **`[workflow] context_mode`** config: `"inject"` (default, current behavior) | `"mcp"` (zero-injection, tools only) | `"hybrid"` (inject CLAUDE.md + memory only, register plan/community as MCP tools). Update `GatewayConfig`.
+2. [x] **`[workflow] context_mode`** config: `"inject"` (default, current behavior) | `"mcp"` (zero-injection, tools only) | `"hybrid"` (inject CLAUDE.md + memory only, register plan/community as MCP tools). Added `ContextMode` enum to `ta-submit/src/config.rs` `WorkflowSection`. Exported from `ta-submit` top-level.
 
-3. [ ] **`context_mode = "mcp"` skips plan + community injection**: In `inject_claude_md()`, when `context_mode == "mcp"`, skip `build_plan_section()` and `build_community_context_section()` calls. Register `ta_plan_status` and `ta-community-hub` in `.mcp.json` instead (already registered for community; plan is new).
+3. [x] **`context_mode = "mcp"` skips plan + community injection**: In `inject_claude_md()`, when `context_mode` is `Mcp` or `Hybrid`, skip `build_plan_section()` and `build_community_context_section()` calls. Adds `use_inject_mode` flag driven by `ContextMode`.
 
-4. [ ] **`context_mode = "hybrid"` (recommended default for future)**: Skip plan + community from CLAUDE.md, but still inject memory context and original CLAUDE.md. Adds a one-line note: `"# Context tools: ta_plan_status, community_search, community_get — call these when you need plan or API context."` (~100 tokens).
+4. [x] **`context_mode = "hybrid"` (recommended default for future)**: Skip plan + community from CLAUDE.md, but still inject memory context and original CLAUDE.md. Adds a one-line note: `"# Context tools: ta_plan_status, community_search, community_get — call these when you need plan or API context."` (~100 tokens). Implemented via `context_tools_hint` string.
 
-5. [ ] **`ta_plan_status` response format**: Returns the same windowed checklist text as `format_plan_checklist_windowed()`. Also supports `{ format: "json" }` for structured output (list of phases with id/title/status). Tests: windowed text round-trip, JSON format structure.
+5. [x] **`ta_plan_status` response format**: Returns the same windowed checklist text as `format_plan_checklist_windowed()`. Also supports `{ format: "json" }` for structured output (list of phases with id/title/status/done/pending counts). 4 tests in `ta-mcp-gateway/src/tools/plan.rs`.
 
-6. [ ] **Documentation**: USAGE.md "Context Mode" section explaining inject/mcp/hybrid tradeoffs. Recommendation: `hybrid` for projects with large plans (>50 phases); `inject` for small projects and agents that don't support tool calling. Note that `community_search` / `community_get` are already available regardless of mode.
+6. [x] **Documentation**: USAGE.md "Context Mode" section explaining inject/mcp/hybrid tradeoffs. Recommendation: `hybrid` for projects with large plans (>50 phases); `inject` for small projects and agents that don't support tool calling.
 
-7. [ ] **Tests**: `test_mcp_mode_skips_plan_injection`, `test_mcp_mode_registers_ta_plan_tool`, `test_hybrid_mode_includes_memory_not_plan`, `test_ta_plan_status_tool_returns_windowed_checklist`.
+7. [x] **Tests**: `test_mcp_mode_skips_plan_injection`, `test_mcp_mode_registers_ta_plan_tool_hint`, `test_hybrid_mode_includes_memory_not_plan`, `test_ta_plan_status_tool_returns_windowed_checklist`, `test_inject_mode_includes_plan_section`, `test_context_mode_config_defaults_to_inject`, `test_context_mode_config_from_toml`, plus 4 unit tests in tools/plan.rs. Total: 11 new tests.
 
 #### Version: `0.14.3.2-alpha`
 
@@ -6793,44 +6793,80 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 
 ---
 
-### v0.14.4 — Daemon Extension Points (team & deployment plugin surface)
+### v0.14.4 — Central Daemon & Multi-User Deployment
 <!-- status: pending -->
-**Goal**: Expose the plugin surface that allows team-deployment and enterprise tooling to extend the TA daemon without forking it. TA OSS remains a single-user local daemon; this phase defines the stable interfaces those extensions attach to.
+<!-- enterprise: yes — team and cloud deployment topology -->
+**Goal**: Enable TA to run as a shared service — a single `ta-daemon` instance (on a server, cloud VM, or container) that multiple developers and CI pipelines connect to over the network, sharing project workspaces, review queues, and audit infrastructure.
 
-**Design principle**: TA defines the traits and plugin protocols. Team/enterprise capabilities are implemented externally and registered at startup — TA never contains the enterprise implementation. This keeps the OSS core lean and creates a clean boundary for commercial extensions.
+**Depends on**: v0.14.0 (sandboxing — each agent must be isolated before multi-user is safe), v0.13.2 (MCP Transport — TCP/TLS transport for remote agent sessions)
 
-#### Extension traits to define
+#### Design
 
-1. [ ] **`TransportBackend` trait** (`crates/ta-daemon/src/transport.rs`): Abstraction over how the daemon accepts connections. Built-in: Unix domain socket (current behaviour, unchanged). Plugin authors implement this trait to add network transports. Interface: `bind() -> impl Listener`, `accept() -> impl Connection`. The daemon's request loop consumes any `TransportBackend` — it does not know whether the underlying bytes come from a socket or the network.
+```
+Developer workstation A  ─── TLS/WebSocket ───┐
+Developer workstation B  ─── TLS/WebSocket ───┤── Central TA Daemon ──── Agent Pool
+CI / CD pipeline         ─── API key ─────────┤   (cloud VM, k8s pod)
+ta shell (remote)        ─── TLS/WebSocket ───┘       │
+                                                  Shared project workspace
+                                                  (NFS / object store / git)
+                                                  Shared review queue
+                                                  Shared audit ledger → S3/Postgres
+```
 
-2. [ ] **`AuthMiddleware` trait** (`crates/ta-daemon/src/auth.rs`): Per-request identity resolution and capability check. Built-in: `NoopAuth` (all requests permitted — current local behaviour, unchanged). Interface: `resolve_identity(request) -> Identity`, `check_capability(identity, capability) -> bool`. Runs before every API handler. Plugin authors implement this to add authentication and authorisation.
+#### Identity & Auth
 
-3. [ ] **`ReviewQueueBackend` trait** (`crates/ta-changeset/src/review_queue.rs`): Where pending drafts are stored and fetched. Built-in: local in-process queue (current behaviour). Interface: `enqueue(draft)`, `list(filter) -> Vec<DraftSummary>`, `dequeue(id)`. Approval routing and shared team queues are implemented by plugins registering a different backend.
+```toml
+# .ta/daemon.toml — server side
+[auth]
+mode = "oidc"   # "oidc" | "api-keys" | "ssh-cert" | "none" (local only)
+issuer = "https://accounts.google.com"
+audience = "ta-daemon-myorg"
 
-4. [ ] **`WorkspaceBackend` trait** (`crates/ta-workspace/src/backend.rs`): Where agent staging directories are created and stored. Built-in: local filesystem (current behaviour). Interface: `create_staging(goal_id) -> StagingHandle`, `sync_back(handle)`. Remote or shared workspace implementations register this trait.
+[[auth.api_keys]]
+key = "ta_key_abc123..."
+identity = "ci-pipeline"
+roles = ["run-goals", "read-drafts"]
 
-5. [ ] **Plugin registration API**: `ta-daemon` exposes a `register_plugin(Box<dyn DaemonPlugin>)` call at startup. `DaemonPlugin` bundles optional implementations of the above traits. Plugins are loaded from `~/.config/ta/plugins/daemon/` as dynamic libraries or as out-of-process sidecar processes using JSON-over-stdio (same pattern as VCS plugins). Built-in plugins always win over external if both are registered.
+[[auth.users]]
+identity = "alice@example.com"
+roles = ["run-goals", "approve-drafts", "admin"]
+```
 
-6. [ ] **Stable HTTP API contract**: Freeze the existing `/api/` shape with a versioned path prefix (`/api/v1/`). Document the full surface in `docs/daemon-api.md`. This is the contract external tooling (shells, CI integrations, extension plugins) builds on — breaking changes require a new prefix.
+#### Items
 
-7. [ ] **`/api/v1/health` and `/api/v1/metrics`**: Structured health endpoint (daemon version, uptime, goal counts by state). Metrics endpoint in a format plugins can extend. Both available on the local socket — no new network listener required.
-
-8. [ ] **Concurrent agent scheduling** (OSS): Local-only. Multiple goals queued and run sequentially (current) or in parallel up to `[daemon] max_concurrent_agents` (default 1). Queue depth exposed via `/api/v1/queue`. No remote scheduling — the scheduler is a plugin extension point for SA.
-
-#### What this enables (without giving it away)
-
-Once these traits are stable, a `ta-daemon-team` plugin can register `TransportBackend` + `AuthMiddleware` + `ReviewQueueBackend` implementations to add multi-user capabilities — without any changes to TA OSS. TA never ships those implementations; it only ships the interfaces.
+1. [ ] **TLS listener**: `ta-daemon` optionally binds on a non-localhost address with TLS. `daemon.toml` `[server] bind = "0.0.0.0:7700"`, `cert`, `key`.
+2. [ ] **Authentication middleware**: OIDC JWT validation + API key lookup on every request. Identity propagated to all operations (goal runs, approvals, audit entries).
+3. [ ] **RBAC**: Roles `run-goals`, `read-drafts`, `approve-drafts`, `admin`. Config in `daemon.toml`. Enforced per-endpoint.
+4. [ ] **Multi-project tenancy**: Daemon can serve multiple projects with namespace isolation. Each project has its own `.ta/` dir, goal queue, and review queue. URL prefix `/projects/<name>/api/...`.
+5. [ ] **Remote workspace adapter**: Agent workspaces can be on a shared NFS mount or object store (S3/GCS). `OverlayWorkspace` abstraction gains a remote backend. Agents still work in an ephemeral local copy; changes sync back on draft build.
+6. [ ] **Concurrent agent scheduling**: Multiple goals can run in parallel up to a configurable `max_concurrent_agents` limit. Queue depth and wait-time exposed via `/api/queue`.
+7. [ ] **Remote `ta shell`**: `ta shell --remote <url>` connects over TLS/WebSocket to a central daemon. Full interactive experience (goals, drafts, events) over the wire. Auth via stored API key or OIDC device flow.
+8. [ ] **Team review queue**: `ta draft list` shows all pending drafts project-wide, not just the current user's. Any authorised team member can approve via `ta draft approve`.
+9. [ ] **`ta daemon deploy`**: Helper command to generate a `docker-compose.yml` or Kubernetes manifest for a central TA deployment. Includes daemon, reverse proxy (nginx/caddy), and optional Postgres for audit storage.
+10. [ ] **`ta daemon invite <email>`**: Generate an API key or OIDC onboarding link for a new team member.
+11. [ ] **Health & observability**: `/metrics` endpoint (Prometheus format) exposing queue depth, active agents, approval latency, error rates.
+12. [ ] **Documentation**: "Running TA for your team" guide — setup, auth config, workspace options, review workflow.
 
 #### Version: `0.14.4-alpha`
 
 ---
 
-### v0.14.5 — Reserved for Secure Autonomy
+### v0.14.5 — Enterprise Identity & SSO Integration
 <!-- status: pending -->
-<!-- enterprise: sa -->
-**Note**: Enterprise identity, SSO, and organisation-wide access control are implemented in **Secure Autonomy** as a plugin registering `AuthMiddleware` against the extension points defined in v0.14.4. No OSS implementation planned for this version slot. The slot is reserved to keep the version sequence stable.
+<!-- enterprise: yes — org-wide identity, SAML/SCIM, group-based RBAC -->
+**Goal**: Integrate with enterprise identity providers (Okta, Azure AD, Google Workspace) via SAML 2.0 and SCIM for automated provisioning. Replace per-user config with group-based RBAC so adding a developer to the "ta-engineers" group in Okta automatically grants them the right TA permissions without any manual `daemon.toml` edit.
 
-**Depends on**: v0.14.4 (extension traits — `AuthMiddleware`, `TransportBackend`)
+**Depends on**: v0.14.4 (Central Daemon — identity and auth infrastructure)
+
+#### Items
+
+1. [ ] **SAML 2.0 SP**: TA daemon acts as a SAML Service Provider. `[auth] mode = "saml"` with `idp_metadata_url`. Handles SSO login redirect and assertion validation.
+2. [ ] **SCIM 2.0 endpoint**: `/scim/v2/Users` and `/scim/v2/Groups` for automated provisioning/deprovisioning from Okta/Azure AD. New users auto-get default role; removed users are immediately locked out.
+3. [ ] **Group → role mapping**: `[auth.group_roles]` maps IdP group names to TA roles. E.g., `"ta-approvers" = ["approve-drafts"]`.
+4. [ ] **Audit entries include SSO identity**: All audit records carry the IdP-verified identity (email + IdP subject), not just a local username.
+5. [ ] **`ta daemon status --identity`**: Show current authenticated identity, roles, and session expiry.
+6. [ ] **Session management**: Short-lived JWT sessions (1h), refresh via OIDC/SAML, configurable idle timeout.
+7. [ ] **Tested with**: Okta, Azure AD / Entra ID, Google Workspace, GitHub (OAuth app).
 
 #### Version: `0.14.5-alpha`
 
@@ -6854,10 +6890,17 @@ The current `.ta/goal-history.jsonl` is a compact index written only on the happ
 5. [ ] **`ta goal gc` writes audit entries**: Before transitioning or removing any goal data, append an audit entry with `disposition: "gc"` and the gc reason.
 6. [ ] **Populate artifact count and lines changed**: Wire the existing `artifact_count` / `lines_changed` fields to the draft's actual artifact data (currently always 0).
 7. [ ] **`ta audit export`**: Export audit ledger in structured formats (JSONL, CSV). Filterable by date range, phase, agent, disposition.
-8. [ ] **`AuditStorageBackend` trait** (`crates/ta-audit/src/storage.rs`): Abstraction over where audit entries are persisted. Built-in: local append-only JSONL (current behaviour, unchanged). Interface: `append(entry)`, `query(filter) -> Vec<AuditEntry>`, `verify_chain() -> ChainResult`. Remote/cloud/database backends are implemented by external plugins registering this trait — not in TA OSS.
+8. [ ] **Pluggable audit storage backend**:
+   ```toml
+   [audit]
+   backend = "file"  # default: .ta/audit-ledger.jsonl
+   # backend = "database"  # connection = "postgres://..."
+   # backend = "s3"        # bucket = "my-audit-bucket"
+   ```
+   Built-in: local JSONL. Plugin interface for database, shared filesystem, cloud storage — integrates with central daemon from v0.14.4.
 9. [ ] **Audit ledger integrity**: Append-only with hash chaining (each entry includes hash of previous entry). `ta audit verify` validates the chain. Tampering is detectable.
-10. → **Secure Autonomy** **Remote storage backends and retention policies**: S3, GCS, Postgres, SIEM, and configurable retention with legal-hold are implemented by SA as a plugin registering `AuditStorageBackend`. Not part of TA OSS.
-11. → **Secure Autonomy** **Compliance evidence packages**: ISO/IEC 42001, EU AI Act, SOC 2 report generation implemented in SA.
+10. [ ] **Retention policy**: Configurable retention. `ta audit gc --older-than 1y` removes entries beyond retention while preserving chain integrity.
+11. [ ] **Structured agent output logging**: Optional `[agent].output_log = "structured"` captures full JSON agent output to the audit ledger for compliance and reproducibility.
 12. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new format on first run.
 
 #### Version: `0.14.6-alpha`
@@ -7406,10 +7449,10 @@ If the decision is to keep TUI, the original v0.13.6 items (survey Rust TUI apps
 > These are NOT part of TA core. They are independent projects that consume TA's extension points.
 > See `docs/ADR-product-concept-model.md` for how they integrate.
 
-### Secure Autonomy *(separate commercial product)*
-> Team deployment, enterprise security, and compliance capabilities built on TA's extension points.
+### SecureTA *(future separate project)*
+> Planned enterprise security layer built on TA's extension points.
 
-Secure Autonomy is a separate product that extends TA via the plugin surface defined in v0.13.3 (`RuntimeAdapter`), v0.14.1 (`AttestationBackend`), v0.14.4 (`TransportBackend`, `AuthMiddleware`, `ReviewQueueBackend`, `WorkspaceBackend`), and v0.14.6 (`AuditStorageBackend`). It does not fork TA. See separate Secure Autonomy documentation.
+Adds OCI/gVisor container isolation, hardware-bound audit trail signing (TPM 2.0, Apple Secure Enclave), and kernel-level network policy — for regulated deployments and environments running untrusted agent code. Depends on TA v0.13.3 (RuntimeAdapter) and v0.14.1 (AttestationBackend). Not yet started.
 
 ---
 

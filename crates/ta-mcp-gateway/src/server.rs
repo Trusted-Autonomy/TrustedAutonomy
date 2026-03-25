@@ -220,6 +220,26 @@ pub struct PlanToolParams {
     pub status_note: Option<String>,
 }
 
+/// Parameters for `ta_plan_status` (lazy plan checklist tool, v0.14.3.2).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlanStatusParams {
+    /// Optional phase ID to use as the "current" anchor for windowed output.
+    /// When omitted, the full plan is returned without windowing.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// Number of completed phases to show individually before the current phase.
+    /// Default: 5.
+    #[serde(default)]
+    pub done_window: Option<u8>,
+    /// Number of pending phases to show individually after the current phase.
+    /// Default: 5.
+    #[serde(default)]
+    pub pending_window: Option<u8>,
+    /// Output format: "text" (default) or "json".
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
 /// Parameters for `ta_context` (persistent memory tool, v0.5.4+).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ContextToolParams {
@@ -1021,6 +1041,21 @@ impl TaGatewayServer {
         tools::plan::handle_plan(&self.state, params)
     }
 
+    #[tool(
+        description = "Return the windowed plan checklist on demand (v0.14.3.2). \
+            Provides the same output as the injected plan context, but fetched lazily \
+            so agents in mcp or hybrid context_mode can retrieve plan state without it \
+            being pre-loaded into CLAUDE.md. Parameters: phase (optional anchor phase ID), \
+            done_window (default 5), pending_window (default 5), format (\"text\" | \"json\")."
+    )]
+    fn ta_plan_status(
+        &self,
+        Parameters(params): Parameters<PlanStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ta_plan_status", None, None);
+        tools::plan::handle_plan_status(&self.state, params)
+    }
+
     /// Persistent memory store for cross-agent context.
     #[tool]
     fn ta_context(
@@ -1173,15 +1208,15 @@ mod tests {
     fn tool_count_matches_expected() {
         let (server, _dir) = test_server();
         let tools = server.tool_router.list_all();
-        // 18 tools: goal_start, goal_status, goal_list,
+        // 19 tools: goal_start, goal_status, goal_list,
         //           fs_read, fs_write, fs_list, fs_diff,
         //           pr_build, pr_status,
-        //           ta_draft, ta_goal_inner, ta_plan, ta_context,
-        //           ta_agent_status (v0.9.6), ta_event_subscribe (v0.9.4),
+        //           ta_draft, ta_goal_inner, ta_plan, ta_plan_status (v0.14.3.2),
+        //           ta_context, ta_agent_status (v0.9.6), ta_event_subscribe (v0.9.4),
         //           ta_workflow (v0.9.8.2), ta_ask_human (v0.9.9.1),
         //           ta_external_action (v0.13.4)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 18, "expected 18 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 19, "expected 19 tools, got: {:?}", names);
     }
 
     #[test]
