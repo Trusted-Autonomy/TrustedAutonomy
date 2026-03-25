@@ -24,7 +24,8 @@ pub enum ReleaseCommands {
         /// Target version (semver or plan phase ID, e.g., "0.4.0-alpha" or "v0.4.1.2").
         version: String,
 
-        /// Skip approval gates (non-interactive / CI mode).
+        /// Skip all approval gates and the constitution check (non-interactive / CI mode).
+        /// Equivalent to --auto-approve.
         #[arg(long)]
         yes: bool,
 
@@ -54,9 +55,10 @@ pub enum ReleaseCommands {
         #[arg(long)]
         interactive: bool,
 
-        /// Auto-approve all approval gates without prompting.
+        /// Auto-approve all approval gates and skip the constitution check.
         /// Use in CI or when approval is not needed. Without this flag,
         /// non-TTY contexts (daemon) will prompt via TUI interaction.
+        /// Equivalent to --yes.
         #[arg(long)]
         auto_approve: bool,
 
@@ -83,6 +85,10 @@ pub enum ReleaseCommands {
         /// Custom pipeline file (overrides default resolution).
         #[arg(long)]
         pipeline: Option<PathBuf>,
+        /// Override the base tag used to compute the commit range.
+        /// By default uses git describe or release-history.json.
+        #[arg(long)]
+        from_tag: Option<String>,
     },
     /// Initialize a `.ta/release.yaml` in the project from the default template.
     Init,
@@ -189,7 +195,9 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             }
             Ok(())
         }
-        ReleaseCommands::Show { pipeline } => show_pipeline(config, pipeline.as_deref()),
+        ReleaseCommands::Show { pipeline, from_tag } => {
+            show_pipeline(config, pipeline.as_deref(), from_tag.as_deref())
+        }
         ReleaseCommands::Init => init_pipeline(config),
         ReleaseCommands::Config { key, value } => configure_release(config, key, value),
         ReleaseCommands::Validate { version, pipeline } => {
@@ -303,6 +311,18 @@ pub struct PipelineStep {
     #[serde(default)]
     pub generate_notes: Option<GenerateNotesConfig>,
 
+    /// If true, run the constitution compliance check programmatically instead of
+    /// displaying a static checklist. Shows scan violations and supervisor verdict.
+    /// Skipped entirely when --yes / --auto-approve is set.
+    #[serde(default)]
+    pub constitution_check: bool,
+
+    /// If true, write .ta/release-history.json and stage it with git add.
+    /// Place this step AFTER "Commit and tag" to capture the correct SHA.
+    /// The next "Update version tracking" amend will include it in the release commit.
+    #[serde(default)]
+    pub record_release_history: bool,
+
     /// Objective/description for context (used by agent steps and display).
     #[serde(default)]
     pub objective: Option<String>,
@@ -310,6 +330,11 @@ pub struct PipelineStep {
     /// If true, pause for human approval before this step executes.
     #[serde(default)]
     pub requires_approval: bool,
+
+    /// If true, the approval prompt defaults to Y (Enter proceeds, n aborts).
+    /// Use for review steps where "looks good" is the common case.
+    #[serde(default)]
+    pub default_approve: bool,
 
     /// Expected output artifact path (informational).
     #[serde(default)]
@@ -391,19 +416,21 @@ impl PipelineStep {
             self.run.is_some(),
             self.agent.is_some(),
             self.generate_notes.is_some(),
+            self.constitution_check,
+            self.record_release_history,
         ]
         .iter()
         .filter(|&&x| x)
         .count();
         if defined == 0 {
             anyhow::bail!(
-                "Step '{}': must have one of 'run', 'agent', or 'generate_notes'",
+                "Step '{}': must have one of 'run', 'agent', 'generate_notes', 'constitution_check', or 'record_release_history'",
                 self.name
             );
         }
         if defined > 1 {
             anyhow::bail!(
-                "Step '{}': only one of 'run', 'agent', or 'generate_notes' may be set",
+                "Step '{}': only one of 'run', 'agent', 'generate_notes', 'constitution_check', or 'record_release_history' may be set",
                 self.name
             );
         }
@@ -781,7 +808,7 @@ fn run_pipeline(
         // Approval gate.
         if step.requires_approval && !skip_approvals && !dry_run {
             println!("[{}/{}] {} — requires approval", i + 1, total, step.name);
-            if !prompt_approval(&step.name)? {
+            if !prompt_approval_default(&step.name, step.default_approve)? {
                 println!("Aborted at step {}.", i + 1);
                 anyhow::bail!("__pipeline_aborted__");
             }
@@ -821,6 +848,25 @@ fn run_pipeline(
                 last_tag.as_deref(),
                 notes_cfg,
             )?;
+        } else if step.constitution_check {
+            if skip_approvals {
+                println!("  Constitution check skipped (--yes/--auto-approve).");
+            } else {
+                let verdict = run_constitution_check_step(config)?;
+                // Gate: default Y on pass/warn, default N on block.
+                let default_approve = !matches!(verdict, ta_changeset::SupervisorVerdict::Block);
+                if !dry_run
+                    && !prompt_approval_default(
+                        &format!("Proceed with '{}' (verdict: {})?", step.name, verdict),
+                        default_approve,
+                    )?
+                {
+                    println!("Aborted at step {}.", i + 1);
+                    anyhow::bail!("__pipeline_aborted__");
+                }
+            }
+        } else if step.record_release_history {
+            execute_record_release_history_step(&config.workspace_root, version)?;
         }
 
         println!("[{}/{}] {} — done", i + 1, total, step.name);
@@ -828,15 +874,6 @@ fn run_pipeline(
     }
 
     println!("Release pipeline complete.");
-
-    // Record this release in .ta/release-history.json so future runs know the
-    // exact commit delta without relying on `git describe`.
-    if !dry_run {
-        if let Err(e) = record_release(&config.workspace_root, version) {
-            // Non-fatal — release succeeded; tracking file failure is just a warning.
-            eprintln!("Warning: could not update release-history.json: {}", e);
-        }
-    }
 
     Ok(())
 }
@@ -1320,6 +1357,107 @@ fn write_release_notes(root: &Path, notes: &str) -> anyhow::Result<()> {
     })
 }
 
+/// Run the constitution compliance check step programmatically.
+///
+/// Loads the project constitution config, calls scan_for_violations(), then
+/// invokes the supervisor agent against the release diff description.
+/// Returns the verdict. If no constitution is configured, returns Pass.
+fn run_constitution_check_step(
+    config: &GatewayConfig,
+) -> anyhow::Result<ta_changeset::SupervisorVerdict> {
+    let constitution_cfg =
+        super::constitution::ProjectConstitutionConfig::load(&config.workspace_root)
+            .unwrap_or_default();
+
+    if let Some(ref cc) = constitution_cfg {
+        // Run static scan.
+        println!("  Running constitution scan...");
+        match super::constitution::scan_for_violations(&config.workspace_root, cc) {
+            Ok(violations) if violations.is_empty() => {
+                println!("  Scan: no violations found.");
+            }
+            Ok(violations) => {
+                println!("  Scan: {} violation(s) found:", violations.len());
+                for v in violations.iter().take(5) {
+                    println!("    [{}] {}:{} — {}", v.severity, v.file, v.line, v.message);
+                }
+                if violations.len() > 5 {
+                    println!("    ... and {} more.", violations.len() - 5);
+                }
+            }
+            Err(e) => {
+                println!("  Scan error (continuing): {}", e);
+            }
+        }
+    } else {
+        println!("  No constitution configured — skipping check.");
+        return Ok(ta_changeset::SupervisorVerdict::Pass);
+    }
+
+    // Build supervisor run config from workflow.toml.
+    let workflow_toml = config.workspace_root.join(".ta/workflow.toml");
+    let wf = ta_submit::WorkflowConfig::load_or_default(&workflow_toml);
+    let sup_cfg = &wf.supervisor;
+
+    if !sup_cfg.enabled {
+        println!("  Supervisor review: disabled.");
+        return Ok(ta_changeset::SupervisorVerdict::Pass);
+    }
+
+    let run_config = ta_changeset::SupervisorRunConfig {
+        enabled: true,
+        agent: sup_cfg.agent.clone(),
+        verdict_on_block: sup_cfg.verdict_on_block.clone(),
+        constitution_path: sup_cfg.constitution_path.clone(),
+        skip_if_no_constitution: sup_cfg.skip_if_no_constitution,
+        timeout_secs: sup_cfg.timeout_secs,
+        api_key_env: sup_cfg.api_key_env.clone(),
+        staging_path: None,
+    };
+
+    let constitution_text = ta_changeset::load_constitution(&config.workspace_root, &run_config);
+    if constitution_text.is_some() {
+        println!("  Constitution: loaded.");
+    }
+
+    println!("  Running supervisor review...");
+    let review = ta_changeset::invoke_supervisor_agent(
+        "Release compliance check",
+        &[],
+        constitution_text.as_deref(),
+        &run_config,
+    );
+
+    let verdict_label = match review.verdict {
+        ta_changeset::SupervisorVerdict::Pass => "[PASS]",
+        ta_changeset::SupervisorVerdict::Warn => "[WARN]",
+        ta_changeset::SupervisorVerdict::Block => "[BLOCK]",
+    };
+    println!("  Supervisor: {} {}", verdict_label, review.summary);
+    for finding in review.findings.iter().take(3) {
+        println!("    - {}", finding);
+    }
+
+    Ok(review.verdict)
+}
+
+/// Record a release in .ta/release-history.json and stage the file with git add.
+///
+/// Called as a pipeline step so the history file is written after tagging but
+/// before the final version-tracking commit, letting it be included in the release.
+fn execute_record_release_history_step(project_root: &Path, version: &str) -> anyhow::Result<()> {
+    record_release(project_root, version)?;
+    // Stage the file so the next git commit --amend picks it up.
+    let status = Command::new("git")
+        .args(["add", ".ta/release-history.json"])
+        .current_dir(project_root)
+        .status()?;
+    if !status.success() {
+        eprintln!("Warning: could not stage release-history.json for commit");
+    }
+    Ok(())
+}
+
 fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_tag: Option<&str>) {
     if let Some(ref cmd) = step.run {
         let resolved = substitute_vars(cmd, version, commits, last_tag);
@@ -1337,9 +1475,21 @@ fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_ta
         println!("  type: generate_notes (agent: {})", notes_cfg.agent);
         println!("  output: .release-draft.md");
         println!("  fallback: {}", notes_cfg.fallback);
+    } else if step.constitution_check {
+        println!("  type: constitution_check");
+        println!("  would: run scan_for_violations() and invoke supervisor agent");
+        println!("  gate: pass/warn → default Y; block → default N");
+    } else if step.record_release_history {
+        println!("  type: record_history");
+        println!("  would: record release in .ta/release-history.json");
     }
     if step.requires_approval {
-        println!("  approval: required");
+        let default_hint = if step.default_approve {
+            " [default Y]"
+        } else {
+            ""
+        };
+        println!("  approval: required{}", default_hint);
     }
     if let Some(ref out) = step.output {
         println!("  output: {}", out);
@@ -1347,26 +1497,24 @@ fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_ta
     println!();
 }
 
-fn prompt_approval(step_name: &str) -> anyhow::Result<bool> {
-    prompt_approval_with_auto(step_name, false)
-}
-
-fn prompt_approval_with_auto(step_name: &str, auto_approve: bool) -> anyhow::Result<bool> {
+/// Prompt for approval with configurable default answer.
+///
+/// When `default_yes = true`, displays `[Y/n]` and treats Enter as yes.
+/// When `default_yes = false`, displays `[y/N]` and requires explicit `y`.
+fn prompt_approval_default(step_name: &str, default_yes: bool) -> anyhow::Result<bool> {
     use std::io::{self, IsTerminal, Write};
-
-    // Explicit auto-approve (--auto-approve flag or CI mode).
-    if auto_approve {
-        println!("Proceed with '{}'? [y/N] y (auto-approved)", step_name);
-        return Ok(true);
-    }
 
     // TTY context: prompt directly.
     if io::stdin().is_terminal() {
-        print!("Proceed with '{}'? [y/N] ", step_name);
+        let prompt_hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+        print!("Proceed with '{}'? {} ", step_name, prompt_hint);
         io::stdout().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         let answer = input.trim().to_lowercase();
+        if answer.is_empty() {
+            return Ok(default_yes);
+        }
         return Ok(answer == "y" || answer == "yes");
     }
 
@@ -1445,13 +1593,41 @@ fn prompt_approval_with_auto(step_name: &str, auto_approve: bool) -> anyhow::Res
     }
 }
 
+#[cfg(test)]
+fn prompt_approval_with_auto(step_name: &str, auto_approve: bool) -> anyhow::Result<bool> {
+    if auto_approve {
+        println!("Proceed with '{}'? [y/N] y (auto-approved)", step_name);
+        return Ok(true);
+    }
+    prompt_approval_default(step_name, false)
+}
+
 // ── Show pipeline ───────────────────────────────────────────────
 
-fn show_pipeline(config: &GatewayConfig, pipeline_path: Option<&Path>) -> anyhow::Result<()> {
+fn show_pipeline(
+    config: &GatewayConfig,
+    pipeline_path: Option<&Path>,
+    from_tag: Option<&str>,
+) -> anyhow::Result<()> {
     let pipeline = load_pipeline(config, pipeline_path)?;
 
-    println!("Pipeline: {}", pipeline.name);
-    println!("Steps:    {}", pipeline.steps.len());
+    // Show base tag for release notes.
+    let base_tag_display = match collect_commits_since_tag(&config.workspace_root, from_tag) {
+        Ok((commits, Some(tag))) => {
+            let count = commits.lines().filter(|l| !l.is_empty()).count();
+            format!("{} ({} commits)", tag, count)
+        }
+        Ok((commits, None)) => {
+            let count = commits.lines().filter(|l| !l.is_empty()).count();
+            format!("(no previous tag — {} commits total)", count)
+        }
+        Err(_) => "(cannot determine — not a git repo or no commits)".to_string(),
+    };
+
+    println!("Pipeline:    {}", pipeline.name);
+    println!("Steps:       {}", pipeline.steps.len());
+    println!("Base tag:    {}", base_tag_display);
+    println!("             Override with: --from-tag <tag>");
     println!();
 
     for (i, step) in pipeline.steps.iter().enumerate() {
@@ -1461,6 +1637,10 @@ fn show_pipeline(config: &GatewayConfig, pipeline_path: Option<&Path>) -> anyhow
             "agent"
         } else if step.generate_notes.is_some() {
             "generate_notes"
+        } else if step.constitution_check {
+            "constitution_check"
+        } else if step.record_release_history {
+            "record_history"
         } else {
             "unknown"
         };
@@ -1469,7 +1649,19 @@ fn show_pipeline(config: &GatewayConfig, pipeline_path: Option<&Path>) -> anyhow
         } else {
             ""
         };
-        println!("  {}. {} ({}){}", i + 1, step.name, kind, approval);
+        let default_y = if step.default_approve {
+            " [default Y]"
+        } else {
+            ""
+        };
+        println!(
+            "  {}. {} ({}){}{}",
+            i + 1,
+            step.name,
+            kind,
+            approval,
+            default_y
+        );
 
         if let Some(ref obj) = step.objective {
             println!("     {}", obj);
@@ -1860,6 +2052,10 @@ fn validate_release_with_env(
             "agent"
         } else if step.generate_notes.is_some() {
             "generate_notes"
+        } else if step.constitution_check {
+            "constitution_check"
+        } else if step.record_release_history {
+            "record_history"
         } else {
             "unknown"
         };
@@ -2090,35 +2286,12 @@ steps:
       ./dev cargo fmt --all -- --check
       echo "All checks passed."
 
-  # Constitution compliance checklist gate (v0.11.6).
-  # Pauses for human sign-off that key constitution invariants are met before
-  # generating release notes. Skippable with --yes / --skip-approvals.
+  # Constitution compliance check (v0.14.3.3).
+  # Runs scan_for_violations() and the supervisor agent against the release diff.
+  # Verdict: pass/warn → gate defaults Y (Enter proceeds); block → gate defaults N.
+  # Skipped entirely with --yes / --auto-approve.
   - name: Constitution compliance sign-off
-    requires_approval: true
-    run: |
-      echo "── Constitution Compliance Checklist ──"
-      echo ""
-      echo "Please confirm the following invariants hold for this release:"
-      echo ""
-      echo "  §4  Injection cleanup: every inject_* call in run.rs has a matching"
-      echo "      restore_* on all early-return paths (ok, err, and non-zero exit)."
-      echo ""
-      echo "  §5  Goal state machine: all GoalRunState transitions go through"
-      echo "      GoalRun::transition(), which enforces can_transition_to()."
-      echo "      No direct .state = assignment outside transition()."
-      echo ""
-      echo "  §7  Policy enforcement: every ta_fs_* tool handler calls check_policy()"
-      echo "      before accessing source content (read, write_patch, diff)."
-      echo ""
-      echo "  §8  Audit trail: DraftBuilt, DraftApproved, DraftDenied, DraftApplied,"
-      echo "      GoalStarted, GoalCompleted, and GoalFailed events are emitted to"
-      echo "      the FsEventStore at every corresponding state change."
-      echo ""
-      echo "  §13 Error observability: all error paths include what happened, what"
-      echo "      was being attempted, and what the user can do next. No bare 'Error'"
-      echo "      or 'failed' messages without context."
-      echo ""
-      echo "Review the diff and audit log before proceeding."
+    constitution_check: true
 
   - name: Clear stale release draft
     run: |
@@ -2132,6 +2305,7 @@ steps:
 
   - name: Review release notes
     requires_approval: true
+    default_approve: true
     run: |
       if [ -f .release-draft.md ]; then
         echo "── Release notes draft ──"
@@ -2165,6 +2339,12 @@ steps:
         git tag -a "${TAG}" -m "Release ${TAG}"
         echo "Created tag ${TAG}."
       fi
+
+  # Record this release in .ta/release-history.json and stage with git add.
+  # Placed after "Commit and tag" so the SHA is correct.
+  # The "Update version tracking" amend below will include it in the release commit.
+  - name: Record release history
+    record_release_history: true
 
   - name: Update version tracking
     run: |
@@ -2253,8 +2433,11 @@ mod tests {
             run: None,
             agent: None,
             generate_notes: None,
+            constitution_check: false,
+            record_release_history: false,
             objective: None,
             requires_approval: false,
+            default_approve: false,
             output: None,
             working_dir: None,
             env: Default::default(),
@@ -2272,8 +2455,11 @@ mod tests {
                 phase: None,
             }),
             generate_notes: None,
+            constitution_check: false,
+            record_release_history: false,
             objective: None,
             requires_approval: false,
+            default_approve: false,
             output: None,
             working_dir: None,
             env: Default::default(),
@@ -2393,7 +2579,7 @@ steps:
         let temp = TempDir::new().unwrap();
         let config = GatewayConfig::for_project(temp.path());
         // Just ensure it doesn't panic.
-        show_pipeline(&config, None).unwrap();
+        show_pipeline(&config, None, None).unwrap();
     }
 
     #[test]
@@ -2655,6 +2841,7 @@ steps:
     // §11.6 / Plan item #5 regression: the default pipeline MUST include a
     // constitution compliance sign-off step between "Build & verify" and
     // "Generate release notes". If this test fails the step was removed.
+    // v0.14.3.3: step is now a programmatic constitution_check (not a static checklist).
     #[test]
     fn default_pipeline_has_constitution_checklist_gate() {
         let pipeline: ReleasePipeline = serde_yaml::from_str(DEFAULT_PIPELINE_YAML).unwrap();
@@ -2679,10 +2866,10 @@ steps:
         );
         let checklist_idx = checklist_idx.unwrap();
 
-        // The checklist step must require human approval.
+        // v0.14.3.3: step is now constitution_check: true (programmatic), not requires_approval.
         assert!(
-            pipeline.steps[checklist_idx].requires_approval,
-            "constitution sign-off step must have requires_approval: true"
+            pipeline.steps[checklist_idx].constitution_check,
+            "constitution sign-off step must have constitution_check: true"
         );
 
         // Ordering: Build & verify < checklist < Generate release notes.
@@ -2696,6 +2883,94 @@ steps:
                 "constitution sign-off must come before 'Generate release notes'"
             );
         }
+    }
+
+    #[test]
+    fn pipeline_step_constitution_check_deserializes() {
+        let yaml = r#"
+name: test
+steps:
+  - name: check
+    constitution_check: true
+"#;
+        let pipeline: ReleasePipeline = serde_yaml::from_str(yaml).unwrap();
+        assert!(pipeline.steps[0].constitution_check);
+        pipeline.steps[0].validate().unwrap();
+    }
+
+    #[test]
+    fn pipeline_step_record_release_history_deserializes() {
+        let yaml = r#"
+name: test
+steps:
+  - name: record
+    record_release_history: true
+"#;
+        let pipeline: ReleasePipeline = serde_yaml::from_str(yaml).unwrap();
+        assert!(pipeline.steps[0].record_release_history);
+        pipeline.steps[0].validate().unwrap();
+    }
+
+    #[test]
+    fn pipeline_step_default_approve_deserializes() {
+        let yaml = r#"
+name: test
+steps:
+  - name: review
+    requires_approval: true
+    default_approve: true
+    run: echo ok
+"#;
+        let pipeline: ReleasePipeline = serde_yaml::from_str(yaml).unwrap();
+        assert!(pipeline.steps[0].default_approve);
+        assert!(pipeline.steps[0].requires_approval);
+    }
+
+    #[test]
+    fn default_pipeline_review_notes_defaults_y() {
+        let pipeline: ReleasePipeline = serde_yaml::from_str(DEFAULT_PIPELINE_YAML).unwrap();
+        let review_step = pipeline
+            .steps
+            .iter()
+            .find(|s| s.name == "Review release notes")
+            .expect("default pipeline must have 'Review release notes' step");
+        assert!(
+            review_step.default_approve,
+            "'Review release notes' step must have default_approve: true"
+        );
+        assert!(
+            review_step.requires_approval,
+            "'Review release notes' step must have requires_approval: true"
+        );
+    }
+
+    #[test]
+    fn default_pipeline_has_record_release_history_step() {
+        let pipeline: ReleasePipeline = serde_yaml::from_str(DEFAULT_PIPELINE_YAML).unwrap();
+        let record_idx = pipeline
+            .steps
+            .iter()
+            .position(|s| s.record_release_history)
+            .expect("default pipeline must have a record_release_history step");
+        let tag_idx = pipeline
+            .steps
+            .iter()
+            .position(|s| s.name == "Commit and tag")
+            .expect("default pipeline must have 'Commit and tag' step");
+        let update_idx = pipeline
+            .steps
+            .iter()
+            .position(|s| s.name == "Update version tracking")
+            .expect("default pipeline must have 'Update version tracking' step");
+        // Must be between "Commit and tag" and "Update version tracking".
+        assert!(
+            tag_idx < record_idx,
+            "record_release_history must come after 'Commit and tag'"
+        );
+        assert!(
+            record_idx < update_idx,
+            "record_release_history must come before 'Update version tracking'"
+        );
     }
 
     #[test]

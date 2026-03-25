@@ -4581,7 +4581,7 @@ Audit all `push_output`, `push_heartbeat`, and `agent_output.push` call sites to
 ---
 
 ### v0.12.8 — Alpha Bug-Fixes: Discord Notification Flood Hardening & Draft CLI Disconnect
-<!-- status: done -->
+<!-- status: pending -->
 **Goal**: Close two remaining rough edges discovered during public-alpha testing that are annoying enough to fix before beta.
 
 #### Bug 1 — Discord notification flood on reconnect / daemon restart
@@ -6563,7 +6563,7 @@ api_key_env = "OPENAI_API_KEY"   # checked but not required — binary handles i
 
 #### Items
 
-1. [x] **`AttestationBackend` trait**: `sign(payload) → attestation`, `verify(payload, attestation) → bool`. Implemented in `crates/ta-audit/src/attestation.rs`. Plugin registry from `~/.config/ta/plugins/attestation/` deferred to v0.14.3 (Constitution Dedup). (v0.14.1)
+1. [x] **`AttestationBackend` trait**: `sign(payload) → attestation`, `verify(payload, attestation) → bool`. Implemented in `crates/ta-audit/src/attestation.rs`. Plugin registry from `~/.config/ta/plugins/attestation/` deferred to v0.14.6.1 (Constitution Dedup). (v0.14.1)
 2. [x] **Software fallback backend**: `SoftwareAttestationBackend` — Ed25519 key pair auto-generated in `.ta/keys/attestation.pkcs8` on first use. Public key exported to `.ta/keys/attestation.pub`. 5 tests. (v0.14.1)
 3. → **Secure Autonomy** **TPM 2.0 backend plugin**: Requires `tss2-rs` and TPM hardware. SA implements this as a commercial plugin; `AttestationBackend` trait is the stable extension point.
 4. → **Secure Autonomy** **Apple Secure Enclave backend plugin**: Requires macOS Keychain + CryptoKit integration. SA implements this as a commercial plugin; `AttestationBackend` trait is the stable extension point.
@@ -6738,7 +6738,7 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 ---
 
 ### v0.14.3.3 — Release Pipeline Polish
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix the friction points discovered during the v0.13.17.7 public beta release. The constitution sign-off step should run the supervisor programmatically and show its verdict — not present a manual checklist. Approval gates should default Y where "proceed" is the safe default. `--yes` / `--auto-approve` should fully skip all gates for CI use.
 
 #### Problems Observed (v0.13.17.7 release)
@@ -6751,19 +6751,19 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 
 #### Items
 
-1. [ ] **Constitution gate runs supervisor programmatically**: Replace the static checklist display with a call to `invoke_supervisor_agent()` scoped to the release diff (changed files since last tag). Display verdict (pass/warn/block) with findings summary. Gate defaults: Y on pass/warn (Enter proceeds), prompts with default N on block (user must type Y to override). Show which constitution file was used, or "no constitution — skipping check".
+1. [x] **Constitution gate runs supervisor programmatically**: Replaced the static checklist display with `run_constitution_check_step()` that calls `scan_for_violations()` and `invoke_supervisor_agent()`. Verdict (pass/warn/block) is shown with findings. Gate defaults Y on pass/warn, N on block via `prompt_approval_default()`. Shows "no constitution" when unconfigured. (`apps/ta-cli/src/commands/release.rs`)
 
-2. [ ] **Release notes review defaults Y**: Change the approval prompt from require-Y to require-N. Display as `Release notes look good? [Y/n]` — Enter proceeds, `n` aborts.
+2. [x] **Release notes review defaults Y**: Added `default_approve: bool` field to `PipelineStep`. Updated `prompt_approval_default(step, default_yes)` to show `[Y/n]` or `[y/N]` and treat Enter as yes when `default_yes=true`. Default pipeline "Review release notes" step now has `default_approve: true`. (`apps/ta-cli/src/commands/release.rs`)
 
-3. [ ] **`--yes` / `--auto-approve` skips all gates**: Both flags must bypass constitution sign-off, release notes review, and all other approval gates in the pipeline. Document in `ta release run --help`.
+3. [x] **`--yes` / `--auto-approve` skips all gates**: Constitution check step is now skipped entirely (prints notice) when `skip_approvals=true`. All other gates already used `skip_approvals`. Both flags' help text updated. (`apps/ta-cli/src/commands/release.rs`)
 
-4. [ ] **`ta release show` surfaces the base tag**: Add a line to the dry-run output showing which previous tag the notes generator will use as its `Changes since ...` base, so a stale base is visible before running (`--from-tag` already exists to override it).
+4. [x] **`ta release show` surfaces the base tag**: Added `--from-tag` option to `ReleaseCommands::Show`. Updated `show_pipeline()` to accept `from_tag` parameter and print "Base tag: <tag> (<N> commits)" using `collect_commits_since_tag()`. (`apps/ta-cli/src/commands/release.rs`)
 
-5. [ ] **Fix duplicate v0.14.6 phase number**: PLAN.md has two phases numbered `v0.14.6` — `Compliance-Ready Audit Ledger` and `Constitution Deduplication via Agent Review`. Renumber `Constitution Deduplication` to `v0.14.6.1` and update all cross-references.
+5. [x] **Fix duplicate v0.14.6 phase number**: Renamed second `### v0.14.6` to `### v0.14.6.1` and updated `#### Version:` and the cross-reference in the v0.14.1 attestation item. (`PLAN.md`)
 
-6. [ ] **`.ta/release-history.json` left uncommitted after release**: `record_release()` in `release.rs` is called after step 12 (push) completes — after the release commit has already been pushed. The file is written to disk but never staged or committed, leaving the working tree dirty. Fix: move `record_release()` to before the step 10 commit (or amend the step 11 commit to include it), so the history file is part of the release commit that gets pushed.
+6. [x] **`.ta/release-history.json` left uncommitted after release**: Added `record_release_history: bool` field and `execute_record_release_history_step()` that calls `record_release()` then `git add`. New "Record release history" pipeline step placed between "Commit and tag" and "Update version tracking". Removed end-of-pipeline `record_release()` call. (`apps/ta-cli/src/commands/release.rs`)
 
-7. [ ] **`.ta/plan_history.jsonl` dirtied after every `ta draft apply`**: `record_history()` in `plan.rs` appends a phase-transition entry when `draft apply` marks a phase done. The file is never staged or committed, leaving the working tree dirty after every apply. Decision: this is per-machine runtime state (timestamps differ per developer) — add `.ta/plan_history.jsonl` to the VCS ignore block written by `ta setup vcs` (both `.gitignore` and `.p4ignore`). Also add it to the shared-vs-local table in USAGE.md.
+7. [x] **`.ta/plan_history.jsonl` dirtied after every `ta draft apply`**: Added `"plan_history.jsonl"` to `LOCAL_TA_PATHS` in `partitioning.rs`, which drives `.gitignore`/`.p4ignore` generation via `ta setup vcs`. (`crates/ta-workspace/src/partitioning.rs`)
 
 #### Version: `0.14.3.3-alpha`
 
@@ -7006,7 +7006,7 @@ plugin  = "ta-memory-supermemory"   # binary name; discovered from plugins/memor
 
 ---
 
-### v0.14.6 — Constitution Deduplication via Agent Review
+### v0.14.6.1 — Constitution Deduplication via Agent Review
 <!-- status: pending -->
 **Goal**: Add a `ta constitution review` command that runs a lightweight agent pass over the project constitution, identifies duplicate or conflicting rules, and proposes a deduplicated version via the standard draft workflow. The review output feeds back through `ta draft view/approve/apply` — no special approval flow needed.
 
@@ -7037,7 +7037,7 @@ Constitutions grow rule sets from multiple sources: `extends = "ta-default"` inh
 6. [ ] **Tests**: Exact dedup (unit). JSON response validation (unit). Draft artifact round-trip (unit). CLI integration test (`--dry-run` produces output without staging changes).
 7. [ ] **USAGE.md**: "Deduplicating Your Constitution" section with example before/after.
 
-#### Version: `0.14.6-alpha`
+#### Version: `0.14.6.1-alpha`
 
 ---
 
