@@ -3545,8 +3545,11 @@ ta release run 0.4.0-alpha --interactive
 ta release run 0.4.0-alpha --yes
 ta release run 0.4.0-alpha --auto-approve  # Explicit auto-approve for CI
 
-# Show pipeline steps
+# Show pipeline steps (with base tag and commit count)
 ta release show
+
+# Show which base tag will be used for release notes
+ta release show --from-tag v0.12.7-alpha
 
 # Create a customizable .ta/release.yaml
 ta release init
@@ -3585,6 +3588,16 @@ ta shell> release v0.10.6
 The `--interactive` flag uses the `releaser` agent with `ta_ask_human` for review checkpoints. The human stays in `ta shell` throughout — the agent asks for release notes approval and publish confirmation interactively.
 
 When running release commands from `ta shell` (non-TTY context), approval gates are presented as interactive questions in the TUI via the same file-based interaction mechanism used by `ta_ask_human`. Use `--auto-approve` to skip all gates in CI/non-interactive environments.
+
+**Approval gate behavior**: Most approval gates default to `[y/N]` (must type `y` to proceed). The "Review release notes" gate defaults to `[Y/n]` — pressing Enter proceeds, `n` aborts. This reduces friction for the common case where the notes look correct.
+
+**`--yes` / `--auto-approve`**: Both flags skip all approval gates and the constitution compliance check entirely. Use in CI pipelines or scripted releases. Without these flags, a non-TTY context (daemon) prompts via the TUI shell.
+
+**Constitution compliance check**: The default pipeline includes a programmatic constitution check step that runs `scan_for_violations()` (static rule scan) and the supervisor agent against the release diff. The verdict is displayed:
+- `[PASS]` or `[WARN]`: gate defaults Y (Enter proceeds)
+- `[BLOCK]`: gate defaults N (must type Y to override)
+
+When no constitution is configured (no `.ta/constitution.toml`), the check prints "No constitution configured — skipping check." and continues.
 
 The `ta release validate` command checks prerequisites before running: version format, git cleanliness, tag availability, pipeline configuration, and toolchain presence. Use it in CI to gate releases.
 
@@ -7852,6 +7865,8 @@ TA distinguishes between **shared configuration** (checked into VCS, reviewed as
 | `.ta/daemon.toml` | Machine-local daemon configuration |
 | `.ta/audit-ledger.jsonl` | Audit log (environment-specific) |
 | `.ta/velocity-stats.jsonl` | Per-machine velocity stats |
+| `.ta/release-history.json` | Release tracking (written by `ta release run`) |
+| `.ta/plan_history.jsonl` | Phase-transition history (timestamps differ per developer) |
 
 To audit the current split for your project:
 

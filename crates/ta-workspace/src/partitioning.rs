@@ -38,6 +38,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "taignore",
     "interactions/",
     "release-history.json",
+    "plan_history.jsonl", // per-machine runtime state, timestamps differ per developer
 ];
 
 /// VCS backend detected or configured for the project.
