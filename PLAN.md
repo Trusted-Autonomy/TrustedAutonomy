@@ -6795,7 +6795,33 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 
 6. [ ] **`.ta/release-history.json` left uncommitted after release**: `record_release()` in `release.rs` is called after step 12 (push) completes — after the release commit has already been pushed. The file is written to disk but never staged or committed, leaving the working tree dirty. Fix: move `record_release()` to before the step 10 commit (or amend the step 11 commit to include it), so the history file is part of the release commit that gets pushed.
 
+7. [ ] **`.ta/plan_history.jsonl` dirtied after every `ta draft apply`**: `record_history()` in `plan.rs` appends a phase-transition entry when `draft apply` marks a phase done. The file is never staged or committed, leaving the working tree dirty after every apply. Decision: this is per-machine runtime state (timestamps differ per developer) — add `.ta/plan_history.jsonl` to the VCS ignore block written by `ta setup vcs` (both `.gitignore` and `.p4ignore`). Also add it to the shared-vs-local table in USAGE.md.
+
 #### Version: `0.14.3.3-alpha`
+
+---
+
+### v0.14.3.4 — Staging VFS & Copy-on-Write Completion
+<!-- status: pending -->
+**Goal**: Complete the staging layer so every supported platform gets a zero-copy or near-zero-copy workspace without full physical copies. Close the Windows ReFS stub, land FUSE-based intercept on Linux (where FUSE is available), and unify the staging strategy API so a future kernel-intercept backend can slot in cleanly.
+
+**Current state**: macOS (APFS reflink `clonefile`) and Linux (Btrfs/XFS `FICLONERANGE`) have native COW. Windows ReFS `FSCTL_DUPLICATE_EXTENTS_TO_FILE` is a stub (`is_refs_volume()` always returns `false`) and falls back to Smart (symlinks). FUSE overlay was explicitly deferred from v0.13.0.
+
+#### Items
+
+1. [ ] **Windows ReFS CoW — full IOCTL implementation**: Implement `is_refs_volume()` using `GetVolumeInformation` Win32 API to detect ReFS. Implement `clone_file_refs()` using `DeviceIoControl(FSCTL_DUPLICATE_EXTENTS_TO_FILE)`. Add a `#[cfg(windows)]` integration test that creates a pair of files, clones one, mutates the clone, and verifies the source is unchanged. Falls back to Smart when `FSCTL_DUPLICATE_EXTENTS_TO_FILE` is unavailable (NTFS, network share).
+
+2. [ ] **FUSE staging intercept (Linux)**: Add an optional `strategy = "fuse"` mode that mounts a FUSE filesystem over the staging copy, intercepting writes at the VFS level instead of copying files upfront. Requires `fuse-overlayfs` or `libfuse3`. Probe availability at startup; if FUSE module not loaded or not permitted, fall back to Smart with a `ta doctor` warning. This eliminates the staging copy for read-heavy workspaces (game assets, large media trees).
+
+3. [ ] **`strategy = "auto"` default**: Replace the `"full"` default with `"auto"` — TA probes the filesystem and selects the best available strategy: `refs-cow` on Windows ReFS, COW reflink on APFS/Btrfs, `fuse` if available on Linux, `smart` otherwise, `full` as the final fallback. Add `ta doctor` output showing which strategy was selected and why.
+
+4. [ ] **`ta staging inspect`**: New command reporting: current strategy, staging root size, number of symlinks vs copied files (smart mode), COW vs full-copy file counts, and an estimated size without TA overhead. Helps users tune `.taignore` and choose the right strategy.
+
+5. [ ] **`.taignore` generation via `ta setup vcs`**: When `ta setup vcs` runs, auto-generate a project-appropriate `.taignore` based on detected project type (Unreal → Binaries/, Intermediate/, Saved/, DerivedDataCache/; Node → node_modules/; Rust → target/; Go → vendor/). Merges with any existing `.taignore` entries — no destructive overwrites.
+
+6. [ ] **Staging size warning threshold config**: Move the `ta doctor` 1 GB staging warning threshold to `[staging] warn_above_gb = 1` in `workflow.toml`, defaulting to 1 GB. Projects with intentionally large workspaces (game art pipelines) can raise or silence the warning.
+
+#### Version: `0.14.3.4-alpha`
 
 ---
 
