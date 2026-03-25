@@ -435,16 +435,60 @@ pub struct WorkflowSection {
     /// - `"off"`: Skip the check entirely.
     #[serde(default = "default_enforce_phase_order")]
     pub enforce_phase_order: String,
+
+    /// Maximum character budget for the injected CLAUDE.md context (v0.14.3.1).
+    ///
+    /// When the assembled injection exceeds this limit, sections are trimmed
+    /// in priority order (solutions → parent context → memory → plan window)
+    /// until it fits. Set to 0 to disable trimming.
+    ///
+    /// Default: 40,000 characters.
+    ///
+    /// ```toml
+    /// [workflow]
+    /// context_budget_chars = 40000
+    /// ```
+    #[serde(default = "default_context_budget_chars")]
+    pub context_budget_chars: usize,
+
+    /// Number of completed phases to show individually before the current
+    /// phase in the windowed plan checklist (v0.14.3.1).
+    ///
+    /// Default: 5
+    #[serde(default = "default_plan_done_window")]
+    pub plan_done_window: usize,
+
+    /// Number of pending phases to show individually after the current
+    /// phase in the windowed plan checklist (v0.14.3.1).
+    ///
+    /// Default: 5
+    #[serde(default = "default_plan_pending_window")]
+    pub plan_pending_window: usize,
 }
 
 fn default_enforce_phase_order() -> String {
     "warn".to_string()
 }
 
+fn default_context_budget_chars() -> usize {
+    40_000
+}
+
+fn default_plan_done_window() -> usize {
+    5
+}
+
+fn default_plan_pending_window() -> usize {
+    5
+}
+
 impl Default for WorkflowSection {
     fn default() -> Self {
         Self {
             enforce_phase_order: default_enforce_phase_order(),
+            context_budget_chars: default_context_budget_chars(),
+            plan_done_window: default_plan_done_window(),
+            plan_pending_window: default_plan_pending_window(),
         }
     }
 }

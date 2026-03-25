@@ -1415,6 +1415,14 @@ pub fn execute(
 
     // 2. Inject context and settings into the staging workspace.
     if agent_config.injects_context_file {
+        // Load context budget config (v0.14.3.1).
+        let ctx_wf = ta_submit::WorkflowConfig::load_or_default(
+            &config.workspace_root.join(".ta/workflow.toml"),
+        );
+        let context_budget_chars = ctx_wf.workflow.context_budget_chars;
+        let done_window = ctx_wf.workflow.plan_done_window;
+        let pending_window = ctx_wf.workflow.plan_pending_window;
+
         tracing::info!(
             goal_id = %goal.goal_run_id,
             staging = %staging_path.display(),
@@ -1432,8 +1440,37 @@ pub fn execute(
             macro_goal,
             interactive,
             follow_up_context.as_deref(),
+            context_budget_chars,
+            done_window,
+            pending_window,
         )?;
         tracing::info!(goal_id = %goal.goal_run_id, "CLAUDE.md injected");
+
+        // v0.14.3.1: Warn at goal start when projected context > 80% of budget.
+        if context_budget_chars > 0 {
+            let sizes = compute_context_section_sizes(
+                title,
+                &goal_id,
+                goal.plan_phase.as_deref(),
+                goal.source_dir.as_deref(),
+                config,
+                done_window,
+                pending_window,
+            );
+            let total = sizes.total();
+            let warn_threshold = context_budget_chars * 80 / 100;
+            if total > warn_threshold {
+                let pct = (total * 100) / context_budget_chars;
+                eprintln!(
+                    "[warn] Injected context is {} chars ({}% of {}k budget). \
+                     Run 'ta context size' for a breakdown. \
+                     Set [workflow] context_budget_chars in .ta/workflow.toml to adjust.",
+                    total,
+                    pct,
+                    context_budget_chars / 1_000
+                );
+            }
+        }
     }
     // v0.12.5: For non-Claude agents that set context_file, write a generic
     // agent_context.md with the same sections (memory, plan, etc.).
@@ -3757,7 +3794,13 @@ pub(crate) const NO_ORIGINAL_SENTINEL: &str = "__TA_NO_ORIGINAL__";
 
 /// Build a plan context section for CLAUDE.md injection.
 /// Returns empty string if no PLAN.md or no phase specified.
-fn build_plan_section(plan_phase: Option<&str>, source_dir: Option<&Path>) -> String {
+/// Uses windowed checklist (v0.14.3.1) to keep plan section compact.
+fn build_plan_section(
+    plan_phase: Option<&str>,
+    source_dir: Option<&Path>,
+    done_window: usize,
+    pending_window: usize,
+) -> String {
     let source = match source_dir {
         Some(s) => s,
         None => return String::new(),
@@ -3772,7 +3815,8 @@ fn build_plan_section(plan_phase: Option<&str>, source_dir: Option<&Path>) -> St
         return String::new();
     }
 
-    let checklist = plan::format_plan_checklist(&phases, plan_phase);
+    let checklist =
+        plan::format_plan_checklist_windowed(&phases, plan_phase, done_window, pending_window);
 
     let current_line = if let Some(phase_id) = plan_phase {
         if let Some(phase) = phases
@@ -3794,6 +3838,82 @@ fn build_plan_section(plan_phase: Option<&str>, source_dir: Option<&Path>) -> St
         "\n## Plan Context\n{}\nPlan progress:\n{}\n",
         current_line, checklist
     )
+}
+
+/// Named section sizes for context budget accounting (v0.14.3.1).
+#[derive(Debug)]
+pub(crate) struct ContextSectionSizes {
+    pub header: usize,
+    pub plan: usize,
+    pub memory: usize,
+    pub solutions: usize,
+    pub community: usize,
+    pub parent: usize,
+    pub original_claude_md: usize,
+}
+
+impl ContextSectionSizes {
+    pub fn total(&self) -> usize {
+        self.header
+            + self.plan
+            + self.memory
+            + self.solutions
+            + self.community
+            + self.parent
+            + self.original_claude_md
+    }
+}
+
+/// Compute section sizes for context budget diagnostics without writing any files.
+pub(crate) fn compute_context_section_sizes(
+    title: &str,
+    goal_id: &str,
+    plan_phase: Option<&str>,
+    source_dir: Option<&Path>,
+    config: &ta_mcp_gateway::GatewayConfig,
+    done_window: usize,
+    pending_window: usize,
+) -> ContextSectionSizes {
+    use super::community;
+
+    let plan_section = build_plan_section(plan_phase, source_dir, done_window, pending_window);
+    let memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
+    let solutions_section = build_solutions_section_for_inject(config);
+    let community_section = if let Some(src) = source_dir {
+        community::build_community_context_section(src)
+    } else {
+        String::new()
+    };
+
+    // Approximate the fixed header size by building a minimal version of it.
+    // The header is the TA header block + instructions (does not include original CLAUDE.md).
+    let header_approx = format!(
+        "# Trusted Autonomy — Mediated Goal\n\nYou are working on a TA-mediated goal in a staging workspace.\n\n**Goal:** {}\n**Goal ID:** {}\n",
+        title, goal_id
+    );
+    // Add the fixed instructions portion (constant regardless of phase).
+    let instructions_approx = "\n## How this works\n\n- This directory is a copy of the original project\n- Work normally — Read, Write, Edit, Bash all work as expected\n- When you're done, just exit. TA will diff your changes and create a draft for review\n- The human reviewer will see exactly what you changed and why\n\n## Important\n\n- Do NOT modify files outside this directory\n- All your changes will be captured as a draft for human review\n\n## Before You Exit — Change Summary (REQUIRED)\n";
+
+    let header = header_approx.len() + instructions_approx.len();
+
+    // Read original CLAUDE.md from source_dir to measure it.
+    let original_claude_md = source_dir
+        .and_then(|src| {
+            let path = src.join("CLAUDE.md");
+            std::fs::read_to_string(path).ok()
+        })
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    ContextSectionSizes {
+        header,
+        plan: plan_section.len(),
+        memory: memory_section.len(),
+        solutions: solutions_section.len(),
+        community: community_section.len(),
+        parent: 0, // parent context is goal-specific; omit from static estimate
+        original_claude_md,
+    }
 }
 
 /// Build a parent goal context section for CLAUDE.md injection.
@@ -4036,6 +4156,9 @@ fn inject_claude_md(
     macro_goal: bool,
     interactive: bool,
     smart_follow_up_context: Option<&str>,
+    context_budget_chars: usize,
+    done_window: usize,
+    pending_window: usize,
 ) -> anyhow::Result<()> {
     let claude_md_path = staging_path.join("CLAUDE.md");
     let backup_path = staging_path.join(CLAUDE_MD_BACKUP);
@@ -4073,13 +4196,13 @@ fn inject_claude_md(
         original_content
     };
 
-    // Build plan context section if PLAN.md exists in source.
-    let plan_section = build_plan_section(plan_phase, source_dir);
+    // Build plan context section if PLAN.md exists in source (windowed, v0.14.3.1).
+    let plan_section = build_plan_section(plan_phase, source_dir, done_window, pending_window);
 
     // Build parent context section if this is a follow-up goal.
     // v0.10.9: Prefer smart follow-up context when available (richer context
     // including verification failures, denial reasons, and reviewer feedback).
-    let parent_section = if let Some(ctx) = smart_follow_up_context {
+    let mut parent_section = if let Some(ctx) = smart_follow_up_context {
         ctx.to_string()
     } else {
         build_parent_context_section(parent_goal_id, goal_store, config)
@@ -4100,10 +4223,10 @@ fn inject_claude_md(
     };
 
     // Build memory context section from prior sessions (v0.6.3: phase-aware).
-    let memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
+    let mut memory_section = build_memory_context_section_for_inject(config, title, plan_phase);
 
     // Build solutions section from curated knowledge base (v0.8.1).
-    let solutions_section = build_solutions_section_for_inject(config);
+    let mut solutions_section = build_solutions_section_for_inject(config);
 
     // Build community knowledge section (v0.13.6: auto_query resources).
     let community_section = if let Some(src) = source_dir {
@@ -4111,6 +4234,72 @@ fn inject_claude_md(
     } else {
         String::new()
     };
+
+    // v0.14.3.1: Enforce context budget. Trim in priority order when over limit.
+    if context_budget_chars > 0 {
+        let fixed_size = existing_section.len()
+            + plan_section.len()
+            + community_section.len()
+            + macro_section.len()
+            + interactive_section.len();
+        let mut variable_total =
+            solutions_section.len() + parent_section.len() + memory_section.len();
+        let total = fixed_size + variable_total;
+
+        if total > context_budget_chars {
+            let mut trims: Vec<String> = Vec::new();
+
+            // 1. Trim solutions first (lowest priority).
+            if fixed_size + variable_total > context_budget_chars && !solutions_section.is_empty() {
+                let old_len = solutions_section.len();
+                solutions_section = trim_solutions_section(&solutions_section, 5);
+                let saved = old_len - solutions_section.len();
+                if saved > 0 {
+                    variable_total -= saved;
+                    trims.push(format!("solutions trimmed ({} chars)", saved));
+                }
+            }
+
+            // 2. Truncate parent/follow-up context to 2k.
+            const PARENT_TRUNCATE: usize = 2_000;
+            if fixed_size + variable_total > context_budget_chars
+                && parent_section.len() > PARENT_TRUNCATE
+            {
+                let old_len = parent_section.len();
+                parent_section.truncate(PARENT_TRUNCATE);
+                parent_section.push_str("\n... [truncated for context budget]\n");
+                let saved = old_len - parent_section.len();
+                variable_total -= saved;
+                trims.push(format!(
+                    "parent context truncated to {}k",
+                    PARENT_TRUNCATE / 1000
+                ));
+            }
+
+            // 3. Trim memory entries.
+            if fixed_size + variable_total > context_budget_chars && !memory_section.is_empty() {
+                let old_len = memory_section.len();
+                memory_section = build_memory_context_section_for_inject_with_limit(
+                    config, title, plan_phase, 5,
+                );
+                let saved = old_len.saturating_sub(memory_section.len());
+                if saved > 0 {
+                    variable_total -= saved;
+                    trims.push(format!("memory entries reduced ({} chars)", saved));
+                }
+            }
+
+            if !trims.is_empty() {
+                let new_total = fixed_size + variable_total;
+                tracing::warn!(
+                    budget = context_budget_chars,
+                    actual = new_total,
+                    trimmed = trims.join(", "),
+                    "CLAUDE.md context budget exceeded; sections trimmed"
+                );
+            }
+        }
+    }
 
     let injected = format!(
         r#"# Trusted Autonomy — Mediated Goal
@@ -4587,6 +4776,40 @@ fn build_memory_context_section_filtered(
 ///
 /// Reads from `.ta/solutions/solutions.toml` and includes relevant entries
 /// matched by project type.
+/// Trim a solutions section string to keep only the first `max_solutions` entries.
+///
+/// Used by the context budget enforcer (v0.14.3.1) to reduce solutions bulk.
+/// Returns the original string unchanged if it has ≤ `max_solutions` entries.
+fn trim_solutions_section(section: &str, max_solutions: usize) -> String {
+    // Each entry starts with "- **".
+    let mut kept = 0usize;
+    let mut result = String::new();
+    let mut in_header = true;
+
+    for line in section.lines() {
+        if in_header {
+            result.push_str(line);
+            result.push('\n');
+            if line.starts_with("- **") {
+                in_header = false;
+                kept += 1;
+            }
+        } else if line.starts_with("- **") {
+            if kept >= max_solutions {
+                break;
+            }
+            result.push_str(line);
+            result.push('\n');
+            kept += 1;
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    result
+}
+
 fn build_solutions_section_for_inject(config: &GatewayConfig) -> String {
     let solutions_path = config
         .workspace_root
@@ -5037,6 +5260,9 @@ mod tests {
             false,
             false,
             None,
+            0,
+            5,
+            5,
         )
         .unwrap();
 
@@ -5078,6 +5304,9 @@ mod tests {
             false,
             false,
             None,
+            0,
+            5,
+            5,
         )
         .unwrap();
 
@@ -5114,6 +5343,9 @@ mod tests {
             false,
             false,
             None,
+            0,
+            5,
+            5,
         )
         .unwrap();
 
@@ -5143,6 +5375,9 @@ mod tests {
             true, // macro_goal = true
             false,
             None,
+            0,
+            5,
+            5,
         )
         .unwrap();
 
@@ -5173,6 +5408,9 @@ mod tests {
             false,
             true, // interactive = true
             None,
+            0,
+            5,
+            5,
         )
         .unwrap();
 
@@ -5209,6 +5447,9 @@ mod tests {
             false,
             false,
             None,
+            0,
+            5,
+            5,
         )
         .unwrap();
 
@@ -5713,6 +5954,9 @@ pre_launch:
             false,
             false,
             None,
+            0,
+            5,
+            5,
         )
         .unwrap();
 
@@ -5734,6 +5978,9 @@ pre_launch:
             false,
             false,
             None,
+            0,
+            5,
+            5,
         )
         .unwrap();
 
@@ -6087,5 +6334,124 @@ non_interactive_env:
             path == "main.rs"
         });
         assert!(main_in_diff, "main.rs change must appear in diff");
+    }
+
+    // ── Context budget tests (v0.14.3.1) ──
+
+    #[test]
+    fn test_budget_trims_solutions_section() {
+        // Verify that trim_solutions_section reduces entry count.
+        let section = "\n## Known Solutions\n\nThe following problem/solution pairs were captured from previous sessions:\n\n\
+            - **Problem A**: Solution A\n\
+            - **Problem B**: Solution B\n\
+            - **Problem C**: Solution C\n\
+            - **Problem D**: Solution D\n\
+            - **Problem E**: Solution E\n\
+            - **Problem F**: Solution F\n\
+            - **Problem G**: Solution G\n\
+            - **Problem H**: Solution H\n\
+            - **Problem I**: Solution I\n\
+            - **Problem J**: Solution J\n\
+            - **Problem K**: Solution K\n\
+            - **Problem L**: Solution L\n\
+            - **Problem M**: Solution M\n\
+            - **Problem N**: Solution N\n\
+            - **Problem O**: Solution O\n";
+
+        let trimmed = trim_solutions_section(section, 5);
+        // Should contain exactly 5 entries.
+        let entry_count = trimmed.matches("- **Problem").count();
+        assert_eq!(
+            entry_count, 5,
+            "should keep exactly 5 entries, got {}",
+            entry_count
+        );
+        assert!(trimmed.contains("Problem A"), "first entry preserved");
+        assert!(trimmed.contains("Problem E"), "fifth entry preserved");
+        assert!(!trimmed.contains("Problem F"), "sixth entry removed");
+    }
+
+    #[test]
+    fn test_budget_inject_with_tight_budget_does_not_panic() {
+        // Inject with a very small budget — should not panic, just trim.
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        inject_claude_md(
+            staging.path(),
+            "Budget test goal",
+            "goal-budget-001",
+            None,
+            None,
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            1_000, // very tight budget
+            5,
+            5,
+        )
+        .unwrap();
+
+        // CLAUDE.md must still exist and contain the TA header.
+        let claude_md = std::fs::read_to_string(staging.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            claude_md.contains("Trusted Autonomy"),
+            "header preserved even under tight budget"
+        );
+    }
+
+    #[test]
+    fn test_budget_disabled_when_zero() {
+        // Budget = 0 means no trimming — inject proceeds normally.
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        inject_claude_md(
+            staging.path(),
+            "No-budget goal",
+            "goal-nobudget-002",
+            None,
+            None,
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            0, // budget disabled
+            5,
+            5,
+        )
+        .unwrap();
+
+        let claude_md = std::fs::read_to_string(staging.path().join("CLAUDE.md")).unwrap();
+        assert!(claude_md.contains("Trusted Autonomy"));
+    }
+
+    #[test]
+    fn test_context_budget_config_defaults() {
+        let section = ta_submit::config::WorkflowSection::default();
+        assert_eq!(section.context_budget_chars, 40_000);
+        assert_eq!(section.plan_done_window, 5);
+        assert_eq!(section.plan_pending_window, 5);
+    }
+
+    #[test]
+    fn test_context_budget_config_from_toml() {
+        let toml = r#"
+[workflow]
+context_budget_chars = 20000
+plan_done_window = 3
+plan_pending_window = 7
+"#;
+        let wf: ta_submit::WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(wf.workflow.context_budget_chars, 20_000);
+        assert_eq!(wf.workflow.plan_done_window, 3);
+        assert_eq!(wf.workflow.plan_pending_window, 7);
     }
 }

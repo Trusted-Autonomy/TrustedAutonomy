@@ -6639,7 +6639,7 @@ These are addressed across v0.14.4–v0.14.5.
 ---
 
 ### v0.14.3.1 — CLAUDE.md Context Budget & Injection Trim
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Keep the injected CLAUDE.md under a configurable character budget (default 40k) so agents don't hit context-size warnings from Claude Code or other LLM runners. The current injection is unbounded — plan checklists, memory entries, solutions, and community sections all accumulate without any ceiling.
 
 #### Problem
@@ -6685,35 +6685,25 @@ Rule: show last `N_DONE_WINDOW` (default 5) done phases + current + next `N_PEND
 
 #### Items
 
-1. [ ] **`format_plan_checklist_windowed(phases, current, done_window, pending_window) -> String`**: New function in `plan.rs`. Collapses all done phases before the window into one summary line `"[x] Phases 0 – vX.Y.Z complete (N phases)"`. Shows individual lines for: last `done_window` done phases + current phase (bolded) + next `pending_window` pending phases. Falls back to full list when `current_phase` is None (backward compat). Replace `format_plan_checklist` call in `build_plan_section()` with windowed version.
+1. [x] **`format_plan_checklist_windowed(phases, current, done_window, pending_window) -> String`**: New function in `plan.rs`. Collapses all done phases before the window into one summary line `"[x] Phases 0 – vX.Y.Z complete (N phases)"`. Shows individual lines for: last `done_window` done phases + current phase (bolded) + next `pending_window` pending phases. Falls back to full list when `current_phase` is None (backward compat). Replace `format_plan_checklist` call in `build_plan_section()` with windowed version.
 
-2. [ ] **Total context budget enforcement in `inject_claude_md()`**: After assembling all sections, check total char length. If over `context_budget_chars` (default 40_000), trim in priority order: solutions first (reduce `take(15)` → `take(5)`), then parent context (truncate to first 2k), then memory entries (reduce), then plan window (reduce `done_window` to 1). Log a `tracing::warn!` message listing which sections were trimmed and by how much.
+2. [x] **Total context budget enforcement in `inject_claude_md()`**: After assembling all sections, check total char length. If over `context_budget_chars` (default 40_000), trim in priority order: solutions first (reduce `take(15)` → `take(5)`), then parent context (truncate to first 2k), then memory entries (reduce). Log a `tracing::warn!` message listing which sections were trimmed and by how much.
 
-3. [ ] **`[workflow] context_budget_chars`** config field in `DaemonConfig`/`GatewayConfig`. Default `40_000`. Configurable per-project. Document in USAGE.md.
+3. [x] **`[workflow] context_budget_chars`** config field in `WorkflowSection`. Default `40_000`. Also adds `plan_done_window` (default 5) and `plan_pending_window` (default 5). Configurable per-project in `.ta/workflow.toml`. Documented in USAGE.md.
 
-4. [ ] **`ta context size [goal-id]`** diagnostic subcommand**: Reads the injected CLAUDE.md from staging (or the last goal's staging) and prints a breakdown:
-   ```
-   Section                  Chars    % of budget
-   ─────────────────────────────────────────────
-   TA header + instructions  2,847    7%
-   Plan checklist            1,943    5%   (windowed: 5 done + current + 5 pending)
-   Memory context            4,201   11%
-   Solutions                 3,102    8%
-   Community                   412    1%
-   Original CLAUDE.md        9,732   24%
-   ─────────────────────────────────────────────
-   Total                    22,237   56% of 40k budget
-   ```
-   If staging doesn't exist, re-runs the section builders in dry-run mode and prints the same table.
+4. [x] **`ta context size [goal-id]`** diagnostic subcommand: Builds sections in dry-run mode for the latest (or specified) goal and prints a per-section character count and percentage of the configured budget. Accepts `--verbose` flag to show zero-size sections.
 
-5. [ ] **Warn at goal start when projected context > budget**: Before agent launch, compute context size and if > 80% of budget, print: `"[warn] Injected context is X chars (budget: 40k). Run 'ta context size' for a breakdown. Set [workflow] context_budget_chars to adjust."`.
+5. [x] **Warn at goal start when projected context > budget**: Before agent launch, compute context size and if > 80% of budget, print: `"[warn] Injected context is X chars (Y% of Zk budget). Run 'ta context size' for a breakdown."`.
 
-6. [ ] **Tests**:
-   - `test_windowed_checklist_collapses_done_phases`: 20 done + 1 current + 10 pending → summary line + 5 done + current + 5 pending.
-   - `test_windowed_checklist_no_current_returns_full`: `current_phase = None` → full list (backward compat).
-   - `test_budget_trims_solutions_first`: Inject with large solutions → solutions reduced before memory.
-   - `test_budget_warn_logged_when_over_limit`: Total over budget → `tracing::warn!` message emitted.
-   - `test_context_budget_config_respected`: `context_budget_chars = 20_000` → trim triggered at lower threshold.
+6. [x] **Tests** (12 new tests across `plan.rs` and `run.rs`):
+   - `test_windowed_checklist_collapses_done_phases`: 20 done + 1 current + 10 pending → summary line + 5 done + current + 5 pending. ✅
+   - `test_windowed_checklist_no_current_returns_full`: `current_phase = None` → full list (backward compat). ✅
+   - `test_windowed_checklist_no_collapse_when_within_window`: 3 done phases within window=5 → no summary line. ✅
+   - `test_budget_trims_solutions_section`: `trim_solutions_section` reduces to max_solutions entries. ✅
+   - `test_budget_inject_with_tight_budget_does_not_panic`: budget=1000 → still writes valid CLAUDE.md. ✅
+   - `test_budget_disabled_when_zero`: budget=0 → no trimming. ✅
+   - `test_context_budget_config_defaults`: default values are 40_000 / 5 / 5. ✅
+   - `test_context_budget_config_from_toml`: TOML parsing of all three fields. ✅
 
 #### Deferred
 

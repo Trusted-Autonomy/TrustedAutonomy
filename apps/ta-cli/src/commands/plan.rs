@@ -678,6 +678,132 @@ pub fn format_plan_checklist(phases: &[PlanPhase], current_phase: Option<&str>) 
     lines.join("\n")
 }
 
+/// Format a windowed plan checklist for CLAUDE.md injection (v0.14.3.1).
+///
+/// Reduces the plan checklist size by collapsing all completed phases before
+/// the window into a single summary line, while showing individual entries for:
+///   - The last `done_window` completed phases before current
+///   - The current phase (bolded, marked `<-- current`)
+///   - The next `pending_window` pending/deferred phases after current
+///
+/// Falls back to the full `format_plan_checklist` when `current_phase` is None
+/// (backward compatibility).
+pub fn format_plan_checklist_windowed(
+    phases: &[PlanPhase],
+    current_phase: Option<&str>,
+    done_window: usize,
+    pending_window: usize,
+) -> String {
+    let current_idx = match current_phase {
+        None => return format_plan_checklist(phases, None),
+        Some(cp) => phases.iter().position(|p| phase_ids_match(&p.id, cp)),
+    };
+
+    let current_idx = match current_idx {
+        None => return format_plan_checklist(phases, current_phase),
+        Some(idx) => idx,
+    };
+
+    // Split into: before current, current, after current.
+    let before = &phases[..current_idx];
+    let current = &phases[current_idx];
+    let after = &phases[current_idx + 1..];
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // Phases before current: collapse all but the last `done_window`.
+    let done_phases: Vec<_> = before
+        .iter()
+        .filter(|p| matches!(p.status, PlanStatus::Done | PlanStatus::Deferred))
+        .collect();
+    let non_done_before: Vec<_> = before
+        .iter()
+        .filter(|p| !matches!(p.status, PlanStatus::Done | PlanStatus::Deferred))
+        .collect();
+
+    let shown_done_start = done_phases.len().saturating_sub(done_window);
+    let collapsed_count = shown_done_start;
+
+    if collapsed_count > 0 {
+        // Emit a single summary line for the collapsed prefix.
+        let last_collapsed = &done_phases[collapsed_count - 1];
+        lines.push(format!(
+            "- [x] Phases 0 – v{} complete ({} phases)",
+            last_collapsed.id, collapsed_count
+        ));
+    }
+
+    // Show the windowed done phases individually.
+    for phase in &done_phases[shown_done_start..] {
+        let deferred_marker = if phase.status == PlanStatus::Deferred {
+            " *(deferred)*"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "- [x] Phase {} — {}{}",
+            phase.id, phase.title, deferred_marker
+        ));
+    }
+
+    // Any non-done phases before current (rare but possible).
+    for phase in non_done_before {
+        let checkbox = if phase.status == PlanStatus::Deferred {
+            "[-]"
+        } else {
+            "[ ]"
+        };
+        lines.push(format!(
+            "- {} Phase {} — {}",
+            checkbox, phase.id, phase.title
+        ));
+    }
+
+    // Current phase (bolded + marker).
+    {
+        let checkbox = match current.status {
+            PlanStatus::Done => "[x]",
+            PlanStatus::Deferred => "[-]",
+            _ => "[ ]",
+        };
+        lines.push(format!(
+            "- {} **Phase {} — {}** <-- current",
+            checkbox, current.id, current.title
+        ));
+    }
+
+    // Next `pending_window` phases after current.
+    let mut shown_pending = 0;
+    for phase in after {
+        if shown_pending >= pending_window {
+            break;
+        }
+        let checkbox = match phase.status {
+            PlanStatus::Done => "[x]",
+            PlanStatus::Deferred => "[-]",
+            _ => "[ ]",
+        };
+        let deferred_marker = if phase.status == PlanStatus::Deferred {
+            " *(deferred)*"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "- {} Phase {} — {}{}",
+            checkbox, phase.id, phase.title, deferred_marker
+        ));
+        shown_pending += 1;
+    }
+
+    // If there are more phases after the window, indicate truncation.
+    let remaining = after.len().saturating_sub(shown_pending);
+    if remaining > 0 {
+        lines.push(format!("- ... ({} more phases)", remaining));
+    }
+
+    lines.join("\n")
+}
+
 /// Find the next actionable phase after the given phase ID.
 ///
 /// Skips phases marked as `Deferred` or `Done`. Only returns phases with
@@ -2338,6 +2464,104 @@ Release automation.
         assert!(checklist.contains("[x] Phase 0"));
         assert!(checklist.contains("[ ] **Phase 4a.1 — Plan Tracking** <-- current"));
         assert!(checklist.contains("[ ] Phase 4b"));
+    }
+
+    #[test]
+    fn test_windowed_checklist_collapses_done_phases() {
+        // Build 20 done phases + 1 current + 10 pending.
+        let mut phases: Vec<PlanPhase> = (0..20)
+            .map(|i| PlanPhase {
+                id: format!("v0.{}", i),
+                title: format!("Done Phase {}", i),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+            })
+            .collect();
+        phases.push(PlanPhase {
+            id: "v0.20".to_string(),
+            title: "Current Phase".to_string(),
+            status: PlanStatus::InProgress,
+            depends_on: vec![],
+        });
+        for i in 21..31 {
+            phases.push(PlanPhase {
+                id: format!("v0.{}", i),
+                title: format!("Pending Phase {}", i),
+                status: PlanStatus::Pending,
+                depends_on: vec![],
+            });
+        }
+
+        let checklist = format_plan_checklist_windowed(&phases, Some("v0.20"), 5, 5);
+
+        // Should have a summary line collapsing phases 0-14 (15 collapsed).
+        assert!(
+            checklist.contains("complete (15 phases)"),
+            "should have collapse line: {}",
+            checklist
+        );
+
+        // Should show last 5 done phases individually (v0.15 – v0.19).
+        assert!(
+            checklist.contains("Phase v0.15"),
+            "should show v0.15: {}",
+            checklist
+        );
+        assert!(
+            checklist.contains("Phase v0.19"),
+            "should show v0.19: {}",
+            checklist
+        );
+        // Should NOT show v0.14 individually (collapsed).
+        assert!(
+            !checklist.contains("Done Phase 14\n"),
+            "v0.14 should be collapsed"
+        );
+
+        // Current phase is bolded.
+        assert!(
+            checklist.contains("**Phase v0.20 — Current Phase**"),
+            "current should be bolded"
+        );
+
+        // Should show next 5 pending (v0.21-v0.25).
+        assert!(checklist.contains("Phase v0.21"), "should show v0.21");
+        assert!(checklist.contains("Phase v0.25"), "should show v0.25");
+        // v0.30 should not be shown individually (beyond window), but truncation note shown.
+        assert!(
+            !checklist.contains("Phase v0.30 —"),
+            "v0.30 should be beyond window"
+        );
+        assert!(
+            checklist.contains("more phases"),
+            "should have truncation note"
+        );
+    }
+
+    #[test]
+    fn test_windowed_checklist_no_current_returns_full() {
+        let phases = parse_plan(SAMPLE_PLAN);
+        let windowed = format_plan_checklist_windowed(&phases, None, 5, 5);
+        let full = format_plan_checklist(&phases, None);
+        assert_eq!(windowed, full, "None current phase should return full list");
+    }
+
+    #[test]
+    fn test_windowed_checklist_no_collapse_when_within_window() {
+        // Only 3 done phases, window=5 → no summary line, all shown individually.
+        let phases = parse_plan(SAMPLE_PLAN);
+        let checklist = format_plan_checklist_windowed(&phases, Some("4a.1"), 5, 5);
+        // SAMPLE_PLAN has 3 done phases (0, 1, 4a) — all within window=5.
+        assert!(
+            !checklist.contains("complete ("),
+            "should not collapse when within window: {}",
+            checklist
+        );
+        assert!(
+            checklist.contains("Phase 0 —"),
+            "should show phase 0 individually"
+        );
+        assert!(checklist.contains("**Phase 4a.1 — Plan Tracking** <-- current"));
     }
 
     #[test]
