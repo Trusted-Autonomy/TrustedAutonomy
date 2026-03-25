@@ -4,6 +4,7 @@
 // TA owns the memory — agents consume it through MCP tools or CLI.
 
 use clap::Subcommand;
+use ta_goal::GoalRunStore;
 use ta_mcp_gateway::GatewayConfig;
 use ta_memory::{FsMemoryStore, KeySchema, MemoryQuery, MemoryStore};
 
@@ -99,6 +100,25 @@ pub enum ContextCommands {
         /// Path or URL to a solutions.toml file.
         source: String,
     },
+    /// Show a breakdown of injected CLAUDE.md context size vs. budget (v0.14.3.1).
+    ///
+    /// Reads the injected CLAUDE.md from the latest (or specified) goal's staging
+    /// workspace and prints a per-section character count and percentage of the
+    /// configured budget. When no staging workspace is available, builds the
+    /// sections in dry-run mode using the current project configuration.
+    ///
+    /// ```text
+    /// ta context size
+    /// ta context size --goal <goal-id>
+    /// ```
+    Size {
+        /// Goal ID to inspect. Defaults to the most recently started goal.
+        #[arg(long)]
+        goal: Option<String>,
+        /// Show raw section content sizes even when under budget.
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -154,6 +174,9 @@ pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<
             non_interactive,
         } => export_solutions(config, output.as_deref(), *non_interactive),
         ContextCommands::Import { source } => import_solutions(config, source),
+        ContextCommands::Size { goal, verbose } => {
+            context_size_report(config, goal.as_deref(), *verbose)
+        }
     }
 }
 
@@ -676,6 +699,162 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+/// Print a per-section context budget breakdown (v0.14.3.1).
+fn context_size_report(
+    config: &GatewayConfig,
+    goal_id: Option<&str>,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    // Load workflow config for budget and window settings.
+    let wf = ta_submit::WorkflowConfig::load_or_default(
+        &config.workspace_root.join(".ta/workflow.toml"),
+    );
+    let budget = wf.workflow.context_budget_chars;
+    let done_window = wf.workflow.plan_done_window;
+    let pending_window = wf.workflow.plan_pending_window;
+
+    // Resolve goal (latest or specified).
+    let goal_store = GoalRunStore::new(&config.goals_dir)?;
+
+    let (plan_phase, source_dir, title, gid) = if let Some(id_str) = goal_id {
+        let uuid = uuid::Uuid::parse_str(id_str)
+            .map_err(|e| anyhow::anyhow!("Invalid goal ID '{}': {}", id_str, e))?;
+        let goal = goal_store
+            .get(uuid)?
+            .ok_or_else(|| anyhow::anyhow!("Goal {} not found", id_str))?;
+        let src = goal
+            .source_dir
+            .clone()
+            .unwrap_or_else(|| config.workspace_root.clone());
+        (
+            goal.plan_phase.clone(),
+            src,
+            goal.title.clone(),
+            id_str.to_string(),
+        )
+    } else {
+        // Use the most recent goal.
+        let goals = goal_store.list()?;
+        if let Some(g) = goals.last() {
+            let src = g
+                .source_dir
+                .clone()
+                .unwrap_or_else(|| config.workspace_root.clone());
+            (
+                g.plan_phase.clone(),
+                src,
+                g.title.clone(),
+                g.goal_run_id.to_string(),
+            )
+        } else {
+            // No goals yet — use workspace root as source.
+            (
+                None,
+                config.workspace_root.clone(),
+                "(no active goal)".to_string(),
+                "-".to_string(),
+            )
+        }
+    };
+
+    let sizes = super::run::compute_context_section_sizes(
+        &title,
+        &gid,
+        plan_phase.as_deref(),
+        Some(source_dir.as_path()),
+        config,
+        done_window,
+        pending_window,
+    );
+
+    let total = sizes.total();
+    let budget_display = if budget == 0 {
+        "(disabled)".to_string()
+    } else {
+        format!("{}", budget)
+    };
+    let pct = if budget > 0 {
+        (total * 100) / budget
+    } else {
+        0
+    };
+
+    println!();
+    println!("Context Budget Report");
+    println!("  Goal:   {}", gid);
+    println!("  Budget: {}", budget_display);
+    println!();
+    println!("  {:<30} {:>8}  {:>6}", "Section", "Chars", "% budget");
+    println!("  {}", "-".repeat(50));
+
+    let sections: &[(&str, usize)] = &[
+        ("TA header + instructions", sizes.header),
+        ("Plan checklist (windowed)", sizes.plan),
+        ("Memory context", sizes.memory),
+        ("Solutions", sizes.solutions),
+        ("Community", sizes.community),
+        ("Parent/follow-up context", sizes.parent),
+        ("Original CLAUDE.md", sizes.original_claude_md),
+    ];
+
+    for (name, chars) in sections {
+        let section_pct = if budget > 0 {
+            (chars * 100) / budget
+        } else {
+            0
+        };
+        if verbose || *chars > 0 {
+            println!(
+                "  {:<30} {:>8}  {:>5}%",
+                name,
+                format_chars(*chars),
+                section_pct
+            );
+        }
+    }
+
+    println!("  {}", "-".repeat(50));
+    println!(
+        "  {:<30} {:>8}  {:>5}%  of {} budget",
+        "Total",
+        format_chars(total),
+        pct,
+        budget_display
+    );
+    println!();
+
+    if budget > 0 {
+        let warn_threshold = budget * 80 / 100;
+        if total > budget {
+            println!(
+                "  [WARN] Context exceeds budget by {} chars.",
+                total - budget
+            );
+            println!("         TA will trim sections automatically.");
+            println!("         Adjust [workflow] context_budget_chars in .ta/workflow.toml to change the limit.");
+        } else if total > warn_threshold {
+            println!("  [WARN] Context is {pct}% of budget (threshold: 80%).");
+            println!(
+                "         Consider increasing [workflow] plan_done_window / plan_pending_window"
+            );
+            println!("         or reducing [workflow] context_budget_chars.");
+        } else {
+            println!("  Context is within budget.");
+        }
+    }
+    println!();
+
+    Ok(())
+}
+
+fn format_chars(n: usize) -> String {
+    if n >= 1_000 {
+        format!("{},{:03}", n / 1_000, n % 1_000)
+    } else {
+        format!("{}", n)
     }
 }
 

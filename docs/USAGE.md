@@ -1436,6 +1436,82 @@ A phase can declare explicit dependencies using an HTML comment in PLAN.md, plac
 
 `ta plan status` shows a warning for phases whose declared dependencies are not yet `Done`. When running `ta run --phase v0.14.3`, TA blocks the goal if any declared dependency is not done — regardless of the `enforce_phase_order` mode.
 
+#### Context Budget & Injection Trim
+
+TA injects a `CLAUDE.md` file into every staging workspace before launching an agent. This file contains the TA header, the plan checklist, memory entries, solutions, community context, and the project's original `CLAUDE.md`. Without limits, this context can exceed 60k characters, causing context-size warnings in LLM runners.
+
+**Plan checklist windowing**
+
+Instead of emitting all 200+ phase titles, TA injects a windowed view:
+
+```
+[x] Phases 0 – v0.13.16 complete (152 phases)  ← single summary line
+[x] v0.13.17 — Draft Evidence, Perforce Plugin
+...
+[x] v0.14.3 — Plan Phase Ordering Enforcement   ← last N done phases
+**v0.14.3.1 — CLAUDE.md Context Budget** <-- current
+[ ] v0.14.3.2 — Full MCP Lazy Context           ← next N pending phases
+...
+```
+
+Configure the window size in `.ta/workflow.toml`:
+
+```toml
+[workflow]
+plan_done_window   = 5   # how many completed phases to show individually (default: 5)
+plan_pending_window = 5  # how many upcoming phases to show (default: 5)
+```
+
+**Context budget enforcement**
+
+Configure the maximum context size:
+
+```toml
+[workflow]
+context_budget_chars = 40000   # default: 40,000 characters (0 = disabled)
+```
+
+When the assembled context exceeds the budget, TA trims in priority order:
+1. Solutions entries (reduced from 15 → 5)
+2. Parent/follow-up context (truncated to 2,000 chars)
+3. Memory entries (reduced)
+
+A `[warn]` message is printed at goal start when projected context exceeds 80% of the budget.
+
+**Inspect context size**
+
+```bash
+# Show per-section breakdown for the most recent goal
+ta context size
+
+# Show breakdown for a specific goal
+ta context size --goal <goal-id>
+
+# Include zero-size sections in the table
+ta context size --verbose
+```
+
+Output:
+
+```
+Context Budget Report
+  Goal:   c0f7bafe-...
+  Budget: 40000
+
+  Section                        Chars  % budget
+  --------------------------------------------------
+  TA header + instructions       2,847       7%
+  Plan checklist (windowed)      1,943       5%
+  Memory context                 4,201      10%
+  Solutions                      3,102       7%
+  Community                        412       1%
+  Original CLAUDE.md             9,732      24%
+  --------------------------------------------------
+  Total                         22,237      55%  of 40000 budget
+
+  Context is within budget.
+```
+
 #### Batch Phase Marking
 
 When a single draft covers multiple plan phases:
@@ -7473,7 +7549,9 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.14.0 | Agent sandboxing — macOS sandbox-exec, Linux bwrap (experimental) | Done |
 | v0.14.1 | Hardware attestation & verifiable audit trails (Ed25519, `ta audit verify-attestation`) | Done |
 | v0.14.2 | Multi-party approval & threshold governance (`ta draft approve --as`, `--override`) | Done |
-| v0.14.3 | Constitution dedup via agent review (`ta constitution review`) | Pending |
+| v0.14.3 | Plan phase ordering enforcement (`ta plan status --check-order`) | Done |
+| v0.14.3.1 | CLAUDE.md context budget & injection trim (`ta context size`, windowed plan checklist) | Done |
+| v0.14.3.2 | Full MCP lazy context (zero-injection plan & community) | Pending |
 | v0.14.4 | Central daemon & multi-user deployment | Pending |
 | v0.14.5 | Enterprise identity & SSO integration | Pending |
 | v0.14.6 | Compliance-ready audit ledger (builds on v0.14.4 Central Daemon) | Pending |
