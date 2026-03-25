@@ -109,14 +109,14 @@ External users (working on their own projects, not TA itself) need these phases 
 | v0.13.5 | Database Proxy Plugins — depends on v0.13.4 |
 | v0.13.9 | Product Constitution Framework — project-level behavioral contracts, draft-time scan, release gate |
 | v0.13.11 | Platform Installers — macOS DMG/pkg, Windows MSI with PATH registration |
-| v0.14.x | Enterprise Readiness — sandboxing, attestation, multi-party governance, cloud/team deployment, SSO |
+| v0.14.x | Hardened Autonomy — sandboxing DSL, verifiable audit trail, multi-party governance, extension-point surface for external plugins |
 
-### Enterprise (Beta)
+### Hardened Autonomy
 
-Needed for compliance-focused or container-isolated deployments.
+Hardening for security-conscious single-node deployments. Multi-user and enterprise features are built by external plugins (see Secure Autonomy) on top of the extension traits defined in v0.14.4.
 
-- v0.13.2 — MCP Transport Abstraction (SecureTA/container enabler; runtime adapters depend on this)
-- v0.13.3 — Runtime Adapter Trait (SecureTA/OCI; depends on v0.13.2)
+- v0.13.2 — MCP Transport Abstraction (Secure Autonomy/container enabler; runtime adapters depend on this)
+- v0.13.3 — Runtime Adapter Trait (Secure Autonomy/OCI; depends on v0.13.2)
 - v0.13.6 — Community Knowledge Hub (post-launch community feature)
 - v0.13.9 — Product Constitution Framework (project-level invariants, draft-time scan, release gate)
 - v0.13.10 — Feature Velocity Stats: build time, fix time, goal outcomes, connector events
@@ -4922,7 +4922,7 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 ### v0.13.2 — MCP Transport Abstraction (TCP/Unix Socket)
 <!-- status: done -->
 <!-- beta: yes — enables container isolation and remote agent execution for team deployments -->
-**Goal**: Abstract MCP transport so agents can communicate with TA over TCP or Unix sockets, not just stdio pipes. Critical enabler for container-based isolation (SecureTA) and remote agent execution.
+**Goal**: Abstract MCP transport so agents can communicate with TA over TCP or Unix sockets, not just stdio pipes. Critical enabler for container-based isolation (Secure Autonomy) and remote agent execution.
 
 #### Items
 
@@ -4959,7 +4959,7 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 ### v0.13.3 — Runtime Adapter Trait
 <!-- status: done -->
 <!-- beta: yes — prerequisite for local model support (v0.13.8) -->
-**Goal**: Abstract how TA spawns and manages agent processes. Today it's hardcoded as a bare child process. A `RuntimeAdapter` trait enables container, VM, and remote execution backends — TA provides BareProcess, SecureTA provides OCI/VM.
+**Goal**: Abstract how TA spawns and manages agent processes. Today it's hardcoded as a bare child process. A `RuntimeAdapter` trait enables container, VM, and remote execution backends — TA provides BareProcess, Secure Autonomy provides OCI/VM.
 
 **Depends on**: v0.13.2 (MCP Transport — runtime adapters need transport abstraction to connect agents over non-stdio channels)
 
@@ -4968,7 +4968,7 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 1. [x] `RuntimeAdapter` trait with `spawn()`, `stop()`, `status()`, `attach_transport()` methods
 2. [x] `BareProcessRuntime`: extract current process spawning into this adapter (no behavior change)
 3. [x] Runtime selection in agent/workflow config: `runtime = "process" | "oci" | "vm"`
-4. [x] Plugin-based runtime loading: SecureTA registers OCI/VM runtimes as plugins
+4. [x] Plugin-based runtime loading: Secure Autonomy registers OCI/VM runtimes as plugins
 5. [x] Runtime lifecycle events: `AgentSpawned`, `AgentExited`, `RuntimeError` fed into event system
 6. [x] Credential injection API: `RuntimeAdapter::inject_credentials()` for scoped secret injection into runtime environment
 
@@ -4987,7 +4987,7 @@ On Windows, `find_daemon_binary()` additionally has two bugs: `dir.join("ta-daem
 
 ### v0.13.4 — External Action Governance Framework
 <!-- status: done -->
-**Goal**: Provide the governance framework for agents performing external actions — sending emails, posting on social media, making API calls, executing financial transactions. TA doesn't implement the actions; it provides the policy, approval, capture, and audit layer so projects like SecureTA or custom workflows can govern them.
+**Goal**: Provide the governance framework for agents performing external actions — sending emails, posting on social media, making API calls, executing financial transactions. TA doesn't implement the actions; it provides the policy, approval, capture, and audit layer so projects like Secure Autonomy or custom workflows can govern them.
 
 **Design**:
 - `ExternalAction` trait: defines an action type (email, social post, API call, DB query) with metadata schema
@@ -6245,7 +6245,7 @@ VcsAdapter::stage_env()
 #### Deferred items
 
 - **SVN isolation**: Static env var injection documented; deeper workspace scoping deferred to v0.14.x.
-- **OCI-based isolation**: Deferred to v0.14.4 (container fallback).
+- **OCI-based isolation**: → Secure Autonomy (`RuntimeAdapter` plugin built on v0.13.3 trait).
 
 #### Version: `0.13.17.3-alpha`
 
@@ -6520,33 +6520,11 @@ api_key_env = "OPENAI_API_KEY"   # checked but not required — binary handles i
 
 ---
 
-## v0.14 — Enterprise Readiness
+## v0.14 — Hardened Autonomy
 
-> **Focus**: Hardening the single-node deployment — sandboxing, verifiable audit trails, multi-party governance, and the extension-point surface that allows external tooling to add team and enterprise capabilities without modifying TA core.
-
-### Cloud & Multi-User Deployment Model
-
-Today TA is a **per-developer local daemon**: one `ta-daemon` process per workstation, one agent at a time, files on the local filesystem. Enterprise teams need a different topology:
-
-```
-                  ┌─────────────────────────────────────┐
-  Developer A ────┤                                     ├──── agent pool
-  Developer B ────┤   Central TA Daemon (cloud/server)  ├──── shared project workspace
-  Developer C ────┤                                     ├──── shared review queue
-  CI pipeline ────┤     RBAC · multi-tenant · TLS       ├──── audit ledger → S3/DB
-                  └─────────────────────────────────────┘
-```
-
-Key design questions to resolve in v0.14:
-
-- **Identity & auth**: Who can run goals? Who can approve? OAuth/OIDC vs API keys vs SSH certs.
-- **Project tenancy**: One daemon per project (current model) vs one daemon serving multiple projects with namespace isolation.
-- **Workspace model**: Central NFS/object-store workspace vs each agent gets a containerised ephemeral workspace that syncs back.
-- **Review routing**: Draft review goes to the project's approval queue; any authorised team member (not just the initiator) can approve.
-- **Concurrency**: Multiple agents running in parallel on different goals; resource scheduling and queue depth.
-- **Remote shell**: `ta shell` connects over TLS/WebSocket to a remote daemon, not localhost. Same UX, different transport.
-
-These are addressed across v0.14.4–v0.14.5.
+> **Focus**: Hardening the single-node deployment — sandboxing, verifiable audit trails, multi-party governance, and the extension-point surface that allows external plugins to add team and enterprise capabilities without modifying TA core.
+>
+> TA does not implement multi-user infrastructure, SSO, cloud deployment, or RBAC. Those capabilities are built by external plugins (see Secure Autonomy) that register against the stable traits defined in v0.14.4.
 
 ### v0.14.0 — Agent Sandboxing & Process Isolation
 <!-- status: done -->
@@ -6587,8 +6565,8 @@ These are addressed across v0.14.4–v0.14.5.
 
 1. [x] **`AttestationBackend` trait**: `sign(payload) → attestation`, `verify(payload, attestation) → bool`. Implemented in `crates/ta-audit/src/attestation.rs`. Plugin registry from `~/.config/ta/plugins/attestation/` deferred to v0.14.3 (Constitution Dedup). (v0.14.1)
 2. [x] **Software fallback backend**: `SoftwareAttestationBackend` — Ed25519 key pair auto-generated in `.ta/keys/attestation.pkcs8` on first use. Public key exported to `.ta/keys/attestation.pub`. 5 tests. (v0.14.1)
-3. → **community** **TPM 2.0 backend plugin**: Deferred — requires `tss2-rs` and TPM hardware. Community contribution; will be a plugin when the `AttestationBackend` trait is stable.
-4. → **community** **Apple Secure Enclave backend plugin**: Deferred — requires macOS Keychain + CryptoKit integration. Community contribution; the `AttestationBackend` trait is the stable plugin point.
+3. → **Secure Autonomy** **TPM 2.0 backend plugin**: Requires `tss2-rs` and TPM hardware. SA implements this as a commercial plugin; `AttestationBackend` trait is the stable extension point.
+4. → **Secure Autonomy** **Apple Secure Enclave backend plugin**: Requires macOS Keychain + CryptoKit integration. SA implements this as a commercial plugin; `AttestationBackend` trait is the stable extension point.
 5. [x] **Attestation fields in `AuditEvent`**: `attestation: Option<AttestationRecord>` added to `AuditEvent` with `backend`, `key_fingerprint`, `signature` fields. `AuditLog::with_attestation()` wires the backend at log-open time. (v0.14.1)
 6. [x] **`ta audit verify-attestation`**: Verifies Ed25519 signatures for all (or a specific) event. Loads key from `.ta/keys/`. Reports per-event OK/INVALID/unsigned, fails with exit code 1 if any signature invalid. (v0.14.1)
 
@@ -7495,12 +7473,6 @@ A browser-based interface to TA's daemon API, aimed at users who need to start g
 ## Future Improvements (unscheduled)
 
 > Ideas that are valuable but not yet prioritized into a release phase. Pull into a versioned phase when ready.
-
-### OCI/gVisor Container Isolation (from v0.9.2)
-Enterprise-grade sandbox using OCI containers with gVisor for kernel-level agent isolation. The `ta-sandbox` crate provides command allowlists and CWD enforcement; OCI adds true process isolation with network/filesystem namespace separation.
-
-### Enterprise State Intercept (from v0.9.2)
-See `docs/enterprise-state-intercept.md`. Allows enterprises to intercept and audit all agent state transitions for compliance.
 
 ### External Plugin System
 Process-based plugin architecture so third parties can publish TA adapters as independent packages. A Perforce vendor, JIRA integration company, or custom VCS provider can ship a `ta-submit-<name>` executable that TA discovers and communicates with via JSON-over-stdio protocol. Extends beyond VCS to any adapter type: notification channels (`ta-channel-slack`), storage backends (`ta-store-postgres`), output integrations (`ta-output-jira`). Includes `ta plugin install/list/remove` commands, a plugin manifest format, and a plugin registry (crates.io or TA-hosted). Design sketched in v0.9.8.4; implementation deferred until the in-process adapter pattern is validated.
