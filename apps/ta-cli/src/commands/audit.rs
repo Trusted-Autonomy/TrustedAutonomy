@@ -1,10 +1,10 @@
 // audit.rs — Audit subcommands: verify, tail, show, export, drift, baseline,
-//             verify-attestation (v0.14.1).
+//             verify-attestation (v0.14.1), ledger (v0.14.6).
 
 use clap::Subcommand;
 use ta_audit::{
-    AttestationBackend, AuditEvent, AuditLog, BaselineStore, DraftSummary, DriftSeverity,
-    SoftwareAttestationBackend,
+    AttestationBackend, AuditDisposition, AuditEvent, AuditLog, BaselineStore, DraftSummary,
+    DriftSeverity, GoalAuditLedger, LedgerFilter, SoftwareAttestationBackend,
 };
 use ta_mcp_gateway::GatewayConfig;
 
@@ -81,6 +81,73 @@ pub enum AuditCommands {
         #[arg(long)]
         keys: Option<String>,
     },
+    /// Goal-level audit ledger operations (v0.14.6).
+    Ledger {
+        #[command(subcommand)]
+        command: LedgerCommands,
+    },
+}
+
+/// Subcommands for the goal audit ledger.
+#[derive(Subcommand)]
+pub enum LedgerCommands {
+    /// Export the goal audit ledger as JSONL or CSV.
+    Export {
+        /// Output format: jsonl or csv.
+        #[arg(long, default_value = "jsonl")]
+        format: LedgerExportFormat,
+        /// Filter by disposition (applied, denied, cancelled, abandoned, gc, timeout, crashed, closed).
+        #[arg(long)]
+        disposition: Option<String>,
+        /// Filter by plan phase.
+        #[arg(long)]
+        phase: Option<String>,
+        /// Filter by agent.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Filter entries recorded after this date (ISO 8601, e.g. 2026-01-01).
+        #[arg(long)]
+        since: Option<String>,
+        /// Filter entries recorded before this date (ISO 8601).
+        #[arg(long)]
+        until: Option<String>,
+        /// Path to ledger (defaults to .ta/goal-audit.jsonl).
+        #[arg(long)]
+        ledger: Option<String>,
+    },
+    /// Verify the goal audit ledger hash chain integrity.
+    Verify {
+        /// Path to ledger (defaults to .ta/goal-audit.jsonl).
+        #[arg(long)]
+        ledger: Option<String>,
+    },
+    /// Remove entries older than a retention period while preserving chain integrity.
+    Gc {
+        /// Remove entries older than this duration (e.g. "1y", "6m", "90d").
+        #[arg(long, default_value = "1y")]
+        older_than: String,
+        /// Show what would be removed without making changes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Path to ledger (defaults to .ta/goal-audit.jsonl).
+        #[arg(long)]
+        ledger: Option<String>,
+    },
+    /// Migrate .ta/goal-history.jsonl entries to the goal audit ledger.
+    Migrate {
+        /// Path to source history file (defaults to .ta/goal-history.jsonl).
+        #[arg(long)]
+        history: Option<String>,
+        /// Path to ledger (defaults to .ta/goal-audit.jsonl).
+        #[arg(long)]
+        ledger: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum LedgerExportFormat {
+    Jsonl,
+    Csv,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -200,6 +267,331 @@ pub fn execute(cmd: &AuditCommands, config: &GatewayConfig) -> anyhow::Result<()
                 keys.as_deref(),
             )?;
         }
+
+        AuditCommands::Ledger { command } => {
+            execute_ledger(command, config)?;
+        }
+    }
+
+    Ok(())
+}
+
+// ── Ledger subcommand (v0.14.6) ──
+
+fn execute_ledger(cmd: &LedgerCommands, config: &GatewayConfig) -> anyhow::Result<()> {
+    match cmd {
+        LedgerCommands::Export {
+            format,
+            disposition,
+            phase,
+            agent,
+            since,
+            until,
+            ledger,
+        } => {
+            ledger_export(
+                config,
+                format,
+                LedgerExportParams {
+                    disposition: disposition.as_deref(),
+                    phase: phase.as_deref(),
+                    agent: agent.as_deref(),
+                    since: since.as_deref(),
+                    until: until.as_deref(),
+                    override_path: ledger.as_deref(),
+                },
+            )?;
+        }
+
+        LedgerCommands::Verify { ledger } => {
+            ledger_verify(config, ledger.as_deref())?;
+        }
+
+        LedgerCommands::Gc {
+            older_than,
+            dry_run,
+            ledger,
+        } => {
+            ledger_gc(config, older_than, *dry_run, ledger.as_deref())?;
+        }
+
+        LedgerCommands::Migrate { history, ledger } => {
+            ledger_migrate(config, history.as_deref(), ledger.as_deref())?;
+        }
+    }
+    Ok(())
+}
+
+fn ledger_path(config: &GatewayConfig, override_path: Option<&str>) -> std::path::PathBuf {
+    override_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| GoalAuditLedger::path_for(&config.workspace_root))
+}
+
+struct LedgerExportParams<'a> {
+    disposition: Option<&'a str>,
+    phase: Option<&'a str>,
+    agent: Option<&'a str>,
+    since: Option<&'a str>,
+    until: Option<&'a str>,
+    override_path: Option<&'a str>,
+}
+
+fn ledger_export(
+    config: &GatewayConfig,
+    format: &LedgerExportFormat,
+    params: LedgerExportParams<'_>,
+) -> anyhow::Result<()> {
+    let LedgerExportParams {
+        disposition,
+        phase,
+        agent,
+        since,
+        until,
+        override_path,
+    } = params;
+    let path = ledger_path(config, override_path);
+
+    if !path.exists() {
+        println!("No goal audit ledger found at {}", path.display());
+        println!("Ledger is populated as goals reach terminal states.");
+        return Ok(());
+    }
+
+    let all = GoalAuditLedger::read_all(&path)?;
+
+    let parsed_disp: Option<AuditDisposition> = disposition
+        .map(|s| {
+            s.parse::<AuditDisposition>()
+                .map_err(|e| anyhow::anyhow!("Invalid disposition '{}': {}", s, e))
+        })
+        .transpose()?;
+
+    let parsed_since = since
+        .map(|s| {
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc())
+                .or_else(|_| s.parse::<chrono::DateTime<chrono::Utc>>())
+                .map_err(|e| anyhow::anyhow!("Invalid --since date '{}': {}", s, e))
+        })
+        .transpose()?;
+
+    let parsed_until = until
+        .map(|s| {
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc())
+                .or_else(|_| s.parse::<chrono::DateTime<chrono::Utc>>())
+                .map_err(|e| anyhow::anyhow!("Invalid --until date '{}': {}", s, e))
+        })
+        .transpose()?;
+
+    let filter = LedgerFilter {
+        since: parsed_since,
+        until: parsed_until,
+        phase: phase.map(|s| s.to_string()),
+        agent: agent.map(|s| s.to_string()),
+        disposition: parsed_disp,
+    };
+
+    let entries: Vec<_> = all.iter().filter(|e| filter.matches(e)).collect();
+
+    match format {
+        LedgerExportFormat::Jsonl => {
+            for entry in &entries {
+                println!("{}", serde_json::to_string(entry)?);
+            }
+        }
+        LedgerExportFormat::Csv => {
+            println!(
+                "goal_id,title,disposition,phase,agent,created_at,recorded_at,build_seconds,review_seconds,total_seconds,draft_id,artifact_count,lines_changed,denial_reason"
+            );
+            for entry in &entries {
+                println!(
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                    entry.goal_id,
+                    csv_escape(&entry.title),
+                    entry.disposition,
+                    entry.phase.as_deref().unwrap_or(""),
+                    entry.agent,
+                    entry.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+                    entry.recorded_at.format("%Y-%m-%dT%H:%M:%SZ"),
+                    entry.build_seconds,
+                    entry.review_seconds,
+                    entry.total_seconds,
+                    entry.draft_id.map(|id| id.to_string()).unwrap_or_default(),
+                    entry.artifact_count,
+                    entry.lines_changed,
+                    csv_escape(entry.denial_reason.as_deref().unwrap_or("")),
+                );
+            }
+        }
+    }
+
+    eprintln!("{} entries exported.", entries.len());
+    Ok(())
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn ledger_verify(config: &GatewayConfig, override_path: Option<&str>) -> anyhow::Result<()> {
+    let path = ledger_path(config, override_path);
+
+    if !path.exists() {
+        println!("No goal audit ledger found at {}", path.display());
+        return Ok(());
+    }
+
+    match GoalAuditLedger::verify_chain(&path) {
+        Ok(_) => {
+            let entries = GoalAuditLedger::read_all(&path)?;
+            println!(
+                "Goal audit ledger verified: {} entries, hash chain intact.",
+                entries.len()
+            );
+        }
+        Err(ta_audit::AuditError::IntegrityViolation {
+            line,
+            expected,
+            actual,
+        }) => {
+            println!("INTEGRITY VIOLATION at line {}:", line);
+            println!("  Expected previous_hash: {}", expected);
+            println!("  Actual previous_hash:   {}", actual);
+            println!();
+            println!("The goal audit ledger may have been tampered with.");
+            anyhow::bail!("Goal audit ledger integrity check failed");
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    Ok(())
+}
+
+fn parse_retention_duration(s: &str) -> anyhow::Result<chrono::Duration> {
+    let s = s.trim();
+    if let Some(years) = s.strip_suffix('y') {
+        let n: i64 = years
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid duration: {}", s))?;
+        Ok(chrono::Duration::days(n * 365))
+    } else if let Some(months) = s.strip_suffix('m') {
+        let n: i64 = months
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid duration: {}", s))?;
+        Ok(chrono::Duration::days(n * 30))
+    } else if let Some(days) = s.strip_suffix('d') {
+        let n: i64 = days
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid duration: {}", s))?;
+        Ok(chrono::Duration::days(n))
+    } else {
+        anyhow::bail!("Duration must end with 'y' (years), 'm' (months), or 'd' (days). Examples: 1y, 6m, 90d")
+    }
+}
+
+fn ledger_gc(
+    config: &GatewayConfig,
+    older_than: &str,
+    dry_run: bool,
+    override_path: Option<&str>,
+) -> anyhow::Result<()> {
+    let path = ledger_path(config, override_path);
+
+    if !path.exists() {
+        println!("No goal audit ledger found at {}", path.display());
+        return Ok(());
+    }
+
+    let retention = parse_retention_duration(older_than)?;
+    let cutoff = chrono::Utc::now() - retention;
+
+    let all = GoalAuditLedger::read_all(&path)?;
+    let (retain, remove): (Vec<_>, Vec<_>) = all.into_iter().partition(|e| e.recorded_at >= cutoff);
+
+    if remove.is_empty() {
+        println!("No entries older than {}. Nothing to remove.", older_than);
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] Would remove {} entries (recorded before {}).",
+            remove.len(),
+            cutoff.format("%Y-%m-%d")
+        );
+        println!("[dry-run] Would retain {} entries.", retain.len());
+        return Ok(());
+    }
+
+    // Rewrite ledger with only retained entries (re-chains hashes).
+    // Write to a temp file first, then rename atomically.
+    let tmp_path = path.with_extension("jsonl.tmp");
+    {
+        let mut ledger = GoalAuditLedger::open(&tmp_path)?;
+        for mut entry in retain.clone() {
+            entry.previous_hash = None; // will be set by append
+            ledger.append(&mut entry)?;
+        }
+    }
+    std::fs::rename(&tmp_path, &path)?;
+
+    println!(
+        "Removed {} entries older than {} (before {}).",
+        remove.len(),
+        older_than,
+        cutoff.format("%Y-%m-%d")
+    );
+    println!("Retained {} entries. Chain re-anchored.", retain.len());
+    Ok(())
+}
+
+fn ledger_migrate(
+    config: &GatewayConfig,
+    history_override: Option<&str>,
+    ledger_override: Option<&str>,
+) -> anyhow::Result<()> {
+    let history_path = history_override
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| config.workspace_root.join(".ta").join("goal-history.jsonl"));
+
+    let ledger_path = ledger_path(config, ledger_override);
+
+    if !history_path.exists() {
+        println!(
+            "No goal history file found at {}. Nothing to migrate.",
+            history_path.display()
+        );
+        return Ok(());
+    }
+
+    // Load existing ledger IDs to skip already-migrated entries.
+    let existing_ids: std::collections::HashSet<uuid::Uuid> = if ledger_path.exists() {
+        GoalAuditLedger::read_all(&ledger_path)?
+            .into_iter()
+            .map(|e| e.goal_id)
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let mut ledger = GoalAuditLedger::open(&ledger_path)?;
+    let count = ta_audit::migrate_from_history(&history_path, &mut ledger, &existing_ids)?;
+
+    if count == 0 {
+        println!("All entries already migrated (or history file is empty).");
+    } else {
+        println!(
+            "Migrated {} entries from {} to {}.",
+            count,
+            history_path.display(),
+            ledger_path.display()
+        );
     }
 
     Ok(())

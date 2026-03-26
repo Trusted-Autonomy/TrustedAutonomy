@@ -25,6 +25,7 @@ pub mod drift;
 pub mod error;
 pub mod event;
 pub mod hasher;
+pub mod ledger;
 pub mod log;
 
 // Re-export the main types at the crate root for convenience.
@@ -38,4 +39,8 @@ pub use drift::{
 };
 pub use error::AuditError;
 pub use event::{Alternative, AuditAction, AuditEvent, DecisionReasoning};
+pub use ledger::{
+    migrate_from_history, ArtifactRecord, AuditDisposition, AuditEntry, GoalAuditLedger,
+    LedgerFilter,
+};
 pub use log::AuditLog;

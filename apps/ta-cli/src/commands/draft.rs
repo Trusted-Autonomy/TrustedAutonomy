@@ -2819,6 +2819,27 @@ fn deny_package(
                 if let Err(e) = vs.append(&entry) {
                     tracing::warn!("Failed to record velocity entry for denied goal: {}", e);
                 }
+                // v0.14.6: Write goal audit ledger entry.
+                write_goal_audit_entry(
+                    config,
+                    &pkg,
+                    Some(&goal),
+                    ta_audit::AuditDisposition::Denied,
+                    Some(reviewer),
+                    Some(reason),
+                    None,
+                );
+            } else {
+                // Goal not found — record without goal context.
+                write_goal_audit_entry(
+                    config,
+                    &pkg,
+                    None,
+                    ta_audit::AuditDisposition::Denied,
+                    Some(reviewer),
+                    Some(reason),
+                    None,
+                );
             }
         }
     }
@@ -4436,6 +4457,20 @@ fn apply_package(
         }
     }
 
+    // v0.14.6: Write goal audit ledger entry.
+    {
+        let reviewer = pkg.pending_approvals.first().map(|a| a.reviewer.as_str());
+        write_goal_audit_entry(
+            config,
+            &pkg,
+            Some(goal),
+            ta_audit::AuditDisposition::Applied,
+            reviewer,
+            None,
+            None,
+        );
+    }
+
     // Auto-close parent draft on follow-up apply (v0.3.6, refined v0.4.1.2).
     // v0.4.1.2: Only auto-close the parent draft when this goal shares the same
     // staging directory (extend case). Standalone follow-ups with different staging
@@ -5143,12 +5178,122 @@ fn close_package(
         let _ = audit_log.append(&mut event);
     }
 
+    // v0.14.6: Write goal audit ledger entry.
+    {
+        let goal_store = GoalRunStore::new(&config.goals_dir);
+        let goal = goal_store.ok().and_then(|store| {
+            store
+                .list()
+                .ok()?
+                .into_iter()
+                .find(|g| g.pr_package_id == Some(package_id))
+        });
+        write_goal_audit_entry(
+            config,
+            &pkg,
+            goal.as_ref(),
+            ta_audit::AuditDisposition::Closed,
+            Some(closed_by),
+            None,
+            reason,
+        );
+    }
+
     println!("Draft {} closed.", package_id);
     if let Some(r) = reason {
         println!("  Reason: {}", r);
     }
     println!("  Previous status: {}", prev_status);
     Ok(())
+}
+
+// ── Goal audit ledger helpers (v0.14.6) ─────────────────────────────
+
+/// Write a goal-level audit entry to the goal audit ledger.
+///
+/// Best-effort — failures are logged as warnings, never propagated.
+fn write_goal_audit_entry(
+    config: &GatewayConfig,
+    pkg: &DraftPackage,
+    goal: Option<&ta_goal::GoalRun>,
+    disposition: ta_audit::AuditDisposition,
+    reviewer: Option<&str>,
+    denial_reason: Option<&str>,
+    cancel_reason: Option<&str>,
+) {
+    let ledger_path = ta_audit::GoalAuditLedger::path_for(&config.workspace_root);
+    let mut ledger = match ta_audit::GoalAuditLedger::open(&ledger_path) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("Failed to open goal audit ledger: {}", e);
+            return;
+        }
+    };
+
+    let now = chrono::Utc::now();
+    let goal_id_str = &pkg.goal.goal_id;
+    let goal_uuid = uuid::Uuid::parse_str(goal_id_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
+
+    let (created_at, phase, agent_id, parent_goal_id, total_seconds) = if let Some(g) = goal {
+        let total = now.signed_duration_since(g.created_at).num_seconds();
+        (
+            g.created_at,
+            g.plan_phase.clone(),
+            g.agent_id.clone(),
+            g.parent_goal_id,
+            total,
+        )
+    } else {
+        (now, None, pkg.agent_identity.agent_id.clone(), None, 0)
+    };
+
+    // Build compact artifact list.
+    let artifacts: Vec<ta_audit::ArtifactRecord> = pkg
+        .changes
+        .artifacts
+        .iter()
+        .map(|a| ta_audit::ArtifactRecord {
+            uri: a.resource_uri.clone(),
+            change_type: format!("{:?}", a.change_type).to_lowercase(),
+        })
+        .collect();
+    let artifact_count = artifacts.len();
+
+    let ai_summary = if pkg.summary.what_changed.is_empty() {
+        None
+    } else {
+        Some(pkg.summary.what_changed.clone())
+    };
+
+    let mut entry = ta_audit::AuditEntry {
+        goal_id: goal_uuid,
+        title: pkg.goal.title.clone(),
+        objective: Some(pkg.goal.objective.clone()),
+        disposition,
+        phase,
+        agent: agent_id,
+        created_at,
+        pr_ready_at: None,
+        recorded_at: now,
+        build_seconds: total_seconds,
+        review_seconds: 0,
+        total_seconds,
+        draft_id: Some(pkg.package_id),
+        ai_summary,
+        reviewer: reviewer.map(|s| s.to_string()),
+        denial_reason: denial_reason.map(|s| s.to_string()),
+        cancel_reason: cancel_reason.map(|s| s.to_string()),
+        artifact_count,
+        lines_changed: 0,
+        artifacts,
+        policy_result: None,
+        parent_goal_id,
+        previous_hash: None,
+    };
+
+    if let Err(e) = ledger.append(&mut entry) {
+        tracing::warn!("Failed to write goal audit entry: {}", e);
+    }
 }
 
 // ── Draft close --stale (v0.13.17.2) ────────────────────────────────
