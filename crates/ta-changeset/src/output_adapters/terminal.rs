@@ -524,6 +524,7 @@ mod tests {
             pending_approvals: vec![],
             supervisor_review: None,
             ignored_artifacts: vec![],
+            baseline_artifacts: vec![],
         }
     }
 

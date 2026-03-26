@@ -5,6 +5,7 @@ use std::path::Path;
 
 use chrono::{Duration, Utc};
 use clap::Subcommand;
+use sha2::Digest as _;
 use ta_changeset::changeset::{ChangeKind, ChangeSet, CommitIntent};
 use ta_changeset::diff::DiffContent;
 use ta_changeset::diff_handlers::DiffHandlersConfig;
@@ -1444,6 +1445,7 @@ pub(crate) fn build_package(
         pending_approvals: vec![],
         supervisor_review: None,
         ignored_artifacts: vec![],
+        baseline_artifacts: vec![], // Set below if this is a follow-up (v0.14.3.5).
     };
 
     // v0.12.2.1: Track parent_draft_id and compute composited diff for follow-up chains.
@@ -1463,6 +1465,17 @@ pub(crate) fn build_package(
                 // Composited diff: if parent is Applied, prepend parent artifacts/changesets
                 // so `ta draft view` shows the full chain impact.
                 if let Ok(parent_pkg) = load_package(config, parent_draft_id) {
+                    // v0.14.3.5: Capture all parent artifact URIs as baseline.
+                    // During apply, baseline-only files that are unchanged in staging
+                    // (staging hash == source hash) are skipped — they were already settled
+                    // by the parent apply. This prevents follow-up staging drift from
+                    // reverting files the parent had already updated (PLAN.md, USAGE.md, etc).
+                    pkg.baseline_artifacts = parent_pkg
+                        .changes
+                        .artifacts
+                        .iter()
+                        .map(|a| a.resource_uri.clone())
+                        .collect();
                     if matches!(parent_pkg.status, DraftStatus::Applied { .. }) {
                         let child_artifact_count = pkg.changes.artifacts.len();
                         let parent_artifact_count = parent_pkg.changes.artifacts.len();
@@ -3491,9 +3504,131 @@ fn apply_package(
             }
         }
 
+        // v0.14.3.5: Baseline skip logic — remove baseline-only artifacts where staging
+        // content matches source. These were inherited from the parent draft and are
+        // already settled in source; copying them would revert post-parent changes.
+        let effective_uris = if pkg.baseline_artifacts.is_empty() {
+            artifact_uris.clone()
+        } else {
+            let baseline_set: std::collections::HashSet<&str> =
+                pkg.baseline_artifacts.iter().map(|s| s.as_str()).collect();
+            let mut filtered = Vec::with_capacity(artifact_uris.len());
+            let mut skipped_baseline = 0usize;
+            for uri in &artifact_uris {
+                // Only check baseline skip for fs:// artifacts.
+                if baseline_set.contains(uri.as_str()) {
+                    if let Some(rel) = uri.strip_prefix("fs://workspace/") {
+                        let staging_path = goal.workspace_path.join(rel);
+                        let source_path = target_dir.join(rel);
+                        // If staging hash == source hash, file is already settled — skip.
+                        let staging_hash = if staging_path.exists() {
+                            std::fs::read(&staging_path)
+                                .ok()
+                                .map(|b| format!("{:x}", sha2::Sha256::digest(&b)))
+                        } else {
+                            None
+                        };
+                        let source_hash = if source_path.exists() {
+                            std::fs::read(&source_path)
+                                .ok()
+                                .map(|b| format!("{:x}", sha2::Sha256::digest(&b)))
+                        } else {
+                            None
+                        };
+                        if staging_hash.is_some() && staging_hash == source_hash {
+                            eprintln!(
+                                "ℹ️  [baseline] skipping {} (unchanged since parent apply)",
+                                rel
+                            );
+                            skipped_baseline += 1;
+                            continue;
+                        }
+                    }
+                }
+                filtered.push(uri.clone());
+            }
+            if skipped_baseline > 0 {
+                eprintln!(
+                    "ℹ️  [baseline] {} baseline artifact(s) skipped (already settled by parent apply)",
+                    skipped_baseline
+                );
+            }
+            filtered
+        };
+
+        // v0.14.3.5: Protected-file revert guard — for files marked "keep-source" in
+        // [apply.conflict_policy] (or the hardcoded TA-managed defaults), if the source
+        // version is strictly newer than staging (content differs), keep source and log a
+        // warning. These files are updated by `ta draft apply` itself — agents should not
+        // overwrite them with an older staging copy.
+        //
+        // Default protected files when no policy is configured (hardcoded seed):
+        const DEFAULT_PROTECTED_FILES: &[&str] = &["PLAN.md", "docs/USAGE.md"];
+        let workflow_config =
+            ta_submit::WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
+        let effective_uris = {
+            let mut guarded = Vec::with_capacity(effective_uris.len());
+            for uri in effective_uris {
+                let keep_source_from_policy = if let Some(rel) = uri.strip_prefix("fs://workspace/")
+                {
+                    // Check per-file conflict_policy first.
+                    let policy = if workflow_config.apply.conflict_policy.is_empty() {
+                        None
+                    } else {
+                        workflow_config.apply.policy_for(rel).map(|s| s.to_string())
+                    };
+                    if policy.as_deref() == Some("keep-source") {
+                        true
+                    } else if policy.is_none() {
+                        // No policy configured — check hardcoded defaults.
+                        DEFAULT_PROTECTED_FILES
+                            .iter()
+                            .any(|&p| rel == p || rel.ends_with(&format!("/{}", p)))
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if keep_source_from_policy {
+                    if let Some(rel) = uri.strip_prefix("fs://workspace/") {
+                        let staging_path = goal.workspace_path.join(rel);
+                        let source_path = target_dir.join(rel);
+                        // Skip if source content differs from staging — source is newer.
+                        let staging_bytes = std::fs::read(&staging_path).ok();
+                        let source_bytes = std::fs::read(&source_path).ok();
+                        if let (Some(s), Some(t)) = (staging_bytes, source_bytes) {
+                            if s != t {
+                                // Check if source is strictly newer by mtime.
+                                let source_mtime = std::fs::metadata(&source_path)
+                                    .and_then(|m| m.modified())
+                                    .ok();
+                                let staging_mtime = std::fs::metadata(&staging_path)
+                                    .and_then(|m| m.modified())
+                                    .ok();
+                                let source_is_newer = match (source_mtime, staging_mtime) {
+                                    (Some(sm), Some(tm)) => sm > tm,
+                                    _ => true, // Unknown → keep source (safe default)
+                                };
+                                if source_is_newer {
+                                    eprintln!(
+                                        "⚠️  [protected] keeping source {} (newer than staging — managed by ta draft apply)",
+                                        rel
+                                    );
+                                    continue; // Skip this artifact.
+                                }
+                            }
+                        }
+                    }
+                }
+                guarded.push(uri);
+            }
+            guarded
+        };
+
         eprintln!("[apply] Diffing staging vs source and copying changes...");
         let applied = overlay
-            .apply_with_conflict_check(&target_dir, conflict_resolution, &artifact_uris)
+            .apply_with_conflict_check(&target_dir, conflict_resolution, &effective_uris)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         applied
