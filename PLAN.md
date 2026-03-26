@@ -4581,7 +4581,7 @@ Audit all `push_output`, `push_heartbeat`, and `agent_output.push` call sites to
 ---
 
 ### v0.12.8 — Alpha Bug-Fixes: Discord Notification Flood Hardening & Draft CLI Disconnect
-<!-- status: done -->
+<!-- status: pending -->
 **Goal**: Close two remaining rough edges discovered during public-alpha testing that are annoying enough to fix before beta.
 
 #### Bug 1 — Discord notification flood on reconnect / daemon restart
@@ -6834,7 +6834,7 @@ All 6 items implemented. New tests:
 ---
 
 ### v0.14.3.6 — PR Creation Reliability & Submit Path Integration Test
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Harden `ta draft apply`'s VCS submit path so that PR creation is idempotent, always uses `workflow.toml` config, and is covered by an integration test that prevents silent regressions.
 
 **Background**: `open_review()` in `crates/ta-submit/src/git.rs` used `SubmitConfig::default()` (adapter="none") instead of `self.config`, silently skipping PR creation and ignoring `target_branch`. Fixed in PR #279. This phase adds the integration test that would have caught it.
@@ -6849,16 +6849,11 @@ All 6 items implemented. New tests:
 
 4. ✅ **Supervisor parent-chain context**: `invoke_supervisor_agent()` receives parent goal scope summary for follow-up goals, eliminating false-positive scope-drift verdicts. Landed in PR #279.
 
-5. [ ] **Integration test: `open_review` uses `workflow.toml` config** — Fast follow after PR #279 merges. In `crates/ta-submit/tests/`, create a test that:
-   - Writes a temp `workflow.toml` with `target_branch = "staging"` and `adapter = "git"`
-   - Calls `GitAdapter::open_review()` with a mock goal
-   - Asserts the `gh pr create` invocation includes `--base staging` and `--head <expected-branch>`
-   - Asserts idempotency: a second `open_review()` call with the branch already existing returns the existing PR without error
-   Use `mockall` or a `gh` stub script (per the VCS plugin test pattern) to avoid real network calls.
+5. ✅ **Integration test: `open_review` uses `workflow.toml` config** — `crates/ta-submit/tests/git_open_review.rs`. Uses a `gh` stub script (per VCS plugin test pattern). Two tests:
+   - `test_open_review_uses_workflow_config`: passes `target_branch = "staging"` in config, asserts stub captures `--base staging` and `--head ta/my-feature`
+   - `test_open_review_idempotency_returns_existing_pr`: stub returns existing PR from `gh pr list`, asserts `open_review()` returns existing URL without calling `gh pr create`
 
-6. [ ] **Constitution rule: no `::default()` in submit paths** — Add to `.ta/constitution.yaml`:
-   - Rule: any `SubmitConfig::default()` usage in `crates/ta-submit/` is a blocking finding
-   - Checklist gate for `crates/ta-submit/src/git.rs` changes: "Does every VCS operation function use `self.config` or an explicitly passed config, not a constructed default?"
+6. ✅ **Constitution rule: no `::default()` in submit paths** — Created `.ta/constitution.yaml` with §1 blocking rule and checklist gate for `crates/ta-submit/src/git.rs` changes. Updated `load_constitution()` in `crates/ta-changeset/src/supervisor_review.rs` to check `.ta/constitution.yaml` before `.ta/constitution.toml` as a fallback, so the rule file is auto-discovered without workflow.toml config changes.
 
 #### Version: `0.14.3.6-alpha` (sub-phase of v0.14.3)
 

@@ -627,6 +627,11 @@ pub fn load_constitution(staging_path: &Path, config: &SupervisorRunConfig) -> O
             return std::fs::read_to_string(&full).ok();
         }
     }
+    // Fallback: .ta/constitution.yaml (preferred for YAML-formatted rule sets)
+    let yaml_path = staging_path.join(".ta/constitution.yaml");
+    if yaml_path.exists() {
+        return std::fs::read_to_string(&yaml_path).ok();
+    }
     // Fallback: .ta/constitution.toml
     let toml_path = staging_path.join(".ta/constitution.toml");
     if toml_path.exists() {
