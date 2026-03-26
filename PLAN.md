@@ -6847,7 +6847,7 @@ All 6 items implemented. New tests:
 
 3. ✅ **Idempotency check before `gh pr create`**: `gh pr list --head <branch> --state open` — returns existing PR URL+number rather than failing with "already exists". Landed in PR #279.
 
-4. ✅ **Supervisor parent-chain context**: `invoke_supervisor_agent()` receives parent goal scope summary for follow-up goals, eliminating false-positive scope-drift verdicts. Landed in PR #280.
+4. ✅ **Supervisor parent-chain context**: `invoke_supervisor_agent()` receives parent goal scope summary for follow-up goals, eliminating false-positive scope-drift verdicts. Landed in PR #279.
 
 5. [ ] **Integration test: `open_review` uses `workflow.toml` config** — Fast follow after PR #279 merges. In `crates/ta-submit/tests/`, create a test that:
    - Writes a temp `workflow.toml` with `target_branch = "staging"` and `adapter = "git"`
@@ -6859,34 +6859,6 @@ All 6 items implemented. New tests:
 6. [ ] **Constitution rule: no `::default()` in submit paths** — Add to `.ta/constitution.yaml`:
    - Rule: any `SubmitConfig::default()` usage in `crates/ta-submit/` is a blocking finding
    - Checklist gate for `crates/ta-submit/src/git.rs` changes: "Does every VCS operation function use `self.config` or an explicitly passed config, not a constructed default?"
-
-#### Version: `0.14.3.6-alpha` (sub-phase of v0.14.3)
-
----
-
-### v0.14.3.6 — PR Creation Reliability & Supervisor Scope Chain
-<!-- status: pending -->
-**Goal**: Fix two regressions blocking reliable `ta draft apply` end-to-end: (1) PR creation silently breaks when `open_review()` ignores `self.config`, and (2) the supervisor scope verdict incorrectly flags follow-up goals that legitimately touch files from the parent chain scope.
-
-#### Root causes
-
-**PR creation bug** (`crates/ta-submit/src/git.rs`)
-- `open_review()` called `SubmitConfig::default()` instead of `self.config`, so `target_branch`, `auto_merge`, and other git settings from `workflow.toml` were always ignored.
-- No `--head <branch>` flag in `gh pr create` — if the working tree HEAD drifts between push and review (e.g. daemon restart), the wrong branch is targeted.
-- No idempotency: if a prior apply attempt succeeded at push but failed at PR creation, the next `ta draft apply` call fails again with "PR already exists" rather than returning the existing PR URL.
-
-**Supervisor scope bug** (`apps/ta-cli/src/commands/run.rs`)
-- The supervisor prompt receives only the immediate goal title as the objective. For follow-up goals, the parent chain scope is not included, causing the supervisor to flag files that are legitimately in scope from the parent goal.
-
-#### Items
-
-1. [x] **Fix `open_review()` to use `self.config`**: Remove `SubmitConfig::default()` call; use `self.config` for `target_branch` and all git settings.
-
-2. [x] **Add `--head <branch>` to `gh pr create`**: Derive branch name from `self.branch_name(goal, &self.config)` and pass explicitly so the correct branch is always targeted.
-
-3. [x] **PR idempotency — return existing PR**: Before `gh pr create`, check `gh pr list --head <branch> --state open`. If an open PR exists, return it (with its URL and number) rather than failing. Also attempt `gh pr merge --auto` if configured. This makes `ta draft apply` idempotent for the PR creation step.
-
-4. [x] **Supervisor follow-up scope context**: When a follow-up context exists (`follow_up_context`), prepend a parent chain summary to the supervisor objective so the supervisor understands that the broader scope includes the parent goal(s). Prevents false-positive scope drift warnings on follow-up goals that correctly touch parent-phase files.
 
 #### Version: `0.14.3.6-alpha` (sub-phase of v0.14.3)
 
