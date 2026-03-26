@@ -6829,9 +6829,49 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
    ```
    `ta setup vcs` pre-populates sensible defaults based on project type (Rust gets `Cargo.lock = "keep-source"`, etc.). Non-technical users get a working config without needing to understand conflict resolution semantics.
 
-6. [ ] **Integration test: follow-up apply does not revert parent changes**: Test that (1) applies a parent goal (updates file F), (2) applies a follow-up on the same staging — verifies F keeps the parent's content, not the staging's older version.
+6. [ ] **Config-driven TA project/local file classification**: Replace the hardcoded `SHARED_TA_PATHS` / `LOCAL_TA_PATHS` in `partitioning.rs` with a `[ta.project]` / `[ta.local]` section in `workflow.toml`. `partitioning.rs` becomes the **seed for `ta init`** — its defaults are written as explicit entries into `workflow.toml` at project creation time. At runtime, TA reads `workflow.toml` as the source of truth.
 
-7. [ ] **Integration test: three-way merge on non-overlapping edits**: Test that two non-overlapping edits to the same file (agent adds lines at top, external commit adds lines at bottom) auto-merge cleanly without human intervention.
+   The distinction is TA-semantic, not VCS-semantic: "project files" belong to the project and travel with it (VCS commit is just the mechanism); "local files" are machine state that never leave. The section names reflect this:
+
+   ```toml
+   [ta.project]
+   # .ta/ files that belong to this project — committed to VCS, shared with team.
+   # TA writes these during `ta init` from its built-in defaults. Edit to customise.
+   include_paths = [
+       "workflow.toml",
+       "policy.yaml",
+       "constitution.toml",
+       "plan_history.jsonl",   # append-only audit trail of phase completions
+       "release-history.json", # append-only project release changelog
+       "agents/",
+       "constitutions/",
+       "memory/",
+       "templates/",
+   ]
+
+   [ta.local]
+   # .ta/ files that are machine-local only — gitignored, never shared.
+   # TA writes these during `ta init` from its built-in defaults. Edit to customise.
+   # Example: solo devs can move plan_history.jsonl here to keep it off the branch.
+   exclude_paths = [
+       "staging/",
+       "goals/",
+       "store/",
+       "events/",
+       "audit.jsonl",
+       "goal-history.jsonl",
+       "daemon.toml",
+       "memory.rvf",
+   ]
+   ```
+
+   **`include_paths` + `exclude_paths` semantics**: `include_paths` is authoritative — files listed there are project files. `exclude_paths` lets users opt specific files out of the defaults (e.g. a solo dev moves `plan_history.jsonl` to `exclude_paths` to keep it local). A file in both lists: `exclude_paths` wins. `ta setup vcs` reads the merged result to generate `.gitignore`. `ta doctor` validates that the on-disk `.gitignore` matches the config.
+
+   **During `ta init`**: generate the full explicit lists from `partitioning.rs` defaults — don't just write comments. Users should be able to read their `workflow.toml` and know exactly what's in and what's out without consulting docs.
+
+7. [ ] **Integration test: follow-up apply does not revert parent changes**: Test that (1) applies a parent goal (updates file F), (2) applies a follow-up on the same staging — verifies F keeps the parent's content, not the staging's older version.
+
+8. [ ] **Integration test: three-way merge on non-overlapping edits**: Test that two non-overlapping edits to the same file (agent adds lines at top, external commit adds lines at bottom) auto-merge cleanly without human intervention.
 
 #### Version: `0.14.3.5-alpha` (sub-phase of v0.14.3)
 
