@@ -2408,7 +2408,7 @@ If you installed BMAD somewhere other than `~/.bmad`, set `TA_BMAD_HOME` first:
 export TA_BMAD_HOME=/path/to/BMAD-METHOD   # then re-run ta init run --template unreal-cpp
 ```
 
-> **Perforce users**: add `.ta/`, `.mcp.json`, and `ONBOARDING.md` to your `.p4ignore`. These are developer-local tooling files — they should not go into the depot.
+> **Perforce users**: Do *not* add all of `.ta/` to `.p4ignore` — only the runtime state paths inside it. The shared config files (`.ta/workflow.toml`, `.ta/policy.yaml`, `.ta/constitution.toml`, etc.) should go into the depot so your team shares them. Add `.mcp.json` and `ONBOARDING.md` to `.p4ignore`. See [Perforce (P4) Project Setup](#perforce-p4-project-setup) for the correct ignore block and Windows setup walkthrough.
 
 #### Step 3 — Run the discovery goal
 
@@ -7951,6 +7951,158 @@ strategy = "refs-cow"   # Windows ReFS only; auto-falls back to "smart" on NTFS
 ```
   Staging strategy... full (workspace is 42 GB — consider strategy=smart with a .taignore)
     Add to .ta/workflow.toml: [staging]\nstrategy = "smart"
+```
+
+---
+
+## Perforce (P4) Project Setup
+
+This section covers the correct Perforce configuration for Windows Unreal Engine projects — including which `.ta/` paths to ignore, how to set required environment variables, and how to commit the output of the onboarding goal.
+
+### What Goes Into the Depot vs. What Stays Local
+
+Do **not** add all of `.ta/` to `.p4ignore`. The shared config files must go into the depot so every developer on the team uses the same policy and agent definitions.
+
+**Commit to depot** (checked into your Perforce stream):
+
+```
+.ta/workflow.toml
+.ta/policy.yaml
+.ta/constitution.toml
+.ta/memory.toml
+.ta/agents/
+.ta/constitutions/
+.ta/templates/
+```
+
+**Add to `.p4ignore`** — runtime state, developer-local only:
+
+```
+# Trusted Autonomy — local runtime state (do not submit)
+.ta/daemon.toml
+.ta/daemon.local.toml
+.ta/staging/
+.ta/goals/
+.ta/events/
+.ta/audit-ledger.jsonl
+.ta/velocity-stats.jsonl
+.ta/release-history.json
+.ta/plan_history.jsonl
+.ta/keys/
+.mcp.json
+ONBOARDING.md
+```
+
+### Required Environment Variables (Windows)
+
+Perforce requires these set before `ta daemon start`. Add them to your Windows user environment variables (System → Advanced → Environment Variables) so they persist across sessions:
+
+```powershell
+# PowerShell — add to your $PROFILE for persistence
+$env:P4PORT   = "ssl:perforce.example.com:1666"
+$env:P4USER   = "your-p4-username"
+$env:P4CLIENT = "your-workspace-name"   # must match a valid clientspec
+$env:P4IGNORE = ".p4ignore"             # required — P4 won't use .p4ignore without this
+```
+
+Without `P4IGNORE` set, TA will print a reminder when you run `ta setup vcs`, but Perforce itself will silently ignore your `.p4ignore` file.
+
+### Project Workspace Configuration
+
+Add a `workflow.local.toml` (developer-local, add to `.p4ignore`) to override the shared workspace name:
+
+```toml
+# .ta/workflow.local.toml  ← NOT committed to depot
+[submit]
+adapter = "perforce"
+workspace = "yourname-mygame-ws"   # your personal P4CLIENT
+```
+
+The shared `.ta/workflow.toml` sets `adapter = "perforce"` without a `workspace` — each developer's local file supplies their own clientspec name.
+
+### Windows Unreal Project Onboarding Walkthrough
+
+**Prerequisites**: Unreal Engine 5.x installed, `p4` CLI on PATH, `ta` installed via MSI, `claude` installed, `ANTHROPIC_API_KEY` set.
+
+```powershell
+# 1. Open your project root (the folder with MyGame.uproject)
+cd C:\Perforce\MyDepot\MyGame
+
+# 2. Initialize TA with the Unreal template
+ta init run --template unreal-cpp
+```
+
+This creates:
+```
+.ta/workflow.toml      ← set adapter = "perforce" automatically
+.ta/policy.yaml
+.ta/.taignore          ← pre-configured for Unreal (excludes Binaries/, Intermediate/, Saved/)
+.ta/agents/            ← BMAD PM/Architect/Dev/QA agent configs
+.mcp.json
+ONBOARDING.md
+```
+
+```powershell
+# 3. Generate the correct .p4ignore block
+ta setup vcs
+
+# 4. Verify everything looks healthy
+ta doctor
+
+# 5. Start the daemon
+ta daemon start
+
+# 6. Run the onboarding discovery goal
+ta run --objective-file .ta/onboarding-goal.md
+```
+
+The agent walks your `Source/`, `Config/`, and `*.uproject` files and writes:
+- `docs/architecture.md` — module graph, key classes, build dependencies
+- `docs/bmad/prd.md` — inferred product requirements
+- `docs/bmad/stories/` — top 5 inferred feature areas as BMAD story stubs
+
+### Committing the Onboarding Output to Perforce
+
+When the discovery goal completes, review and commit in two steps:
+
+```powershell
+# Step 1 — review the draft
+ta draft list
+ta draft view <id>
+ta draft approve <id>   # accept the proposed docs
+
+# Step 2 — apply and submit to Perforce
+ta draft apply <id>
+# This runs: p4 add / p4 edit on changed files, then shelves a pending CL.
+# Review the CL in P4V or p4 describe, then submit:
+p4 submit -c <CL-number>
+```
+
+What gets submitted:
+- `docs/architecture.md`, `docs/bmad/prd.md`, `docs/bmad/stories/` — the agent-written discovery docs
+- `.ta/workflow.toml`, `.ta/policy.yaml`, `.ta/constitution.toml` — shared TA config
+- `.ta/agents/` — BMAD agent definitions
+- `.taignore` — shared staging exclusions
+
+What stays local (not submitted):
+- `.mcp.json`, `ONBOARDING.md` — already in `.p4ignore`
+- `.ta/staging/`, `.ta/goals/`, `.ta/events/` — runtime state, already in `.p4ignore`
+
+### Staging Strategy for Large Unreal Projects
+
+Unreal projects are typically 10–100+ GB. Use smart staging so only the agent-writable subset is physically copied:
+
+```toml
+# .ta/workflow.toml
+[staging]
+strategy = "smart"   # symlinks Binaries/, Intermediate/, Saved/, Plugins/ (read-only for agent)
+```
+
+On a Windows ReFS Dev Drive, use `refs-cow` for instant zero-copy staging:
+
+```toml
+[staging]
+strategy = "refs-cow"   # instant clone via Windows ReFS CoW; auto-falls back to smart on NTFS
 ```
 
 ---
