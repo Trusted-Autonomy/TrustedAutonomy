@@ -6808,80 +6808,59 @@ All 6 items implemented. New tests:
 **Background**: `ta draft apply` has known failure modes and a merge gap:
 1. **Duplicate artifact paths** — Fixed in v0.14.3.4 (`HashSet` dedup).
 2. **Deleted/renamed files** — Fixed in v0.14.3.4 (`git rm --cached --ignore-unmatch`).
-3. **Follow-up staging drift** — Follow-up staging predates the parent commit. Shared files (PLAN.md, USAGE.md, unchanged source) are at the pre-parent version in staging; apply copies them back, reverting in-between changes. **Not yet fixed.**
-4. **No line-level merge** — When the agent and an external commit both touch the same file, TA aborts rather than attempting a three-way hunk merge. Even non-overlapping edits to different lines of the same file trigger abort. **Not yet fixed.**
+3. **Follow-up staging drift** — Follow-up staging predates the parent commit. Shared files (PLAN.md, USAGE.md, unchanged source) are at the pre-parent version in staging; apply copies them back, reverting in-between changes. **Fixed in v0.14.3.5.**
+4. **No line-level merge** — When the agent and an external commit both touch the same file, TA aborts rather than attempting a three-way hunk merge. Even non-overlapping edits to different lines of the same file trigger abort. **Fixed in v0.14.3.5.**
+
+#### Completed
+
+1. ✅ **`DraftPackage.baseline_artifacts`**: Added `baseline_artifacts: Vec<String>` field to `DraftPackage`. When a follow-up draft is built in `build_package`, all parent artifact URIs are captured into `baseline_artifacts`. Backward-compatible (`#[serde(default)]`). Added to all struct initializers across the codebase (9 files).
+
+2. ✅ **Apply skip logic for baseline-only artifacts**: In `apply_package` (draft.rs), before calling `apply_with_conflict_check`, files in `baseline_artifacts` where staging hash == source hash are skipped with `ℹ️  [baseline] skipping <file>` log. This prevents staging drift from reverting files the parent already settled.
+
+3. ✅ **Protected-file revert guard**: In `apply_package`, for files matching `DEFAULT_PROTECTED_FILES` (`["PLAN.md", "docs/USAGE.md"]`) or `[apply.conflict_policy]` entries with `"keep-source"`, if source is strictly newer than staging (content differs, source mtime > staging mtime), apply skips the file with `⚠️  [protected] keeping source <file>` warning.
+
+4. ✅ **Three-way content merge for true conflicts**: `ConflictResolution::Merge` now invokes `three_way_merge()` in `overlay.rs`. Uses `git show HEAD:<path>` to reconstruct base content, writes three temp files, runs `git merge-file --quiet`. Clean merges write the result to staging (which then applies normally). Conflicted results fall through to abort. Logs `ℹ️  auto-merged: <file> (N hunks, 0 conflicts)`. Binary files are skipped.
+
+5. ✅ **Per-file conflict policy in `workflow.toml`**: Added `ApplyConfig` struct with `conflict_policy: HashMap<String, String>` to `WorkflowConfig`. Supports exact filenames, glob patterns (`src/**`, `docs/**`, `*.lock`), and a `"default"` fallback key. Values: `"abort"`, `"merge"`, `"keep-source"`, `"force-overwrite"`. Wired into the protected-file guard in `apply_package`. 5 new tests in `config.rs`.
+
+6. ✅ **Config-driven TA project/local file classification**: Added `TaPathConfig`, `TaProjectPaths`, `TaLocalPaths` structs to `WorkflowConfig` under the `[ta]` key. Defaults mirror `partitioning.rs` constants. `[ta.project] include_paths` / `[ta.local] exclude_paths` are parseable from `workflow.toml`. Exported from `ta-submit` lib. 2 new tests. Runtime callers of `partitioning.rs` not yet migrated (runtime migration planned: `ta setup vcs` will write the config at `ta init` time, tracked separately).
+
+7. ✅ **Integration test: follow-up apply does not revert parent changes**: `follow_up_apply_does_not_revert_parent_changes` in `overlay.rs` — verifies that apply_selective with only the new artifact does not overwrite source's "parent-applied plan" with staging's older "original plan".
+
+8. ✅ **Integration test: three-way merge on non-overlapping edits**: `three_way_merge_non_overlapping_succeeds` in `overlay.rs` — sets up a real git repo, commits base, creates non-overlapping agent/external edits, verifies `three_way_merge()` returns `MergeResult::Clean` with both changes. Also adds `extract_path_from_conflict_desc` unit test (3 new tests in overlay.rs).
+
+#### Version: `0.14.3.5-alpha` (sub-phase of v0.14.3)
+
+---
+
+### v0.14.3.6 — PR Creation Reliability & Submit Path Integration Test
+<!-- status: pending -->
+**Goal**: Harden `ta draft apply`'s VCS submit path so that PR creation is idempotent, always uses `workflow.toml` config, and is covered by an integration test that prevents silent regressions.
+
+**Background**: `open_review()` in `crates/ta-submit/src/git.rs` used `SubmitConfig::default()` (adapter="none") instead of `self.config`, silently skipping PR creation and ignoring `target_branch`. Fixed in PR #279. This phase adds the integration test that would have caught it.
 
 #### Items
 
-1. [ ] **`DraftPackage.baseline_artifacts`**: Add an optional `baseline_artifacts: Vec<ResourceUri>` field to `DraftPackage`. When a follow-up draft is built, populate it with all URIs from the parent draft's artifact list. Apply uses this to distinguish "inherited from parent — already applied" from "genuinely changed in this follow-up."
+1. ✅ **`open_review()` uses `self.config`**: `target_branch`, `head_branch` (derived from `self.config`), `merge_strategy`, `auto_merge` all sourced from `self.config`. Landed in PR #279.
 
-2. [ ] **Apply skip logic for baseline-only artifacts**: During `apply_copy`, if a file is in `baseline_artifacts` but unchanged relative to current source (staging hash == source hash), skip it — neither copy nor delete. Prevents staging drift from reverting files the parent already settled.
+2. ✅ **`--head <branch>` on `gh pr create`**: Explicit `--head` prevents the PR using a drifted `git HEAD`. Landed in PR #279.
 
-3. [ ] **Protected-file revert guard**: For files TA manages directly (PLAN.md, USAGE.md), if the source version is strictly newer than staging (content hash differs and source mtime > staging mtime), keep the source version and log a warning rather than overwriting. These files are managed by `ta draft apply`'s own update logic — agents should not be able to revert them via the copy step.
+3. ✅ **Idempotency check before `gh pr create`**: `gh pr list --head <branch> --state open` — returns existing PR URL+number rather than failing with "already exists". Landed in PR #279.
 
-4. [ ] **Three-way content merge for true conflicts**: When a file has a true conflict (agent changed it AND source changed it since the snapshot), attempt a three-way merge before escalating to human:
-   - `base` = snapshot content (captured at goal start)
-   - `ours` = staging content (agent's version)
-   - `theirs` = current source content (external changes)
-   - Use `git merge-file --quiet` (or the `diffy` Rust crate for a pure-Rust path). If the merge is clean (no conflict markers), write the merged result and continue. If conflict markers remain, fall through to the configured `conflict_resolution` strategy (abort by default).
-   - Log each auto-merged file: `ℹ️  auto-merged: src/foo.rs (3 hunks, 0 conflicts)`
+4. ✅ **Supervisor parent-chain context**: `invoke_supervisor_agent()` receives parent goal scope summary for follow-up goals, eliminating false-positive scope-drift verdicts. Landed in PR #280.
 
-5. [ ] **Per-file conflict policy in `workflow.toml`**: Add a `[apply.conflict_policy]` table so teams can set file-level resolution rules once rather than passing flags each time:
-   ```toml
-   [apply.conflict_policy]
-   default = "merge"            # attempt 3-way merge first
-   "PLAN.md" = "keep-source"   # TA owns this — never let agents overwrite
-   "Cargo.lock" = "keep-source" # auto-generated, always regenerated by cargo
-   "docs/**" = "merge"         # docs are usually safe to 3-way merge
-   "src/**" = "abort"          # code conflicts need human review
-   ```
-   `ta setup vcs` pre-populates sensible defaults based on project type (Rust gets `Cargo.lock = "keep-source"`, etc.). Non-technical users get a working config without needing to understand conflict resolution semantics.
+5. [ ] **Integration test: `open_review` uses `workflow.toml` config** — Fast follow after PR #279 merges. In `crates/ta-submit/tests/`, create a test that:
+   - Writes a temp `workflow.toml` with `target_branch = "staging"` and `adapter = "git"`
+   - Calls `GitAdapter::open_review()` with a mock goal
+   - Asserts the `gh pr create` invocation includes `--base staging` and `--head <expected-branch>`
+   - Asserts idempotency: a second `open_review()` call with the branch already existing returns the existing PR without error
+   Use `mockall` or a `gh` stub script (per the VCS plugin test pattern) to avoid real network calls.
 
-6. [ ] **Config-driven TA project/local file classification**: Replace the hardcoded `SHARED_TA_PATHS` / `LOCAL_TA_PATHS` in `partitioning.rs` with a `[ta.project]` / `[ta.local]` section in `workflow.toml`. `partitioning.rs` becomes the **seed for `ta init`** — its defaults are written as explicit entries into `workflow.toml` at project creation time. At runtime, TA reads `workflow.toml` as the source of truth.
+6. [ ] **Constitution rule: no `::default()` in submit paths** — Add to `.ta/constitution.yaml`:
+   - Rule: any `SubmitConfig::default()` usage in `crates/ta-submit/` is a blocking finding
+   - Checklist gate for `crates/ta-submit/src/git.rs` changes: "Does every VCS operation function use `self.config` or an explicitly passed config, not a constructed default?"
 
-   The distinction is TA-semantic, not VCS-semantic: "project files" belong to the project and travel with it (VCS commit is just the mechanism); "local files" are machine state that never leave. The section names reflect this:
-
-   ```toml
-   [ta.project]
-   # .ta/ files that belong to this project — committed to VCS, shared with team.
-   # TA writes these during `ta init` from its built-in defaults. Edit to customise.
-   include_paths = [
-       "workflow.toml",
-       "policy.yaml",
-       "constitution.toml",
-       "plan_history.jsonl",   # append-only audit trail of phase completions
-       "release-history.json", # append-only project release changelog
-       "agents/",
-       "constitutions/",
-       "memory/",
-       "templates/",
-   ]
-
-   [ta.local]
-   # .ta/ files that are machine-local only — gitignored, never shared.
-   # TA writes these during `ta init` from its built-in defaults. Edit to customise.
-   # Example: solo devs can move plan_history.jsonl here to keep it off the branch.
-   exclude_paths = [
-       "staging/",
-       "goals/",
-       "store/",
-       "events/",
-       "audit.jsonl",
-       "goal-history.jsonl",
-       "daemon.toml",
-       "memory.rvf",
-   ]
-   ```
-
-   **`include_paths` + `exclude_paths` semantics**: `include_paths` is authoritative — files listed there are project files. `exclude_paths` lets users opt specific files out of the defaults (e.g. a solo dev moves `plan_history.jsonl` to `exclude_paths` to keep it local). A file in both lists: `exclude_paths` wins. `ta setup vcs` reads the merged result to generate `.gitignore`. `ta doctor` validates that the on-disk `.gitignore` matches the config.
-
-   **During `ta init`**: generate the full explicit lists from `partitioning.rs` defaults — don't just write comments. Users should be able to read their `workflow.toml` and know exactly what's in and what's out without consulting docs.
-
-7. [ ] **Integration test: follow-up apply does not revert parent changes**: Test that (1) applies a parent goal (updates file F), (2) applies a follow-up on the same staging — verifies F keeps the parent's content, not the staging's older version.
-
-8. [ ] **Integration test: three-way merge on non-overlapping edits**: Test that two non-overlapping edits to the same file (agent adds lines at top, external commit adds lines at bottom) auto-merge cleanly without human intervention.
-
-#### Version: `0.14.3.5-alpha` (sub-phase of v0.14.3)
+#### Version: `0.14.3.6-alpha` (sub-phase of v0.14.3)
 
 ---
 
