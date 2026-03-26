@@ -6860,7 +6860,7 @@ All 6 items implemented. New tests:
 ---
 
 ### v0.14.3.7 — Critical File Auto-Staging in Draft Apply
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Ensure that `ta draft apply --git-commit` (and the auto-commit path in the VCS submit adapter) always includes project-critical files — build lock files, TA state files, and user-configured extras — in the commit it creates. Today these files are left as uncommitted local changes after apply, breaking the git hygiene requirement that every commit be self-consistent.
 
 **Background**: Two categories of files accumulate as uncommitted changes after `ta draft apply`:
@@ -6873,38 +6873,27 @@ This is a partial complement to v0.14.3.5 item 6 (config-driven TA project/local
 
 #### Items
 
-1. [ ] **Known lock file auto-staging**: In `GitAdapter::do_commit()` (and the `open_review()` commit path), after staging the draft artifact files, scan the working tree for any modified files matching the built-in lock file list: `["Cargo.lock", "package-lock.json", "go.sum", "Pipfile.lock", "poetry.lock", "yarn.lock", "bun.lockb", "flake.lock"]`. If present and modified, stage them automatically. Log each: `ℹ️  auto-staged lock file: Cargo.lock`.
+1. [x] **Known lock file auto-staging**: `GitAdapter::commit()` now auto-stages all built-in lock files (`Cargo.lock`, `package-lock.json`, `go.sum`, `Pipfile.lock`, `poetry.lock`, `yarn.lock`, `bun.lockb`, `flake.lock`) that exist and are modified at commit time. Logged per file: `ℹ️  auto-staged: Cargo.lock`. Implemented via `GitAdapter::BUILTIN_LOCK_FILES` constant and `auto_stage_critical_files()` helper.
 
-2. [ ] **TA state file auto-staging**: Stage `.ta/plan_history.jsonl` automatically when it is modified at commit time. This captures the phase-completion events appended during the goal run, making the commit the authoritative record of what phase the goal completed.
+2. [x] **TA state file auto-staging**: `.ta/plan_history.jsonl` is included in the auto-staging candidate list via `auto_stage_candidates()`, making it automatically staged when modified at commit time.
 
-3. [ ] **`[commit] auto_stage` config in `workflow.toml`**: Allow projects to declare additional files that should always be auto-staged alongside draft apply commits:
-   ```toml
-   [commit]
-   auto_stage = [
-       "Cargo.lock",
-       ".ta/plan_history.jsonl",
-       "docs/generated/**",     # generated docs rebuilt by verify step
-   ]
-   ```
-   Supports exact paths and glob patterns. Merged with the built-in lock file list. Projects using TA can add project-specific generated files here. `ta setup vcs` pre-populates the list based on detected project type.
+3. [x] **`[commit] auto_stage` config in `workflow.toml`**: Added `CommitConfig` struct with `auto_stage: Vec<String>` field to `WorkflowConfig`. User-configured paths are merged with the built-in list in `auto_stage_candidates()`. 5 new tests: `add_auto_stage_entries_*`, `lock_files_for_project_type_*`, `update_workflow_vcs_adds_commit_auto_stage`.
 
-4. [ ] **Downstream TA project path**: When a project uses TA as a governance layer (not TA's own repo), the same mechanism applies:
-   - `ta setup vcs --project-type rust` → writes `Cargo.lock` to `[commit] auto_stage`
-   - `ta setup vcs --project-type node` → writes `package-lock.json`
-   - `ta setup vcs --project-type python` → writes `poetry.lock` or `Pipfile.lock`
-   - `ta setup vcs --project-type go` → writes `go.sum`
-   - `ta doctor` validates that `auto_stage` entries exist for any detected lock files not already listed
-   This gives every TA-governed project a clear, documented path to the correct behaviour without manual config.
+4. [x] **Downstream TA project path**: Added `--project-type` flag to `ta setup vcs`. Running `ta setup vcs --project-type rust` adds `Cargo.lock` to `[commit] auto_stage` in workflow.toml. Supports `rust`, `node`, `python`, `go`. When no `--project-type` is given, auto-detects from project root. Lock file entries are added to workflow.toml if it exists. `ta doctor` checks and warns about lock files present but not in `auto_stage`.
 
-5. [ ] **Post-apply dirty-tree check**: After `ta draft apply --git-commit`, run `git status --porcelain` on the committed files. If any files that should have been auto-staged were missed (i.e., are still dirty), emit a structured warning:
-   ```
-   ⚠  Post-apply uncommitted files detected:
-     Cargo.lock  — add to [commit] auto_stage in workflow.toml, or run:
-     git add Cargo.lock && git commit --amend --no-edit
-   ```
-   This is a safety net for files not covered by the built-in list.
+5. [x] **Post-apply dirty-tree check**: After a successful `adapter.commit()` in `draft.rs`, `check_post_commit_dirty_files()` runs `git status --porcelain --untracked-files=no` and warns about any built-in lock files or `[commit] auto_stage` entries that are still dirty, with a `git add ... && git commit --amend --no-edit` remediation hint.
 
-6. [ ] **Update `ta doctor` to validate `auto_stage` completeness**: `ta doctor` checks that every lock file present in the project root is either in `[commit] auto_stage` or explicitly excluded. Flags missing entries with remediation instructions.
+6. [x] **Update `ta doctor` to validate `auto_stage` completeness**: `ta doctor` checks all built-in lock files that exist in the project root and warns if any are not in `[commit] auto_stage`, with a `ta setup vcs` remediation suggestion.
+
+#### Completed (9 new tests)
+- `builtin_lock_files_contains_expected_entries` — `git.rs`
+- `auto_stage_candidates_includes_builtin_and_plan_history` — `git.rs`
+- `auto_stage_candidates_merges_user_config` — `git.rs`
+- `auto_stage_candidates_no_duplicates_with_user_config` — `git.rs`
+- `auto_stage_critical_files_stages_modified_file` — `git.rs`
+- `auto_stage_critical_files_skips_unmodified_file` — `git.rs`
+- `auto_stage_critical_files_skips_nonexistent_file` — `git.rs`
+- `add_auto_stage_entries_*` (3) and `lock_files_for_project_type_*` (5), `update_workflow_vcs_adds_commit_auto_stage` — `setup.rs`
 
 #### Version: `0.14.3.7-alpha` (sub-phase of v0.14.3)
 

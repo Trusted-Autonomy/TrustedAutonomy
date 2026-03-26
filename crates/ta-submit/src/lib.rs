@@ -37,10 +37,10 @@ pub use adapter::{
 pub use adapter::SubmitAdapter;
 
 pub use config::{
-    check_disk_space_mb, ApplyConfig, BuildConfig, BuildOnFail, ContextMode, DiffConfig, GitConfig,
-    PerforceConfig, ShellConfig, StagingConfig, SubmitConfig, SvnConfig, SyncConfig, TaLocalPaths,
-    TaPathConfig, TaProjectPaths, VcsAgentConfig, VcsConfig, VerifyCommand, VerifyConfig,
-    VerifyOnFailure, WorkflowConfig,
+    check_disk_space_mb, ApplyConfig, BuildConfig, BuildOnFail, CommitConfig, ContextMode,
+    DiffConfig, GitConfig, PerforceConfig, ShellConfig, StagingConfig, SubmitConfig, SvnConfig,
+    SyncConfig, TaLocalPaths, TaPathConfig, TaProjectPaths, VcsAgentConfig, VcsConfig,
+    VerifyCommand, VerifyConfig, VerifyOnFailure, WorkflowConfig,
 };
 pub use external_vcs_adapter::ExternalVcsAdapter;
 pub use git::GitAdapter;

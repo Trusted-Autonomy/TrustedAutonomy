@@ -51,9 +51,13 @@ pub enum SetupCommands {
     /// runtime state, and reports what was changed.
     ///
     /// Examples:
-    ///   ta setup vcs             # auto-detect VCS and update ignore files
-    ///   ta setup vcs --force     # rewrite the TA block even if already present
-    ///   ta setup vcs --dry-run   # show what would change without writing
+    ///   ta setup vcs                        # auto-detect VCS and update ignore files
+    ///   ta setup vcs --force                # rewrite the TA block even if already present
+    ///   ta setup vcs --dry-run              # show what would change without writing
+    ///   ta setup vcs --project-type rust    # pre-populate [commit] auto_stage with Cargo.lock
+    ///   ta setup vcs --project-type node    # pre-populate with package-lock.json
+    ///   ta setup vcs --project-type python  # pre-populate with poetry.lock / Pipfile.lock
+    ///   ta setup vcs --project-type go      # pre-populate with go.sum
     Vcs {
         /// Rewrite the TA ignore block even if it already exists.
         #[arg(long)]
@@ -64,6 +68,10 @@ pub enum SetupCommands {
         /// Override VCS backend: git, perforce, or none.
         #[arg(long)]
         vcs: Option<String>,
+        /// Project type for auto-stage pre-population: rust, node, python, go.
+        /// Auto-detected from project files if not specified.
+        #[arg(long)]
+        project_type: Option<String>,
     },
 }
 
@@ -77,7 +85,14 @@ pub fn execute(command: &SetupCommands, config: &GatewayConfig) -> anyhow::Resul
             force,
             dry_run,
             vcs,
-        } => run_vcs_setup(config, *force, *dry_run, vcs.as_deref()),
+            project_type,
+        } => run_vcs_setup(
+            config,
+            *force,
+            *dry_run,
+            vcs.as_deref(),
+            project_type.as_deref(),
+        ),
     }
 }
 
@@ -87,6 +102,7 @@ fn run_vcs_setup(
     force: bool,
     dry_run: bool,
     vcs_override: Option<&str>,
+    project_type_override: Option<&str>,
 ) -> anyhow::Result<()> {
     let project_root = &config.workspace_root;
 
@@ -127,8 +143,8 @@ fn run_vcs_setup(
                 println!("  [ok] .gitignore already contains TA block — no change needed.");
                 println!("       Use --force to rewrite the block.");
             }
-            // Update workflow.toml [submit] adapter field.
-            update_workflow_vcs(project_root, &backend, dry_run)?;
+            // Update workflow.toml [submit] adapter field and [commit] auto_stage.
+            update_workflow_vcs(project_root, &backend, dry_run, project_type_override)?;
         }
         VcsBackend::Perforce => {
             let p4ignore_path = project_root.join(".p4ignore");
@@ -160,7 +176,7 @@ fn run_vcs_setup(
                 println!("      export P4IGNORE=.p4ignore   (add to your shell profile)");
                 println!("    Without this, .ta/staging/, .ta/goals/, etc. may be submitted accidentally.");
             }
-            update_workflow_vcs(project_root, &backend, dry_run)?;
+            update_workflow_vcs(project_root, &backend, dry_run, project_type_override)?;
         }
         VcsBackend::None => {
             println!("  No VCS detected — skipping ignore file generation.");
@@ -206,10 +222,14 @@ fn run_vcs_setup(
 /// If `workflow.toml` doesn't exist, nothing is written — the user may not have
 /// a submit workflow configured yet.  If it does exist, we ensure the `[submit]`
 /// section has `adapter = "<vcs>"`, creating the section if absent.
+///
+/// Also populates `[commit] auto_stage` with the lock file(s) for the detected
+/// or specified project type (v0.14.3.7).
 fn update_workflow_vcs(
     project_root: &std::path::Path,
     backend: &VcsBackend,
     dry_run: bool,
+    project_type_override: Option<&str>,
 ) -> anyhow::Result<()> {
     let ta_dir = project_root.join(".ta");
     let workflow_path = ta_dir.join("workflow.toml");
@@ -221,44 +241,165 @@ fn update_workflow_vcs(
     let existing = std::fs::read_to_string(&workflow_path)?;
     let vcs_str = backend.as_str();
 
+    // ── [submit] adapter ────────────────────────────────────────────
+    let mut updated = existing.clone();
+
     // Check if [submit] section already has adapter = "<vcs>" — nothing to do.
-    if existing.contains(&format!("adapter = \"{}\"", vcs_str)) {
-        return Ok(());
+    if !updated.contains(&format!("adapter = \"{}\"", vcs_str)) {
+        // Simple text manipulation: insert/update adapter = "..." in [submit] section.
+        updated = if updated.contains("[submit]") {
+            // Replace whatever adapter = "..." was set to.
+            let re = regex::Regex::new(r#"adapter\s*=\s*"[^"]*""#).unwrap();
+            let replaced = re.replace(&updated, &format!("adapter = \"{}\"", vcs_str));
+            if replaced == updated {
+                // adapter key not yet in [submit] — append after [submit] header.
+                updated.replace("[submit]", &format!("[submit]\nadapter = \"{}\"", vcs_str))
+            } else {
+                replaced.to_string()
+            }
+        } else {
+            // Append [submit] section at end.
+            format!(
+                "{}\n[submit]\nadapter = \"{}\"\n",
+                updated.trim_end(),
+                vcs_str
+            )
+        };
+
+        if dry_run {
+            println!(
+                "  [dry-run] Would update .ta/workflow.toml [submit] adapter = \"{}\"",
+                vcs_str
+            );
+        } else {
+            println!(
+                "  [updated] .ta/workflow.toml — set [submit] adapter = \"{}\"",
+                vcs_str
+            );
+        }
     }
 
-    // Simple text manipulation: insert/update adapter = "..." in [submit] section.
-    let updated = if existing.contains("[submit]") {
-        // Replace whatever adapter = "..." was set to.
-        let re = regex::Regex::new(r#"adapter\s*=\s*"[^"]*""#).unwrap();
-        let replaced = re.replace(&existing, &format!("adapter = \"{}\"", vcs_str));
-        if replaced == existing {
-            // adapter key not yet in [submit] — append after [submit] header.
-            existing.replace("[submit]", &format!("[submit]\nadapter = \"{}\"", vcs_str))
-        } else {
-            replaced.to_string()
+    // ── [commit] auto_stage ─────────────────────────────────────────
+    // Determine which lock file(s) to add based on project type.
+    let lock_files = lock_files_for_project_type(project_root, project_type_override);
+    if !lock_files.is_empty() {
+        updated = add_auto_stage_entries(&updated, &lock_files);
+        if dry_run {
+            println!(
+                "  [dry-run] Would add to [commit] auto_stage in .ta/workflow.toml: {}",
+                lock_files.join(", ")
+            );
+        } else if updated != existing {
+            println!(
+                "  [updated] .ta/workflow.toml — added [commit] auto_stage: {}",
+                lock_files.join(", ")
+            );
         }
-    } else {
-        // Append [submit] section at end.
-        format!(
-            "{}\n[submit]\nadapter = \"{}\"\n",
-            existing.trim_end(),
-            vcs_str
-        )
-    };
+    }
 
-    if dry_run {
-        println!(
-            "  [dry-run] Would update .ta/workflow.toml [submit] adapter = \"{}\"",
-            vcs_str
-        );
-    } else {
+    if !dry_run && updated != existing {
         std::fs::write(&workflow_path, &updated)?;
-        println!(
-            "  [updated] .ta/workflow.toml — set [submit] adapter = \"{}\"",
-            vcs_str
-        );
     }
     Ok(())
+}
+
+/// Return the lock file name(s) appropriate for the given project type.
+///
+/// When `project_type_override` is provided, it takes precedence. Otherwise,
+/// the project root is scanned for known lock files to auto-detect.
+fn lock_files_for_project_type(
+    project_root: &std::path::Path,
+    project_type_override: Option<&str>,
+) -> Vec<String> {
+    let pt = project_type_override.unwrap_or("");
+    match pt {
+        "rust" => vec!["Cargo.lock".to_string()],
+        "node" => vec!["package-lock.json".to_string()],
+        "python" => {
+            // Prefer poetry.lock if both exist; also accept Pipfile.lock.
+            let mut result = Vec::new();
+            if project_root.join("poetry.lock").exists() {
+                result.push("poetry.lock".to_string());
+            } else if project_root.join("Pipfile.lock").exists() {
+                result.push("Pipfile.lock".to_string());
+            } else {
+                result.push("poetry.lock".to_string());
+            }
+            result
+        }
+        "go" => vec!["go.sum".to_string()],
+        _ => {
+            // Auto-detect from project root.
+            ta_submit::GitAdapter::BUILTIN_LOCK_FILES
+                .iter()
+                .filter(|f| project_root.join(f).exists())
+                .map(|f| f.to_string())
+                .collect()
+        }
+    }
+}
+
+/// Add entries to `[commit] auto_stage` in workflow.toml content (TOML text).
+///
+/// Skips entries that are already present. Appends a `[commit]` section if absent.
+fn add_auto_stage_entries(toml_content: &str, entries: &[String]) -> String {
+    // Find which entries are not already present.
+    let missing: Vec<&str> = entries
+        .iter()
+        .filter(|e| !toml_content.contains(e.as_str()))
+        .map(|e| e.as_str())
+        .collect();
+    if missing.is_empty() {
+        return toml_content.to_string();
+    }
+
+    let new_lines: String = missing
+        .iter()
+        .map(|e| format!("    \"{}\",\n", e))
+        .collect();
+
+    if toml_content.contains("[commit]") {
+        // Find `auto_stage = [` and append before the closing `]`.
+        if let Some(pos) = toml_content.find("auto_stage = [") {
+            // Find the closing `]` after the opening `[`.
+            let after_bracket = pos + "auto_stage = [".len();
+            if let Some(close) = toml_content[after_bracket..].find(']') {
+                let close_abs = after_bracket + close;
+                let mut result = toml_content[..close_abs].to_string();
+                // If the existing content before `]` has entries, ensure newline.
+                if !result.trim_end_matches([' ', '\t']).ends_with('[') && !result.ends_with('\n') {
+                    result.push('\n');
+                }
+                result.push_str(&new_lines);
+                result.push_str(&toml_content[close_abs..]);
+                return result;
+            }
+        }
+        // [commit] exists but no auto_stage key — append after [commit] header.
+        let commit_pos = toml_content.find("[commit]").unwrap();
+        let after_header = commit_pos + "[commit]".len();
+        let auto_stage_block = format!(
+            "\nauto_stage = [\n{}]",
+            missing
+                .iter()
+                .map(|e| format!("    \"{}\",\n", e))
+                .collect::<String>()
+        );
+        let mut result = toml_content[..after_header].to_string();
+        result.push_str(&auto_stage_block);
+        result.push_str(&toml_content[after_header..]);
+        result
+    } else {
+        // Append a new [commit] section.
+        let block = format!(
+            "\n[commit]\nauto_stage = [\n{}]\n",
+            missing
+                .iter()
+                .map(|e| format!("    \"{}\",\n", e))
+                .collect::<String>()
+        );
+        format!("{}{}", toml_content.trim_end(), block)
+    }
 }
 
 /// Run the interactive setup wizard.
@@ -978,7 +1119,7 @@ source = "registry:ta-channel-slack"
         // Create .git/ so Git is detected.
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         let config = test_config(&dir);
-        run_vcs_setup(&config, false, false, None).unwrap();
+        run_vcs_setup(&config, false, false, None, None).unwrap();
         let gitignore = dir.path().join(".gitignore");
         assert!(gitignore.exists(), ".gitignore should be created");
         let content = std::fs::read_to_string(&gitignore).unwrap();
@@ -993,8 +1134,8 @@ source = "registry:ta-channel-slack"
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         let config = test_config(&dir);
         // Run twice — should not duplicate the block.
-        run_vcs_setup(&config, false, false, None).unwrap();
-        run_vcs_setup(&config, false, false, None).unwrap();
+        run_vcs_setup(&config, false, false, None, None).unwrap();
+        run_vcs_setup(&config, false, false, None, None).unwrap();
         let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         let count = content.matches("# Trusted Autonomy").count();
         assert_eq!(count, 1, "should only have one TA block after two runs");
@@ -1010,7 +1151,7 @@ source = "registry:ta-channel-slack"
         )
         .unwrap();
         let config = test_config(&dir);
-        run_vcs_setup(&config, true, false, None).unwrap();
+        run_vcs_setup(&config, true, false, None, None).unwrap();
         let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         let count = content.matches("# Trusted Autonomy").count();
         assert_eq!(count, 1, "force should rewrite, not duplicate");
@@ -1021,7 +1162,7 @@ source = "registry:ta-channel-slack"
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         let config = test_config(&dir);
-        run_vcs_setup(&config, false, true, None).unwrap();
+        run_vcs_setup(&config, false, true, None, None).unwrap();
         // dry-run should NOT create .gitignore.
         assert!(
             !dir.path().join(".gitignore").exists(),
@@ -1034,7 +1175,7 @@ source = "registry:ta-channel-slack"
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
         // Should not fail even when VCS is forced to none.
-        run_vcs_setup(&config, false, false, Some("none")).unwrap();
+        run_vcs_setup(&config, false, false, Some("none"), None).unwrap();
         assert!(!dir.path().join(".gitignore").exists());
     }
 
@@ -1042,7 +1183,104 @@ source = "registry:ta-channel-slack"
     fn vcs_setup_unknown_backend_errors() {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
-        let result = run_vcs_setup(&config, false, false, Some("svn"));
+        let result = run_vcs_setup(&config, false, false, Some("svn"), None);
         assert!(result.is_err());
+    }
+
+    // ── v0.14.3.7: [commit] auto_stage helpers ───────────────────
+
+    #[test]
+    fn add_auto_stage_entries_appends_new_commit_section() {
+        let toml = "[submit]\nadapter = \"git\"\n";
+        let result = add_auto_stage_entries(toml, &["Cargo.lock".to_string()]);
+        assert!(result.contains("[commit]"), "should add [commit] section");
+        assert!(
+            result.contains("\"Cargo.lock\""),
+            "should add Cargo.lock entry"
+        );
+    }
+
+    #[test]
+    fn add_auto_stage_entries_appends_to_existing_commit_section() {
+        let toml =
+            "[submit]\nadapter = \"git\"\n\n[commit]\nauto_stage = [\n    \"existing.lock\",\n]\n";
+        let result = add_auto_stage_entries(toml, &["Cargo.lock".to_string()]);
+        assert!(
+            result.contains("\"existing.lock\""),
+            "should keep existing entry"
+        );
+        assert!(result.contains("\"Cargo.lock\""), "should add new entry");
+    }
+
+    #[test]
+    fn add_auto_stage_entries_skips_already_present() {
+        let toml = "[commit]\nauto_stage = [\n    \"Cargo.lock\",\n]\n";
+        let result = add_auto_stage_entries(toml, &["Cargo.lock".to_string()]);
+        let count = result.matches("\"Cargo.lock\"").count();
+        assert_eq!(count, 1, "Cargo.lock should appear exactly once");
+    }
+
+    #[test]
+    fn lock_files_for_project_type_rust_override() {
+        let dir = TempDir::new().unwrap();
+        let files = lock_files_for_project_type(dir.path(), Some("rust"));
+        assert_eq!(files, vec!["Cargo.lock"]);
+    }
+
+    #[test]
+    fn lock_files_for_project_type_node_override() {
+        let dir = TempDir::new().unwrap();
+        let files = lock_files_for_project_type(dir.path(), Some("node"));
+        assert_eq!(files, vec!["package-lock.json"]);
+    }
+
+    #[test]
+    fn lock_files_for_project_type_go_override() {
+        let dir = TempDir::new().unwrap();
+        let files = lock_files_for_project_type(dir.path(), Some("go"));
+        assert_eq!(files, vec!["go.sum"]);
+    }
+
+    #[test]
+    fn lock_files_for_project_type_python_prefers_poetry() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("poetry.lock"), "").unwrap();
+        let files = lock_files_for_project_type(dir.path(), Some("python"));
+        assert_eq!(files, vec!["poetry.lock"]);
+    }
+
+    #[test]
+    fn lock_files_for_project_type_auto_detect_from_disk() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "").unwrap();
+        let files = lock_files_for_project_type(dir.path(), None);
+        assert!(files.contains(&"Cargo.lock".to_string()));
+        // Non-existent lock files should not appear.
+        assert!(!files.contains(&"go.sum".to_string()));
+    }
+
+    #[test]
+    fn update_workflow_vcs_adds_commit_auto_stage() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[submit]\nadapter = \"git\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "").unwrap();
+        update_workflow_vcs(
+            dir.path(),
+            &ta_workspace::partitioning::VcsBackend::Git,
+            false,
+            None,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".ta/workflow.toml")).unwrap();
+        assert!(
+            content.contains("\"Cargo.lock\""),
+            "workflow.toml should have Cargo.lock in auto_stage"
+        );
     }
 }

@@ -162,6 +162,71 @@ impl GitAdapter {
         project_root.join(".git").exists()
     }
 
+    /// Built-in lock files that are always auto-staged when modified (v0.14.3.7).
+    ///
+    /// These are deterministic outputs of the build process — when a version
+    /// bump or dependency change occurs, the lock file regenerates and must be
+    /// committed together with the source change to keep the tree self-consistent.
+    pub const BUILTIN_LOCK_FILES: &'static [&'static str] = &[
+        "Cargo.lock",
+        "package-lock.json",
+        "go.sum",
+        "Pipfile.lock",
+        "poetry.lock",
+        "yarn.lock",
+        "bun.lockb",
+        "flake.lock",
+    ];
+
+    /// Auto-stage critical files that should always accompany a draft apply commit.
+    ///
+    /// Stages each file in `candidates` that (a) exists in the working tree and
+    /// (b) is dirty according to `git status --porcelain`. Logs each auto-staged
+    /// path to stdout with the `ℹ️  auto-staged` prefix.
+    fn auto_stage_critical_files(&self, candidates: &[&str]) {
+        for path in candidates {
+            let full = self.work_dir.join(path);
+            if !full.exists() {
+                continue;
+            }
+            // Check if modified (both unstaged and staged changes).
+            let dirty = Command::new("git")
+                .args(["status", "--porcelain", path])
+                .current_dir(&self.work_dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_CEILING_DIRECTORIES")
+                .output()
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+            if dirty {
+                if let Ok(()) = self.git_cmd(&["add", path]).map(|_| ()) {
+                    println!("  ℹ️  auto-staged: {}", path);
+                    tracing::info!(path = %path, "auto-staged critical file");
+                }
+            }
+        }
+    }
+
+    /// Build the full list of auto-stage candidates from built-in + user config.
+    fn auto_stage_candidates(work_dir: &std::path::Path) -> Vec<String> {
+        let mut candidates: Vec<String> = Self::BUILTIN_LOCK_FILES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // Always include TA state files.
+        candidates.push(".ta/plan_history.jsonl".to_string());
+        // Merge user-configured entries from [commit] auto_stage.
+        let workflow_path = work_dir.join(".ta/workflow.toml");
+        let workflow = crate::config::WorkflowConfig::load_or_default(&workflow_path);
+        for entry in workflow.commit.auto_stage {
+            if !candidates.contains(&entry) {
+                candidates.push(entry);
+            }
+        }
+        candidates
+    }
+
     /// Known-safe artifact patterns that are silently dropped from `git add`
     /// when gitignored (v0.13.17.5). These are TA infrastructure files that
     /// should never reach a commit.
@@ -320,14 +385,14 @@ impl SourceAdapter for GitAdapter {
                         );
                     }
                 }
-                // Still attempt to stage PLAN.md and plan_history.jsonl and then check if there's anything to commit.
+                // Still attempt to stage PLAN.md and critical files even when all
+                // draft artifacts were gitignored, then check if there's anything to commit.
                 if self.work_dir.join("PLAN.md").exists() {
                     let _ = self.git_cmd(&["add", "PLAN.md"]);
                 }
-                let plan_history = std::path::Path::new(".ta/plan_history.jsonl");
-                if self.work_dir.join(plan_history).exists() {
-                    let _ = self.git_cmd(&["add", ".ta/plan_history.jsonl"]);
-                }
+                let candidates = Self::auto_stage_candidates(&self.work_dir);
+                let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+                self.auto_stage_critical_files(&candidate_refs);
                 return Ok(CommitResult {
                     commit_id: String::new(),
                     message: "All artifacts were gitignored — nothing was committed.".to_string(),
@@ -367,14 +432,15 @@ impl SourceAdapter for GitAdapter {
                     self.git_cmd(&rm_args)?;
                 }
 
-                // Always stage PLAN.md and plan_history.jsonl if they exist and were modified.
-                // plan_history.jsonl is updated by every apply and is project audit history.
+                // Auto-stage lock files, .ta/plan_history.jsonl, and user-configured
+                // files that are modified but were not in the draft artifact list.
+                // PLAN.md is always staged if it exists (may have been updated by apply).
                 if self.work_dir.join("PLAN.md").exists() {
                     let _ = self.git_cmd(&["add", "PLAN.md"]);
                 }
-                if self.work_dir.join(".ta/plan_history.jsonl").exists() {
-                    let _ = self.git_cmd(&["add", ".ta/plan_history.jsonl"]);
-                }
+                let candidates = Self::auto_stage_candidates(&self.work_dir);
+                let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+                self.auto_stage_critical_files(&candidate_refs);
             }
             ignored
         };
@@ -1771,5 +1837,139 @@ mod tests {
         assert!(to_add.is_empty(), "all paths should be filtered out");
         assert_eq!(ignored.len(), 2);
         assert!(ignored.iter().all(|a| a.known_safe), "both are known-safe");
+    }
+
+    // ── v0.14.3.7: lock file auto-staging ────────────────────────
+
+    #[test]
+    fn builtin_lock_files_contains_expected_entries() {
+        let list = GitAdapter::BUILTIN_LOCK_FILES;
+        assert!(list.contains(&"Cargo.lock"));
+        assert!(list.contains(&"package-lock.json"));
+        assert!(list.contains(&"go.sum"));
+        assert!(list.contains(&"poetry.lock"));
+        assert!(list.contains(&"yarn.lock"));
+        assert!(list.contains(&"bun.lockb"));
+        assert!(list.contains(&"flake.lock"));
+        assert!(list.contains(&"Pipfile.lock"));
+    }
+
+    #[test]
+    fn auto_stage_candidates_includes_builtin_and_plan_history() {
+        let dir = tempdir().unwrap();
+        let candidates = GitAdapter::auto_stage_candidates(dir.path());
+        // Built-in lock files must be present.
+        assert!(candidates.iter().any(|c| c == "Cargo.lock"));
+        assert!(candidates.iter().any(|c| c == "go.sum"));
+        // TA state file must be present.
+        assert!(candidates.iter().any(|c| c == ".ta/plan_history.jsonl"));
+    }
+
+    #[test]
+    fn auto_stage_candidates_merges_user_config() {
+        let dir = tempdir().unwrap();
+        // Create workflow.toml with a custom auto_stage entry.
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[commit]\nauto_stage = [\"docs/generated/api.md\"]\n",
+        )
+        .unwrap();
+        let candidates = GitAdapter::auto_stage_candidates(dir.path());
+        assert!(
+            candidates.iter().any(|c| c == "docs/generated/api.md"),
+            "user-configured entry should be present"
+        );
+        // Built-in entries must still be present.
+        assert!(candidates.iter().any(|c| c == "Cargo.lock"));
+    }
+
+    #[test]
+    fn auto_stage_candidates_no_duplicates_with_user_config() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        // User lists Cargo.lock, which is already in the built-in list.
+        std::fs::write(
+            dir.path().join(".ta/workflow.toml"),
+            "[commit]\nauto_stage = [\"Cargo.lock\"]\n",
+        )
+        .unwrap();
+        let candidates = GitAdapter::auto_stage_candidates(dir.path());
+        let cargo_lock_count = candidates
+            .iter()
+            .filter(|c| c.as_str() == "Cargo.lock")
+            .count();
+        assert_eq!(cargo_lock_count, 1, "Cargo.lock should appear exactly once");
+    }
+
+    /// Run a git command in `dir` without TA env var interference.
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(dir);
+        cmd.env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES");
+        cmd.output().unwrap()
+    }
+
+    #[test]
+    fn auto_stage_critical_files_stages_modified_file() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+
+        // Create and commit Cargo.lock initially.
+        std::fs::write(dir.path().join("Cargo.lock"), "version = 3\n").unwrap();
+        git_in(dir.path(), &["add", "Cargo.lock"]);
+        git_in(dir.path(), &["commit", "-m", "add lock"]);
+
+        // Modify Cargo.lock (simulating a version bump regenerating it).
+        std::fs::write(dir.path().join("Cargo.lock"), "version = 3\n# updated\n").unwrap();
+
+        let adapter = GitAdapter::new(dir.path());
+        adapter.auto_stage_critical_files(&["Cargo.lock"]);
+
+        // Cargo.lock should now be in the index.
+        let output = git_in(dir.path(), &["diff", "--cached", "--name-only"]);
+        let staged = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            staged.contains("Cargo.lock"),
+            "Cargo.lock should be staged after auto_stage_critical_files"
+        );
+    }
+
+    #[test]
+    fn auto_stage_critical_files_skips_unmodified_file() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+
+        // Create and commit Cargo.lock.
+        std::fs::write(dir.path().join("Cargo.lock"), "version = 3\n").unwrap();
+        git_in(dir.path(), &["add", "Cargo.lock"]);
+        git_in(dir.path(), &["commit", "-m", "add lock"]);
+
+        // Do NOT modify Cargo.lock — it should not be staged.
+        let adapter = GitAdapter::new(dir.path());
+        adapter.auto_stage_critical_files(&["Cargo.lock"]);
+
+        let output = git_in(dir.path(), &["diff", "--cached", "--name-only"]);
+        let staged = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !staged.contains("Cargo.lock"),
+            "Cargo.lock should not be staged when unmodified"
+        );
+    }
+
+    #[test]
+    fn auto_stage_critical_files_skips_nonexistent_file() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+
+        // Cargo.lock does not exist — auto_stage_critical_files should not error.
+        let adapter = GitAdapter::new(dir.path());
+        adapter.auto_stage_critical_files(&["Cargo.lock"]); // must not panic
+
+        let output = git_in(dir.path(), &["diff", "--cached", "--name-only"]);
+        let staged = String::from_utf8_lossy(&output.stdout);
+        assert!(!staged.contains("Cargo.lock"));
     }
 }

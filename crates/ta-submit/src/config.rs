@@ -126,6 +126,41 @@ pub struct WorkflowConfig {
     /// ```
     #[serde(default)]
     pub ta: TaPathConfig,
+
+    /// Commit auto-staging configuration (v0.14.3.7).
+    ///
+    /// Lists additional files/globs that are always staged alongside a draft
+    /// apply commit, merged with the built-in lock file list. Use this for
+    /// project-specific generated files that are always correct to include.
+    ///
+    /// ```toml
+    /// [commit]
+    /// auto_stage = [
+    ///     "Cargo.lock",
+    ///     ".ta/plan_history.jsonl",
+    ///     "docs/generated/**",
+    /// ]
+    /// ```
+    #[serde(default)]
+    pub commit: CommitConfig,
+}
+
+/// Commit auto-staging configuration (v0.14.3.7).
+///
+/// Files in `auto_stage` (and the built-in lock file list) are staged
+/// automatically during `ta draft apply --git-commit` even when they
+/// are not in the draft's artifact list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommitConfig {
+    /// Additional files or glob patterns to auto-stage alongside draft apply commits.
+    ///
+    /// Merged with the built-in lock file list:
+    /// `Cargo.lock`, `package-lock.json`, `go.sum`, `Pipfile.lock`,
+    /// `poetry.lock`, `yarn.lock`, `bun.lockb`, `flake.lock`.
+    ///
+    /// Each entry is matched against working-tree paths using simple glob rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_stage: Vec<String>,
 }
 
 /// Apply conflict resolution configuration (v0.14.3.5).

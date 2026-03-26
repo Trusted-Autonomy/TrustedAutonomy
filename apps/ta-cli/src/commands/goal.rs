@@ -2757,6 +2757,34 @@ pub fn doctor(config: &GatewayConfig) -> anyhow::Result<()> {
             }
         }
 
+        // ── [commit] auto_stage completeness check (v0.14.3.7) ───────
+        {
+            let workflow_path = config.workspace_root.join(".ta/workflow.toml");
+            let workflow = ta_submit::config::WorkflowConfig::load_or_default(&workflow_path);
+            let configured: std::collections::HashSet<String> =
+                workflow.commit.auto_stage.iter().cloned().collect();
+            let mut uncovered: Vec<&str> = Vec::new();
+            for lock_file in ta_submit::GitAdapter::BUILTIN_LOCK_FILES {
+                if config.workspace_root.join(lock_file).exists()
+                    && !configured.contains(*lock_file)
+                {
+                    uncovered.push(lock_file);
+                }
+            }
+            if !uncovered.is_empty() {
+                println!("  [warn] lock file(s) present but not in [commit] auto_stage:");
+                for f in &uncovered {
+                    println!("    {}  — will be auto-staged by built-in list", f);
+                    println!(
+                        "    To make this explicit: add \"{}\" to [commit] auto_stage in .ta/workflow.toml",
+                        f
+                    );
+                    println!("    Or run: ta setup vcs");
+                }
+                warn += 1;
+            }
+        }
+
         // ── Staging strategy check ────────────────────────────────
         print!("  Staging strategy... ");
         let workflow = ta_submit::config::WorkflowConfig::load_or_default(&config.workspace_root);

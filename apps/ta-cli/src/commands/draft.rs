@@ -4158,6 +4158,9 @@ fn apply_package(
                             }
                             commit_ignored_artifacts = result.ignored_artifacts;
                         }
+                        // Post-apply dirty-tree check (v0.14.3.7): warn if any
+                        // lock files or auto-stage candidates were missed.
+                        check_post_commit_dirty_files(&target_dir, &workflow_config);
                     }
                     Err(e) => {
                         eprintln!("Stage/commit failed: {}", e);
@@ -5455,6 +5458,83 @@ pub fn load_all_packages(config: &GatewayConfig) -> anyhow::Result<Vec<DraftPack
 
     packages.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(packages)
+}
+
+/// Post-apply dirty-tree check (v0.14.3.7).
+///
+/// After `ta draft apply --git-commit`, runs `git status --porcelain` to detect
+/// any files that should have been auto-staged but were not (e.g., a lock file
+/// type not in the built-in list or not yet in `[commit] auto_stage`). Emits a
+/// structured warning with remediation instructions for each dirty file.
+fn check_post_commit_dirty_files(
+    project_root: &std::path::Path,
+    workflow_config: &ta_submit::WorkflowConfig,
+) {
+    if !project_root.join(".git").exists() {
+        return;
+    }
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(project_root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CEILING_DIRECTORIES")
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+    let status_text = String::from_utf8_lossy(&output.stdout);
+    if status_text.trim().is_empty() {
+        return;
+    }
+
+    // Collect dirty tracked files (XY path format from git status --porcelain).
+    // Filter to files that look like lock files or known auto-stage candidates.
+    let auto_stage_configured: std::collections::HashSet<String> =
+        workflow_config.commit.auto_stage.iter().cloned().collect();
+
+    let mut missed: Vec<String> = Vec::new();
+    for line in status_text.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let path = line[3..].trim().to_string();
+        // Collect paths that are in [commit] auto_stage or the built-in list.
+        let in_builtin = ta_submit::GitAdapter::BUILTIN_LOCK_FILES.contains(&path.as_str());
+        let in_configured = auto_stage_configured.contains(&path);
+        if in_builtin || in_configured {
+            missed.push(path);
+        }
+    }
+
+    if missed.is_empty() {
+        return;
+    }
+
+    eprintln!();
+    eprintln!("⚠  Post-apply uncommitted files detected:");
+    for path in &missed {
+        let in_builtin = ta_submit::GitAdapter::BUILTIN_LOCK_FILES.contains(&path.as_str());
+        let hint = if in_builtin {
+            format!(
+                "  {}  — built-in lock file; was not tracked by git or was in a subdir. \
+                 Run: git add {} && git commit --amend --no-edit",
+                path, path
+            )
+        } else {
+            format!(
+                "  {}  — listed in [commit] auto_stage but still dirty. \
+                 Run: git add {} && git commit --amend --no-edit",
+                path, path
+            )
+        };
+        eprintln!("{}", hint);
+    }
+    eprintln!(
+        "  To suppress this warning, ensure these files are tracked by git or add them to \
+         [commit] auto_stage in .ta/workflow.toml."
+    );
 }
 
 pub fn load_package(config: &GatewayConfig, package_id: Uuid) -> anyhow::Result<DraftPackage> {
