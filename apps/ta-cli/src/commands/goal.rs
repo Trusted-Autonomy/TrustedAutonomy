@@ -1260,6 +1260,9 @@ fn show_status(
             if let Some(ref vcs) = g.vcs_isolation {
                 println!("VCS:      {}", vcs);
             }
+            if let Some(ref by) = g.initiated_by {
+                println!("By:       {}", by);
+            }
             println!("Agent:    {}", g.agent_id);
             println!("Created:  {}", g.created_at.to_rfc3339());
             println!("Updated:  {}", g.updated_at.to_rfc3339());

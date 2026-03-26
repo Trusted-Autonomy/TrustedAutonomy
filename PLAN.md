@@ -6921,17 +6921,31 @@ This is a partial complement to v0.14.3.5 item 6 (config-driven TA project/local
 ---
 
 ### v0.14.5 — Auth Plugin Surface
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Harden and document the `AuthMiddleware` trait defined in v0.14.4 as a stable extension point. TA ships a local-identity default; enterprise identity providers (OIDC, SAML, SCIM) are implemented as SA plugins against this trait.
 
 **Depends on**: v0.14.4 (`AuthMiddleware` trait)
 
 #### Items
 
-1. [ ] **Local identity default**: `LocalIdentityMiddleware` — reads identity from `daemon.toml` `[[auth.users]]` entries. No network calls. Default for single-user and small-team setups without SSO.
-2. [ ] **API key middleware**: `ApiKeyMiddleware` — validates `Authorization: Bearer ta_key_...` against a hashed key store in `daemon.toml`. Suitable for CI pipelines.
-3. [ ] **Identity propagation**: Every operation (goal run, draft approval, audit entry) carries the authenticated identity from the middleware. Identity field in all relevant structs.
-4. [ ] **Plugin trait stability**: Freeze the `AuthMiddleware` interface and document it in `docs/plugin-traits.md` as a stable extension surface. Includes: `authenticate(request) → Identity`, `authorize(identity, action) → bool`, `session_info(identity) → SessionInfo`.
+1. [x] **Local identity default**: `LocalIdentityMiddleware` — reads identity from `daemon.toml` `[[auth.users]]` entries. No network calls. Default for single-user and small-team setups without SSO. Users authenticate with hashed bearer tokens; admin role grants full access. Implemented in `crates/ta-extension/src/auth.rs`. Config: `[[auth.users]]` in `daemon.toml`. 7 tests.
+2. [x] **API key middleware**: `ApiKeyMiddleware` — validates `Authorization: Bearer ta_key_...` against a hashed key store in `daemon.toml`. Suitable for CI pipelines. Keys must have `ta_key_` prefix; non-matching tokens return `MissingCredentials` for middleware chaining. Implemented in `crates/ta-extension/src/auth.rs`. Config: `[[auth.api_keys]]` in `daemon.toml`. 5 tests. `AuthConfig::build_middleware()` auto-selects based on config.
+3. [x] **Identity propagation**: `GoalRun.initiated_by: Option<String>` field added (v0.14.5). Set by `ta run` to the `user_id` returned by the active auth middleware. Displayed in `ta goal status` as `By: <user_id>`. Serde default ensures forward compatibility with existing stored goals.
+4. [x] **Plugin trait stability**: `AuthMiddleware` interface frozen and documented in `docs/plugin-traits.md` as a stable extension surface. Covers all three methods (`authenticate`, `authorize`, `session_info`), key types (`Identity`, `AuthRequest`, `SessionInfo`, `AuthError`), built-in implementations table, config examples, and the stability contract (no breaking changes without major version bump).
+
+#### Completed (12 new tests)
+- `local_identity_valid_token_authenticates` — `auth.rs`
+- `local_identity_invalid_token_rejected` — `auth.rs`
+- `local_identity_no_header_returns_missing_credentials` — `auth.rs`
+- `local_identity_hash_token_is_deterministic` — `auth.rs`
+- `local_identity_authorize_admin_role` — `auth.rs`
+- `local_identity_session_info` — `auth.rs`
+- `api_key_valid_key_authenticates` — `auth.rs`
+- `api_key_invalid_key_rejected` — `auth.rs`
+- `api_key_non_ta_key_returns_missing` — `auth.rs`
+- `api_key_verify_key_matches` — `auth.rs`
+- `api_key_session_info` — `auth.rs`
+- `auth_config_build_middleware_*` (via config.rs tests)
 
 #### Version: `0.14.5-alpha`
 
