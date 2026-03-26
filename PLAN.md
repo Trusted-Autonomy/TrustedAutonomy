@@ -6864,6 +6864,57 @@ All 6 items implemented. New tests:
 
 ---
 
+### v0.14.3.7 — Critical File Auto-Staging in Draft Apply
+<!-- status: pending -->
+**Goal**: Ensure that `ta draft apply --git-commit` (and the auto-commit path in the VCS submit adapter) always includes project-critical files — build lock files, TA state files, and user-configured extras — in the commit it creates. Today these files are left as uncommitted local changes after apply, breaking the git hygiene requirement that every commit be self-consistent.
+
+**Background**: Two categories of files accumulate as uncommitted changes after `ta draft apply`:
+1. **Build lock files** (`Cargo.lock`, `package-lock.json`, `go.sum`, `poetry.lock`, `yarn.lock`, `bun.lockb`): when the agent bumps a version or adds a dependency, the lock file regenerates during the verify step. The apply copies the new lock file into source, but the commit doesn't include it because it wasn't in the draft's artifact list.
+2. **TA state files** (`.ta/plan_history.jsonl`): records which plan phases completed during the goal run. It mutates during `ta draft apply` (phase-completion events are appended), so it's always dirty after apply but is never in the artifact list.
+
+Both categories are "deterministic outputs of the process" — they're always correct to include and wrong to omit. Leaving them uncommitted causes `git status` noise, breaks CI that checks for clean trees, and requires a manual follow-up commit that breaks the logical unit of the change.
+
+This is a partial complement to v0.14.3.5 item 6 (config-driven TA project/local file classification). Item 6 makes `plan_history.jsonl` a declared project file. This phase makes the commit process actually include it.
+
+#### Items
+
+1. [ ] **Known lock file auto-staging**: In `GitAdapter::do_commit()` (and the `open_review()` commit path), after staging the draft artifact files, scan the working tree for any modified files matching the built-in lock file list: `["Cargo.lock", "package-lock.json", "go.sum", "Pipfile.lock", "poetry.lock", "yarn.lock", "bun.lockb", "flake.lock"]`. If present and modified, stage them automatically. Log each: `ℹ️  auto-staged lock file: Cargo.lock`.
+
+2. [ ] **TA state file auto-staging**: Stage `.ta/plan_history.jsonl` automatically when it is modified at commit time. This captures the phase-completion events appended during the goal run, making the commit the authoritative record of what phase the goal completed.
+
+3. [ ] **`[commit] auto_stage` config in `workflow.toml`**: Allow projects to declare additional files that should always be auto-staged alongside draft apply commits:
+   ```toml
+   [commit]
+   auto_stage = [
+       "Cargo.lock",
+       ".ta/plan_history.jsonl",
+       "docs/generated/**",     # generated docs rebuilt by verify step
+   ]
+   ```
+   Supports exact paths and glob patterns. Merged with the built-in lock file list. Projects using TA can add project-specific generated files here. `ta setup vcs` pre-populates the list based on detected project type.
+
+4. [ ] **Downstream TA project path**: When a project uses TA as a governance layer (not TA's own repo), the same mechanism applies:
+   - `ta setup vcs --project-type rust` → writes `Cargo.lock` to `[commit] auto_stage`
+   - `ta setup vcs --project-type node` → writes `package-lock.json`
+   - `ta setup vcs --project-type python` → writes `poetry.lock` or `Pipfile.lock`
+   - `ta setup vcs --project-type go` → writes `go.sum`
+   - `ta doctor` validates that `auto_stage` entries exist for any detected lock files not already listed
+   This gives every TA-governed project a clear, documented path to the correct behaviour without manual config.
+
+5. [ ] **Post-apply dirty-tree check**: After `ta draft apply --git-commit`, run `git status --porcelain` on the committed files. If any files that should have been auto-staged were missed (i.e., are still dirty), emit a structured warning:
+   ```
+   ⚠  Post-apply uncommitted files detected:
+     Cargo.lock  — add to [commit] auto_stage in workflow.toml, or run:
+     git add Cargo.lock && git commit --amend --no-edit
+   ```
+   This is a safety net for files not covered by the built-in list.
+
+6. [ ] **Update `ta doctor` to validate `auto_stage` completeness**: `ta doctor` checks that every lock file present in the project root is either in `[commit] auto_stage` or explicitly excluded. Flags missing entries with remediation instructions.
+
+#### Version: `0.14.3.7-alpha` (sub-phase of v0.14.3)
+
+---
+
 ### v0.14.4 — Central Daemon & Multi-User Deployment
 <!-- status: pending -->
 <!-- enterprise: yes — team and cloud deployment topology -->
