@@ -4558,6 +4558,10 @@ bind = "127.0.0.1"
 port = 7700
 cors_origins = ["*"]
 # socket_path = ".ta/daemon.sock"   # Optional Unix domain socket path
+
+# TLS for the HTTP API (no-op stub; activated by a transport plugin):
+# tls_cert_path = "certs/server.pem"
+# tls_key_path = "certs/server.key"
 ```
 
 #### Graceful Shutdown and PID File
@@ -4570,6 +4574,8 @@ A PID file is written to `.ta/daemon.pid` on startup with the process ID, port, 
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/health` | Daemon liveness check (no auth required) |
+| `GET` | `/metrics` | Prometheus scrape endpoint (requires metrics plugin) |
 | `POST` | `/api/cmd` | Execute a `ta` CLI command |
 | `GET` | `/api/status` | Project dashboard (JSON) |
 | `GET` | `/api/events` | SSE event stream |
@@ -4581,6 +4587,17 @@ A PID file is written to `.ta/daemon.pid` on startup with the process ID, port, 
 | `DELETE` | `/api/agent/:id` | Stop an agent session |
 
 Plus the existing draft and memory endpoints (`/api/drafts/*`, `/api/memory/*`) and multi-project endpoints (`/api/projects/*`, `/api/office/*` — see [Multi-Project Office](#multi-project-office)).
+
+#### Health Check
+
+`GET /health` returns 200 OK with a JSON body when the daemon is running. No authentication is required. Use this for load balancer checks, systemd readiness probes, and CI scripts:
+
+```bash
+curl http://127.0.0.1:7700/health
+# {"status":"ok","version":"0.14.4-alpha","timestamp":"...","plugins":[]}
+```
+
+The `plugins` array lists any extension plugins currently registered (see [Daemon Extension Plugins](#daemon-extension-plugins) below).
 
 #### Command Execution
 
@@ -4648,6 +4665,29 @@ curl -H "Authorization: Bearer ta_..." http://your-server:7700/api/status
 ```
 
 Token scopes: `read` (status, list, events), `write` (approve, deny, agent), `admin` (config, tokens).
+
+#### Daemon Extension Plugins
+
+TA's daemon exposes five extension points that can be replaced by external plugins. Each slot has a local default; set the plugin name or path in `daemon.toml` to activate the plugin.
+
+```toml
+[plugins]
+# transport = "ta-transport-websocket"   # Custom MCP network transport
+# auth = "ta-auth-oidc"                  # OIDC/SAML authentication
+# workspace = "ta-workspace-s3"          # Remote staging workspace storage
+# review_queue = "ta-review-jira"        # External draft review routing
+# audit_storage = "ta-audit-splunk"      # SIEM / cloud audit log sink
+```
+
+| Extension point | Default | What it controls |
+|---|---|---|
+| `transport` | Built-in stdio/unix/tcp | Network transport for MCP connections |
+| `auth` | No-op (local single-user) | HTTP API request authentication |
+| `workspace` | Local `.ta/staging/` | Staging workspace storage |
+| `review_queue` | Local `.ta/review_queue/` | Draft routing and multi-user review |
+| `audit_storage` | Local `.ta/audit.jsonl` | Audit record persistence |
+
+Plugin binaries are resolved in order: absolute path → `.ta/plugins/<slot>/<name>` → `~/.config/ta/plugins/<slot>/<name>` → `$PATH`. The active plugin list appears in `GET /health`.
 
 #### Sandbox Configuration
 

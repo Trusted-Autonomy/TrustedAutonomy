@@ -15,6 +15,7 @@ pub mod auth;
 pub mod cmd;
 pub mod events;
 pub mod goal_output;
+pub mod health;
 pub mod input;
 pub mod interactions;
 pub mod notifications;
@@ -276,7 +277,14 @@ async fn shutdown_daemon(
 
 /// Build the full API router with auth middleware.
 pub fn build_api_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    // Health endpoint is auth-free (load balancers, readiness probes).
+    let health_routes = Router::new()
+        .route("/health", get(health::health))
+        .route("/metrics", get(health::metrics))
+        .with_state(state.clone());
+
+    // All other routes go through the auth middleware.
+    let api_routes = Router::new()
         // New v0.9.7 API routes.
         .route("/api/cmd", post(cmd::execute_command))
         .route("/api/status", get(status::project_status))
@@ -329,5 +337,8 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             state.clone(),
             auth::auth_middleware,
         ))
-        .with_state(state)
+        .with_state(state);
+
+    // Merge health (no auth) and api (with auth) into a single router.
+    health_routes.merge(api_routes)
 }

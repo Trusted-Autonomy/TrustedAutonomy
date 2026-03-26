@@ -6899,115 +6899,62 @@ This is a partial complement to v0.14.3.5 item 6 (config-driven TA project/local
 
 ---
 
-### v0.14.4 — Central Daemon & Multi-User Deployment
-<!-- status: pending -->
-<!-- enterprise: yes — team and cloud deployment topology -->
-**Goal**: Enable TA to run as a shared service — a single `ta-daemon` instance (on a server, cloud VM, or container) that multiple developers and CI pipelines connect to over the network, sharing project workspaces, review queues, and audit infrastructure.
+### v0.14.4 — Daemon Extension Surface
+<!-- status: done -->
+**Goal**: Define the stable plugin traits that team and enterprise tooling implements to extend TA with remote access, authentication, shared workspaces, and external review queues. TA itself remains single-user and local-first; these traits are the boundary where SA and other plugins connect.
 
-**Depends on**: v0.14.0 (sandboxing — each agent must be isolated before multi-user is safe), v0.13.2 (MCP Transport — TCP/TLS transport for remote agent sessions)
-
-#### Design
-
-```
-Developer workstation A  ─── TLS/WebSocket ───┐
-Developer workstation B  ─── TLS/WebSocket ───┤── Central TA Daemon ──── Agent Pool
-CI / CD pipeline         ─── API key ─────────┤   (cloud VM, k8s pod)
-ta shell (remote)        ─── TLS/WebSocket ───┘       │
-                                                  Shared project workspace
-                                                  (NFS / object store / git)
-                                                  Shared review queue
-                                                  Shared audit ledger → S3/Postgres
-```
-
-#### Identity & Auth
-
-```toml
-# .ta/daemon.toml — server side
-[auth]
-mode = "oidc"   # "oidc" | "api-keys" | "ssh-cert" | "none" (local only)
-issuer = "https://accounts.google.com"
-audience = "ta-daemon-myorg"
-
-[[auth.api_keys]]
-key = "ta_key_abc123..."
-identity = "ci-pipeline"
-roles = ["run-goals", "read-drafts"]
-
-[[auth.users]]
-identity = "alice@example.com"
-roles = ["run-goals", "approve-drafts", "admin"]
-```
+**Depends on**: v0.14.0 (sandboxing), v0.13.2 (MCP Transport)
 
 #### Items
 
-1. [ ] **TLS listener**: `ta-daemon` optionally binds on a non-localhost address with TLS. `daemon.toml` `[server] bind = "0.0.0.0:7700"`, `cert`, `key`.
-2. [ ] **Authentication middleware**: OIDC JWT validation + API key lookup on every request. Identity propagated to all operations (goal runs, approvals, audit entries).
-3. [ ] **RBAC**: Roles `run-goals`, `read-drafts`, `approve-drafts`, `admin`. Config in `daemon.toml`. Enforced per-endpoint.
-4. [ ] **Multi-project tenancy**: Daemon can serve multiple projects with namespace isolation. Each project has its own `.ta/` dir, goal queue, and review queue. URL prefix `/projects/<name>/api/...`.
-5. [ ] **Remote workspace adapter**: Agent workspaces can be on a shared NFS mount or object store (S3/GCS). `OverlayWorkspace` abstraction gains a remote backend. Agents still work in an ephemeral local copy; changes sync back on draft build.
-6. [ ] **Concurrent agent scheduling**: Multiple goals can run in parallel up to a configurable `max_concurrent_agents` limit. Queue depth and wait-time exposed via `/api/queue`.
-7. [ ] **Remote `ta shell`**: `ta shell --remote <url>` connects over TLS/WebSocket to a central daemon. Full interactive experience (goals, drafts, events) over the wire. Auth via stored API key or OIDC device flow.
-8. [ ] **Team review queue**: `ta draft list` shows all pending drafts project-wide, not just the current user's. Any authorised team member can approve via `ta draft approve`.
-9. [ ] **`ta daemon deploy`**: Helper command to generate a `docker-compose.yml` or Kubernetes manifest for a central TA deployment. Includes daemon, reverse proxy (nginx/caddy), and optional Postgres for audit storage.
-10. [ ] **`ta daemon invite <email>`**: Generate an API key or OIDC onboarding link for a new team member.
-11. [ ] **Health & observability**: `/metrics` endpoint (Prometheus format) exposing queue depth, active agents, approval latency, error rates.
-12. [ ] **Documentation**: "Running TA for your team" guide — setup, auth config, workspace options, review workflow.
+1. [x] **`TransportBackend` trait**: Plugin trait for network-exposed MCP transport. Default implementation: Unix socket (local only). Plugins register remote transports (TCP/TLS, WebSocket).
+2. [x] **`AuthMiddleware` trait**: Plugin trait for request authentication and identity. Default: no-op (local single-user). Plugins implement API key, OIDC, SAML backends.
+3. [x] **`WorkspaceBackend` trait**: Plugin trait for staging workspace storage. Default: local filesystem. Plugins implement shared/remote backends.
+4. [x] **`ReviewQueueBackend` trait**: Plugin trait for draft routing and multi-user review queues. Default: local queue. Plugins implement shared queues and external routing.
+5. [x] **`AuditStorageBackend` trait**: Plugin trait for audit log storage. Default: local JSONL file. Plugins implement cloud storage, database, and SIEM sinks.
+6. [x] **`[server]` config stub in `daemon.toml`**: Parseable section for bind address, cert/key paths — no-op without a plugin. Establishes the config surface SA builds on.
+7. [x] **Health endpoint**: `/health` (local only) and a plugin hook for `/metrics`. Minimal observability for daemon liveness checks.
+8. [x] **Plugin registration**: `[plugins] transport = "..."`, `auth = "..."` etc. in `daemon.toml`. Daemon loads and wires registered plugins at startup.
 
 #### Version: `0.14.4-alpha`
 
 ---
 
-### v0.14.5 — Enterprise Identity & SSO Integration
+### v0.14.5 — Auth Plugin Surface
 <!-- status: pending -->
-<!-- enterprise: yes — org-wide identity, SAML/SCIM, group-based RBAC -->
-**Goal**: Integrate with enterprise identity providers (Okta, Azure AD, Google Workspace) via SAML 2.0 and SCIM for automated provisioning. Replace per-user config with group-based RBAC so adding a developer to the "ta-engineers" group in Okta automatically grants them the right TA permissions without any manual `daemon.toml` edit.
+**Goal**: Harden and document the `AuthMiddleware` trait defined in v0.14.4 as a stable extension point. TA ships a local-identity default; enterprise identity providers (OIDC, SAML, SCIM) are implemented as SA plugins against this trait.
 
-**Depends on**: v0.14.4 (Central Daemon — identity and auth infrastructure)
+**Depends on**: v0.14.4 (`AuthMiddleware` trait)
 
 #### Items
 
-1. [ ] **SAML 2.0 SP**: TA daemon acts as a SAML Service Provider. `[auth] mode = "saml"` with `idp_metadata_url`. Handles SSO login redirect and assertion validation.
-2. [ ] **SCIM 2.0 endpoint**: `/scim/v2/Users` and `/scim/v2/Groups` for automated provisioning/deprovisioning from Okta/Azure AD. New users auto-get default role; removed users are immediately locked out.
-3. [ ] **Group → role mapping**: `[auth.group_roles]` maps IdP group names to TA roles. E.g., `"ta-approvers" = ["approve-drafts"]`.
-4. [ ] **Audit entries include SSO identity**: All audit records carry the IdP-verified identity (email + IdP subject), not just a local username.
-5. [ ] **`ta daemon status --identity`**: Show current authenticated identity, roles, and session expiry.
-6. [ ] **Session management**: Short-lived JWT sessions (1h), refresh via OIDC/SAML, configurable idle timeout.
-7. [ ] **Tested with**: Okta, Azure AD / Entra ID, Google Workspace, GitHub (OAuth app).
+1. [ ] **Local identity default**: `LocalIdentityMiddleware` — reads identity from `daemon.toml` `[[auth.users]]` entries. No network calls. Default for single-user and small-team setups without SSO.
+2. [ ] **API key middleware**: `ApiKeyMiddleware` — validates `Authorization: Bearer ta_key_...` against a hashed key store in `daemon.toml`. Suitable for CI pipelines.
+3. [ ] **Identity propagation**: Every operation (goal run, draft approval, audit entry) carries the authenticated identity from the middleware. Identity field in all relevant structs.
+4. [ ] **Plugin trait stability**: Freeze the `AuthMiddleware` interface and document it in `docs/plugin-traits.md` as a stable extension surface. Includes: `authenticate(request) → Identity`, `authorize(identity, action) → bool`, `session_info(identity) → SessionInfo`.
 
 #### Version: `0.14.5-alpha`
 
 ---
 
-### v0.14.6 — Compliance-Ready Audit Ledger
+### v0.14.6 — Local Audit Ledger
 <!-- status: pending -->
-<!-- enterprise: yes — compliance capstone, builds on cloud deployment (v0.14.4) -->
-**Goal**: Replace the lightweight goal history index with a compliance-ready audit ledger that captures full decision context, covers all goal lifecycle paths, and supports pluggable storage backends including cloud object stores and databases suitable for enterprise compliance requirements.
-
-*(Moved from v0.13.9 → originally numbered v0.14.3 but placed after v0.14.4/v0.14.5 due to dependency on the Central Daemon's multi-user context. Renumbered v0.14.6 to match physical order and dependency sequence.)*
+**Goal**: Replace the lightweight goal history index with a complete local audit ledger — capturing full decision context across every goal lifecycle path, not just the happy path. Dispatches to pluggable storage backends via the `AuditStorageBackend` trait defined in v0.14.4.
 
 #### Problem
-The current `.ta/goal-history.jsonl` is a compact index written only on the happy path (`ta draft apply`). It records *what* happened but not *why*. Multiple lifecycle paths produce no audit record at all: `ta goal delete`, `ta goal gc`, `ta draft deny`, agent crash/timeout. Even on the happy path, `GoalHistoryEntry` lacks intent, AI summary, reviewer identity, denial reason, artifact manifest, and policy evaluation results.
+The current `.ta/goal-history.jsonl` records only successful `draft apply` events. Goals that are deleted, denied, gc'd, or crash produce no audit record. Even on the happy path, records lack intent, reviewer identity, denial reason, artifact manifest, and policy evaluation results.
 
 #### Items
-1. [ ] **`AuditEntry` data model**: Rich audit record capturing: goal ID, title, objective/intent, final state, phase, agent, timestamps, duration, draft ID, AI summary, reviewer/approver, denial reason, artifact URIs with change types, policy evaluation results, parent goal (for chained goals). Serialized as JSONL.
-2. [ ] **Emit audit entry on all terminal transitions**: apply, deny, close, delete, gc, timeout, agent crash. No goal data should be removed without an audit record.
-3. [ ] **Separate ledger for deleted incomplete goals**: Goals deleted before producing a draft get `disposition: "abandoned"` with available context.
-4. [ ] **`ta goal delete --reason`**: Require or prompt for a reason when manually deleting goals. Stored in the audit entry.
-5. [ ] **`ta goal gc` writes audit entries**: Before transitioning or removing any goal data, append an audit entry with `disposition: "gc"` and the gc reason.
-6. [ ] **Populate artifact count and lines changed**: Wire the existing `artifact_count` / `lines_changed` fields to the draft's actual artifact data (currently always 0).
-7. [ ] **`ta audit export`**: Export audit ledger in structured formats (JSONL, CSV). Filterable by date range, phase, agent, disposition.
-8. [ ] **Pluggable audit storage backend**:
-   ```toml
-   [audit]
-   backend = "file"  # default: .ta/audit-ledger.jsonl
-   # backend = "database"  # connection = "postgres://..."
-   # backend = "s3"        # bucket = "my-audit-bucket"
-   ```
-   Built-in: local JSONL. Plugin interface for database, shared filesystem, cloud storage — integrates with central daemon from v0.14.4.
-9. [ ] **Audit ledger integrity**: Append-only with hash chaining (each entry includes hash of previous entry). `ta audit verify` validates the chain. Tampering is detectable.
-10. [ ] **Retention policy**: Configurable retention. `ta audit gc --older-than 1y` removes entries beyond retention while preserving chain integrity.
-11. [ ] **Structured agent output logging**: Optional `[agent].output_log = "structured"` captures full JSON agent output to the audit ledger for compliance and reproducibility.
-12. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new format on first run.
+1. [ ] **`AuditEntry` data model**: Rich record capturing: goal ID, title, objective/intent, final state, phase, agent, timestamps, duration, draft ID, AI summary, reviewer/approver, denial reason, artifact URIs with change types, policy evaluation results, parent goal. Serialized as JSONL.
+2. [ ] **Emit on all terminal transitions**: apply, deny, close, delete, gc, timeout, agent crash. No goal data removed without an audit record.
+3. [ ] **Abandoned goal records**: Goals deleted before producing a draft get `disposition: "abandoned"` with available context.
+4. [ ] **`ta goal delete --reason`**: Prompt for a reason when manually deleting goals. Stored in the audit entry.
+5. [ ] **`ta goal gc` writes audit entries**: Append audit entry with `disposition: "gc"` before removing any goal data.
+6. [ ] **Populate artifact count and lines changed**: Wire `artifact_count` / `lines_changed` to actual draft artifact data (currently always 0).
+7. [ ] **`ta audit export`**: Export ledger as JSONL or CSV, filterable by date range, phase, agent, disposition.
+8. [ ] **Ledger integrity**: Append-only with hash chaining — each entry includes hash of previous. `ta audit verify` validates the chain.
+9. [ ] **Retention policy**: `ta audit gc --older-than 1y` removes entries beyond configured retention while preserving chain integrity.
+10. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new format on first run.
 
 #### Version: `0.14.6-alpha`
 

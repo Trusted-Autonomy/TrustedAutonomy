@@ -35,6 +35,7 @@ ta-connector-slack = { path = "../ta-connectors/slack" }
 ta-connector-email = { path = "../ta-connectors/email" }
 reqwest = { workspace = true }
 ta-output-schema = { path = "../ta-output-schema" }
+ta-extension = { path = "../ta-extension" }
 which = "7"
 libc = { workspace = true }
 async-trait = "0.1"

@@ -1,0 +1,20 @@
+[package]
+name = "ta-extension"
+version.workspace = true
+edition = "2021"
+description = "Plugin trait definitions for the Trusted Autonomy daemon extension surface (v0.14.4)"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = "0.1"
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+toml = { workspace = true }
