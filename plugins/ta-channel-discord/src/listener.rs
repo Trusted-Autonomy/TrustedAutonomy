@@ -47,8 +47,6 @@ const INTERACTION_RESPONSE_DEFERRED: u64 = 5;
 /// 4 = CHANNEL_MESSAGE_WITH_SOURCE
 const INTERACTION_RESPONSE_CHANNEL_MESSAGE: u64 = 4;
 
-/// Seconds before posting a "Working…" placeholder for long commands.
-const LONG_RUNNING_THRESHOLD_SECS: u64 = 5;
 
 /// Per-user rate limit: max commands in window.
 const RATE_LIMIT_MAX: u32 = 10;
