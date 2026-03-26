@@ -18,6 +18,8 @@ pub const SHARED_TA_PATHS: &[&str] = &[
     "constitutions/",
     "memory/",
     "templates/",
+    "plan_history.jsonl", // append-only audit trail of plan phase completions
+    "release-history.json", // append-only project release changelog
 ];
 
 /// Paths inside `.ta/` that are local runtime state and must NOT be committed.
@@ -37,8 +39,6 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "audit-ledger.jsonl",
     "taignore",
     "interactions/",
-    "release-history.json",
-    "plan_history.jsonl", // per-machine runtime state, timestamps differ per developer
 ];
 
 /// VCS backend detected or configured for the project.
