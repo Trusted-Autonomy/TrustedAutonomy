@@ -539,6 +539,20 @@ pub struct DraftPackage {
     /// Unexpected-ignored artifacts are highlighted in `ta draft view`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored_artifacts: Vec<IgnoredArtifact>,
+
+    /// Artifact URIs inherited from the parent draft (v0.14.3.5).
+    ///
+    /// Populated when building a follow-up draft. Contains all `resource_uri` values
+    /// from the parent draft's artifact list at build time. During `ta draft apply`,
+    /// files in this list that are unchanged in staging (staging hash == source hash)
+    /// are skipped — they were already settled by the parent apply and staging just
+    /// has an older copy.
+    ///
+    /// This prevents "follow-up staging drift": applying a follow-up draft from
+    /// staging that predates the parent commit would otherwise revert files
+    /// (PLAN.md, USAGE.md, shared source) that the parent apply had already updated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub baseline_artifacts: Vec<String>,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -764,6 +778,7 @@ mod tests {
             pending_approvals: vec![],
             supervisor_review: None,
             ignored_artifacts: vec![],
+            baseline_artifacts: vec![],
         }
     }
 

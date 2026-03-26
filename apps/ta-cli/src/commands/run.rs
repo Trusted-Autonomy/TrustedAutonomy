@@ -5803,6 +5803,7 @@ pre_launch:
             pending_approvals: vec![],
             supervisor_review: None,
             ignored_artifacts: vec![],
+            baseline_artifacts: vec![],
         };
 
         // Save the draft package.
@@ -5963,6 +5964,7 @@ pre_launch:
             pending_approvals: vec![],
             supervisor_review: None,
             ignored_artifacts: vec![],
+            baseline_artifacts: vec![],
         };
 
         super::super::draft::save_package(&config, &parent_draft).unwrap();

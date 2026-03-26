@@ -311,6 +311,7 @@ impl<S: ChangeStore> FsConnector<S> {
             pending_approvals: vec![],
             supervisor_review: None,
             ignored_artifacts: vec![],
+            baseline_artifacts: vec![],
         };
 
         Ok(package)
