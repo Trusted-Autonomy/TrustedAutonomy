@@ -382,7 +382,24 @@ This means:
 - Multiple goals can run concurrently without interfering with each other.
 - If something goes wrong, you reject the draft and start over.
 
-**Copy-on-write staging (macOS/Linux)**: On APFS (macOS) and Btrfs (Linux), TA creates staging workspaces using the kernel's native copy-on-write mechanism. The staging copy appears instantly and consumes no additional disk space until the agent actually modifies a file. On other filesystems (ext4, network mounts, etc.), TA falls back to a regular byte-for-byte copy. The strategy is detected automatically — no configuration needed. Staging creation timing and file counts are logged to help diagnose performance issues.
+**Copy-on-write staging**: TA automatically selects the most efficient staging strategy for your platform:
+
+- **macOS (APFS)** and **Linux (Btrfs/XFS)**: uses the kernel's native COW reflink mechanism — staging appears instantly with zero additional disk space until the agent writes a file.
+- **Windows (ReFS/Dev Drive)**: uses `FSCTL_DUPLICATE_EXTENTS_TO_FILE` for instant zero-copy staging.
+- **Linux (FUSE available)**: uses a FUSE overlay, intercepting writes at the VFS level — no upfront copy at all.
+- **All other platforms**: uses Smart mode (symlinks for excluded directories) or a full byte-for-byte copy as a final fallback.
+
+The default `strategy = "auto"` probes your filesystem at workspace creation time and selects the best option. You can pin a strategy in `.ta/workflow.toml`:
+
+```toml
+[staging]
+strategy = "smart"    # "auto" | "full" | "smart" | "refs-cow" | "fuse"
+warn_above_gb = 2.0   # warn in `ta doctor` if staging exceeds this size (0 = silent)
+```
+
+Use `ta staging inspect` to see which strategy is active, file counts, disk usage, and current exclude patterns.
+
+**Auto-generating `.taignore`**: When you run `ta setup vcs`, TA now detects your project type and automatically adds appropriate exclude patterns to `.taignore`. For example, a Rust project gets `target/`, a Node project gets `node_modules/`, and an Unreal project gets `Binaries/`, `Intermediate/`, etc. Existing entries are never overwritten — only new patterns are appended.
 
 ### Goals
 
