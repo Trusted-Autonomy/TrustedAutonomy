@@ -47,7 +47,10 @@ pub mod transport;
 pub mod workspace;
 
 pub use audit::{AuditStorageBackend, LocalAuditStorage, RawAuditEntry};
-pub use auth::{AuthError, AuthMiddleware, AuthRequest, Identity, NoopAuthMiddleware, SessionInfo};
+pub use auth::{
+    ApiKeyEntry, ApiKeyMiddleware, AuthError, AuthMiddleware, AuthRequest, Identity,
+    LocalIdentityMiddleware, LocalUserEntry, NoopAuthMiddleware, SessionInfo,
+};
 pub use plugin_config::PluginsConfig;
 pub use review_queue::{LocalReviewQueue, ReviewDecision, ReviewQueueBackend, ReviewQueueEntry};
 pub use transport::{LocalTransportBackend, TransportBackend, TransportPluginConfig};

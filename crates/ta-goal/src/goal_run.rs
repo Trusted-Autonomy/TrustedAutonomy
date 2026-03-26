@@ -291,6 +291,14 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs_isolation: Option<String>,
 
+    /// Authenticated identity that initiated this goal (v0.14.5).
+    ///
+    /// Set by `ta run` from the active auth middleware. Format is the `user_id`
+    /// returned by the middleware (e.g., `"alice"`, `"ci"`, `"local"`).
+    /// Used in audit records and review UIs to show who triggered the goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiated_by: Option<String>,
+
     /// When this goal run was created.
     pub created_at: DateTime<Utc>,
 
@@ -374,6 +382,7 @@ impl GoalRun {
             pr_package_id: None,
             progress_note: None,
             vcs_isolation: None,
+            initiated_by: None,
             created_at: now,
             updated_at: now,
         }

@@ -2708,6 +2708,95 @@ allow_network = ["api.anthropic.com", "api.github.com"]
 
 **Network filtering note**: On macOS, `allow_network` is a declaration (used for auditing) but the sandbox profile currently allows all outbound when any host is listed. Hostname-level network filtering (L7 proxy) is planned for v0.14.1.
 
+### Authentication (`[auth]` in `daemon.toml`)
+
+TA supports three built-in authentication modes for the HTTP API and MCP connections. Choose based on your deployment:
+
+| Mode | When to use | Config |
+|---|---|---|
+| **No-op** (default) | Local single-user on `127.0.0.1` | No config needed |
+| **Local identity** | Small teams; users defined in config | `[[auth.users]]` |
+| **API key** | CI pipelines, service accounts | `[[auth.api_keys]]` |
+
+#### No-op (default)
+
+By default, TA trusts loopback connections without requiring any credentials:
+
+```toml
+[auth]
+require_token = false
+local_bypass  = true
+```
+
+#### Local identity (`[[auth.users]]`)
+
+Define named users with hashed bearer tokens. No network calls — identity is resolved entirely from `daemon.toml`:
+
+```toml
+[auth]
+require_token = true
+local_bypass  = true   # loopback still bypasses auth
+
+[[auth.users]]
+user_id      = "alice"
+display_name = "Alice Smith"
+roles        = ["admin"]
+token_hash   = "sha256:<hex SHA-256 of the bearer token>"
+```
+
+Generate a `token_hash`:
+
+```bash
+echo -n "ta_mysecrettoken" | sha256sum
+# abc123...  -
+# Use: sha256:abc123...
+```
+
+Your API client then sends `Authorization: Bearer ta_mysecrettoken`. The daemon hashes it and compares it to the stored hash.
+
+#### API key middleware (`[[auth.api_keys]]`)
+
+For CI pipelines and service accounts, define `ta_key_`-prefixed keys:
+
+```toml
+[[auth.api_keys]]
+label    = "ci-pipeline"
+user_id  = "ci"
+roles    = ["read", "write"]
+key_hash = "sha256:<hex SHA-256 of the API key>"
+```
+
+Generate a key hash:
+
+```bash
+echo -n "ta_key_yourkey" | sha256sum
+```
+
+When `[[auth.api_keys]]` entries are present, they take precedence over `[[auth.users]]`.
+
+#### Identity propagation
+
+The authenticated `user_id` is recorded on each goal and shown in `ta goal status`:
+
+```
+$ ta goal status my-goal-abc1
+Goal:     Fix auth bug
+State:    completed
+By:       alice
+Agent:    claude-code
+```
+
+#### External auth plugins
+
+Enterprise identity providers (OIDC, SAML, SCIM) are implemented as external plugins. See `docs/plugin-traits.md` for the stable `AuthMiddleware` interface.
+
+```toml
+[plugins]
+auth = "ta-auth-oidc"
+```
+
+---
+
 ### VCS Isolation for Agents (`[vcs.agent]`)
 
 When TA spawns an agent in a staging workspace, the agent inherits your shell's VCS environment by default. This can cause index-lock collisions, accidental commits to your main branch, or Perforce submits to your live changelist. TA's VCS isolation prevents these problems by injecting a scoped environment before the agent starts.

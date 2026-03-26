@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use ta_policy::AccessFilter;
 
-pub use ta_extension::PluginsConfig;
+pub use ta_extension::{ApiKeyEntry, LocalUserEntry, PluginsConfig};
 
 /// Top-level daemon configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -605,6 +605,35 @@ impl Default for ServerConfig {
 pub struct AuthConfig {
     pub require_token: bool,
     pub local_bypass: bool,
+    /// Named users for `LocalIdentityMiddleware` (v0.14.5).
+    ///
+    /// When non-empty, authenticated requests are matched against these entries
+    /// by hashed bearer token. Use `LocalIdentityMiddleware` when you want
+    /// user-level identity without an external SSO provider.
+    ///
+    /// ```toml
+    /// [[auth.users]]
+    /// user_id = "alice"
+    /// display_name = "Alice Smith"
+    /// roles = ["admin"]
+    /// token_hash = "sha256:<hex SHA-256 of the bearer token>"
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<LocalUserEntry>,
+    /// API key entries for `ApiKeyMiddleware` (v0.14.5).
+    ///
+    /// Suitable for CI pipelines and service accounts that present a
+    /// `ta_key_`-prefixed bearer token.
+    ///
+    /// ```toml
+    /// [[auth.api_keys]]
+    /// label = "ci-pipeline"
+    /// user_id = "ci"
+    /// roles = ["read", "write"]
+    /// key_hash = "sha256:<hex SHA-256 of the raw API key>"
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<ApiKeyEntry>,
 }
 
 impl Default for AuthConfig {
@@ -612,6 +641,28 @@ impl Default for AuthConfig {
         Self {
             require_token: false,
             local_bypass: true,
+            users: Vec::new(),
+            api_keys: Vec::new(),
+        }
+    }
+}
+
+impl AuthConfig {
+    /// Build the appropriate `AuthMiddleware` for the current config (v0.14.5).
+    ///
+    /// Selection order:
+    /// 1. If `[[auth.api_keys]]` are configured, return `ApiKeyMiddleware`.
+    /// 2. If `[[auth.users]]` are configured, return `LocalIdentityMiddleware`.
+    /// 3. Otherwise, return `NoopAuthMiddleware` (local single-user default).
+    pub fn build_middleware(&self) -> Box<dyn ta_extension::AuthMiddleware> {
+        if !self.api_keys.is_empty() {
+            Box::new(ta_extension::ApiKeyMiddleware::new(self.api_keys.clone()))
+        } else if !self.users.is_empty() {
+            Box::new(ta_extension::LocalIdentityMiddleware::new(
+                self.users.clone(),
+            ))
+        } else {
+            Box::new(ta_extension::NoopAuthMiddleware)
         }
     }
 }
