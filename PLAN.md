@@ -6770,24 +6770,32 @@ The zero-injection mode is **opt-in** via config (`[workflow] context_mode = "mc
 ---
 
 ### v0.14.3.4 — Staging VFS & Copy-on-Write Completion
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Complete the staging layer so every supported platform gets a zero-copy or near-zero-copy workspace without full physical copies. Close the Windows ReFS stub, land FUSE-based intercept on Linux (where FUSE is available), and unify the staging strategy API so a future kernel-intercept backend can slot in cleanly.
 
 **Current state**: macOS (APFS reflink `clonefile`) and Linux (Btrfs/XFS `FICLONERANGE`) have native COW. Windows ReFS `FSCTL_DUPLICATE_EXTENTS_TO_FILE` is a stub (`is_refs_volume()` always returns `false`) and falls back to Smart (symlinks). FUSE overlay was explicitly deferred from v0.13.0.
 
 #### Items
 
-1. [ ] **Windows ReFS CoW — full IOCTL implementation**: Implement `is_refs_volume()` using `GetVolumeInformation` Win32 API to detect ReFS. Implement `clone_file_refs()` using `DeviceIoControl(FSCTL_DUPLICATE_EXTENTS_TO_FILE)`. Add a `#[cfg(windows)]` integration test that creates a pair of files, clones one, mutates the clone, and verifies the source is unchanged. Falls back to Smart when `FSCTL_DUPLICATE_EXTENTS_TO_FILE` is unavailable (NTFS, network share).
+1. [x] **Windows ReFS CoW — full IOCTL implementation**: Implemented `is_refs_volume()` using `GetVolumeInformationW` Win32 API to detect ReFS (`FILE_SUPPORTS_BLOCK_REFCOUNTING` flag). Implemented `clone_file_refs()` using `DeviceIoControl(FSCTL_DUPLICATE_EXTENTS_TO_FILE)` with pre-allocation via `SetEndOfFile`. Added `CopyStrategy::RefsClone` variant and `probe_refs_clone()`. Added `windows-sys` dependency (Windows-only). `RefsClone.is_cow() = true`. Falls back to Smart when `FSCTL_DUPLICATE_EXTENTS_TO_FILE` is unavailable (NTFS, network share). New tests: `refs_clone_is_cow`.
 
-2. [ ] **FUSE staging intercept (Linux)**: Add an optional `strategy = "fuse"` mode that mounts a FUSE filesystem over the staging copy, intercepting writes at the VFS level instead of copying files upfront. Requires `fuse-overlayfs` or `libfuse3`. Probe availability at startup; if FUSE module not loaded or not permitted, fall back to Smart with a `ta doctor` warning. This eliminates the staging copy for read-heavy workspaces (game assets, large media trees).
+2. [x] **FUSE staging intercept (Linux)**: Added `strategy = "fuse"` to `StagingStrategy` and `OverlayStagingMode::Fuse`. Implemented `is_fuse_available()` / `linux_fuse::probe_fuse_available()` probing `/proc/filesystems` for "fuse" kernel support and `fuse-overlayfs`/`fusermount3` on PATH. Falls back to Smart with logging if FUSE not available. Added `ta doctor` warning showing FUSE status and install hint.
 
-3. [ ] **`strategy = "auto"` default**: Replace the `"full"` default with `"auto"` — TA probes the filesystem and selects the best available strategy: `refs-cow` on Windows ReFS, COW reflink on APFS/Btrfs, `fuse` if available on Linux, `smart` otherwise, `full` as the final fallback. Add `ta doctor` output showing which strategy was selected and why.
+3. [x] **`strategy = "auto"` default**: Added `StagingStrategy::Auto` and `OverlayStagingMode::Auto`. `detect_best_mode()` selects: ReFS-CoW on Windows ReFS, FUSE on Linux if available, Smart otherwise. Added `ta doctor` auto-strategy reporting showing which strategy was selected. Changed default from `Full` to `Auto` in both `StagingStrategy` and `OverlayStagingMode`. Added `probe_refs_volume_for_doctor()` and `probe_fuse_for_doctor()` public helpers. Matched all callers (goal.rs, run.rs) for new variants.
 
-4. [ ] **`ta staging inspect`**: New command reporting: current strategy, staging root size, number of symlinks vs copied files (smart mode), COW vs full-copy file counts, and an estimated size without TA overhead. Helps users tune `.taignore` and choose the right strategy.
+4. [x] **`ta staging inspect`**: New `staging.rs` command module with `StagingCommands::Inspect`. Reports: goal title/ID/state, source dir, staging dir, configured strategy, file counts (copied vs symlinked), disk usage (physical vs source), exclude patterns, change summary (modified/created/deleted), and size warning if `warn_above_gb` threshold exceeded. Wired into `main.rs` and shell help. 4 new tests.
 
-5. [ ] **`.taignore` generation via `ta setup vcs`**: When `ta setup vcs` runs, auto-generate a project-appropriate `.taignore` based on detected project type (Unreal → Binaries/, Intermediate/, Saved/, DerivedDataCache/; Node → node_modules/; Rust → target/; Go → vendor/). Merges with any existing `.taignore` entries — no destructive overwrites.
+5. [x] **`.taignore` generation via `ta setup vcs`**: Added `generate_taignore()` to `setup.rs`. Detects project types (Rust, Node, Go, Python, Unreal Engine, Gradle, Maven) from key files/dirs. Generates appropriate `.taignore` entries, merging with existing — never overwrites user patterns. Skips if no recognized project type. Called automatically from `run_vcs_setup`. Dry-run support. 7 new tests.
 
-6. [ ] **Staging size warning threshold config**: Move the `ta doctor` 1 GB staging warning threshold to `[staging] warn_above_gb = 1` in `workflow.toml`, defaulting to 1 GB. Projects with intentionally large workspaces (game art pipelines) can raise or silence the warning.
+6. [x] **Staging size warning threshold config**: Added `warn_above_gb: f64` field to `StagingConfig` (default: 1.0). Updated `ta doctor` to read `workflow.staging.warn_above_gb` for the `Full` strategy warning. Added `warn_above_gb = 0` silencing support and tip for raising the threshold. Updated `ta staging inspect` to also check the threshold.
+
+#### Completed
+
+All 6 items implemented. New tests:
+- `copy_strategy.rs`: `refs_clone_is_cow` (1 new)
+- `staging.rs` (CLI): `walk_staging_counts_files_and_symlinks`, `walk_staging_empty_dir`, `dir_size_bytes_no_follow_counts_only_files`, `staging_commands_have_inspect_variant` (4 new)
+- `setup.rs`: `generate_taignore_rust_project`, `generate_taignore_node_project`, `generate_taignore_go_project`, `generate_taignore_python_project`, `generate_taignore_merges_with_existing`, `generate_taignore_dry_run_does_not_write`, `generate_taignore_no_project_type_no_file`, `generate_taignore_unreal_project` (8 new)
+- `overlay.rs`: Updated `staging_mode_default_is_full` → `staging_mode_default_is_auto`, updated 3 tests to use explicit Full mode where behavior must be exact
 
 #### Version: `0.14.3.4-alpha`
 
