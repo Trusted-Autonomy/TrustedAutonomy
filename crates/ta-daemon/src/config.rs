@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use ta_policy::AccessFilter;
 
+pub use ta_extension::PluginsConfig;
+
 /// Top-level daemon configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -48,6 +50,20 @@ pub struct DaemonConfig {
     /// ```
     #[serde(default)]
     pub experimental: ExperimentalConfig,
+    /// Plugin registration (v0.14.4).
+    ///
+    /// Maps each daemon extension point to a plugin binary name or path.
+    /// Unset slots use TA's built-in local defaults. See `docs/PLUGIN-AUTHORING.md`.
+    ///
+    /// ```toml
+    /// [plugins]
+    /// # auth = "ta-auth-oidc"
+    /// # workspace = "ta-workspace-s3"
+    /// # review_queue = "ta-review-jira"
+    /// # audit_storage = "ta-audit-splunk"
+    /// ```
+    #[serde(default)]
+    pub plugins: PluginsConfig,
 }
 
 /// Shell Q&A agent configuration (v0.11.4.2).
@@ -553,6 +569,22 @@ pub struct ServerConfig {
     /// Only used on Unix platforms; ignored on Windows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket_path: Option<String>,
+    /// Optional TLS certificate path for the HTTP API server (v0.14.4).
+    ///
+    /// When set together with `tls_key_path`, the HTTP API is served over
+    /// HTTPS. This is a no-op stub until a transport plugin activates it.
+    /// Plugins read this field from `DaemonConfig::server` at startup.
+    ///
+    /// ```toml
+    /// [server]
+    /// tls_cert_path = "certs/server.pem"
+    /// tls_key_path = "certs/server.key"
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert_path: Option<String>,
+    /// Optional TLS private key path for the HTTP API server (v0.14.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key_path: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -562,6 +594,8 @@ impl Default for ServerConfig {
             port: 7700,
             cors_origins: vec!["*".to_string()],
             socket_path: None,
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }
