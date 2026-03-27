@@ -577,6 +577,7 @@ fn goal_to_candidate(
         }
         GoalRunState::Running
         | GoalRunState::Finalizing { .. }
+        | GoalRunState::DraftPending { .. }
         | GoalRunState::AwaitingInput { .. } => ("in progress".to_string(), None, vec![]),
         GoalRunState::PrReady | GoalRunState::UnderReview => {
             // Check if draft was denied.

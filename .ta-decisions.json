@@ -1,26 +1,32 @@
 [
   {
-    "decision": "Use scroll_offset > 0 as a guard inside push_output rather than relying solely on auto_scroll",
-    "rationale": "Existing tests set scroll_offset directly without going through scroll_up(). If push_output relied only on auto_scroll (which starts as true), those tests would incorrectly snap to bottom when scroll_offset > 0. The guard `auto_scroll && scroll_offset == 0` is correct: snap to bottom only when both the flag says auto and we're actually at the bottom. When scroll_offset > 0 but auto_scroll is still true (e.g. direct assignment in tests), we also set auto_scroll = false to keep state consistent.",
-    "alternatives": ["Rely solely on auto_scroll flag, update all existing tests to set auto_scroll=false", "Use only scroll_offset threshold with no auto_scroll flag"],
-    "confidence": 0.95
+    "decision": "DraftPending carries `exit_code: i32` alongside `pending_since` timestamp",
+    "rationale": "The watchdog needs to distinguish 'agent exited 0 (clean, work likely done)' vs 'agent exited non-zero (crash)' when deciding whether to auto-heal by running `ta draft build`. Storing exit_code on the state avoids re-reading the process table after the fact.",
+    "alternatives": ["Store exit_code in GoalRun.reason string (lossy)", "Add separate field on GoalRun (redundant with state)"],
+    "confidence": 0.85
   },
   {
-    "decision": "Update r3_paste_appends_at_end_when_cursor_in_middle to match new cursor-aware behavior",
-    "rationale": "This test was an explicit regression test for the v0.12.2 'always append at end' behavior. The v0.14.7.1 spec intentionally changes this behavior: when input-focused (scroll_offset==0), paste inserts at cursor position. Keeping the old assertion would require keeping the old behavior, contradicting the spec. The test was renamed to r3_paste_inserts_at_cursor_when_input_focused with updated assertions.",
-    "alternatives": ["Add a code path to detect 'user navigated with arrow keys' vs 'user clicked output pane' — too complex to distinguish reliably in crossterm", "Keep old behavior and only change scroll-focused case"],
+    "decision": "Default `ta goal list` shows Failed+staging goals rather than requiring `--all`",
+    "rationale": "The core problem in TRACE-1 is discoverability: users don't know to run `--all` when their goal disappears. Showing recoverable-failed by default means the common case (watchdog-killed goal with complete agent work) is immediately visible. Truly terminal failed goals (no staging) remain hidden to avoid clutter.",
+    "alternatives": ["Always show Failed in default list (too noisy)", "Add --recoverable flag (still requires knowing to add it)", "Show footer hint without listing (insufficient — user needs to see the goal tag to act)"],
     "confidence": 0.9
   },
   {
-    "decision": "clear_all_heartbeats takes &mut [OutputLine] not &mut Vec<OutputLine>",
-    "rationale": "Clippy ptr_arg lint: using a slice reference is idiomatic Rust when the function only needs to iterate and mutate elements, not grow/shrink the collection. This is the correct signature.",
-    "alternatives": ["Suppress the lint with #[allow(clippy::ptr_arg)]"],
-    "confidence": 1.0
+    "decision": "Progress journal uses GOAL_ID_PLACEHOLDER substitution in run.rs rather than positional format arg",
+    "rationale": "The CLAUDE.md injection string uses `format!()` with many named fields; inserting `{goal_id}` as a positional arg would require reordering the entire format call. String substitution of a sentinel value (`GOAL_ID_PLACEHOLDER`) after format!() is simpler and avoids touching the existing arg layout.",
+    "alternatives": ["Named format arg `{goal_id}` (requires restructuring format! call)", "Separate concatenation step (verbose)"],
+    "confidence": 0.95
   },
   {
-    "decision": "update_layout_cache stores output_area_top = 0 always",
-    "rationale": "The TUI layout places the output pane at the top (row 0). The function computes output_area_height from terminal size minus input height minus status bar. This is correct for the three-zone layout (output | input | status).",
-    "alternatives": ["Read layout from ratatui's computed Rect — but this requires refactoring draw_ui to return or store the rect"],
-    "confidence": 0.85
+    "decision": "Watchdog writes audit entry via GoalAuditLedger rather than direct file append",
+    "rationale": "GoalAuditLedger provides hash-chaining and consistent serialization. Bypassing it with a direct write would produce audit entries incompatible with chain verification.",
+    "alternatives": ["Direct JSONL append (breaks hash chain)", "Emit through event bus (adds latency, may lose entries on crash)"],
+    "confidence": 0.9
+  },
+  {
+    "decision": "TRACE-1/TRACE-2 checks placed in verify_constitution() (ta goal check), not a separate ta audit command",
+    "rationale": "These are workspace integrity invariants that fit naturally alongside the existing constitution checks. Users already know to run `ta goal check` for health checks; adding a separate command would fragment the verification surface. They can be extracted to a dedicated `ta audit integrity` command later if the check surface grows.",
+    "alternatives": ["New `ta goal integrity` subcommand (separate discovery surface)", "`ta audit check` (audit crate doesn't exist yet for CLI dispatch)"],
+    "confidence": 0.8
   }
 ]

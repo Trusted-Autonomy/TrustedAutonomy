@@ -4363,6 +4363,20 @@ You are working on a TA-mediated goal in a staging workspace.
 - Do NOT modify files outside this directory
 - All your changes will be captured as a draft for human review
 
+## Agent Progress Journal (strongly encouraged)
+
+Write checkpoints to `.ta/ta-progress.json` as you complete significant steps. This survives process crashes and lets TA's recovery tools know how far you got. Write each checkpoint **immediately after** completing a verification step.
+
+```json
+{{ "goal_id": "GOAL_ID_PLACEHOLDER", "checkpoints": [
+    {{ "label": "compiled", "at": "<ISO timestamp>", "detail": "cargo build passed" }},
+    {{ "label": "tests_pass", "at": "<ISO timestamp>", "detail": "847 tests passed" }},
+    {{ "label": "work_complete", "at": "<ISO timestamp>", "detail": "all items implemented" }}
+]}}
+```
+
+Use labels like: `compiled`, `tests_pass`, `linted`, `work_complete`. The file is TA-internal and excluded from the diff shown to reviewers.
+
 ## Agent Decision Log (optional but encouraged)
 
 If you make significant design decisions during this session, record them in `.ta-decisions.json` so the reviewer can see your reasoning. This is separate from the change summary — it captures *why you chose one approach over another*.
@@ -4443,6 +4457,9 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
         context_tools_hint,
         existing_section
     );
+
+    // Replace placeholder in progress journal section with the actual goal ID.
+    let injected = injected.replace("GOAL_ID_PLACEHOLDER", goal_id);
 
     std::fs::write(&claude_md_path, injected)?;
     Ok(())
