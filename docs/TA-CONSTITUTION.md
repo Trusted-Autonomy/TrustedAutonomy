@@ -130,6 +130,25 @@ A goal in `Running` state must have a live agent process. If the process exits w
 ### 5.5 Zombie Prevention
 Goals stuck in `Running` with no live process are zombies. `ta goal gc` should detect and offer to transition them. Goals dispatched via daemon should have configurable timeouts.
 
+### 5.6 Goal Traceability Invariant
+Every goal that was ever started MUST be completely traceable through TA tooling, regardless of how it ended.
+
+1. **`ta goal list --all` is the authoritative ledger.** Every goal run, past or present, must appear here. No goal may be silently dropped.
+2. **`Failed` goals with staging directories are NOT truly terminal.** A goal killed by watchdog or system crash may have recoverable work. Such goals MUST surface in the default `ta goal list` output — they must not be hidden the way `Applied`/`Completed` goals are.
+3. **Recovery path always visible.** When a failed goal has an existing staging directory, `ta goal list` output MUST surface the recovery hint (`ta goal recover <id>`) inline — not buried inside the goal's JSON.
+4. **Watchdog transitions are audited.** When the daemon watchdog transitions a goal to `Failed`, it MUST write an audit record including: detected PID exit, goal ID, detection timestamp, and recovery command.
+
+**Corollary**: Staging is preserved until explicitly GC'd. TA must surface recoverable failed goals rather than hiding them from default views.
+
+### 5.7 Goal Lifecycle Cleanup
+`ta goal gc` is the designated cleanup command:
+- `ta goal gc` — detects and transitions zombie `Running` goals (dead PID) to `Failed`; prints summary.
+- `ta goal gc --include-staging` — additionally removes staging directories for `Applied` and `Completed` goals.
+- `ta goal gc --dry-run` — previews all actions without making changes.
+- Goals in `Closed`, `Denied`, or `Applied` states with no open draft require explicit purge; GC does not auto-delete them.
+
+`ta goal list` should show a GC hint footer when zombie or stale goals are detected.
+
 ---
 
 ## 6. Policy Engine
@@ -358,8 +377,10 @@ For pre-release review, verify each command against these rules:
 | `ta draft apply` | 2.1-2.2 (branch isolation + restoration), 2.4 (default submit), 7.3 (audit) |
 | `ta draft deny` | 7.4 (terminal audit), 10.1 (state transition) |
 | `ta goal start` | 3.1 (staging copy), 5.1 (Created → Configured) |
+| `ta goal list` | 5.6 (traceability — failed+staging goals visible by default) |
+| `ta goal recover` | 5.6 (recovery path always visible), 5.3 (failure always allowed) |
 | `ta goal delete` | 7.4 (terminal audit) |
-| `ta goal gc` | 5.5 (zombie detection), 7.4 (terminal audit) |
+| `ta goal gc` | 5.5 (zombie detection), 5.7 (lifecycle cleanup), 7.4 (terminal audit) |
 | `ta shell` | 9.1-9.5 (thin client, daemon mediates, auto-start, version guard) |
 | `ta plan *` | 9.4 (read-only agent inspection) |
 | `ta audit verify` | 7.2 (hash chain validation) |
