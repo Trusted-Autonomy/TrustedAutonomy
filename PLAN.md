@@ -7162,7 +7162,7 @@ In future GUI: native collapse via the same JSON structure.
 ---
 
 ### v0.14.7.1 — Shell UX Fixes
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix a cluster of persistent TUI shell regressions: cursor-aware paste, agent working indicator clearing, scroll-to-bottom auto-tail resumption, keyboard scroll navigation on Mac, and an unusable scrollbar.
 
 #### Problems
@@ -7205,6 +7205,103 @@ The right-margin scrollbar renders correctly (position indicator visible while s
 9. [ ] **Scroll lock when new output arrives below prompt line**: When the user is at the bottom of the output (`scroll_offset == 0`) and the agent streams new output that is rendered below the `ta>` prompt line (i.e., the prompt is not the last visual line), the view does not snap to follow the new output. Root cause: `auto_scroll_if_near_bottom()` uses `scroll_offset <= 3` threshold which works when output is above the prompt, but does not account for new content that pushes below the prompt's visual row. Fix: when rendering, track the prompt's visual row vs. the terminal height; if new output would be placed at or below the prompt row and `scroll_offset == 0`, force scroll to bottom so the prompt re-anchors at the bottom of the visible area.
 
 #### Version: `0.14.7.1-alpha`
+
+---
+
+### v0.14.7.2 — Goal Traceability & Lifecycle Hygiene
+<!-- status: pending -->
+**Goal**: Fix the Goal Traceability Invariant (Constitution §5.6): failed goals with staging directories are silently hidden from `ta goal list` because `Failed` is grouped with `Applied`/`Completed` as a terminal filter. A goal killed by watchdog during a system lock-up — with potentially complete agent work in staging — disappears from the default view. Users cannot find it without knowing to run `ta goal list --all`, and the recovery hint (`ta goal recover <id>`) is buried in the goal's JSON file. Also: add `ta goal purge` for deliberate cleanup of old goals and drafts.
+
+#### Root Cause (immediate, fixed in v0.14.7-alpha as a hot-patch)
+`list_goals()` in `apps/ta-cli/src/commands/goal.rs:632` filters out `GoalRunState::Failed { .. }` alongside `Applied` and `Completed` in the default (no `--all`) view. `Failed` goals may have staging directories with finished agent work that is still recoverable via `ta goal recover`.
+
+Additionally, `ta goal recover` option 1 ("rebuild draft") called `draft::build` which rejected `Failed` state — making recovery impossible even when the user could reach the recover UI. **Hot-patched**: `recover` now temporarily transitions `Failed` → `Finalizing` before calling `draft::build`, restoring `Failed` if the build errors. `diagnose_goal` now also detects `Failed` + staging-dir and surfaces it as recoverable.
+
+#### Progress Journal (new capability)
+The deeper issue: when a goal's process is killed (system lock-up, OOM, user Ctrl+C mid-run), TA has no record of what the agent actually completed. The watchdog can only detect PID death, not work state. A progress journal fixes this by having the agent report checkpoints that survive process death.
+
+#### Items
+
+1. [ ] **Show recoverable failed goals in default `ta goal list`**: Change the default filter to retain `Failed` goals that have an existing staging directory (`workspace_path` exists on disk). Goals with `Failed` state and no staging dir (truly terminal) are still hidden by default. Add a `⚠ recoverable` marker in the `STATE` column for these goals, and print a footnote: `"Run 'ta goal recover <id>' to inspect and recover work from staging."` 3 tests: failed-with-staging appears in default list; failed-without-staging hidden; `--all` shows both.
+
+2. [ ] **Recovery hint in `ta goal list` output**: For any goal in `Failed` state with a staging directory, append the recovery command to the STATE column or as a trailing hint line. The watchdog already writes the hint into the goal's `reason` field — surface it in list output without requiring `ta goal inspect`.
+
+3. [ ] **Watchdog transition audit record**: Ensure `mark_goal_failed_watchdog()` (or equivalent in `daemon/watchdog.rs`) writes an audit event to `goal-audit.jsonl` including: goal ID, detected PID (or "no PID"), detection timestamp, watchdog reason, and recovery command. Currently the watchdog may set `Failed` state in the goal JSON without producing an audit trail.
+
+4. [ ] **`ta goal purge` command**: New subcommand for deliberate bulk cleanup of old/stale goals and drafts.
+   - `ta goal purge --state closed,denied,applied --older-than 30d` — removes goal records + staging dirs for terminal goals older than threshold.
+   - `ta goal purge --id <id>` — remove a specific goal record + staging + associated draft package.
+   - Always writes an audit record per purged goal.
+   - Refuses to purge `Running`, `PrReady`, or `UnderReview` goals (still active).
+   - `--dry-run` mode lists what would be removed.
+
+5. [ ] **`ta goal list` GC hint footer**: When `ta goal list` detects zombie goals (Running + dead PID) or goals with stale unknown health, print a footer: `"⚠ N zombie/stale goals found. Run 'ta goal gc' to clean up."` This replaces the per-row health label with an actionable summary.
+
+6. [ ] **Constitution §5.6 + §5.7 check in `ta goal check`**: Add two invariant checks to `ta goal check` (or `ta constitution check`):
+   - `TRACE-1`: Every staging directory in `.ta/staging/` has a corresponding goal record in `.ta/goals/` (orphaned staging dirs are flagged).
+   - `TRACE-2`: Every goal record with a staging directory present on disk has state `Running`, `PrReady`, `UnderReview`, `Approved`, `Failed`, or `Finalizing` — never `Applied` or `Completed` with staging still present (that's a cleanup failure).
+
+7. [ ] **Agent progress journal** — observability layer for goal execution: Add a `.ta-progress.json` file in staging that the agent writes during execution. Format:
+   ```json
+   { "goal_id": "...", "checkpoints": [
+       { "label": "compiled", "at": "...", "detail": "cargo build passed" },
+       { "label": "tests_pass", "at": "...", "detail": "847 tests passed" },
+       { "label": "work_complete", "at": "...", "detail": "all items implemented" }
+   ]}
+   ```
+   - `ta run` injects the journal path + format into CLAUDE.md context with instructions to write checkpoints as work completes (immediately after each verification step).
+   - `ta goal recover` shows the last checkpoint in its diagnosis: *"Last checkpoint: 'work_complete' at 00:14 — agent may have finished before crash."*
+   - `ta goal inspect <id>` shows the full checkpoint timeline as "Agent Progress" section.
+   - `ta draft build` reads the journal and includes checkpoints in the draft's validation evidence section.
+   - The journal is excluded from diffs (TA internal state, like `.ta-decisions.json`).
+   - 3 tests: journal read/display in recover; journal included in draft evidence; journal excluded from diff.
+
+8. [ ] **Goal state: `DraftPending`** — new state between `Finalizing` and `PrReady` representing "agent completed work, draft build has not run yet". Transition: `Running` → `DraftPending` (agent writes `work_complete` checkpoint) → `PrReady` (after `ta draft build`). The watchdog detects `DraftPending` + dead PID as "build not started" and offers to auto-heal by running `ta draft build`. This eliminates the current ambiguity where a `Failed` goal with staging could mean either "crashed mid-work" or "finished but watchdog beat it to state update."
+
+#### Version: `0.14.7.2-alpha`
+
+---
+
+### v0.14.7.3 — Unified Goal Shortref: Single ID Across Goal → Draft → PR → Audit
+<!-- status: pending -->
+**Goal**: Give every workspace (goal + its drafts + its PR + audit entries) a single durable short identifier — the first 8 hex characters of the goal UUID — that flows through every surface. Today, goals display their tag (`v0-14-7-1-shell-ux-01`), drafts display a *separate* UUID (`2c9f520c`), and there is no way to find all artifacts for a goal without knowing both IDs. The tag itself is not surfaced on drafts, `ta draft view` output, or audit entries.
+
+#### Problem
+
+| Surface | Today | After |
+|---|---|---|
+| `ta goal list` | tag column (`v0-14-7-1-shell-ux-01`) | adds shortref column (`2159d87e`) |
+| `ta draft list` | draft UUID (`2c9f520c`) | `<goal-shortref>/<n>` (`2159d87e/1`) |
+| `ta draft view` | "Draft: 2c9f520c …" | "Draft: 2159d87e/1 (v0-14-7-1-shell-ux-01)" |
+| `ta draft view <id>` | must use full draft UUID | accepts `2159d87e` → latest draft for that goal |
+| Audit log | goal_id UUID | adds `shortref` field to every entry |
+| PR title / branch | no shortref | `[2159d87e] v0.14.7.1 — Shell UX Fixes` |
+
+The shortref is defined as: first 8 lowercase hex chars of `goal_run_id`. It is deterministic, short enough to remember, and unique in practice across a project's history. Subsequent drafts for the same goal append a sequence counter: `/1`, `/2`, etc.
+
+#### Items
+
+1. [ ] **`shortref()` on `GoalRun`**: Add `pub fn shortref(&self) -> String { self.goal_run_id.to_string()[..8].to_string() }`. Used by all CLI output instead of the full UUID.
+
+2. [ ] **`DraftPackage` carries goal shortref and draft sequence**: Add `goal_shortref: String` and `draft_seq: u32` to `DraftPackage`. Populated at `ta draft build` time by reading the goal's shortref and counting existing drafts for that goal. Display format: `<goal_shortref>/<draft_seq>` (e.g., `2159d87e/1`).
+
+3. [ ] **`ta goal list` shortref column**: Replace the current 8-char UUID prefix in the `ID` column with `shortref()`. Same data, guaranteed 8 chars, no truncation surprises.
+
+4. [ ] **`ta draft list` uses `<shortref>/<seq>`**: Replace the draft UUID column with `<goal_shortref>/<draft_seq>`. Full draft UUID still available in `ta draft view --json`.
+
+5. [ ] **`ta draft view` header shows shortref + goal tag**: Change the header line from `"Draft: <uuid>"` to `"Draft: <shortref>/<seq>  ·  <goal_tag>"`. Both the short identity and the human-readable name visible at a glance.
+
+6. [ ] **`ta draft view <shortref>`**: Accept the 8-char goal shortref as an alias — resolves to the latest draft for that goal. `ta draft view 2159d87e` → same as `ta draft view 2c9f520c` (latest draft). Disambiguation: if the shortref matches a draft UUID prefix, prefer the goal shortref resolution (explicitly a goal-scoped lookup).
+
+7. [ ] **`ta goal status <shortref>`**: Accept shortref as a synonym for the goal UUID prefix (already works for prefix matching, but shortref is now the canonical displayed form — make it explicit in help text).
+
+8. [ ] **Audit log `shortref` field**: Add `shortref: Option<String>` to `AuditEvent`. Populated from `goal_run_id` when available. Allows `grep 2159d87e .ta/audit.jsonl` to find all entries for a goal.
+
+9. [ ] **PR branch and title prefix**: When `ta draft apply` creates a branch/PR, prefix the branch name and PR title with `[<shortref>]`: branch `ta/2159d87e-v0-14-7-1-shell-ux-fixes`, title `[2159d87e] v0.14.7.1 — Shell UX Fixes`. Users can find the PR from the shortref alone.
+
+10. [ ] **Backward compat**: Existing UUIDs in draft lists continue to resolve. `ta draft view <full-uuid>` still works. The shortref is additive display and alias — not a replacement for UUID storage.
+
+#### Version: `0.14.7.3-alpha`
 
 ---
 

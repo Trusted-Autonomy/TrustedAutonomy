@@ -1,0 +1,26 @@
+[
+  {
+    "decision": "Use scroll_offset > 0 as a guard inside push_output rather than relying solely on auto_scroll",
+    "rationale": "Existing tests set scroll_offset directly without going through scroll_up(). If push_output relied only on auto_scroll (which starts as true), those tests would incorrectly snap to bottom when scroll_offset > 0. The guard `auto_scroll && scroll_offset == 0` is correct: snap to bottom only when both the flag says auto and we're actually at the bottom. When scroll_offset > 0 but auto_scroll is still true (e.g. direct assignment in tests), we also set auto_scroll = false to keep state consistent.",
+    "alternatives": ["Rely solely on auto_scroll flag, update all existing tests to set auto_scroll=false", "Use only scroll_offset threshold with no auto_scroll flag"],
+    "confidence": 0.95
+  },
+  {
+    "decision": "Update r3_paste_appends_at_end_when_cursor_in_middle to match new cursor-aware behavior",
+    "rationale": "This test was an explicit regression test for the v0.12.2 'always append at end' behavior. The v0.14.7.1 spec intentionally changes this behavior: when input-focused (scroll_offset==0), paste inserts at cursor position. Keeping the old assertion would require keeping the old behavior, contradicting the spec. The test was renamed to r3_paste_inserts_at_cursor_when_input_focused with updated assertions.",
+    "alternatives": ["Add a code path to detect 'user navigated with arrow keys' vs 'user clicked output pane' — too complex to distinguish reliably in crossterm", "Keep old behavior and only change scroll-focused case"],
+    "confidence": 0.9
+  },
+  {
+    "decision": "clear_all_heartbeats takes &mut [OutputLine] not &mut Vec<OutputLine>",
+    "rationale": "Clippy ptr_arg lint: using a slice reference is idiomatic Rust when the function only needs to iterate and mutate elements, not grow/shrink the collection. This is the correct signature.",
+    "alternatives": ["Suppress the lint with #[allow(clippy::ptr_arg)]"],
+    "confidence": 1.0
+  },
+  {
+    "decision": "update_layout_cache stores output_area_top = 0 always",
+    "rationale": "The TUI layout places the output pane at the top (row 0). The function computes output_area_height from terminal size minus input height minus status bar. This is correct for the three-zone layout (output | input | status).",
+    "alternatives": ["Read layout from ratatui's computed Rect — but this requires refactoring draw_ui to return or store the rect"],
+    "confidence": 0.85
+  }
+]

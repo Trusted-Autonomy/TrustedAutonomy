@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -29,15 +29,16 @@ use super::shell::{resolve_daemon_url, StatusInfo};
 
 // ── Mouse & scroll handling ─────────────────────────────────────────
 //
-// NO mouse capture is enabled — no `?1000h`, `?1002h`, `?1003h`, or
-// `?1007h`. This lets the terminal handle ALL mouse interaction natively:
-// click-drag text selection, Command+C/Ctrl+C copy, right-click menus.
+// Mouse capture IS enabled (`?1000h`/`?1002h`) to allow scroll wheel and
+// scrollbar click/drag (v0.14.7.1 item 6). Native text selection and copy
+// are still available in most terminals via Option+drag (macOS) or
+// Shift+drag (Linux/Windows).
 //
-// Scroll wheel does not work in the TUI (it would require mouse capture
-// which breaks native selection). Use keyboard scrolling instead:
+// Keyboard scrolling (always available):
 //   Shift+Up/Down    → scroll output 1 line
 //   PageUp/PageDown  → scroll output 1 page
 //   Shift+Home/End   → scroll to top/bottom
+//   Cmd+Up/Down      → scroll to top/bottom (macOS)
 //   Up/Down          → command history
 
 // ── Latency diagnostics ─────────────────────────────────────────
@@ -468,6 +469,17 @@ struct App {
     last_routed_tag: Option<String>,
     /// Goal ID awaiting auth-failure retry/abort decision (v0.12.3).
     pending_auth_retry: Option<String>,
+    /// Whether new output should auto-scroll to bottom (v0.14.7.1 item 4).
+    /// Set to false when user scrolls up; restored to true when scrolled back to bottom.
+    auto_scroll: bool,
+    /// Column index of the scrollbar (rightmost column, v0.14.7.1 item 6).
+    scrollbar_col: Option<u16>,
+    /// Top row of the output area for mouse coordinate mapping (v0.14.7.1 item 6).
+    output_area_top: u16,
+    /// Height of the output area in rows (v0.14.7.1 item 6).
+    output_area_height: u16,
+    /// Whether the user is currently dragging the scrollbar (v0.14.7.1 item 6).
+    scrollbar_dragging: bool,
 }
 
 impl App {
@@ -518,6 +530,11 @@ impl App {
             active_tailing_goals: std::collections::HashSet::new(),
             last_routed_tag: None,
             pending_auth_retry: None,
+            auto_scroll: true,
+            scrollbar_col: None,
+            output_area_top: 0,
+            output_area_height: 0,
+            scrollbar_dragging: false,
         }
     }
 
@@ -550,8 +567,16 @@ impl App {
             // Adjust scroll offset to compensate for removed lines.
             self.scroll_offset = self.scroll_offset.saturating_sub(excess);
         }
-        // If scrolled up, don't auto-scroll — increment unread.
-        if self.scroll_offset > 0 {
+        // If auto-scroll is enabled and we're at bottom, stay at bottom.
+        // If scroll_offset > 0 (scrolled up), always increment unread — even if
+        // auto_scroll wasn't explicitly set to false (e.g. tests that set scroll_offset directly).
+        if self.auto_scroll && self.scroll_offset == 0 {
+            self.unread_events = 0;
+        } else {
+            // Ensure auto_scroll is false when scrolled up.
+            if self.scroll_offset > 0 {
+                self.auto_scroll = false;
+            }
             self.unread_events += 1;
         }
     }
@@ -777,6 +802,10 @@ impl App {
         // lines are a safe ceiling — you can't scroll past all content.
         let max_scroll = self.output.len().saturating_sub(1);
         self.scroll_offset = (self.scroll_offset + amount).min(max_scroll);
+        // Disable auto-scroll when user has scrolled up (v0.14.7.1 item 4).
+        if self.scroll_offset > 0 {
+            self.auto_scroll = false;
+        }
     }
 
     /// Scroll down in the output pane.
@@ -784,6 +813,8 @@ impl App {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         if self.scroll_offset == 0 {
             self.unread_events = 0;
+            // Re-enable auto-scroll when back at bottom (v0.14.7.1 item 4).
+            self.auto_scroll = true;
         }
     }
 
@@ -791,6 +822,8 @@ impl App {
     fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
         self.unread_events = 0;
+        // Re-enable auto-scroll when explicitly scrolled to bottom (v0.14.7.1 item 4).
+        self.auto_scroll = true;
     }
 
     /// Auto-scroll to bottom when "near bottom" (within threshold lines).
@@ -805,6 +838,8 @@ impl App {
         if self.scroll_offset <= NEAR_BOTTOM_LINES {
             self.scroll_offset = 0;
             self.unread_events = 0;
+            // Re-enable auto-scroll when near bottom (v0.14.7.1 item 4).
+            self.auto_scroll = true;
         }
     }
 }
@@ -1009,11 +1044,10 @@ async fn run_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    // No mouse capture — the terminal handles all mouse interaction natively:
-    // click-drag selection, Command+C copy, right-click menus.
-    // Scroll: Shift+Up/Down, PageUp/PageDown, Shift+Home/End (keyboard only).
+    // Enable mouse capture for scroll wheel and scrollbar click/drag (v0.14.7.1 item 6).
     // Bracketed paste: pasted text arrives as Event::Paste(String) instead of
     // individual key events, so we can insert without executing on newlines.
+    stdout.execute(crossterm::event::EnableMouseCapture)?;
     stdout.execute(EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -1073,7 +1107,10 @@ async fn run_tui(
     running.store(false, Ordering::Relaxed);
     disable_raw_mode()?;
     terminal.backend_mut().execute(DisableBracketedPaste)?;
-    // No mouse capture to disable — terminal handles mouse natively.
+    // Disable mouse capture (v0.14.7.1 item 6).
+    terminal
+        .backend_mut()
+        .execute(crossterm::event::DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
     // Save history.
@@ -1186,6 +1223,7 @@ async fn tui_event_loop(
                     let draw_start = Instant::now();
                     update_wrap_cache(terminal, app);
                     terminal.draw(|f| draw_ui(f, app))?;
+                    update_layout_cache(app, terminal);
                     last_draw = Instant::now();
                     needs_draw = false;
                     app.latency_diag
@@ -1241,6 +1279,7 @@ async fn tui_event_loop(
             let draw_start = Instant::now();
             update_wrap_cache(terminal, app);
             terminal.draw(|f| draw_ui(f, app))?;
+            update_layout_cache(app, terminal);
             last_draw = Instant::now();
             needs_draw = false;
             app.latency_diag
@@ -2011,6 +2050,14 @@ async fn handle_terminal_event(
                 }
                 (KeyCode::Home, _) => app.home(),
                 (KeyCode::End, _) => app.end(),
+                // Cmd+Up/Down scroll to top/bottom (macOS, v0.14.7.1 item 5).
+                // Must be checked BEFORE the plain Up/Down handlers.
+                (KeyCode::Up, m) if m.contains(KeyModifiers::SUPER) => {
+                    app.scroll_up(app.output.len());
+                }
+                (KeyCode::Down, m) if m.contains(KeyModifiers::SUPER) => {
+                    app.scroll_to_bottom();
+                }
                 // Shift+Up/Down scroll output 1 line; plain Up/Down navigate history.
                 (KeyCode::Up, m) if m.contains(KeyModifiers::SHIFT) => {
                     app.scroll_up(1);
@@ -2054,12 +2101,59 @@ async fn handle_terminal_event(
             }
         }
         Event::Mouse(mouse) => {
-            // No mouse capture is enabled, so mouse events only arrive if the
-            // terminal sends them without capture (rare). Handle scroll wheel
-            // as a fallback for terminals that report it anyway.
             match mouse.kind {
                 MouseEventKind::ScrollUp => app.scroll_up(3),
                 MouseEventKind::ScrollDown => app.scroll_down(3),
+                // Scrollbar click: jump to proportional position (v0.14.7.1 item 6).
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(scol) = app.scrollbar_col {
+                        if mouse.column == scol
+                            && app.output_area_height > 0
+                            && mouse.row >= app.output_area_top
+                            && mouse.row < app.output_area_top + app.output_area_height
+                        {
+                            app.scrollbar_dragging = true;
+                            let h = app.output_area_height as usize;
+                            let rel_row = (mouse.row - app.output_area_top) as usize;
+                            let vl = app.cached_visual_lines.max(app.output.len());
+                            let max_scroll = vl.saturating_sub(h);
+                            if max_scroll > 0 {
+                                let pos = rel_row * max_scroll / h;
+                                app.scroll_offset = max_scroll.saturating_sub(pos);
+                                if app.scroll_offset == 0 {
+                                    app.auto_scroll = true;
+                                    app.unread_events = 0;
+                                } else {
+                                    app.auto_scroll = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Scrollbar drag: update position while dragging (v0.14.7.1 item 6).
+                MouseEventKind::Drag(MouseButton::Left) if app.scrollbar_dragging => {
+                    if app.output_area_height > 0 {
+                        let h = app.output_area_height as usize;
+                        let rel_row = (mouse.row.saturating_sub(app.output_area_top)) as usize;
+                        let rel_row = rel_row.min(h.saturating_sub(1));
+                        let vl = app.cached_visual_lines.max(app.output.len());
+                        let max_scroll = vl.saturating_sub(h);
+                        if max_scroll > 0 {
+                            let pos = rel_row * max_scroll / h;
+                            app.scroll_offset = max_scroll.saturating_sub(pos);
+                            if app.scroll_offset == 0 {
+                                app.auto_scroll = true;
+                                app.unread_events = 0;
+                            } else {
+                                app.auto_scroll = false;
+                            }
+                        }
+                    }
+                }
+                // Release drag (v0.14.7.1 item 6).
+                MouseEventKind::Up(_) => {
+                    app.scrollbar_dragging = false;
+                }
                 _ => {}
             }
         }
@@ -2080,10 +2174,13 @@ async fn handle_terminal_event(
                 app.pending_paste = Some(safe);
                 app.paste_preview_expanded = false;
             } else {
-                // Small paste: always append at end of input regardless of cursor position
-                // (v0.12.2). Users paste via ⌘V/Ctrl+V after clicking around the output
-                // pane and expect the text to land at the prompt end, not mid-input.
-                app.cursor = app.input.len();
+                // Small paste: cursor-aware (v0.14.7.1 items 1/8).
+                // Scroll-focused (output scrolled up): snap to end of input + scroll to bottom.
+                // Input-focused (at prompt, scroll_offset==0): insert at current cursor position.
+                if app.scroll_offset > 0 {
+                    app.cursor = app.input.len();
+                    app.scroll_to_bottom();
+                }
                 for ch in safe.chars() {
                     app.insert_char(ch);
                 }
@@ -2094,6 +2191,23 @@ async fn handle_terminal_event(
         }
         _ => {}
     }
+}
+
+/// Clear all heartbeat lines from a buffer, blanking their text and resetting style.
+/// Returns true if any heartbeat lines were found and cleared (v0.14.7.1 item 3).
+fn clear_all_heartbeats(buf: &mut [OutputLine]) -> bool {
+    let indices: Vec<usize> = buf
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| if l.is_heartbeat { Some(i) } else { None })
+        .collect();
+    let found = !indices.is_empty();
+    for &i in &indices {
+        buf[i].is_heartbeat = false;
+        buf[i].style = Style::default().fg(Color::DarkGray);
+        buf[i].text = String::new();
+    }
+    found
 }
 
 fn handle_tui_message(app: &mut App, msg: TuiMessage) {
@@ -2474,11 +2588,17 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             app.scroll_to_bottom();
         }
         TuiMessage::DraftReady {
-            goal_id: _,
+            goal_id,
             draft_id: _,
             display_id,
             title,
         } => {
+            // Clear any lingering working-indicator heartbeats (v0.14.7.1 item 3).
+            clear_all_heartbeats(&mut app.output);
+            clear_all_heartbeats(&mut app.agent_output);
+            if !goal_id.is_empty() {
+                app.active_tailing_goals.remove(&goal_id);
+            }
             app.push_output(OutputLine::notification(format!(
                 "[draft ready] \"{}\" ({}) — run: draft view {}",
                 title, display_id, display_id
@@ -3536,6 +3656,12 @@ async fn background_sse(
                     if let Some(rendered) = super::shell::render_sse_event(&frame) {
                         let _ = tx.send(TuiMessage::SseEvent(rendered));
                     }
+                } else if let Some(goal_id) = parse_goal_terminal_state(&frame) {
+                    // Goal reached terminal state — clear working indicator (v0.14.7.1 item 3).
+                    let _ = tx.send(TuiMessage::AgentOutputDone(goal_id));
+                    if let Some(rendered) = super::shell::render_sse_event(&frame) {
+                        let _ = tx.send(TuiMessage::SseEvent(rendered));
+                    }
                 } else if let Some(rendered) = super::shell::render_sse_event(&frame) {
                     let _ = tx.send(TuiMessage::SseEvent(rendered));
                 }
@@ -4273,6 +4399,71 @@ fn parse_draft_built(frame: &str) -> Option<(String, String, String, String)> {
     Some((goal_id, draft_id, display_id, title))
 }
 
+/// Parse an SSE frame for any terminal goal state (failed, cancelled, denied, pr_ready).
+/// Returns `Some(goal_id)` so the TUI can clear working indicators (v0.14.7.1 item 3).
+fn parse_goal_terminal_state(frame: &str) -> Option<String> {
+    let mut event_type = None;
+    let mut data = None;
+    for line in frame.lines() {
+        if let Some(rest) = line.strip_prefix("event: ") {
+            event_type = Some(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("data: ") {
+            data = Some(rest.trim());
+        }
+    }
+    let event_type = event_type?;
+    if !matches!(
+        event_type,
+        "goal_failed" | "goal_cancelled" | "goal_denied" | "goal_pr_ready"
+    ) {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(data?).ok()?;
+    let payload = &json["payload"];
+    payload["goal_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Update App's cached layout information for mouse event handling.
+/// Called after each terminal draw (v0.14.7.1 item 6).
+fn update_layout_cache(app: &mut App, terminal: &Terminal<CrosstermBackend<Stdout>>) {
+    let size = match terminal.size() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let prompt = app.prompt_str();
+    let display = format!("{}{}", prompt, app.input);
+    let inner_width = size.width.max(1) as usize;
+    let content_lines = {
+        let mut lines = 0u16;
+        let mut col = 0usize;
+        for ch in display.chars() {
+            if ch == '\n' {
+                lines += 1;
+                col = 0;
+            } else {
+                col += 1;
+                if col >= inner_width {
+                    lines += 1;
+                    col = 0;
+                }
+            }
+        }
+        lines + 1
+    };
+    let input_height = (content_lines + 2).min(size.height / 2).max(3);
+    let output_height = size.height.saturating_sub(1 + input_height);
+    app.output_area_top = 0;
+    app.output_area_height = output_height;
+    app.scrollbar_col = if size.width > 0 {
+        Some(size.width - 1)
+    } else {
+        None
+    };
+}
+
 const HELP_TEXT: &str = "\
 TA Shell -- Interactive terminal for Trusted Autonomy
 
@@ -4328,6 +4519,7 @@ const KEYBINDING_TABLE: &[(&str, &str)] = &[
     ("Shift+Up / Down", "Scroll output 1 line"),
     ("PgUp / PgDn", "Scroll output one full page"),
     ("Shift+Home / End", "Scroll to top / bottom of output"),
+    ("Cmd+Up / Down", "Scroll to top / bottom of output (Mac)"),
     ("", ""),
     // Text editing
     ("Ctrl-A / Ctrl-E", "Jump to start / end of input"),
@@ -6006,7 +6198,7 @@ mod tests {
         assert!(result.is_none(), "empty pending paste should not submit");
     }
 
-    // ── Paste-at-end tests (v0.12.2) ──────────────────────────────────────────
+    // ── Paste tests (v0.12.2 / v0.14.7.1) ────────────────────────────────────
 
     /// Helper that simulates the Event::Paste handler on an App.
     fn simulate_paste(app: &mut App, data: &str) {
@@ -6022,7 +6214,11 @@ mod tests {
             app.pending_paste = Some(safe);
             app.paste_preview_expanded = false;
         } else {
-            app.cursor = app.input.len();
+            // Cursor-aware paste (v0.14.7.1 items 1/8).
+            if app.scroll_offset > 0 {
+                app.cursor = app.input.len();
+                app.scroll_to_bottom();
+            }
             for ch in safe.chars() {
                 app.insert_char(ch);
             }
@@ -6042,17 +6238,13 @@ mod tests {
         }
         app.cursor = 0;
         assert_eq!(app.cursor, 0);
+        // scroll_offset == 0 (input-focused), so paste inserts at cursor (position 0).
         simulate_paste(&mut app, "world");
-        // Pasted text must appear at the end, not at position 0.
         assert_eq!(
-            app.input, "helloworld",
-            "paste should append at end when cursor is at start"
+            app.input, "worldhello",
+            "paste should insert at cursor (position 0) when input-focused"
         );
-        assert_eq!(
-            app.cursor,
-            app.input.len(),
-            "cursor should be at end after paste"
-        );
+        assert_eq!(app.cursor, 5, "cursor should be after pasted text");
     }
 
     #[test]
@@ -6067,12 +6259,13 @@ mod tests {
         }
         // Move cursor to middle (position 2, between 'b' and 'c').
         app.cursor = 2;
+        // scroll_offset == 0 (input-focused), so paste inserts at cursor (position 2).
         simulate_paste(&mut app, "XYZ");
         assert_eq!(
-            app.input, "abcdeXYZ",
-            "paste should append at end even when cursor is mid-input"
+            app.input, "abXYZcde",
+            "paste should insert at cursor position when input-focused"
         );
-        assert_eq!(app.cursor, app.input.len());
+        assert_eq!(app.cursor, 5, "cursor should be after pasted text");
     }
 
     #[test]
@@ -6129,6 +6322,190 @@ mod tests {
         assert_eq!(
             app.input, "line one\nline two",
             "internal newlines in a small paste must be preserved"
+        );
+    }
+
+    // ── v0.14.7.1 new paste tests ─────────────────────────────────────────────
+
+    #[test]
+    fn paste_at_start_when_input_focused() {
+        // scroll_offset == 0 → input-focused → insert at cursor position 0.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for ch in "hello".chars() {
+            app.insert_char(ch);
+        }
+        app.cursor = 0;
+        assert_eq!(app.scroll_offset, 0);
+        simulate_paste(&mut app, "world");
+        assert_eq!(app.input, "worldhello");
+        assert_eq!(app.cursor, 5);
+    }
+
+    #[test]
+    fn paste_at_middle_when_input_focused() {
+        // scroll_offset == 0 → input-focused → insert at cursor position 2.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for ch in "abcde".chars() {
+            app.insert_char(ch);
+        }
+        app.cursor = 2;
+        assert_eq!(app.scroll_offset, 0);
+        simulate_paste(&mut app, "XYZ");
+        assert_eq!(app.input, "abXYZcde");
+        assert_eq!(app.cursor, 5);
+    }
+
+    #[test]
+    fn paste_at_end_when_input_focused() {
+        // scroll_offset == 0, cursor at end → normal append.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for ch in "prefix ".chars() {
+            app.insert_char(ch);
+        }
+        assert_eq!(app.scroll_offset, 0);
+        simulate_paste(&mut app, "pasted");
+        assert_eq!(app.input, "prefix pasted");
+        assert_eq!(app.cursor, app.input.len());
+    }
+
+    #[test]
+    fn paste_scroll_focused_appends_at_end() {
+        // scroll_offset > 0 → scroll-focused → snap to end, scroll to bottom, append.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Push enough output lines so scroll_offset can be > 0.
+        for i in 0..10 {
+            app.push_output(OutputLine::info(format!("line {}", i)));
+        }
+        // Type input with cursor at start.
+        for ch in "hello".chars() {
+            app.insert_char(ch);
+        }
+        app.cursor = 0;
+        // Simulate scrolling up.
+        app.auto_scroll = false;
+        app.scroll_offset = 3;
+        assert!(app.scroll_offset > 0);
+        simulate_paste(&mut app, "world");
+        // After paste: scroll snapped to bottom and text appended at end.
+        assert_eq!(app.scroll_offset, 0, "scroll should snap to bottom");
+        assert_eq!(
+            app.input, "helloworld",
+            "paste should append at end when scroll-focused"
+        );
+        assert_eq!(app.cursor, app.input.len(), "cursor should be at end");
+    }
+
+    // ── v0.14.7.1 scroll and working indicator tests ──────────────────────────
+
+    #[test]
+    fn draft_ready_clears_working_indicator() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Push a heartbeat line (working indicator).
+        app.push_heartbeat("Agent is working...".to_string());
+        assert!(
+            app.output.iter().any(|l| l.is_heartbeat),
+            "heartbeat should be present before DraftReady"
+        );
+        // Simulate DraftReady message handling.
+        clear_all_heartbeats(&mut app.output);
+        clear_all_heartbeats(&mut app.agent_output);
+        assert!(
+            !app.output.iter().any(|l| l.is_heartbeat),
+            "no heartbeats should remain after clear_all_heartbeats"
+        );
+    }
+
+    #[test]
+    fn scroll_resumption_after_scroll_up_and_back() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Fill buffer with some lines.
+        for i in 0..20 {
+            app.push_output(OutputLine::info(format!("line {}", i)));
+        }
+        // Scroll up — auto_scroll should become false.
+        app.scroll_up(5);
+        assert!(app.scroll_offset > 0);
+        assert!(
+            !app.auto_scroll,
+            "auto_scroll should be false after scrolling up"
+        );
+        // Scroll back to bottom — auto_scroll should be restored.
+        app.scroll_to_bottom();
+        assert_eq!(app.scroll_offset, 0);
+        assert!(
+            app.auto_scroll,
+            "auto_scroll should be true after scrolling to bottom"
+        );
+        // Push a new line — should stay at bottom.
+        app.push_output(OutputLine::info("new line".to_string()));
+        assert_eq!(
+            app.scroll_offset, 0,
+            "scroll_offset should remain 0 after new output"
+        );
+        assert_eq!(
+            app.unread_events, 0,
+            "no unread events when auto_scroll is true"
+        );
+    }
+
+    #[test]
+    fn scrollbar_click_jumps_to_position() {
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Fill buffer with lines to scroll.
+        for i in 0..50 {
+            app.push_output(OutputLine::info(format!("line {}", i)));
+        }
+        // Set up layout cache as if terminal is 80x24.
+        app.scrollbar_col = Some(79);
+        app.output_area_top = 0;
+        app.output_area_height = 20;
+        // Simulate click at row 0 (top of scrollbar) — should scroll to top.
+        let h = app.output_area_height as usize;
+        let rel_row: usize = 0;
+        let vl = app.cached_visual_lines.max(app.output.len());
+        let max_scroll = vl.saturating_sub(h);
+        if max_scroll > 0 {
+            let pos = rel_row * max_scroll / h;
+            app.scroll_offset = max_scroll.saturating_sub(pos);
+            if app.scroll_offset == 0 {
+                app.auto_scroll = true;
+                app.unread_events = 0;
+            } else {
+                app.auto_scroll = false;
+            }
+        }
+        assert!(app.scroll_offset > 0, "click at top should scroll up");
+        assert!(
+            !app.auto_scroll,
+            "auto_scroll should be false when scrolled up"
         );
     }
 
@@ -6707,11 +7084,9 @@ mod tests {
     }
 
     #[test]
-    fn r3_paste_appends_at_end_when_cursor_in_middle() {
-        // R3 regression test (v0.13.1.5): paste must always append at end of
-        // input even when the cursor is positioned mid-input by arrow keys.
-        // This mirrors what simulate_paste does but explicitly tests the scenario
-        // described in the v0.12.2 deferred verification item.
+    fn r3_paste_inserts_at_cursor_when_input_focused() {
+        // v0.14.7.1: when input-focused (scroll_offset == 0), paste inserts at
+        // current cursor position (replaces the old v0.12.2 append-at-end behavior).
         let mut app = App::new(
             "http://localhost".into(),
             None,
@@ -6724,19 +7099,16 @@ mod tests {
         app.cursor_left(); // cursor at byte 4 (before 'o')
         app.cursor_left(); // cursor at byte 3 (before 'l')
         assert_eq!(app.cursor, 3, "cursor should be mid-input");
+        assert_eq!(app.scroll_offset, 0, "should be input-focused");
 
-        // Paste — must go to end regardless of cursor position.
+        // Paste inserts at cursor (position 3).
         simulate_paste(&mut app, " world");
 
         assert_eq!(
-            app.input, "hello world",
-            "R3: paste must append at end, not at cursor position 3"
+            app.input, "hel worldlo",
+            "v0.14.7.1: paste inserts at cursor position when input-focused"
         );
-        assert_eq!(
-            app.cursor,
-            app.input.len(),
-            "cursor must be at end after paste"
-        );
+        assert_eq!(app.cursor, 9, "cursor must be after inserted text");
     }
 
     #[test]

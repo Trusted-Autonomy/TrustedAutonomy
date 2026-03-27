@@ -359,7 +359,7 @@ ta> exit                                # Done for now
 
 The shell remembers your command history across sessions. Reconnect any time with `ta shell` -- the daemon keeps running.
 
-**Pasting large text**: The shell automatically compacts large pastes (over 500 chars or 10 lines). Instead of flooding the input with raw text, you'll see an indicator:
+**Pasting text**: Small pastes (under 500 chars / 10 lines) insert at the current cursor position when the prompt is active, or snap to the end of the input and scroll to the bottom if you had scrolled up to read history. Large pastes are compacted into an indicator instead of flooding the input:
 
 ```
 ta> [Pasted 2,847 chars / 47 lines — Tab to preview, Esc to cancel]
@@ -5257,7 +5257,7 @@ Features:
 - **Conversation chaining** — follow-up questions retain context via `--continue`
 - **Multiple concurrent SSE streams** for parallel goal output
 - **Ctrl+L** to clear, Up/Down for command history
-- **Auto-scroll** that pauses when you scroll up
+- **Auto-scroll** that pauses when you scroll up and resumes when you scroll back to the bottom
 - **Animated working indicator** — background commands show a live spinner (`Agent is working ⠿ (120s elapsed)`) updated on each heartbeat. Heartbeat lines are removed from the output stream so they don't flood the view.
 - **No-heartbeat alert** — if no heartbeat arrives within the configured window (default 30 s), the indicator turns red: `Agent is working ⚠ (150s elapsed — no heartbeat)`. Clears automatically when the next heartbeat arrives.
 - **Auto-tail on background commands** — when any command runs in the background, the shell immediately starts tailing its output. No manual `:tail` needed.
@@ -5366,7 +5366,7 @@ The TUI shell provides a three-zone layout:
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **Output pane** (top): Command responses, SSE event notifications, and live agent output. Events are rendered in dimmed styling; agent stdout appears in white, stderr in yellow. Auto-scrolls to bottom when at the end; holds position when scrolled up. Retained as a scrollable buffer (configurable limit, default 50,000 lines, minimum 10,000). Use Shift+Up/Down for line-by-line scroll, PgUp/PgDn for 10-line jumps, or Shift+Home/End to jump to top/bottom. A visual scrollbar appears in the right margin when the buffer exceeds the visible area.
+- **Output pane** (top): Command responses, SSE event notifications, and live agent output. Events are rendered in dimmed styling; agent stdout appears in white, stderr in yellow. Auto-scrolls to bottom when at the end; holds position when scrolled up. Retained as a scrollable buffer (configurable limit, default 50,000 lines, minimum 10,000). Use Shift+Up/Down for line-by-line scroll, PgUp/PgDn for 10-line jumps, Shift+Home/End or Cmd+Up/Down (macOS) to jump to top/bottom. A visual scrollbar appears in the right margin when the buffer exceeds the visible area — click or drag it to jump to a position. When you scroll back to the bottom, auto-follow resumes automatically.
 - **Input area** (middle): Text input with cursor movement, command history (up/down), and tab-completion.
 - **Status bar** (bottom): Project name, version, agent count, draft count, daemon connection indicator (green/red dot), scroll position ("line N of M" when scrolled up), "new output" badge with count when new content arrives while scrolled up, tailing indicator (green badge when streaming agent output), stdin prompt indicator (magenta badge when an agent is waiting for input), and workflow stage indicator.
 
@@ -5408,8 +5408,10 @@ Built-in shell commands:
 | `Shift+Up` / `Shift+Down` | Scroll output 1 line |
 | `PgUp` / `PgDn` | Scroll output one full page (with 4-line overlap) |
 | Mouse wheel / touchpad scroll | Scroll output 3 lines per tick |
+| Scrollbar click / drag | Jump to or drag the scroll position (right margin) |
 | Click-drag | Select text for copy (native selection always works) |
 | `Shift+Home` / `Shift+End` | Scroll to top/bottom of output |
+| `Cmd+Up` / `Cmd+Down` | Scroll to top/bottom of output (macOS) |
 | `Tab` | Auto-complete commands |
 | `Ctrl-W` | Toggle split-pane mode (agent output on the right) |
 | `Ctrl-A` / `Ctrl-E` | Jump to start/end of input |
