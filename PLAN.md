@@ -7908,3 +7908,39 @@ Federated sharing of anonymized problem→solution pairs across TA instances. Bu
 - **Provenance tracking**: Did this solution actually work when applied downstream? Feedback loop from consumers back to publishers.
 - **Trust model**: Reputation scoring for contributors. Verified solutions (applied successfully N times) ranked higher.
 - **Spam/quality**: Moderation queue for new contributors. Automated quality checks (is the problem statement clear? is the solution actionable?).
+
+### Unreal Engine MCP Plugin (`ta-mcp-unreal`)
+
+A TA plugin that exposes Unreal Engine 5 as an MCP server, allowing TA agents to interact with UE5 projects directly — triggering Movie Render Queue jobs, reading scene structure, querying asset metadata, and initiating guide render passes as part of a governed goal. Builds on the External Plugin System architecture.
+
+Key capabilities:
+- **MCP tools surfaced**: `ue5_render_queue_submit`, `ue5_scene_query`, `ue5_asset_list`, `ue5_mrq_status`, `ue5_control_pass_export` (depth, normal, motion vector)
+- **Plugin binary**: `ta-mcp-unreal` — communicates with the UE5 Editor via the existing Unreal Remote Control API (HTTP, localhost) or a bundled UE5 plugin that exposes a JSON-over-TCP socket
+- **Governed render jobs**: Render queue submissions go through TA's draft/approval flow — agent proposes a render job, human approves, TA submits. Audit trail records what was rendered, at what settings, and when.
+- **Render-to-staging**: Output frames land in TA staging, enabling diff-based review of render output changes before promotion to the workspace
+- **Use case**: AI pipeline orchestration for CG production (e.g., guide render → AI v2v → review gate → delivery), automated test renders in CI, asset extraction for LoRA training data collection
+- **Distribution**: Published as an independent package (`ta-mcp-unreal`) + a companion UE5 Marketplace plugin that installs the Remote Control extensions TA needs
+
+### Unity MCP Plugin (`ta-mcp-unity`)
+
+A TA plugin that exposes Unity as an MCP server, enabling TA agents to interact with Unity projects — triggering builds, querying scene contents, running PlayMode tests, and exporting assets. Parallel architecture to `ta-mcp-unreal`, adapted for Unity's toolchain.
+
+Key capabilities:
+- **MCP tools surfaced**: `unity_build_trigger`, `unity_scene_query`, `unity_asset_export`, `unity_test_run`, `unity_addressables_build`, `unity_render_capture`
+- **Plugin binary**: `ta-mcp-unity` — communicates with the Unity Editor via Unity's existing Editor scripting API, exposed through a companion C# Editor extension that listens on a local socket
+- **Governed builds**: Build submissions go through TA's goal/draft flow — agent proposes a build configuration, human reviews, TA triggers. Full audit trail.
+- **CI integration**: Works alongside the VCS Event Hooks (v0.14.8.2) — a git push triggers a TA workflow that calls `unity_build_trigger`, waits for result, and routes the output to a draft for review
+- **Distribution**: Published as `ta-mcp-unity` + a companion Unity Package Manager (UPM) package that installs the Editor extension
+
+### Nvidia Omniverse Integration Plugin (`ta-mcp-omniverse`)
+
+A TA plugin for Nvidia Omniverse that enables USD-based asset and scene exchange between Omniverse applications (Isaac Sim, USD Composer, DriveSim) and TA-governed workflows. Designed around the OpenUSD standard for interoperability.
+
+Key capabilities:
+- **MCP tools surfaced**: `omniverse_stage_open`, `omniverse_prim_query`, `omniverse_usd_export`, `omniverse_usd_import`, `omniverse_render_submit`, `omniverse_nucleus_sync`
+- **USD data exchange**: TA can read and write `.usd`/`.usda`/`.usdc` files as first-class artifacts — diff USD prims between staging and source, track changes to scene hierarchy, material assignments, and xform overrides
+- **Nucleus integration**: Omniverse Nucleus (the USD asset server) acts as a TA-adjacent store — TA can checkpoint USD stage state into its artifact store and restore on draft deny
+- **Governed USD mutations**: Agent proposes USD scene modifications (prim additions, material swaps, physics parameter changes), TA creates a draft showing the USD diff, human approves before the change lands on Nucleus
+- **Plugin binary**: `ta-mcp-omniverse` — communicates with Omniverse via the Omniverse Kit Python scripting API through a companion Kit extension, or directly via the Omniverse USD Resolver API for read-only operations
+- **Use cases**: AI robotics simulation pipelines (Isaac Sim), autonomous vehicle dataset generation (DriveSim), CG production asset pipelines using USD as the interchange format (feeds into `ta-mcp-unreal` for UE5 ingestion)
+- **Distribution**: Published as `ta-mcp-omniverse` + a companion Omniverse Extension installable via the Omniverse Extension Manager
