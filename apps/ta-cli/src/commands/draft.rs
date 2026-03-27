@@ -113,6 +113,9 @@ pub enum DraftCommands {
         /// Output as structured JSON (overrides --format).
         #[arg(long)]
         json: bool,
+        /// Show only one section: summary, decisions, validation, files (v0.14.7).
+        #[arg(long)]
+        section: Option<String>,
     },
     /// Approve a draft package for application.
     Approve {
@@ -499,6 +502,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             format,
             color,
             json,
+            section,
         } => {
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
             if *json {
@@ -513,6 +517,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                     detail,
                     format,
                     *color,
+                    section.as_deref(),
                 )
             }
         }
@@ -792,6 +797,31 @@ struct ChangeSummaryEntry {
     alternatives_considered: Vec<AlternativeConsidered>,
 }
 
+/// Try to load agent-authored decisions from `.ta-decisions.json` in the staging workspace (v0.14.7).
+///
+/// Agents write this file to record non-obvious implementation choices.
+/// Format: JSON array of `{ decision, alternatives, rationale, confidence? }` objects.
+fn load_agent_decisions(staging_path: &std::path::Path) -> Vec<DecisionLogEntry> {
+    let path = staging_path.join(".ta-decisions.json");
+    if !path.exists() {
+        return vec![];
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: could not read .ta-decisions.json: {}", e);
+            return vec![];
+        }
+    };
+    match serde_json::from_str::<Vec<DecisionLogEntry>>(&content) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("Warning: could not parse .ta-decisions.json: {}", e);
+            vec![]
+        }
+    }
+}
+
 /// Try to load the agent's change summary from the staging workspace.
 fn load_change_summary(staging_path: &std::path::Path) -> Option<ChangeSummary> {
     let path = staging_path.join(".ta/change_summary.json");
@@ -872,6 +902,7 @@ fn extract_decision_log(summary: &ChangeSummary) -> Vec<DecisionLogEntry> {
                 .map(|a| format!("{}: {}", a.description, a.rejected_reason))
                 .collect(),
             alternatives_considered: entry.alternatives_considered.clone(),
+            confidence: None,
         })
         .collect()
 }
@@ -1344,6 +1375,15 @@ pub(crate) fn build_package(
         );
     }
 
+    // v0.14.7: Load agent-authored decision log from .ta-decisions.json.
+    let agent_decision_log = load_agent_decisions(&goal.workspace_path);
+    if !agent_decision_log.is_empty() {
+        println!(
+            "Agent decision log: {} decision(s) captured from .ta-decisions.json",
+            agent_decision_log.len()
+        );
+    }
+
     // Plan validation: if this goal is linked to a plan phase, validate artifacts.
     if let Some(ref phase_id) = goal.plan_phase {
         let phases = super::plan::load_plan(source_dir).unwrap_or_default();
@@ -1446,6 +1486,7 @@ pub(crate) fn build_package(
         supervisor_review: None,
         ignored_artifacts: vec![],
         baseline_artifacts: vec![], // Set below if this is a follow-up (v0.14.3.5).
+        agent_decision_log,
     };
 
     // v0.12.2.1: Track parent_draft_id and compute composited diff for follow-up chains.
@@ -2239,6 +2280,7 @@ fn view_package(
     detail_str: &str,
     format_str: &str,
     color: bool,
+    section_str: Option<&str>,
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
     let pkg = load_package(config, package_id)?;
@@ -2318,6 +2360,12 @@ fn view_package(
     let output_format = format_str
         .parse::<OutputFormat>()
         .map_err(|e| anyhow::anyhow!(e))?;
+    let section_filter = section_str
+        .map(|s| {
+            s.parse::<ta_changeset::output_adapters::SectionFilter>()
+                .map_err(|e| anyhow::anyhow!(e))
+        })
+        .transpose()?;
 
     // v0.2.3: Use output adapters for rendering.
     // Exception: If --file with --open-external, try external handler first.
@@ -2387,6 +2435,7 @@ fn view_package(
         detail_level: effective_detail,
         file_filter: file_filter.map(String::from),
         diff_provider: diff_provider.as_ref().map(|p| p as &dyn DiffProvider),
+        section_filter,
     };
 
     // Resolve color: CLI --color overrides config default.
@@ -3075,6 +3124,7 @@ fn build_commit_message(goal: &ta_goal::GoalRun, pkg: &DraftPackage) -> String {
         detail_level: DetailLevel::Medium,
         file_filter: None,
         diff_provider: None,
+        section_filter: None,
     };
     let adapter = get_adapter(OutputFormat::Terminal, false);
     let rendered = adapter
@@ -4675,6 +4725,7 @@ fn amend_package(
             rationale: reason.unwrap_or("Artifact removed from draft").to_string(),
             alternatives: vec![],
             alternatives_considered: vec![],
+            confidence: None,
         });
 
         save_package(config, &pkg)?;
@@ -4793,6 +4844,7 @@ fn amend_package(
                 .to_string(),
             alternatives: vec![],
             alternatives_considered: vec![],
+            confidence: None,
         });
 
         save_package(config, &pkg)?;

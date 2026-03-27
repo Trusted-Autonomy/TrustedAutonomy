@@ -7112,7 +7112,7 @@ Constitutions grow rule sets from multiple sources: `extends = "ta-default"` inh
 ---
 
 ### v0.14.7 — Draft View Polish & Agent Decision Log
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Transform `ta draft view` from a flat diff dump into a structured, navigable review surface. Add an **Agent Decision Log** — a first-class draft artifact where the agent records the key implementation decisions it made and the alternatives it considered. Introduce hierarchical output with collapsible sections in HTML/GUI views.
 
 #### Problem
@@ -7147,15 +7147,15 @@ In future GUI: native collapse via the same JSON structure.
 
 #### Items
 
-1. [ ] **`AgentDecisionLog` in `DraftPackage`**: `Vec<DecisionEntry { decision: String, alternatives: Vec<String>, rationale: String, confidence: Option<f32> }>`. Agent populates this by writing a `DECISIONS.json` file to the staging workspace during its run; `ta draft build` picks it up if present.
-2. [ ] **Convention for agent to write decisions**: CLAUDE.md injection (via `ta run`) includes a standard section: "When making a significant implementation choice, write a decision record to `.ta-decisions.json` in the format `{decision, alternatives, rationale}`. Decisions are optional but recommended for non-obvious choices."
-3. [ ] **`ta draft view` hierarchical terminal output**: Structured with section headers, indentation, file change counts. Diffs are collapsed by default (show file + stats only); `--full-diff` shows all. `--section=decisions` shows only the decision log.
-4. [ ] **`ta draft view --html > draft.html`**: Self-contained HTML file. `<details>` for each changed file (diff inside), `<details>` for decision log entries. Inline CSS only — no external deps. Valid HTML5.
-5. [ ] **JSON output for GUI**: `ta draft view --json` emits the full `DraftPackage` as JSON with the hierarchical structure — files, decisions, validation log — so the VS Code extension (v0.15) can render it natively.
-6. [ ] **`ta draft view --section <section>`**: Filter to one section: `summary`, `decisions`, `validation`, `files`. Useful for scripting and automation.
-7. [ ] **Tests**: Decision log round-trip (unit). HTML output contains `<details>` and collapsible file sections (unit). JSON output structure (unit). `--section` filter (unit).
-8. [ ] **USAGE.md**: Updated "Reviewing a Draft" section. Screenshot-style example of the hierarchical terminal output.
-9. [ ] **Status bar community badge** *(from v0.13.17.7 item 9)*: Add a community hub badge to the TUI status bar — shows unread community updates, new plugin versions, or pending constitution suggestions. Deferred from v0.13.17.7 because TUI status-bar integration requires significant ratatui widget work, which belongs here alongside the broader TUI rework.
+1. [x] **`AgentDecisionLog` in `DraftPackage`**: Added `agent_decision_log: Vec<DecisionLogEntry>` (with `confidence: Option<f32>`) to `DraftPackage`. Agent populates by writing `.ta-decisions.json` in staging; `ta draft build` picks it up via `load_agent_decisions()`. 3 new tests.
+2. [x] **Convention for agent to write decisions**: CLAUDE.md injection (in `run.rs`) now includes an "Agent Decision Log" section with `.ta-decisions.json` format and instructions.
+3. [x] **`ta draft view` hierarchical terminal output**: Terminal adapter updated with section headers, `▸` markers, `render_agent_decision_log()`, footer tip updated. 5 new tests.
+4. [x] **`ta draft view --html > draft.html`**: HTML adapter rewritten with `<details>/<summary>` for all sections (summary, decisions, files, diffs). Section state persists in `localStorage`. 2 new tests.
+5. [x] **JSON output for GUI**: Already works — serializes full `DraftPackage` including `agent_decision_log`. 1 existing test updated.
+6. [x] **`ta draft view --section <section>`**: `--section` flag added to `DraftCommands::View`. `SectionFilter` enum (`summary`, `decisions`, `validation`, `files`) in `output_adapters/mod.rs`. All adapters respect it. 3 new tests.
+7. [x] **Tests**: Decision log round-trip ✓. HTML `<details>` ✓. JSON output ✓. `--section` filter ✓. Total: 13+ new tests across modules.
+8. [x] **USAGE.md**: Updated "Draft View Output" section with Agent Decision Log, `--section` flag, `.ta-decisions.json` format, localStorage persistence note.
+9. [x] **Status bar community badge** *(from v0.13.17.7 item 9)*: Added `community_pending_count` to daemon `/api/status` (counts stale/missing community cache resources), `StatusInfo` in shell.rs, background polling in shell_tui.rs. TUI status bar shows `⬡ N community` badge when count > 0.
 
 #### Version: `0.14.7-alpha`
 

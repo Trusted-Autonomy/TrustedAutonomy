@@ -160,6 +160,7 @@ fn make_draft_package() -> DraftPackage {
         supervisor_review: None,
         ignored_artifacts: vec![],
         baseline_artifacts: vec![],
+        agent_decision_log: vec![],
     }
 }
 

@@ -46,6 +46,9 @@ pub struct ProjectStatus {
     /// Whether a power assertion (preventing idle sleep) is currently active (v0.13.1.1).
     /// True when there are active goals and `prevent_sleep_during_active_goals` is enabled.
     pub power_assertion_active: bool,
+    /// Number of community resources with stale or missing caches (v0.14.7).
+    /// A resource is "pending" if its cache is older than 30 days or has never been synced.
+    pub community_pending_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -171,6 +174,10 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     let power_assertion_active =
         active_goals > 0 && state.daemon_config.power.prevent_sleep_during_active_goals;
 
+    // Community cache staleness check (v0.14.7).
+    // Count resources whose cache is missing or older than 30 days.
+    let community_pending_count = count_stale_community_resources(&state.project_root);
+
     Json(ProjectStatus {
         project: project_name,
         version: version.clone(),
@@ -189,7 +196,66 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         cursor_style: state.daemon_config.shell.ui.cursor_style.clone(),
         no_heartbeat_alert_secs: state.daemon_config.shell.ui.no_heartbeat_alert_secs,
         power_assertion_active,
+        community_pending_count,
     })
+}
+
+/// Count community resources with stale or missing caches.
+///
+/// Reads `<project_root>/.ta/community-resources.toml` for resource names,
+/// then checks each resource's `_meta.json` cache file. Resources with no cache
+/// or caches older than 30 days are counted as "pending".
+fn count_stale_community_resources(project_root: &std::path::Path) -> usize {
+    let resources_path = project_root.join(".ta").join("community-resources.toml");
+    let cache_root = project_root.join(".ta").join("community-cache");
+
+    if !resources_path.exists() {
+        return 0;
+    }
+
+    let content = match std::fs::read_to_string(&resources_path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+
+    let stale_threshold = chrono::Duration::days(30);
+    let now = chrono::Utc::now();
+    let mut stale_count = 0;
+
+    // Extract resource names from TOML: lines like `name = "..."` inside [[resource]] blocks.
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("name = ") {
+            let name = rest.trim().trim_matches('"');
+            if name.is_empty() {
+                continue;
+            }
+            let meta_path = cache_root.join(name).join("_meta.json");
+            if !meta_path.exists() {
+                stale_count += 1;
+                continue;
+            }
+            // Try to read synced_at from the meta file.
+            if let Ok(meta_content) = std::fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_content) {
+                    if let Some(synced_at_str) = meta["synced_at"].as_str() {
+                        if let Ok(synced_at) = chrono::DateTime::parse_from_rfc3339(synced_at_str) {
+                            let age =
+                                now.signed_duration_since(synced_at.with_timezone(&chrono::Utc));
+                            if age > stale_threshold {
+                                stale_count += 1;
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            // If we can't parse the meta, count as stale.
+            stale_count += 1;
+        }
+    }
+
+    stale_count
 }
 
 fn find_next_pending_phase(plan_content: &str) -> Option<PhaseInfo> {

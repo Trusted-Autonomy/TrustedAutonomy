@@ -440,8 +440,9 @@ For simple workflows, `ta draft apply` works directly on unapproved drafts (auto
 `ta draft view` organizes its output into structured sections for clear review:
 
 - **Summary** — high-level what changed, why, and impact
+- **Agent Decision Log** — key implementation decisions the agent recorded during the session: what was chosen, alternatives considered, and confidence score
 - **What Changed** — module-grouped file list with change icons (+/~/−), one-line descriptions, and dependency annotations
-- **Design Decisions** — alternatives the agent considered, with `[chosen]`/`[considered]` markers and rationale
+- **Design Decisions** — alternatives the agent considered (from `change_summary.json`), with `[chosen]`/`[considered]` markers and rationale
 - **Artifacts** — detailed per-file view with explanations (at `--detail medium` or `--detail full`)
 
 ```bash
@@ -454,11 +455,32 @@ ta draft view <id> --detail top
 # Full diffs included (renders colored unified diffs from changeset store)
 ta draft view <id> --detail full
 
+# Show only one section
+ta draft view <id> --section summary
+ta draft view <id> --section decisions
+ta draft view <id> --section validation
+ta draft view <id> --section files
+
 # Machine-readable JSON output
 ta draft view <id> --json
 ```
 
-Agents can populate the Design Decisions section by passing an `alternatives` array to the `ta_pr_build` MCP tool. Each entry has `option`, `rationale`, and `chosen` fields.
+**Agent Decision Log**: Agents can write a `.ta-decisions.json` file in the workspace during a goal session. Each entry records a decision made during implementation:
+
+```json
+[
+  {
+    "decision": "Used Ed25519 instead of RSA",
+    "rationale": "Ed25519 is faster with smaller keys and is the modern standard",
+    "alternatives": ["RSA-2048", "ECDSA P-256"],
+    "confidence": 0.9
+  }
+]
+```
+
+These are surfaced in `ta draft view` under "Agent Decision Log" and in the HTML output as collapsible sections. In the HTML view, section open/closed state is persisted in `localStorage` between page loads.
+
+Agents can also populate the Design Decisions section by passing an `alternatives` array to the `ta_pr_build` MCP tool. Each entry has `option`, `rationale`, and `chosen` fields.
 
 ### Validation Log
 

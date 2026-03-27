@@ -351,17 +351,73 @@ impl TerminalAdapter {
 
         output
     }
-}
 
-impl OutputAdapter for TerminalAdapter {
-    fn render(&self, ctx: &RenderContext) -> Result<String, ChangeSetError> {
-        let mut output = String::new();
+    /// Render the "Agent Decision Log" section (v0.14.7).
+    ///
+    /// Shows decisions from `.ta-decisions.json` written by the agent,
+    /// with indented alternatives and rationale.
+    fn render_agent_decision_log(&self, ctx: &RenderContext) -> String {
+        let decisions = &ctx.package.agent_decision_log;
+        if decisions.is_empty() {
+            return String::new();
+        }
+
         let bold = self.bold();
         let reset = self.reset();
         let dim = self.dim();
 
-        // ── Summary ──
-        output.push_str(&self.render_header(ctx));
+        let mut output = format!(
+            "\n{bold}▸ Agent Decision Log ({} decision(s)):{reset}\n",
+            decisions.len()
+        );
+
+        for entry in decisions {
+            let confidence_str = entry
+                .confidence
+                .map(|c| format!(" {dim}[{:.0}% confidence]{reset}", c * 100.0))
+                .unwrap_or_default();
+            output.push_str(&format!(
+                "  ▸ Decision: {}{}{}\n",
+                entry.decision, confidence_str, reset
+            ));
+
+            // List alternatives if any.
+            let alts: Vec<&str> = entry
+                .alternatives
+                .iter()
+                .map(String::as_str)
+                .chain(
+                    entry
+                        .alternatives_considered
+                        .iter()
+                        .map(|a| a.description.as_str()),
+                )
+                .collect();
+            if !alts.is_empty() {
+                output.push_str(&format!(
+                    "      {dim}Alternatives:{reset} {}\n",
+                    alts.join(", ")
+                ));
+            }
+
+            output.push_str(&format!(
+                "      {dim}Rationale:{reset} {}\n",
+                entry.rationale
+            ));
+        }
+
+        output
+    }
+}
+
+impl OutputAdapter for TerminalAdapter {
+    fn render(&self, ctx: &RenderContext) -> Result<String, ChangeSetError> {
+        use crate::output_adapters::SectionFilter;
+
+        let mut output = String::new();
+        let bold = self.bold();
+        let reset = self.reset();
+        let dim = self.dim();
 
         // Filter artifacts
         let artifacts = &ctx.package.changes.artifacts;
@@ -381,11 +437,70 @@ impl OutputAdapter for TerminalAdapter {
             )));
         }
 
+        // ── Section filtering: emit only the requested section ──
+        match ctx.section_filter {
+            Some(SectionFilter::Summary) => {
+                output.push_str(&self.render_header(ctx));
+                return Ok(output);
+            }
+            Some(SectionFilter::Decisions) => {
+                output.push_str(&self.render_agent_decision_log(ctx));
+                output.push_str(&self.render_design_decisions(ctx));
+                if output.is_empty() {
+                    output.push_str(&format!(
+                        "{dim}No decisions recorded for this draft.{reset}\n"
+                    ));
+                }
+                return Ok(output);
+            }
+            Some(SectionFilter::Validation) => {
+                // Validation log is rendered in the calling layer (draft.rs) after adapter output.
+                // Return a hint so the user knows to look there.
+                output.push_str(&format!(
+                    "{dim}Validation output is shown after the main view.{reset}\n\
+                     {dim}Run `ta draft view <id>` (without --section) to see it inline.{reset}\n"
+                ));
+                return Ok(output);
+            }
+            Some(SectionFilter::Files) => {
+                output.push_str(&self.render_grouped_changes(&filtered_artifacts));
+                if ctx.detail_level != DetailLevel::Top {
+                    output.push_str(&format!(
+                        "\n{bold}Artifacts ({}):{reset}\n",
+                        filtered_artifacts.len()
+                    ));
+                    for artifact in &filtered_artifacts {
+                        match ctx.detail_level {
+                            DetailLevel::Top => unreachable!(),
+                            DetailLevel::Medium => {
+                                output.push_str(&self.render_artifact_medium(artifact));
+                                output.push('\n');
+                            }
+                            DetailLevel::Full => {
+                                output.push_str(&self.render_artifact_full(artifact, ctx));
+                                output.push('\n');
+                            }
+                        }
+                    }
+                }
+                return Ok(output);
+            }
+            None => {}
+        }
+
+        // ── Full hierarchical view ──
+
+        // ── Summary ──
+        output.push_str(&self.render_header(ctx));
+
+        // ── Agent Decision Log (v0.14.7) ──
+        output.push_str(&self.render_agent_decision_log(ctx));
+
+        // ── Design Decisions (legacy alternatives_considered) ──
+        output.push_str(&self.render_design_decisions(ctx));
+
         // ── What Changed (module-grouped file list) ──
         output.push_str(&self.render_grouped_changes(&filtered_artifacts));
-
-        // ── Design Decisions ──
-        output.push_str(&self.render_design_decisions(ctx));
 
         // ── Artifacts (detailed per-artifact view) ──
         if ctx.detail_level != DetailLevel::Top {
@@ -412,7 +527,7 @@ impl OutputAdapter for TerminalAdapter {
         // Footer with review guidance
         if ctx.detail_level == DetailLevel::Top || ctx.detail_level == DetailLevel::Medium {
             output.push_str(&format!(
-                "\n{dim}Tip: Use --detail full to see complete diffs{reset}\n"
+                "\n{dim}Tip: Use --detail full to see diffs · --section <name> to filter · --section decisions for decision log{reset}\n"
             ));
         }
 
@@ -525,6 +640,7 @@ mod tests {
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
+            agent_decision_log: vec![],
         }
     }
 
@@ -537,6 +653,7 @@ mod tests {
             detail_level: DetailLevel::Top,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
 
         let output = adapter.render(&ctx).unwrap();
@@ -558,6 +675,7 @@ mod tests {
             detail_level: DetailLevel::Top,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
 
         let output = adapter.render(&ctx).unwrap();
@@ -575,6 +693,7 @@ mod tests {
             detail_level: DetailLevel::Medium,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
 
         let output = adapter.render(&ctx).unwrap();
@@ -591,6 +710,7 @@ mod tests {
             detail_level: DetailLevel::Top,
             file_filter: Some("auth.rs".to_string()),
             diff_provider: None,
+            section_filter: None,
         };
 
         let output = adapter.render(&ctx).unwrap();
@@ -606,6 +726,7 @@ mod tests {
             detail_level: DetailLevel::Top,
             file_filter: Some("nonexistent.rs".to_string()),
             diff_provider: None,
+            section_filter: None,
         };
 
         let result = adapter.render(&ctx);
@@ -622,6 +743,7 @@ mod tests {
             detail_level: DetailLevel::Medium,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
         let output = adapter.render(&ctx).unwrap();
         assert!(
@@ -686,6 +808,7 @@ mod tests {
             detail_level: DetailLevel::Top,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
         let output = adapter.render(&ctx).unwrap();
         assert!(
@@ -718,6 +841,7 @@ mod tests {
             detail_level: DetailLevel::Top,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
         let output = adapter.render(&ctx).unwrap();
         assert!(output.contains("What Changed (2 files):"));
@@ -746,6 +870,7 @@ mod tests {
             detail_level: DetailLevel::Top,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
         let output = adapter.render(&ctx).unwrap();
         assert!(output.contains("Design Decisions:"));
@@ -764,6 +889,7 @@ mod tests {
             detail_level: DetailLevel::Top,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
         let output = adapter.render(&ctx).unwrap();
         assert!(!output.contains("Design Decisions:"));
@@ -778,10 +904,123 @@ mod tests {
             detail_level: DetailLevel::Medium,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
         let output = adapter.render(&ctx).unwrap();
         // Medium shows both grouped summary and detailed artifacts
         assert!(output.contains("What Changed"));
         assert!(output.contains("Artifacts (1):"));
+    }
+
+    // ── v0.14.7 Agent Decision Log tests ──
+
+    #[test]
+    fn render_agent_decision_log() {
+        use crate::draft_package::DecisionLogEntry;
+
+        let adapter = TerminalAdapter::new();
+        let mut package = test_package();
+        package.agent_decision_log = vec![DecisionLogEntry {
+            decision: "Used Ed25519 instead of RSA".to_string(),
+            rationale: "Ed25519 is faster and smaller keys".to_string(),
+            alternatives: vec!["RSA-2048".to_string(), "ECDSA P-256".to_string()],
+            alternatives_considered: vec![],
+            confidence: Some(0.9),
+        }];
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filter: None,
+            diff_provider: None,
+            section_filter: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(output.contains("Agent Decision Log"));
+        assert!(output.contains("Used Ed25519 instead of RSA"));
+        assert!(output.contains("RSA-2048"));
+        assert!(output.contains("ECDSA P-256"));
+        assert!(output.contains("Ed25519 is faster"));
+        // Confidence shown as percentage
+        assert!(output.contains("90%"));
+    }
+
+    #[test]
+    fn render_agent_decision_log_empty() {
+        let adapter = TerminalAdapter::new();
+        let package = test_package();
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filter: None,
+            diff_provider: None,
+            section_filter: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(!output.contains("Agent Decision Log"));
+    }
+
+    #[test]
+    fn section_filter_decisions() {
+        use crate::draft_package::DecisionLogEntry;
+        use crate::output_adapters::SectionFilter;
+
+        let adapter = TerminalAdapter::new();
+        let mut package = test_package();
+        package.agent_decision_log = vec![DecisionLogEntry {
+            decision: "Chose async over sync".to_string(),
+            rationale: "Better throughput".to_string(),
+            alternatives: vec!["sync".to_string()],
+            alternatives_considered: vec![],
+            confidence: None,
+        }];
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filter: None,
+            diff_provider: None,
+            section_filter: Some(SectionFilter::Decisions),
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(output.contains("Chose async over sync"));
+        // Summary should not appear when section=decisions
+        assert!(!output.contains("Status:"));
+    }
+
+    #[test]
+    fn section_filter_summary() {
+        use crate::output_adapters::SectionFilter;
+
+        let adapter = TerminalAdapter::new();
+        let package = test_package();
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filter: None,
+            diff_provider: None,
+            section_filter: Some(SectionFilter::Summary),
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(output.contains("Summary:"));
+        // Files section should not appear
+        assert!(!output.contains("What Changed"));
+    }
+
+    #[test]
+    fn section_filter_files() {
+        use crate::output_adapters::SectionFilter;
+
+        let adapter = TerminalAdapter::new();
+        let package = test_package();
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filter: None,
+            diff_provider: None,
+            section_filter: Some(SectionFilter::Files),
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(output.contains("What Changed"));
+        // Header not present in files-only view
+        assert!(!output.contains("Status:"));
     }
 }

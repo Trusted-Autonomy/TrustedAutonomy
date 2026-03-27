@@ -312,6 +312,7 @@ impl<S: ChangeStore> FsConnector<S> {
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
+            agent_decision_log: vec![],
         };
 
         Ok(package)

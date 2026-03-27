@@ -553,6 +553,15 @@ pub struct DraftPackage {
     /// (PLAN.md, USAGE.md, shared source) that the parent apply had already updated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub baseline_artifacts: Vec<String>,
+
+    /// Agent-authored decision log (v0.14.7).
+    ///
+    /// Populated from `.ta-decisions.json` written by the agent during its run.
+    /// Records non-obvious implementation choices with alternatives and rationale.
+    /// Distinct from `plan.decision_log` which is extracted from `change_summary.json`.
+    /// Shown as the "Agent Decision Log" section in `ta draft view`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_decision_log: Vec<DecisionLogEntry>,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -629,6 +638,9 @@ pub struct DecisionLogEntry {
     /// Structured alternatives with rejection reasons (v0.3.3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives_considered: Vec<AlternativeConsidered>,
+    /// Optional agent confidence in this decision (0.0–1.0) (v0.14.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
 }
 
 /// A structured alternative considered during a decision (v0.3.3).
@@ -779,6 +791,7 @@ mod tests {
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
+            agent_decision_log: vec![],
         }
     }
 
@@ -1069,6 +1082,7 @@ mod tests {
                     rejected_reason: "Adds operational dependency".to_string(),
                 },
             ],
+            confidence: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -1315,5 +1329,48 @@ mod tests {
         let restored: DraftPackage = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.tag, Some("fix-auth-01".to_string()));
         assert!(restored.vcs_status.is_some());
+    }
+
+    #[test]
+    fn agent_decision_log_round_trip() {
+        let mut pkg = test_package();
+        pkg.agent_decision_log = vec![DecisionLogEntry {
+            decision: "Used Ed25519 instead of RSA".to_string(),
+            rationale: "Ed25519 is faster, smaller keys, already in Cargo.lock".to_string(),
+            alternatives: vec!["RSA-2048".to_string(), "ECDSA P-256".to_string()],
+            alternatives_considered: vec![],
+            confidence: Some(0.9),
+        }];
+        let json = serde_json::to_string(&pkg).unwrap();
+        assert!(json.contains("agent_decision_log"));
+        assert!(json.contains("Ed25519"));
+        assert!(json.contains("0.9"));
+        let restored: DraftPackage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.agent_decision_log.len(), 1);
+        assert_eq!(
+            restored.agent_decision_log[0].decision,
+            "Used Ed25519 instead of RSA"
+        );
+        assert_eq!(restored.agent_decision_log[0].confidence, Some(0.9));
+        assert_eq!(restored.agent_decision_log[0].alternatives.len(), 2);
+    }
+
+    #[test]
+    fn agent_decision_log_backward_compat() {
+        // Packages without agent_decision_log should deserialize with empty vec.
+        let pkg = test_package();
+        let json = serde_json::to_string(&pkg).unwrap();
+        assert!(!json.contains("agent_decision_log"));
+        let restored: DraftPackage = serde_json::from_str(&json).unwrap();
+        assert!(restored.agent_decision_log.is_empty());
+    }
+
+    #[test]
+    fn decision_log_confidence_optional() {
+        // DecisionLogEntry without confidence should deserialize fine.
+        let entry_json = r#"{"decision":"test","rationale":"reason","alternatives":[]}"#;
+        let entry: DecisionLogEntry = serde_json::from_str(entry_json).unwrap();
+        assert_eq!(entry.decision, "test");
+        assert!(entry.confidence.is_none());
     }
 }

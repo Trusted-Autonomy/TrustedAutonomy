@@ -4363,6 +4363,23 @@ You are working on a TA-mediated goal in a staging workspace.
 - Do NOT modify files outside this directory
 - All your changes will be captured as a draft for human review
 
+## Agent Decision Log (optional but encouraged)
+
+If you make significant design decisions during this session, record them in `.ta-decisions.json` so the reviewer can see your reasoning. This is separate from the change summary — it captures *why you chose one approach over another*.
+
+```json
+[
+  {{
+    "decision": "One-line description of the choice made",
+    "rationale": "Why this approach was chosen",
+    "alternatives": ["other option A", "other option B"],
+    "confidence": 0.9
+  }}
+]
+```
+
+This file is optional. If present, TA will surface these decisions in `ta draft view` under "Agent Decision Log".
+
 ## Before You Exit — Change Summary (REQUIRED)
 
 You MUST create `.ta/change_summary.json` before exiting. The human reviewer relies on this to understand your work. Every changed file needs a clear "what I did" and "why" — reviewers who don't understand a change will reject it.
@@ -5804,6 +5821,7 @@ pre_launch:
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
+            agent_decision_log: vec![],
         };
 
         // Save the draft package.
@@ -5965,6 +5983,7 @@ pre_launch:
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
+            agent_decision_log: vec![],
         };
 
         super::super::draft::save_package(&config, &parent_draft).unwrap();

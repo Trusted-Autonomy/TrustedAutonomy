@@ -157,6 +157,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             format: format.clone(),
             color: *color,
             json: false,
+            section: None,
         },
         PrCommands::Approve { id, reviewer } => draft::DraftCommands::Approve {
             id: Some(id.clone()),

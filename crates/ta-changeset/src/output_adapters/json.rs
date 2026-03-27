@@ -116,6 +116,7 @@ mod tests {
             supervisor_review: None,
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
+            agent_decision_log: vec![],
         };
 
         let adapter = JsonAdapter::new();
@@ -124,6 +125,7 @@ mod tests {
             detail_level: DetailLevel::Full,
             file_filter: None,
             diff_provider: None,
+            section_filter: None,
         };
 
         let output = adapter.render(&ctx).unwrap();

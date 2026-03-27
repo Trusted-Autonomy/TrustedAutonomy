@@ -380,6 +380,8 @@ pub(crate) struct StatusInfo {
     pub(crate) agent_model: Option<String>,
     /// Active goal tag for status bar display (v0.11.2.3).
     pub(crate) active_goal_tag: Option<String>,
+    /// Number of community resources with stale or missing caches (v0.14.7).
+    pub(crate) community_pending_count: usize,
 }
 
 pub(crate) async fn fetch_status(client: &reqwest::Client, base_url: &str) -> StatusInfo {
@@ -426,6 +428,7 @@ pub(crate) async fn fetch_status(client: &reqwest::Client, base_url: &str) -> St
                 .first()
                 .and_then(|a| a["tag"].as_str().map(String::from))
         }),
+        community_pending_count: json["community_pending_count"].as_u64().unwrap_or(0) as usize,
     }
 }
 

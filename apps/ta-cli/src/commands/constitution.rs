@@ -1699,6 +1699,7 @@ fn create_review_draft(
         supervisor_review: None,
         ignored_artifacts: vec![],
         baseline_artifacts: vec![],
+        agent_decision_log: vec![],
     };
 
     super::draft::save_package(config, &pkg)

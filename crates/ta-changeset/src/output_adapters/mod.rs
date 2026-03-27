@@ -88,6 +88,47 @@ impl std::fmt::Display for DetailLevel {
     }
 }
 
+/// Section filter for `ta draft view --section` (v0.14.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionFilter {
+    /// Show only the summary section.
+    Summary,
+    /// Show only the Agent Decision Log.
+    Decisions,
+    /// Show only the validation evidence.
+    Validation,
+    /// Show only the changed files list.
+    Files,
+}
+
+impl std::str::FromStr for SectionFilter {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "summary" => Ok(SectionFilter::Summary),
+            "decisions" => Ok(SectionFilter::Decisions),
+            "validation" => Ok(SectionFilter::Validation),
+            "files" => Ok(SectionFilter::Files),
+            _ => Err(format!(
+                "Invalid section: '{}'. Valid sections: summary, decisions, validation, files",
+                s
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for SectionFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SectionFilter::Summary => write!(f, "summary"),
+            SectionFilter::Decisions => write!(f, "decisions"),
+            SectionFilter::Validation => write!(f, "validation"),
+            SectionFilter::Files => write!(f, "files"),
+        }
+    }
+}
+
 /// Context for rendering a PR package.
 pub struct RenderContext<'a> {
     pub package: &'a DraftPackage,
@@ -96,6 +137,8 @@ pub struct RenderContext<'a> {
     pub file_filter: Option<String>,
     /// Optional: Diff content provider (for fetching full diffs).
     pub diff_provider: Option<&'a dyn DiffProvider>,
+    /// Optional: Show only one section of the draft view (v0.14.7).
+    pub section_filter: Option<SectionFilter>,
 }
 
 /// Trait for fetching diff content.

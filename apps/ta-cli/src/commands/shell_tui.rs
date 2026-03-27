@@ -3142,6 +3142,18 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    // Community hub badge (v0.14.7): shows stale/missing resource count.
+    if app.status.community_pending_count > 0 {
+        spans.push(Span::raw("│"));
+        spans.push(Span::styled(
+            format!(" ⬡ {} community ", app.status.community_pending_count),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Scroll position indicator (v0.10.18.2).
     if app.scroll_offset > 0 {
         // Calculate current visible line range.
@@ -3596,6 +3608,9 @@ async fn background_health(
                                 .first()
                                 .and_then(|a| a["tag"].as_str().map(String::from))
                         }),
+                        community_pending_count: json["community_pending_count"]
+                            .as_u64()
+                            .unwrap_or(0) as usize,
                     };
                     let _ = tx.send(TuiMessage::StatusUpdate(status));
                 }
