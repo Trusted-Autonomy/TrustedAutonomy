@@ -201,6 +201,9 @@ pub enum GoalCommands {
     Delete {
         /// Goal run ID.
         id: String,
+        /// Reason for deleting (recorded in the audit ledger).
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Manage access constitutions for goals (v0.4.3).
     Constitution {
@@ -428,7 +431,7 @@ pub fn execute(cmd: &GoalCommands, config: &GatewayConfig) -> anyhow::Result<()>
             *limit,
         ),
         GoalCommands::Status { id, json } => show_status(&store, config, id, *json),
-        GoalCommands::Delete { id } => delete_goal(&store, config, id),
+        GoalCommands::Delete { id, reason } => delete_goal(&store, config, id, reason.as_deref()),
         GoalCommands::Constitution { command } => execute_constitution(command, config, &store),
         GoalCommands::Inspect { id, json } => goal_inspect(config, &store, id, *json),
         GoalCommands::PostMortem { id } => goal_post_mortem(config, &store, id),
@@ -1352,22 +1355,74 @@ fn show_status(
     Ok(())
 }
 
-fn delete_goal(store: &GoalRunStore, config: &GatewayConfig, id: &str) -> anyhow::Result<()> {
+fn delete_goal(
+    store: &GoalRunStore,
+    config: &GatewayConfig,
+    id: &str,
+    reason: Option<&str>,
+) -> anyhow::Result<()> {
     let goal_run_id = resolve_goal_id(id, store)?;
     let goal = store.get(goal_run_id)?;
 
     match goal {
         Some(g) => {
-            // Record velocity entry for non-terminal goals being deleted (cancelled).
+            // Determine disposition: abandoned if no draft was ever produced.
+            let has_draft = g.pr_package_id.is_some();
             let is_terminal = matches!(
                 g.state,
                 GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Failed { .. }
             );
+
+            let disposition = if !has_draft && !is_terminal {
+                ta_audit::AuditDisposition::Abandoned
+            } else {
+                ta_audit::AuditDisposition::Cancelled
+            };
+
+            // Record velocity entry for non-terminal goals being deleted.
             if !is_terminal {
+                let cancel_msg = reason.unwrap_or("user deleted goal");
                 let entry = VelocityEntry::from_goal(&g, GoalOutcome::Cancelled)
-                    .with_cancel_reason("user deleted goal");
+                    .with_cancel_reason(cancel_msg);
                 let vs = VelocityStore::for_project(&config.workspace_root);
                 let _ = vs.append(&entry);
+            }
+
+            // Write audit ledger entry before removing data.
+            {
+                let ledger_path = ta_audit::GoalAuditLedger::path_for(&config.workspace_root);
+                if let Ok(mut ledger) = ta_audit::GoalAuditLedger::open(&ledger_path) {
+                    let now = chrono::Utc::now();
+                    let total = now.signed_duration_since(g.created_at).num_seconds();
+                    let mut entry = ta_audit::AuditEntry {
+                        goal_id: g.goal_run_id,
+                        title: g.title.clone(),
+                        objective: None,
+                        disposition,
+                        phase: g.plan_phase.clone(),
+                        agent: g.agent_id.clone(),
+                        created_at: g.created_at,
+                        pr_ready_at: None,
+                        recorded_at: now,
+                        build_seconds: total,
+                        review_seconds: 0,
+                        total_seconds: total,
+                        draft_id: g.pr_package_id,
+                        ai_summary: None,
+                        reviewer: None,
+                        denial_reason: None,
+                        cancel_reason: reason.map(|s| s.to_string()),
+                        artifact_count: 0,
+                        lines_changed: 0,
+                        artifacts: Vec::new(),
+                        policy_result: None,
+                        parent_goal_id: g.parent_goal_id,
+                        previous_hash: None,
+                    };
+                    if let Err(e) = ledger.append(&mut entry) {
+                        tracing::warn!("Failed to write goal audit entry for delete: {}", e);
+                    }
+                }
             }
 
             // Remove the staging directory if it exists.
@@ -1727,7 +1782,7 @@ fn verify_constitution(
 /// Garbage-collect zombie goals and stale staging directories (v0.9.5.1).
 fn gc_goals(
     store: &GoalRunStore,
-    _config: &GatewayConfig,
+    config: &GatewayConfig,
     dry_run: bool,
     include_staging: bool,
     threshold_days: u32,
@@ -1750,6 +1805,8 @@ fn gc_goals(
                     (chrono::Utc::now() - goal.updated_at).num_days(),
                 );
             } else {
+                // Write audit ledger entry before transitioning.
+                write_gc_audit_entry(config, goal, "stale: exceeded threshold");
                 let mut g = goal.clone();
                 let _ = g.transition(GoalRunState::Failed {
                     reason: format!("gc: stale goal exceeded {}d threshold", threshold_days),
@@ -1781,6 +1838,8 @@ fn gc_goals(
                     truncate(&goal.title, 40),
                 );
             } else {
+                // Write audit ledger entry before marking failed.
+                write_gc_audit_entry(config, goal, "missing staging workspace");
                 let mut g = goal.clone();
                 let _ = g.transition(GoalRunState::Failed {
                     reason: "gc: missing staging workspace".to_string(),
@@ -1834,6 +1893,52 @@ fn gc_goals(
     );
 
     Ok(())
+}
+
+/// Write a gc audit entry for a goal being transitioned by the garbage collector.
+fn write_gc_audit_entry(config: &GatewayConfig, goal: &GoalRun, gc_reason: &str) {
+    let ledger_path = ta_audit::GoalAuditLedger::path_for(&config.workspace_root);
+    match ta_audit::GoalAuditLedger::open(&ledger_path) {
+        Ok(mut ledger) => {
+            let now = chrono::Utc::now();
+            let total = now.signed_duration_since(goal.created_at).num_seconds();
+            let mut entry = ta_audit::AuditEntry {
+                goal_id: goal.goal_run_id,
+                title: goal.title.clone(),
+                objective: None,
+                disposition: ta_audit::AuditDisposition::Gc,
+                phase: goal.plan_phase.clone(),
+                agent: goal.agent_id.clone(),
+                created_at: goal.created_at,
+                pr_ready_at: None,
+                recorded_at: now,
+                build_seconds: total,
+                review_seconds: 0,
+                total_seconds: total,
+                draft_id: goal.pr_package_id,
+                ai_summary: None,
+                reviewer: None,
+                denial_reason: None,
+                cancel_reason: Some(format!("gc: {}", gc_reason)),
+                artifact_count: 0,
+                lines_changed: 0,
+                artifacts: Vec::new(),
+                policy_result: None,
+                parent_goal_id: goal.parent_goal_id,
+                previous_hash: None,
+            };
+            if let Err(e) = ledger.append(&mut entry) {
+                tracing::warn!(
+                    "Failed to write gc audit entry for goal {}: {}",
+                    goal.goal_run_id,
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to open goal audit ledger for gc entry: {}", e);
+        }
+    }
 }
 
 /// Approximate directory size in bytes (non-recursive for speed — counts immediate files).
@@ -2986,7 +3091,7 @@ mod tests {
         assert!(staging_path.exists());
 
         // Delete the goal.
-        delete_goal(&store, &config, &goal_id.to_string()).unwrap();
+        delete_goal(&store, &config, &goal_id.to_string(), None).unwrap();
 
         // Verify metadata is removed.
         assert!(store.get(goal_id).unwrap().is_none());

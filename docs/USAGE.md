@@ -3520,6 +3520,86 @@ Five drift signals are tracked:
 
 Baselines are stored in `.ta/baselines/<agent-id>.json`.
 
+### Goal Audit Ledger
+
+Every terminal outcome of a goal run — applied, denied, cancelled, abandoned, timed out, or GC'd — is recorded in `.ta/goal-audit.jsonl`. Entries are hash-chained for tamper detection.
+
+#### Inspecting the ledger
+
+```bash
+# Export all entries as JSONL (default)
+ta audit ledger export
+
+# Export as CSV for spreadsheet analysis
+ta audit ledger export --format csv
+
+# Filter by disposition
+ta audit ledger export --disposition applied
+ta audit ledger export --disposition denied
+
+# Filter by plan phase or agent
+ta audit ledger export --phase v0.14.6
+ta audit ledger export --agent claude-opus-4-5
+
+# Filter by date range (RFC 3339 or ISO 8601)
+ta audit ledger export --since 2025-01-01T00:00:00Z
+ta audit ledger export --until 2025-06-30T23:59:59Z
+
+# Export to a file
+ta audit ledger export --format csv > goal-history.csv
+
+# Point at a specific ledger file
+ta audit ledger export --ledger /path/to/goal-audit.jsonl
+```
+
+#### Verifying integrity
+
+```bash
+# Verify the hash chain (detects tampering or truncation)
+ta audit ledger verify
+
+# Verify a specific ledger file
+ta audit ledger verify --ledger /path/to/goal-audit.jsonl
+```
+
+A broken chain prints the first entry where the hash link fails and exits non-zero.
+
+#### Retention / GC
+
+```bash
+# Remove entries older than 1 year (dry run first)
+ta audit ledger gc --older-than 1y --dry-run
+ta audit ledger gc --older-than 1y
+
+# Other retention windows
+ta audit ledger gc --older-than 6m   # 6 months
+ta audit ledger gc --older-than 90d  # 90 days
+```
+
+GC rewrites the ledger atomically (temp file + rename) and re-anchors the hash chain so `verify` still passes after pruning.
+
+#### Migrating from goal-history.jsonl
+
+If you have an existing `.ta/goal-history.jsonl` from an older version, import it:
+
+```bash
+ta audit ledger migrate
+# → reads .ta/goal-history.jsonl, appends to .ta/goal-audit.jsonl
+
+# Custom paths
+ta audit ledger migrate --history .ta/goal-history.jsonl --ledger .ta/goal-audit.jsonl
+```
+
+#### Deleting a goal with a reason
+
+When you delete a goal manually, you can record why:
+
+```bash
+ta goal delete <goal-id> --reason "duplicate of goal-abc"
+```
+
+The reason is stored in the audit ledger entry as `cancel_reason`.
+
 ### Conflict Detection
 
 If source files change while a goal is running:

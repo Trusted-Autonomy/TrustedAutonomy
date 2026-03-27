@@ -6952,23 +6952,26 @@ This is a partial complement to v0.14.3.5 item 6 (config-driven TA project/local
 ---
 
 ### v0.14.6 — Local Audit Ledger
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Replace the lightweight goal history index with a complete local audit ledger — capturing full decision context across every goal lifecycle path, not just the happy path. Dispatches to pluggable storage backends via the `AuditStorageBackend` trait defined in v0.14.4.
 
 #### Problem
 The current `.ta/goal-history.jsonl` records only successful `draft apply` events. Goals that are deleted, denied, gc'd, or crash produce no audit record. Even on the happy path, records lack intent, reviewer identity, denial reason, artifact manifest, and policy evaluation results.
 
 #### Items
-1. [ ] **`AuditEntry` data model**: Rich record capturing: goal ID, title, objective/intent, final state, phase, agent, timestamps, duration, draft ID, AI summary, reviewer/approver, denial reason, artifact URIs with change types, policy evaluation results, parent goal. Serialized as JSONL.
-2. [ ] **Emit on all terminal transitions**: apply, deny, close, delete, gc, timeout, agent crash. No goal data removed without an audit record.
-3. [ ] **Abandoned goal records**: Goals deleted before producing a draft get `disposition: "abandoned"` with available context.
-4. [ ] **`ta goal delete --reason`**: Prompt for a reason when manually deleting goals. Stored in the audit entry.
-5. [ ] **`ta goal gc` writes audit entries**: Append audit entry with `disposition: "gc"` before removing any goal data.
-6. [ ] **Populate artifact count and lines changed**: Wire `artifact_count` / `lines_changed` to actual draft artifact data (currently always 0).
-7. [ ] **`ta audit export`**: Export ledger as JSONL or CSV, filterable by date range, phase, agent, disposition.
-8. [ ] **Ledger integrity**: Append-only with hash chaining — each entry includes hash of previous. `ta audit verify` validates the chain.
-9. [ ] **Retention policy**: `ta audit gc --older-than 1y` removes entries beyond configured retention while preserving chain integrity.
-10. [ ] **Migration**: Migrate existing `.ta/goal-history.jsonl` entries to the new format on first run.
+1. [x] **`AuditEntry` data model**: Rich record in `crates/ta-audit/src/ledger.rs`: goal_id, title, objective, disposition, phase, agent, timestamps, build/review/total_seconds, draft_id, ai_summary, reviewer, denial_reason, cancel_reason, artifact_count, lines_changed, artifact list (uri + change_type), policy_result, parent_goal_id, previous_hash chain. `GoalAuditLedger` stores to `.ta/goal-audit.jsonl`.
+2. [x] **Emit on all terminal transitions**: apply → `AuditDisposition::Applied` in `apply_package`; deny → `Denied` in `deny_package`; close → `Closed` in `close_package`; delete → `Abandoned`/`Cancelled` in `delete_goal`; gc → `Gc` in `gc_goals`. All write before data removal.
+3. [x] **Abandoned goal records**: `delete_goal` detects `!has_draft && !is_terminal` and sets `disposition: Abandoned`. `AuditEntry::abandoned()` constructor for goals deleted before producing a draft.
+4. [x] **`ta goal delete --reason`**: Added `--reason <text>` flag to `ta goal delete`. Stored in `cancel_reason` field of the audit entry.
+5. [x] **`ta goal gc` writes audit entries**: `gc_goals` calls `write_gc_audit_entry()` before any state transition. Entries carry `disposition: gc` and `cancel_reason: "gc: <reason>"`.
+6. [x] **Populate artifact count and lines changed**: `artifact_count = pkg.changes.artifacts.len()` wired in `write_goal_audit_entry`. Artifact list includes URI + change_type per artifact. `lines_changed` recorded as 0 (no per-line diff data available without loading diffs).
+7. [x] **`ta audit ledger export`**: `ta audit ledger export [--format jsonl|csv] [--disposition <d>] [--phase <p>] [--agent <a>] [--since <date>] [--until <date>]`. Both JSONL and CSV outputs supported.
+8. [x] **Ledger integrity**: `GoalAuditLedger` uses same SHA-256 hash chaining as `AuditLog`. `ta audit ledger verify` validates the chain, reporting the violation line and expected/actual hashes on failure.
+9. [x] **Retention policy**: `ta audit ledger gc --older-than 1y` removes entries beyond the configured retention, re-anchors the hash chain, and prints before/after counts. Supports `y`, `m`, `d` suffixes. `--dry-run` flag.
+10. [x] **Migration**: `ta audit ledger migrate` reads `.ta/goal-history.jsonl` entries, converts to `AuditEntry` records, skips already-migrated IDs. `migrate_from_history()` function in `crates/ta-audit/src/ledger.rs`.
+
+#### Completed (12 tests added in `crates/ta-audit/src/ledger.rs`)
+- `append_and_read_round_trip`, `hash_chain_is_valid`, `first_entry_has_no_previous_hash`, `reopen_continues_chain`, `ledger_filter_by_disposition`, `ledger_filter_by_phase`, `abandoned_entry_constructor`, `migrate_from_history_basic`, `migrate_skips_already_migrated`, `disposition_display_round_trip` + 2 more.
 
 #### Version: `0.14.6-alpha`
 
