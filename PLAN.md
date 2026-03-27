@@ -7354,6 +7354,47 @@ ta template install ./my-local-template        # local path
 
 ---
 
+### v0.14.9 — Qwen3.5 Local Agent Profiles & Ollama Install Flow
+<!-- status: pending -->
+**Goal**: First-class support for Qwen3.5 (4B, 9B, 27B) as local TA agents via Ollama. The `ta-agent-ollama` binary already supports any OpenAI-compatible endpoint — this phase adds: ready-to-use agent profiles for each size, a `ta agent install` flow that drives Ollama model pulls, Qwen3.x thinking-mode integration, hardware guidance, and size-adaptive selection so TA automatically picks the right model for the task.
+
+**Depends on**: v0.13.16 (`ta-agent-ollama` crate, `ta agent install/publish`)
+
+#### Background
+
+`ta-agent-ollama` (v0.13.16) is already model-agnostic — `ta run "..." --model ollama/qwen2.5-coder:7b` works today. What's missing for Qwen3.5 is: bundled agent profiles, an install flow that hides the `ollama pull` step, and support for Qwen3's native thinking-mode tokens.
+
+**Qwen3.x thinking mode**: Qwen3 models support `/think` and `/no_think` system prompt instructions that toggle chain-of-thought reasoning. The 27B and 9B models benefit significantly from thinking mode on complex tasks; the 4B is better used without it to stay within context limits. TA should surface this as a profile flag rather than exposing raw token syntax.
+
+**Size guidance:**
+| Model | VRAM | Best for |
+|---|---|---|
+| `qwen3.5:4b` | ~4 GB | Quick edits, simple scripts, fast iteration |
+| `qwen3.5:9b` | ~8 GB | Mid-complexity tasks, most coding work |
+| `qwen3.5:27b` | ~20 GB | Complex multi-file refactors, planning, research |
+
+#### Items
+
+1. [ ] **Agent profiles** in `agents/` (shipped with TA): `qwen3.5-4b.toml`, `qwen3.5-9b.toml`, `qwen3.5-27b.toml`. Each sets `framework = "ta-agent-ollama"`, the appropriate model string, `temperature`, `max_turns`, and a `thinking_mode` flag (on for 9B/27B, off for 4B). Profile descriptions include RAM guidance and task fit notes.
+
+2. [ ] **`ta agent install qwen3.5 --size 27b`** (also `4b`, `9b`, `all`): Checks if Ollama is installed and running; prints install link if not (`https://ollama.ai`). Runs `ollama pull qwen3.5:27b` (or the appropriate tag). Installs the bundled agent profile to `~/.config/ta/agents/`. Confirms with: `"qwen3.5:27b installed — run: ta run \"title\" --agent qwen3.5-27b"`. `--size all` pulls all three variants.
+
+3. [ ] **Ollama health check in `ta doctor`**: Detect if Ollama is not running when a `ta-agent-ollama`-backed agent is configured. Print: `"Ollama not reachable at http://localhost:11434 — start with: ollama serve"`.
+
+4. [ ] **Thinking-mode support in `ta-agent-ollama`**: When the agent profile sets `thinking_mode = true`, prepend `/think\n` to the system prompt. When `false`, prepend `/no_think\n`. No change for profiles that don't set the flag (backward compatible). Document in `docs/USAGE.md` "Thinking mode" section.
+
+5. [ ] **Size-adaptive selection**: `ta run "..." --model qwen3.5:auto` queries available Ollama models and picks the largest installed variant. Prints which model was selected. Falls back to explicit `--model` error message if no qwen3.5 variant is found.
+
+6. [ ] **`ta agent list --local`**: Shows installed Ollama-backed agents alongside their model name, estimated VRAM, and whether Ollama reports the model as downloaded. Differentiates from cloud agents (Claude, GPT-4) with a `[local]` tag.
+
+7. [ ] **USAGE.md "Local Models" section**: Quick-start for Qwen3.5. Prerequisites (Ollama, VRAM table), install command, first run example, thinking-mode guidance, switching between sizes.
+
+8. [ ] **Tests**: `ta agent install qwen3.5 --size 4b` with Ollama stub (mock the `ollama pull` subprocess). Profile loading round-trip. Thinking-mode system prompt injection. `--model qwen3.5:auto` selection logic with mocked model list.
+
+#### Version: `0.14.9-alpha`
+
+---
+
 ## v0.15 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
