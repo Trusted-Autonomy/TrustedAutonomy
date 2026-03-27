@@ -288,6 +288,32 @@ pub enum GoalCommands {
         #[arg(long)]
         latest: bool,
     },
+
+    /// Bulk cleanup of old goals and drafts (v0.14.7.2).
+    ///
+    /// Removes goal records, staging directories, and associated draft packages
+    /// for terminal goals that are no longer needed. Always writes an audit record
+    /// per purged goal. Refuses to purge active goals (Running, PrReady, UnderReview).
+    ///
+    /// Examples:
+    ///   ta goal purge --state closed,denied,applied --older-than 30d
+    ///   ta goal purge --id <id>
+    ///   ta goal purge --state completed --older-than 7d --dry-run
+    Purge {
+        /// Remove a specific goal by ID or prefix.
+        #[arg(long)]
+        id: Option<String>,
+        /// Filter by comma-separated terminal states to purge (e.g., "closed,denied,applied,completed").
+        /// Only terminal states are accepted; active states are refused.
+        #[arg(long)]
+        state: Option<String>,
+        /// Only purge goals older than this duration (e.g., "7d", "30d", "90d").
+        #[arg(long)]
+        older_than: Option<String>,
+        /// Show what would be removed without making changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Access constitution subcommands (v0.4.3).
@@ -445,6 +471,19 @@ pub fn execute(cmd: &GoalCommands, config: &GatewayConfig) -> anyhow::Result<()>
         GoalCommands::Recover { id, list, latest } => {
             goal_recover(config, &store, id.as_deref(), *list, *latest)
         }
+        GoalCommands::Purge {
+            id,
+            state,
+            older_than,
+            dry_run,
+        } => purge_goals(
+            config,
+            &store,
+            id.as_deref(),
+            state.as_deref(),
+            older_than.as_deref(),
+            *dry_run,
+        ),
     }
 }
 
@@ -629,12 +668,18 @@ fn list_goals(
     };
 
     // Default: show active (non-terminal) goals unless --all is passed or a state filter is explicit.
+    // v0.14.7.2: Also retain Failed goals that have a staging directory on disk — these are
+    // recoverable and should not disappear from the default view.
     if !all && state.is_none() || active {
         goals.retain(|g| {
-            !matches!(
-                g.state,
-                GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Failed { .. }
-            )
+            if matches!(g.state, GoalRunState::Applied | GoalRunState::Completed) {
+                return false;
+            }
+            if let GoalRunState::Failed { .. } = &g.state {
+                // Only show Failed goals that have recoverable staging directories.
+                return !g.workspace_path.as_os_str().is_empty() && g.workspace_path.exists();
+            }
+            true
         });
     }
 
@@ -651,6 +696,11 @@ fn list_goals(
         "TAG", "ID", "TITLE", "STATE", "HEALTH", "DRAFT", "VCS"
     );
     println!("{}", "-".repeat(116));
+
+    // v0.14.7.2: Track zombie goals for footer hint.
+    let mut zombie_count = 0u32;
+    // v0.14.7.2: Track recoverable failed goals for footer.
+    let mut recoverable_failed = 0u32;
 
     for g in &goals {
         let tag = g.display_tag();
@@ -682,6 +732,7 @@ fn list_goals(
         // v0.13.17.2: Show "ta-building-draft [Xs]" for Finalizing goals instead of
         // the raw "finalizing" state, which was previously indistinguishable from a
         // red "no heartbeat" banner in some display contexts.
+        // v0.14.7.2: Show "⚠ recoverable" for Failed goals with staging present.
         let state_display = if let GoalRunState::Finalizing {
             finalize_started_at,
             ..
@@ -691,7 +742,24 @@ fn list_goals(
                 .num_seconds()
                 .unsigned_abs();
             format!("building-draft [{}s]", elapsed)
+        } else if matches!(&g.state, GoalRunState::Failed { .. }) {
+            recoverable_failed += 1;
+            "failed [⚠ recoverable]".to_string()
+        } else if let GoalRunState::DraftPending { pending_since, .. } = &g.state {
+            // v0.14.7.2: Show elapsed time for DraftPending goals.
+            let elapsed = (chrono::Utc::now() - *pending_since)
+                .num_seconds()
+                .unsigned_abs();
+            format!("draft_pending [{}s]", elapsed)
         } else {
+            // v0.14.7.2: Detect zombie running goals (Running + dead PID).
+            if g.state == GoalRunState::Running {
+                if let Some(pid) = g.agent_pid {
+                    if !is_process_alive(pid) {
+                        zombie_count += 1;
+                    }
+                }
+            }
             g.state.to_string()
         };
 
@@ -701,6 +769,20 @@ fn list_goals(
         );
     }
     println!("\n{} goal(s) total.", goals.len());
+
+    // v0.14.7.2: Footer hints for recoverable and zombie goals.
+    if recoverable_failed > 0 {
+        println!(
+            "  {} goal(s) marked recoverable. Run 'ta goal recover <id>' to inspect and recover work from staging.",
+            recoverable_failed
+        );
+    }
+    if zombie_count > 0 {
+        println!(
+            "  ⚠ {} zombie/stale goal(s) found (Running with dead PID). Run 'ta goal gc' to clean up.",
+            zombie_count
+        );
+    }
 
     Ok(())
 }
@@ -1139,6 +1221,36 @@ fn goal_recover(
     Ok(())
 }
 
+/// A single checkpoint in the agent progress journal (v0.14.7.2).
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+struct ProgressCheckpoint {
+    label: String,
+    at: String,
+    detail: String,
+}
+
+/// The agent progress journal stored at `.ta/ta-progress.json` in staging (v0.14.7.2).
+///
+/// Written by the agent during execution; survives process crashes so recovery
+/// tools can show how far the agent got before failure.
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+struct ProgressJournal {
+    goal_id: String,
+    checkpoints: Vec<ProgressCheckpoint>,
+}
+
+/// Try to load the progress journal from a staging workspace.
+///
+/// Returns `None` if the file is absent or unparseable.
+fn load_progress_journal(workspace_path: &std::path::Path) -> Option<ProgressJournal> {
+    let path = workspace_path.join(".ta").join("ta-progress.json");
+    if !path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<ProgressJournal>(&content).ok()
+}
+
 /// Produce a plain-English diagnosis for a goal in a potentially-recoverable state.
 ///
 /// Returns `None` if the goal is not in a recoverable state.
@@ -1148,7 +1260,7 @@ fn diagnose_goal(
     config: &GatewayConfig,
 ) -> Option<String> {
     match &goal.state {
-        GoalRunState::Failed { .. } => {
+        GoalRunState::Failed { reason } => {
             // Check if a valid draft exists — indicates watchdog race.
             if let Some(pkg_id) = goal.pr_package_id {
                 let pkg_path = config
@@ -1161,6 +1273,24 @@ fn diagnose_goal(
                             .to_string(),
                     );
                 }
+            }
+            // v0.14.7.2: Check if staging directory has agent work + progress journal.
+            if !goal.workspace_path.as_os_str().is_empty() && goal.workspace_path.exists() {
+                let last_checkpoint = load_progress_journal(&goal.workspace_path)
+                    .and_then(|j| j.checkpoints.into_iter().last())
+                    .map(|cp| {
+                        format!(
+                            "Last checkpoint: '{}' at {} — {}",
+                            cp.label, cp.at, cp.detail
+                        )
+                    })
+                    .unwrap_or_else(|| "(no progress journal)".to_string());
+                return Some(format!(
+                    "Failed with staging directory present — agent work may be recoverable. \
+                     Reason: {}. {}",
+                    reason.chars().take(120).collect::<String>(),
+                    last_checkpoint
+                ));
             }
             None
         }
@@ -1763,6 +1893,71 @@ fn verify_constitution(
         }
     }
 
+    // v0.14.7.2: TRACE-1 — Every staging dir in .ta/staging/ has a goal record.
+    println!("  TRACE-1 (§5.6 — Orphaned Staging Dirs):");
+    let staging_root = config.workspace_root.join(".ta").join("staging");
+    if staging_root.exists() {
+        let all_goals = goal_store.list().unwrap_or_default();
+        let known_staging: std::collections::HashSet<std::path::PathBuf> =
+            all_goals.iter().map(|g| g.workspace_path.clone()).collect();
+        match std::fs::read_dir(&staging_root) {
+            Ok(entries) => {
+                let mut orphan_count = 0u32;
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && !known_staging.contains(&path) {
+                        println!(
+                            "    [FAIL] Orphaned staging dir (no goal record): {}",
+                            path.display()
+                        );
+                        fail_count += 1;
+                        orphan_count += 1;
+                    }
+                }
+                if orphan_count == 0 {
+                    println!("    [OK]   No orphaned staging directories found");
+                    pass_count += 1;
+                }
+            }
+            Err(e) => {
+                println!("    [INFO] Cannot read .ta/staging/: {}", e);
+                pass_count += 1;
+            }
+        }
+    } else {
+        println!("    [OK]   No .ta/staging/ directory (nothing to check)");
+        pass_count += 1;
+    }
+
+    // v0.14.7.2: TRACE-2 — Applied/Completed goals must not have staging present.
+    println!("  TRACE-2 (§5.7 — Applied Goals with Staging Present):");
+    {
+        let all_goals = goal_store.list().unwrap_or_default();
+        let mut cleanup_failures = 0u32;
+        for g in &all_goals {
+            let is_terminal_clean =
+                matches!(g.state, GoalRunState::Applied | GoalRunState::Completed);
+            if is_terminal_clean
+                && !g.workspace_path.as_os_str().is_empty()
+                && g.workspace_path.exists()
+            {
+                println!(
+                    "    [FAIL] Goal {} ({}) — staging dir still present after {} (cleanup failure): {}",
+                    &g.goal_run_id.to_string()[..8],
+                    g.display_tag(),
+                    g.state,
+                    g.workspace_path.display()
+                );
+                fail_count += 1;
+                cleanup_failures += 1;
+            }
+        }
+        if cleanup_failures == 0 {
+            println!("    [OK]   No applied/completed goals with lingering staging dirs");
+            pass_count += 1;
+        }
+    }
+
     println!();
     println!(
         "Constitution verification: {} passed, {} warnings/failures.",
@@ -1895,6 +2090,246 @@ fn gc_goals(
     Ok(())
 }
 
+/// Bulk purge of old terminal goals (v0.14.7.2).
+///
+/// Removes goal records, staging directories, and associated draft packages.
+/// Always writes an audit record per purged goal. Refuses to purge active goals.
+fn purge_goals(
+    config: &GatewayConfig,
+    store: &GoalRunStore,
+    id: Option<&str>,
+    state_filter: Option<&str>,
+    older_than: Option<&str>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    // States that may NOT be purged (still active).
+    const PROTECTED_STATES: &[&str] = &[
+        "running",
+        "pr_ready",
+        "under_review",
+        "awaiting_input",
+        "finalizing",
+    ];
+
+    // Parse --older-than (e.g., "30d", "7d").
+    let cutoff: Option<chrono::DateTime<chrono::Utc>> = if let Some(age_str) = older_than {
+        let days: u64 = if let Some(d) = age_str.strip_suffix('d') {
+            d.parse::<u64>().map_err(|_| {
+                anyhow::anyhow!(
+                    "Invalid --older-than value '{}'. Use format like '30d'.",
+                    age_str
+                )
+            })?
+        } else {
+            anyhow::bail!(
+                "Invalid --older-than value '{}'. Use format like '30d' (days only).",
+                age_str
+            );
+        };
+        Some(chrono::Utc::now() - chrono::Duration::days(days as i64))
+    } else {
+        None
+    };
+
+    // Parse --state list.
+    let allowed_states: Option<Vec<&str>> =
+        state_filter.map(|s| s.split(',').map(str::trim).collect());
+
+    // Validate no protected states in the filter.
+    if let Some(ref states) = allowed_states {
+        for s in states {
+            if PROTECTED_STATES.contains(s) {
+                anyhow::bail!(
+                    "Cannot purge goals in active state '{}'. Only terminal states are purgeable \
+                     (applied, completed, failed, denied, closed).",
+                    s
+                );
+            }
+        }
+    }
+
+    let goals = store.list()?;
+
+    // Collect goals to purge.
+    let to_purge: Vec<&GoalRun> = if let Some(id_prefix) = id {
+        // Specific goal by ID.
+        let goal_id = resolve_goal_id(id_prefix, store)?;
+        goals
+            .iter()
+            .filter(|g| {
+                g.goal_run_id == goal_id
+                    && !PROTECTED_STATES.contains(&g.state.to_string().as_str())
+            })
+            .collect()
+    } else {
+        goals
+            .iter()
+            .filter(|g| {
+                // Exclude protected states.
+                if PROTECTED_STATES.contains(&g.state.to_string().as_str()) {
+                    return false;
+                }
+                // Apply state filter.
+                if let Some(ref states) = allowed_states {
+                    if !states.contains(&g.state.to_string().as_str()) {
+                        return false;
+                    }
+                }
+                // Apply age filter.
+                if let Some(cutoff_time) = cutoff {
+                    if g.updated_at >= cutoff_time {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect()
+    };
+
+    if to_purge.is_empty() {
+        println!("No goals matched the purge criteria.");
+        return Ok(());
+    }
+
+    let mut purged_count = 0u32;
+    let mut staging_bytes = 0u64;
+
+    for goal in &to_purge {
+        let short_id = &goal.goal_run_id.to_string()[..8];
+        let age_days = (chrono::Utc::now() - goal.updated_at).num_days();
+
+        if dry_run {
+            println!(
+                "[dry-run] Would purge: {} \"{}\" (state: {}, age: {}d)",
+                short_id,
+                truncate(&goal.title, 40),
+                goal.state,
+                age_days
+            );
+            if !goal.workspace_path.as_os_str().is_empty() && goal.workspace_path.exists() {
+                let sz = dir_size_bytes(&goal.workspace_path);
+                println!(
+                    "           staging: {} ({})",
+                    goal.workspace_path.display(),
+                    format_bytes(sz)
+                );
+            }
+            if let Some(pkg_id) = goal.pr_package_id {
+                let pkg_path = config
+                    .workspace_root
+                    .join(".ta/pr_packages")
+                    .join(format!("{}.json", pkg_id));
+                if pkg_path.exists() {
+                    println!("           draft: {}", short_id);
+                }
+            }
+            continue;
+        }
+
+        // Write audit record.
+        write_purge_audit_entry(config, goal);
+
+        // Remove staging directory.
+        if !goal.workspace_path.as_os_str().is_empty() && goal.workspace_path.exists() {
+            let sz = dir_size_bytes(&goal.workspace_path);
+            staging_bytes += sz;
+            if let Err(e) = std::fs::remove_dir_all(&goal.workspace_path) {
+                eprintln!("  warn: failed to remove staging for {}: {}", short_id, e);
+            }
+        }
+
+        // Remove associated draft package.
+        if let Some(pkg_id) = goal.pr_package_id {
+            let pkg_path = config
+                .workspace_root
+                .join(".ta/pr_packages")
+                .join(format!("{}.json", pkg_id));
+            if pkg_path.exists() {
+                if let Err(e) = std::fs::remove_file(&pkg_path) {
+                    eprintln!(
+                        "  warn: failed to remove draft {} for goal {}: {}",
+                        &pkg_id.to_string()[..8],
+                        short_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Delete goal record.
+        if let Err(e) = store.delete(goal.goal_run_id) {
+            eprintln!("  warn: failed to delete goal record {}: {}", short_id, e);
+        } else {
+            println!(
+                "Purged: {} \"{}\" (state: {}, age: {}d)",
+                short_id,
+                truncate(&goal.title, 40),
+                goal.state,
+                age_days
+            );
+            purged_count += 1;
+        }
+    }
+
+    if dry_run {
+        println!("\n[dry-run] {} goal(s) would be purged.", to_purge.len());
+    } else {
+        println!(
+            "\nPurged {} goal(s). Reclaimed {} of staging space.",
+            purged_count,
+            format_bytes(staging_bytes)
+        );
+    }
+
+    Ok(())
+}
+
+/// Write an audit entry for a purged goal.
+fn write_purge_audit_entry(config: &GatewayConfig, goal: &GoalRun) {
+    let ledger_path = ta_audit::GoalAuditLedger::path_for(&config.workspace_root);
+    match ta_audit::GoalAuditLedger::open(&ledger_path) {
+        Ok(mut ledger) => {
+            let now = chrono::Utc::now();
+            let total = now.signed_duration_since(goal.created_at).num_seconds();
+            let mut entry = ta_audit::AuditEntry {
+                goal_id: goal.goal_run_id,
+                title: goal.title.clone(),
+                objective: None,
+                disposition: ta_audit::AuditDisposition::Gc,
+                phase: goal.plan_phase.clone(),
+                agent: goal.agent_id.clone(),
+                created_at: goal.created_at,
+                pr_ready_at: None,
+                recorded_at: now,
+                build_seconds: total,
+                review_seconds: 0,
+                total_seconds: total,
+                draft_id: goal.pr_package_id,
+                ai_summary: None,
+                reviewer: None,
+                denial_reason: None,
+                cancel_reason: Some("purge: deliberate user cleanup via ta goal purge".to_string()),
+                artifact_count: 0,
+                lines_changed: 0,
+                artifacts: Vec::new(),
+                policy_result: None,
+                parent_goal_id: goal.parent_goal_id,
+                previous_hash: None,
+            };
+            if let Err(e) = ledger.append(&mut entry) {
+                tracing::warn!(
+                    "Failed to write purge audit entry for goal {}: {}",
+                    goal.goal_run_id,
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Cannot open ledger for purge audit: {}", e);
+        }
+    }
+}
+
 /// Write a gc audit entry for a goal being transitioned by the garbage collector.
 fn write_gc_audit_entry(config: &GatewayConfig, goal: &GoalRun, gc_reason: &str) {
     let ledger_path = ta_audit::GoalAuditLedger::path_for(&config.workspace_root);
@@ -2021,6 +2456,7 @@ fn process_health_label(goal: &ta_goal::GoalRun) -> &'static str {
     match &goal.state {
         GoalRunState::Running
         | GoalRunState::Finalizing { .. }
+        | GoalRunState::DraftPending { .. }
         | GoalRunState::AwaitingInput { .. } => match goal.agent_pid {
             Some(pid) => {
                 if is_process_alive(pid) {
@@ -2254,6 +2690,23 @@ fn goal_inspect(
         println!("Recent events:");
         for event in &recent_events {
             println!("  {}", event);
+        }
+    }
+
+    // v0.14.7.2: Show agent progress journal checkpoints.
+    if staging_exists {
+        if let Some(journal) = load_progress_journal(&goal.workspace_path) {
+            println!();
+            println!(
+                "Agent Progress ({} checkpoint(s)):",
+                journal.checkpoints.len()
+            );
+            if journal.checkpoints.is_empty() {
+                println!("  (no checkpoints recorded)");
+            }
+            for cp in &journal.checkpoints {
+                println!("  [{}] {} — {}", cp.at, cp.label, cp.detail);
+            }
         }
     }
 

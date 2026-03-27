@@ -30,6 +30,7 @@ ta-changeset = { path = "../ta-changeset" }
 ta-memory = { path = "../ta-memory" }
 ta-events = { path = "../ta-events" }
 ta-goal = { path = "../ta-goal" }
+ta-audit = { path = "../ta-audit" }
 ta-policy = { path = "../ta-policy" }
 ta-connector-slack = { path = "../ta-connectors/slack" }
 ta-connector-email = { path = "../ta-connectors/email" }

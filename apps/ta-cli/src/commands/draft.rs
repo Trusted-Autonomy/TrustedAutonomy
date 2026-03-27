@@ -822,6 +822,39 @@ fn load_agent_decisions(staging_path: &std::path::Path) -> Vec<DecisionLogEntry>
     }
 }
 
+/// Load agent progress journal checkpoints as human-readable strings for draft evidence (v0.14.7.2).
+///
+/// Reads `.ta/ta-progress.json` from the staging workspace.
+/// Returns formatted checkpoint strings for inclusion in `plan.completed_steps`.
+fn load_progress_journal_for_draft(staging_path: &std::path::Path) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Checkpoint {
+        label: String,
+        at: String,
+        detail: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Journal {
+        checkpoints: Vec<Checkpoint>,
+    }
+    let path = staging_path.join(".ta").join("ta-progress.json");
+    if !path.exists() {
+        return vec![];
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    match serde_json::from_str::<Journal>(&content) {
+        Ok(j) => j
+            .checkpoints
+            .into_iter()
+            .map(|cp| format!("[checkpoint:{}] {} — {}", cp.at, cp.label, cp.detail))
+            .collect(),
+        Err(_) => vec![],
+    }
+}
+
 /// Try to load the agent's change summary from the staging workspace.
 fn load_change_summary(staging_path: &std::path::Path) -> Option<ChangeSummary> {
     let path = staging_path.join(".ta/change_summary.json");
@@ -1384,6 +1417,15 @@ pub(crate) fn build_package(
         );
     }
 
+    // v0.14.7.2: Load agent progress journal from .ta/ta-progress.json.
+    let progress_checkpoints: Vec<String> = load_progress_journal_for_draft(&goal.workspace_path);
+    if !progress_checkpoints.is_empty() {
+        println!(
+            "Agent progress journal: {} checkpoint(s) found",
+            progress_checkpoints.len()
+        );
+    }
+
     // Plan validation: if this goal is linked to a plan phase, validate artifacts.
     if let Some(ref phase_id) = goal.plan_phase {
         let phases = super::plan::load_plan(source_dir).unwrap_or_default();
@@ -1443,7 +1485,14 @@ pub(crate) fn build_package(
             alternatives_considered: vec![],
         },
         plan: Plan {
-            completed_steps: vec!["Agent completed work in staging".to_string()],
+            completed_steps: if progress_checkpoints.is_empty() {
+                vec!["Agent completed work in staging".to_string()]
+            } else {
+                // v0.14.7.2: Include progress journal checkpoints as evidence.
+                let mut steps = progress_checkpoints;
+                steps.push("Agent completed work in staging".to_string());
+                steps
+            },
             next_steps: vec!["Review and apply changes".to_string()],
             decision_log,
         },

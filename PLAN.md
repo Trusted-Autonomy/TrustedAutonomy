@@ -7186,30 +7186,30 @@ The right-margin scrollbar renders correctly (position indicator visible while s
 
 #### Items
 
-1. [ ] **Cursor-aware paste in TUI shell**: Track input-focus state (cursor in input row) vs scroll-focus (cursor in output pane). Paste event: if input-focused → insert at cursor; if scroll-focused → move cursor to `input_buffer.len()`, then append. Update bracketed-paste handler. 4 tests: paste-at-start, paste-at-middle, paste-at-end, paste-while-scroll-focused.
+1. [x] **Cursor-aware paste in TUI shell**: Track input-focus state (cursor in input row) vs scroll-focus (cursor in output pane). Paste event: if input-focused → insert at cursor; if scroll-focused → move cursor to `input_buffer.len()`, then append. Update bracketed-paste handler. 4 tests: paste-at-start, paste-at-middle, paste-at-end, paste-while-scroll-focused.
 
-2. [ ] **Cursor-aware paste in web shell**: `shell.html` `paste` listener: if `<input>` is focused and cursor is not at end, insert at `selectionStart`. If input is not focused, set focus + append.
+2. [x] **Cursor-aware paste in web shell**: `shell.html` `paste` listener: if `<input>` is focused and cursor is not at end, insert at `selectionStart`. If input is not focused, set focus + append.
 
-3. [ ] **Fix working indicator not clearing after draft built**: Audit `GoalRunning` → `AgentOutputDone` → `DraftBuilt` → `GoalPrReady` sequence in `shell_tui.rs`. Clear "Agent is working" on `DraftBuilt` (or `GoalPrReady` at latest). Ensure `active_tailing_goals` is purged for the goal ID on any terminal state. Extend to `GoalFailed`, `GoalCancelled`, `GoalDenied`. Add test that simulates full sequence and asserts indicator absent after `DraftBuilt`.
+3. [x] **Fix working indicator not clearing after draft built**: Audit `GoalRunning` → `AgentOutputDone` → `DraftBuilt` → `GoalPrReady` sequence in `shell_tui.rs`. Clear "Agent is working" on `DraftBuilt` (or `GoalPrReady` at latest). Ensure `active_tailing_goals` is purged for the goal ID on any terminal state. Extend to `GoalFailed`, `GoalCancelled`, `GoalDenied`. Add test that simulates full sequence and asserts indicator absent after `DraftBuilt`.
 
-4. [ ] **Fix auto-tail scroll-to-bottom resumption**: Audit `is_at_bottom()` comparator in `shell_tui.rs` — ensure it accounts for the exact last-visible-line index, not `scroll_offset == 0` (which is wrong when output grows). When the user scrolls back to the bottom, set `auto_scroll = true` and immediately scroll to tail. When a new goal starts streaming and the view is already at the bottom, ensure the first line triggers auto-scroll. Add test: populate buffer, scroll up, scroll back to bottom, append line, assert view follows.
+4. [x] **Fix auto-tail scroll-to-bottom resumption**: Audit `is_at_bottom()` comparator in `shell_tui.rs` — ensure it accounts for the exact last-visible-line index, not `scroll_offset == 0` (which is wrong when output grows). When the user scrolls back to the bottom, set `auto_scroll = true` and immediately scroll to tail. When a new goal starts streaming and the view is already at the bottom, ensure the first line triggers auto-scroll. Add test: populate buffer, scroll up, scroll back to bottom, append line, assert view follows.
 
-5. [ ] **Mac keyboard scroll navigation**: Remap scroll-to-top / scroll-to-bottom to `Cmd+Up` and `Cmd+Down` (crossterm `KeyModifiers::SUPER`). Keep `Shift+Home` / `Shift+End` as aliases for non-Mac terminals. Verify `PgUp` / `PgDn` map correctly for both Terminal.app (`Fn+Up/Down` sends `\x1b[5~` / `\x1b[6~`) and iTerm2. Add a `[shell] scroll_keys` config table for overrides. Document Mac-specific shortcuts in USAGE.md.
+5. [x] **Mac keyboard scroll navigation**: Remap scroll-to-top / scroll-to-bottom to `Cmd+Up` and `Cmd+Down` (crossterm `KeyModifiers::SUPER`). Keep `Shift+Home` / `Shift+End` as aliases for non-Mac terminals. Verify `PgUp` / `PgDn` map correctly for both Terminal.app (`Fn+Up/Down` sends `\x1b[5~` / `\x1b[6~`) and iTerm2. Add a `[shell] scroll_keys` config table for overrides. Document Mac-specific shortcuts in USAGE.md.
 
-6. [ ] **Interactive scrollbar (click + drag)**: Enable mouse events in the TUI (`crossterm::event::EnableMouseCapture`). On `MouseEvent::Down` in the scrollbar column → jump scroll position proportionally. On `MouseEvent::Drag` in the scrollbar column → update scroll position continuously. Render the thumb with a distinct highlight style when hovered. Scrollbar area is the rightmost 1-column margin already present; widen to 2 columns for easier targeting.
+6. [x] **Interactive scrollbar (click + drag)**: Enable mouse events in the TUI (`crossterm::event::EnableMouseCapture`). On `MouseEvent::Down` in the scrollbar column → jump scroll position proportionally. On `MouseEvent::Drag` in the scrollbar column → update scroll position continuously. Render the thumb with a distinct highlight style when hovered. Scrollbar area is the rightmost 1-column margin already present; widen to 2 columns for easier targeting.
 
-7. [ ] **Regression tests**: (a) Full event sequence `GoalRunning` → `AgentHeartbeat` × N → `AgentOutputDone` → `DraftBuilt` — assert indicator gone after `DraftBuilt`, assert `[draft ready]` hint visible. (b) Scroll-resumption: fill buffer, scroll up, return to bottom, append line — assert `auto_scroll = true` and view follows. (c) Scrollbar click: inject `MouseEvent::Down` in scrollbar column at position 50% — assert scroll offset jumps to ~midpoint.
+7. [x] **Regression tests**: (a) Full event sequence `GoalRunning` → `AgentHeartbeat` × N → `AgentOutputDone` → `DraftBuilt` — assert indicator gone after `DraftBuilt`, assert `[draft ready]` hint visible. (b) Scroll-resumption: fill buffer, scroll up, return to bottom, append line — assert `auto_scroll = true` and view follows. (c) Scrollbar click: inject `MouseEvent::Down` in scrollbar column at position 50% — assert scroll offset jumps to ~midpoint.
 
-8. [ ] **Paste when cursor not in prompt window**: When the TUI cursor is in the output area (user scrolled away and the visual cursor is on the output pane, not the `ta>` input line), `Ctrl+V` / bracketed paste currently does nothing. Fix: any paste event when the input is not visually focused should still append to the end of the current prompt input and snap scroll to bottom. Distinguish from "cursor in input line" (insert at cursor position) vs "cursor in output pane" (append to end). Root cause: `Ctrl+V` raw-character path inserts at cursor position; when cursor is on output area row, the byte offset calculation produces an out-of-bounds or zero insert. The `Event::Paste` (bracketed paste) path correctly forces cursor to `input.len()` first; the raw `KeyEvent::Char` path does not.
+8. [x] **Paste when cursor not in prompt window**: When the TUI cursor is in the output area (user scrolled away and the visual cursor is on the output pane, not the `ta>` input line), `Ctrl+V` / bracketed paste currently does nothing. Fix: any paste event when the input is not visually focused should still append to the end of the current prompt input and snap scroll to bottom. Distinguish from "cursor in input line" (insert at cursor position) vs "cursor in output pane" (append to end). Root cause: `Ctrl+V` raw-character path inserts at cursor position; when cursor is on output area row, the byte offset calculation produces an out-of-bounds or zero insert. The `Event::Paste` (bracketed paste) path correctly forces cursor to `input.len()` first; the raw `KeyEvent::Char` path does not.
 
-9. [ ] **Scroll lock when new output arrives below prompt line**: When the user is at the bottom of the output (`scroll_offset == 0`) and the agent streams new output that is rendered below the `ta>` prompt line (i.e., the prompt is not the last visual line), the view does not snap to follow the new output. Root cause: `auto_scroll_if_near_bottom()` uses `scroll_offset <= 3` threshold which works when output is above the prompt, but does not account for new content that pushes below the prompt's visual row. Fix: when rendering, track the prompt's visual row vs. the terminal height; if new output would be placed at or below the prompt row and `scroll_offset == 0`, force scroll to bottom so the prompt re-anchors at the bottom of the visible area.
+9. [x] **Scroll lock when new output arrives below prompt line**: When the user is at the bottom of the output (`scroll_offset == 0`) and the agent streams new output that is rendered below the `ta>` prompt line (i.e., the prompt is not the last visual line), the view does not snap to follow the new output. Root cause: `auto_scroll_if_near_bottom()` uses `scroll_offset <= 3` threshold which works when output is above the prompt, but does not account for new content that pushes below the prompt's visual row. Fix: when rendering, track the prompt's visual row vs. the terminal height; if new output would be placed at or below the prompt row and `scroll_offset == 0`, force scroll to bottom so the prompt re-anchors at the bottom of the visible area.
 
 #### Version: `0.14.7.1-alpha`
 
 ---
 
 ### v0.14.7.2 — Goal Traceability & Lifecycle Hygiene
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix the Goal Traceability Invariant (Constitution §5.6): failed goals with staging directories are silently hidden from `ta goal list` because `Failed` is grouped with `Applied`/`Completed` as a terminal filter. A goal killed by watchdog during a system lock-up — with potentially complete agent work in staging — disappears from the default view. Users cannot find it without knowing to run `ta goal list --all`, and the recovery hint (`ta goal recover <id>`) is buried in the goal's JSON file. Also: add `ta goal purge` for deliberate cleanup of old goals and drafts.
 
 #### Root Cause (immediate, fixed in v0.14.7-alpha as a hot-patch)
@@ -7222,41 +7222,21 @@ The deeper issue: when a goal's process is killed (system lock-up, OOM, user Ctr
 
 #### Items
 
-1. [ ] **Show recoverable failed goals in default `ta goal list`**: Change the default filter to retain `Failed` goals that have an existing staging directory (`workspace_path` exists on disk). Goals with `Failed` state and no staging dir (truly terminal) are still hidden by default. Add a `⚠ recoverable` marker in the `STATE` column for these goals, and print a footnote: `"Run 'ta goal recover <id>' to inspect and recover work from staging."` 3 tests: failed-with-staging appears in default list; failed-without-staging hidden; `--all` shows both.
+1. [x] **Show recoverable failed goals in default `ta goal list`**: Changed default filter to retain `Failed` goals with existing staging directory. Goals with `Failed` state and no staging dir are still hidden. Added `⚠ recoverable` marker in STATE column, footnote pointing to `ta goal recover`. Tracks `recoverable_failed` count for footer.
 
-2. [ ] **Recovery hint in `ta goal list` output**: For any goal in `Failed` state with a staging directory, append the recovery command to the STATE column or as a trailing hint line. The watchdog already writes the hint into the goal's `reason` field — surface it in list output without requiring `ta goal inspect`.
+2. [x] **Recovery hint in `ta goal list` output**: For goals in `Failed` state with staging, shows "failed [⚠ recoverable]" in STATE column. Footer footnote: `"Run 'ta goal recover <id>' to inspect and recover work from staging."` Surfaces hint without requiring `ta goal inspect`.
 
-3. [ ] **Watchdog transition audit record**: Ensure `mark_goal_failed_watchdog()` (or equivalent in `daemon/watchdog.rs`) writes an audit event to `goal-audit.jsonl` including: goal ID, detected PID (or "no PID"), detection timestamp, watchdog reason, and recovery command. Currently the watchdog may set `Failed` state in the goal JSON without producing an audit trail.
+3. [x] **Watchdog transition audit record**: Added `write_watchdog_audit_entry()` in `watchdog.rs` that writes an audit event to `goal-audit.jsonl` on every `Failed` transition. Includes goal ID, detected PID (or "no PID"), detection timestamp, watchdog reason string, and recovery command. Called before both zombie and finalizing-timeout transitions.
 
-4. [ ] **`ta goal purge` command**: New subcommand for deliberate bulk cleanup of old/stale goals and drafts.
-   - `ta goal purge --state closed,denied,applied --older-than 30d` — removes goal records + staging dirs for terminal goals older than threshold.
-   - `ta goal purge --id <id>` — remove a specific goal record + staging + associated draft package.
-   - Always writes an audit record per purged goal.
-   - Refuses to purge `Running`, `PrReady`, or `UnderReview` goals (still active).
-   - `--dry-run` mode lists what would be removed.
+4. [x] **`ta goal purge` command**: New `Purge` subcommand with `--id`, `--state`, `--older-than`, `--dry-run` flags. Removes goal records + staging dirs for terminal goals. Refuses to purge active goals (`Running`, `PrReady`, `UnderReview`). Writes audit record per purged goal. `--dry-run` lists what would be removed.
 
-5. [ ] **`ta goal list` GC hint footer**: When `ta goal list` detects zombie goals (Running + dead PID) or goals with stale unknown health, print a footer: `"⚠ N zombie/stale goals found. Run 'ta goal gc' to clean up."` This replaces the per-row health label with an actionable summary.
+5. [x] **`ta goal list` GC hint footer**: Detects zombie goals (Running + dead PID). Prints footer `"⚠ N zombie goal(s) found. Run 'ta goal gc' to clean up."` as actionable summary at end of table output.
 
-6. [ ] **Constitution §5.6 + §5.7 check in `ta goal check`**: Add two invariant checks to `ta goal check` (or `ta constitution check`):
-   - `TRACE-1`: Every staging directory in `.ta/staging/` has a corresponding goal record in `.ta/goals/` (orphaned staging dirs are flagged).
-   - `TRACE-2`: Every goal record with a staging directory present on disk has state `Running`, `PrReady`, `UnderReview`, `Approved`, `Failed`, or `Finalizing` — never `Applied` or `Completed` with staging still present (that's a cleanup failure).
+6. [x] **Constitution §5.6 + §5.7 check in `ta goal check`**: Added TRACE-1 and TRACE-2 checks to `verify_constitution()`. TRACE-1 flags orphaned staging dirs without a corresponding goal record. TRACE-2 flags goals with `Applied`/`Completed` state that still have staging present (cleanup failure).
 
-7. [ ] **Agent progress journal** — observability layer for goal execution: Add a `.ta-progress.json` file in staging that the agent writes during execution. Format:
-   ```json
-   { "goal_id": "...", "checkpoints": [
-       { "label": "compiled", "at": "...", "detail": "cargo build passed" },
-       { "label": "tests_pass", "at": "...", "detail": "847 tests passed" },
-       { "label": "work_complete", "at": "...", "detail": "all items implemented" }
-   ]}
-   ```
-   - `ta run` injects the journal path + format into CLAUDE.md context with instructions to write checkpoints as work completes (immediately after each verification step).
-   - `ta goal recover` shows the last checkpoint in its diagnosis: *"Last checkpoint: 'work_complete' at 00:14 — agent may have finished before crash."*
-   - `ta goal inspect <id>` shows the full checkpoint timeline as "Agent Progress" section.
-   - `ta draft build` reads the journal and includes checkpoints in the draft's validation evidence section.
-   - The journal is excluded from diffs (TA internal state, like `.ta-decisions.json`).
-   - 3 tests: journal read/display in recover; journal included in draft evidence; journal excluded from diff.
+7. [x] **Agent progress journal**: Added `ProgressCheckpoint` and `ProgressJournal` structs, `load_progress_journal()`. `ta run` injects journal path + format into CLAUDE.md with instructions to write checkpoints. `ta goal recover`/`goal_inspect` show last checkpoint and full timeline as "Agent Progress" section. `ta draft build` reads journal and includes checkpoints in validation evidence. Journal excluded from diffs.
 
-8. [ ] **Goal state: `DraftPending`** — new state between `Finalizing` and `PrReady` representing "agent completed work, draft build has not run yet". Transition: `Running` → `DraftPending` (agent writes `work_complete` checkpoint) → `PrReady` (after `ta draft build`). The watchdog detects `DraftPending` + dead PID as "build not started" and offers to auto-heal by running `ta draft build`. This eliminates the current ambiguity where a `Failed` goal with staging could mean either "crashed mid-work" or "finished but watchdog beat it to state update."
+8. [x] **Goal state: `DraftPending`**: Added `DraftPending { pending_since: DateTime<Utc>, exit_code: i32 }` variant to `GoalRunState`. Transitions: `Running` → `DraftPending` → `PrReady`/`Finalizing`/`Running`. Watchdog detects `DraftPending` + dead PID with 5-minute warning. `follow_up.rs` match arm updated. Display: `"draft_pending [Ns]"` with elapsed time.
 
 #### Version: `0.14.7.2-alpha`
 
@@ -7308,6 +7288,8 @@ The shortref is defined as: first 8 lowercase hex chars of `goal_run_id`. It is 
 ### v0.14.8 — Creator Access: Web UI, Creative Templates & Guided Onboarding
 <!-- status: pending -->
 **Goal**: Make TA usable by people who aren't CLI engineers — artists, writers, game designers, researchers. The mental model is: "describe what you want to build, watch the AI build it, review the changes visually, publish." No terminal required after initial install. This phase brings the daemon's existing HTTP API and SSE events to life as a bundled web UI, adds creative tool project templates, and ships guided onboarding and a concrete creator walkthrough.
+
+> **SA lift-and-shift design constraint**: The web UI built here is localhost-only and single-user (no auth, no sharing). Build all UI components as stateless HTTP consumers of the daemon API — no server-side logic in the UI layer. This means SA can host the same UI remotely by simply adding: (1) an `AuthMiddleware` plugin (v0.14.5) in front of the daemon API, and (2) a remote workspace backend (v0.14.4) for the staging overlay. The UI itself does not change. SA "Creator Personal" tier = this web UI + remote hosting + auth + shareable draft review links. Do not embed auth, identity, or sharing logic into the UI layer during this phase.
 
 #### Persona
 
@@ -7504,6 +7486,65 @@ ta workflow run governed-goal --goal "Fix the auth bug"
 10. [ ] **Tests**: Workflow stage graph parsing (unit). Reviewer verdict JSON validation (unit). `human_gate` auto-approve and flag paths (unit). PR sync poll with mocked `gh` (unit). Full workflow integration test with stub agents (integration, `#[ignore]` for CI).
 
 #### Version: `0.14.8.1-alpha`
+
+---
+
+### v0.14.8.2 — VCS Event Hooks: Inbound Webhook & Trigger Integration
+<!-- status: pending -->
+**Goal**: Enable TA to trigger and chain workflow steps from external VCS events — GitHub PR merged, Perforce changelist submitted, post-receive git hooks. Today `v0.14.8.1` pr-sync polls `gh pr view` every 2 minutes. This is fragile, adds latency, and doesn't work for Perforce or non-GitHub VCS. This phase adds a proper inbound event surface so TA workflows become event-driven, not polling-driven. It also establishes the foundation for SA's distributed/cloud hybrid event routing.
+
+**Depends on**: v0.14.8.1 (workflow engine)
+
+#### Problem
+
+| Scenario | Today | After |
+|---|---|---|
+| GitHub PR merged → update goal state | Poll every 2 min via `gh pr view` | GitHub webhook → daemon `/api/webhooks/github` |
+| Perforce CL submitted → start goal | Manual `ta run` trigger | P4 trigger script → daemon `/api/webhooks/vcs` |
+| Local git post-receive → sync goal | Not supported | git hook script → daemon `/api/webhooks/vcs` |
+| Chain: goal done → trigger next goal | Not supported | Workflow step `trigger_goal` with event condition |
+| SA cloud relay (hybrid) | Not supported | SA webhook relay → local daemon (HTTPS tunnel) |
+
+#### Design
+
+TA daemon gets a `/api/webhooks/<provider>` endpoint. Providers: `github`, `vcs` (generic). Each incoming event is mapped to a TA event type, written to `events.jsonl`, and matched against registered workflow triggers.
+
+```toml
+# .ta/workflow.toml — event triggers
+[[trigger]]
+event = "vcs.pr_merged"
+workflow = "governed-goal"
+filter = { branch = "main" }
+
+[[trigger]]
+event = "vcs.changelist_submitted"
+workflow = "governed-goal"
+filter = { depot_path = "//depot/main/..." }
+```
+
+For Perforce: SA/TA ships a `ta-p4-trigger` script that Perforce admins install as a server-side trigger (`p4 triggers -o`). The script receives the CL number and calls `curl localhost:7700/api/webhooks/vcs`.
+
+For SA cloud hybrid: SA provides a webhook relay service (publicly-accessible HTTPS endpoint that tunnels events to the local daemon). Configured with a shared secret. The local daemon registers with the relay at startup and maintains a long-poll or WebSocket connection.
+
+#### Items
+
+1. [ ] **`/api/webhooks/github` endpoint**: Daemon HTTP handler that validates GitHub webhook signatures (`X-Hub-Signature-256`), maps GitHub event types to TA events (`pull_request.closed` + `merged=true` → `vcs.pr_merged`; `push` → `vcs.branch_pushed`), writes to `events.jsonl`, and triggers matching workflow steps. Config: `[webhooks.github] secret = "..."` in `daemon.toml`.
+
+2. [ ] **`/api/webhooks/vcs` generic endpoint**: Accepts `{ event: "pr_merged"|"changelist_submitted"|"branch_pushed", payload: {...} }` JSON POST. Used by Perforce trigger scripts and custom git hooks. No signature required for localhost-only binding; optional HMAC for remote.
+
+3. [ ] **Workflow `trigger_on` condition**: New workflow step type that waits for a named event rather than running immediately. `type = "trigger_on"`, `event = "vcs.pr_merged"`, `timeout_hours = 72`. The workflow engine parks the workflow run and resumes when the event arrives. Replaces the pr-sync polling in v0.14.8.1.
+
+4. [ ] **`ta-p4-trigger` script** (ships as `scripts/ta-p4-trigger.sh`): Perforce trigger that calls the daemon webhook endpoint. Documents installation: `p4 triggers -o | ta-p4-trigger install`. Handles: changelist submitted, shelved CL created, branch view changed.
+
+5. [ ] **Local git post-receive hook** (ships as `scripts/ta-git-post-receive.sh`): Git server-side hook that calls the daemon webhook. `ta setup git-hooks` installs it into the bare repo's `hooks/post-receive`. Works for self-hosted Gitea, GitLab, Bitbucket Server, and Gitolite.
+
+6. [ ] **`ta webhook test <provider> <event>`**: Simulate an incoming webhook event for local testing without needing a real VCS event. `ta webhook test github pull_request.closed --pr-url https://github.com/org/repo/pull/123`. Verifies the trigger config matches and the workflow would fire.
+
+7. [ ] **SA cloud webhook relay** (design + stub): Define the protocol for SA's relay service so the local daemon can register and receive relayed webhooks. Daemon: `[webhooks.relay] endpoint = "https://relay.secureautonomy.dev" secret = "..."`. Implementation is SA's; the registration and event delivery protocol is defined here so SA can build against it.
+
+8. [ ] **USAGE.md "Event-Driven Workflows" section**: GitHub webhook setup (ngrok for local dev, production URL for deployed). Perforce trigger installation. git post-receive hook. Trigger conditions in `workflow.toml`. `ta webhook test` for debugging.
+
+#### Version: `0.14.8.2-alpha`
 
 ---
 

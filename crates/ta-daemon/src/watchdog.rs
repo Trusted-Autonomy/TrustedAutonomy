@@ -17,6 +17,7 @@ use reqwest;
 
 use crate::power_manager::SharedPowerManager;
 use chrono::Utc;
+use ta_audit::{AuditDisposition, AuditEntry, GoalAuditLedger};
 use ta_events::schema::{HealthIssue, SessionEvent};
 use ta_events::store::{EventStore, FsEventStore};
 use ta_events::EventEnvelope;
@@ -311,6 +312,7 @@ fn watchdog_cycle(
                     &now,
                     &mut issues,
                     in_wake_grace,
+                    project_root,
                 );
             }
             GoalRunState::Finalizing {
@@ -329,6 +331,7 @@ fn watchdog_cycle(
                     &store,
                     &now,
                     &mut issues,
+                    project_root,
                 );
             }
             GoalRunState::AwaitingInput {
@@ -346,6 +349,32 @@ fn watchdog_cycle(
                     &mut issues,
                 );
             }
+            // v0.14.7.2: DraftPending — agent wrote work_complete but build hasn't started.
+            // Emit a health issue if the goal has been pending too long.
+            GoalRunState::DraftPending { pending_since, .. } => {
+                goals_checked += 1;
+                let pending_secs = (now - *pending_since).num_seconds().unsigned_abs();
+                // Give a generous grace period (5 min) before flagging.
+                if pending_secs > 300 {
+                    let detail = format!(
+                        "Goal '{}' has been in draft_pending state for {}s. \
+                         Run: ta draft build --goal {}",
+                        goal.display_tag(),
+                        pending_secs,
+                        &goal.goal_run_id.to_string()[..8],
+                    );
+                    tracing::warn!(
+                        goal_id = %goal.goal_run_id,
+                        pending_secs = pending_secs,
+                        "Draft pending too long — draft build may not have started"
+                    );
+                    issues.push(HealthIssue {
+                        kind: "draft_pending_timeout".to_string(),
+                        goal_id: Some(goal.goal_run_id),
+                        detail,
+                    });
+                }
+            }
             // Terminal/inactive states — skip.
             _ => {}
         }
@@ -358,7 +387,9 @@ fn watchdog_cycle(
             .filter(|g| {
                 matches!(
                     g.state,
-                    GoalRunState::Running | GoalRunState::Finalizing { .. }
+                    GoalRunState::Running
+                        | GoalRunState::Finalizing { .. }
+                        | GoalRunState::DraftPending { .. }
                 )
             })
             .count();
@@ -427,18 +458,83 @@ fn check_api_connectivity(
     }
 }
 
-/// Check a running goal's agent process liveness (v0.13.14: stale/zombie separation).
+/// Write a watchdog-crash audit entry to goal-audit.jsonl (v0.14.7.2).
 ///
-/// Two distinct conditions:
-///   - **Stale**: PID alive, no state update for > `stale_threshold`. Warn only; never
-///     transition to failed. Only checked when `goal.heartbeat_required = true`.
-///   - **Zombie**: PID gone AND exit code is non-zero or unknown. Transition to Failed.
-///   - **Clean-exit-pending**: PID gone, but the exit handler must have already written
-///     `Finalizing` before reaching here — so this branch only fires for unexpected
-///     process death (signal, kill -9, spawn failure). Transition to Failed.
+/// Called whenever the watchdog transitions a goal to `Failed` (zombie or finalize
+/// timeout). Records the goal ID, detected PID (or none), detection timestamp,
+/// watchdog reason, and recovery command so the audit trail reflects process crashes.
+fn write_watchdog_audit_entry(
+    project_root: &Path,
+    goal: &GoalRun,
+    detected_pid: Option<u32>,
+    watchdog_reason: &str,
+) {
+    let ledger_path = GoalAuditLedger::path_for(project_root);
+    match GoalAuditLedger::open(&ledger_path) {
+        Ok(mut ledger) => {
+            let now = chrono::Utc::now();
+            let total = now.signed_duration_since(goal.created_at).num_seconds();
+            let pid_note = match detected_pid {
+                Some(p) => format!("pid={}", p),
+                None => "no PID".to_string(),
+            };
+            let recovery_cmd = format!("ta goal recover {}", &goal.goal_run_id.to_string()[..8]);
+            let mut entry = AuditEntry {
+                goal_id: goal.goal_run_id,
+                title: goal.title.clone(),
+                objective: None,
+                disposition: AuditDisposition::Crashed,
+                phase: goal.plan_phase.clone(),
+                agent: goal.agent_id.clone(),
+                created_at: goal.created_at,
+                pr_ready_at: None,
+                recorded_at: now,
+                build_seconds: total,
+                review_seconds: 0,
+                total_seconds: total,
+                draft_id: goal.pr_package_id,
+                ai_summary: None,
+                reviewer: None,
+                denial_reason: None,
+                cancel_reason: Some(format!(
+                    "watchdog: {} ({}). Recovery: {}",
+                    watchdog_reason, pid_note, recovery_cmd
+                )),
+                artifact_count: 0,
+                lines_changed: 0,
+                artifacts: Vec::new(),
+                policy_result: None,
+                parent_goal_id: goal.parent_goal_id,
+                previous_hash: None,
+            };
+            if let Err(e) = ledger.append(&mut entry) {
+                tracing::warn!(
+                    goal_id = %goal.goal_run_id,
+                    "Watchdog: failed to write crash audit entry: {}",
+                    e
+                );
+            } else {
+                tracing::info!(
+                    goal_id = %goal.goal_run_id,
+                    reason = watchdog_reason,
+                    "Watchdog: wrote crash audit entry to goal-audit.jsonl"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                goal_id = %goal.goal_run_id,
+                "Watchdog: cannot open goal audit ledger: {}",
+                e
+            );
+        }
+    }
+}
+
 ///
 /// `in_wake_grace` suppresses all liveness alerts immediately after a detected
 /// sleep/wake cycle, preventing false alarms before the agent resumes.
+#[allow(clippy::too_many_arguments)]
 fn check_running_goal(
     goal: &GoalRun,
     config: &WatchdogConfig,
@@ -447,6 +543,7 @@ fn check_running_goal(
     now: &chrono::DateTime<Utc>,
     issues: &mut Vec<HealthIssue>,
     in_wake_grace: bool,
+    project_root: &Path,
 ) {
     // During wake grace period, suppress all liveness alerts.
     if in_wake_grace {
@@ -563,6 +660,14 @@ fn check_running_goal(
         tracing::warn!("Watchdog: failed to persist GoalProcessExited event: {}", e);
     }
 
+    // v0.14.7.2: Write audit record before transitioning to Failed.
+    write_watchdog_audit_entry(
+        project_root,
+        goal,
+        Some(pid),
+        &format!("zombie_goal: PID {} dead after {}s", pid, age_secs),
+    );
+
     // Transition to Failed.
     let reason = format!(
         "Agent process (PID {}) exited without updating goal state. \
@@ -594,6 +699,7 @@ fn check_running_goal(
 /// `Finalizing` means the agent exited cleanly and draft creation is in progress.
 /// The watchdog should leave it alone unless the timeout is exceeded (indicating
 /// the draft-build process was interrupted).
+#[allow(clippy::too_many_arguments)]
 fn check_finalizing_goal(
     goal: &GoalRun,
     finalize_started_at: chrono::DateTime<Utc>,
@@ -602,6 +708,7 @@ fn check_finalizing_goal(
     store: &GoalRunStore,
     now: &chrono::DateTime<Utc>,
     issues: &mut Vec<HealthIssue>,
+    project_root: &Path,
 ) {
     // If the ta run process is still alive, it is actively building the draft.
     // Never fire the timeout while the builder process is running — only catch
@@ -692,6 +799,18 @@ fn check_finalizing_goal(
         progress_note,
         &goal.goal_run_id.to_string()[..8],
     );
+
+    // v0.14.7.2: Write audit record before transitioning to Failed.
+    write_watchdog_audit_entry(
+        project_root,
+        goal,
+        run_pid,
+        &format!(
+            "finalize_timeout: stuck {}s (timeout {}s), last_op='{}'",
+            elapsed_secs, config.finalize_timeout_secs, progress_note
+        ),
+    );
+
     if let Err(e) = store.transition(goal.goal_run_id, GoalRunState::Failed { reason }) {
         tracing::warn!(
             goal_id = %goal.goal_run_id,

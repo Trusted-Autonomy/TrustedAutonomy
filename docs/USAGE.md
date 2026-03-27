@@ -1159,6 +1159,18 @@ ta constitution check-toml --json     # JSON output for CI/scripts
 
 If `.ta/constitution.toml` is absent, the scanner uses TA's built-in `ta-default` rules (inject/restore pairs from `run.rs`). Exit code 1 is returned only when `on_violation = "block"`.
 
+#### Goal Traceability Invariants (TRACE-1, TRACE-2)
+
+`ta goal check` includes two traceability invariants:
+
+- **TRACE-1 (§5.6 — Orphaned Staging Dirs)**: Every staging directory in `.ta/staging/` must have a corresponding goal record in `.ta/goals/`. Orphaned directories indicate a goal was deleted without cleanup.
+
+- **TRACE-2 (§5.7 — Applied Goals with Staging Present)**: Every goal with `Applied` or `Completed` state must not have a staging directory present on disk. Staging after apply indicates a cleanup failure.
+
+```bash
+ta goal check                          # Runs constitution + TRACE-1 + TRACE-2
+```
+
 ### Deduplicating Your Constitution
 
 Constitutions grow over time from multiple sources: `extends = "ta-default"`, per-language templates, manual additions. Over time, rules can overlap or conflict. `ta constitution review` identifies duplicates and proposes a cleaned-up version via the standard draft workflow.
@@ -1721,6 +1733,11 @@ ta goal gc --dry-run                  # Preview what would be cleaned
 ta goal gc                            # Transition zombie goals to failed
 ta goal gc --include-staging          # Also delete staging dirs for terminal goals
 ta goal gc --threshold-days 3         # Custom stale threshold (default: 7 days)
+
+# Purge old goal records and staging dirs
+ta goal purge --state applied,denied --older-than 30d --dry-run
+ta goal purge --state applied,denied,closed --older-than 30d
+ta goal purge --id <goal-id>
 ```
 
 Configure thresholds:
@@ -2130,10 +2147,10 @@ The daemon enforces plugin requirements on startup. If a required plugin is miss
 
 ### Goal List Filtering
 
-By default, `ta goal list` shows only active (non-terminal) goals:
+By default, `ta goal list` shows active goals plus any `Failed` goals that still have a staging directory (recoverable work):
 
 ```bash
-# Active goals only (default)
+# Active goals + recoverable failed goals (default)
 ta goal list
 
 # All goals including completed/failed/applied
@@ -2142,6 +2159,61 @@ ta goal list --all
 # Filter by specific state
 ta goal list --state running
 ```
+
+Failed goals with staging appear with a warning marker and a recovery hint:
+
+```
+TAG              TITLE                  STATE
+auth-fix-01      Fix OAuth token...     failed [⚠ recoverable]
+
+Run 'ta goal recover <id>' to inspect and recover work from staging.
+```
+
+When zombie goals are detected (Running + dead PID), a footer prompts cleanup:
+
+```
+⚠ 2 zombie goal(s) found. Run 'ta goal gc' to clean up.
+```
+
+### Recovering a Failed Goal
+
+If a goal's agent was interrupted (OOM, watchdog timeout, system lock-up), the staging directory may contain complete or partial work:
+
+```bash
+# Inspect the failed goal — shows last agent checkpoint and staging contents
+ta goal recover <goal-id>
+
+# The recover UI offers:
+#   1) Rebuild draft from staging (re-runs ta draft build)
+#   2) Inspect staging directory
+#   3) Abandon (purge staging)
+```
+
+The agent progress journal (`.ta/ta-progress.json` in staging) shows what the agent completed before the crash:
+
+```
+Last checkpoint: 'tests_pass' at 12:43 — agent may have finished before crash.
+Checkpoints:
+  [12:40] compiled — cargo build --workspace passed
+  [12:43] tests_pass — 847 tests passed
+```
+
+### Goal Purge
+
+Remove old goal records and their staging directories in bulk:
+
+```bash
+# Preview what would be purged (dry-run)
+ta goal purge --state applied,denied --older-than 30d --dry-run
+
+# Purge terminal goals older than 30 days
+ta goal purge --state applied,denied,closed --older-than 30d
+
+# Purge a specific goal by ID
+ta goal purge --id <goal-id>
+```
+
+`ta goal purge` refuses to remove active goals (`Running`, `PrReady`, `UnderReview`). Each purged goal generates an audit record in `goal-audit.jsonl`.
 
 ### Goal Tags
 

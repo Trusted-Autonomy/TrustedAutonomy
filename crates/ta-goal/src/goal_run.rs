@@ -86,6 +86,23 @@ pub enum GoalRunState {
         run_pid: Option<u32>,
     },
 
+    /// Agent wrote `work_complete` checkpoint; draft build has not started yet (v0.14.7.2).
+    ///
+    /// This state represents "agent finished, draft build pending". It fills the gap
+    /// between `Finalizing` (draft build running) and `PrReady` (draft built).
+    ///
+    /// The watchdog detects `DraftPending` + dead PID as "build not started" and
+    /// offers to auto-heal by running `ta draft build`.
+    ///
+    /// Transition path: `Running` → `DraftPending` (agent exits after `work_complete`)
+    ///   → `PrReady` (after `ta draft build`).
+    DraftPending {
+        /// When the agent indicated work was complete.
+        pending_since: DateTime<Utc>,
+        /// Exit code of the agent process (0 = clean exit).
+        exit_code: i32,
+    },
+
     /// Goal failed at some point.
     Failed { reason: String },
 }
@@ -104,6 +121,7 @@ impl fmt::Display for GoalRunState {
             GoalRunState::Completed => write!(f, "completed"),
             GoalRunState::AwaitingInput { .. } => write!(f, "awaiting_input"),
             GoalRunState::Finalizing { .. } => write!(f, "finalizing"),
+            GoalRunState::DraftPending { .. } => write!(f, "draft_pending"),
             GoalRunState::Failed { .. } => write!(f, "failed"),
         }
     }
@@ -155,6 +173,14 @@ impl GoalRunState {
                 | (GoalRunState::Finalizing { .. }, GoalRunState::PrReady)
                 // Recover: Finalizing → Running (manual recovery after timeout/interrupt)
                 | (GoalRunState::Finalizing { .. }, GoalRunState::Running)
+                // v0.14.7.2: Running → DraftPending (agent wrote work_complete, exited before build)
+                | (GoalRunState::Running, GoalRunState::DraftPending { .. })
+                // DraftPending → PrReady (draft build ran)
+                | (GoalRunState::DraftPending { .. }, GoalRunState::PrReady)
+                // DraftPending → Finalizing (watchdog auto-heals by starting draft build)
+                | (GoalRunState::DraftPending { .. }, GoalRunState::Finalizing { .. })
+                // DraftPending → Running (manual recovery / restart)
+                | (GoalRunState::DraftPending { .. }, GoalRunState::Running)
         )
     }
 }
