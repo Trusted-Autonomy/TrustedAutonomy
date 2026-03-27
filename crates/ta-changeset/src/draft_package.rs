@@ -562,6 +562,23 @@ pub struct DraftPackage {
     /// Shown as the "Agent Decision Log" section in `ta draft view`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_decision_log: Vec<DecisionLogEntry>,
+
+    /// Goal shortref inherited from the parent GoalRun (v0.14.7.3).
+    ///
+    /// First 8 lowercase hex characters of `goal.goal_id`. Populated at `ta draft build`
+    /// time. Used to display drafts as `<goal_shortref>/<draft_seq>` across all CLI
+    /// surfaces (list, view, PR title, audit log). Allows `grep 2159d87e audit.jsonl`
+    /// to find all entries for a goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_shortref: Option<String>,
+
+    /// Sequence number for this draft within its goal (v0.14.7.3).
+    ///
+    /// First draft for a goal is 1, second is 2, etc. Combined with `goal_shortref`
+    /// to produce the `<shortref>/<seq>` display identifier (e.g., `2159d87e/1`).
+    /// Defaults to 0 for legacy drafts without this field.
+    #[serde(default)]
+    pub draft_seq: u32,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -792,6 +809,8 @@ mod tests {
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            goal_shortref: None,
+            draft_seq: 0,
         }
     }
 

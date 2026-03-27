@@ -161,6 +161,8 @@ fn make_draft_package() -> DraftPackage {
         ignored_artifacts: vec![],
         baseline_artifacts: vec![],
         agent_decision_log: vec![],
+        goal_shortref: None,
+        draft_seq: 0,
     }
 }
 
@@ -285,9 +287,11 @@ fn test_open_review_uses_workflow_config() {
         "gh pr create must include --base staging (from workflow.toml target_branch); \
          got: {captured}"
     );
+    // v0.14.7.3: branch name now includes goal shortref prefix: ta/<shortref>-my-feature
+    // The shortref is dynamic (first 8 chars of a random UUID), so check for the stable parts.
     assert!(
-        captured.contains("--head ta/my-feature"),
-        "gh pr create must include --head ta/my-feature (derived from goal title + prefix); \
+        captured.contains("--head ta/") && captured.contains("-my-feature"),
+        "gh pr create must include --head ta/<shortref>-my-feature (shortref + goal title slug + prefix); \
          got: {captured}"
     );
 }

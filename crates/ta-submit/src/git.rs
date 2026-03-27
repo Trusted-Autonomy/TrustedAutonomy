@@ -154,7 +154,10 @@ impl GitAdapter {
             slug
         };
 
-        format!("{}{}", prefix, truncated)
+        // v0.14.7.3: Prefix branch with goal shortref for traceability.
+        // e.g. ta/2159d87e-v0-14-7-1-shell-ux-fixes
+        let shortref = goal.shortref();
+        format!("{}{}-{}", prefix, shortref, truncated)
     }
 
     /// Auto-detect whether this is a git repository.
@@ -601,6 +604,8 @@ impl SourceAdapter for GitAdapter {
         // Create PR using gh CLI. Pass --head explicitly so the correct branch
         // is targeted even if the working tree HEAD has drifted (e.g. daemon
         // restart between push and PR creation).
+        // v0.14.7.3: Prefix PR title with [<shortref>] for goal traceability.
+        let pr_title = format!("[{}] {}", goal.shortref(), goal.title);
         let output = Command::new("gh")
             .args([
                 "pr",
@@ -610,7 +615,7 @@ impl SourceAdapter for GitAdapter {
                 "--base",
                 target_branch,
                 "--title",
-                &goal.title,
+                &pr_title,
                 "--body",
                 &body,
             ])
