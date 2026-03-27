@@ -6036,7 +6036,7 @@ All items implemented except items 5 and 13 (deferred). New tests: 5 (main.rs) +
 ---
 
 ### v0.13.17 — Draft Evidence, Perforce Plugin & Pre-Release Hardening
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Harden the path from agent exit to draft review: make `ta run` inject live progress into the daemon during the draft phase, embed hard validation evidence in every draft package, ship a working Perforce VCS plugin for the game-project release, add an experimental feature flag system, fix the finalize timeout, and gate E2E pre-release tests.
 
 #### 1. `ta run` Draft-Phase Progress Injection
@@ -7351,6 +7351,62 @@ ta template install ./my-local-template        # local path
 - **Visual plan editor** (drag-and-drop phase ordering in web UI): Deferred — the wizard covers creation; editing is less critical initially.
 
 #### Version: `0.14.8-alpha`
+
+---
+
+### v0.14.8.1 — End-to-End Governed Workflow: Goal → Review → Apply → Sync
+<!-- status: pending -->
+**Goal**: Ship a reference workflow that demonstrates TA's full governance loop as a single composable workflow definition: run a goal, route it to an independent reviewer agent before apply, apply on approval, then sync back to the PR once merged. This is the canonical "safe autonomous coding loop" that SA and Virtual Office builds on top of.
+
+**Depends on**: v0.14.4 (plugin traits), v0.14.6 (audit ledger), v0.14.7 (draft view structure)
+
+#### Design
+
+The workflow is defined in `.ta/workflows/governed-goal.toml` and executed via `ta workflow run governed-goal --goal "title"`. Each step is a named stage with explicit inputs, outputs, and approval gates.
+
+```
+ta workflow run governed-goal --goal "Fix the auth bug"
+  │
+  ├─ [1] run-goal      → ta run "<goal>" → draft ready
+  │
+  ├─ [2] review-draft  → independent reviewer agent reads draft artifacts,
+  │       (agent)        runs constitution checks, writes structured verdict
+  │                      to .ta/review/<draft-id>/verdict.json
+  │
+  ├─ [3] human-gate    → if reviewer verdict is "approve": auto-proceed
+  │       (optional)     if "flag": pause for human decision
+  │                      if "reject": deny draft, emit audit entry, stop
+  │
+  ├─ [4] apply-draft   → ta draft apply <id> --git-commit
+  │
+  └─ [5] pr-sync       → on PR merged event (webhook or poll):
+                          ta workflow sync --event pr_merged --pr <url>
+                          updates goal state, emits audit entry, notifies channels
+```
+
+#### Items
+
+1. [ ] **`governed-goal.toml` workflow template**: Ships as a built-in template in `templates/workflows/`. Stages: `run_goal`, `review_draft`, `human_gate` (configurable: `auto | prompt | always`), `apply_draft`, `pr_sync`. Config knobs: `reviewer_agent`, `gate_on_verdict` (pass/flag/reject thresholds), `notify_channels`.
+
+2. [ ] **Reviewer agent step**: The `review_draft` stage spawns a lightweight reviewer agent (configurable — defaults to `claude-code` with a focused constitution-review prompt). Agent receives: draft summary, artifact list, diff content, constitution rules, goal objective. Writes `verdict.json`: `{ verdict: "approve"|"flag"|"reject", findings: [...], confidence: 0.0–1.0 }`.
+
+3. [ ] **`human_gate` stage**: Reads `verdict.json`. On `approve` and `gate_on_verdict = "auto"`: advance immediately. On `flag`: print findings, prompt `"Reviewer flagged issues — apply anyway? [y/N]"`. On `reject`: deny draft, write audit entry with reviewer findings as denial reason, stop workflow.
+
+4. [ ] **`ta workflow run <name> --goal "<title>"`**: Execute a named workflow. Streams stage progress to stdout with stage names and elapsed time. `--dry-run` prints the stage graph without executing. `--resume <workflow-run-id>` resumes a paused workflow at the `human_gate` stage.
+
+5. [ ] **`ta workflow status <run-id>`**: Show current stage, elapsed time per stage, verdict summary, next action. Used for monitoring long-running workflows or checking a paused gate.
+
+6. [ ] **PR sync step**: `pr_sync` stage polls `gh pr view <url> --json state` every 2 minutes (configurable). On `MERGED`: calls `ta draft apply --sync-only` to update goal state and emit a `GoalSynced` audit entry. On `CLOSED` (without merge): emits `GoalAbandoned` audit entry. Timeout configurable (`sync_timeout_hours`, default 72h).
+
+7. [ ] **Audit trail integration**: Each stage transition emits an `AuditEntry` with `stage`, `agent`, `verdict`, `duration`. The full workflow run is queryable with `ta audit export --workflow-run <id>`. Human gate decisions (approve/override) include the human identity from `AuthMiddleware`.
+
+8. [ ] **`ta workflow list`**: Lists available workflow templates (built-in + `.ta/workflows/*.toml`). Shows name, stages, last run status.
+
+9. [ ] **USAGE.md "Governed Workflow" section**: Complete walkthrough — install template, run with a goal, watch stage progress, respond to a human gate prompt, see the PR sync complete. Positions this as the building block for Virtual Office department workflows.
+
+10. [ ] **Tests**: Workflow stage graph parsing (unit). Reviewer verdict JSON validation (unit). `human_gate` auto-approve and flag paths (unit). PR sync poll with mocked `gh` (unit). Full workflow integration test with stub agents (integration, `#[ignore]` for CI).
+
+#### Version: `0.14.8.1-alpha`
 
 ---
 
