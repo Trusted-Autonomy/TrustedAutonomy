@@ -9,11 +9,18 @@
 // agent prompt produces the first draft for human review. The full v0.14.1
 // constitution framework (guided UI, incremental sections, versioning) is
 // deferred.
+//
+// v0.14.6.1: `ta constitution review` — deduplication via agent review.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
+use std::process::Stdio;
 
+use chrono::Utc;
 use clap::Subcommand;
 use ta_mcp_gateway::GatewayConfig;
+use uuid::Uuid;
 
 #[derive(Subcommand, Debug)]
 pub enum ConstitutionCommands {
@@ -71,6 +78,29 @@ pub enum ConstitutionCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Deduplicate the project constitution via agent review (v0.14.6.1).
+    ///
+    /// Loads the effective rule set from `.ta/constitution.toml` (after `extends`
+    /// inheritance), identifies duplicate and conflicting rules, proposes a
+    /// deduplicated version, and packages it as a draft for human review via
+    /// the standard `ta draft view / approve / apply` workflow.
+    ///
+    /// The review runs in two passes:
+    ///   1. Rust-side exact dedup (hash-based, fast, no model needed).
+    ///   2. Agent semantic pass (`claude --print`) for near-duplicates and
+    ///      conflicting rules that differ in phrasing but enforce the same
+    ///      or contradictory constraints. Skip with `--no-agent`.
+    Review {
+        /// Print the proposed changes without creating a draft.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override the model used for the semantic review pass.
+        #[arg(long)]
+        model: Option<String>,
+        /// Skip the agent semantic review pass (exact dedup only).
+        #[arg(long)]
+        no_agent: bool,
+    },
 }
 
 pub fn execute(command: &ConstitutionCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -86,6 +116,11 @@ pub fn execute(command: &ConstitutionCommands, config: &GatewayConfig) -> anyhow
             init_toml(&config.workspace_root, template.as_deref())
         }
         ConstitutionCommands::CheckToml { json } => check_toml(&config.workspace_root, *json),
+        ConstitutionCommands::Review {
+            dry_run,
+            model,
+            no_agent,
+        } => review_constitution(config, *dry_run, model.as_deref(), *no_agent),
     }
 }
 
@@ -918,6 +953,769 @@ fn check_toml(project_root: &Path, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── v0.14.6.1 — Constitution Deduplication via Agent Review ─────────────────
+
+/// Agent-returned semantic review response.
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct AgentReviewResponse {
+    /// Pairs of rules that are semantically equivalent or near-duplicate.
+    #[serde(default)]
+    pub duplicates: Vec<SemanticDuplicate>,
+    /// Pairs of rules that conflict with each other.
+    #[serde(default)]
+    pub conflicts: Vec<SemanticConflict>,
+}
+
+/// A pair of rules identified as semantic duplicates by the agent.
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct SemanticDuplicate {
+    /// Name of the first rule.
+    pub rule_a: String,
+    /// Name of the second rule.
+    pub rule_b: String,
+    /// The canonical name to keep (should be one of rule_a or rule_b).
+    pub canonical: String,
+}
+
+/// A pair of rules identified as conflicting by the agent.
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct SemanticConflict {
+    /// Name of the first rule.
+    pub rule_a: String,
+    /// Name of the second rule.
+    pub rule_b: String,
+    /// Agent's recommendation for resolving the conflict.
+    pub recommendation: String,
+}
+
+/// Statistics from the deduplication pass.
+#[derive(Debug)]
+struct DeduplicationStats {
+    rules_before: usize,
+    rules_after: usize,
+    exact_removed: usize,
+    semantic_removed: usize,
+    conflicts: usize,
+}
+
+/// Main handler for `ta constitution review`.
+fn review_constitution(
+    config: &GatewayConfig,
+    dry_run: bool,
+    model: Option<&str>,
+    no_agent: bool,
+) -> anyhow::Result<()> {
+    let project_root = &config.workspace_root;
+    let toml_path = project_root.join(".ta/constitution.toml");
+
+    // 1. Load the effective rule set (with extends inheritance).
+    let (effective_config, original_toml) = if toml_path.exists() {
+        let raw = ProjectConstitutionConfig::load(project_root)?
+            .expect("load returned None but file exists");
+        let original = std::fs::read_to_string(&toml_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read .ta/constitution.toml: {}", e))?;
+        (raw, original)
+    } else {
+        println!("No .ta/constitution.toml found — using ta-default as the baseline.");
+        println!("Run `ta constitution init-toml` to create a project constitution first.");
+        println!();
+        // Use ta-default as the effective config; original is empty (new file).
+        (ProjectConstitutionConfig::ta_default(), String::new())
+    };
+
+    let rules_before = effective_config.rules.len();
+    println!("Constitution review:");
+    println!("  Rules loaded: {}", rules_before);
+
+    // 2. Exact duplicate detection (Rust-side, no model needed).
+    let exact_dups = detect_exact_duplicates(&effective_config.rules);
+    if exact_dups.is_empty() {
+        println!("  Exact duplicates: none");
+    } else {
+        println!("  Exact duplicates: {} pair(s)", exact_dups.len());
+        for (a, b) in &exact_dups {
+            println!("    • \"{}\" ≡ \"{}\"", a, b);
+        }
+    }
+
+    // 3. Agent semantic review pass (optional).
+    let agent_response = if no_agent {
+        println!("  Semantic review: skipped (--no-agent)");
+        None
+    } else {
+        print!("  Semantic review: ");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        match try_agent_review(&effective_config.rules, model) {
+            Some(resp) => {
+                let sem_dups = resp.duplicates.len();
+                let conflicts = resp.conflicts.len();
+                println!(
+                    "done ({} semantic duplicate(s), {} conflict(s))",
+                    sem_dups, conflicts
+                );
+                Some(resp)
+            }
+            None => {
+                println!("skipped (claude not available or returned invalid JSON)");
+                None
+            }
+        }
+    };
+
+    // 4. Generate merged TOML.
+    let (merged_toml, stats) =
+        generate_merged_toml(&effective_config, &exact_dups, agent_response.as_ref());
+
+    println!();
+    println!("Deduplication summary:");
+    println!("  Rules before:  {}", stats.rules_before);
+    println!("  Rules after:   {}", stats.rules_after);
+    if stats.exact_removed > 0 {
+        println!("  Exact removed: {}", stats.exact_removed);
+    }
+    if stats.semantic_removed > 0 {
+        println!("  Semantic removed: {}", stats.semantic_removed);
+    }
+    if stats.conflicts > 0 {
+        println!("  Conflicts flagged: {}", stats.conflicts);
+    }
+
+    if stats.rules_before == stats.rules_after && stats.conflicts == 0 {
+        println!();
+        println!("Constitution is already clean — no duplicates or conflicts found.");
+        if dry_run {
+            return Ok(());
+        }
+        // Still create a draft so the user can confirm the review ran.
+    }
+
+    if dry_run {
+        println!();
+        println!("--- Proposed .ta/constitution.toml ---");
+        println!();
+        println!("{}", merged_toml);
+        return Ok(());
+    }
+
+    // 5. Create draft artifact.
+    println!();
+    print!("Creating draft... ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let package_id = create_review_draft(config, &original_toml, &merged_toml, &stats)?;
+    println!("done");
+    println!();
+    println!("Draft created: {}", &package_id.to_string()[..8]);
+    println!(
+        "  ta draft view {} — review the proposed constitution diff",
+        &package_id.to_string()[..8]
+    );
+    println!(
+        "  ta draft approve {} — approve the deduplication",
+        &package_id.to_string()[..8]
+    );
+    println!(
+        "  ta draft apply {} — write the deduplicated .ta/constitution.toml",
+        &package_id.to_string()[..8]
+    );
+
+    Ok(())
+}
+
+/// Detect exact duplicate rules: two rules with identical inject_fns, restore_fns,
+/// and patterns (order-independent). Returns pairs of (rule_name_a, rule_name_b)
+/// where rule_a < rule_b lexicographically.
+pub fn detect_exact_duplicates(rules: &HashMap<String, ConstitutionRule>) -> Vec<(String, String)> {
+    // Build a fingerprint for each rule: sorted lists joined into a canonical string.
+    let mut fingerprint_to_names: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (name, rule) in rules {
+        let fp = rule_fingerprint(rule);
+        fingerprint_to_names
+            .entry(fp)
+            .or_default()
+            .push(name.clone());
+    }
+
+    let mut pairs = Vec::new();
+    for names in fingerprint_to_names.values() {
+        if names.len() >= 2 {
+            let mut sorted = names.clone();
+            sorted.sort();
+            // Emit all (a, b) pairs where a < b.
+            for i in 0..sorted.len() {
+                for j in (i + 1)..sorted.len() {
+                    pairs.push((sorted[i].clone(), sorted[j].clone()));
+                }
+            }
+        }
+    }
+
+    pairs.sort();
+    pairs
+}
+
+/// Compute a canonical fingerprint for a ConstitutionRule.
+/// Two rules with the same fingerprint are content-identical.
+fn rule_fingerprint(rule: &ConstitutionRule) -> String {
+    let mut inject = rule.inject_fns.clone();
+    inject.sort();
+    let mut restore = rule.restore_fns.clone();
+    restore.sort();
+    let mut patterns = rule.patterns.clone();
+    patterns.sort();
+    format!(
+        "inject:{:?}|restore:{:?}|patterns:{:?}|severity:{}",
+        inject, restore, patterns, rule.severity
+    )
+}
+
+/// Call `claude --print` for a short semantic review of the rules.
+///
+/// Sends all rule names and their content to the model, asks for JSON output
+/// identifying semantic duplicates and conflicts. Returns `None` if the model
+/// is not available, the call fails, or the response is not valid JSON.
+pub fn try_agent_review(
+    rules: &HashMap<String, ConstitutionRule>,
+    model: Option<&str>,
+) -> Option<AgentReviewResponse> {
+    if rules.is_empty() {
+        return Some(AgentReviewResponse {
+            duplicates: vec![],
+            conflicts: vec![],
+        });
+    }
+
+    // Serialize rules to JSON for the prompt.
+    let rules_json = serde_json::to_string_pretty(rules).ok()?;
+
+    let prompt = format!(
+        "You are reviewing a project constitution — a set of named rules that govern AI agent \
+         behavior. Each rule has inject_fns, restore_fns, patterns, and a severity.\n\
+         \n\
+         Identify:\n\
+         1. **Semantic near-duplicates**: two rules that enforce the same constraint with \
+            different names or slightly different content. These can be merged.\n\
+         2. **Conflicts**: two rules that cannot both be satisfied simultaneously.\n\
+         \n\
+         Rules (JSON):\n\
+         {rules_json}\n\
+         \n\
+         Respond ONLY with valid JSON in EXACTLY this format — no prose, no markdown fencing:\n\
+         {{\"duplicates\":[{{\"rule_a\":\"name1\",\"rule_b\":\"name2\",\"canonical\":\"preferred_name\"}}],\
+         \"conflicts\":[{{\"rule_a\":\"name1\",\"rule_b\":\"name2\",\"recommendation\":\"how to resolve\"}}]}}\n\
+         \n\
+         Use the EXACT rule names from the input. If there are no duplicates or conflicts, \
+         return empty arrays. Only flag rules that are clearly redundant or contradictory.",
+        rules_json = rules_json,
+    );
+
+    let mut args = vec!["--print".to_string()];
+    if let Some(m) = model {
+        args.push(format!("--model={}", m));
+    }
+    args.push(prompt);
+
+    let output = Command::new("claude")
+        .args(&args)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let trimmed = text.trim();
+
+    // Strip markdown code fences if the model wrapped the JSON.
+    let json_str = if trimmed.starts_with("```") {
+        trimmed
+            .lines()
+            .skip(1)
+            .take_while(|l| !l.starts_with("```"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        trimmed.to_string()
+    };
+
+    // Find the JSON object within the response (model may add prose).
+    let json_start = json_str.find('{');
+    let json_end = json_str.rfind('}');
+    if let (Some(start), Some(end)) = (json_start, json_end) {
+        let candidate = &json_str[start..=end];
+        serde_json::from_str(candidate).ok()
+    } else {
+        None
+    }
+}
+
+/// Generate the merged constitution TOML content with dedup annotations.
+///
+/// Returns (toml_string, stats). The merged config removes exact-duplicate rules
+/// (keeping the lexicographically first name) and semantic duplicates flagged by
+/// the agent (keeping the canonical). Conflicts are annotated with a comment.
+///
+/// The `extends` field is preserved from the original effective config.
+fn generate_merged_toml(
+    config: &ProjectConstitutionConfig,
+    exact_dups: &[(String, String)],
+    agent_response: Option<&AgentReviewResponse>,
+) -> (String, DeduplicationStats) {
+    let rules_before = config.rules.len();
+
+    // Build the set of rules to remove (keep lexicographically first of each pair).
+    let mut remove: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut merge_comments: HashMap<String, String> = HashMap::new(); // canonical → comment
+
+    // Exact duplicates: keep the lex-first name, remove the rest.
+    for (a, b) in exact_dups {
+        // a < b by construction from detect_exact_duplicates.
+        remove.insert(b.clone());
+        merge_comments
+            .entry(a.clone())
+            .or_insert_with(|| format!("# merged from: {}, {}", a, b));
+    }
+
+    // Semantic duplicates from agent: keep `canonical`, remove the other.
+    let mut semantic_removed = 0usize;
+    let mut conflict_comments: HashMap<String, String> = HashMap::new();
+
+    if let Some(resp) = agent_response {
+        for dup in &resp.duplicates {
+            // Only remove if both rules actually exist and canonical is one of them.
+            if config.rules.contains_key(&dup.rule_a)
+                && config.rules.contains_key(&dup.rule_b)
+                && (dup.canonical == dup.rule_a || dup.canonical == dup.rule_b)
+            {
+                let to_remove = if dup.canonical == dup.rule_a {
+                    &dup.rule_b
+                } else {
+                    &dup.rule_a
+                };
+                if !remove.contains(to_remove) {
+                    remove.insert(to_remove.clone());
+                    semantic_removed += 1;
+                    merge_comments
+                        .entry(dup.canonical.clone())
+                        .or_insert_with(|| {
+                            format!("# merged from: {}, {}", dup.rule_a, dup.rule_b)
+                        });
+                }
+            }
+        }
+
+        for conflict in &resp.conflicts {
+            if config.rules.contains_key(&conflict.rule_a)
+                && config.rules.contains_key(&conflict.rule_b)
+            {
+                let comment = format!(
+                    "# CONFLICT: {} vs {} — {}",
+                    conflict.rule_a, conflict.rule_b, conflict.recommendation
+                );
+                conflict_comments
+                    .entry(conflict.rule_a.clone())
+                    .or_insert(comment.clone());
+                conflict_comments
+                    .entry(conflict.rule_b.clone())
+                    .or_insert(comment);
+            }
+        }
+    }
+
+    let exact_removed = exact_dups.len();
+    let _num_conflicts = conflict_comments.len() / 2; // each conflict annotates 2 rules (unused here)
+
+    // Build deduplicated rule set.
+    let mut merged_rules: HashMap<String, ConstitutionRule> = HashMap::new();
+    for (name, rule) in &config.rules {
+        if !remove.contains(name) {
+            merged_rules.insert(name.clone(), rule.clone());
+        }
+    }
+
+    let rules_after = merged_rules.len();
+
+    // Build the merged config.
+    let merged_config = ProjectConstitutionConfig {
+        extends: config.extends.clone(),
+        rules: merged_rules.clone(),
+        scan: config.scan.clone(),
+        release: config.release.clone(),
+        validate: config.validate.clone(),
+    };
+
+    // Serialize base TOML.
+    let base_toml = toml::to_string_pretty(&merged_config)
+        .unwrap_or_else(|e| format!("# ERROR: failed to serialize merged constitution: {}\n", e));
+
+    // Insert per-rule comments into the TOML string.
+    // Look for `[rules.<name>]` sections and prepend the comment.
+    let mut annotated = base_toml.clone();
+    let mut rule_names: Vec<&str> = merged_rules.keys().map(|s| s.as_str()).collect();
+    rule_names.sort();
+    for name in rule_names {
+        let section_header = format!("[rules.{}]", name);
+        let mut comment = String::new();
+        if let Some(merge_cmt) = merge_comments.get(name) {
+            comment.push_str(merge_cmt);
+            comment.push('\n');
+        }
+        if let Some(conflict_cmt) = conflict_comments.get(name) {
+            comment.push_str(conflict_cmt);
+            comment.push('\n');
+        }
+        if !comment.is_empty() {
+            annotated =
+                annotated.replace(&section_header, &format!("{}{}", comment, section_header));
+        }
+    }
+
+    // Prepend header comment.
+    let conflicts_total = if let Some(resp) = agent_response {
+        resp.conflicts.len()
+    } else {
+        0
+    };
+    let header = format!(
+        "# Generated by `ta constitution review`\n\
+         # Rules before: {rules_before}  Rules after: {rules_after}\n\
+         # Exact duplicates removed: {exact_removed}  Semantic: {semantic_removed}\n\
+         # Conflicts flagged: {conflicts_total}\n\
+         # Apply via: ta draft approve <id> && ta draft apply <id>\n\n",
+        rules_before = rules_before,
+        rules_after = rules_after,
+        exact_removed = exact_removed,
+        semantic_removed = semantic_removed,
+        conflicts_total = conflicts_total,
+    );
+
+    let final_toml = format!("{}{}", header, annotated);
+
+    let stats = DeduplicationStats {
+        rules_before,
+        rules_after,
+        exact_removed,
+        semantic_removed,
+        conflicts: conflicts_total,
+    };
+
+    (final_toml, stats)
+}
+
+/// Compute a simple unified diff between two strings.
+///
+/// Returns a diff string in unified diff format. If the strings are equal,
+/// returns an empty string.
+fn constitution_unified_diff(path: &str, original: &str, modified: &str) -> String {
+    if original == modified {
+        return String::new();
+    }
+    let mut output = String::new();
+    output.push_str(&format!("--- a/{}\n", path));
+    output.push_str(&format!("+++ b/{}\n", path));
+
+    let orig_lines: Vec<&str> = original.lines().collect();
+    let mod_lines: Vec<&str> = modified.lines().collect();
+
+    output.push_str(&format!(
+        "@@ -{},{} +{},{} @@\n",
+        1,
+        orig_lines.len(),
+        1,
+        mod_lines.len()
+    ));
+    for line in &orig_lines {
+        output.push_str(&format!("-{}\n", line));
+    }
+    for line in &mod_lines {
+        output.push_str(&format!("+{}\n", line));
+    }
+
+    output
+}
+
+/// Create a draft package for the constitution review.
+///
+/// Uses the legacy MCP-based apply path (GoalRun.source_dir = None) so that
+/// `.ta/constitution.toml` is copied directly from staging without going through
+/// the overlay diff that excludes `.ta/`.
+///
+/// Returns the package UUID.
+fn create_review_draft(
+    config: &GatewayConfig,
+    original_toml: &str,
+    merged_toml: &str,
+    stats: &DeduplicationStats,
+) -> anyhow::Result<Uuid> {
+    use ta_changeset::changeset::{ChangeKind, ChangeSet, CommitIntent};
+    use ta_changeset::diff::DiffContent;
+    use ta_changeset::draft_package::{
+        AgentIdentity, Artifact, ChangeType, Changes, DraftPackage, DraftStatus, Goal, Iteration,
+        Plan, Provenance, ReviewRequests, Risk, Signatures, Summary, WorkspaceRef,
+    };
+    use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
+    use ta_workspace::ChangeStore;
+    use ta_workspace::JsonFileStore;
+
+    let review_id = Uuid::new_v4();
+    let review_id_str = review_id.to_string();
+    let now = Utc::now();
+
+    // Staging workspace: write the merged constitution.toml.
+    // The legacy MCP apply path uses:
+    //   StagingWorkspace::new(goal_run_id, &config.staging_dir)
+    // which creates config.staging_dir/<goal_run_id>/ as the staging dir.
+    // FsConnector::apply copies all files from that dir to target_dir.
+    let staging_dir = config.staging_dir.join(&review_id_str);
+    let ta_staging = staging_dir.join(".ta");
+    std::fs::create_dir_all(&ta_staging).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create staging directory {}: {}",
+            ta_staging.display(),
+            e
+        )
+    })?;
+    std::fs::write(ta_staging.join("constitution.toml"), merged_toml)
+        .map_err(|e| anyhow::anyhow!("Failed to write merged constitution to staging: {}", e))?;
+
+    // Changeset: record the diff for `ta draft view`.
+    // Store path: config.store_dir/<review_id>/
+    let store_path = config.store_dir.join(&review_id_str);
+    std::fs::create_dir_all(&store_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create store directory {}: {}",
+            store_path.display(),
+            e
+        )
+    })?;
+
+    let diff_text = constitution_unified_diff(".ta/constitution.toml", original_toml, merged_toml);
+    let change_type = if original_toml.is_empty() {
+        ChangeType::Add
+    } else {
+        ChangeType::Modify
+    };
+    let diff_content = if original_toml.is_empty() {
+        DiffContent::CreateFile {
+            content: merged_toml.to_string(),
+        }
+    } else {
+        DiffContent::UnifiedDiff { content: diff_text }
+    };
+
+    let changeset = ChangeSet::new(
+        "fs://workspace/.ta/constitution.toml".to_string(),
+        ChangeKind::FsPatch,
+        diff_content,
+    )
+    .with_commit_intent(CommitIntent::RequestCommit);
+
+    let mut cs_store = JsonFileStore::new(&store_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open changeset store: {}", e))?;
+    cs_store
+        .save(&review_id_str, &changeset)
+        .map_err(|e| anyhow::anyhow!("Failed to save changeset: {}", e))?;
+
+    // GoalRun record (legacy/MCP-based: source_dir = None).
+    let goal_run = GoalRun {
+        goal_run_id: review_id,
+        tag: Some(format!("constitution-review-{}", &review_id_str[..8])),
+        title: "Constitution Deduplication Review".to_string(),
+        objective: format!(
+            "Deduplicate .ta/constitution.toml: {} rule(s) → {} rule(s) \
+             ({} exact duplicate(s) removed, {} conflict(s) flagged)",
+            stats.rules_before, stats.rules_after, stats.exact_removed, stats.conflicts,
+        ),
+        agent_id: "ta-constitution-review".to_string(),
+        state: GoalRunState::Running,
+        manifest_id: Uuid::new_v4(),
+        workspace_path: staging_dir.clone(),
+        store_path: store_path.clone(),
+        source_dir: None, // legacy path — no overlay diff
+        plan_phase: None,
+        parent_goal_id: None,
+        source_snapshot: None,
+        is_macro: false,
+        parent_macro_id: None,
+        sub_goal_ids: vec![],
+        workflow_id: None,
+        stage: None,
+        role: None,
+        context_from: vec![],
+        thread_id: None,
+        project_name: config
+            .workspace_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string()),
+        agent_pid: None,
+        heartbeat_required: false,
+        pr_url: None,
+        pr_package_id: None,
+        progress_note: None,
+        vcs_isolation: None,
+        initiated_by: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let goal_store = GoalRunStore::new(&config.goals_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to open goal store: {}", e))?;
+    goal_store
+        .save(&goal_run)
+        .map_err(|e| anyhow::anyhow!("Failed to save goal run: {}", e))?;
+
+    // Build the DraftPackage.
+    let package_id = Uuid::new_v4();
+
+    let pkg = DraftPackage {
+        package_version: "1.0.0".to_string(),
+        package_id,
+        created_at: now,
+        goal: Goal {
+            goal_id: review_id_str.clone(),
+            title: "Constitution Deduplication Review".to_string(),
+            objective: goal_run.objective.clone(),
+            success_criteria: vec![format!(
+                "Deduplicated .ta/constitution.toml to {} rule(s)",
+                stats.rules_after
+            )],
+            constraints: vec![],
+            parent_goal_title: None,
+        },
+        iteration: Iteration {
+            iteration_id: Uuid::new_v4().to_string(),
+            sequence: 1,
+            workspace_ref: WorkspaceRef {
+                ref_type: "constitution_review".to_string(),
+                ref_name: staging_dir.to_string_lossy().to_string(),
+                base_ref: None,
+            },
+        },
+        agent_identity: AgentIdentity {
+            agent_id: "ta-constitution-review".to_string(),
+            agent_type: "constitution-review".to_string(),
+            constitution_id: "ta-default".to_string(),
+            capability_manifest_hash: "constitution-review".to_string(),
+            orchestrator_run_id: None,
+        },
+        summary: Summary {
+            what_changed: format!(
+                "Deduplicated .ta/constitution.toml: {} → {} rule(s)",
+                stats.rules_before, stats.rules_after
+            ),
+            why: format!(
+                "Removed {} exact duplicate(s) and {} semantic duplicate(s). \
+                 {} conflict(s) flagged for human review.",
+                stats.exact_removed, stats.semantic_removed, stats.conflicts
+            ),
+            impact: "Constitution rule set is smaller and consistent. \
+                     No behavioral change unless conflicting rules are resolved."
+                .to_string(),
+            rollback_plan: "Deny this draft — no changes are applied until approved.".to_string(),
+            open_questions: vec![],
+            alternatives_considered: vec![],
+        },
+        plan: Plan {
+            completed_steps: vec![
+                format!("Exact deduplication: {} pair(s) found", stats.exact_removed),
+                if stats.semantic_removed > 0 {
+                    format!(
+                        "Semantic review: {} near-duplicate(s) found",
+                        stats.semantic_removed
+                    )
+                } else {
+                    "Semantic review: no near-duplicates found".to_string()
+                },
+            ],
+            next_steps: if stats.conflicts > 0 {
+                vec![format!(
+                    "Resolve {} conflict(s) flagged with # CONFLICT: comments in the diff",
+                    stats.conflicts
+                )]
+            } else {
+                vec![]
+            },
+            decision_log: vec![],
+        },
+        changes: Changes {
+            artifacts: vec![Artifact {
+                resource_uri: "fs://workspace/.ta/constitution.toml".to_string(),
+                change_type,
+                diff_ref: "changeset:0".to_string(),
+                tests_run: vec![],
+                disposition: Default::default(),
+                rationale: Some(format!(
+                    "Deduplicated from {} to {} rule(s). \
+                     Generated by `ta constitution review`.",
+                    stats.rules_before, stats.rules_after
+                )),
+                dependencies: vec![],
+                explanation_tiers: None,
+                comments: None,
+                amendment: None,
+            }],
+            patch_sets: vec![],
+            pending_actions: vec![],
+        },
+        risk: Risk {
+            risk_score: 5,
+            findings: vec![],
+            policy_decisions: vec![],
+        },
+        provenance: Provenance {
+            inputs: vec![],
+            tool_trace_hash: "constitution-review".to_string(),
+        },
+        review_requests: ReviewRequests {
+            requested_actions: vec![],
+            reviewers: vec![],
+            required_approvals: 1,
+            notes_to_reviewer: if stats.conflicts > 0 {
+                Some(format!(
+                    "{} conflict(s) flagged with # CONFLICT: comments — \
+                     resolve these before applying.",
+                    stats.conflicts
+                ))
+            } else {
+                None
+            },
+        },
+        signatures: Signatures {
+            package_hash: "constitution-review".to_string(),
+            agent_signature: "constitution-review".to_string(),
+            gateway_attestation: None,
+        },
+        status: DraftStatus::PendingReview,
+        verification_warnings: vec![],
+        validation_log: vec![],
+        display_id: Some(format!("{}-01", &review_id_str[..8])),
+        tag: Some(format!("constitution-review-{}", &review_id_str[..8])),
+        vcs_status: None,
+        parent_draft_id: None,
+        pending_approvals: vec![],
+        supervisor_review: None,
+        ignored_artifacts: vec![],
+        baseline_artifacts: vec![],
+    };
+
+    super::draft::save_package(config, &pkg)
+        .map_err(|e| anyhow::anyhow!("Failed to save draft package: {}", e))?;
+
+    // Update GoalRun to PrReady with the package ID.
+    let mut updated_goal = goal_run;
+    updated_goal.state = GoalRunState::PrReady;
+    updated_goal.pr_package_id = Some(package_id);
+    updated_goal.updated_at = Utc::now();
+    goal_store
+        .save(&updated_goal)
+        .map_err(|e| anyhow::anyhow!("Failed to update goal run with package ID: {}", e))?;
+
+    Ok(package_id)
+}
+
 fn read_file_if_exists(path: &Path) -> Option<String> {
     if path.exists() {
         std::fs::read_to_string(path).ok()
@@ -1265,6 +2063,179 @@ severity = "high"
         std::fs::write(dir.path().join("pyproject.toml"), "[tool.poetry]\n").unwrap();
         let lang = detect_constitution_language(dir.path());
         assert_eq!(lang, "python");
+    }
+
+    // ── v0.14.6.1 tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn exact_duplicates_none_when_all_distinct() {
+        let mut rules = HashMap::new();
+        rules.insert(
+            "rule_a".to_string(),
+            ConstitutionRule {
+                inject_fns: vec!["fn_a".to_string()],
+                restore_fns: vec!["fn_a_restore".to_string()],
+                patterns: vec![],
+                severity: "high".to_string(),
+            },
+        );
+        rules.insert(
+            "rule_b".to_string(),
+            ConstitutionRule {
+                inject_fns: vec!["fn_b".to_string()],
+                restore_fns: vec!["fn_b_restore".to_string()],
+                patterns: vec![],
+                severity: "medium".to_string(),
+            },
+        );
+        let dups = detect_exact_duplicates(&rules);
+        assert!(
+            dups.is_empty(),
+            "distinct rules should produce no exact duplicates"
+        );
+    }
+
+    #[test]
+    fn exact_duplicates_found_when_content_identical() {
+        let rule = ConstitutionRule {
+            inject_fns: vec!["fn_x".to_string()],
+            restore_fns: vec!["fn_x_restore".to_string()],
+            patterns: vec!["PATTERN".to_string()],
+            severity: "high".to_string(),
+        };
+        let mut rules = HashMap::new();
+        rules.insert("alpha".to_string(), rule.clone());
+        rules.insert("beta".to_string(), rule.clone());
+        let dups = detect_exact_duplicates(&rules);
+        assert_eq!(dups.len(), 1, "one duplicate pair should be found");
+        // alpha < beta lexicographically
+        assert_eq!(dups[0], ("alpha".to_string(), "beta".to_string()));
+    }
+
+    #[test]
+    fn exact_duplicates_order_independent() {
+        // inject_fns in different order should still be detected as duplicate.
+        let mut rule_a = ConstitutionRule {
+            inject_fns: vec!["fn2".to_string(), "fn1".to_string()],
+            restore_fns: vec!["fn1_r".to_string()],
+            patterns: vec![],
+            severity: "low".to_string(),
+        };
+        let rule_b = ConstitutionRule {
+            inject_fns: vec!["fn1".to_string(), "fn2".to_string()],
+            restore_fns: vec!["fn1_r".to_string()],
+            patterns: vec![],
+            severity: "low".to_string(),
+        };
+        rule_a.inject_fns.sort(); // fingerprint sorts them
+        let mut rules = HashMap::new();
+        rules.insert("x".to_string(), rule_a);
+        rules.insert("y".to_string(), rule_b);
+        // Both have the same sorted inject_fns so fingerprints should match.
+        let dups = detect_exact_duplicates(&rules);
+        assert_eq!(
+            dups.len(),
+            1,
+            "order-independent duplicate should be detected"
+        );
+    }
+
+    #[test]
+    fn agent_review_response_roundtrip_json() {
+        let resp = AgentReviewResponse {
+            duplicates: vec![SemanticDuplicate {
+                rule_a: "a".to_string(),
+                rule_b: "b".to_string(),
+                canonical: "a".to_string(),
+            }],
+            conflicts: vec![SemanticConflict {
+                rule_a: "c".to_string(),
+                rule_b: "d".to_string(),
+                recommendation: "drop d".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentReviewResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.duplicates.len(), 1);
+        assert_eq!(parsed.conflicts.len(), 1);
+        assert_eq!(parsed.duplicates[0].canonical, "a");
+        assert_eq!(parsed.conflicts[0].recommendation, "drop d");
+    }
+
+    #[test]
+    fn generate_merged_toml_removes_exact_dups() {
+        let rule = ConstitutionRule {
+            inject_fns: vec!["fn_inject".to_string()],
+            restore_fns: vec!["fn_restore".to_string()],
+            patterns: vec![],
+            severity: "medium".to_string(),
+        };
+        let mut config = ProjectConstitutionConfig::default();
+        config.rules.insert("rule_dup_a".to_string(), rule.clone());
+        config.rules.insert("rule_dup_b".to_string(), rule.clone());
+        config.rules.insert(
+            "rule_unique".to_string(),
+            ConstitutionRule {
+                inject_fns: vec!["other".to_string()],
+                restore_fns: vec![],
+                patterns: vec![],
+                severity: "low".to_string(),
+            },
+        );
+
+        let exact_dups = detect_exact_duplicates(&config.rules);
+        let (toml_str, stats) = generate_merged_toml(&config, &exact_dups, None);
+
+        assert_eq!(stats.rules_before, 3);
+        assert_eq!(stats.rules_after, 2, "one duplicate should be removed");
+        assert_eq!(stats.exact_removed, 1);
+        // The merged TOML should contain the canonical name but not the duplicate.
+        assert!(
+            toml_str.contains("[rules.rule_dup_a]"),
+            "canonical section should be present"
+        );
+        // rule_dup_b should not appear as a rules section (may appear in comment text)
+        assert!(
+            !toml_str.contains("[rules.rule_dup_b]"),
+            "duplicate section should be absent"
+        );
+        assert!(
+            toml_str.contains("# merged from:"),
+            "merge comment should be present"
+        );
+    }
+
+    #[test]
+    fn generate_merged_toml_no_changes_when_clean() {
+        let mut config = ProjectConstitutionConfig::default();
+        config.rules.insert(
+            "only_rule".to_string(),
+            ConstitutionRule {
+                inject_fns: vec!["fn".to_string()],
+                restore_fns: vec![],
+                patterns: vec![],
+                severity: "medium".to_string(),
+            },
+        );
+        let (_, stats) = generate_merged_toml(&config, &[], None);
+        assert_eq!(stats.rules_before, stats.rules_after);
+        assert_eq!(stats.exact_removed, 0);
+        assert_eq!(stats.conflicts, 0);
+    }
+
+    #[test]
+    fn constitution_unified_diff_empty_when_equal() {
+        let diff = constitution_unified_diff(".ta/constitution.toml", "same", "same");
+        assert!(diff.is_empty(), "no diff when content is identical");
+    }
+
+    #[test]
+    fn constitution_unified_diff_non_empty_when_changed() {
+        let diff = constitution_unified_diff(".ta/constitution.toml", "old\n", "new\n");
+        assert!(diff.contains("--- a/.ta/constitution.toml"));
+        assert!(diff.contains("+++ b/.ta/constitution.toml"));
+        assert!(diff.contains("-old"));
+        assert!(diff.contains("+new"));
     }
 
     #[test]

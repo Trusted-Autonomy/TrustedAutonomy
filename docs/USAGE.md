@@ -1137,6 +1137,51 @@ ta constitution check-toml --json     # JSON output for CI/scripts
 
 If `.ta/constitution.toml` is absent, the scanner uses TA's built-in `ta-default` rules (inject/restore pairs from `run.rs`). Exit code 1 is returned only when `on_violation = "block"`.
 
+### Deduplicating Your Constitution
+
+Constitutions grow over time from multiple sources: `extends = "ta-default"`, per-language templates, manual additions. Over time, rules can overlap or conflict. `ta constitution review` identifies duplicates and proposes a cleaned-up version via the standard draft workflow.
+
+```bash
+ta constitution review
+```
+
+This runs two passes:
+
+1. **Exact duplicate detection** (Rust, no model) — finds rules with identical `inject_fns`, `restore_fns`, `patterns`, and `severity` (order-independent).
+2. **Semantic review** (`claude --print`) — finds near-duplicates and conflicting rules. Skip with `--no-agent`.
+
+After both passes, TA generates a merged `.ta/constitution.toml` with annotations and packages it as a draft:
+
+```
+Constitution review:
+  Rules loaded: 12
+  Exact duplicates: 1 pair(s)
+    • "inject_cleanup" ≡ "inject_cleanup_v2"
+  Semantic review: done (2 semantic duplicate(s), 1 conflict(s))
+
+Deduplication summary:
+  Rules before:  12
+  Rules after:   9
+  Exact removed: 1
+  Semantic removed: 2
+  Conflicts flagged: 1
+
+Draft created: a3f2b1c0
+  ta draft view a3f2b1c0     — review the proposed constitution diff
+  ta draft approve a3f2b1c0  — approve the deduplication
+  ta draft apply a3f2b1c0    — write the deduplicated .ta/constitution.toml
+```
+
+The diff shows each removed rule and which rules were merged. Conflicts are flagged with `# CONFLICT: rule_a vs rule_b — <recommendation>` comments so you can decide how to resolve them manually before applying.
+
+**Flags:**
+
+```bash
+ta constitution review --dry-run           # print proposed TOML, no draft created
+ta constitution review --no-agent          # exact dedup only, skip model call
+ta constitution review --model claude-opus-4-6  # override model for semantic review
+```
+
 ### Desktop Notifications
 
 TA sends a system notification when a draft is ready for review, so you don't have to watch the terminal. On macOS this uses Notification Center (via `osascript`); on Linux it uses `notify-send`.
