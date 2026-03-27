@@ -313,6 +313,8 @@ impl<S: ChangeStore> FsConnector<S> {
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            goal_shortref: None,
+            draft_seq: 0,
         };
 
         Ok(package)

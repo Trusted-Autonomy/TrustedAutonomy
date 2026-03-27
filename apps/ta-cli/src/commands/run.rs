@@ -5839,6 +5839,8 @@ pre_launch:
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            goal_shortref: None,
+            draft_seq: 0,
         };
 
         // Save the draft package.
@@ -6001,6 +6003,8 @@ pre_launch:
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            goal_shortref: None,
+            draft_seq: 0,
         };
 
         super::super::draft::save_package(&config, &parent_draft).unwrap();

@@ -126,6 +126,12 @@ pub struct AuditEvent {
     /// Verify with `ta audit verify-attestation`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<crate::attestation::AttestationRecord>,
+
+    /// 8-char goal shortref derived from `goal_run_id` (v0.14.7.3).
+    /// Allows `grep <shortref> audit.jsonl` to find all entries for a goal.
+    /// Populated whenever `goal_run_id` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortref: Option<String>,
 }
 
 impl AuditEvent {
@@ -149,6 +155,7 @@ impl AuditEvent {
             tool_name: None,
             goal_run_id: None,
             attestation: None,
+            shortref: None,
         }
     }
 
@@ -203,9 +210,21 @@ impl AuditEvent {
         self
     }
 
-    /// Set the goal run ID and return self (v0.10.15).
+    /// Set the goal run ID and shortref, and return self (v0.10.15).
+    ///
+    /// Automatically populates `shortref` from the first 8 chars of the UUID (v0.14.7.3).
     pub fn with_goal_run_id(mut self, id: Uuid) -> Self {
+        self.shortref = Some(id.to_string()[..8].to_string());
         self.goal_run_id = Some(id);
+        self
+    }
+
+    /// Set the goal shortref explicitly and return self (v0.14.7.3).
+    ///
+    /// Normally populated automatically by `with_goal_run_id`. Use this only when
+    /// the shortref needs to be set independently (e.g., replay or migration).
+    pub fn with_shortref(mut self, shortref: impl Into<String>) -> Self {
+        self.shortref = Some(shortref.into());
         self
     }
 }

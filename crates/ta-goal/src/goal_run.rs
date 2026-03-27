@@ -414,6 +414,16 @@ impl GoalRun {
         }
     }
 
+    /// Return the 8-character goal shortref (first 8 hex chars of goal_run_id).
+    ///
+    /// The shortref is the canonical short identity for a goal across all surfaces:
+    /// goal list, draft list, draft view, audit log, and PR branch/title.
+    /// It is deterministic (always the same for a given goal), short enough to
+    /// remember and type, and unique in practice across a project's history.
+    pub fn shortref(&self) -> String {
+        self.goal_run_id.to_string()[..8].to_string()
+    }
+
     /// Return the display tag, auto-deriving from title + UUID prefix if not set.
     pub fn display_tag(&self) -> String {
         if let Some(ref tag) = self.tag {

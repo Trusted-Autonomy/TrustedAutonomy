@@ -704,7 +704,7 @@ fn list_goals(
 
     for g in &goals {
         let tag = g.display_tag();
-        let id_short = &g.goal_run_id.to_string()[..8];
+        let id_short = g.shortref();
         let title_display = if g.is_macro {
             format!("[M] {}", truncate(&g.title, 18))
         } else if let Some(ref macro_id) = g.parent_macro_id {

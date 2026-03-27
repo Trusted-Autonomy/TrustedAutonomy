@@ -1536,6 +1536,8 @@ pub(crate) fn build_package(
         ignored_artifacts: vec![],
         baseline_artifacts: vec![], // Set below if this is a follow-up (v0.14.3.5).
         agent_decision_log,
+        goal_shortref: None, // Set below with display_id (v0.14.7.3).
+        draft_seq: 0,        // Set below with display_id (v0.14.7.3).
     };
 
     // v0.12.2.1: Track parent_draft_id and compute composited diff for follow-up chains.
@@ -1678,8 +1680,10 @@ pub(crate) fn build_package(
         }
     }
 
-    // Generate goal-derived display ID (v0.10.11).
-    // Format: <goal-id-prefix>-NN (e.g., 511e0465-01, 511e0465-02 for follow-ups).
+    // Generate goal-derived display ID (v0.10.11) and unified shortref/seq (v0.14.7.3).
+    // display_id format: <goal-id-prefix>-NN (e.g., 511e0465-01, 511e0465-02 for follow-ups).
+    // goal_shortref: first 8 chars of goal UUID (same as shortref() on GoalRun).
+    // draft_seq: 1-based sequence counter for drafts within this goal.
     {
         let goal_prefix = &goal_id[..8.min(goal_id.len())];
         let existing = load_all_packages(config)
@@ -1689,6 +1693,8 @@ pub(crate) fn build_package(
             .count();
         let seq = existing + 1;
         pkg.display_id = Some(format!("{}-{:02}", goal_prefix, seq));
+        pkg.goal_shortref = Some(goal_prefix.to_string());
+        pkg.draft_seq = seq as u32;
     }
 
     // v0.13.9: Project constitution scan — reads inject/restore rules from
@@ -1788,15 +1794,16 @@ pub(crate) fn build_package(
         }
     }
 
-    println!("draft package built: {}", package_id);
+    let draft_display = draft_display_id(&pkg);
+    println!("draft package built: {}", draft_display);
     println!("  Goal:    {} ({})", goal.title, goal_id);
     println!("  Changes: {} file(s)", pkg.changes.artifacts.len());
     for artifact in &pkg.changes.artifacts {
         println!("    {:?}  {}", artifact.change_type, artifact.resource_uri);
     }
     println!();
-    println!("Review with:  ta draft view {}", package_id);
-    println!("Approve with: ta draft approve {}", package_id);
+    println!("Review with:  ta draft view {}", draft_display);
+    println!("Approve with: ta draft approve {}", draft_display);
 
     Ok(())
 }
@@ -2206,8 +2213,16 @@ fn list_packages(
 }
 
 /// Return the human-friendly display ID for a draft package.
-/// Uses goal-derived display_id (v0.10.11) or falls back to package_id short prefix.
+///
+/// Prefers `<goal_shortref>/<draft_seq>` (v0.14.7.3), falls back to the
+/// goal-derived display_id (v0.10.11), then to package_id short prefix for
+/// legacy drafts.
 fn draft_display_id(pkg: &DraftPackage) -> String {
+    if let (Some(shortref), seq) = (&pkg.goal_shortref, pkg.draft_seq) {
+        if seq > 0 {
+            return format!("{}/{}", shortref, seq);
+        }
+    }
     pkg.display_id
         .as_ref()
         .cloned()
@@ -5863,6 +5878,25 @@ fn resolve_draft_id_flexible(
             return Ok(uuid.to_string());
         }
         anyhow::bail!("Draft {} not found", input);
+    }
+
+    // Try goal shortref match (v0.14.7.3): 8-char hex resolves to latest draft for that goal.
+    // An 8-char all-hex string is treated as a goal shortref — resolves to the latest draft.
+    // This takes priority over draft UUID prefix matching so `ta draft view 2159d87e`
+    // means "latest draft for goal 2159d87e" not "draft whose UUID starts with 2159d87e".
+    if input.len() == 8 && input.chars().all(|c| c.is_ascii_hexdigit()) {
+        let shortref_matches: Vec<&DraftPackage> = packages
+            .iter()
+            .filter(|p| p.goal_shortref.as_ref().is_some_and(|s| s == input))
+            .collect();
+        if !shortref_matches.is_empty() {
+            // Return the most recent (latest created_at) draft for this goal.
+            let latest = shortref_matches
+                .iter()
+                .max_by_key(|p| p.created_at)
+                .unwrap();
+            return Ok(latest.package_id.to_string());
+        }
     }
 
     // Try tag match (v0.11.2.3).

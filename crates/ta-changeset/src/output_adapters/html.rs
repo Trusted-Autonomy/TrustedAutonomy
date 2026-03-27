@@ -402,6 +402,8 @@ mod tests {
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            goal_shortref: None,
+            draft_seq: 0,
         };
         pkg.status = DraftStatus::PendingReview;
 
@@ -513,6 +515,8 @@ mod tests {
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            goal_shortref: None,
+            draft_seq: 0,
         };
 
         let adapter = HtmlAdapter::new();
@@ -621,6 +625,8 @@ mod tests {
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            goal_shortref: None,
+            draft_seq: 0,
         };
         pkg.agent_decision_log = vec![DecisionLogEntry {
             decision: "Used Ed25519 over RSA".to_string(),

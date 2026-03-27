@@ -431,7 +431,14 @@ ta draft apply <id>             # Copy approved changes to your project
 ta draft close <id>             # Abandon without applying
 ```
 
-All `<id>` arguments accept either a full UUID or an 8+ character prefix (e.g., `ta draft view a1b2c3d4`). If a prefix is ambiguous, you'll be asked to use a longer one.
+All `<id>` arguments accept a full UUID, an 8+ character UUID prefix, **or a goal shortref** (the 8-char hex prefix of the goal UUID). Using a shortref resolves to the latest draft for that goal:
+
+```bash
+ta draft view 2159d87e          # latest draft for goal 2159d87e
+ta draft approve 2159d87e       # approve latest draft for that goal
+```
+
+The goal shortref is shown in `ta goal list` (ID column) and in `ta draft list` (DRAFT ID column as `<shortref>/<seq>`). You can use `grep 2159d87e .ta/audit.jsonl` to find all audit entries for a goal.
 
 For simple workflows, `ta draft apply` works directly on unapproved drafts (auto-approves on apply).
 

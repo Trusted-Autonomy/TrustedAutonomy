@@ -110,6 +110,17 @@ impl TerminalAdapter {
         let bold = self.bold();
         let reset = self.reset();
 
+        // Build the draft identity string: prefer <shortref>/<seq> · <tag> (v0.14.7.3).
+        let draft_identity = match (&pkg.goal_shortref, pkg.draft_seq, &pkg.tag) {
+            (Some(shortref), seq, Some(tag)) if seq > 0 => {
+                format!("{}/{} · {}", shortref, seq, tag)
+            }
+            (Some(shortref), seq, None) if seq > 0 => {
+                format!("{}/{}", shortref, seq)
+            }
+            _ => pkg.package_id.to_string(),
+        };
+
         format!(
             "{bold}Draft: {}{reset}\n\
             Status: {}{}{reset}\n\
@@ -121,7 +132,7 @@ impl TerminalAdapter {
             {}\n\n\
             {bold}Impact:{reset}\n\
             {}\n\n",
-            pkg.package_id,
+            draft_identity,
             status_color,
             pkg.status,
             Self::strip_html(&pkg.goal.title),
@@ -641,6 +652,8 @@ mod tests {
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            goal_shortref: None,
+            draft_seq: 0,
         }
     }
 
