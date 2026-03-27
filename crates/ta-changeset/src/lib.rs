@@ -13,6 +13,7 @@ pub mod channel_registry;
 pub mod diff;
 pub mod diff_handlers;
 pub mod draft_package;
+pub mod draft_resolver;
 pub mod error;
 pub mod explanation;
 pub mod interaction;
@@ -46,6 +47,7 @@ pub use draft_package::{
     ActionKind, ApprovalRecord, DesignAlternative, DraftPackage, DraftStatus, ExplanationTiers,
     IgnoredArtifact, PendingAction, ValidationEntry, VcsTrackingInfo,
 };
+pub use draft_resolver::{draft_canonical_id, resolve_draft, DraftResolveError};
 pub use error::ChangeSetError;
 pub use explanation::ExplanationSidecar;
 pub use interaction::{

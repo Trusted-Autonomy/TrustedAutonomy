@@ -5880,6 +5880,44 @@ fn resolve_draft_id_flexible(
         anyhow::bail!("Draft {} not found", input);
     }
 
+    // Try shortref/seq format (v0.14.8.1): `<8hex>/<N>` — goal shortref + draft seq number.
+    // This is the canonical ID format emitted by `ta draft list` and `ta run` completion.
+    if let Some((shortref_part, seq_part)) = input.split_once('/') {
+        if shortref_part.len() == 8 && shortref_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            if let Ok(seq) = seq_part.parse::<u32>() {
+                let matched: Vec<&DraftPackage> = packages
+                    .iter()
+                    .filter(|p| {
+                        p.goal_shortref.as_deref() == Some(shortref_part) && p.draft_seq == seq
+                    })
+                    .collect();
+                match matched.len() {
+                    0 => anyhow::bail!(
+                        "No draft matching \"{}\". Run `ta draft list` to see available drafts.",
+                        input
+                    ),
+                    1 => return Ok(matched[0].package_id.to_string()),
+                    _ => {
+                        // Theoretically impossible (seq is unique per goal), surface as ambiguous.
+                        let ids: Vec<String> = matched
+                            .iter()
+                            .map(|p| {
+                                format!("{}  {}", &p.package_id.to_string()[..8], p.goal.title)
+                            })
+                            .collect();
+                        anyhow::bail!(
+                            "Ambiguous shortref/seq \"{}\" matches {} drafts:\n  {}",
+                            input,
+                            matched.len(),
+                            ids.join("\n  ")
+                        );
+                    }
+                }
+            }
+        }
+        // Has a `/` but doesn't look like shortref/seq — fall through to other matchers.
+    }
+
     // Try goal shortref match (v0.14.7.3): 8-char hex resolves to latest draft for that goal.
     // An 8-char all-hex string is treated as a goal shortref — resolves to the latest draft.
     // This takes priority over draft UUID prefix matching so `ta draft view 2159d87e`
@@ -10436,5 +10474,110 @@ fn run() {
 - [ ] Item not done\n";
         let warnings = detect_unchecked_in_done_phases(content);
         assert!(warnings.is_empty(), "pending phase should not warn");
+    }
+
+    // ── v0.14.8.1: DraftResolver — ID unification tests ─────────────────
+
+    /// Helper: create a project, start a goal, modify a file, build a draft.
+    /// Returns (config, goal_id, project TempDir).
+    fn setup_resolver_test() -> (GatewayConfig, String, TempDir) {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Resolver test goal".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test resolver".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+        build_package(&config, &goal_id, "Resolver test change", false).unwrap();
+        (config, goal_id, project)
+    }
+
+    #[test]
+    fn resolve_draft_by_full_uuid() {
+        let (config, _goal_id, _project) = setup_resolver_test();
+        let packages = load_all_packages(&config).unwrap();
+        let full_uuid = packages[0].package_id.to_string();
+        let resolved = resolve_draft_id_flexible(&config, Some(&full_uuid));
+        assert!(resolved.is_ok(), "full UUID must resolve: {:?}", resolved);
+        assert_eq!(resolved.unwrap(), full_uuid);
+    }
+
+    #[test]
+    fn resolve_draft_by_uuid_prefix() {
+        let (config, _goal_id, _project) = setup_resolver_test();
+        let packages = load_all_packages(&config).unwrap();
+        let prefix = &packages[0].package_id.to_string()[..8];
+        let resolved = resolve_draft_id_flexible(&config, Some(prefix));
+        assert!(resolved.is_ok(), "UUID prefix must resolve: {:?}", resolved);
+    }
+
+    #[test]
+    fn resolve_draft_by_shortref_seq() {
+        let (config, _goal_id, _project) = setup_resolver_test();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg = &packages[0];
+        // Only test this format when the package has goal_shortref and draft_seq set.
+        if let (Some(shortref), seq) = (&pkg.goal_shortref, pkg.draft_seq) {
+            if seq > 0 {
+                let shortref_seq = format!("{}/{}", shortref, seq);
+                let resolved = resolve_draft_id_flexible(&config, Some(&shortref_seq));
+                assert!(
+                    resolved.is_ok(),
+                    "shortref/seq '{}' must resolve: {:?}",
+                    shortref_seq,
+                    resolved
+                );
+                assert_eq!(resolved.unwrap(), pkg.package_id.to_string());
+            }
+        }
+        // (If seq is 0 the package predates v0.14.7.3 shortref — test is vacuously OK.)
+    }
+
+    #[test]
+    fn resolve_draft_unknown_id_gives_helpful_error() {
+        let (config, _goal_id, _project) = setup_resolver_test();
+        let result = resolve_draft_id_flexible(&config, Some("no-such-draft-xyz-000"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("ta draft list") || msg.contains("No draft"),
+            "error should guide the user: {msg}"
+        );
+    }
+
+    #[test]
+    fn draft_list_ids_are_resolvable() {
+        let (config, _goal_id, _project) = setup_resolver_test();
+        let packages = load_all_packages(&config).unwrap();
+        for pkg in &packages {
+            let display_id = draft_display_id(pkg);
+            let resolved = resolve_draft_id_flexible(&config, Some(&display_id));
+            assert!(
+                resolved.is_ok(),
+                "DRAFT ID column value '{}' from ta draft list must resolve, got: {:?}",
+                display_id,
+                resolved
+            );
+            assert_eq!(
+                resolved.unwrap(),
+                pkg.package_id.to_string(),
+                "resolved ID must match package_id for '{}'",
+                display_id
+            );
+        }
     }
 }

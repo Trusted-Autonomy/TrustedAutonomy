@@ -448,6 +448,10 @@ fn default_on_failure() -> String {
 /// A constitution rule (injection/cleanup pairs or error-path patterns).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConstitutionRule {
+    /// Human-readable description of the rule (v0.14.8.1).
+    /// Policy-only rules may set only `description` with no inject/restore/patterns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Functions that inject context (must have corresponding restore calls).
     #[serde(default)]
     pub inject_fns: Vec<String>,
@@ -464,6 +468,18 @@ pub struct ConstitutionRule {
 
 fn default_severity() -> String {
     "medium".to_string()
+}
+
+impl Default for ConstitutionRule {
+    fn default() -> Self {
+        ConstitutionRule {
+            description: None,
+            inject_fns: vec![],
+            restore_fns: vec![],
+            patterns: vec![],
+            severity: default_severity(),
+        }
+    }
 }
 
 /// Scan configuration for constitution checks.
@@ -586,6 +602,7 @@ impl ProjectConstitutionConfig {
         rules.insert(
             "injection_cleanup".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec![
                     "inject_claude_md".to_string(),
                     "inject_credentials".to_string(),
@@ -601,10 +618,33 @@ impl ProjectConstitutionConfig {
         rules.insert(
             "error_paths".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec![],
                 restore_fns: vec![],
                 patterns: vec!["return Err(".to_string()],
                 severity: "medium".to_string(),
+            },
+        );
+        // Identifier-consistency rule (v0.14.8.1): any ID shown in output must resolve as input.
+        // This is a policy rule — no inject/restore/patterns to scan; enforced structurally by
+        // `resolve_draft_id_flexible` and `resolve_goal_id_from_store` routing all ID inputs
+        // through unified resolvers that accept every format surfaced in CLI output.
+        rules.insert(
+            "identifier-consistency".to_string(),
+            ConstitutionRule {
+                description: Some(
+                    "All identifiers surfaced in command output must be accepted as input by \
+                     the same command family. Draft IDs shown in `ta draft list` must resolve \
+                     via `ta draft view/approve/apply`. Goal IDs shown in `ta goal list` must \
+                     resolve via `ta goal status/recover/cancel`. Enforced by routing all ID \
+                     lookups through a unified resolver that accepts full UUID, UUID prefix, \
+                     shortref/seq (e.g. `6ebf85ab/1`), and display_id formats."
+                        .to_string(),
+                ),
+                inject_fns: vec![],
+                restore_fns: vec![],
+                patterns: vec![],
+                severity: "high".to_string(),
             },
         );
         ProjectConstitutionConfig {
@@ -1878,6 +1918,7 @@ severity = "high"
         config.rules.insert(
             "test_rule".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec!["inject_claude_md".to_string()],
                 restore_fns: vec!["restore_claude_md".to_string()],
                 patterns: vec![],
@@ -1913,6 +1954,7 @@ severity = "high"
         config.rules.insert(
             "test_rule".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec!["inject_claude_md".to_string()],
                 restore_fns: vec!["restore_claude_md".to_string()],
                 patterns: vec![],
@@ -1940,6 +1982,7 @@ severity = "high"
         config.rules.insert(
             "test_rule".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec!["inject_claude_md".to_string()],
                 restore_fns: vec!["restore_claude_md".to_string()],
                 patterns: vec![],
@@ -1973,6 +2016,7 @@ severity = "high"
         config.rules.insert(
             "test_rule".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec!["inject_claude_md".to_string()],
                 restore_fns: vec!["restore_claude_md".to_string()],
                 patterns: vec![],
@@ -2076,6 +2120,7 @@ severity = "high"
         rules.insert(
             "rule_a".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec!["fn_a".to_string()],
                 restore_fns: vec!["fn_a_restore".to_string()],
                 patterns: vec![],
@@ -2085,6 +2130,7 @@ severity = "high"
         rules.insert(
             "rule_b".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec!["fn_b".to_string()],
                 restore_fns: vec!["fn_b_restore".to_string()],
                 patterns: vec![],
@@ -2101,6 +2147,7 @@ severity = "high"
     #[test]
     fn exact_duplicates_found_when_content_identical() {
         let rule = ConstitutionRule {
+            description: None,
             inject_fns: vec!["fn_x".to_string()],
             restore_fns: vec!["fn_x_restore".to_string()],
             patterns: vec!["PATTERN".to_string()],
@@ -2119,12 +2166,14 @@ severity = "high"
     fn exact_duplicates_order_independent() {
         // inject_fns in different order should still be detected as duplicate.
         let mut rule_a = ConstitutionRule {
+            description: None,
             inject_fns: vec!["fn2".to_string(), "fn1".to_string()],
             restore_fns: vec!["fn1_r".to_string()],
             patterns: vec![],
             severity: "low".to_string(),
         };
         let rule_b = ConstitutionRule {
+            description: None,
             inject_fns: vec!["fn1".to_string(), "fn2".to_string()],
             restore_fns: vec!["fn1_r".to_string()],
             patterns: vec![],
@@ -2168,6 +2217,7 @@ severity = "high"
     #[test]
     fn generate_merged_toml_removes_exact_dups() {
         let rule = ConstitutionRule {
+            description: None,
             inject_fns: vec!["fn_inject".to_string()],
             restore_fns: vec!["fn_restore".to_string()],
             patterns: vec![],
@@ -2179,6 +2229,7 @@ severity = "high"
         config.rules.insert(
             "rule_unique".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec!["other".to_string()],
                 restore_fns: vec![],
                 patterns: vec![],
@@ -2214,6 +2265,7 @@ severity = "high"
         config.rules.insert(
             "only_rule".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec!["fn".to_string()],
                 restore_fns: vec![],
                 patterns: vec![],
@@ -2250,6 +2302,7 @@ severity = "high"
         project.rules.insert(
             "my_rule".to_string(),
             ConstitutionRule {
+                description: None,
                 inject_fns: vec!["my_inject".to_string()],
                 restore_fns: vec!["my_restore".to_string()],
                 patterns: vec![],

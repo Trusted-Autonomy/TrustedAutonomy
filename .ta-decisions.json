@@ -1,50 +1,20 @@
 [
   {
-    "decision": "DraftPending carries `exit_code: i32` alongside `pending_since` timestamp",
-    "rationale": "The watchdog needs to distinguish 'agent exited 0 (clean, work likely done)' vs 'agent exited non-zero (crash)' when deciding whether to auto-heal by running `ta draft build`. Storing exit_code on the state avoids re-reading the process table after the fact.",
-    "alternatives": ["Store exit_code in GoalRun.reason string (lossy)", "Add separate field on GoalRun (redundant with state)"],
-    "confidence": 0.85
-  },
-  {
-    "decision": "Default `ta goal list` shows Failed+staging goals rather than requiring `--all`",
-    "rationale": "The core problem in TRACE-1 is discoverability: users don't know to run `--all` when their goal disappears. Showing recoverable-failed by default means the common case (watchdog-killed goal with complete agent work) is immediately visible. Truly terminal failed goals (no staging) remain hidden to avoid clutter.",
-    "alternatives": ["Always show Failed in default list (too noisy)", "Add --recoverable flag (still requires knowing to add it)", "Show footer hint without listing (insufficient — user needs to see the goal tag to act)"],
+    "decision": "Place DraftResolver in crates/ta-changeset/src/draft_resolver.rs rather than a new draft_store.rs",
+    "rationale": "There is no DraftStore struct in the codebase — packages are loaded directly from the filesystem in draft.rs. A standalone resolve_draft(packages, id) function achieves the same goal without unnecessary abstraction.",
+    "alternatives": ["Create DraftStore struct wrapping GatewayConfig", "Keep all resolution logic in apps/ta-cli/src/commands/draft.rs"],
     "confidence": 0.9
   },
   {
-    "decision": "Progress journal uses GOAL_ID_PLACEHOLDER substitution in run.rs rather than positional format arg",
-    "rationale": "The CLAUDE.md injection string uses `format!()` with many named fields; inserting `{goal_id}` as a positional arg would require reordering the entire format call. String substitution of a sentinel value (`GOAL_ID_PLACEHOLDER`) after format!() is simpler and avoids touching the existing arg layout.",
-    "alternatives": ["Named format arg `{goal_id}` (requires restructuring format! call)", "Separate concatenation step (verbose)"],
+    "decision": "Added shortref/seq handling to resolve_draft_id_flexible in draft.rs rather than replacing with the new crate function",
+    "rationale": "resolve_draft_id_flexible already handles 7+ formats and is used by 20+ call sites. Adding the missing shortref/seq case is minimal and surgical. The new crate module provides the canonical API for new code.",
+    "alternatives": ["Replace resolve_draft_id_flexible entirely", "Refactor all 20+ callers to use the new crate API"],
     "confidence": 0.95
   },
   {
-    "decision": "Watchdog writes audit entry via GoalAuditLedger rather than direct file append",
-    "rationale": "GoalAuditLedger provides hash-chaining and consistent serialization. Bypassing it with a direct write would produce audit entries incompatible with chain verification.",
-    "alternatives": ["Direct JSONL append (breaks hash chain)", "Emit through event bus (adds latency, may lose entries on crash)"],
-    "confidence": 0.9
-  },
-  {
-    "decision": "TRACE-1/TRACE-2 checks placed in verify_constitution() (ta goal check), not a separate ta audit command",
-    "rationale": "These are workspace integrity invariants that fit naturally alongside the existing constitution checks. Users already know to run `ta goal check` for health checks; adding a separate command would fragment the verification surface. They can be extracted to a dedicated `ta audit integrity` command later if the check surface grows.",
-    "alternatives": ["New `ta goal integrity` subcommand (separate discovery surface)", "`ta audit check` (audit crate doesn't exist yet for CLI dispatch)"],
-    "confidence": 0.8
-  },
-  {
-    "decision": "Remote template install downloads archive and guides manual extraction rather than using tar/flate2",
-    "rationale": "The workspace has no tar/flate2 crate. Adding them would pull in C dependencies (libz). For v0.14.8, local path install is fully automated; remote downloads save the archive and print clear extraction steps. Future phase can add a pure-Rust extractor.",
-    "alternatives": ["Add tar + flate2 workspace deps (C deps)", "Add a pure-Rust zip extractor", "Only support local path install"],
+    "decision": "Added description: Option<String> to ConstitutionRule for the identifier-consistency policy rule",
+    "rationale": "identifier-consistency is a design policy, not a code pattern — inject_fns/restore_fns/patterns don't apply. A description field lets it carry human-readable intent without needing a separate struct type.",
+    "alternatives": ["Add a separate PolicyRule struct", "Skip the constitution rule entirely"],
     "confidence": 0.85
-  },
-  {
-    "decision": "plan_wizard uses stdin readline without an agent call",
-    "rationale": "The plan item says no agent call is needed. stdin readline is simpler, faster, works offline, and requires no staging workspace. The output is structurally correct PLAN.md immediately.",
-    "alternatives": ["Call an agent to structure the input", "Use a TUI library for the wizard"],
-    "confidence": 0.95
-  },
-  {
-    "decision": "Captured daemon_config fields before move to fix borrow-after-move in web.rs",
-    "rationale": "build_full_router takes ownership of daemon_config. The web_ui flag and bind info need to be used after the move for the startup log message. Extracting the values (web_ui_enabled, web_ui_port, web_ui_bind) before the move is the minimal correct fix with no cloning of the entire config.",
-    "alternatives": ["Clone daemon_config before build_full_router", "Change build_full_router signature to borrow", "Add web_ui to AppState"],
-    "confidence": 0.99
   }
 ]
