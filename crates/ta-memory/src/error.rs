@@ -15,4 +15,8 @@ pub enum MemoryError {
 
     #[error("vector database error: {0}")]
     VectorDb(String),
+
+    /// External plugin error (spawn failure, protocol mismatch, backend error).
+    #[error("memory plugin error: {0}")]
+    Plugin(String),
 }

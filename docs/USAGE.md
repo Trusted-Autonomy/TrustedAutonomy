@@ -4264,6 +4264,110 @@ ta memory list --category convention
 ta memory list --limit 5
 ```
 
+#### Memory backend plugins
+
+TA supports external memory backend plugins — standalone binaries that implement a JSON-over-stdio protocol. This lets you connect any storage system (Supermemory, Redis, Notion, Postgres, …) without modifying TA.
+
+**Configuring a plugin backend** (`.ta/memory.toml`):
+
+```toml
+backend = "plugin"
+plugin  = "supermemory"   # looks for ta-memory-supermemory in plugin dirs and $PATH
+```
+
+**Plugin discovery** (searched in order):
+
+```
+.ta/plugins/memory/<name>/memory.toml    (project-local)
+~/.config/ta/plugins/memory/<name>/      (user-global)
+ta-memory-<name> on $PATH                (bare binary, no manifest required)
+```
+
+**List and health-check discovered plugins:**
+
+```bash
+# List all discovered plugins with their capabilities and source location
+ta memory plugin
+
+# Probe each plugin (sends a stats request and shows the response)
+ta memory plugin --probe
+```
+
+**Migrate local entries to a new backend:**
+
+```bash
+# Preview what would be pushed
+ta memory sync --dry-run
+
+# Push all .ta/memory/ entries to the configured backend
+ta memory sync
+```
+
+**Supermemory quick-start:**
+
+1. Install the plugin binary:
+   ```bash
+   cargo install --path plugins/ta-memory-supermemory
+   ```
+2. Set your API key:
+   ```bash
+   export SUPERMEMORY_API_KEY=your_key_here
+   ```
+3. Configure TA to use it:
+   ```toml
+   # .ta/memory.toml
+   backend = "plugin"
+   plugin  = "supermemory"
+   ```
+4. Verify the plugin is found:
+   ```bash
+   ta memory plugin --probe
+   ```
+
+**Writing a custom memory plugin:**
+
+A plugin is any executable that reads JSON requests from stdin and writes JSON responses to stdout (one per line). The minimal protocol:
+
+```bash
+#!/bin/bash
+# Example: minimal echo plugin
+while IFS= read -r line; do
+  op=$(echo "$line" | jq -r '.op')
+  case "$op" in
+    handshake) echo '{"ok":true,"plugin_name":"my-plugin","plugin_version":"0.1.0","protocol_version":1,"capabilities":[]}' ;;
+    store)     echo '{"ok":true}' ;;
+    recall)    echo '{"ok":true}' ;;
+    lookup)    echo '{"ok":true,"entries":[]}' ;;
+    forget)    echo '{"ok":true,"deleted":false}' ;;
+    stats)     echo '{"ok":true,"stats":{"total_entries":0,"avg_confidence":0.0,"backends":["custom"]}}' ;;
+    *)         echo '{"ok":false,"error":"unknown op"}' ;;
+  esac
+done
+```
+
+Place the plugin manifest at `.ta/plugins/memory/<name>/memory.toml`:
+
+```toml
+name        = "my-plugin"
+version     = "0.1.0"
+command     = "/path/to/my-plugin-binary"
+capabilities = []
+description = "My custom memory backend"
+timeout_secs = 30
+```
+
+The full operation schema:
+
+| Op | Request fields | Response fields |
+|---|---|---|
+| `handshake` | `ta_version` | `plugin_name`, `plugin_version`, `protocol_version`, `capabilities` |
+| `store` | `key`, `value`, `tags`, `source`, `goal_id`, `category`, `expires_at`, `confidence`, `phase_id` | `ok` |
+| `recall` | `key` | `ok`, `entry` |
+| `lookup` | `prefix`, `tags`, `category`, `limit`, `phase_id` | `ok`, `entries` |
+| `forget` | `key` | `ok`, `deleted` |
+| `semantic_search` | `query`, `embedding`, `k` | `ok`, `entries` |
+| `stats` | _(none)_ | `ok`, `stats` |
+
 Example output of `ta memory backend`:
 
 ```

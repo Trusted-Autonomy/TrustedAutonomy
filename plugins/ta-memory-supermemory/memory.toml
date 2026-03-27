@@ -1,0 +1,6 @@
+name = "supermemory"
+version = "0.1.0"
+command = "ta-memory-supermemory"
+capabilities = ["semantic_search"]
+description = "Supermemory cloud memory backend — https://supermemory.ai"
+timeout_secs = 30

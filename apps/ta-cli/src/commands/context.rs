@@ -6,7 +6,7 @@
 use clap::Subcommand;
 use ta_goal::GoalRunStore;
 use ta_mcp_gateway::GatewayConfig;
-use ta_memory::{FsMemoryStore, KeySchema, MemoryQuery, MemoryStore};
+use ta_memory::{memory_store_from_config, KeySchema, MemoryQuery, MemoryStore};
 
 #[derive(Subcommand)]
 pub enum ContextCommands {
@@ -122,7 +122,6 @@ pub enum ContextCommands {
 }
 
 pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<()> {
-    let memory_dir = config.workspace_root.join(".ta").join("memory");
     match cmd {
         ContextCommands::Store {
             key,
@@ -132,7 +131,7 @@ pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<
             expires_in,
             confidence,
         } => store_entry(
-            &memory_dir,
+            config,
             key,
             value.as_deref(),
             tag,
@@ -148,26 +147,20 @@ pub fn execute(cmd: &ContextCommands, config: &GatewayConfig) -> anyhow::Result<
             if *semantic {
                 semantic_recall(config, key, *limit)
             } else {
-                recall_entry(&memory_dir, key)
+                recall_entry(config, key)
             }
         }
         ContextCommands::Search { query, limit } => semantic_recall(config, query, *limit),
         ContextCommands::Similar { entry_id, limit } => find_similar(config, entry_id, *limit),
-        ContextCommands::Explain { entry } => explain_entry(&memory_dir, entry),
-        ContextCommands::Stats => show_stats(&memory_dir),
+        ContextCommands::Explain { entry } => explain_entry(config, entry),
+        ContextCommands::Stats => show_stats(config),
         ContextCommands::List {
             tag,
             prefix,
             category,
             limit,
-        } => list_entries(
-            &memory_dir,
-            tag,
-            prefix.as_deref(),
-            category.as_deref(),
-            *limit,
-        ),
-        ContextCommands::Forget { key } => forget_entry(&memory_dir, key),
+        } => list_entries(config, tag, prefix.as_deref(), category.as_deref(), *limit),
+        ContextCommands::Forget { key } => forget_entry(config, key),
         ContextCommands::Schema => show_schema(config),
         ContextCommands::Export {
             output,
@@ -201,7 +194,7 @@ fn parse_duration(s: &str) -> anyhow::Result<chrono::Duration> {
 }
 
 fn store_entry(
-    memory_dir: &std::path::Path,
+    config: &GatewayConfig,
     key: &str,
     value: Option<&str>,
     tags: &[String],
@@ -209,7 +202,7 @@ fn store_entry(
     expires_in: Option<&str>,
     confidence: Option<f64>,
 ) -> anyhow::Result<()> {
-    let mut store = FsMemoryStore::new(memory_dir);
+    let mut store = memory_store_from_config(&config.workspace_root);
     let json_value = match value {
         Some(v) => {
             serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.to_string()))
@@ -247,8 +240,8 @@ fn store_entry(
     Ok(())
 }
 
-fn recall_entry(memory_dir: &std::path::Path, key: &str) -> anyhow::Result<()> {
-    let store = FsMemoryStore::new(memory_dir);
+fn recall_entry(config: &GatewayConfig, key: &str) -> anyhow::Result<()> {
+    let store = memory_store_from_config(&config.workspace_root);
     match store.recall(key)? {
         Some(entry) => {
             println!("{}", serde_json::to_string_pretty(&entry.value)?);
@@ -357,8 +350,8 @@ fn find_similar(config: &GatewayConfig, entry_id: &str, limit: usize) -> anyhow:
     }
 }
 
-fn explain_entry(memory_dir: &std::path::Path, entry_key_or_id: &str) -> anyhow::Result<()> {
-    let store = FsMemoryStore::new(memory_dir);
+fn explain_entry(config: &GatewayConfig, entry_key_or_id: &str) -> anyhow::Result<()> {
+    let store = memory_store_from_config(&config.workspace_root);
 
     // Try exact key first, then UUID lookup.
     let entry = if let Some(e) = store.recall(entry_key_or_id)? {
@@ -411,8 +404,8 @@ fn explain_entry(memory_dir: &std::path::Path, entry_key_or_id: &str) -> anyhow:
     Ok(())
 }
 
-fn show_stats(memory_dir: &std::path::Path) -> anyhow::Result<()> {
-    let store = FsMemoryStore::new(memory_dir);
+fn show_stats(config: &GatewayConfig) -> anyhow::Result<()> {
+    let store = memory_store_from_config(&config.workspace_root);
     let stats = store.stats()?;
 
     println!("Memory Store Statistics");
@@ -457,13 +450,13 @@ fn show_stats(memory_dir: &std::path::Path) -> anyhow::Result<()> {
 }
 
 fn list_entries(
-    memory_dir: &std::path::Path,
+    config: &GatewayConfig,
     tags: &[String],
     prefix: Option<&str>,
     category: Option<&str>,
     limit: Option<usize>,
 ) -> anyhow::Result<()> {
-    let store = FsMemoryStore::new(memory_dir);
+    let store = memory_store_from_config(&config.workspace_root);
 
     let entries = if tags.is_empty() && prefix.is_none() && category.is_none() {
         store.list(limit)?
@@ -516,8 +509,8 @@ fn print_entry_summary(e: &ta_memory::MemoryEntry) {
     }
 }
 
-fn forget_entry(memory_dir: &std::path::Path, key: &str) -> anyhow::Result<()> {
-    let mut store = FsMemoryStore::new(memory_dir);
+fn forget_entry(config: &GatewayConfig, key: &str) -> anyhow::Result<()> {
+    let mut store = memory_store_from_config(&config.workspace_root);
     if store.forget(key)? {
         println!("Forgot memory entry '{}'", key);
     } else {
@@ -531,8 +524,7 @@ fn export_solutions(
     output: Option<&str>,
     non_interactive: bool,
 ) -> anyhow::Result<()> {
-    let memory_dir = config.workspace_root.join(".ta").join("memory");
-    let store = FsMemoryStore::new(&memory_dir);
+    let store = memory_store_from_config(&config.workspace_root);
 
     // Gather NegativePath and Convention entries.
     let negative = store.lookup(MemoryQuery {

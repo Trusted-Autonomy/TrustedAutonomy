@@ -267,3 +267,65 @@ pub trait MemoryStore: Send + Sync {
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Free helpers
+// ---------------------------------------------------------------------------
+
+/// Compute aggregate statistics for any MemoryStore by listing all entries.
+///
+/// Used as a fallback by backends that don't implement a native `stats` op.
+pub fn default_stats(store: &dyn MemoryStore) -> Result<MemoryStats, MemoryError> {
+    let all = store.list(None)?;
+    let now = chrono::Utc::now();
+    let total = all.len();
+
+    let mut by_category = std::collections::HashMap::new();
+    let mut by_source = std::collections::HashMap::new();
+    let mut expired = 0usize;
+    let mut confidence_sum = 0.0f64;
+    let mut oldest: Option<DateTime<Utc>> = None;
+    let mut newest: Option<DateTime<Utc>> = None;
+
+    for e in &all {
+        let cat = e
+            .category
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "other".to_string());
+        *by_category.entry(cat).or_insert(0usize) += 1;
+        *by_source.entry(e.source.clone()).or_insert(0usize) += 1;
+
+        if let Some(exp) = e.expires_at {
+            if exp < now {
+                expired += 1;
+            }
+        }
+        confidence_sum += e.confidence;
+
+        match oldest {
+            None => oldest = Some(e.created_at),
+            Some(o) if e.created_at < o => oldest = Some(e.created_at),
+            _ => {}
+        }
+        match newest {
+            None => newest = Some(e.created_at),
+            Some(n) if e.created_at > n => newest = Some(e.created_at),
+            _ => {}
+        }
+    }
+
+    Ok(MemoryStats {
+        total_entries: total,
+        by_category,
+        by_source,
+        expired_count: expired,
+        avg_confidence: if total > 0 {
+            confidence_sum / total as f64
+        } else {
+            0.0
+        },
+        oldest_entry: oldest,
+        newest_entry: newest,
+    })
+}

@@ -117,9 +117,17 @@ pub struct MemoryConfig {
     /// Key domain overrides.
     #[serde(default)]
     pub key_domains: Option<KeyDomainsConfig>,
-    /// Backend selection: "ruvector" (default) or "fs".
+    /// Backend selection: "ruvector" (default), "file", or "plugin".
     #[serde(default)]
     pub backend: Option<String>,
+    /// Plugin name when `backend = "plugin"` (e.g., "supermemory").
+    ///
+    /// The binary is resolved as:
+    /// 1. `.ta/plugins/memory/<name>/memory.toml`
+    /// 2. `~/.config/ta/plugins/memory/<name>/memory.toml`
+    /// 3. `ta-memory-<name>` on `$PATH`
+    #[serde(default)]
+    pub plugin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
