@@ -7589,6 +7589,77 @@ For SA cloud hybrid: SA provides a webhook relay service (publicly-accessible HT
 
 ---
 
+### v0.14.9.1 — Shell Paste & Tail Reliability (Pre-release Polish)
+<!-- status: pending -->
+**Goal**: Fix two persistent, reproducible failures in `ta shell` that survived v0.14.7.1: paste from OS clipboard never inserts content regardless of paste method (Cmd+V, Ctrl+V, middle-click), and auto-tail scrolling still stops following new output after any manual scroll, even when the user returns to the bottom. These are pre-release blockers — the shell is the primary TA interface and both issues affect every session.
+
+#### Problem 1 — Paste inserts nothing ("from anywhere")
+
+**Symptoms**: Cmd+V, Ctrl+V, right-click→Paste, and middle-click all produce no visible text insertion in the `ta>` prompt. The input buffer remains unchanged. This is consistent across iTerm2, Terminal.app, and terminal emulators on Linux.
+
+**Root cause analysis**:
+
+v0.14.7.1 fixed *where* pasted content lands (cursor position), but not *whether* clipboard content is retrieved and inserted. In crossterm raw mode, Cmd+V on macOS and Ctrl+V on Linux/Windows do **not** automatically read the system clipboard — they send a raw keycode (`\x16`, ASCII 22) or trigger a bracketed paste sequence (`\e[200~...\e[201~`) only if the terminal has bracketed paste mode active.
+
+Two separate issues must both be fixed:
+
+1. **Bracketed paste mode not enabled**: `crossterm::terminal::EnableBracketedPaste` must be written to stdout on TUI startup and `DisableBracketedPaste` on cleanup. Without it, Cmd+V pastes from iTerm2 may fire as `Event::Paste` in some terminals but silently do nothing in others (Terminal.app sends characters as raw `KeyEvent::Char` bursts instead). Check: `grep -n "EnableBracketedPaste\|BracketedPaste" apps/ta-cli/src/commands/shell_tui.rs`.
+
+2. **No clipboard read path for Ctrl+V / Cmd+V as keycode**: When the terminal does NOT fire `Event::Paste` but instead sends `KeyEvent { code: Char('v'), modifiers: CONTROL }` (Linux Ctrl+V) or `KeyEvent { code: Char('v'), modifiers: SUPER }` (Mac Cmd+V), the TUI currently treats this as a literal character insertion (inserts byte `0x16`). The TUI must intercept this keycode and read from the OS clipboard using the `arboard` crate (`arboard::Clipboard::new()?.get_text()`).
+
+#### Problem 2 — Auto-tail does not resume after manual scroll
+
+**Symptoms**: During agent streaming output, scrolling up (to read earlier content) and then scrolling back to the bottom does not resume auto-following. New output lines appear but the viewport stays anchored. The "new output" badge may or may not appear. The only way to re-engage tail is to run `:tail <id>` again.
+
+**Root cause analysis**:
+
+`is_at_bottom()` is broken in at least one of these ways — must be verified by reading the current code:
+
+1. **Off-by-one in comparator**: The check `scroll_offset == 0` is correct for "at the absolute bottom of the scroll buffer" but breaks when content doesn't fill the viewport (content shorter than terminal height → scroll_offset is always 0 but the view is "at the top"). The correct check is: `scroll_offset == 0 AND total_visual_lines >= terminal_height` OR `total_visual_lines < terminal_height` (content fits entirely, always at bottom). If this condition is wrong, returning to the bottom position does not flip `auto_scroll = true`.
+
+2. **`auto_scroll` flag not set on scroll-to-bottom**: When `scroll_offset` reaches 0 via Cmd+Down / PageDown / scroll-wheel, the event handler must explicitly set `self.auto_scroll = true`. If this assignment is missing or conditional on a flag already being true, the flag stays false forever after the first manual scroll.
+
+3. **`auto_scroll_if_near_bottom()` threshold not firing**: The "near bottom" guard (scroll within N lines of bottom) may not fire at all when returning to bottom because the `scroll_offset` update happens after the content appended. The new-content append path must call `auto_scroll_if_near_bottom()` after updating `scroll_offset`, not before.
+
+#### Items
+
+1. [ ] **Diagnose paste root cause — read current code**: Read `shell_tui.rs` and search for: `EnableBracketedPaste`, `Event::Paste`, `KeyCode::Char('v')`, and `SUPER` modifier handling. Determine: (a) is bracketed paste mode enabled on startup? (b) is `Event::Paste` handled and does it actually insert text? (c) is there a Ctrl+V/Cmd+V keyboard shortcut handler that reads clipboard? Document findings in a code comment before fixing.
+
+2. [ ] **Enable bracketed paste mode**: Add `crossterm::execute!(stdout, crossterm::event::EnableBracketedPaste)` to TUI init (alongside `EnableRawMode`, `EnterAlternateScreen`). Add `crossterm::execute!(stdout, crossterm::event::DisableBracketedPaste)` to cleanup. Ensure `Event::Paste(text)` is handled: insert `text` at cursor position if input-focused, append to `input_buffer.len()` if scroll-focused.
+
+3. [ ] **Add `arboard` clipboard read for Ctrl+V / Cmd+V**: Add `arboard` to `apps/ta-cli/Cargo.toml`. In the key event handler, intercept `KeyEvent { code: KeyCode::Char('v'), modifiers }` where `modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::SUPER)`. Read `arboard::Clipboard::new()?.get_text()` and process the result through the same paste insertion path (cursor-aware, from v0.14.7.1). Graceful fallback: if clipboard read fails, show `[clipboard unavailable]` in status bar for 2 seconds. Test: mock the clipboard read, inject a Ctrl+V keyevent, assert input buffer contains clipboard text.
+
+4. [ ] **Diagnose auto-tail root cause — read current code**: Read `is_at_bottom()`, the scroll-to-bottom key handler, and the new-content append path in `shell_tui.rs`. Confirm: (a) what condition sets `auto_scroll = true`? (b) does returning to `scroll_offset == 0` set `auto_scroll = true`? (c) does the content-append path call `auto_scroll_if_near_bottom()` after appending? Document findings in a code comment.
+
+5. [ ] **Fix `is_at_bottom()` comparator**: Replace the current check with:
+   ```rust
+   fn is_at_bottom(&self) -> bool {
+       self.scroll_offset == 0
+       // also treat as "at bottom" when content doesn't fill viewport
+       || self.output_buffer.len() < self.terminal_height.saturating_sub(4) as usize
+   }
+   ```
+   Ensure this is called from: (a) scroll-to-bottom key handlers (Cmd+Down, scroll-wheel at bottom), (b) new-content append path.
+
+6. [ ] **Set `auto_scroll = true` unconditionally when returning to bottom**: In every code path that moves `scroll_offset` to 0 — Cmd+Down, PageDown past the end, scroll-wheel at bottom, `:tail` command — explicitly set `self.auto_scroll = true`. No condition. If the user is at the bottom, they want auto-tail. This must not be conditional on `auto_scroll` already being true or on a tailing goal being active.
+
+7. [ ] **Move `auto_scroll_if_near_bottom()` call to after append**: In the output-buffer append path (wherever new agent output lines are pushed), ensure `auto_scroll_if_near_bottom()` is called after the push, not before. If `auto_scroll == true`, immediately set `scroll_offset = 0` so the next render shows the latest line.
+
+8. [ ] **End-to-end paste test**: Inject `Event::Paste("hello world".to_string())` → assert `input_buffer == "hello world"`. Inject `KeyEvent { code: Char('v'), modifiers: CONTROL }` with clipboard mock returning `"clipboard text"` → assert `input_buffer == "clipboard text"`. Inject paste while `scroll_offset > 0` (scroll-focused) → assert pasted to end, `scroll_offset` reset to 0.
+
+9. [ ] **End-to-end tail test**: Populate buffer with 200 lines, simulate scroll-up (scroll_offset = 50), simulate scroll-back-to-bottom (scroll_offset = 0) → assert `auto_scroll == true`. Append 10 new lines → assert `scroll_offset` stays 0. Verify `is_at_bottom()` returns true when content shorter than viewport.
+
+10. [ ] **Manual verification checklist** (must be done before marking done — these cannot be tested headlessly):
+    - [ ] Cmd+V in iTerm2 on Mac inserts clipboard text into `ta>` prompt
+    - [ ] Cmd+V in Terminal.app on Mac inserts clipboard text
+    - [ ] Ctrl+V on Linux (xterm/gnome-terminal) inserts clipboard text
+    - [ ] Scroll up during agent output → scroll back to bottom → new output auto-follows
+    - [ ] `:tail <id>` then scroll up → scroll back to bottom → output auto-follows without re-running `:tail`
+
+#### Version: `0.14.9.1-alpha`
+
+---
+
 ## v0.15 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
