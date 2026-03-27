@@ -711,6 +711,96 @@ impl std::fmt::Display for DraftStatus {
     }
 }
 
+/// Create a minimal valid [`DraftPackage`] for testing with the given goal
+/// shortref and draft sequence number.
+///
+/// Only available in test builds. Used by `draft_resolver` unit tests and
+/// any other test that needs a lightweight package fixture.
+#[cfg(test)]
+pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
+    DraftPackage {
+        package_version: "1.0.0".to_string(),
+        package_id: Uuid::new_v4(),
+        created_at: chrono::Utc::now(),
+        goal: Goal {
+            goal_id: format!("{}-0000-0000-0000-000000000000", goal_shortref),
+            title: format!("Test goal {}", goal_shortref),
+            objective: "test".to_string(),
+            success_criteria: vec![],
+            constraints: vec![],
+            parent_goal_title: None,
+        },
+        iteration: Iteration {
+            iteration_id: "iter-1".to_string(),
+            sequence: 1,
+            workspace_ref: WorkspaceRef {
+                ref_type: "staging_dir".to_string(),
+                ref_name: "staging/test".to_string(),
+                base_ref: None,
+            },
+        },
+        agent_identity: AgentIdentity {
+            agent_id: "test-agent".to_string(),
+            agent_type: "test".to_string(),
+            constitution_id: "default".to_string(),
+            capability_manifest_hash: "abc".to_string(),
+            orchestrator_run_id: None,
+        },
+        summary: Summary {
+            what_changed: "test".to_string(),
+            why: "test".to_string(),
+            impact: "none".to_string(),
+            rollback_plan: "none".to_string(),
+            open_questions: vec![],
+            alternatives_considered: vec![],
+        },
+        plan: Plan {
+            completed_steps: vec![],
+            next_steps: vec![],
+            decision_log: vec![],
+        },
+        changes: Changes {
+            artifacts: vec![],
+            patch_sets: vec![],
+            pending_actions: vec![],
+        },
+        risk: Risk {
+            risk_score: 0,
+            findings: vec![],
+            policy_decisions: vec![],
+        },
+        provenance: Provenance {
+            inputs: vec![],
+            tool_trace_hash: "test".to_string(),
+        },
+        review_requests: ReviewRequests {
+            requested_actions: vec![],
+            reviewers: vec![],
+            required_approvals: 1,
+            notes_to_reviewer: None,
+        },
+        signatures: Signatures {
+            package_hash: "test".to_string(),
+            agent_signature: "test".to_string(),
+            gateway_attestation: None,
+        },
+        status: DraftStatus::PendingReview,
+        verification_warnings: vec![],
+        validation_log: vec![],
+        display_id: None,
+        tag: None,
+        vcs_status: None,
+        parent_draft_id: None,
+        pending_approvals: vec![],
+        supervisor_review: None,
+        ignored_artifacts: vec![],
+        baseline_artifacts: vec![],
+        agent_decision_log: vec![],
+        goal_shortref: Some(goal_shortref.to_string()),
+        draft_seq,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3432,8 +3432,12 @@ fn launch_agent_via_runtime(
 }
 
 /// Find the most recent draft ID for a goal (headless output).
+///
+/// Returns the canonical display ID (`<shortref>/<seq>` when available, else UUID prefix)
+/// so that the ID shown in completion messages resolves via `ta draft view/approve/apply`.
 fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Option<String> {
     use ta_changeset::draft_package::DraftPackage;
+    use ta_changeset::draft_resolver::draft_canonical_id;
 
     let dir = &config.pr_packages_dir;
     if !dir.exists() {
@@ -3452,7 +3456,8 @@ fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Option<String>
         .collect();
 
     drafts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    drafts.first().map(|d| d.package_id.to_string())
+    // Return the canonical display ID so the emitted string resolves via `ta draft view`.
+    drafts.first().map(draft_canonical_id)
 }
 
 /// Simple shell quoting for display purposes.

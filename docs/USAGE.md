@@ -451,14 +451,25 @@ ta draft apply <id>             # Copy approved changes to your project
 ta draft close <id>             # Abandon without applying
 ```
 
-All `<id>` arguments accept a full UUID, an 8+ character UUID prefix, **or a goal shortref** (the 8-char hex prefix of the goal UUID). Using a shortref resolves to the latest draft for that goal:
+All `<id>` arguments accept any of these formats — every ID shown in `ta draft list` resolves directly as input:
+
+| Format | Example | Resolves to |
+|--------|---------|-------------|
+| Full UUID | `cbda7f5f-4a19-4752-bea4-802af93fc020` | Exact draft |
+| UUID prefix (≥4 chars) | `cbda7f5f` | Unique match, error if ambiguous |
+| Shortref/seq | `2159d87e/1` | Draft #1 for goal `2159d87e` |
+| Goal shortref (8 hex chars) | `2159d87e` | Latest draft for that goal |
+| Goal tag | `my-feature` | Draft whose goal has that tag |
+| Goal title substring | `v0.14.8` | Draft matching by title |
 
 ```bash
+ta draft view 2159d87e/1        # exact: draft #1 for goal 2159d87e
 ta draft view 2159d87e          # latest draft for goal 2159d87e
-ta draft approve 2159d87e       # approve latest draft for that goal
+ta draft approve cbda7f5f       # approve by UUID prefix
+ta draft apply 2159d87e/2       # apply draft #2 for that goal
 ```
 
-The goal shortref is shown in `ta goal list` (ID column) and in `ta draft list` (DRAFT ID column as `<shortref>/<seq>`). You can use `grep 2159d87e .ta/audit.jsonl` to find all audit entries for a goal.
+The DRAFT ID column in `ta draft list` emits the `<shortref>/<seq>` format (e.g. `2159d87e/1`). Copy-paste it directly into any draft command — it will resolve. The goal shortref is also shown in `ta goal list` (ID column). Use `grep 2159d87e .ta/audit.jsonl` to find all audit entries for a goal.
 
 For simple workflows, `ta draft apply` works directly on unapproved drafts (auto-approves on apply).
 
