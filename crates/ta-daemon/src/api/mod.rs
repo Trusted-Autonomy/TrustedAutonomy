@@ -21,6 +21,7 @@ pub mod interactions;
 pub mod notifications;
 pub mod project_new;
 pub mod status;
+pub mod webhooks;
 pub mod workflow;
 
 use std::path::PathBuf;
@@ -283,6 +284,13 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(health::metrics))
         .with_state(state.clone());
 
+    // Webhook endpoints use their own HMAC-based authentication — no Bearer token required.
+    // The vcs_webhook handler uses ConnectInfo<SocketAddr> to allow localhost without a secret.
+    let webhook_routes = Router::new()
+        .route("/api/webhooks/github", post(webhooks::github_webhook))
+        .route("/api/webhooks/vcs", post(webhooks::vcs_webhook))
+        .with_state(state.clone());
+
     // All other routes go through the auth middleware.
     let api_routes = Router::new()
         // New v0.9.7 API routes.
@@ -339,6 +347,6 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         ))
         .with_state(state);
 
-    // Merge health (no auth) and api (with auth) into a single router.
-    health_routes.merge(api_routes)
+    // Merge: health (no auth), webhooks (HMAC auth), api (Bearer auth).
+    health_routes.merge(webhook_routes).merge(api_routes)
 }

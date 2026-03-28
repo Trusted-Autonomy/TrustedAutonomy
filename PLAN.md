@@ -7496,7 +7496,7 @@ ta workflow run governed-goal --goal "Fix the auth bug"
 ---
 
 ### v0.14.8.3 — VCS Event Hooks: Inbound Webhook & Trigger Integration
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Enable TA to trigger and chain workflow steps from external VCS events — GitHub PR merged, Perforce changelist submitted, post-receive git hooks. Today `v0.14.8.2` pr-sync polls `gh pr view` every 2 minutes. This is fragile, adds latency, and doesn't work for Perforce or non-GitHub VCS. This phase adds a proper inbound event surface so TA workflows become event-driven, not polling-driven. It also establishes the foundation for SA's distributed/cloud hybrid event routing.
 
 **Depends on**: v0.14.8.2 (workflow engine)

@@ -353,6 +353,50 @@ pub enum SessionEvent {
         /// Human-readable error message including context and suggested remediation.
         error: String,
     },
+
+    /// A VCS pull request was merged (v0.14.8.3).
+    VcsPrMerged {
+        /// Repository (e.g., "org/repo").
+        repo: String,
+        /// Target branch that was merged into.
+        branch: String,
+        /// Pull request number.
+        pr_number: u64,
+        /// PR title.
+        pr_title: String,
+        /// Username who merged the PR.
+        merged_by: String,
+        /// Merge commit SHA.
+        commit_sha: String,
+        /// VCS provider (e.g., "github").
+        provider: String,
+    },
+
+    /// A commit was pushed to a VCS branch (v0.14.8.3).
+    VcsBranchPushed {
+        /// Repository (e.g., "org/repo").
+        repo: String,
+        /// Branch that received the push.
+        branch: String,
+        /// Who pushed.
+        pushed_by: String,
+        /// Head commit SHA.
+        commit_sha: String,
+        /// VCS provider (e.g., "github").
+        provider: String,
+    },
+
+    /// A Perforce changelist was submitted (v0.14.8.3).
+    VcsChangelistSubmitted {
+        /// Perforce depot path (e.g., "//depot/main/...").
+        depot_path: String,
+        /// Changelist number.
+        change_number: u64,
+        /// Submitter.
+        submitter: String,
+        /// CL description (first line).
+        description: String,
+    },
 }
 
 /// A single issue found during a watchdog health check (v0.11.2.4).
@@ -404,6 +448,9 @@ impl SessionEvent {
             Self::AgentSpawned { .. } => "agent_spawned",
             Self::AgentExited { .. } => "agent_exited",
             Self::RuntimeError { .. } => "runtime_error",
+            Self::VcsPrMerged { .. } => "vcs.pr_merged",
+            Self::VcsBranchPushed { .. } => "vcs.branch_pushed",
+            Self::VcsChangelistSubmitted { .. } => "vcs.changelist_submitted",
         }
     }
 
@@ -874,11 +921,33 @@ mod tests {
                 runtime: "oci".into(),
                 error: "Container failed to start".into(),
             },
+            SessionEvent::VcsPrMerged {
+                repo: "org/repo".into(),
+                branch: "main".into(),
+                pr_number: 42,
+                pr_title: "Add feature".into(),
+                merged_by: "alice".into(),
+                commit_sha: "abc123".into(),
+                provider: "github".into(),
+            },
+            SessionEvent::VcsBranchPushed {
+                repo: "org/repo".into(),
+                branch: "feature-x".into(),
+                pushed_by: "bob".into(),
+                commit_sha: "def456".into(),
+                provider: "github".into(),
+            },
+            SessionEvent::VcsChangelistSubmitted {
+                depot_path: "//depot/main/...".into(),
+                change_number: 12345,
+                submitter: "carol".into(),
+                description: "Fix login bug".into(),
+            },
         ];
         for e in &events {
             assert!(!e.event_type().is_empty());
         }
-        assert_eq!(events.len(), 29);
+        assert_eq!(events.len(), 32);
     }
 
     #[test]

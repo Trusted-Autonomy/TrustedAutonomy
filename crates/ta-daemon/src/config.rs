@@ -64,6 +64,81 @@ pub struct DaemonConfig {
     /// ```
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// Inbound webhook configuration (v0.14.8.3).
+    ///
+    /// Configure endpoints for receiving VCS events from GitHub, Perforce, and
+    /// custom git hooks. Triggers matched workflow steps when events arrive.
+    ///
+    /// ```toml
+    /// [webhooks.github]
+    /// secret = "your-webhook-secret"
+    ///
+    /// [webhooks.vcs]
+    /// secret = ""   # optional HMAC secret for remote senders
+    ///
+    /// [webhooks.relay]
+    /// endpoint = "https://relay.secureautonomy.dev"
+    /// secret = "your-relay-secret"
+    /// ```
+    #[serde(default)]
+    pub webhooks: WebhooksConfig,
+}
+
+/// Top-level inbound webhook configuration (v0.14.8.3).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebhooksConfig {
+    /// GitHub webhook configuration.
+    pub github: GitHubWebhookConfig,
+    /// Generic VCS webhook configuration.
+    pub vcs: VcsWebhookConfig,
+    /// SA cloud webhook relay configuration (design + stub).
+    pub relay: Option<WebhookRelayConfig>,
+}
+
+/// GitHub inbound webhook configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitHubWebhookConfig {
+    /// HMAC secret configured in the GitHub webhook settings.
+    /// Required for `X-Hub-Signature-256` validation.
+    /// If empty, signature validation is skipped (NOT recommended for production).
+    pub secret: String,
+}
+
+/// Generic VCS inbound webhook configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VcsWebhookConfig {
+    /// Optional HMAC secret for authenticating requests from non-localhost senders.
+    /// If empty and the request originates from a non-loopback address, the
+    /// request is rejected with 401.
+    pub secret: String,
+}
+
+/// SA cloud webhook relay configuration (v0.14.8.3 — design + stub).
+///
+/// The relay is an SA-hosted publicly-accessible HTTPS endpoint that
+/// tunnels VCS events to the local TA daemon. The local daemon registers
+/// with the relay at startup (when `endpoint` is non-empty) and receives
+/// forwarded events over a long-poll connection.
+///
+/// Implementation is SA's responsibility; this struct defines the protocol
+/// contract so SA can build against it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookRelayConfig {
+    /// SA relay endpoint URL.
+    pub endpoint: String,
+    /// Shared secret for authenticating relay → daemon messages.
+    pub secret: String,
+    /// How long (in seconds) the daemon keeps the long-poll connection alive
+    /// before reconnecting. Default: 30.
+    #[serde(default = "default_relay_poll_secs")]
+    pub poll_secs: u64,
+}
+
+fn default_relay_poll_secs() -> u64 {
+    30
 }
 
 /// Shell Q&A agent configuration (v0.11.4.2).
@@ -1708,5 +1783,26 @@ mod tests {
         assert!(config.shell.qa_agent.auto_start); // default
         assert_eq!(config.shell.qa_agent.agent, "claude-code"); // default
         assert_eq!(config.shell.qa_agent.idle_timeout_secs, 120); // overridden
+    }
+
+    #[test]
+    fn webhook_config_roundtrip() {
+        let toml_str = r#"
+[webhooks.github]
+secret = "gh-secret-123"
+
+[webhooks.vcs]
+secret = "vcs-secret-456"
+
+[webhooks.relay]
+endpoint = "https://relay.example.com"
+secret = "relay-secret"
+"#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.webhooks.github.secret, "gh-secret-123");
+        assert_eq!(config.webhooks.vcs.secret, "vcs-secret-456");
+        let relay = config.webhooks.relay.as_ref().unwrap();
+        assert_eq!(relay.endpoint, "https://relay.example.com");
+        assert_eq!(relay.poll_secs, 30);
     }
 }
