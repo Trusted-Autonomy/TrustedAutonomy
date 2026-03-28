@@ -541,12 +541,17 @@ pub async fn serve_daemon_api(
             web_ui_port
         );
     }
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown.notified().await;
-            tracing::info!("Daemon API shutting down gracefully");
-        })
-        .await?;
+    // Use into_make_service_with_connect_info so that ConnectInfo<SocketAddr> is
+    // populated in request extensions (needed by webhook and auth handlers).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown.notified().await;
+        tracing::info!("Daemon API shutting down gracefully");
+    })
+    .await?;
 
     // Clean up PID file on normal exit too.
     let _ = std::fs::remove_file(&pid_path);

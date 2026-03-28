@@ -8187,6 +8187,212 @@ Behavior:
 
 ---
 
+## Event-Driven Workflows
+
+TA can react to VCS events automatically — no polling, no manual `ta run`. When a GitHub PR is merged, a Perforce changelist is submitted, or commits are pushed to a branch, TA receives the event and fires the matching workflow.
+
+### How It Works
+
+1. Your VCS (GitHub, Perforce, self-hosted git) sends a webhook to TA's daemon.
+2. The daemon validates the request, maps it to a TA event (`vcs.pr_merged`, `vcs.branch_pushed`, `vcs.changelist_submitted`), and writes it to `events.jsonl`.
+3. Any `[[trigger]]` blocks in `.ta/workflow.toml` that match the event fire immediately.
+
+### GitHub Webhook Setup
+
+**1. Configure the secret in `.ta/daemon.toml`:**
+
+```toml
+[webhooks.github]
+secret = "your-webhook-secret"   # Set this to any random string
+```
+
+**2. Add the webhook in GitHub:**
+
+- Go to your repository → Settings → Webhooks → Add webhook
+- Payload URL: `https://your-ta-host:7700/api/webhooks/github`
+- Content type: `application/json`
+- Secret: same value as `[webhooks.github] secret`
+- Events: "Pull requests", "Pushes"
+
+For local development, expose the daemon with ngrok:
+```bash
+ngrok http 7700
+# Then use the ngrok URL as the Payload URL
+```
+
+**3. Add trigger conditions to `.ta/workflow.toml`:**
+
+```toml
+[[trigger]]
+event = "vcs.pr_merged"
+workflow = "governed-goal"
+
+[trigger.filter]
+branch = "main"          # Only trigger when merging into main
+
+[[trigger]]
+event = "vcs.branch_pushed"
+workflow = "governed-goal"
+
+[trigger.filter]
+repo = "org/repo"        # Only this repository
+```
+
+**4. Test the setup:**
+
+```bash
+ta webhook test github pull_request.closed --branch main
+```
+
+### Perforce Trigger Setup
+
+TA's Perforce trigger is a script you **commit to your depot**. Once registered with a one-time admin command, future updates are ordinary depot submits — no server access needed again.
+
+**1. Commit the trigger script to your depot:**
+
+```bash
+# Copy into your workspace at the path you'll use for TA triggers
+# Adjust the depot path to fit your project (e.g., //your-project/main/.ta/triggers/)
+p4 add //depot/.ta/triggers/ta-p4-trigger.sh
+# (copy scripts/ta-p4-trigger.sh from the TA install into your workspace mapping first)
+p4 submit -d "Add TA VCS event webhook trigger"
+```
+
+**2. Register with Perforce (one-time, requires p4 admin):**
+
+```bash
+p4 triggers -o > /tmp/p4triggers.txt
+```
+
+Add this line under `Triggers:` — replace the placeholders marked with `<>`:
+
+```
+ta-cl-submitted change-commit //depot/... "bash -c 'TA_DAEMON_URL=<http://your-ta-host:7700> TA_VCS_SECRET=<your-secret> p4 print -q //depot/.ta/triggers/ta-p4-trigger.sh | bash -s -- %change%'"
+```
+
+Then apply:
+
+```bash
+p4 triggers -i < /tmp/p4triggers.txt
+```
+
+`p4 print -q` fetches the **latest committed version** from the depot each time the trigger fires. The script never lives on the Perforce server filesystem — only in the depot.
+
+**Placeholders to replace:**
+
+| Placeholder | Value |
+|---|---|
+| `<http://your-ta-host:7700>` | URL of the machine running the TA daemon |
+| `<your-secret>` | `[webhooks.vcs] secret` from `.ta/daemon.toml` (empty = localhost-only, no auth) |
+| `//depot/.ta/triggers/...` | The depot path where you committed the script in step 1 |
+| `//depot/...` (first field) | Narrow this to the paths that should fire — e.g., `//depot/main/...` |
+
+**3. Configure in `.ta/daemon.toml`:**
+
+```toml
+[webhooks.vcs]
+secret = "your-vcs-secret"
+```
+
+**4. Add trigger condition to `.ta/workflow.toml`:**
+
+```toml
+[[trigger]]
+event = "vcs.changelist_submitted"
+workflow = "governed-goal"
+
+[trigger.filter]
+depot_path = "//depot/main/..."
+```
+
+**5. Verify:**
+
+```bash
+ta webhook test vcs changelist_submitted --change 12345 --depot //depot/main/...
+```
+
+**Updating the trigger:** Submit a new version to the depot. The next changelist that fires the trigger automatically uses the updated script. No server access required.
+
+### Git Post-Receive Hook (Self-Hosted Git)
+
+For self-hosted Gitea, GitLab, Bitbucket Server, or Gitolite:
+
+```bash
+# Copy the hook script
+cp scripts/ta-git-post-receive.sh /path/to/repo.git/hooks/post-receive
+chmod +x /path/to/repo.git/hooks/post-receive
+
+# Set the repo name (optional — defaults to directory name)
+export TA_REPO_NAME=org/repo
+```
+
+For localhost git servers (hook runs on same machine as TA daemon), no secret is needed. For remote hook execution:
+
+```bash
+export TA_VCS_SECRET=your-vcs-secret
+```
+
+**Trigger condition:**
+
+```toml
+[[trigger]]
+event = "vcs.branch_pushed"
+workflow = "governed-goal"
+
+[trigger.filter]
+branch = "main"
+```
+
+### Testing Webhook Triggers
+
+Use `ta webhook test` to simulate events without a real VCS:
+
+```bash
+# Test a GitHub PR merge
+ta webhook test github pull_request.closed --branch main --pr 123
+
+# Test a Perforce changelist submit
+ta webhook test vcs changelist_submitted --change 12345 --depot //depot/main/...
+
+# Test a branch push
+ta webhook test vcs branch_pushed --branch main --repo org/repo
+```
+
+If the event is accepted and matches a trigger, you'll see:
+```
+Webhook accepted
+  Event ID:   a1b2c3d4-...
+  Event type: vcs.pr_merged
+
+Check events: ta events list
+```
+
+If no trigger matches:
+```
+Event sent but not matched by any workflow trigger.
+To trigger a workflow, add a [[trigger]] block to .ta/workflow.toml:
+  [[trigger]]
+  event = "vcs.pr_merged"
+  workflow = "governed-goal"
+```
+
+### SA Cloud Webhook Relay (Coming Soon)
+
+For teams where the TA daemon runs on a machine without a public IP, SA provides a cloud relay that tunnels VCS events through HTTPS to your local daemon.
+
+Configure in `.ta/daemon.toml`:
+
+```toml
+[webhooks.relay]
+endpoint = "https://relay.secureautonomy.dev"
+secret = "your-relay-secret"
+poll_secs = 30      # How often the daemon reconnects (default: 30)
+```
+
+The relay configuration structure is available now so SA can build the relay service. Watch for updates.
+
+---
+
 ## Roadmap
 
 ### What's Done

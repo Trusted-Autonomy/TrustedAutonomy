@@ -467,6 +467,20 @@ enum Commands {
         json: bool,
     },
 
+    /// Test and manage inbound VCS webhook triggers (v0.14.8.3).
+    ///
+    /// Simulates webhook events locally to verify trigger configuration
+    /// without needing a real VCS event. Use `ta webhook test` to check
+    /// that your workflow.toml triggers fire correctly.
+    ///
+    /// Examples:
+    ///   ta webhook test github pull_request.closed --branch main
+    ///   ta webhook test vcs changelist_submitted --change 12345
+    Webhook {
+        #[command(subcommand)]
+        command: commands::webhook::WebhookCommands,
+    },
+
     // ── TERMS ───────────────────────────────────────────────────────────────
     /// Review and accept the terms of use.
     #[command(hide = true)]
@@ -848,6 +862,7 @@ fn main() -> anyhow::Result<()> {
         ),
         Commands::Operations { command } => commands::operations::execute(command, &config),
         Commands::Runbook { command } => commands::runbook::execute(command, &config),
+        Commands::Webhook { command } => commands::webhook::execute(command, &config),
         Commands::Serve => commands::serve::execute(&project_root),
         Commands::Build { test } => commands::build::execute(&config, *test),
         Commands::Sync => commands::sync::execute(&config),

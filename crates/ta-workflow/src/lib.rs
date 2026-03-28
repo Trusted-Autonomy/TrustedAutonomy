@@ -15,6 +15,7 @@ pub mod process_engine;
 pub mod scorer;
 pub mod serial_phases;
 pub mod swarm;
+pub mod trigger;
 pub mod validate;
 pub mod verdict;
 pub mod yaml_engine;
@@ -29,6 +30,7 @@ pub use serial_phases::{
     evaluate_gates, run_gate, GateFailure, GateResult, SerialPhasesState, StepState, WorkflowGate,
 };
 pub use swarm::{IntegrationConfig, SubGoalSpec, SubGoalStatus, SwarmState};
+pub use trigger::{TriggerCondition, TriggerConfig, TriggerWaitRecord};
 pub use verdict::{Finding, Severity, Verdict, VerdictDecision};
 pub use yaml_engine::YamlWorkflowEngine;
 
