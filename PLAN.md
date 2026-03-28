@@ -952,7 +952,7 @@ agents:
    Result: WOULD AUTO-APPROVE
    ```
 
-9. **Status line: distinguish active vs tracked agents/goals**: The daemon `/api/status` endpoint currently counts all `GoalRun` entries with state `running` or `pr_ready`, including stale historical goals with no live process. This inflates the agent/goal count shown in `ta shell` and the Console. Fix:
+9. **Status line: distinguish active vs tracked agents/goals**: The daemon `/api/status` endpoint currently counts all `GoalRun` entries with state `running` or `pr_ready`, including stale historical goals with no live process. This inflates the agent/goal count shown in `ta shell` and TA Studio. Fix:
    - Add `active_agents` (goals with a live process or updated within the last hour) vs `total_tracked` (all non-terminal goals) to the status response
    - Shell status line shows only active: `2 agents running` not `26 agents`
    - `ta status --all` shows the full breakdown including stale entries
@@ -7835,17 +7835,17 @@ ta session run                  # execute approved items as governed workflow
 
 ---
 
-### v0.14.13 — TA Console: Setup Wizard & Settings Management
+### v0.14.13 — TA Studio: Setup Wizard & Settings Management
 <!-- status: pending -->
-**Goal**: TA Console (the web app at `http://localhost:7700`) gains a first-run Setup Wizard and a persistent Settings section that let non-engineers configure everything an engineer would do by editing YAML files — without ever seeing a YAML file. Engineers can still edit YAML directly; the Console is the non-engineer surface. Setup can be re-run at any time to update any setting.
+**Goal**: TA Studio (the web app at `http://localhost:7700`) gains a first-run Setup Wizard and a persistent Settings section that let non-engineers configure everything an engineer would do by editing YAML files — without ever seeing a YAML file. Engineers can still edit YAML directly; TA Studio is the non-engineer surface. Setup can be re-run at any time to update any setting.
 
-**Key principle**: The Console owns all user-facing configuration. YAML files are the storage format — they are written by the Console, not by the user. Non-engineers should never need to open `workflow.toml`, `daemon.toml`, `policy.yaml`, or `constitution.toml` directly.
+**Key principle**: TA Studio owns all user-facing configuration. YAML files are the storage format — they are written by Studio, not by the user. Non-engineers should never need to open `workflow.toml`, `daemon.toml`, `policy.yaml`, or `constitution.toml` directly.
 
 **Depends on**: v0.14.8 (web UI shell), v0.14.11 (project session / ta new)
 
 #### Design — First-Run Setup Wizard
 
-When the Console loads and no TA workspace is configured, it shows the Setup Wizard as a full-screen multi-step flow. Each step is a web form with plain-English labels — no YAML, no technical jargon beyond what the user needs to make a choice.
+When TA Studio loads and no TA workspace is configured, it shows the Setup Wizard as a full-screen multi-step flow. Each step is a web form with plain-English labels — no YAML, no technical jargon beyond what the user needs to make a choice.
 
 ```
 Step 1 of 5 ── Agent System
@@ -7915,17 +7915,17 @@ Step 5 of 5 ── Ready
   ✓ Project: My Project created
 
   ┌──────────────────────────────────────────────────────────────┐
-  │  Start your first goal from the Console home screen,        │
+  │  Start your first goal from the TA Studio home screen,      │
   │  or run:  ta run "Add user login"                           │
   └──────────────────────────────────────────────────────────────┘
-                                               [Go to Console →]
+                                               [Go to Studio →]
 ```
 
 The wizard writes the appropriate config files on completion (`daemon.toml`, `workflow.toml`, `policy.yaml`, `.ta/` structure). The user never sees these files unless they choose to.
 
 #### Design — Settings Section
 
-After setup, the Console has a **Settings** section (top-nav or sidebar) with sub-pages corresponding to each config domain. Each sub-page is a form that reads current values from the config files and writes back on Save. Changes take effect immediately (daemon hot-reloads config).
+After setup, TA Studio has a **Settings** section (top-nav or sidebar) with sub-pages corresponding to each config domain. Each sub-page is a form that reads current values from the config files and writes back on Save. Changes take effect immediately (daemon hot-reloads config).
 
 ```
 Settings
@@ -7958,7 +7958,7 @@ Agent permissions
 
 1. [ ] **Settings API endpoints**: Daemon exposes `GET/PUT /api/settings/<section>` (agent, vcs, workflow, policy, constitution, notifications, memory). Each endpoint reads/writes the corresponding config file. Returns structured JSON — not raw YAML. Hot-reloads affected subsystems on write. Auth: localhost-only (same as existing web UI).
 
-2. [ ] **Setup Wizard (web)**: 5-step flow rendered in the Console. Step 1: agent system (Claude/Ollama/OpenAI) with key validation. Step 2: VCS selection with auth flow and "no repo yet" guidance. Step 3: notifications (Discord/Slack webhooks, Test button). Step 4: project creation (name, description, first goal, approval gate preference). Step 5: completion summary. Wizard state persists across page reloads (saved to `.ta/setup-progress.json`) so users can complete it in multiple sessions.
+2. [ ] **Setup Wizard (web)**: 5-step flow rendered in TA Studio. Step 1: agent system (Claude/Ollama/OpenAI) with key validation. Step 2: VCS selection with auth flow and "no repo yet" guidance. Step 3: notifications (Discord/Slack webhooks, Test button). Step 4: project creation (name, description, first goal, approval gate preference). Step 5: completion summary. Wizard state persists across page reloads (saved to `.ta/setup-progress.json`) so users can complete it in multiple sessions.
 
 3. [ ] **Agent Settings page**: Dropdown for agent system. API key field (masked, "set" indicator). Model selector (populated from available models for the chosen system). Sliders/inputs for temperature, max turns. "Test connection" button that runs a lightweight probe.
 
@@ -7984,7 +7984,9 @@ Agent permissions
 
 14. [ ] **USAGE.md "Governed Workflow" prerequisites block**: Add a "Before you start" callout at the top of the Governed Workflow section pointing to the web wizard or to `ta doctor` for diagnosis.
 
-15. [ ] **Tests**: Settings API: GET returns current config as JSON; PUT writes and hot-reloads. API key validation endpoint (mock Anthropic). VCS connection check (mock git/p4). Webhook test send (mock HTTP). Wizard progress persistence round-trip. Policy toggle → correct `policy.yaml` diff. Constitution plain-English input → valid TOML rule generated.
+15. [ ] **`docs/Studio-WalkThru.md`**: Complete narrative walkthrough for non-engineers using a concrete sample project ("TaskFlow" task tracker). Covers: install, setup wizard, plan creation, constitution with agent help, running goals, reviewing and approving drafts, modifying settings, updating the constitution, editing the plan. Written in plain English — no YAML, no code beyond simple CLI commands. This is the primary onboarding document for non-engineer users.
+
+16. [ ] **Tests**: Settings API: GET returns current config as JSON; PUT writes and hot-reloads. API key validation endpoint (mock Anthropic). VCS connection check (mock git/p4). Webhook test send (mock HTTP). Wizard progress persistence round-trip. Policy toggle → correct `policy.yaml` diff. Constitution plain-English input → valid TOML rule generated.
 
 #### Version: `0.14.13-alpha`
 
