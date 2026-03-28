@@ -4623,6 +4623,28 @@ fn apply_package(
         }
     }
 
+    // Read plan phase status from staging BEFORE auto_clean removes it (v0.14.9 item 10).
+    // Staging is the agent's authoritative output; target_dir may not yet reflect changes.
+    let phase_status_from_staging: Option<(String, super::plan::PlanStatus)> =
+        if let Some(ref phase) = goal.plan_phase {
+            let staging_plan = goal.workspace_path.join("PLAN.md");
+            let source_plan = target_dir.join("PLAN.md");
+            let plan_content = if staging_plan.exists() {
+                std::fs::read_to_string(&staging_plan).ok()
+            } else {
+                std::fs::read_to_string(&source_plan).ok()
+            };
+            plan_content.and_then(|content| {
+                let phases = super::plan::parse_plan(&content);
+                phases
+                    .into_iter()
+                    .find(|p| super::plan::phase_ids_match(&p.id, phase))
+                    .map(|p| (phase.clone(), p.status))
+            })
+        } else {
+            None
+        };
+
     // Auto-clean staging directory if configured (v0.11.3 item 27).
     {
         let wf_cfg = ta_submit::WorkflowConfig::load_or_default(
@@ -4658,33 +4680,45 @@ fn apply_package(
         "  Goal:   {} -> applied",
         goal.goal_run_id.to_string().get(..8).unwrap_or("?")
     );
-    if let Some(ref phase) = goal.plan_phase {
-        let plan_path = target_dir.join("PLAN.md");
-        if plan_path.exists() {
-            let content = std::fs::read_to_string(&plan_path).unwrap_or_default();
-            let phases = super::plan::parse_plan(&content);
-            if let Some(p) = phases
-                .iter()
-                .find(|p| super::plan::phase_ids_match(&p.id, phase))
-            {
-                let status_str = match p.status {
-                    super::plan::PlanStatus::Done => "done",
-                    super::plan::PlanStatus::InProgress => "in_progress",
-                    super::plan::PlanStatus::Pending => "pending",
-                    super::plan::PlanStatus::Deferred => "deferred",
-                };
-                if p.status == super::plan::PlanStatus::Done {
-                    println!("  Plan:   {} -> {}", phase, status_str);
+    if let Some((ref phase, ref status)) = phase_status_from_staging {
+        let status_str = match status {
+            super::plan::PlanStatus::Done => "done",
+            super::plan::PlanStatus::InProgress => "in_progress",
+            super::plan::PlanStatus::Pending => "pending",
+            super::plan::PlanStatus::Deferred => "deferred",
+        };
+        if *status == super::plan::PlanStatus::Done {
+            println!("  Plan:   {} -> {}", phase, status_str);
+        } else {
+            // Fall back to re-reading from target_dir (applied tree) in case plan was updated.
+            let target_plan = target_dir.join("PLAN.md");
+            if target_plan.exists() {
+                let content = std::fs::read_to_string(&target_plan).unwrap_or_default();
+                let phases = super::plan::parse_plan(&content);
+                if let Some(p) = phases
+                    .iter()
+                    .find(|p| super::plan::phase_ids_match(&p.id, phase))
+                {
+                    if p.status == super::plan::PlanStatus::Done {
+                        println!("  Plan:   {} -> done", phase);
+                    } else {
+                        eprintln!(
+                            "  [warn] Plan: {} is still '{}' -- expected 'done'. Check PLAN.md.",
+                            phase, status_str
+                        );
+                    }
                 } else {
-                    eprintln!(
-                        "  [warn] Plan: {} is still '{}' -- expected 'done'. Check PLAN.md.",
-                        phase, status_str
-                    );
+                    eprintln!("  [warn] Plan: phase '{}' not found in PLAN.md", phase);
                 }
             } else {
-                eprintln!("  [warn] Plan: phase '{}' not found in PLAN.md", phase);
+                eprintln!(
+                    "  [warn] Plan: {} is still '{}' -- expected 'done'. Check PLAN.md.",
+                    phase, status_str
+                );
             }
         }
+    } else if let Some(ref phase) = goal.plan_phase {
+        eprintln!("  [warn] Plan: phase '{}' not found in PLAN.md", phase);
     }
     if git_commit {
         if dry_run {

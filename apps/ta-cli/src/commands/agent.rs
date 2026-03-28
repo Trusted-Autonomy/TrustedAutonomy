@@ -55,6 +55,9 @@ pub enum AgentCommands {
         /// Show pluggable agent framework manifests instead of YAML agent configs (v0.13.8).
         #[arg(long)]
         frameworks: bool,
+        /// Show only locally-installed Ollama-backed agents with model status (v0.14.9).
+        #[arg(long)]
+        local: bool,
     },
     /// Install an agent config from an external source (registry, GitHub, URL).
     Add {
@@ -148,6 +151,20 @@ pub enum AgentCommands {
         #[arg(long)]
         registry: Option<String>,
     },
+    /// Install a Qwen3.5 model and agent profile via Ollama (v0.14.9).
+    ///
+    /// Checks if Ollama is installed, runs `ollama pull`, and installs the
+    /// bundled agent profile to ~/.config/ta/agents/.
+    ///
+    /// Examples:
+    ///   ta agent install-qwen --size 9b
+    ///   ta agent install-qwen --size 27b
+    ///   ta agent install-qwen --size all
+    InstallQwen {
+        /// Model size to install: 4b, 9b, 27b, or all.
+        #[arg(long, default_value = "9b")]
+        size: String,
+    },
 }
 
 pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -158,8 +175,11 @@ pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Resul
             templates,
             source,
             frameworks,
+            local,
         } => {
-            if *frameworks {
+            if *local {
+                list_local_agents(config)
+            } else if *frameworks {
                 list_frameworks(&config.workspace_root)
             } else if *templates {
                 list_templates()
@@ -190,6 +210,7 @@ pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Resul
             framework_install(name, *global, &config.workspace_root)
         }
         AgentCommands::Publish { path, registry } => framework_publish(path, registry.as_deref()),
+        AgentCommands::InstallQwen { size } => install_qwen(size),
     }
 }
 
@@ -1325,6 +1346,260 @@ fn framework_publish(path: &std::path::Path, registry: Option<&str>) -> anyhow::
     Ok(())
 }
 
+// ── Qwen3.5 bundled profile constants (v0.14.9) ─────────────────────────────
+
+const QWEN35_4B_PROFILE: &str = r#"# Qwen3.5 4B — lightweight local model (~4 GB VRAM).
+# Best for: quick edits, simple scripts, fast iteration.
+# Thinking mode: disabled (4B performs best with direct responses)
+
+name        = "qwen3.5-4b"
+version     = "1.0.0"
+description = "Qwen3.5 4B via Ollama — fast local agent, ~4 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "qwen3.5:4b", "--base-url", "http://localhost:11434", "--max-turns", "30", "--temperature", "0.1", "--thinking-mode", "false"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 10
+recency_days = 7
+"#;
+
+const QWEN35_9B_PROFILE: &str = r#"# Qwen3.5 9B — mid-size local model (~8 GB VRAM).
+# Best for: mid-complexity tasks, most coding work.
+# Thinking mode: enabled (9B benefits from chain-of-thought on complex tasks)
+
+name        = "qwen3.5-9b"
+version     = "1.0.0"
+description = "Qwen3.5 9B via Ollama — balanced local agent, ~8 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "qwen3.5:9b", "--base-url", "http://localhost:11434", "--max-turns", "50", "--temperature", "0.1", "--thinking-mode", "true"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 15
+recency_days = 7
+"#;
+
+const QWEN35_27B_PROFILE: &str = r#"# Qwen3.5 27B — large local model (~20 GB VRAM).
+# Best for: complex multi-file refactors, planning, research.
+# Thinking mode: enabled (27B reasoning is significantly enhanced with /think)
+
+name        = "qwen3.5-27b"
+version     = "1.0.0"
+description = "Qwen3.5 27B via Ollama — powerful local agent, ~20 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "qwen3.5:27b", "--base-url", "http://localhost:11434", "--max-turns", "80", "--temperature", "0.15", "--thinking-mode", "true"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 20
+recency_days = 7
+"#;
+
+/// Returns the bundled TOML content for a qwen3.5 profile by size.
+fn bundled_qwen_profile(size: &str) -> &'static str {
+    match size {
+        "4b" => QWEN35_4B_PROFILE,
+        "9b" => QWEN35_9B_PROFILE,
+        "27b" => QWEN35_27B_PROFILE,
+        _ => "",
+    }
+}
+
+/// Install a Qwen3.5 model via Ollama and write the bundled agent profile.
+fn install_qwen(size: &str) -> anyhow::Result<()> {
+    let sizes: Vec<&str> = match size {
+        "all" => vec!["4b", "9b", "27b"],
+        "4b" | "9b" | "27b" => vec![size],
+        _ => anyhow::bail!(
+            "Unknown size '{}'. Use: 4b, 9b, 27b, or all.\n\
+             Example: ta agent install-qwen --size 9b",
+            size
+        ),
+    };
+
+    // 1. Check Ollama is installed.
+    if which::which("ollama").is_err() {
+        println!("Ollama is not installed.");
+        println!("  Install: https://ollama.ai");
+        println!("  macOS:   brew install ollama");
+        println!("  Linux:   curl -fsSL https://ollama.ai/install.sh | sh");
+        anyhow::bail!(
+            "Ollama is required to use Qwen3.5 local agents.\n\
+             Install from https://ollama.ai then re-run this command."
+        );
+    }
+
+    // 2. Check Ollama is running.
+    let ollama_running = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()
+        .and_then(|c| c.get("http://localhost:11434/api/tags").send().ok())
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    if !ollama_running {
+        println!("Ollama is not running at http://localhost:11434.");
+        println!("  Start it: ollama serve");
+        println!("  macOS:    Run the Ollama app from your Applications folder");
+        anyhow::bail!(
+            "Ollama must be running before pulling models.\n\
+             Start with: ollama serve"
+        );
+    }
+
+    for sz in &sizes {
+        let model_tag = format!("qwen3.5:{}", sz);
+        let profile_name = format!("qwen3.5-{}", sz);
+
+        println!("Pulling {}...", model_tag);
+        let status = std::process::Command::new("ollama")
+            .args(["pull", &model_tag])
+            .status()
+            .map_err(|e| anyhow::anyhow!("Failed to run `ollama pull {}`: {}", model_tag, e))?;
+
+        if !status.success() {
+            anyhow::bail!(
+                "`ollama pull {}` failed (exit {}). Check your network connection and that the model name is correct.",
+                model_tag,
+                status.code().unwrap_or(-1)
+            );
+        }
+
+        // Install bundled profile to ~/.config/ta/agents/
+        let profile_toml = bundled_qwen_profile(sz);
+        let agents_dir = ta_config_dir().join("agents");
+        std::fs::create_dir_all(&agents_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create agents dir {}: {}",
+                agents_dir.display(),
+                e
+            )
+        })?;
+        let profile_path = agents_dir.join(format!("{}.toml", profile_name));
+        std::fs::write(&profile_path, profile_toml).map_err(|e| {
+            anyhow::anyhow!("Failed to write profile {}: {}", profile_path.display(), e)
+        })?;
+
+        println!(
+            "{} installed — profile at {}",
+            model_tag,
+            profile_path.display()
+        );
+        println!("  Run: ta run \"your goal\" --agent {}", profile_name);
+    }
+    println!();
+    println!("To check prerequisites: ta agent doctor <profile-name>");
+    Ok(())
+}
+
+/// List only locally-installed Ollama-backed agent frameworks, with model download status.
+fn list_local_agents(config: &GatewayConfig) -> anyhow::Result<()> {
+    println!("Local (Ollama-backed) agents:");
+    println!();
+
+    // Collect all manifests from builtins + discovered.
+    let mut all = AgentFrameworkManifest::builtins();
+    all.extend(AgentFrameworkManifest::discover(&config.workspace_root));
+
+    let local_agents: Vec<_> = all
+        .iter()
+        .filter(|m| m.command == "ta-agent-ollama")
+        .collect();
+
+    if local_agents.is_empty() {
+        println!("  (no local agents installed)");
+        println!();
+        println!("Install Qwen3.5: ta agent install-qwen --size 9b");
+        return Ok(());
+    }
+
+    // Query Ollama for installed models (best-effort).
+    let installed_models: Vec<String> = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()
+        .and_then(|c| c.get("http://localhost:11434/api/tags").send().ok())
+        .and_then(|r| r.json::<serde_json::Value>().ok())
+        .and_then(|v| {
+            v.get("models")?.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("name")?.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+
+    let ollama_running = !installed_models.is_empty()
+        || reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .ok()
+            .and_then(|c| c.get("http://localhost:11434/api/tags").send().ok())
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+
+    for agent in &local_agents {
+        // Extract model from args (--model <tag>).
+        let model_tag = agent
+            .args
+            .windows(2)
+            .find(|w| w[0] == "--model")
+            .map(|w| w[1].as_str())
+            .unwrap_or("(unknown model)");
+
+        // Estimate VRAM from model tag.
+        let vram = if model_tag.contains("27b") {
+            "~20 GB"
+        } else if model_tag.contains("9b") {
+            "~8 GB"
+        } else if model_tag.contains("4b") {
+            "~4 GB"
+        } else if model_tag.contains("7b") {
+            "~6 GB"
+        } else {
+            "unknown"
+        };
+
+        // Check if model is downloaded.
+        let downloaded = if !ollama_running {
+            "[ollama not running]".to_string()
+        } else if installed_models
+            .iter()
+            .any(|m| m == model_tag || m.starts_with(model_tag))
+        {
+            "downloaded".to_string()
+        } else {
+            "not downloaded".to_string()
+        };
+
+        println!(
+            "  [local] {}  model={} VRAM={}  status={}",
+            agent.name, model_tag, vram, downloaded
+        );
+        println!("    {}", agent.description);
+    }
+
+    println!();
+    if !ollama_running {
+        println!("Ollama not running. Start with: ollama serve");
+    } else {
+        println!("Install more: ta agent install-qwen --size <4b|9b|27b|all>");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1538,5 +1813,59 @@ description = "Test framework"
             "unexpected error message: {}",
             msg
         );
+    }
+
+    // ── Qwen3.5 install tests (v0.14.9) ──────────────────────────────────────
+
+    #[test]
+    fn install_qwen_rejects_unknown_size() {
+        // Unknown size returns Err immediately, before any network call.
+        let result = install_qwen("3b");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unknown size"),
+            "expected 'Unknown size' in: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn bundled_qwen_profile_4b_is_valid_toml() {
+        let content = bundled_qwen_profile("4b");
+        assert!(!content.is_empty());
+        let manifest: AgentFrameworkManifest =
+            toml::from_str(content).expect("4b profile should be valid TOML");
+        assert_eq!(manifest.name, "qwen3.5-4b");
+        assert!(
+            manifest.args.contains(&"qwen3.5:4b".to_string()),
+            "args should include model tag"
+        );
+    }
+
+    #[test]
+    fn bundled_qwen_profile_9b_is_valid_toml() {
+        let content = bundled_qwen_profile("9b");
+        assert!(!content.is_empty());
+        let manifest: AgentFrameworkManifest =
+            toml::from_str(content).expect("9b profile should be valid TOML");
+        assert_eq!(manifest.name, "qwen3.5-9b");
+        assert!(manifest.args.contains(&"qwen3.5:9b".to_string()));
+    }
+
+    #[test]
+    fn bundled_qwen_profile_27b_is_valid_toml() {
+        let content = bundled_qwen_profile("27b");
+        assert!(!content.is_empty());
+        let manifest: AgentFrameworkManifest =
+            toml::from_str(content).expect("27b profile should be valid TOML");
+        assert_eq!(manifest.name, "qwen3.5-27b");
+        assert!(manifest.args.contains(&"qwen3.5:27b".to_string()));
+    }
+
+    #[test]
+    fn bundled_qwen_profile_unknown_returns_empty() {
+        let content = bundled_qwen_profile("99b");
+        assert!(content.is_empty());
     }
 }

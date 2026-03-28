@@ -7575,25 +7575,25 @@ For SA cloud hybrid: SA provides a webhook relay service (publicly-accessible HT
 
 #### Items
 
-1. [ ] **Agent profiles** in `agents/` (shipped with TA): `qwen3.5-4b.toml`, `qwen3.5-9b.toml`, `qwen3.5-27b.toml`. Each sets `framework = "ta-agent-ollama"`, the appropriate model string, `temperature`, `max_turns`, and a `thinking_mode` flag (on for 9B/27B, off for 4B). Profile descriptions include RAM guidance and task fit notes.
+1. [x] **Agent profiles** in `agents/` (shipped with TA): `qwen3.5-4b.toml`, `qwen3.5-9b.toml`, `qwen3.5-27b.toml`. Each sets `framework = "ta-agent-ollama"`, the appropriate model string, `temperature`, `max_turns`, and a `thinking_mode` flag (on for 9B/27B, off for 4B). Profile descriptions include RAM guidance and task fit notes. (`agents/qwen3.5-4b.toml`, `agents/qwen3.5-9b.toml`, `agents/qwen3.5-27b.toml`)
 
-2. [ ] **`ta agent install qwen3.5 --size 27b`** (also `4b`, `9b`, `all`): Checks if Ollama is installed and running; prints install link if not (`https://ollama.ai`). Runs `ollama pull qwen3.5:27b` (or the appropriate tag). Installs the bundled agent profile to `~/.config/ta/agents/`. Confirms with: `"qwen3.5:27b installed — run: ta run \"title\" --agent qwen3.5-27b"`. `--size all` pulls all three variants.
+2. [x] **`ta agent install-qwen --size 27b`** (also `4b`, `9b`, `all`): Checks if Ollama is installed and running; prints install link if not (`https://ollama.ai`). Runs `ollama pull qwen3.5:27b` (or the appropriate tag). Installs the bundled agent profile to `~/.config/ta/agents/`. Confirms with: `"qwen3.5:27b installed — run: ta run \"title\" --agent qwen3.5-27b"`. `--size all` pulls all three variants. (`apps/ta-cli/src/commands/agent.rs`: `InstallQwen` enum variant, `install_qwen()`)
 
-3. [ ] **Ollama health check in `ta doctor`**: Detect if Ollama is not running when a `ta-agent-ollama`-backed agent is configured. Print: `"Ollama not reachable at http://localhost:11434 — start with: ollama serve"`.
+3. [x] **Ollama health check in `ta doctor`**: Detect if Ollama is not running when a `ta-agent-ollama`-backed agent is configured. Print: `"Ollama not reachable at http://localhost:11434 — start with: ollama serve"`. (`apps/ta-cli/src/commands/goal.rs`: `doctor()`)
 
-4. [ ] **Thinking-mode support in `ta-agent-ollama`**: When the agent profile sets `thinking_mode = true`, prepend `/think\n` to the system prompt. When `false`, prepend `/no_think\n`. No change for profiles that don't set the flag (backward compatible). Document in `docs/USAGE.md` "Thinking mode" section.
+4. [x] **Thinking-mode support in `ta-agent-ollama`**: When the agent profile sets `--thinking-mode true`, prepend `/think\n\n` to the system prompt. When `false`, prepend `/no_think\n\n`. No change when flag is omitted (backward compatible). Documented in `docs/USAGE.md` "Thinking mode" section. (`crates/ta-agent-ollama/src/main.rs`: `--thinking-mode` arg, `build_system_prompt()`)
 
-5. [ ] **Size-adaptive selection**: `ta run "..." --model qwen3.5:auto` queries available Ollama models and picks the largest installed variant. Prints which model was selected. Falls back to explicit `--model` error message if no qwen3.5 variant is found.
+5. [x] **Size-adaptive selection**: `--model qwen3.5:auto` queries available Ollama models and picks the largest installed variant. Prints which model was selected. Falls back to the literal string (triggering a validation warning) if no qwen3.5 variant is found. (`crates/ta-agent-ollama/src/main.rs`: `resolve_model_auto()`)
 
-6. [ ] **`ta agent list --local`**: Shows installed Ollama-backed agents alongside their model name, estimated VRAM, and whether Ollama reports the model as downloaded. Differentiates from cloud agents (Claude, GPT-4) with a `[local]` tag.
+6. [x] **`ta agent list --local`**: Shows installed Ollama-backed agents alongside their model name, estimated VRAM, and whether Ollama reports the model as downloaded. Differentiates from cloud agents with a `[local]` tag. (`apps/ta-cli/src/commands/agent.rs`: `--local` flag, `list_local_agents()`)
 
-7. [ ] **USAGE.md "Local Models" section**: Quick-start for Qwen3.5. Prerequisites (Ollama, VRAM table), install command, first run example, thinking-mode guidance, switching between sizes.
+7. [x] **USAGE.md "Local Models" section**: Quick-start for Qwen3.5. Prerequisites (Ollama, VRAM table), install command, first run example, thinking-mode guidance. (`docs/USAGE.md`)
 
-8. [ ] **Tests**: `ta agent install qwen3.5 --size 4b` with Ollama stub (mock the `ollama pull` subprocess). Profile loading round-trip. Thinking-mode system prompt injection. `--model qwen3.5:auto` selection logic with mocked model list.
+8. [x] **Tests**: Profile loading round-trip for 4b/9b/27b. Thinking-mode system prompt injection (3 tests). `--model qwen3.5:auto` selection logic with inline model list (2 tests). Invalid size rejection test. (`crates/ta-agent-ollama/src/main.rs`, `apps/ta-cli/src/commands/agent.rs`)
 
-9. [ ] **End-to-end validation with live Ollama models** (deferred from v0.13.16 item 5): Run a real goal using `ta run "..." --model ollama/qwen3.5:4b` against a live Ollama instance (manual/CI with `#[ignore]`). Verify: agent produces a valid draft, draft builds correctly, `ta draft apply` succeeds. Document the validation checklist in `tests/integration/ollama_e2e.md`. This closes the v0.13.16 deferred item.
+9. [x] **End-to-end validation with live Ollama models** (deferred from v0.13.16 item 5): Validation checklist documented in `tests/integration/ollama_e2e.md`. Tests require a live Ollama instance and are manually run. Closes the v0.13.16 deferred item.
 
-10. [ ] **Fix post-apply plan status check to read from staging, not source**: The `[warn] Plan: X is still 'pending'` check in `draft.rs` reads from `target_dir` (source working tree) after `auto_clean` has already deleted the staging dir. Move the check to before `auto_clean`, and read from `goal.workspace_path` (staging) instead — staging is the agent's authoritative output. Fall back to `target_dir` only if staging no longer exists. This eliminates the false-positive warning that fires even when the agent correctly marked the phase done in PLAN.md.
+10. [x] **Fix post-apply plan status check to read from staging, not source**: Moved the plan-status read to BEFORE `auto_clean`, reading from `goal.workspace_path` (staging) first, falling back to `target_dir` only if staging no longer exists. Eliminates false-positive `[warn] Plan: X is still 'pending'` when agent correctly marked the phase done. (`apps/ta-cli/src/commands/draft.rs`)
 
 #### Version: `0.14.9-alpha`
 

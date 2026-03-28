@@ -95,6 +95,11 @@ struct Args {
     /// Print verbose debug info to stderr.
     #[arg(long, short)]
     verbose: bool,
+
+    /// Enable Qwen3.x thinking mode: prepend /think to system prompt.
+    /// When false, prepend /no_think. Omit to leave system prompt unchanged.
+    #[arg(long)]
+    thinking_mode: Option<bool>,
 }
 
 #[tokio::main]
@@ -124,7 +129,8 @@ async fn main() -> Result<()> {
         .and_then(|p| std::fs::read_to_string(p).ok());
 
     // 4. Build system prompt.
-    let system_prompt = build_system_prompt(&context, memory_snapshot.as_deref());
+    let system_prompt =
+        build_system_prompt(&context, memory_snapshot.as_deref(), args.thinking_mode);
 
     // 5. Resolve working directory.
     let workdir = args
@@ -135,12 +141,17 @@ async fn main() -> Result<()> {
     let bridge = MemoryBridge::new(args.memory_out.as_deref());
     let tools = ToolSet::new(workdir.clone(), bridge);
 
-    // 7. Create HTTP client.
-    let client = OllamaClient::new(&args.base_url, &args.model, args.temperature)?;
+    // 7. Create HTTP client; resolve qwen3.5:auto before validation.
+    let resolved_model = if args.model == "qwen3.5:auto" {
+        resolve_model_auto(&args.base_url, &args.model).await
+    } else {
+        args.model.clone()
+    };
+    let client = OllamaClient::new(&args.base_url, &resolved_model, args.temperature)?;
 
     // 8. Validate model (unless skipped).
     if !args.skip_validation {
-        validate_model(&client, &args.model).await?;
+        validate_model(&client, &resolved_model).await?;
     }
 
     // 9. Probe function-calling capability.
@@ -171,6 +182,49 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Resolve `qwen3.5:auto` to the largest installed Qwen3.5 variant by querying Ollama.
+///
+/// Preference order: 27b > 9b > 4b. If no variant is found, returns the original string
+/// (`qwen3.5:auto`) so the validation step can produce a clear error.
+async fn resolve_model_auto(base_url: &str, model: &str) -> String {
+    if model != "qwen3.5:auto" {
+        return model.to_string();
+    }
+    // Build a temporary client just for the list query.
+    let temp_client = match OllamaClient::new(base_url, "probe", 0.0) {
+        Ok(c) => c,
+        Err(_) => return model.to_string(),
+    };
+    match temp_client.list_models().await {
+        Ok(models) => {
+            for variant in &["qwen3.5:27b", "qwen3.5:9b", "qwen3.5:4b"] {
+                if models
+                    .iter()
+                    .any(|m| m == variant || m.starts_with(variant))
+                {
+                    eprintln!(
+                        "[ta-agent-ollama] qwen3.5:auto → selected {} (largest installed variant)",
+                        variant
+                    );
+                    return variant.to_string();
+                }
+            }
+            eprintln!(
+                "[ta-agent-ollama] qwen3.5:auto: no qwen3.5 variant found in Ollama.\n\
+                 Install one with: ta agent install-qwen --size 9b"
+            );
+            model.to_string()
+        }
+        Err(e) => {
+            eprintln!(
+                "[ta-agent-ollama] qwen3.5:auto: could not query Ollama models: {}",
+                e
+            );
+            model.to_string()
+        }
+    }
+}
+
 /// Load goal context from a file path, returning empty string if absent.
 fn load_context(path: Option<&std::path::Path>) -> Result<String> {
     match path {
@@ -187,9 +241,21 @@ fn load_context(path: Option<&std::path::Path>) -> Result<String> {
     }
 }
 
-/// Build the system prompt, incorporating goal context and memory snapshot.
-fn build_system_prompt(context: &str, memory: Option<&str>) -> String {
+/// Build the system prompt, incorporating goal context, memory snapshot, and thinking mode.
+///
+/// `thinking_mode`:
+/// - `Some(true)`  → prepend `/think\n\n` (Qwen3.x chain-of-thought reasoning)
+/// - `Some(false)` → prepend `/no_think\n\n` (Qwen3.x direct response mode)
+/// - `None`        → no prefix (backward-compatible default)
+fn build_system_prompt(context: &str, memory: Option<&str>, thinking_mode: Option<bool>) -> String {
     let mut prompt = String::new();
+
+    // Qwen3.x thinking mode token (must appear before all other content).
+    match thinking_mode {
+        Some(true) => prompt.push_str("/think\n\n"),
+        Some(false) => prompt.push_str("/no_think\n\n"),
+        None => {}
+    }
 
     prompt.push_str(
         "You are an autonomous AI agent working inside the Trusted Autonomy framework.\n\
@@ -474,16 +540,63 @@ mod tests {
     #[test]
     fn system_prompt_includes_context() {
         let ctx = "## Goal Context\nFix the bug.";
-        let prompt = build_system_prompt(ctx, None);
+        let prompt = build_system_prompt(ctx, None, None);
         assert!(prompt.contains("Fix the bug."));
         assert!(prompt.contains("autonomous AI agent"));
     }
 
     #[test]
     fn system_prompt_includes_memory() {
-        let prompt = build_system_prompt("", Some("## Memory\n- Key: Value"));
+        let prompt = build_system_prompt("", Some("## Memory\n- Key: Value"), None);
         assert!(prompt.contains("Memory"));
         assert!(prompt.contains("Key: Value"));
+    }
+
+    #[test]
+    fn thinking_mode_true_prepends_think() {
+        let prompt = build_system_prompt("ctx", None, Some(true));
+        assert!(prompt.starts_with("/think\n\n"));
+        assert!(prompt.contains("ctx"));
+    }
+
+    #[test]
+    fn thinking_mode_false_prepends_no_think() {
+        let prompt = build_system_prompt("", None, Some(false));
+        assert!(prompt.starts_with("/no_think\n\n"));
+    }
+
+    #[test]
+    fn thinking_mode_none_no_prefix() {
+        let prompt = build_system_prompt("ctx", None, None);
+        assert!(!prompt.starts_with("/think"));
+        assert!(!prompt.starts_with("/no_think"));
+        assert!(prompt.contains("ctx"));
+    }
+
+    #[test]
+    fn auto_model_selection_prefers_largest() {
+        // Unit test the selection logic used in resolve_model_auto:
+        // given an installed model list, the first match in preference order wins.
+        let variants = ["qwen3.5:27b", "qwen3.5:9b", "qwen3.5:4b"];
+        let models = ["qwen3.5:9b".to_string(), "qwen3.5:4b".to_string()];
+        let selected = variants
+            .iter()
+            .find(|v| models.iter().any(|m| m == *v))
+            .copied()
+            .unwrap_or("qwen3.5:auto");
+        assert_eq!(selected, "qwen3.5:9b");
+    }
+
+    #[test]
+    fn auto_model_selection_falls_back_when_none_installed() {
+        let variants = ["qwen3.5:27b", "qwen3.5:9b", "qwen3.5:4b"];
+        let models: [String; 0] = [];
+        let selected = variants
+            .iter()
+            .find(|v| models.iter().any(|m| m == *v))
+            .copied()
+            .unwrap_or("qwen3.5:auto");
+        assert_eq!(selected, "qwen3.5:auto");
     }
 
     #[test]

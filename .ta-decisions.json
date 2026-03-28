@@ -1,20 +1,26 @@
 [
   {
-    "decision": "Place DraftResolver in crates/ta-changeset/src/draft_resolver.rs rather than a new draft_store.rs",
-    "rationale": "There is no DraftStore struct in the codebase — packages are loaded directly from the filesystem in draft.rs. A standalone resolve_draft(packages, id) function achieves the same goal without unnecessary abstraction.",
-    "alternatives": ["Create DraftStore struct wrapping GatewayConfig", "Keep all resolution logic in apps/ta-cli/src/commands/draft.rs"],
-    "confidence": 0.9
-  },
-  {
-    "decision": "Added shortref/seq handling to resolve_draft_id_flexible in draft.rs rather than replacing with the new crate function",
-    "rationale": "resolve_draft_id_flexible already handles 7+ formats and is used by 20+ call sites. Adding the missing shortref/seq case is minimal and surgical. The new crate module provides the canonical API for new code.",
-    "alternatives": ["Replace resolve_draft_id_flexible entirely", "Refactor all 20+ callers to use the new crate API"],
+    "decision": "Use --thinking-mode CLI flag in ta-agent-ollama args instead of extra TOML field",
+    "rationale": "AgentFrameworkManifest does not have an 'extra' or 'metadata' map field. Adding one would require a schema change to a shared crate. Passing --thinking-mode true/false directly in the profile's args list keeps all configuration in args, is parsed by clap's Option<bool>, and requires no struct changes.",
+    "alternatives": ["Add HashMap<String, toml::Value> extra field to AgentFrameworkManifest", "Store as separate profile-level fields requiring new serde deserialization logic"],
     "confidence": 0.95
   },
   {
-    "decision": "Added description: Option<String> to ConstitutionRule for the identifier-consistency policy rule",
-    "rationale": "identifier-consistency is a design policy, not a code pattern — inject_fns/restore_fns/patterns don't apply. A description field lets it carry human-readable intent without needing a separate struct type.",
-    "alternatives": ["Add a separate PolicyRule struct", "Skip the constitution rule entirely"],
+    "decision": "Inline bundled Qwen3.5 profile TOML as string constants in agent.rs instead of include_str!",
+    "rationale": "include_str! with a relative path from apps/ta-cli/src/commands/agent.rs to the agents/ directory at the workspace root would be fragile (deep relative path, breaks if file layout changes). Inline string constants are compile-time checked and self-contained. The agents/ TOML files are still created for file-level discovery, but the install command uses the constants.",
+    "alternatives": ["Use include_str!(\"../../../../agents/qwen3.5-4b.toml\")", "Read from disk at runtime and bundle in the binary via build.rs"],
+    "confidence": 0.90
+  },
+  {
+    "decision": "Place resolve_model_auto as a standalone async fn rather than on OllamaClient",
+    "rationale": "resolve_model_auto needs to be called before the final OllamaClient is constructed (since the model name is part of client init). Making it a standalone fn that takes base_url as &str keeps the responsibility boundary clean: client.rs is for HTTP mechanics, main.rs handles argument resolution logic.",
+    "alternatives": ["Add resolve_auto() method to OllamaClient", "Move resolution into Args parsing"],
     "confidence": 0.85
+  },
+  {
+    "decision": "Read plan phase status from staging workspace BEFORE auto_clean in draft.rs",
+    "rationale": "The original code read from target_dir after auto_clean could delete the staging dir, causing a false-positive 'still pending' warning even when the agent correctly marked the phase done. The fix reads from goal.workspace_path (staging) before auto_clean runs, then falls back to target_dir only for the validation step if staging status is non-Done.",
+    "alternatives": ["Disable auto_clean before the check", "Only read from target_dir after apply has copied files"],
+    "confidence": 0.92
   }
 ]
