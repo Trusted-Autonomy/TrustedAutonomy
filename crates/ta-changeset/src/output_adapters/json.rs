@@ -15,7 +15,7 @@ impl JsonAdapter {
 impl OutputAdapter for JsonAdapter {
     fn render(&self, ctx: &RenderContext) -> Result<String, ChangeSetError> {
         // For JSON output, we serialize the entire PRPackage
-        // The detail_level and file_filter are ignored — the consumer can filter client-side
+        // The detail_level and file_filters are ignored — the consumer can filter client-side
 
         let json = serde_json::to_string_pretty(ctx.package).map_err(|e| {
             ChangeSetError::InvalidData(format!("JSON serialization failed: {}", e))
@@ -125,7 +125,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Full,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };

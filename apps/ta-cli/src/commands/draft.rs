@@ -90,11 +90,12 @@ pub enum DraftCommands {
         /// Show summary and file list only (skip diffs). [DEPRECATED: use --detail top]
         #[arg(long)]
         summary: bool,
-        /// Show diff for a single file only (path relative to workspace root).
-        /// If a diff handler is configured for this file type, it will be opened
-        /// in the external application instead of showing the diff inline.
+        /// Filter to files matching these glob patterns (repeatable). Multiple --file flags allowed.
+        /// E.g.: --file "src/auth/*.rs" --file PLAN.md
+        /// If a diff handler is configured for this file type (with a single match), it will be
+        /// opened in the external application instead of showing the diff inline.
         #[arg(long)]
-        file: Option<String>,
+        file: Vec<String>,
         /// Open file in external handler.
         /// If not specified, uses workflow.toml [diff] open_external setting (default: true).
         /// Use --no-open-external to force inline diff display even if handler exists.
@@ -142,6 +143,10 @@ pub enum DraftCommands {
         /// Reviewer name.
         #[arg(long, default_value = "human-reviewer")]
         reviewer: String,
+        /// Deny only a specific artifact (by path or URI fragment), leaving others pending.
+        /// After denying, prompts to ask the agent why it made this choice.
+        #[arg(long)]
+        file: Option<String>,
     },
     /// Apply approved changes to the target directory.
     ///
@@ -512,7 +517,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                     config,
                     &resolved,
                     *summary,
-                    file.as_deref(),
+                    file,
                     open_external,
                     detail,
                     format,
@@ -535,9 +540,14 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             id,
             reason,
             reviewer,
+            file,
         } => {
             let resolved = resolve_draft_id_flexible(config, id.as_deref())?;
-            deny_package(config, &resolved, reason, reviewer)
+            if let Some(file_path) = file {
+                deny_artifact(config, &resolved, reason, reviewer, file_path)
+            } else {
+                deny_package(config, &resolved, reason, reviewer)
+            }
         }
         DraftCommands::Apply {
             id,
@@ -936,6 +946,7 @@ fn extract_decision_log(summary: &ChangeSummary) -> Vec<DecisionLogEntry> {
                 .collect(),
             alternatives_considered: entry.alternatives_considered.clone(),
             confidence: None,
+            context: None,
         })
         .collect()
 }
@@ -2339,7 +2350,7 @@ fn view_package(
     config: &GatewayConfig,
     id: &str,
     summary_only: bool,
-    file_filter: Option<&str>,
+    file_filters: &[String],
     open_external: &Option<bool>,
     detail_str: &str,
     format_str: &str,
@@ -2432,8 +2443,9 @@ fn view_package(
         .transpose()?;
 
     // v0.2.3: Use output adapters for rendering.
-    // Exception: If --file with --open-external, try external handler first.
-    if let Some(filter) = file_filter {
+    // Exception: If exactly one --file with --open-external, try external handler first.
+    if file_filters.len() == 1 {
+        let filter = &file_filters[0];
         if let Some(true) = open_external {
             // Try external handler path (legacy v0.2.2 behavior).
             if let Ok(goal_store) = GoalRunStore::new(&config.goals_dir) {
@@ -2497,7 +2509,7 @@ fn view_package(
     let ctx = RenderContext {
         package: &pkg,
         detail_level: effective_detail,
-        file_filter: file_filter.map(String::from),
+        file_filters: file_filters.to_vec(),
         diff_provider: diff_provider.as_ref().map(|p| p as &dyn DiffProvider),
         section_filter,
     };
@@ -2961,6 +2973,117 @@ fn deny_package(
     Ok(())
 }
 
+/// Deny a single artifact within a draft package (v0.14.9.2).
+///
+/// Sets `artifact.disposition = Rejected` for the matching artifact,
+/// prints confirmation, and optionally shows the agent's stored rationale.
+fn deny_artifact(
+    config: &GatewayConfig,
+    id: &str,
+    reason: &str,
+    _reviewer: &str,
+    file_path: &str,
+) -> anyhow::Result<()> {
+    let package_id = resolve_draft_id(id, config)?;
+    let mut pkg = load_package(config, package_id)?;
+
+    // Find artifact by glob/substring match on the resource_uri path.
+    let artifact_idx = pkg
+        .changes
+        .artifacts
+        .iter()
+        .position(|a| {
+            let path = a
+                .resource_uri
+                .strip_prefix("fs://workspace/")
+                .unwrap_or(&a.resource_uri);
+            if let Ok(pat) = glob::Pattern::new(file_path) {
+                if pat.matches(path) {
+                    return true;
+                }
+            }
+            path.contains(file_path) || a.resource_uri.contains(file_path)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No artifact matching '{}' found in draft {}",
+                file_path,
+                &package_id.to_string()[..8]
+            )
+        })?;
+
+    let uri = pkg.changes.artifacts[artifact_idx].resource_uri.clone();
+    let stored_rationale = pkg.changes.artifacts[artifact_idx]
+        .explanation_tiers
+        .as_ref()
+        .map(|t| t.explanation.clone())
+        .or_else(|| pkg.changes.artifacts[artifact_idx].rationale.clone());
+
+    pkg.changes.artifacts[artifact_idx].disposition =
+        ta_changeset::draft_package::ArtifactDisposition::Rejected;
+
+    save_package(config, &pkg)?;
+
+    println!("Denied artifact {}: {}", uri, reason);
+    println!();
+    print!("Ask the agent why it made this choice? [y/N] ");
+    use std::io::Write;
+    std::io::stdout().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+
+    if trimmed.eq_ignore_ascii_case("y") {
+        let path_display = uri.strip_prefix("fs://workspace/").unwrap_or(&uri);
+        println!();
+        println!("[Interrogation] Agent's rationale for {}:", path_display);
+        if let Some(rationale) = &stored_rationale {
+            println!("  {}", rationale);
+        } else {
+            println!("  (No rationale recorded for this artifact)");
+        }
+        println!();
+        println!("Options:");
+        println!(
+            "  r) Re-approve this artifact  (ta draft amend {} {} --file <corrected-file>)",
+            &package_id.to_string()[..8],
+            uri
+        );
+        println!(
+            "  c) Provide a correction      (ta draft amend {} {} --file <corrected-file>)",
+            &package_id.to_string()[..8],
+            uri
+        );
+        println!("  Enter) Leave it denied");
+        println!();
+        print!("Choice: ");
+        std::io::stdout().flush()?;
+
+        let mut choice = String::new();
+        std::io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim();
+        if choice.eq_ignore_ascii_case("r") {
+            println!("To re-approve, run:");
+            println!(
+                "  ta draft amend {} {} --file <corrected-file>",
+                &package_id.to_string()[..8],
+                uri
+            );
+        } else if choice.eq_ignore_ascii_case("c") {
+            println!("To provide a correction, run:");
+            println!(
+                "  ta draft amend {} {} --file <corrected-file>",
+                &package_id.to_string()[..8],
+                uri
+            );
+        }
+        // Empty/Enter: leave it denied — nothing to do.
+    }
+
+    Ok(())
+}
+
 /// Capture a draft denial into the memory store (v0.12.5).
 ///
 /// Writes a draft rejection entry (NegativePath) and treats the denial reason
@@ -3186,7 +3309,7 @@ fn build_commit_message(goal: &ta_goal::GoalRun, pkg: &DraftPackage) -> String {
     let ctx = RenderContext {
         package: pkg,
         detail_level: DetailLevel::Medium,
-        file_filter: None,
+        file_filters: vec![],
         diff_provider: None,
         section_filter: None,
     };
@@ -4827,6 +4950,7 @@ fn amend_package(
             alternatives: vec![],
             alternatives_considered: vec![],
             confidence: None,
+            context: None,
         });
 
         save_package(config, &pkg)?;
@@ -4946,6 +5070,7 @@ fn amend_package(
             alternatives: vec![],
             alternatives_considered: vec![],
             confidence: None,
+            context: None,
         });
 
         save_package(config, &pkg)?;
@@ -10613,5 +10738,87 @@ fn run() {
                 display_id
             );
         }
+    }
+
+    // ── v0.14.9.2: deny_artifact tests ────────────────────────────────
+
+    #[test]
+    fn deny_artifact_sets_disposition() {
+        // Creates a package with 2 artifacts, denies one, verifies the other is unchanged.
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        std::fs::write(project.path().join("extra.txt"), "extra\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "deny artifact test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test selective artifact deny".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Modify both files in the staging workspace.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        std::fs::write(goal.workspace_path.join("extra.txt"), "updated extra\n").unwrap();
+
+        build_package(&config, &goal_id, "Test deny artifact", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        assert_eq!(
+            packages[0].changes.artifacts.len(),
+            2,
+            "should have 2 artifacts"
+        );
+
+        // Deny only the extra.txt artifact by loading the package directly
+        // and calling the internal logic (deny_artifact reads stdin so we test at package level).
+        let mut pkg = load_package(&config, packages[0].package_id).unwrap();
+        let artifact_idx = pkg
+            .changes
+            .artifacts
+            .iter()
+            .position(|a| a.resource_uri.contains("extra.txt"))
+            .expect("extra.txt artifact should exist");
+        pkg.changes.artifacts[artifact_idx].disposition = ArtifactDisposition::Rejected;
+        save_package(&config, &pkg).unwrap();
+
+        // Reload and verify only extra.txt is rejected, README.md is still pending.
+        let updated = load_package(&config, packages[0].package_id).unwrap();
+        let readme_artifact = updated
+            .changes
+            .artifacts
+            .iter()
+            .find(|a| a.resource_uri.contains("README.md"))
+            .expect("README.md should still exist");
+        let extra_artifact = updated
+            .changes
+            .artifacts
+            .iter()
+            .find(|a| a.resource_uri.contains("extra.txt"))
+            .expect("extra.txt should still exist");
+        assert_eq!(
+            readme_artifact.disposition,
+            ArtifactDisposition::Pending,
+            "README.md should remain pending"
+        );
+        assert_eq!(
+            extra_artifact.disposition,
+            ArtifactDisposition::Rejected,
+            "extra.txt should be rejected"
+        );
+        let _ = pkg_id; // suppress unused warning
     }
 }

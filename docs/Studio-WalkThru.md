@@ -388,6 +388,55 @@ You click **Approve**, TA applies it, and PR #2 goes up on GitHub.
 
 ---
 
+### Denying Part of a Draft
+
+Sometimes an agent makes the right change to most files but gets one wrong. Instead of denying the whole draft and rerunning everything, you can deny a single artifact:
+
+```
+ta draft deny abc123 --file src/auth/session.rs --reason "Should use Ed25519, not RSA"
+```
+
+After denying, `ta` asks if you'd like to understand why the agent made this choice:
+
+```
+Denied artifact fs://workspace/src/auth/session.rs: Should use Ed25519, not RSA
+
+Ask the agent why it made this choice? [y/N] y
+
+[Interrogation] Agent's rationale for src/auth/session.rs:
+  RSA-2048 was chosen for compatibility with the existing JWT library.
+
+Options:
+  r) Re-approve this artifact
+  c) Provide a correction    (ta draft amend abc123 <uri> --file <corrected-file>)
+  Enter) Leave it denied
+```
+
+To replace the artifact with a corrected version:
+
+```
+ta draft amend abc123 fs://workspace/src/auth/session.rs --file src/auth/session.rs --reason "Replaced RSA with Ed25519"
+```
+
+### Examining a Specific File in a Draft
+
+Large drafts can be hard to navigate. Use `--file` to focus on specific files:
+
+```
+# Show diff for a specific file
+ta draft view abc123 --file src/auth/middleware.rs
+
+# Show all Rust files in the auth module
+ta draft view abc123 --file "src/auth/*.rs"
+
+# Multiple patterns
+ta draft view abc123 --file PLAN.md --file "src/commands/*.rs"
+```
+
+When no `--file` is given, the default summary view shows all changed files. The `--file` flag is especially useful when you've already reviewed most of a draft and want to re-examine one area after making corrections.
+
+---
+
 ## 11. Modifying the Plan
 
 After v0.2.0 ships, you realize you want to add email notifications — users should get notified when a task is assigned to them. This wasn't in the original plan.

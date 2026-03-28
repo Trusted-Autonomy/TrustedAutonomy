@@ -151,7 +151,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
         } => draft::DraftCommands::View {
             id: Some(id.clone()),
             summary: *summary,
-            file: file.clone(),
+            file: file.as_ref().map(|f| vec![f.clone()]).unwrap_or_default(),
             open_external: *open_external,
             detail: detail.clone(),
             format: format.clone(),
@@ -173,6 +173,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             id: Some(id.clone()),
             reason: reason.clone(),
             reviewer: reviewer.clone(),
+            file: None,
         },
         PrCommands::Apply {
             id,

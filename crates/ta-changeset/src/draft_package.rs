@@ -658,6 +658,10 @@ pub struct DecisionLogEntry {
     /// Optional agent confidence in this decision (0.0–1.0) (v0.14.7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
+    /// What external need, feature, or constraint triggered this decision (v0.14.9.2).
+    /// Shown as the header line in collapsed state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
 }
 
 /// A structured alternative considered during a decision (v0.3.3).
@@ -1192,6 +1196,7 @@ mod tests {
                 },
             ],
             confidence: None,
+            context: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -1449,6 +1454,7 @@ mod tests {
             alternatives: vec!["RSA-2048".to_string(), "ECDSA P-256".to_string()],
             alternatives_considered: vec![],
             confidence: Some(0.9),
+            context: None,
         }];
         let json = serde_json::to_string(&pkg).unwrap();
         assert!(json.contains("agent_decision_log"));
@@ -1481,5 +1487,35 @@ mod tests {
         let entry: DecisionLogEntry = serde_json::from_str(entry_json).unwrap();
         assert_eq!(entry.decision, "test");
         assert!(entry.confidence.is_none());
+    }
+
+    #[test]
+    fn decision_log_entry_with_context() {
+        // Serialization round-trip with context field (v0.14.9.2).
+        let entry = DecisionLogEntry {
+            decision: "Use Ollama for local inference".to_string(),
+            rationale: "Privacy and offline requirements".to_string(),
+            alternatives: vec![],
+            alternatives_considered: vec![],
+            confidence: Some(0.8),
+            context: Some("Ollama thinking-mode config".to_string()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("context"));
+        assert!(json.contains("Ollama thinking-mode config"));
+        let restored: DecisionLogEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.context.as_deref(),
+            Some("Ollama thinking-mode config")
+        );
+        assert_eq!(restored.decision, "Use Ollama for local inference");
+    }
+
+    #[test]
+    fn decision_log_entry_context_backward_compat() {
+        // Old JSON without context should deserialize with context: None (v0.14.9.2).
+        let json = r#"{"decision":"Used JWT","rationale":"Scalability"}"#;
+        let entry: DecisionLogEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.context.is_none());
     }
 }

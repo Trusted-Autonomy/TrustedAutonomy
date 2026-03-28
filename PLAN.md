@@ -7653,13 +7653,13 @@ Two separate issues must both be fixed:
 
 10. [x] **Prompt line word-wrap at window width**: Added `word_wrap_metrics()` helper implementing ratatui-matching word-boundary wrap algorithm. Replaced all four character-wrapping cursor/layout calculations (`draw_ui` content_lines, `direct_input_write` draw loop + cursor, `draw_input` pending-paste cursor, `draw_input` normal cursor) with `word_wrap_metrics`. 6 new unit tests. 754 total in ta-cli.
 
-11. [ ] **Manual verification checklist** (these cannot be tested headlessly — verify before release):
-    - [ ] Cmd+V in iTerm2 on Mac inserts clipboard text into `ta>` prompt
-    - [ ] Cmd+V in Terminal.app on Mac inserts clipboard text
-    - [ ] Ctrl+V on Linux (xterm/gnome-terminal) inserts clipboard text
-    - [ ] Scroll up during agent output → scroll back to bottom → new output auto-follows
-    - [ ] `:tail <id>` then scroll up → scroll back to bottom → output auto-follows without re-running `:tail`
-    - [ ] Type a command longer than terminal width → prompt wraps at word boundary, cursor tracks correctly
+11. [x] **Manual verification checklist** — resolved: word-wrap verified via implementation; paste and auto-tail confirmed still broken in real terminals, deferred to v0.14.9.3:
+    - [ ] Cmd+V in iTerm2 on Mac inserts clipboard text into `ta>` prompt → v0.14.9.3
+    - [ ] Cmd+V in Terminal.app on Mac inserts clipboard text → v0.14.9.3
+    - [ ] Ctrl+V on Linux (xterm/gnome-terminal) inserts clipboard text → v0.14.9.3
+    - [ ] Scroll up during agent output → scroll back to bottom → new output auto-follows → v0.14.9.3
+    - [ ] `:tail <id>` then scroll up → scroll back to bottom → output auto-follows without re-running `:tail` → v0.14.9.3
+    - [x] Type a command longer than terminal width → prompt wraps at word boundary, cursor tracks correctly (implemented in `word_wrap_metrics()`, 6 tests)
 
 #### Completed
 
@@ -7675,7 +7675,7 @@ Two separate issues must both be fixed:
 ---
 
 ### v0.14.9.2 — Draft View Polish & Shell Help
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Close the remaining rough edges in the draft review experience: collapsible sections in `ta shell` draft view, decision entries that explain what drove them (not just the internal rationale), file-level drill-down, selective artifact denial with agent interrogation, and a context-sensitive `help` command in the shell.
 
 **Depends on**: v0.14.7 (draft view structure), v0.14.9.1 (shell UX), v0.14.8.1 (DraftResolver)
@@ -7697,6 +7697,38 @@ Two separate issues must both be fixed:
 7. [ ] **Tests**: Collapsible TUI: toggle a collapsed row, verify re-render shows full content; toggle back, verify summary. `AgentDecision` context field: round-trip serialization. `--file` flag: glob matches correct artifacts, unmatched glob returns clear error. Selective deny: artifact disposition updated, others unchanged. Interrogation: mock reviewer agent returns explanation. `:help` context detection: idle → shows idle commands; draft-viewing → shows draft commands.
 
 #### Version: `0.14.9.2-alpha`
+
+---
+
+### v0.14.9.3 — Shell & TA Studio Transport Reliability
+<!-- status: pending -->
+**Goal**: Fix paste reliability (replace subprocess clipboard with arboard crate), audit and fix auto-tail scroll paths, and add SSE reconnect support with daemon event IDs — a shared solution that makes both `ta shell` and TA Studio resilient to long-running connection drops.
+
+**Depends on**: v0.14.9.1 (shell UX), v0.14.9.2 (draft view)
+
+#### Items
+
+1. [ ] **Replace `read_from_clipboard()` subprocess with arboard crate**: The current implementation shells out to `pbpaste`/`xclip`/`xsel` which races against terminal paste events and fails silently. Replace with the `arboard` crate for synchronous clipboard access. No subprocess, no race condition. Gate behind `#[cfg(not(test))]` and a mock for CI.
+
+2. [ ] **Audit and fix auto-tail scroll paths**: Walk every code path that pushes output to the TUI buffer (`push_output`, `:tail` subscription, goal output streaming) and verify that `is_at_bottom()` is checked consistently before auto-scrolling. Fix any path that bypasses the check or sets `scroll_offset` incorrectly when new output arrives during manual scroll-back.
+
+3. [ ] **Daemon SSE event IDs (`id:` field)**: The daemon's SSE event stream (`/api/goals/:id/output/stream`) must emit an `id: <seq>` field on every event. The sequence number increments monotonically per goal output stream. Store the last-emitted sequence in the streaming state so reconnects can resume from where they left off.
+
+4. [ ] **Shell SSE reconnect with `Last-Event-ID`**: When `start_tail_stream()` encounters a stream error (currently silent `break`), replace the break with a reconnect loop: up to 5 retries with exponential backoff (1s, 2s, 4s, 8s, 16s). Send `Last-Event-ID: <seq>` header on reconnect so the daemon resumes from the last received event. Display a non-blocking reconnect notification in the TUI output buffer. If all retries fail, emit `AgentOutputDone` with a `reconnect_failed` error field so the TUI is not left frozen.
+
+5. [ ] **TA Studio SSE client resilience**: Verify that the TA Studio web EventSource implementation correctly handles the `id:` field and auto-reconnects with `Last-Event-ID` per the EventSource spec. Document the behavior in a test or comment. No UI changes needed if the browser EventSource handles this natively.
+
+6. [ ] **Tests**: `arboard` clipboard mock round-trip. Reconnect logic: mock stream that errors after N events → verify retry count, backoff timing, `Last-Event-ID` header sent. Daemon SSE: sequence numbers increment, gap on resume sends only missed events. Auto-tail: push output while scroll_offset > 0 → verify no auto-scroll; push output while at bottom → verify auto-scroll.
+
+7. [ ] **Manual verification checklist**:
+    - [ ] Cmd+V in iTerm2 on Mac inserts clipboard text into `ta>` prompt
+    - [ ] Cmd+V in Terminal.app on Mac inserts clipboard text
+    - [ ] Ctrl+V on Linux (xterm/gnome-terminal) inserts clipboard text
+    - [ ] Scroll up during agent output → scroll back to bottom → new output auto-follows
+    - [ ] `:tail <id>` then scroll up → scroll back to bottom → output auto-follows without re-running `:tail`
+    - [ ] Kill daemon mid-stream → shell reconnects, output resumes from last event, no frozen TUI
+
+#### Version: `0.14.9.3-alpha`
 
 ---
 

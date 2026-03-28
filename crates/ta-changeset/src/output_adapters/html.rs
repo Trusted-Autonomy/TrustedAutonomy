@@ -1,7 +1,7 @@
 //! html.rs — HTML output adapter with JavaScript-free progressive disclosure.
 
 use crate::error::ChangeSetError;
-use crate::output_adapters::{DetailLevel, OutputAdapter, RenderContext};
+use crate::output_adapters::{matches_file_filters, DetailLevel, OutputAdapter, RenderContext};
 use crate::pr_package::{Artifact, ArtifactDisposition, ChangeType};
 
 #[derive(Default)]
@@ -183,15 +183,12 @@ impl OutputAdapter for HtmlAdapter {
         }
 
         if show_files {
-            let artifacts: Vec<&Artifact> = if let Some(filter) = &ctx.file_filter {
-                pkg.changes
-                    .artifacts
-                    .iter()
-                    .filter(|a| a.resource_uri.contains(filter))
-                    .collect()
-            } else {
-                pkg.changes.artifacts.iter().collect()
-            };
+            let artifacts: Vec<&Artifact> = pkg
+                .changes
+                .artifacts
+                .iter()
+                .filter(|a| matches_file_filters(&a.resource_uri, &ctx.file_filters))
+                .collect();
 
             html.push_str(&format!(
                 "<details open data-key=\"files\">\n<summary><h2 style=\"display:inline\">Changed Files ({})</h2></summary>\n",
@@ -411,7 +408,7 @@ mod tests {
         let ctx = RenderContext {
             package: &pkg,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -523,7 +520,7 @@ mod tests {
         let ctx = RenderContext {
             package: &pkg,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -634,13 +631,14 @@ mod tests {
             alternatives: vec!["RSA-2048".to_string()],
             alternatives_considered: vec![],
             confidence: Some(0.85),
+            context: None,
         }];
 
         let adapter = HtmlAdapter::new();
         let ctx = RenderContext {
             package: &pkg,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };

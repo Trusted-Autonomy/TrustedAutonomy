@@ -1,7 +1,9 @@
 //! markdown.rs — Markdown output adapter for GitHub PR bodies.
 
 use crate::error::ChangeSetError;
-use crate::output_adapters::{default_summary, DetailLevel, OutputAdapter, RenderContext};
+use crate::output_adapters::{
+    default_summary, matches_file_filters, DetailLevel, OutputAdapter, RenderContext,
+};
 use crate::pr_package::{Artifact, ChangeType};
 
 #[derive(Default)]
@@ -51,15 +53,12 @@ impl OutputAdapter for MarkdownAdapter {
             pkg.changes.artifacts.len()
         ));
 
-        let artifacts: Vec<&Artifact> = if let Some(filter) = &ctx.file_filter {
-            pkg.changes
-                .artifacts
-                .iter()
-                .filter(|a| a.resource_uri.contains(filter))
-                .collect()
-        } else {
-            pkg.changes.artifacts.iter().collect()
-        };
+        let artifacts: Vec<&Artifact> = pkg
+            .changes
+            .artifacts
+            .iter()
+            .filter(|a| matches_file_filters(&a.resource_uri, &ctx.file_filters))
+            .collect();
 
         for artifact in artifacts {
             let icon = self.change_icon(&artifact.change_type);

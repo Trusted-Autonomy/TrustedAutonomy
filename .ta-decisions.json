@@ -22,5 +22,23 @@
     "rationale": "The original code read from target_dir after auto_clean could delete the staging dir, causing a false-positive 'still pending' warning even when the agent correctly marked the phase done. The fix reads from goal.workspace_path (staging) before auto_clean runs, then falls back to target_dir only for the validation step if staging status is non-Done.",
     "alternatives": ["Disable auto_clean before the check", "Only read from target_dir after apply has copied files"],
     "confidence": 0.92
+  },
+  {
+    "decision": "file_filters is Vec<String> instead of Option<String> for RenderContext and DraftCommands::View",
+    "rationale": "Vec<String> enables multiple --file patterns in one command and is a natural fit for clap's repeatable args. Option<String> would require separate handling of the multi-pattern case. All four output adapters use the same matches_file_filters() helper from mod.rs.",
+    "alternatives": ["Option<String> with separate --file-pattern repeat flag", "comma-separated string"],
+    "confidence": 0.95
+  },
+  {
+    "decision": "deny_artifact reads stdin interactively rather than launching an external agent subprocess",
+    "rationale": "The spec says show stored rationale rather than launching an agent. Interactive stdin is simpler, always available, and correct for the v0.14.9.2 scope. Full agent interrogation is a future enhancement.",
+    "alternatives": ["Launch reviewer agent subprocess", "Print rationale only without interaction"],
+    "confidence": 0.9
+  },
+  {
+    "decision": "ShellContext state updated via TailStarted message and view command string detection",
+    "rationale": "The shell dispatches most commands via the daemon async API with no synchronous return. Monitoring TailStarted and intercepting 'view <id>' / 'ta draft view <id>' strings before dispatch is minimal-invasive and does not require changes to the daemon protocol.",
+    "alternatives": ["Add context-tracking channel messages from daemon", "Intercept all CommandResponse messages"],
+    "confidence": 0.85
   }
 ]

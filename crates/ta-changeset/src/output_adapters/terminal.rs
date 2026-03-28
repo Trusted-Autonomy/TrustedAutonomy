@@ -3,7 +3,9 @@
 //! Color is off by default. Enable with `TerminalAdapter::with_color()` or `--color` CLI flag.
 
 use crate::error::ChangeSetError;
-use crate::output_adapters::{default_summary, DetailLevel, OutputAdapter, RenderContext};
+use crate::output_adapters::{
+    default_summary, matches_file_filters, DetailLevel, OutputAdapter, RenderContext,
+};
 use crate::pr_package::{Artifact, ChangeType};
 
 #[derive(Default)]
@@ -387,10 +389,19 @@ impl TerminalAdapter {
                 .confidence
                 .map(|c| format!(" {dim}[{:.0}% confidence]{reset}", c * 100.0))
                 .unwrap_or_default();
-            output.push_str(&format!(
-                "  ▸ Decision: {}{}{}\n",
-                entry.decision, confidence_str, reset
-            ));
+
+            // Header line: if context is set, use "[context] → decision"; otherwise just "decision".
+            if let Some(ctx_str) = &entry.context {
+                output.push_str(&format!(
+                    "  ▸ {} → {}{}{}\n",
+                    ctx_str, entry.decision, confidence_str, reset
+                ));
+            } else {
+                output.push_str(&format!(
+                    "  ▸ {}{}{}\n",
+                    entry.decision, confidence_str, reset
+                ));
+            }
 
             // List alternatives if any.
             let alts: Vec<&str> = entry
@@ -432,19 +443,15 @@ impl OutputAdapter for TerminalAdapter {
 
         // Filter artifacts
         let artifacts = &ctx.package.changes.artifacts;
-        let filtered_artifacts: Vec<&Artifact> = if let Some(filter) = &ctx.file_filter {
-            artifacts
-                .iter()
-                .filter(|a| a.resource_uri.contains(filter))
-                .collect()
-        } else {
-            artifacts.iter().collect()
-        };
+        let filtered_artifacts: Vec<&Artifact> = artifacts
+            .iter()
+            .filter(|a| matches_file_filters(&a.resource_uri, &ctx.file_filters))
+            .collect();
 
-        if let (true, Some(filter)) = (filtered_artifacts.is_empty(), &ctx.file_filter) {
+        if filtered_artifacts.is_empty() && !ctx.file_filters.is_empty() {
             return Err(ChangeSetError::InvalidData(format!(
-                "No artifacts match filter: {}",
-                filter
+                "No artifacts match filters: {}",
+                ctx.file_filters.join(", ")
             )));
         }
 
@@ -664,7 +671,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -686,7 +693,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -704,7 +711,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Medium,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -721,7 +728,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: Some("auth.rs".to_string()),
+            file_filters: vec!["auth.rs".to_string()],
             diff_provider: None,
             section_filter: None,
         };
@@ -737,7 +744,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: Some("nonexistent.rs".to_string()),
+            file_filters: vec!["nonexistent.rs".to_string()],
             diff_provider: None,
             section_filter: None,
         };
@@ -754,7 +761,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Medium,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -819,7 +826,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -852,7 +859,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -881,7 +888,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -900,7 +907,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -915,7 +922,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Medium,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -939,11 +946,12 @@ mod tests {
             alternatives: vec!["RSA-2048".to_string(), "ECDSA P-256".to_string()],
             alternatives_considered: vec![],
             confidence: Some(0.9),
+            context: None,
         }];
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -964,7 +972,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: None,
         };
@@ -985,11 +993,12 @@ mod tests {
             alternatives: vec!["sync".to_string()],
             alternatives_considered: vec![],
             confidence: None,
+            context: None,
         }];
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: Some(SectionFilter::Decisions),
         };
@@ -1008,7 +1017,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: Some(SectionFilter::Summary),
         };
@@ -1027,7 +1036,7 @@ mod tests {
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
-            file_filter: None,
+            file_filters: vec![],
             diff_provider: None,
             section_filter: Some(SectionFilter::Files),
         };
@@ -1035,5 +1044,90 @@ mod tests {
         assert!(output.contains("What Changed"));
         // Header not present in files-only view
         assert!(!output.contains("Status:"));
+    }
+
+    #[test]
+    fn render_agent_decision_log_with_context() {
+        // Verify context is shown as "▸ [context] → [decision]" (v0.14.9.2).
+        use crate::draft_package::DecisionLogEntry;
+
+        let adapter = TerminalAdapter::new();
+        let mut package = test_package();
+        package.agent_decision_log = vec![DecisionLogEntry {
+            decision: "Use Ed25519 keys".to_string(),
+            rationale: "Smaller and faster than RSA".to_string(),
+            alternatives: vec![],
+            alternatives_considered: vec![],
+            confidence: None,
+            context: Some("Ollama thinking-mode config".to_string()),
+        }];
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filters: vec![],
+            diff_provider: None,
+            section_filter: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(output.contains("Ollama thinking-mode config"));
+        assert!(output.contains("Use Ed25519 keys"));
+        // Should show the "→" separator between context and decision
+        assert!(output.contains("→"));
+    }
+
+    #[test]
+    fn file_filter_glob_match() {
+        // Create a package with 2 artifacts, filter with "src/*.rs",
+        // verify only the matching src-level file appears (v0.14.9.2).
+        use crate::pr_package::*;
+
+        let adapter = TerminalAdapter::new();
+        let mut package = test_package();
+        // The default test_package has src/auth.rs — add a file in a different directory.
+        package.changes.artifacts.push(Artifact {
+            resource_uri: "fs://workspace/docs/README.md".to_string(),
+            change_type: ChangeType::Modify,
+            diff_ref: "changeset:1".to_string(),
+            tests_run: vec![],
+            disposition: ArtifactDisposition::Pending,
+            rationale: Some("Documentation".to_string()),
+            dependencies: vec![],
+            explanation_tiers: None,
+            comments: None,
+            amendment: None,
+        });
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filters: vec!["src/*.rs".to_string()],
+            diff_provider: None,
+            section_filter: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        // auth.rs should appear (matches glob src/*.rs)
+        assert!(output.contains("auth.rs"), "auth.rs should be shown");
+        // README.md should not appear (doesn't match glob)
+        assert!(
+            !output.contains("README.md"),
+            "README.md should be filtered out"
+        );
+    }
+
+    #[test]
+    fn file_filter_unmatched_returns_error() {
+        // Filter with non-matching pattern should return an error (v0.14.9.2).
+        let adapter = TerminalAdapter::new();
+        let package = test_package();
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Top,
+            file_filters: vec!["totally/nonexistent/path.rs".to_string()],
+            diff_provider: None,
+            section_filter: None,
+        };
+        let result = adapter.render(&ctx);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("No artifacts match filters"));
     }
 }

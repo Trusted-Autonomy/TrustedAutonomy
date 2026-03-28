@@ -133,8 +133,9 @@ impl std::fmt::Display for SectionFilter {
 pub struct RenderContext<'a> {
     pub package: &'a DraftPackage,
     pub detail_level: DetailLevel,
-    /// Optional: Filter to a specific file (show only one artifact).
-    pub file_filter: Option<String>,
+    /// Optional: Filter to specific files matching these patterns (glob supported).
+    /// Empty vec = show all.
+    pub file_filters: Vec<String>,
     /// Optional: Diff content provider (for fetching full diffs).
     pub diff_provider: Option<&'a dyn DiffProvider>,
     /// Optional: Show only one section of the draft view (v0.14.7).
@@ -195,6 +196,28 @@ pub fn default_summary<'a>(uri: &str, change_type: &crate::pr_package::ChangeTyp
         crate::pr_package::ChangeType::Rename => "file renamed",
         crate::pr_package::ChangeType::Modify => "modified",
     }
+}
+
+/// Check whether a resource URI matches any of the given file filter patterns.
+///
+/// Returns true if filters is empty (show all). Supports glob patterns
+/// (e.g. `"src/auth/*.rs"`) and falls back to substring matching for plain paths.
+pub fn matches_file_filters(uri: &str, filters: &[String]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    // Extract path from URI: "fs://workspace/src/auth.rs" -> "src/auth.rs"
+    let path = uri.strip_prefix("fs://workspace/").unwrap_or(uri);
+    filters.iter().any(|pattern| {
+        // Try glob match first
+        if let Ok(pat) = glob::Pattern::new(pattern) {
+            if pat.matches(path) {
+                return true;
+            }
+        }
+        // Fall back to substring match (for plain paths without wildcards)
+        path.contains(pattern.as_str()) || uri.contains(pattern.as_str())
+    })
 }
 
 /// Get an adapter instance for the given format.

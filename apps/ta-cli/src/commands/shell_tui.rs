@@ -384,6 +384,17 @@ const PASTE_LINE_THRESHOLD: usize = 10;
 /// Max lines shown in the expanded paste preview.
 const PASTE_PREVIEW_LINES: usize = 5;
 
+/// Current shell context for context-sensitive help (v0.14.9.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellContext {
+    /// No active goal or draft view.
+    Idle,
+    /// Currently tailing a running goal.
+    RunningGoal { goal_id: String },
+    /// Viewing a draft (after `view <id>` or `ta draft view <id>`).
+    ViewingDraft { draft_id: String },
+}
+
 /// The TUI application state.
 struct App {
     /// Lines displayed in the output pane.
@@ -480,6 +491,8 @@ struct App {
     output_area_height: u16,
     /// Whether the user is currently dragging the scrollbar (v0.14.7.1 item 6).
     scrollbar_dragging: bool,
+    /// Current shell context for context-sensitive help (v0.14.9.2).
+    shell_context: ShellContext,
 }
 
 impl App {
@@ -535,6 +548,7 @@ impl App {
             output_area_top: 0,
             output_area_height: 0,
             scrollbar_dragging: false,
+            shell_context: ShellContext::Idle,
         }
     }
 
@@ -1808,11 +1822,31 @@ async fn handle_terminal_event(
                                 return;
                             }
                             "help" | ":help" | "?" => {
-                                app.push_lines(HELP_TEXT, OutputLine::info);
-                                // Keybindings from data-driven table (v0.13.1.3).
-                                app.push_lines(&keybinding_help_text(), OutputLine::info);
-                                // Also show CLI commands for discoverability.
-                                app.push_lines(CLI_HELP_TEXT, OutputLine::info);
+                                match &app.shell_context.clone() {
+                                    ShellContext::Idle => {
+                                        app.push_lines(HELP_TEXT, OutputLine::info);
+                                        // Keybindings from data-driven table (v0.13.1.3).
+                                        app.push_lines(&keybinding_help_text(), OutputLine::info);
+                                        // Also show CLI commands for discoverability.
+                                        app.push_lines(CLI_HELP_TEXT, OutputLine::info);
+                                    }
+                                    ShellContext::ViewingDraft { draft_id } => {
+                                        let id = draft_id.clone();
+                                        app.push_lines(DRAFT_HELP_TEXT, OutputLine::info);
+                                        app.push_output(OutputLine::info(format!(
+                                            "  Current draft: {}",
+                                            id
+                                        )));
+                                    }
+                                    ShellContext::RunningGoal { goal_id } => {
+                                        let id = goal_id.clone();
+                                        app.push_lines(RUNNING_GOAL_HELP_TEXT, OutputLine::info);
+                                        app.push_output(OutputLine::info(format!(
+                                            "  Current goal: {}",
+                                            id
+                                        )));
+                                    }
+                                }
                                 return;
                             }
                             ":status" => {
@@ -1958,6 +1992,25 @@ async fn handle_terminal_event(
                         if text.starts_with(":follow-up") || text.starts_with(":followup") {
                             handle_follow_up_picker(app, &text);
                             return;
+                        }
+
+                        // Track draft view context for context-sensitive help (v0.14.9.2).
+                        // Detect "view <id>" and "ta draft view <id>" to update shell_context.
+                        {
+                            let cmd_lower = text.trim().to_lowercase();
+                            let view_id = if let Some(rest) = cmd_lower.strip_prefix("view ") {
+                                // "view <id>" shortcut
+                                rest.split_whitespace().next()
+                            } else if let Some(rest) = cmd_lower.strip_prefix("ta draft view ") {
+                                rest.split_whitespace().next()
+                            } else {
+                                None
+                            };
+                            if let Some(id) = view_id {
+                                app.shell_context = ShellContext::ViewingDraft {
+                                    draft_id: id.to_string(),
+                                };
+                            }
                         }
 
                         // Agent consent check for goal-dispatching commands (v0.10.18.4 item 7).
@@ -2536,8 +2589,12 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             app.active_tailing_goals.insert(goal_id.clone());
             // Also set tailing_goal if not already set (covers explicit :tail calls).
             if app.tailing_goal.is_none() {
-                app.tailing_goal = Some(goal_id);
+                app.tailing_goal = Some(goal_id.clone());
             }
+            // Update shell context for context-sensitive help (v0.14.9.2).
+            app.shell_context = ShellContext::RunningGoal {
+                goal_id: goal_id.clone(),
+            };
         }
         TuiMessage::GoalStarted { goal_id, title } => {
             app.push_output(OutputLine::notification(format!(
@@ -4622,7 +4679,38 @@ Shell commands:
   :status            Refresh the status bar
   :latency on|off    Toggle input latency diagnostics (log: .ta/latency.log)
   :latency dump      Show latency report now
-  clear              Clear the output pane";
+  clear              Clear the output pane
+
+  :help shows context-specific commands when viewing a draft or running a goal.";
+
+const DRAFT_HELP_TEXT: &str = "\
+TA Shell -- Draft Review Mode
+
+Commands:
+  view <id>                   View draft summary
+  view <id> --section files   List changed files
+  view <id> --section decisions  Show agent decision log
+  view <id> --file <pattern>  Show diff for specific files (glob supported)
+  approve <id>                Approve the entire draft
+  deny <id> --reason <why>    Deny the entire draft
+  deny <id> --file <path> --reason <why>  Deny a single artifact
+  ta draft amend <id> <uri> --file <corrected>  Replace an artifact
+  apply <id>                  Apply approved draft to workspace
+  :help                       Show this help
+  exit                        Exit the shell";
+
+const RUNNING_GOAL_HELP_TEXT: &str = "\
+TA Shell -- Goal Running Mode
+
+Commands:
+  :tail [id]              Attach to goal output stream
+  :detach                 Detach from goal output (stops tailing)
+  > <message>             Send a message to the running agent
+  ta goal status <id>     Show goal status details
+  ta goal stop <id>       Request the agent to stop
+  drafts                  List draft packages (check when goal completes)
+  :help                   Show this help
+  exit                    Exit the shell";
 
 /// Keybinding table — single source of truth for help output and documentation.
 /// Each entry is (key, description). Sections are separated by ("", "") blank rows.
@@ -7625,5 +7713,72 @@ mod tests {
         let (row, col, _) = word_wrap_metrics(display, cursor_byte, 8);
         assert_eq!(row, 0);
         assert_eq!(col, 5);
+    }
+
+    // ── v0.14.9.2 ShellContext tests ──
+
+    #[test]
+    fn shell_context_default_is_idle() {
+        // App starts in Idle context (v0.14.9.2).
+        let app = App::new(
+            "http://localhost:7777".to_string(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        assert_eq!(app.shell_context, ShellContext::Idle);
+    }
+
+    #[test]
+    fn help_context_idle() {
+        // When context is Idle, HELP_TEXT is shown (v0.14.9.2).
+        let mut app = App::new(
+            "http://localhost:7777".to_string(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.shell_context = ShellContext::Idle;
+        // Simulate pushing HELP_TEXT as the help handler does.
+        app.push_lines(HELP_TEXT, OutputLine::info);
+        let combined: String = app
+            .output
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("TA Shell"),
+            "Idle help should contain main help text"
+        );
+        assert!(
+            combined.contains("run <title>"),
+            "Idle help should list 'run' command"
+        );
+    }
+
+    #[test]
+    fn help_context_draft_viewing() {
+        // When context is ViewingDraft, DRAFT_HELP_TEXT is shown (v0.14.9.2).
+        let mut app = App::new(
+            "http://localhost:7777".to_string(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.shell_context = ShellContext::ViewingDraft {
+            draft_id: "abc12345".to_string(),
+        };
+        // Simulate what the help handler does for ViewingDraft.
+        app.push_lines(DRAFT_HELP_TEXT, OutputLine::info);
+        app.push_output(OutputLine::info("  Current draft: abc12345".to_string()));
+        let combined: String = app
+            .output
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("Draft Review Mode"),
+            "Draft help should be shown"
+        );
+        assert!(combined.contains("abc12345"), "Draft ID should be shown");
     }
 }
