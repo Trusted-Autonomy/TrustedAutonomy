@@ -567,16 +567,17 @@ impl App {
             // Adjust scroll offset to compensate for removed lines.
             self.scroll_offset = self.scroll_offset.saturating_sub(excess);
         }
-        // If auto-scroll is enabled and we're at bottom, stay at bottom.
-        // If scroll_offset > 0 (scrolled up), always increment unread — even if
-        // auto_scroll wasn't explicitly set to false (e.g. tests that set scroll_offset directly).
-        if self.auto_scroll && self.scroll_offset == 0 {
+        // Auto-scroll logic (v0.14.9.1): use is_at_bottom() so that both
+        // scroll_offset==0 and the "content shorter than viewport" case are handled.
+        // When at bottom, always re-enable auto_scroll — this ensures tail resumes
+        // after a scroll-up/scroll-back sequence even if auto_scroll was left false
+        // (e.g. by buffer-overflow scroll_offset adjustment via saturating_sub).
+        if self.is_at_bottom() {
             self.unread_events = 0;
+            self.auto_scroll = true;
         } else {
-            // Ensure auto_scroll is false when scrolled up.
-            if self.scroll_offset > 0 {
-                self.auto_scroll = false;
-            }
+            // Scrolled up — disable auto-scroll and count unread events.
+            self.auto_scroll = false;
             self.unread_events += 1;
         }
     }
@@ -841,6 +842,21 @@ impl App {
             // Re-enable auto-scroll when near bottom (v0.14.7.1 item 4).
             self.auto_scroll = true;
         }
+    }
+
+    /// Returns true when the viewport is at the bottom of the output buffer.
+    ///
+    /// Two cases count as "at bottom" (v0.14.9.1):
+    ///   1. scroll_offset == 0 — the standard case: user is pinned to newest output.
+    ///   2. Content doesn't fill the viewport — when there are fewer lines than the
+    ///      visible area, scroll_offset may be a small positive number while the user
+    ///      is visually looking at everything. Without this check, auto_scroll stays
+    ///      false after scrolling up in a short buffer, even when the user scrolls back
+    ///      to the very last line.
+    fn is_at_bottom(&self) -> bool {
+        self.scroll_offset == 0
+            || (self.output_area_height > 0
+                && self.output.len() < self.output_area_height.saturating_sub(4) as usize)
     }
 }
 
@@ -1512,6 +1528,7 @@ async fn handle_terminal_event(
                     app.output.clear();
                     app.scroll_offset = 0;
                     app.unread_events = 0;
+                    app.auto_scroll = true; // re-enable tail after clear (v0.14.9.1)
                 }
                 // Ctrl+M mouse toggle removed — no mouse capture enabled.
                 // Native text selection always works. Scroll via keyboard.
@@ -2086,6 +2103,52 @@ async fn handle_terminal_event(
                         .map(|(_, h)| h as usize)
                         .unwrap_or(40);
                     app.scroll_down(page.saturating_sub(4));
+                }
+                // Ctrl+V / Cmd+V — read from OS clipboard (v0.14.9.1).
+                //
+                // Bracketed-paste mode (EnableBracketedPaste) handles modern
+                // terminals that send Event::Paste. But Terminal.app and some
+                // Linux terminals send a raw keycode instead (Ctrl+V → CONTROL,
+                // Cmd+V → SUPER). We intercept that here and read from the
+                // system clipboard directly so paste works everywhere.
+                (KeyCode::Char('v'), m)
+                    if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
+                {
+                    match read_from_clipboard() {
+                        Some(text) => {
+                            // Process through the same paste path as Event::Paste.
+                            let safe = text
+                                .replace("\r\n", "\n")
+                                .replace('\r', "\n")
+                                .replace('\t', "    ")
+                                .trim_matches('\n')
+                                .to_string();
+                            let line_count = safe.lines().count();
+                            let char_count = safe.chars().count();
+                            if char_count > PASTE_CHAR_THRESHOLD
+                                || line_count > PASTE_LINE_THRESHOLD
+                            {
+                                app.pending_paste = Some(safe);
+                                app.paste_preview_expanded = false;
+                            } else {
+                                if app.scroll_offset > 0 {
+                                    app.cursor = app.input.len();
+                                    app.scroll_to_bottom();
+                                }
+                                for ch in safe.chars() {
+                                    app.insert_char(ch);
+                                }
+                            }
+                        }
+                        None => {
+                            // Clipboard unavailable or empty — show brief notice.
+                            app.push_output(OutputLine::info(
+                                "[clipboard] paste failed: no clipboard content available \
+                                 (install pbpaste/xclip/xsel or use bracketed-paste)"
+                                    .to_string(),
+                            ));
+                        }
+                    }
                 }
                 (KeyCode::Char(c), m)
                     if !m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -3603,6 +3666,56 @@ fn copy_to_clipboard(text: &str) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Err(_) => {}
     }
+}
+
+/// Read text from the system clipboard using platform-native commands.
+///
+/// Mirrors `copy_to_clipboard` but reads instead of writes (v0.14.9.1):
+/// - macOS: `pbpaste`
+/// - Linux/BSD: `xclip -selection clipboard -o` (fallback: `xsel --clipboard --output`)
+/// - Windows: PowerShell `Get-Clipboard`
+///
+/// Returns `None` if no clipboard tool is available or the clipboard is empty.
+fn read_from_clipboard() -> Option<String> {
+    use std::process::Command;
+
+    #[cfg(target_os = "macos")]
+    let output = Command::new("pbpaste")
+        .output()
+        .ok()
+        .filter(|o| o.status.success());
+
+    #[cfg(target_os = "windows")]
+    let output = Command::new("powershell")
+        .args(["-Command", "Get-Clipboard"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success());
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let output = {
+        Command::new("xclip")
+            .args(["-selection", "clipboard", "-o"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .or_else(|| {
+                Command::new("xsel")
+                    .args(["--clipboard", "--output"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+            })
+    };
+
+    output.and_then(|o| {
+        let text = String::from_utf8_lossy(&o.stdout).into_owned();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    })
 }
 
 // -- Background tasks --------------------------------------------------------
@@ -7246,5 +7359,206 @@ mod tests {
 
         // Scrolled far up — offset should NOT be reset.
         assert_eq!(app.agent_scroll_offset, 10);
+    }
+
+    // ── v0.14.9.1: Paste (Ctrl+V path) tests ──────────────────────────────────
+
+    /// Helper: simulate the Ctrl+V clipboard paste path on an App, given
+    /// clipboard text as a string. Mirrors the key handler branch exactly.
+    fn simulate_ctrl_v_paste(app: &mut App, clipboard_text: &str) {
+        let safe = clipboard_text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ")
+            .trim_matches('\n')
+            .to_string();
+        let line_count = safe.lines().count();
+        let char_count = safe.chars().count();
+        if char_count > PASTE_CHAR_THRESHOLD || line_count > PASTE_LINE_THRESHOLD {
+            app.pending_paste = Some(safe);
+            app.paste_preview_expanded = false;
+        } else {
+            if app.scroll_offset > 0 {
+                app.cursor = app.input.len();
+                app.scroll_to_bottom();
+            }
+            for ch in safe.chars() {
+                app.insert_char(ch);
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_v_small_paste_inserts_at_cursor() {
+        // Ctrl+V with short clipboard text inserts inline at cursor position.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for ch in "hello".chars() {
+            app.insert_char(ch);
+        }
+        app.cursor = 2; // between 'h','e' and 'l','l','o'
+        simulate_ctrl_v_paste(&mut app, "WORLD");
+        assert_eq!(
+            app.input, "heWORLDllo",
+            "Ctrl+V must insert at cursor position"
+        );
+        assert_eq!(app.cursor, 7, "cursor must advance past inserted text");
+    }
+
+    #[test]
+    fn ctrl_v_large_paste_stores_pending() {
+        // Ctrl+V with a large payload (>PASTE_CHAR_THRESHOLD) stores as pending paste.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        let big = "x".repeat(PASTE_CHAR_THRESHOLD + 1);
+        simulate_ctrl_v_paste(&mut app, &big);
+        assert!(
+            app.pending_paste.is_some(),
+            "large Ctrl+V clipboard text must be stored as pending paste"
+        );
+        assert!(
+            app.input.is_empty(),
+            "input buffer must be unaffected by large pending paste"
+        );
+    }
+
+    #[test]
+    fn ctrl_v_when_scrolled_up_snaps_to_bottom_then_appends() {
+        // If the user has scrolled up, Ctrl+V should snap to bottom before inserting.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for i in 0..20 {
+            app.push_output(OutputLine::event(format!("line {}", i)));
+        }
+        app.scroll_up(5);
+        assert!(app.scroll_offset > 0);
+
+        simulate_ctrl_v_paste(&mut app, "pasted");
+
+        assert_eq!(
+            app.scroll_offset, 0,
+            "Ctrl+V from scroll-up must snap to bottom"
+        );
+        assert_eq!(app.input, "pasted", "text must be in input buffer");
+    }
+
+    // ── v0.14.9.1: Auto-tail (is_at_bottom) tests ─────────────────────────────
+
+    #[test]
+    fn auto_scroll_resumes_after_scroll_up_and_scroll_down() {
+        // Core tail regression: scroll up, scroll back to 0, then new output
+        // must not increment unread_events (auto_scroll must be true).
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for i in 0..50 {
+            app.push_output(OutputLine::event(format!("line {}", i)));
+        }
+        assert!(app.auto_scroll);
+        assert_eq!(app.scroll_offset, 0);
+
+        // Scroll up.
+        app.scroll_up(10);
+        assert!(!app.auto_scroll);
+
+        // Scroll back to bottom.
+        app.scroll_down(10);
+        assert_eq!(app.scroll_offset, 0);
+        assert!(
+            app.auto_scroll,
+            "auto_scroll must be true after returning to bottom"
+        );
+
+        // New output must NOT increment unread.
+        let before = app.unread_events;
+        app.push_output(OutputLine::event("new event".into()));
+        assert_eq!(
+            app.unread_events, before,
+            "new output at bottom must not increment unread_events"
+        );
+    }
+
+    #[test]
+    fn auto_scroll_resumes_from_push_output_when_at_bottom_with_auto_scroll_false() {
+        // If auto_scroll was incorrectly left false (e.g. after buffer-overflow
+        // scroll_offset adjustment) but scroll_offset is 0, the next push_output
+        // must re-enable auto_scroll (is_at_bottom() fix, v0.14.9.1).
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.auto_scroll = false;
+        app.scroll_offset = 0;
+
+        app.push_output(OutputLine::event("trigger".into()));
+
+        assert!(
+            app.auto_scroll,
+            "push_output with scroll_offset==0 must re-enable auto_scroll"
+        );
+        assert_eq!(
+            app.unread_events, 0,
+            "unread_events must be 0 when at bottom"
+        );
+    }
+
+    #[test]
+    fn is_at_bottom_true_when_content_shorter_than_viewport() {
+        // When the output buffer has fewer lines than the visible area height,
+        // is_at_bottom() must return true even if scroll_offset > 0.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Simulate a visible area of 40 rows.
+        app.output_area_height = 40;
+        // Only 5 lines of output — well under 40 - 4 = 36.
+        for i in 0..5 {
+            app.push_output(OutputLine::event(format!("line {}", i)));
+        }
+        // Manually set a small offset (as if the user scrolled up in a tiny buffer).
+        app.scroll_offset = 2;
+        assert!(
+            app.is_at_bottom(),
+            "is_at_bottom must be true when output.len() < output_area_height - 4"
+        );
+    }
+
+    #[test]
+    fn ctrl_l_clears_and_reenables_auto_scroll() {
+        // Ctrl+L must set auto_scroll = true so tail resumes after clear (v0.14.9.1).
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for i in 0..20 {
+            app.push_output(OutputLine::event(format!("line {}", i)));
+        }
+        app.scroll_up(5);
+        assert!(!app.auto_scroll);
+
+        // Simulate Ctrl+L.
+        app.output.clear();
+        app.scroll_offset = 0;
+        app.unread_events = 0;
+        app.auto_scroll = true; // the fix
+
+        assert!(app.auto_scroll, "Ctrl+L must re-enable auto_scroll");
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.output.len(), 0);
     }
 }

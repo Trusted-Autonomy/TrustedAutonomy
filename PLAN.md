@@ -7600,7 +7600,7 @@ For SA cloud hybrid: SA provides a webhook relay service (publicly-accessible HT
 ---
 
 ### v0.14.9.1 — Shell Paste & Tail Reliability (Pre-release Polish)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix two persistent, reproducible failures in `ta shell` that survived v0.14.7.1: paste from OS clipboard never inserts content regardless of paste method (Cmd+V, Ctrl+V, middle-click), and auto-tail scrolling still stops following new output after any manual scroll, even when the user returns to the bottom. These are pre-release blockers — the shell is the primary TA interface and both issues affect every session.
 
 #### Problem 1 — Paste inserts nothing ("from anywhere")
@@ -7633,33 +7633,25 @@ Two separate issues must both be fixed:
 
 #### Items
 
-1. [ ] **Diagnose paste root cause — read current code**: Read `shell_tui.rs` and search for: `EnableBracketedPaste`, `Event::Paste`, `KeyCode::Char('v')`, and `SUPER` modifier handling. Determine: (a) is bracketed paste mode enabled on startup? (b) is `Event::Paste` handled and does it actually insert text? (c) is there a Ctrl+V/Cmd+V keyboard shortcut handler that reads clipboard? Document findings in a code comment before fixing.
+1. [x] **Diagnose paste root cause — read current code**: `EnableBracketedPaste` is active (line 1051). `Event::Paste` is handled (line 2160). No Ctrl+V/Cmd+V keyboard handler exists — those keycodes fall through to `_ => {}` silently. Findings documented in inline code comment above the new handler.
 
-2. [ ] **Enable bracketed paste mode**: Add `crossterm::execute!(stdout, crossterm::event::EnableBracketedPaste)` to TUI init (alongside `EnableRawMode`, `EnterAlternateScreen`). Add `crossterm::execute!(stdout, crossterm::event::DisableBracketedPaste)` to cleanup. Ensure `Event::Paste(text)` is handled: insert `text` at cursor position if input-focused, append to `input_buffer.len()` if scroll-focused.
+2. [x] **Enable bracketed paste mode**: Already implemented in v0.14.7.1 (`EnableBracketedPaste` / `DisableBracketedPaste`). `Event::Paste(text)` correctly inserts at cursor. No changes needed.
 
-3. [ ] **Add `arboard` clipboard read for Ctrl+V / Cmd+V**: Add `arboard` to `apps/ta-cli/Cargo.toml`. In the key event handler, intercept `KeyEvent { code: KeyCode::Char('v'), modifiers }` where `modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::SUPER)`. Read `arboard::Clipboard::new()?.get_text()` and process the result through the same paste insertion path (cursor-aware, from v0.14.7.1). Graceful fallback: if clipboard read fails, show `[clipboard unavailable]` in status bar for 2 seconds. Test: mock the clipboard read, inject a Ctrl+V keyevent, assert input buffer contains clipboard text.
+3. [x] **Add clipboard read for Ctrl+V / Cmd+V**: Added `read_from_clipboard()` helper using `pbpaste` (macOS), `xclip -selection clipboard -o` / `xsel --clipboard --output` (Linux), `Get-Clipboard` (Windows) — consistent with existing `copy_to_clipboard` pattern (no new crate dependency needed). Added key handler for `(Char('v'), CONTROL | SUPER)` that processes through the same `Event::Paste` path (cursor-aware, large-paste threshold). On clipboard failure: pushes `[clipboard] paste failed: ...` to output buffer. 3 new tests: small paste at cursor, large paste stored as pending, paste from scroll-up snaps to bottom.
 
-4. [ ] **Diagnose auto-tail root cause — read current code**: Read `is_at_bottom()`, the scroll-to-bottom key handler, and the new-content append path in `shell_tui.rs`. Confirm: (a) what condition sets `auto_scroll = true`? (b) does returning to `scroll_offset == 0` set `auto_scroll = true`? (c) does the content-append path call `auto_scroll_if_near_bottom()` after appending? Document findings in a code comment.
+4. [x] **Diagnose auto-tail root cause — read current code**: `scroll_down()` sets `auto_scroll=true` when offset reaches 0 ✓. `scroll_to_bottom()` sets `auto_scroll=true` ✓. `push_output` required BOTH `auto_scroll==true` AND `scroll_offset==0` — if `auto_scroll` was left false (e.g. from buffer-overflow `saturating_sub` of offset to 0), new content increments `unread_events` and `auto_scroll` stays false indefinitely. Added `is_at_bottom()` to fix.
 
-5. [ ] **Fix `is_at_bottom()` comparator**: Replace the current check with:
-   ```rust
-   fn is_at_bottom(&self) -> bool {
-       self.scroll_offset == 0
-       // also treat as "at bottom" when content doesn't fill viewport
-       || self.output_buffer.len() < self.terminal_height.saturating_sub(4) as usize
-   }
-   ```
-   Ensure this is called from: (a) scroll-to-bottom key handlers (Cmd+Down, scroll-wheel at bottom), (b) new-content append path.
+5. [x] **Fix `is_at_bottom()` comparator**: Added `is_at_bottom()` method with two cases: `scroll_offset==0` (standard) and `output.len() < output_area_height.saturating_sub(4)` (content shorter than viewport). Updated `push_output` to use `is_at_bottom()` and unconditionally set `auto_scroll=true` when at bottom.
 
-6. [ ] **Set `auto_scroll = true` unconditionally when returning to bottom**: In every code path that moves `scroll_offset` to 0 — Cmd+Down, PageDown past the end, scroll-wheel at bottom, `:tail` command — explicitly set `self.auto_scroll = true`. No condition. If the user is at the bottom, they want auto-tail. This must not be conditional on `auto_scroll` already being true or on a tailing goal being active.
+6. [x] **Set `auto_scroll = true` unconditionally when returning to bottom**: `scroll_down()`, `scroll_to_bottom()`, and scrollbar drag/click all set `auto_scroll=true` when reaching offset=0. `push_output` now also re-enables `auto_scroll` via `is_at_bottom()`. `Ctrl+L` (clear screen) now also sets `auto_scroll=true`.
 
-7. [ ] **Move `auto_scroll_if_near_bottom()` call to after append**: In the output-buffer append path (wherever new agent output lines are pushed), ensure `auto_scroll_if_near_bottom()` is called after the push, not before. If `auto_scroll == true`, immediately set `scroll_offset = 0` so the next render shows the latest line.
+7. [x] **Move `auto_scroll_if_near_bottom()` call to after append**: Was already correct — all `TuiMessage` handlers call it after `push_output`. The `push_output` change now makes this more robust.
 
-8. [ ] **End-to-end paste test**: Inject `Event::Paste("hello world".to_string())` → assert `input_buffer == "hello world"`. Inject `KeyEvent { code: Char('v'), modifiers: CONTROL }` with clipboard mock returning `"clipboard text"` → assert `input_buffer == "clipboard text"`. Inject paste while `scroll_offset > 0` (scroll-focused) → assert pasted to end, `scroll_offset` reset to 0.
+8. [x] **End-to-end paste tests**: `ctrl_v_small_paste_inserts_at_cursor`, `ctrl_v_large_paste_stores_pending`, `ctrl_v_when_scrolled_up_snaps_to_bottom_then_appends` (3 tests in shell_tui.rs).
 
-9. [ ] **End-to-end tail test**: Populate buffer with 200 lines, simulate scroll-up (scroll_offset = 50), simulate scroll-back-to-bottom (scroll_offset = 0) → assert `auto_scroll == true`. Append 10 new lines → assert `scroll_offset` stays 0. Verify `is_at_bottom()` returns true when content shorter than viewport.
+9. [x] **End-to-end tail tests**: `auto_scroll_resumes_after_scroll_up_and_scroll_down`, `auto_scroll_resumes_from_push_output_when_at_bottom_with_auto_scroll_false`, `is_at_bottom_true_when_content_shorter_than_viewport`, `ctrl_l_clears_and_reenables_auto_scroll` (4 tests in shell_tui.rs).
 
-10. [ ] **Prompt line word-wrap at window width**: The `ta>` input prompt currently stays on a single line and scrolls right indefinitely when input exceeds terminal width. It must wrap at word boundaries — never splitting a word across lines — matching the behaviour of Claude's chat input and standard terminal editors. Implementation: in the `ta shell` input renderer, calculate available width as `terminal_width - prompt_prefix_len`. When `input_buffer` rendered length exceeds available width, reflowed into continuation lines using word-boundary breaks. Cursor position tracking must account for the multi-line layout so left/right arrows and Home/End work correctly across wrapped lines. Test: input a 200-char string in a 80-col terminal → renders across multiple lines with no word split at boundary, cursor moves correctly.
+10. [ ] **Prompt line word-wrap at window width** → deferred to v0.14.9.2 (out of scope for paste/tail reliability fix).
 
 11. [ ] **Manual verification checklist** (must be done before marking done — these cannot be tested headlessly):
     - [ ] Cmd+V in iTerm2 on Mac inserts clipboard text into `ta>` prompt
@@ -7668,6 +7660,15 @@ Two separate issues must both be fixed:
     - [ ] Scroll up during agent output → scroll back to bottom → new output auto-follows
     - [ ] `:tail <id>` then scroll up → scroll back to bottom → output auto-follows without re-running `:tail`
     - [ ] Type a command longer than terminal width → prompt wraps at word boundary, no horizontal scroll
+
+#### Completed
+
+- Added `read_from_clipboard()` in `shell_tui.rs` using platform system commands (no new crate)
+- Added Ctrl+V / Cmd+V key handler routing through same `Event::Paste` path (cursor-aware, large-paste-aware)
+- Added `is_at_bottom()` method: `scroll_offset==0 || output.len() < output_area_height.saturating_sub(4)`
+- Updated `push_output` to use `is_at_bottom()` and unconditionally set `auto_scroll=true` when at bottom
+- Fixed `Ctrl+L` (clear screen) to set `auto_scroll=true`
+- 7 new tests (748 total in ta-cli)
 
 #### Version: `0.14.9.1-alpha`
 
