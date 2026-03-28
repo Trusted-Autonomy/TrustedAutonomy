@@ -379,7 +379,12 @@ ta> exit                                # Done for now
 
 The shell remembers your command history across sessions. Reconnect any time with `ta shell` -- the daemon keeps running.
 
-**Pasting text**: Small pastes (under 500 chars / 10 lines) insert at the current cursor position when the prompt is active, or snap to the end of the input and scroll to the bottom if you had scrolled up to read history. Large pastes are compacted into an indicator instead of flooding the input:
+**Pasting text**: The shell supports two paste paths:
+
+- **Bracketed paste** (iTerm2, most Linux terminals): `Cmd+V` / `Ctrl+V` triggers `Event::Paste` automatically. Text is inserted at the cursor position.
+- **Clipboard shortcut** (Terminal.app, xterm, any terminal without bracketed-paste): `Ctrl+V` (Linux) or `Cmd+V` (macOS) reads the OS clipboard directly using `pbpaste` / `xclip` / `xsel` and inserts at the cursor. If no clipboard tool is found, a brief notice appears in the output pane.
+
+Small pastes (under 500 chars / 10 lines) insert at the current cursor position when the prompt is active, or snap to the end of the input and scroll to the bottom if you had scrolled up to read history. Large pastes are compacted into an indicator instead of flooding the input:
 
 ```
 ta> [Pasted 2,847 chars / 47 lines — Tab to preview, Esc to cancel]
@@ -388,6 +393,8 @@ ta> [Pasted 2,847 chars / 47 lines — Tab to preview, Esc to cancel]
 - Press **Tab** to toggle an inline preview of the first few lines.
 - Press **Enter** to send the full paste text (combined with anything you typed before pasting).
 - Press **Esc** or **Ctrl-C** to discard the paste.
+
+**Auto-tail**: When streaming agent output, the shell follows new lines automatically (`tail -f` style). If you scroll up to read earlier output, auto-tail is paused. Scroll back to the bottom (mouse wheel, `PageDown`, or `Cmd+Down`) to resume — the viewport will immediately begin following new output again. `Ctrl+L` clears the output and also resumes auto-tail.
 
 ---
 
@@ -8662,6 +8669,8 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.14.6 | Compliance-ready audit ledger (builds on v0.14.4 Central Daemon) | Pending |
 | v0.14.6.5 | Pluggable memory backends (ExternalMemoryAdapter, Supermemory plugin) | Pending |
 | v0.14.7 | Draft view polish — agent decision log, collapsible HTML | Pending |
+| v0.14.9 | Qwen3.5 local agent profiles & Ollama install flow | Done |
+| v0.14.9.1 | Shell paste & tail reliability (Ctrl+V clipboard, auto-tail resume) | Done |
 | v0.15.0 | VS Code extension | Pending |
 | v0.15.1 | JetBrains plugin (PyCharm / WebStorm / IntelliJ) | Pending |
 | v0.15.2 | Neovim plugin | Pending |
