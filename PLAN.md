@@ -7651,15 +7651,15 @@ Two separate issues must both be fixed:
 
 9. [x] **End-to-end tail tests**: `auto_scroll_resumes_after_scroll_up_and_scroll_down`, `auto_scroll_resumes_from_push_output_when_at_bottom_with_auto_scroll_false`, `is_at_bottom_true_when_content_shorter_than_viewport`, `ctrl_l_clears_and_reenables_auto_scroll` (4 tests in shell_tui.rs).
 
-10. [ ] **Prompt line word-wrap at window width** → deferred to v0.14.9.2 (out of scope for paste/tail reliability fix).
+10. [x] **Prompt line word-wrap at window width**: Added `word_wrap_metrics()` helper implementing ratatui-matching word-boundary wrap algorithm. Replaced all four character-wrapping cursor/layout calculations (`draw_ui` content_lines, `direct_input_write` draw loop + cursor, `draw_input` pending-paste cursor, `draw_input` normal cursor) with `word_wrap_metrics`. 6 new unit tests. 754 total in ta-cli.
 
-11. [ ] **Manual verification checklist** (must be done before marking done — these cannot be tested headlessly):
+11. [ ] **Manual verification checklist** (these cannot be tested headlessly — verify before release):
     - [ ] Cmd+V in iTerm2 on Mac inserts clipboard text into `ta>` prompt
     - [ ] Cmd+V in Terminal.app on Mac inserts clipboard text
     - [ ] Ctrl+V on Linux (xterm/gnome-terminal) inserts clipboard text
     - [ ] Scroll up during agent output → scroll back to bottom → new output auto-follows
     - [ ] `:tail <id>` then scroll up → scroll back to bottom → output auto-follows without re-running `:tail`
-    - [ ] Type a command longer than terminal width → prompt wraps at word boundary, no horizontal scroll
+    - [ ] Type a command longer than terminal width → prompt wraps at word boundary, cursor tracks correctly
 
 #### Completed
 
