@@ -16,6 +16,7 @@ pub mod events;
 pub mod follow_up;
 pub mod gc;
 pub mod goal;
+pub mod governed_workflow;
 pub mod init;
 pub mod memory;
 pub mod new;

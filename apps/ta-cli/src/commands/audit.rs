@@ -33,10 +33,20 @@ pub enum AuditCommands {
         #[arg(long)]
         log: Option<String>,
     },
-    /// Export structured audit data for compliance reporting (v0.3.3).
+    /// Export structured audit data for compliance reporting (v0.3.3 / v0.14.8.2).
+    ///
+    /// Export a goal's audit trail, or a governed workflow run's stage audit trail.
+    ///
+    /// Examples:
+    ///   ta audit export <goal-id>
+    ///   ta audit export --workflow-run <run-id>
     Export {
-        /// Goal ID to export.
-        goal_id: String,
+        /// Goal ID to export. Required unless --workflow-run is specified.
+        goal_id: Option<String>,
+        /// Export the audit trail for a governed workflow run (v0.14.8.2).
+        /// Use the full run ID or an 8-char prefix.
+        #[arg(long)]
+        workflow_run: Option<String>,
         /// Output format.
         #[arg(long, default_value = "json")]
         format: ExportFormat,
@@ -236,10 +246,24 @@ pub fn execute(cmd: &AuditCommands, config: &GatewayConfig) -> anyhow::Result<()
 
         AuditCommands::Export {
             goal_id,
+            workflow_run,
             format,
             log,
         } => {
-            export_audit(config, goal_id, format, log.as_deref())?;
+            if let Some(run_id) = workflow_run {
+                let runs_dir = config.workspace_root.join(".ta").join("workflow-runs");
+                super::governed_workflow::export_run_audit(&runs_dir, run_id)?;
+            } else {
+                let gid = goal_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provide a goal ID or use --workflow-run <run-id>\n\
+                         Examples:\n  \
+                           ta audit export <goal-id>\n  \
+                           ta audit export --workflow-run <run-id>"
+                    )
+                })?;
+                export_audit(config, gid, format, log.as_deref())?;
+            }
         }
 
         AuditCommands::Drift {

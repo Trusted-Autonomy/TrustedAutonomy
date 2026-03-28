@@ -1,0 +1,71 @@
+# governed-goal.toml — Canonical safe autonomous coding loop.
+#
+# Executes the full TA governance workflow:
+#   run_goal → review_draft → human_gate → apply_draft → pr_sync
+#
+# Usage:
+#   ta workflow run governed-goal --goal "Fix the auth bug"
+#   ta workflow run governed-goal --goal "Fix the auth bug" --dry-run
+#   ta workflow status <run-id>
+
+[workflow]
+name = "governed-goal"
+description = """
+Safe autonomous coding loop that demonstrates TA's full governance sequence:
+run a goal, route it to an independent reviewer agent before apply,
+apply on approval, then sync back to the PR once merged.
+"""
+
+[workflow.config]
+# Agent used for the review_draft stage.
+reviewer_agent = "claude-code"
+
+# Gate behaviour after the reviewer writes verdict.json.
+# auto   — proceed immediately on "approve" verdict
+# prompt — always prompt the human regardless of verdict
+# always — require explicit human approval (same as prompt)
+gate_on_verdict = "auto"
+
+# Channels to notify on workflow completion or failure.
+notify_channels = []
+
+# How often to poll `gh pr view` during pr_sync (seconds).
+pr_poll_interval_secs = 120
+
+# Maximum hours to wait for PR merge before declaring timeout.
+sync_timeout_hours = 72
+
+# ── Stages ─────────────────────────────────────────────────────────────────
+
+[[stages]]
+name = "run_goal"
+description = "Run the agent goal in a TA-mediated staging workspace. Produces a draft."
+
+[[stages]]
+name = "review_draft"
+description = """
+Spawn a reviewer agent that reads the draft artifacts, runs constitution
+checks, and writes a structured verdict to .ta/review/<draft-id>/verdict.json.
+"""
+depends_on = ["run_goal"]
+
+[[stages]]
+name = "human_gate"
+description = """
+Read verdict.json. On approve + gate=auto: advance. On flag: prompt human.
+On reject: deny draft, write audit entry, stop.
+"""
+depends_on = ["review_draft"]
+
+[[stages]]
+name = "apply_draft"
+description = "Apply the approved draft to the source directory with a git commit."
+depends_on = ["human_gate"]
+
+[[stages]]
+name = "pr_sync"
+description = """
+Poll for PR merge. On MERGED: update goal state, emit GoalSynced audit entry.
+On CLOSED without merge: emit GoalAbandoned audit entry.
+"""
+depends_on = ["apply_draft"]

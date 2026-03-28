@@ -7048,6 +7048,130 @@ ta> draft approve latest
 - If your BMAD workflow produces multiple artifacts across personas, use `--follow-up` to chain them into a single reviewable draft thread.
 - BMAD's QA persona pairs well with TA's `[validate]` commands in `constitution.toml` — the QA persona writes the tests, and TA's validation gate runs them before the draft is built.
 
+### Governed Workflow
+
+The **governed workflow** is the canonical safe autonomous coding loop built into TA. It runs a goal through a five-stage governance sequence — agent work, independent review, human gate, apply, and PR sync — as a single composable command.
+
+```
+ta workflow run governed-goal --goal "Fix the auth bug"
+  │
+  ├─ [1] run_goal      → ta run "<goal>" → draft ready
+  │
+  ├─ [2] review_draft  → reviewer agent reads draft artifacts,
+  │                       writes verdict.json
+  │
+  ├─ [3] human_gate    → verdict=approve → proceed automatically
+  │                      verdict=flag    → prompt human [y/N]
+  │                      verdict=reject  → deny draft, stop
+  │
+  ├─ [4] apply_draft   → ta draft apply --git-commit
+  │
+  └─ [5] pr_sync       → polls gh pr view until merged/closed
+```
+
+#### Running the governed workflow
+
+```bash
+# Run a goal through the full governance loop
+ta workflow run governed-goal --goal "Fix the auth bug"
+
+# See the stage graph without running anything
+ta workflow run governed-goal --goal "..." --dry-run
+
+# Resume after a human_gate pause or failure
+ta workflow run governed-goal --goal "..." --resume <run-id>
+
+# Check the status of a running or completed workflow
+ta workflow status
+ta workflow status <run-id>
+```
+
+Progress streams to stdout as each stage completes:
+
+```
+Started workflow run: a3f7bc12
+  Workflow: governed-goal
+  Goal:     Fix the auth bug
+
+━━━ Stage: run_goal ━━━
+  Running: ta run "Fix the auth bug" --agent claude-code --headless
+  [run_goal] completed in 183s — draft a3f7bc12
+
+━━━ Stage: review_draft ━━━
+  Spawning reviewer agent (claude-code) for draft a3f7bc12
+  [review_draft] completed in 47s — verdict=approve, confidence=92%, findings=0
+
+━━━ Stage: human_gate ━━━
+  [human_gate] completed in 0s — verdict=approve — proceeding
+
+━━━ Stage: apply_draft ━━━
+  [apply_draft] completed in 3s — applied, PR: https://github.com/…/pull/42
+
+━━━ Stage: pr_sync ━━━
+  Polling PR: https://github.com/…/pull/42
+  PR merged — goal state updated (GoalSynced)
+  [pr_sync] completed in 240s — PR merged after 240s
+
+Workflow 'governed-goal' completed successfully.
+  Run ID: a3f7bc12
+  PR:     https://github.com/…/pull/42
+
+Audit trail: ta audit export --workflow-run a3f7bc12
+```
+
+#### Human gate
+
+When the reviewer flags issues, the gate pauses and prompts:
+
+```
+Reviewer flagged issues (confidence 72%):
+  - Missing test coverage for the new API endpoint
+  - No rollback path documented
+
+Reviewer flagged issues — apply anyway? [y/N]:
+```
+
+Answering **y** overrides the flag and proceeds to apply. Answering **n** (or Enter) denies the draft and stops the workflow.
+
+When the reviewer rejects outright, the draft is automatically denied and the workflow stops with a clear error message listing the findings.
+
+#### Customising the workflow
+
+Copy the built-in template to your project to customise it:
+
+```bash
+ta workflow new my-governed-goal --from governed-goal
+# Creates: .ta/workflows/my-governed-goal.toml
+```
+
+Key configuration knobs in the TOML:
+
+```toml
+[workflow.config]
+reviewer_agent = "claude-code"    # Agent used for review_draft
+gate_on_verdict = "auto"          # auto | prompt | always
+pr_poll_interval_secs = 120       # How often to poll PR status
+sync_timeout_hours = 72           # Max wait time for PR merge
+```
+
+Run your customised workflow by name:
+
+```bash
+ta workflow run my-governed-goal --goal "Add rate limiting"
+```
+
+#### Viewing the audit trail
+
+Every stage transition is recorded. Export the full audit trail for a workflow run:
+
+```bash
+ta audit export --workflow-run a3f7bc12
+```
+
+Output is JSON with `run_id`, `workflow_name`, `goal_title`, per-stage records, and an `audit_trail` array with `stage`, `agent`, `verdict`, `duration_secs`, and timestamp for each transition.
+
+---
+
 ### Workflow Engine
 
 TA includes a pluggable workflow engine for orchestrating multi-stage, multi-role workflows. Define stages, assign roles to agents, and let TA handle routing, verdict scoring, and human-in-the-loop interaction.
@@ -7099,7 +7223,7 @@ This creates `.ta/workflows/my-pipeline.yaml` with annotated comments explaining
 ta workflow new my-pipeline --from deploy-pipeline
 ```
 
-Available templates: `simple-review`, `security-audit`, `milestone-review`, `deploy-pipeline`, `plan-implement-review`. Browse them with `ta workflow list --templates`.
+Available templates: `governed-goal`, `simple-review`, `security-audit`, `milestone-review`, `deploy-pipeline`, `plan-implement-review`. Browse them with `ta workflow list --templates`.
 
 **Step 2: Create missing agent configs.**
 

@@ -1,17 +1,18 @@
-// workflow.rs — CLI commands for workflow management (v0.10.5).
+// workflow.rs — CLI commands for workflow management (v0.10.5 / v0.14.8.2).
 //
 // Commands:
-//   ta workflow start <definition.yaml>  — start a workflow
-//   ta workflow status [workflow_id]      — show status
+//   ta workflow run <name> --goal "<title>"  — execute a named governed workflow
+//   ta workflow start <definition.yaml>      — start a workflow from YAML
+//   ta workflow status [run-id]              — show workflow / run status
 //   ta workflow list [--templates|--source external]  — list workflows
-//   ta workflow cancel <workflow_id>      — cancel a workflow
-//   ta workflow history <workflow_id>     — show stage transitions
-//   ta workflow new <name>               — scaffold a new workflow definition
-//   ta workflow validate <path>          — validate a workflow definition
-//   ta workflow add <name> --from <source>  — install from external source
-//   ta workflow remove <name>            — remove an external workflow
-//   ta workflow publish <name>           — publish to a registry
-//   ta workflow update [name|--all]      — check for updates
+//   ta workflow cancel <workflow_id>         — cancel a running workflow
+//   ta workflow history <workflow_id>        — show stage transitions
+//   ta workflow new <name>                   — scaffold a new workflow definition
+//   ta workflow validate <path>              — validate a workflow definition
+//   ta workflow add <name> --from <source>   — install from external source
+//   ta workflow remove <name>               — remove an external workflow
+//   ta workflow publish <name>              — publish to a registry
+//   ta workflow update [name|--all]         — check for updates
 
 use std::path::PathBuf;
 
@@ -20,16 +21,48 @@ use ta_changeset::sources::{ExternalSource, Lockfile, PackageManifest, SourceCac
 use ta_mcp_gateway::GatewayConfig;
 use ta_workflow::{WorkflowCatalog, WorkflowDefinition, WorkflowEngine, YamlWorkflowEngine};
 
+use super::governed_workflow::{self, RunOptions};
+
 #[derive(Subcommand)]
 pub enum WorkflowCommands {
+    /// Execute a named governed workflow end-to-end (v0.14.8.2).
+    ///
+    /// Runs the five-stage governance loop:
+    ///   run_goal → review_draft → human_gate → apply_draft → pr_sync
+    ///
+    /// Examples:
+    ///   ta workflow run governed-goal --goal "Fix the auth bug"
+    ///   ta workflow run governed-goal --goal "Add rate limiting" --dry-run
+    ///   ta workflow run governed-goal --goal "..." --resume <run-id>
+    Run {
+        /// Workflow name (e.g. "governed-goal"). Resolved from .ta/workflows/<name>.toml
+        /// then templates/workflows/<name>.toml.
+        name: String,
+        /// Goal title to execute through the workflow.
+        #[arg(long)]
+        goal: String,
+        /// Agent to use for the run_goal stage.
+        #[arg(long, default_value = "claude-code")]
+        agent: String,
+        /// Print the stage graph without executing any stages.
+        #[arg(long)]
+        dry_run: bool,
+        /// Resume a paused workflow run at the next pending stage.
+        #[arg(long)]
+        resume: Option<String>,
+    },
     /// Start a workflow from a YAML definition file.
     Start {
         /// Path to the workflow definition YAML file.
         definition: PathBuf,
     },
-    /// Show the status of a workflow.
+    /// Show the status of a workflow or governed workflow run.
+    ///
+    /// When given a governed workflow run ID (or prefix), shows stage progress,
+    /// reviewer verdict, and next action. Without an ID, shows the most recent run.
     Status {
-        /// Workflow ID. If omitted, shows the most recent workflow.
+        /// Workflow ID or governed workflow run ID (or 8-char prefix).
+        /// If omitted, shows the most recent governed workflow run.
         workflow_id: Option<String>,
     },
     /// List all workflows (active and completed).
@@ -103,8 +136,36 @@ pub enum WorkflowCommands {
 
 pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match command {
+        WorkflowCommands::Run {
+            name,
+            goal,
+            agent,
+            dry_run,
+            resume,
+        } => {
+            let opts = RunOptions {
+                workspace_root: &config.workspace_root,
+                workflow_name: name,
+                goal_title: goal,
+                dry_run: *dry_run,
+                resume_run_id: resume.as_deref(),
+                agent,
+            };
+            governed_workflow::run_governed_workflow(&opts)
+        }
         WorkflowCommands::Start { definition } => start_workflow(definition),
-        WorkflowCommands::Status { workflow_id } => show_status(workflow_id.as_deref()),
+        WorkflowCommands::Status { workflow_id } => {
+            let runs_dir = config.workspace_root.join(".ta").join("workflow-runs");
+            // Try governed workflow run first; fall back to legacy status.
+            if runs_dir.exists() || workflow_id.is_some() {
+                match governed_workflow::show_run_status(&runs_dir, workflow_id.as_deref()) {
+                    Ok(()) => Ok(()),
+                    Err(_) => show_status(workflow_id.as_deref()),
+                }
+            } else {
+                show_status(workflow_id.as_deref())
+            }
+        }
         WorkflowCommands::List {
             templates,
             source,
@@ -250,13 +311,18 @@ fn list_builtin_workflows() -> anyhow::Result<()> {
 fn list_templates() -> anyhow::Result<()> {
     println!("Workflow templates:");
     println!();
+    println!("  governed-goal        5-stage safe autonomous loop: run → review → gate → apply → sync (v0.14.8.2)");
     println!("  simple-review        2-stage build + review");
     println!("  security-audit       3-stage scan, review, remediate");
     println!("  milestone-review     4-stage plan, build, review, approval");
     println!("  deploy-pipeline      3-stage build, test, deploy with gates");
     println!("  plan-implement-review  Planner-driven loop with iterative review");
     println!();
-    println!("Use a template:");
+    println!("Governed workflow (ta workflow run):");
+    println!("  ta workflow run governed-goal --goal \"Fix the auth bug\"");
+    println!("  ta workflow run governed-goal --goal \"...\" --dry-run");
+    println!();
+    println!("YAML-based workflows (ta workflow start):");
     println!("  ta workflow new my-workflow --from simple-review");
     println!();
     println!("Template files: templates/workflows/");
@@ -320,6 +386,32 @@ fn new_workflow(
         } else {
             // Fall back to built-in templates.
             match template_name {
+                "governed-goal" => {
+                    // Copy the TOML template to .ta/workflows/ for project-local customization.
+                    let toml_path = config
+                        .workspace_root
+                        .join("templates")
+                        .join("workflows")
+                        .join("governed-goal.toml");
+                    if toml_path.exists() {
+                        let toml_content = std::fs::read_to_string(&toml_path).map_err(|e| {
+                            anyhow::anyhow!("Failed to read governed-goal.toml: {}", e)
+                        })?;
+                        // Write as .toml not .yaml.
+                        let toml_dest = workflows_dir.join(format!("{}.toml", name));
+                        std::fs::write(&toml_dest, toml_content)?;
+                        println!("Created governed workflow: {}", toml_dest.display());
+                        println!();
+                        println!("Run it with:");
+                        println!("  ta workflow run {} --goal \"Your goal title\"", name);
+                        return Ok(());
+                    }
+                    anyhow::bail!(
+                        "Built-in governed-goal template not found.\n\
+                         Expected: templates/workflows/governed-goal.toml\n\
+                         Run directly: ta workflow run governed-goal --goal \"Your goal\""
+                    );
+                }
                 "simple-review" => TEMPLATE_SIMPLE_REVIEW.to_string(),
                 "security-audit" => TEMPLATE_SECURITY_AUDIT.to_string(),
                 "milestone-review" => TEMPLATE_MILESTONE_REVIEW.to_string(),
@@ -328,7 +420,7 @@ fn new_workflow(
                 _ => {
                     anyhow::bail!(
                         "Unknown template: '{}'\n\
-                         Available templates: simple-review, security-audit, milestone-review, deploy-pipeline, plan-implement-review\n\
+                         Available templates: governed-goal, simple-review, security-audit, milestone-review, deploy-pipeline, plan-implement-review\n\
                          List all: ta workflow list --templates",
                         template_name
                     );
