@@ -3378,6 +3378,35 @@ pub fn doctor(config: &GatewayConfig) -> anyhow::Result<()> {
         }
     }
 
+    // ── Ollama health check (v0.14.9) ─────────────────────────────────────────
+    // Check if Ollama is reachable when any ta-agent-ollama-backed framework is configured.
+    {
+        let manifests = ta_runtime::AgentFrameworkManifest::discover(&config.workspace_root);
+        let builtin_ollama = ta_runtime::AgentFrameworkManifest::builtin("ollama").is_some();
+        let has_ollama_agent =
+            builtin_ollama || manifests.iter().any(|m| m.command == "ta-agent-ollama");
+        if has_ollama_agent {
+            print!("  Ollama (local agent)... ");
+            let ollama_ok = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .ok()
+                .and_then(|c| c.get("http://localhost:11434/api/tags").send().ok())
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ollama_ok {
+                println!("ok (http://localhost:11434)");
+                pass += 1;
+            } else {
+                println!("not running");
+                println!(
+                    "     Ollama not reachable at http://localhost:11434 — start with: ollama serve"
+                );
+                warn += 1;
+            }
+        }
+    }
+
     println!();
     println!("{} passed, {} warnings, {} failures", pass, warn, fail);
     if fail > 0 {

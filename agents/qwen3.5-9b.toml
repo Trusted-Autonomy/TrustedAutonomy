@@ -1,0 +1,17 @@
+# Qwen3.5 9B — mid-size local model (requires ~8 GB VRAM).
+# Best for: mid-complexity tasks, most coding work.
+# Install: ta agent install-qwen --size 9b
+
+name        = "qwen3.5-9b"
+version     = "1.0.0"
+description = "Qwen3.5 9B via Ollama — balanced local agent, ~8 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "qwen3.5:9b", "--base-url", "http://localhost:11434", "--max-turns", "50", "--temperature", "0.1", "--thinking-mode", "true"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 15
+recency_days = 7

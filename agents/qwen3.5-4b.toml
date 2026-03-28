@@ -1,0 +1,19 @@
+# Qwen3.5 4B — lightweight local model (requires ~4 GB VRAM).
+# Best for: quick edits, simple scripts, fast iteration.
+# Install: ta agent install-qwen --size 4b
+#
+# Thinking mode: disabled (4B benefits from direct answers)
+
+name        = "qwen3.5-4b"
+version     = "1.0.0"
+description = "Qwen3.5 4B via Ollama — fast local agent, ~4 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "qwen3.5:4b", "--base-url", "http://localhost:11434", "--max-turns", "30", "--temperature", "0.1", "--thinking-mode", "false"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 10
+recency_days = 7

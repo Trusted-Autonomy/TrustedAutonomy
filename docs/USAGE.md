@@ -751,6 +751,73 @@ ta run "refactor the auth module" \
 
 See `docs/agent-framework-options.md` for a full comparison of Ollama, llama.cpp server, vLLM, and LM Studio.
 
+## Local Models (Ollama)
+
+TA supports running goals against local models via [Ollama](https://ollama.ai), with no cloud API key required. The `ta-agent-ollama` binary implements a full tool-use loop against any OpenAI-compatible endpoint.
+
+### Prerequisites
+
+Install Ollama first:
+- **macOS**: `brew install ollama` or download from [ollama.ai](https://ollama.ai)
+- **Linux**: `curl -fsSL https://ollama.ai/install.sh | sh`
+
+**VRAM requirements by model size:**
+
+| Model | VRAM | Best for |
+|---|---|---|
+| `qwen3.5:4b` | ~4 GB | Quick edits, simple scripts, fast iteration |
+| `qwen3.5:9b` | ~8 GB | Mid-complexity tasks, most coding work |
+| `qwen3.5:27b` | ~20 GB | Complex multi-file refactors, planning, research |
+
+### Install a Qwen3.5 agent
+
+```bash
+# Install a specific size (pulls model + installs agent profile)
+ta agent install-qwen --size 9b
+
+# Install all sizes
+ta agent install-qwen --size all
+
+# Check prerequisites
+ta agent doctor qwen3.5-9b
+```
+
+`ta agent install-qwen` checks that Ollama is installed and running, runs `ollama pull` to download the model, and writes a ready-to-use agent profile to `~/.config/ta/agents/`.
+
+### Run a goal with a local model
+
+```bash
+ta run "Fix the authentication bug" --agent qwen3.5-9b
+```
+
+### Automatic model selection
+
+If you have multiple Qwen3.5 variants installed, `ta-agent-ollama` can pick the largest available one automatically:
+
+```bash
+ta-agent-ollama --model qwen3.5:auto
+```
+
+TA selects the largest installed variant (27b > 9b > 4b) and prints which model was selected.
+
+### Thinking mode
+
+Qwen3.x models support a chain-of-thought reasoning mode that can significantly improve results on complex tasks. The bundled profiles configure thinking mode automatically:
+
+- `qwen3.5-4b`: thinking **off** — direct responses, stays within context limits
+- `qwen3.5-9b`: thinking **on** — better results on complex reasoning tasks
+- `qwen3.5-27b`: thinking **on** — significantly enhanced reasoning on hard problems
+
+To override the default, pass `--thinking-mode true` or `--thinking-mode false` to `ta-agent-ollama` directly, or edit the `args` list in your agent profile TOML.
+
+### View installed local agents
+
+```bash
+ta agent list --local
+```
+
+Shows each local agent's model tag, estimated VRAM requirement, and whether the model is already downloaded in Ollama.
+
 #### Add a custom framework
 
 The fastest way is `ta agent new`:

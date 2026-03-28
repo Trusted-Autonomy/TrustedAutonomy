@@ -1,0 +1,17 @@
+# Qwen3.5 27B — large local model (requires ~20 GB VRAM).
+# Best for: complex multi-file refactors, planning, research.
+# Install: ta agent install-qwen --size 27b
+
+name        = "qwen3.5-27b"
+version     = "1.0.0"
+description = "Qwen3.5 27B via Ollama — powerful local agent, ~20 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "qwen3.5:27b", "--base-url", "http://localhost:11434", "--max-turns", "80", "--temperature", "0.15", "--thinking-mode", "true"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 20
+recency_days = 7
