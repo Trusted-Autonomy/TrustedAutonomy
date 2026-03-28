@@ -2671,6 +2671,64 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
     }
 }
 
+/// Simulate word-boundary wrapping matching ratatui's `Wrap { trim: false }`.
+///
+/// Returns `(cursor_row, cursor_col, total_visual_lines)`.
+/// - `cursor_byte`: byte offset in `display` where the cursor sits; pass
+///   `display.len()` when only `total_visual_lines` is needed.
+///
+/// The algorithm mirrors ratatui: at a space, if placing the space plus the
+/// following word would exceed `wrap_width`, the space is consumed as a wrap
+/// point and the next word starts on a fresh line.  Single characters or
+/// words that are longer than `wrap_width` hard-break at the column boundary.
+fn word_wrap_metrics(display: &str, cursor_byte: usize, wrap_width: usize) -> (u16, usize, u16) {
+    if wrap_width == 0 {
+        return (0, 0, 1);
+    }
+    let mut row: u16 = 0;
+    let mut col: usize = 0;
+    let mut cursor_row: u16 = 0;
+    let mut cursor_col: usize = 0;
+    let chars: Vec<(usize, char)> = display.char_indices().collect();
+    let mut idx = 0;
+    while idx < chars.len() {
+        let (bi, ch) = chars[idx];
+        if bi == cursor_byte {
+            cursor_row = row;
+            cursor_col = col;
+        }
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+            idx += 1;
+            continue;
+        }
+        if ch == ' ' && col > 0 {
+            let next_word_len: usize = chars[idx + 1..]
+                .iter()
+                .take_while(|(_, c)| *c != ' ' && *c != '\n')
+                .count();
+            if col + 1 + next_word_len > wrap_width {
+                row += 1;
+                col = 0;
+                idx += 1;
+                continue;
+            }
+        }
+        if col >= wrap_width {
+            row += 1;
+            col = 0;
+        }
+        col += 1;
+        idx += 1;
+    }
+    if cursor_byte >= display.len() {
+        cursor_row = row;
+        cursor_col = col;
+    }
+    (cursor_row, cursor_col, row + 1)
+}
+
 /// Write ONLY the input line directly to stdout using crossterm, bypassing
 /// ratatui's full-frame diff entirely. This produces ~50 bytes of output —
 /// the terminal processes it in microseconds regardless of how busy it is
@@ -2691,23 +2749,7 @@ fn direct_input_write(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &A
     let prompt = app.prompt_str();
     let display = format!("{}{}", prompt, app.input);
     let inner_width = size.width.max(1) as usize;
-    let content_lines = {
-        let mut lines = 0u16;
-        let mut col = 0usize;
-        for ch in display.chars() {
-            if ch == '\n' {
-                lines += 1;
-                col = 0;
-            } else {
-                col += 1;
-                if col >= inner_width {
-                    lines += 1;
-                    col = 0;
-                }
-            }
-        }
-        lines + 1
-    };
+    let content_lines = word_wrap_metrics(&display, display.len(), inner_width).2;
     let input_height = (content_lines + 2).min(size.height / 2).max(3);
     // Input area: top border at (size.height - 1 - input_height), text starts 1 below.
     let input_top = size.height.saturating_sub(1 + input_height);
@@ -2726,49 +2768,55 @@ fn direct_input_write(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &A
         let _ = backend.queue(Clear(ClearType::CurrentLine));
     }
 
-    // Write the display string with wrapping.
+    // Write the display string with word-boundary wrapping (matches ratatui Wrap { trim: false }).
     let _ = backend.queue(MoveTo(0, text_start_row));
-    for ch in display.chars() {
+    let chars_vec: Vec<(usize, char)> = display.char_indices().collect();
+    let mut widx = 0;
+    while widx < chars_vec.len() {
+        if row > text_end_row {
+            break;
+        }
+        let (_, ch) = chars_vec[widx];
         if ch == '\n' {
+            row += 1;
+            col = 0;
+            widx += 1;
+            if row <= text_end_row {
+                let _ = backend.queue(MoveTo(0, text_start_row + row as u16));
+            }
+            continue;
+        }
+        if ch == ' ' && col > 0 {
+            let next_word_len: usize = chars_vec[widx + 1..]
+                .iter()
+                .take_while(|(_, c)| *c != ' ' && *c != '\n')
+                .count();
+            if col + 1 + next_word_len > inner_width {
+                row += 1;
+                col = 0;
+                widx += 1;
+                if row <= text_end_row {
+                    let _ = backend.queue(MoveTo(0, text_start_row + row as u16));
+                }
+                continue;
+            }
+        }
+        if col >= inner_width {
             row += 1;
             col = 0;
             if row > text_end_row {
                 break;
             }
-            let _ = backend.queue(MoveTo(0, row));
-        } else {
-            if col >= inner_width {
-                row += 1;
-                col = 0;
-                if row > text_end_row {
-                    break;
-                }
-                let _ = backend.queue(MoveTo(0, row));
-            }
-            let _ = backend.queue(Print(ch));
-            col += 1;
+            let _ = backend.queue(MoveTo(0, text_start_row + row as u16));
         }
+        let _ = backend.queue(Print(ch));
+        col += 1;
+        widx += 1;
     }
 
-    // Position cursor.
+    // Position cursor using the same word-wrap metrics.
     let cursor_byte = prompt.len() + app.cursor;
-    let mut crow: u16 = 0;
-    let mut ccol: usize = 0;
-    for (i, ch) in display.char_indices() {
-        if i >= cursor_byte {
-            break;
-        }
-        if ch == '\n' {
-            crow += 1;
-            ccol = 0;
-        } else {
-            ccol += 1;
-            if ccol >= inner_width {
-                crow += 1;
-                ccol = 0;
-            }
-        }
-    }
+    let (crow, ccol, _) = word_wrap_metrics(&display, cursor_byte, inner_width);
     let cx = (ccol as u16).min(size.width.saturating_sub(1));
     let cy = (text_start_row + crow).min(text_end_row);
     let _ = backend.queue(MoveTo(cx, cy));
@@ -2778,31 +2826,16 @@ fn direct_input_write(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &A
 fn draw_ui(f: &mut Frame, app: &App) {
     let size = f.area();
 
-    // Calculate input area height dynamically based on wrapped text (v0.10.14).
+    // Calculate input area height dynamically based on word-wrapped text.
     // The block has top+bottom borders (2 lines), plus content lines.
     // Account for both word-wrap AND embedded newlines (from paste/Shift+Enter).
     let prompt = app.prompt_str();
     let display = format!("{}{}", prompt, app.input);
-    let inner_width = size.width.max(1) as usize;
-    let content_lines = {
-        let mut lines = 0u16;
-        let mut col = 0usize;
-        for ch in display.chars() {
-            if ch == '\n' {
-                lines += 1;
-                col = 0;
-            } else {
-                col += 1;
-                if col >= inner_width {
-                    lines += 1;
-                    col = 0;
-                }
-            }
-        }
-        lines + 1 // +1 for the current (possibly partial) line
-    };
+    // Subtract 2 for block borders to get the actual text width.
+    let inner_width = size.width.saturating_sub(2).max(1) as usize;
+    let content_lines = word_wrap_metrics(&display, display.len(), inner_width).2;
     // Borders add 2 lines; cap at half the terminal to keep output visible.
-    let input_height = (content_lines as u16 + 2).min(size.height / 2).max(3);
+    let input_height = (content_lines + 2).min(size.height / 2).max(3);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3178,25 +3211,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(paragraph, area);
 
         // Place the cursor at the end of the typed prefix (before the indicator).
-        let cursor_byte = prefix_display.len();
         let wrap_width = inner.width.max(1) as usize;
-        let mut row: u16 = 0;
-        let mut col: usize = 0;
-        for (i, ch) in prefix_display.char_indices() {
-            if i >= cursor_byte {
-                break;
-            }
-            if ch == '\n' {
-                row += 1;
-                col = 0;
-            } else {
-                col += 1;
-                if col >= wrap_width {
-                    row += 1;
-                    col = 0;
-                }
-            }
-        }
+        let (row, col, _) = word_wrap_metrics(&prefix_display, prefix_display.len(), wrap_width);
         let x = inner.x + (col as u16).min(inner.width.saturating_sub(1));
         let y = inner.y + row.min(inner.height.saturating_sub(1));
         f.set_cursor_position((x, y));
@@ -3210,26 +3226,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .block(block);
     f.render_widget(paragraph, area);
 
-    // Position cursor accounting for line wrap and embedded newlines.
+    // Position cursor with word-boundary wrap matching ratatui's Wrap { trim: false }.
     let cursor_byte = prompt.len() + app.cursor;
     let wrap_width = inner.width.max(1) as usize;
-    let mut row: u16 = 0;
-    let mut col: usize = 0;
-    for (i, ch) in display.char_indices() {
-        if i >= cursor_byte {
-            break;
-        }
-        if ch == '\n' {
-            row += 1;
-            col = 0;
-        } else {
-            col += 1;
-            if col >= wrap_width {
-                row += 1;
-                col = 0;
-            }
-        }
-    }
+    let (row, col, _) = word_wrap_metrics(&display, cursor_byte, wrap_width);
     let x = inner.x + (col as u16).min(inner.width.saturating_sub(1));
     let y = inner.y + row.min(inner.height.saturating_sub(1));
     f.set_cursor_position((x, y));
@@ -7560,5 +7560,70 @@ mod tests {
         assert!(app.auto_scroll, "Ctrl+L must re-enable auto_scroll");
         assert_eq!(app.scroll_offset, 0);
         assert_eq!(app.output.len(), 0);
+    }
+
+    // --- word_wrap_metrics tests (v0.14.9.1 item 10) ---
+
+    #[test]
+    fn word_wrap_metrics_short_text_no_wrap() {
+        // "ta> hello" at width 20 — fits on one line, cursor at end
+        let display = "ta> hello";
+        let (row, col, lines) = word_wrap_metrics(display, display.len(), 20);
+        assert_eq!(row, 0, "no wrap expected");
+        assert_eq!(col, 9, "cursor at end of 9-char string");
+        assert_eq!(lines, 1);
+    }
+
+    #[test]
+    fn word_wrap_metrics_wraps_at_word_boundary() {
+        // "hello world" at width 8: "hello " (6) + "world" (5) = 11 > 8
+        // → "hello " on row 0 (space consumed as wrap), "world" on row 1
+        let display = "hello world";
+        let (row, col, lines) = word_wrap_metrics(display, display.len(), 8);
+        assert_eq!(lines, 2, "should take 2 visual lines");
+        // Cursor (at end = after "world") should be on row 1
+        assert_eq!(row, 1);
+        assert_eq!(col, 5, "col 5 after 'world'");
+    }
+
+    #[test]
+    fn word_wrap_metrics_cursor_mid_word_on_wrapped_line() {
+        // "hello world" at width 8, cursor after 'w' in "world" (byte 7)
+        let display = "hello world";
+        let cursor_byte = display.find('w').unwrap(); // byte 6
+        let (row, col, _) = word_wrap_metrics(display, cursor_byte, 8);
+        assert_eq!(row, 1, "cursor is on the wrapped line");
+        assert_eq!(col, 0, "at start of wrapped line");
+    }
+
+    #[test]
+    fn word_wrap_metrics_hard_wrap_long_word() {
+        // A single word longer than wrap_width hard-breaks at character boundary
+        let display = "abcdefghij"; // 10 chars
+        let (row, col, lines) = word_wrap_metrics(display, display.len(), 6);
+        // "abcdef" row 0 (6 chars), "ghij" row 1
+        assert_eq!(lines, 2);
+        assert_eq!(row, 1);
+        assert_eq!(col, 4);
+    }
+
+    #[test]
+    fn word_wrap_metrics_embedded_newline() {
+        // Explicit '\n' always starts a new row regardless of position
+        let display = "abc\ndef";
+        let (row, col, lines) = word_wrap_metrics(display, display.len(), 20);
+        assert_eq!(lines, 2);
+        assert_eq!(row, 1);
+        assert_eq!(col, 3);
+    }
+
+    #[test]
+    fn word_wrap_metrics_cursor_before_wrap_space() {
+        // "hello world" at width 8, cursor at the space (byte 5) — still on row 0
+        let display = "hello world";
+        let cursor_byte = 5; // the space
+        let (row, col, _) = word_wrap_metrics(display, cursor_byte, 8);
+        assert_eq!(row, 0);
+        assert_eq!(col, 5);
     }
 }
