@@ -1914,6 +1914,14 @@ pub fn execute(
                 }
             }
 
+            // Write progress journal entry: agent_exit (v0.14.12).
+            append_progress_journal(
+                &config.goals_dir,
+                goal.goal_run_id,
+                "agent_exit",
+                &format!("agent exited with code {}", exit.code().unwrap_or(-1)),
+            );
+
             {
                 let elapsed_secs = agent_start.elapsed().as_secs();
                 if exit.success() {
@@ -2689,9 +2697,16 @@ pub fn execute(
         }
 
         // v0.13.17.2: Final progress note — draft is ready with its ID.
+        // v0.14.12: Also write to the progress journal.
         if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
             let short_id = &draft_id[..8.min(draft_id.len())];
             update_finalize_note(&format!("draft ready — ID: {}", short_id));
+            append_progress_journal(
+                &config.goals_dir,
+                goal.goal_run_id,
+                "draft_built",
+                &format!("draft {} created", short_id),
+            );
         }
 
         true
@@ -5211,6 +5226,63 @@ fn ingest_memory_out(staging_path: &Path, config: &GatewayConfig) {
     );
     // Clean up the output file.
     let _ = std::fs::remove_file(&out_path);
+}
+
+/// Append a progress journal entry to `.ta/goals/<id>/progress.jsonl` (v0.14.12).
+///
+/// The journal is append-only and survives process crashes. It provides
+/// TA's recovery tools with a chronological record of key lifecycle events.
+/// Each entry is a single JSON line with `label`, `at`, and `detail` fields.
+fn append_progress_journal(
+    goals_dir: &std::path::Path,
+    goal_id: uuid::Uuid,
+    label: &str,
+    detail: &str,
+) {
+    let goal_dir = goals_dir.join(goal_id.to_string());
+    // Ensure the goal directory exists (it should, but be defensive).
+    if let Err(e) = std::fs::create_dir_all(&goal_dir) {
+        tracing::warn!(
+            goal_id = %goal_id,
+            label = label,
+            "append_progress_journal: cannot create goal dir: {}",
+            e
+        );
+        return;
+    }
+    let journal_path = goal_dir.join("progress.jsonl");
+    let at = chrono::Utc::now().to_rfc3339();
+    let entry = format!(
+        "{{\"label\":{},\"at\":{},\"detail\":{}}}\n",
+        serde_json::json!(label),
+        serde_json::json!(at),
+        serde_json::json!(detail),
+    );
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&journal_path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(entry.as_bytes()) {
+                tracing::warn!(
+                    goal_id = %goal_id,
+                    label = label,
+                    "append_progress_journal: write failed: {}",
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                goal_id = %goal_id,
+                label = label,
+                "append_progress_journal: open failed: {}",
+                e
+            );
+        }
+    }
 }
 
 #[cfg(test)]

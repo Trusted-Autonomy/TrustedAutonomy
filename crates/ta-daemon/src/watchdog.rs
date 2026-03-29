@@ -961,6 +961,142 @@ pub fn process_health_label(goal: &GoalRun) -> &'static str {
     }
 }
 
+/// Startup recovery scan (v0.14.12).
+///
+/// Runs once at daemon startup (before the watchdog loop starts) to detect
+/// goals that were left in `Running` state because the daemon crashed or
+/// was killed while an agent was running.
+///
+/// For each such goal:
+/// - If the agent PID is set and still alive, skip it (agent is still running).
+/// - If the staging workspace exists but the process is dead, transition the
+///   goal to `DraftPending` so the user or watchdog can finish building the draft.
+/// - If both process is dead and staging is absent, transition to `Failed`.
+///
+/// Returns the number of goals recovered (transitioned out of zombie Running state).
+pub fn startup_recovery_scan(project_root: &Path) -> usize {
+    let goals_dir = project_root.join(".ta").join("goals");
+    let store = match GoalRunStore::new(&goals_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "startup_recovery_scan: cannot open goal store — skipping"
+            );
+            return 0;
+        }
+    };
+
+    let goals = match store.list() {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "startup_recovery_scan: cannot list goals — skipping"
+            );
+            return 0;
+        }
+    };
+
+    let mut recovered = 0usize;
+    let now = chrono::Utc::now();
+
+    for goal in &goals {
+        if !matches!(goal.state, GoalRunState::Running) {
+            continue;
+        }
+
+        // Check if the agent process is still alive.
+        let process_alive = goal.agent_pid.map(is_process_alive).unwrap_or(false);
+
+        if process_alive {
+            tracing::debug!(
+                goal_id = %goal.goal_run_id,
+                pid = ?goal.agent_pid,
+                "startup_recovery_scan: agent still running — skipping"
+            );
+            continue;
+        }
+
+        // Agent process is dead (or no PID). Check if staging workspace exists.
+        let staging_exists = goal.workspace_path.exists();
+
+        if let Ok(Some(mut g)) = store.get(goal.goal_run_id) {
+            if staging_exists {
+                // Staging exists: transition to DraftPending so the user can build a draft.
+                let reason = format!(
+                    "startup-recovery: agent PID {:?} not alive at daemon start (age: {}s)",
+                    goal.agent_pid,
+                    (now - goal.created_at).num_seconds()
+                );
+                tracing::info!(
+                    goal_id = %goal.goal_run_id,
+                    pid = ?goal.agent_pid,
+                    staging = %goal.workspace_path.display(),
+                    reason = %reason,
+                    "startup_recovery_scan: transitioning Running -> DraftPending"
+                );
+                let new_state = GoalRunState::DraftPending {
+                    pending_since: now,
+                    exit_code: -1,
+                };
+                // Force the transition even if can_transition_to would normally block it
+                // (recovery path — goal was left stuck by a crash).
+                g.state = new_state;
+                g.progress_note = Some(reason);
+                if let Err(e) = store.save(&g) {
+                    tracing::warn!(
+                        goal_id = %goal.goal_run_id,
+                        error = %e,
+                        "startup_recovery_scan: failed to save DraftPending state"
+                    );
+                } else {
+                    recovered += 1;
+                }
+            } else {
+                // No staging: transition to Failed — nothing to recover.
+                let reason = format!(
+                    "startup-recovery: agent dead and staging absent (age: {}s)",
+                    (now - goal.created_at).num_seconds()
+                );
+                tracing::info!(
+                    goal_id = %goal.goal_run_id,
+                    pid = ?goal.agent_pid,
+                    reason = %reason,
+                    "startup_recovery_scan: transitioning Running -> Failed (no staging)"
+                );
+                g.state = GoalRunState::Failed {
+                    reason: reason.clone(),
+                };
+                g.progress_note = Some(reason.clone());
+                if let Err(e) = store.save(&g) {
+                    tracing::warn!(
+                        goal_id = %goal.goal_run_id,
+                        error = %e,
+                        "startup_recovery_scan: failed to save Failed state"
+                    );
+                } else {
+                    // Write audit entry for the crash.
+                    write_watchdog_audit_entry(project_root, &g, goal.agent_pid, &reason);
+                    recovered += 1;
+                }
+            }
+        }
+    }
+
+    if recovered > 0 {
+        tracing::info!(
+            recovered = recovered,
+            "startup_recovery_scan: {} goal(s) recovered",
+            recovered
+        );
+    } else {
+        tracing::debug!("startup_recovery_scan: no zombie goals found");
+    }
+
+    recovered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1444,5 +1580,85 @@ mod tests {
             .map(|d| d.as_secs() < config.wake_grace_secs)
             .unwrap_or(false);
         assert!(!in_grace_old, "Should not be in grace window after 90s");
+    }
+
+    #[test]
+    fn startup_recovery_scan_transitions_dead_running_goal() {
+        use tempfile::TempDir;
+
+        let project = TempDir::new().unwrap();
+        let goals_dir = project.path().join(".ta").join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        // Create a staging workspace for the goal.
+        let staging = TempDir::new().unwrap();
+
+        let store = GoalRunStore::new(&goals_dir).unwrap();
+        let mut goal = GoalRun::new(
+            "Recovery Test",
+            "test recovery",
+            "agent",
+            staging.path().to_path_buf(),
+            project.path().join(".ta").join("store").join("x"),
+        );
+        goal.state = GoalRunState::Running;
+        // Use a PID that is definitely not alive.
+        goal.agent_pid = Some(99999999);
+        store.save(&goal).unwrap();
+
+        // Run the recovery scan.
+        let count = startup_recovery_scan(project.path());
+        assert_eq!(count, 1, "expected 1 goal recovered");
+
+        // Goal should now be DraftPending (staging exists).
+        let updated = store.get(goal.goal_run_id).unwrap().unwrap();
+        assert!(
+            matches!(updated.state, GoalRunState::DraftPending { .. }),
+            "expected DraftPending, got: {}",
+            updated.state
+        );
+        // Progress note should mention recovery.
+        assert!(
+            updated
+                .progress_note
+                .as_deref()
+                .unwrap_or("")
+                .contains("startup-recovery"),
+            "progress note should mention startup-recovery"
+        );
+    }
+
+    #[test]
+    fn startup_recovery_scan_alive_goal_not_transitioned() {
+        use tempfile::TempDir;
+
+        let project = TempDir::new().unwrap();
+        let goals_dir = project.path().join(".ta").join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        let staging = TempDir::new().unwrap();
+        let store = GoalRunStore::new(&goals_dir).unwrap();
+        let mut goal = GoalRun::new(
+            "Live Goal",
+            "obj",
+            "agent",
+            staging.path().to_path_buf(),
+            project.path().join(".ta").join("store").join("x"),
+        );
+        goal.state = GoalRunState::Running;
+        // Use our own PID — definitely alive.
+        goal.agent_pid = Some(std::process::id());
+        store.save(&goal).unwrap();
+
+        // Run the recovery scan — should not touch the alive goal.
+        let count = startup_recovery_scan(project.path());
+        assert_eq!(count, 0, "expected 0 goals recovered (agent alive)");
+
+        let updated = store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(
+            updated.state,
+            GoalRunState::Running,
+            "live goal should remain Running"
+        );
     }
 }

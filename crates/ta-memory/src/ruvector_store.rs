@@ -152,6 +152,7 @@ impl MemoryStore for RuVectorStore {
             expires_at: params.expires_at,
             confidence: params.confidence.unwrap_or(0.5),
             phase_id: params.phase_id,
+            scope: params.scope,
             created_at,
             updated_at: now,
         };
@@ -371,6 +372,9 @@ fn entry_to_metadata(entry: &MemoryEntry) -> HashMap<String, serde_json::Value> 
     if let Some(ref phase) = entry.phase_id {
         meta.insert("phase_id".into(), serde_json::json!(phase));
     }
+    if let Some(ref scope) = entry.scope {
+        meta.insert("scope".into(), serde_json::json!(scope));
+    }
     meta
 }
 
@@ -431,6 +435,8 @@ fn metadata_to_entry(rv_entry: &RvEntry) -> Option<MemoryEntry> {
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    let scope = meta.get("scope").and_then(|v| v.as_str()).map(String::from);
+
     Some(MemoryEntry {
         entry_id,
         key,
@@ -442,6 +448,7 @@ fn metadata_to_entry(rv_entry: &RvEntry) -> Option<MemoryEntry> {
         expires_at,
         confidence,
         phase_id,
+        scope,
         created_at,
         updated_at,
     })
@@ -584,6 +591,7 @@ mod tests {
             expires_at: None,
             confidence: 0.5,
             phase_id: None,
+            scope: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

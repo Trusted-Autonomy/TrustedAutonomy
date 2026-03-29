@@ -70,6 +70,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub vcs: VcsConfig,
 
+    /// Plan file configuration (v0.14.12).
+    #[serde(default)]
+    pub plan: PlanConfig,
+
     /// Supervisor agent configuration (v0.13.17.4)
     #[serde(default)]
     pub supervisor: SupervisorConfig,
@@ -583,6 +587,44 @@ pub struct VcsConfig {
     /// Agent environment isolation settings.
     #[serde(default)]
     pub agent: VcsAgentConfig,
+}
+
+/// Plan file configuration (v0.14.12).
+///
+/// Allows projects to name their plan file something other than `PLAN.md`.
+///
+/// ```toml
+/// [plan]
+/// file = "ROADMAP.md"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanConfig {
+    /// Name of the plan file relative to workspace root. Default: "PLAN.md".
+    #[serde(default = "default_plan_file")]
+    pub file: String,
+}
+
+impl Default for PlanConfig {
+    fn default() -> Self {
+        Self {
+            file: default_plan_file(),
+        }
+    }
+}
+
+fn default_plan_file() -> String {
+    "PLAN.md".to_string()
+}
+
+/// Resolve the plan file path given a workspace root and workflow config.
+///
+/// Respects the `[plan] file` config setting so projects can name their
+/// plan file something other than the default `PLAN.md`.
+pub fn resolve_plan_path(
+    workspace_root: &std::path::Path,
+    config: &WorkflowConfig,
+) -> std::path::PathBuf {
+    workspace_root.join(&config.plan.file)
 }
 
 /// Supervisor agent configuration (v0.13.17.4).
@@ -2172,5 +2214,43 @@ exclude_paths = ["staging/", "goals/"]
             vec!["workflow.toml", "agents/"]
         );
         assert_eq!(config.ta.local.exclude_paths, vec!["staging/", "goals/"]);
+    }
+
+    #[test]
+    fn plan_config_defaults_to_plan_md() {
+        let config = PlanConfig::default();
+        assert_eq!(config.file, "PLAN.md");
+    }
+
+    #[test]
+    fn plan_config_custom_file_resolves_path() {
+        let config = PlanConfig {
+            file: "ROADMAP.md".to_string(),
+        };
+        let workflow = WorkflowConfig {
+            plan: config,
+            ..Default::default()
+        };
+        let root = std::path::Path::new("/workspace");
+        let path = resolve_plan_path(root, &workflow);
+        assert_eq!(path, std::path::Path::new("/workspace/ROADMAP.md"));
+    }
+
+    #[test]
+    fn plan_config_default_resolves_to_plan_md() {
+        let workflow = WorkflowConfig::default();
+        let root = std::path::Path::new("/project");
+        let path = resolve_plan_path(root, &workflow);
+        assert_eq!(path, std::path::Path::new("/project/PLAN.md"));
+    }
+
+    #[test]
+    fn plan_config_parses_from_toml() {
+        let toml = r#"
+[plan]
+file = "ROADMAP.md"
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.plan.file, "ROADMAP.md");
     }
 }

@@ -88,6 +88,12 @@ pub struct MemoryEntry {
     /// Abstract string (not coupled to semver). Entries with `None` are global.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_id: Option<String>,
+    /// Sharing scope for this entry: "local" (default) or "team".
+    ///
+    /// Set at write time from the `[memory.sharing]` config or via `--scope` CLI flag.
+    /// Entries with `None` should be treated as "local".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -148,6 +154,8 @@ pub struct StoreParams {
     pub confidence: Option<f64>,
     /// Plan phase to associate this entry with (v0.6.3).
     pub phase_id: Option<String>,
+    /// Sharing scope: "local" or "team". Resolved from config or CLI flag.
+    pub scope: Option<String>,
 }
 
 /// Pluggable memory storage backend.
@@ -180,6 +188,7 @@ pub trait MemoryStore: Send + Sync {
             entry.confidence = c;
         }
         entry.phase_id = params.phase_id;
+        entry.scope = params.scope;
         Ok(entry)
     }
 
