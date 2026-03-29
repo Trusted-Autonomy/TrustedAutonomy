@@ -3618,6 +3618,93 @@ fn apply_package(
             .unwrap_or_else(|| config.workspace_root.clone()),
     };
 
+    // ── VCS pre-flight: branch creation BEFORE any file writes ───────────────
+    // Files must never land on a protected branch (main/master/etc.). We create
+    // or switch to the feature branch here — before the rollback guard and before
+    // the overlay apply — so the working tree is always on the right branch when
+    // files are written.
+    //
+    // This closes the race window where: files written to main → apply interrupted
+    // → user manually commits to main. After this block, the working tree is on
+    // the feature branch regardless of how the rest of apply behaves.
+    if git_commit {
+        use ta_submit::{select_adapter, WorkflowConfig};
+        let wf_path = target_dir.join(".ta/workflow.toml");
+        let wf_config = WorkflowConfig::load_or_default(&wf_path);
+        let adapter = select_adapter(&target_dir, &wf_config.submit);
+
+        if adapter.name() != "none" {
+            let branch = adapter
+                .current_branch()
+                .unwrap_or_else(|_| "unknown".to_string());
+            let protected = adapter.protected_submit_targets();
+            let on_protected = protected.iter().any(|b| b == &branch);
+
+            if on_protected {
+                eprintln!(
+                    "[apply] On protected branch '{}' — creating feature branch before writing any files...",
+                    branch
+                );
+                adapter.prepare(goal, &wf_config.submit).map_err(|e| {
+                    anyhow::anyhow!(
+                        "VCS pre-flight failed: could not create feature branch before writing files.\n\
+                         Aborted with no changes made to the source tree.\n\
+                         Branch was: '{}'\n\
+                         VCS error: {}\n\
+                         \n\
+                         Ensure the working tree is clean (git status), then re-run:\n\
+                         ta draft apply {}",
+                        branch,
+                        e,
+                        id
+                    )
+                })?;
+                // Double-check we're off the protected branch before proceeding.
+                adapter.verify_not_on_protected_target().map_err(|e| {
+                    anyhow::anyhow!(
+                        "VCS pre-flight: prepare() succeeded but still on protected branch.\n\
+                         Aborted with no changes made. Check the VCS adapter configuration.\n\
+                         Error: {}",
+                        e
+                    )
+                })?;
+                let new_branch = adapter
+                    .current_branch()
+                    .unwrap_or_else(|_| "unknown".to_string());
+                eprintln!(
+                    "[apply] Switched to feature branch '{}' — proceeding with file writes.",
+                    new_branch
+                );
+            } else {
+                eprintln!(
+                    "[apply] VCS pre-flight: already on branch '{}' (not protected) — ok.",
+                    branch
+                );
+            }
+        }
+    } else {
+        // Not submitting — warn if on a protected branch so the user knows they
+        // must not manually commit the resulting changes to main.
+        use ta_submit::{select_adapter, WorkflowConfig};
+        let wf_path = target_dir.join(".ta/workflow.toml");
+        let wf_config = WorkflowConfig::load_or_default(&wf_path);
+        let adapter = select_adapter(&target_dir, &wf_config.submit);
+        if adapter.name() != "none" {
+            let branch = adapter
+                .current_branch()
+                .unwrap_or_else(|_| "unknown".to_string());
+            let protected = adapter.protected_submit_targets();
+            if protected.iter().any(|b| b == &branch) {
+                eprintln!(
+                    "\nWarning: applying without VCS submit on protected branch '{branch}'.\n\
+                     Changes will be written to your working tree on '{branch}'.\n\
+                     Do NOT commit these changes to '{branch}' directly.\n\
+                     To auto-commit to a feature branch, re-run with `ta draft apply --submit`.\n"
+                );
+            }
+        }
+    }
+
     // ── Transactional rollback guard (v0.12.2.2) ─────────────────────────────
     // Snapshot working-tree files before any writes so we can restore them
     // atomically if pre-submit verification fails (or any other error occurs).
@@ -4855,26 +4942,52 @@ fn apply_package(
         }
     }
 
-    // Post-apply guidance: show PR URL and suggested next commands.
+    // Post-apply guidance: show branch + PR URL prominently at the very end.
+    // This block must always be the last output so the URL is never scrolled away.
     if !dry_run && git_commit {
         // Reload the package to get the VCS tracking info saved during apply.
         if let Ok(final_pkg) = load_package(config, package_id) {
             if let Some(ref vcs) = final_pkg.vcs_status {
-                println!();
-                println!("-- Next Steps --");
-                if let Some(ref url) = vcs.review_url {
-                    println!("  PR:    {}", url);
-                }
                 let short_id = &package_id.to_string()[..8];
-                println!("  Check: ta draft pr-status {}", short_id);
-                println!(
-                    "  Merge: ta draft merge {}            # merge PR + sync main",
-                    short_id
-                );
-                println!(
-                    "  Watch: ta draft watch {}            # poll until merged + auto-sync",
-                    short_id
-                );
+                // Check auto_merge directly from workflow config — this is always current.
+                let auto_merge = {
+                    use ta_submit::WorkflowConfig;
+                    let wf = WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
+                    wf.submit.git.auto_merge
+                };
+
+                println!();
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("  VCS APPLY SUMMARY");
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("  Branch:  {}", vcs.branch);
+                if let Some(ref sha) = vcs.commit_sha {
+                    println!("  Commit:  {}", sha);
+                }
+                if let Some(ref url) = vcs.review_url {
+                    println!("  PR:      {}", url);
+                    if auto_merge {
+                        println!(
+                            "  [!] AUTO-MERGE is enabled — this PR will merge without review."
+                        );
+                        println!("      Disable: set auto_merge = false in .ta/workflow.toml");
+                    } else {
+                        println!("  ACTION:  Review and merge the PR above before continuing.");
+                    }
+                } else if !vcs.branch.is_empty() && vcs.branch != "unknown" {
+                    println!(
+                        "  PR:      not created (run `ta draft reopen-review {}` to retry)",
+                        short_id
+                    );
+                }
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("  ta draft pr-status {}    — check PR/CI status", short_id);
+                if !auto_merge {
+                    println!(
+                        "  ta draft watch {}        — poll until merged + auto-sync",
+                        short_id
+                    );
+                }
             }
         }
     }

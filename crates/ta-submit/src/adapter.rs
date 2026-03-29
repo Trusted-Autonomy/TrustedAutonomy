@@ -220,6 +220,16 @@ pub trait SourceAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Get the current branch or workspace name.
+    ///
+    /// Git: current branch name (e.g., "main", "feature/abc-def")
+    /// SVN: working copy URL path
+    /// Perforce: current client/workspace name
+    /// Default: "unknown"
+    fn current_branch(&self) -> Result<String> {
+        Ok("unknown".to_string())
+    }
+
     /// Get the current revision identifier for the working directory.
     ///
     /// Git: short commit hash (e.g., "abc1234")
