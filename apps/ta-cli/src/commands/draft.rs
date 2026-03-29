@@ -4942,26 +4942,52 @@ fn apply_package(
         }
     }
 
-    // Post-apply guidance: show PR URL and suggested next commands.
+    // Post-apply guidance: show branch + PR URL prominently at the very end.
+    // This block must always be the last output so the URL is never scrolled away.
     if !dry_run && git_commit {
         // Reload the package to get the VCS tracking info saved during apply.
         if let Ok(final_pkg) = load_package(config, package_id) {
             if let Some(ref vcs) = final_pkg.vcs_status {
-                println!();
-                println!("-- Next Steps --");
-                if let Some(ref url) = vcs.review_url {
-                    println!("  PR:    {}", url);
-                }
                 let short_id = &package_id.to_string()[..8];
-                println!("  Check: ta draft pr-status {}", short_id);
-                println!(
-                    "  Merge: ta draft merge {}            # merge PR + sync main",
-                    short_id
-                );
-                println!(
-                    "  Watch: ta draft watch {}            # poll until merged + auto-sync",
-                    short_id
-                );
+                // Check auto_merge directly from workflow config — this is always current.
+                let auto_merge = {
+                    use ta_submit::WorkflowConfig;
+                    let wf = WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
+                    wf.submit.git.auto_merge
+                };
+
+                println!();
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("  VCS APPLY SUMMARY");
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("  Branch:  {}", vcs.branch);
+                if let Some(ref sha) = vcs.commit_sha {
+                    println!("  Commit:  {}", sha);
+                }
+                if let Some(ref url) = vcs.review_url {
+                    println!("  PR:      {}", url);
+                    if auto_merge {
+                        println!(
+                            "  [!] AUTO-MERGE is enabled — this PR will merge without review."
+                        );
+                        println!("      Disable: set auto_merge = false in .ta/workflow.toml");
+                    } else {
+                        println!("  ACTION:  Review and merge the PR above before continuing.");
+                    }
+                } else if !vcs.branch.is_empty() && vcs.branch != "unknown" {
+                    println!(
+                        "  PR:      not created (run `ta draft reopen-review {}` to retry)",
+                        short_id
+                    );
+                }
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("  ta draft pr-status {}    — check PR/CI status", short_id);
+                if !auto_merge {
+                    println!(
+                        "  ta draft watch {}        — poll until merged + auto-sync",
+                        short_id
+                    );
+                }
             }
         }
     }

@@ -640,6 +640,7 @@ impl SourceAdapter for GitAdapter {
             .to_string();
 
         // Enable auto-merge if configured (v0.11.2.3).
+        let auto_merge_active;
         if self.config.git.auto_merge && self.has_gh_cli() {
             let merge_strategy = &self.config.git.merge_strategy;
             let merge_flag = match merge_strategy.as_str() {
@@ -647,37 +648,82 @@ impl SourceAdapter for GitAdapter {
                 "merge" => "--merge",
                 _ => "--squash",
             };
+            // Warn loudly before enabling auto-merge. This bypasses the normal human
+            // review gate and merges to main as soon as CI passes (or immediately if
+            // there are no required checks). The user must see this — silent auto-merge
+            // was the root cause of the v0.14.10 direct-to-main incident.
+            eprintln!(
+                "\n[!] AUTO-MERGE ENABLED (workflow.toml: auto_merge = true)\n\
+                 [!] PR #{pr_number} will be merged to '{target}' automatically when CI passes.\n\
+                 [!] There is NO human review gate. Disable with: auto_merge = false in .ta/workflow.toml\n",
+                pr_number = pr_number,
+                target = target_branch,
+            );
             let auto_merge_output = Command::new("gh")
                 .args(["pr", "merge", "--auto", merge_flag, &pr_number])
                 .current_dir(&self.work_dir)
                 .output();
             match auto_merge_output {
                 Ok(o) if o.status.success() => {
+                    eprintln!(
+                        "[!] Auto-merge queued for PR #{} ({} into {}).",
+                        pr_number, merge_flag, target_branch
+                    );
                     tracing::info!("GitAdapter: auto-merge enabled for PR #{}", pr_number);
+                    auto_merge_active = true;
                 }
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
+                    eprintln!(
+                        "[warn] Auto-merge request failed for PR #{}: {}",
+                        pr_number, stderr
+                    );
                     tracing::warn!(
                         "GitAdapter: auto-merge failed for PR #{}: {}",
                         pr_number,
                         stderr
                     );
+                    auto_merge_active = false;
                 }
                 Err(e) => {
+                    eprintln!(
+                        "[warn] Could not enable auto-merge for PR #{}: {}",
+                        pr_number, e
+                    );
                     tracing::warn!(
                         "GitAdapter: could not enable auto-merge for PR #{}: {}",
                         pr_number,
                         e
                     );
+                    auto_merge_active = false;
                 }
             }
+        } else {
+            auto_merge_active = false;
+        }
+
+        let message = if auto_merge_active {
+            format!(
+                "Created PR: {} [AUTO-MERGE ENABLED — will merge when CI passes]",
+                pr_url
+            )
+        } else {
+            format!("Created PR: {}", pr_url)
+        };
+
+        let mut meta: std::collections::HashMap<String, String> =
+            [("pr_url".to_string(), pr_url.clone())]
+                .into_iter()
+                .collect();
+        if auto_merge_active {
+            meta.insert("auto_merge".to_string(), "true".to_string());
         }
 
         Ok(ReviewResult {
-            review_url: pr_url.clone(),
+            review_url: pr_url,
             review_id: pr_number,
-            message: format!("Created PR: {}", pr_url),
-            metadata: [("pr_url".to_string(), pr_url)].into_iter().collect(),
+            message,
+            metadata: meta,
         })
     }
 
