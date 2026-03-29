@@ -9278,6 +9278,147 @@ strategy = "refs-cow"   # instant clone via Windows ReFS CoW; auto-falls back to
 
 ---
 
+## Project Sessions
+
+A **project session** bridges plan generation and governed execution. Instead of starting a goal from scratch each time, you describe what you want in a brief, let TA generate a structured plan, review each item interactively, and then watch the items execute with human-in-the-loop oversight.
+
+The workflow is:
+
+```
+ta new plan --from brief.md     # 1. Generate a PlanDocument from a brief
+ta session start <plan-id>      # 2. Instantiate a session from the plan
+ta session review               # 3. Accept/skip/defer each item interactively
+ta session run                  # 4. Execute accepted items as governed workflow
+ta session status               # 5. Monitor progress
+```
+
+### Writing a Brief
+
+A brief is a plain-text or Markdown file describing what you want built. Use H2 headings for plan items and bullet lists for acceptance criteria:
+
+```markdown
+## Add OAuth2 login
+- Users can sign in with GitHub
+- Token stored in session, not cookie
+- Logout clears all auth state
+
+## Write onboarding guide
+- Covers install, first run, and core concepts
+- Examples for each command
+```
+
+### Generating a Plan
+
+```bash
+ta new plan --from brief.md
+# plan-id: a3f1c8d2-...
+
+ta new plan --from brief.md --verbose   # show parsed items during generation
+```
+
+The `plan-id` is the key used to start a session. The plan is stored in memory under `plan/<uuid>` and is accessible with `ta memory retrieve --key plan/<uuid>`.
+
+### Starting a Session
+
+```bash
+ta session start a3f1c8d2-...
+# session-id: b9e2d7f4-...
+# Session 'Add OAuth2 login + 1 more' created — 2 items in review
+```
+
+A session file is written to `.ta/sessions/workflow-<session-id>.json`. Multiple sessions can exist simultaneously, one per plan.
+
+### Reviewing Plan Items
+
+```bash
+ta session review                   # review the most recent session
+ta session review b9e2d7f4-...      # review a specific session
+```
+
+For each item you are prompted:
+
+```
+Item 1/2: Add OAuth2 login
+  • Users can sign in with GitHub
+  • Token stored in session, not cookie
+  • Logout clears all auth state
+
+[A]ccept  [S]kip  [D]efer  [Q]uit  >
+```
+
+- **Accept** — item enters the execution queue
+- **Skip** — item is recorded as skipped and excluded from this run
+- **Defer** — item is recorded as deferred (can be revisited in a future session)
+- **Quit** — saves current state and exits; you can resume with `ta session review` again
+
+### Running Accepted Items
+
+```bash
+ta session run                      # run the most recent session
+ta session run b9e2d7f4-...         # run a specific session
+ta session run --gate prompt        # pause before applying each draft
+ta session run --gate always        # pause before and after each item
+ta session run --gate auto          # apply automatically (default)
+```
+
+Gate modes:
+- **auto** — drafts are applied without prompting (fastest)
+- **prompt** — after each goal runs, you see `[A]pply / [S]kip / [Q]uit` before the draft is applied
+- **always** — same as prompt, but also pauses if the governed workflow itself requests a human gate
+
+At each gate prompt you can:
+- **Apply** — runs `ta draft apply --git-commit` for the item
+- **Skip** — marks the item as skipped, moves to the next
+- **Quit** — saves session state as Paused; resume later with `ta session run`
+
+### Checking Session Status
+
+```bash
+ta session status                   # status of the most recent session
+ta session status b9e2d7f4-...      # status of a specific session
+```
+
+Example output:
+
+```
+Session: b9e2d7f4-...
+Plan:    Add OAuth2 login + 1 more   (2 items)
+State:   Running
+
+  ✅ Add OAuth2 login          complete  (draft: d5a7...)
+  ⏳ Write onboarding guide    running
+```
+
+### Listing Sessions
+
+```bash
+ta session list                     # list recent TaSession (goal) sessions
+ta session list --workflow          # list workflow (project) sessions
+ta session projects                 # alias for --workflow list
+```
+
+### Resuming After Interruption
+
+If a session is interrupted (Ctrl-C, network drop, or `[Q]uit` at a gate), it is saved with state `Paused`. Resume it:
+
+```bash
+ta session run b9e2d7f4-...         # picks up from the first non-terminal item
+```
+
+Items that completed before the interruption are not re-run. Items at `AtGate` are re-presented at the gate prompt.
+
+### Session Memory
+
+After each item is applied, TA commits the result to memory:
+
+```
+session/<session-id>/applied/<item-id>  →  { goal_id, draft_id, applied_at }
+```
+
+This makes session history queryable and surfaces applied outcomes in future conversations.
+
+---
+
 ## Troubleshooting
 
 ### Agent cannot access files

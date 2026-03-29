@@ -40,5 +40,35 @@
     "rationale": "The shell dispatches most commands via the daemon async API with no synchronous return. Monitoring TailStarted and intercepting 'view <id>' / 'ta draft view <id>' strings before dispatch is minimal-invasive and does not require changes to the daemon protocol.",
     "alternatives": ["Add context-tracking channel messages from daemon", "Intercept all CommandResponse messages"],
     "confidence": 0.85
+  },
+  {
+    "decision": "Use 'workflow-<uuid>.json' filename prefix to distinguish WorkflowSession from TaSession in .ta/sessions/",
+    "rationale": "Both TaSession and WorkflowSession are stored in the same directory. TaSession uses '<uuid>.json'. A prefix prevents collision and makes 'list all workflow sessions' a simple filename filter.",
+    "alternatives": ["Separate subdirectory (.ta/sessions/workflows/)", "Different file extension (.workflow.json)"],
+    "confidence": 0.95
+  },
+  {
+    "decision": "GateMode::FromStr::Err is String, not anyhow::Error",
+    "rationale": "ta-session crate does not have an anyhow dependency. Using String for the error type avoids adding a new dependency to a foundational crate for a minor ergonomic benefit.",
+    "alternatives": ["Add anyhow to ta-session", "Use a custom error enum"],
+    "confidence": 0.9
+  },
+  {
+    "decision": "run_session() spawns 'ta run --headless' as a subprocess rather than calling run::execute() directly",
+    "rationale": "Governed workflow execution needs process isolation — each plan item runs in its own agent process with its own environment. Calling execute() directly would share state and make cleanup harder. This also matches the existing governed_workflow.rs pattern.",
+    "alternatives": ["Call run::execute() directly in-process", "Use tokio::spawn with a shared executor"],
+    "confidence": 0.85
+  },
+  {
+    "decision": "AwaitHuman gate is implemented inline in run_session() rather than as a separate workflow step type",
+    "rationale": "The gate needs to block the CLI process and interact with the terminal. A separate step type would require a channel-based pause/resume mechanism that doesn't exist yet. Inline prompt matches the v0.14.11 scope; can be refactored to a proper step type in v0.14.12.",
+    "alternatives": ["Implement as a workflow step type with mpsc channel", "Write pause state and poll on resume"],
+    "confidence": 0.8
+  },
+  {
+    "decision": "from_brief() uses deterministic markdown parsing rather than calling an LLM planner agent",
+    "rationale": "The PLAN.md item specified a 'stub planner agent'. A deterministic parser is testable, reproducible, and doesn't require a running daemon. LLM-enhanced planning can be added later without breaking the interface.",
+    "alternatives": ["Call configured LLM agent via ta run --headless", "Parse JSON output from a planner binary"],
+    "confidence": 0.9
   }
 ]

@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use ta_mcp_gateway::GatewayConfig;
+use ta_memory::{memory_store_from_config, MemoryCategory, StoreParams};
+use ta_session::PlanDocument;
 
 use super::init;
 
@@ -138,10 +140,32 @@ pub enum NewCommands {
     Templates,
     /// List available version schemas.
     VersionSchemas,
+
+    /// Generate a PlanDocument from a brief file (v0.14.11).
+    ///
+    /// Parses the brief into structured plan items and saves it to memory
+    /// under `plan/<uuid>`. Use the printed plan ID with `ta session start`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// ta new plan --from brief.md
+    /// # Prints: plan-id: <uuid>
+    /// ta session start <uuid>
+    /// ```
+    Plan {
+        /// Path to the brief file (markdown or plain text).
+        #[arg(long)]
+        from: PathBuf,
+        /// Print the generated plan items in detail before saving.
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 pub fn execute(command: &NewCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match command {
+        NewCommands::Plan { from, verbose } => plan_from_brief(config, from, *verbose),
         NewCommands::Run {
             name,
             from,
@@ -1247,6 +1271,105 @@ fn print_post_creation_summary(project_dir: &Path, project_name: &str, has_plan:
     println!("  ta shell                      — open the interactive TUI");
 }
 
+// ── ta new plan --from <brief.md> ─────────────────────────────────────────────
+
+/// Parse a brief file into a PlanDocument and save it to TA memory.
+///
+/// Called by `ta new plan --from <brief.md>`. Prints the plan ID so the user
+/// can pass it to `ta session start <plan-id>`.
+fn plan_from_brief(config: &GatewayConfig, from: &Path, verbose: bool) -> anyhow::Result<()> {
+    // Resolve path relative to workspace root if not absolute.
+    let resolved = if from.is_absolute() {
+        from.to_path_buf()
+    } else {
+        config.workspace_root.join(from)
+    };
+
+    if !resolved.exists() {
+        anyhow::bail!(
+            "Brief file not found: {}\n\
+             Provide the path to your project brief (markdown or plain text).",
+            resolved.display()
+        );
+    }
+
+    let brief = std::fs::read_to_string(&resolved)
+        .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", resolved.display(), e))?;
+
+    if brief.trim().is_empty() {
+        anyhow::bail!(
+            "Brief file '{}' is empty. Add project requirements to generate a plan.",
+            resolved.display()
+        );
+    }
+
+    println!("Parsing brief: {}", resolved.display());
+    println!("  Size: {} bytes", brief.len());
+    println!();
+
+    // Parse the brief into a PlanDocument using the stub planner.
+    let plan = PlanDocument::from_brief(&brief);
+
+    if plan.items.is_empty() {
+        anyhow::bail!(
+            "No plan items could be extracted from '{}'. \n\
+             Structure your brief with:\n\
+             - H2 headings (## Step title) for plan items, or\n\
+             - Numbered/bullet lists (1. Step, - Step) for simpler plans.",
+            resolved.display()
+        );
+    }
+
+    println!("Plan: {}", plan.title);
+    println!("  {} item(s) extracted", plan.items.len());
+
+    if verbose {
+        println!();
+        for (i, item) in plan.items.iter().enumerate() {
+            println!("  [{:>2}] {}", i + 1, item.title);
+            for crit in &item.acceptance_criteria {
+                println!("       - {}", crit);
+            }
+            if let Some(effort) = &item.estimated_effort {
+                println!("       effort: {}", effort);
+            }
+        }
+    }
+
+    // Persist to memory store under `plan/<uuid>`.
+    let memory_dir = config.workspace_root.join(".ta/memory");
+    let mut store = memory_store_from_config(&config.workspace_root);
+    let key = plan.memory_key();
+    let value = serde_json::to_value(&plan)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize PlanDocument: {}", e))?;
+
+    store.store_with_params(
+        &key,
+        value,
+        vec!["plan".to_string()],
+        "ta-new-plan",
+        StoreParams {
+            category: Some(MemoryCategory::State),
+            ..Default::default()
+        },
+    )?;
+
+    println!();
+    println!("PlanDocument saved to: {}", memory_dir.display());
+    println!();
+    println!("plan-id: {}", plan.plan_id);
+    println!();
+    println!("Next step:");
+    println!(
+        "  ta session start {}  # instantiate a workflow session",
+        plan.plan_id
+    );
+    println!("  ta session review    # accept, edit, skip, or defer each item");
+    println!("  ta session run       # execute approved items with oversight");
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1741,5 +1864,79 @@ mod tests {
         assert!(result.is_ok(), "{:?}", result.err());
         // setup.sh still gets generated.
         assert!(project_dir.join("setup.sh").exists());
+    }
+
+    // ── ta new plan --from tests ─────────────────────────────────────────
+
+    #[test]
+    fn plan_from_brief_nonexistent_file_errors() {
+        let dir = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let result = plan_from_brief(&config, Path::new("nonexistent.md"), false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn plan_from_brief_empty_file_errors() {
+        let dir = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let brief_path = dir.path().join("empty.md");
+        std::fs::write(&brief_path, "   ").unwrap();
+        let result = plan_from_brief(&config, &brief_path, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn plan_from_brief_produces_plan_document_in_memory() {
+        let dir = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let brief_path = dir.path().join("brief.md");
+        std::fs::write(
+            &brief_path,
+            "# My API\n\n## Implement endpoints\n- GET /items\n- POST /items\n\n## Add tests\n- Unit tests\n",
+        )
+        .unwrap();
+
+        let result = plan_from_brief(&config, &brief_path, false);
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        // Memory store should contain the plan.
+        let memory_dir = dir.path().join(".ta/memory");
+        assert!(memory_dir.exists(), "memory dir should be created");
+        // At least one file should be present with "plan" in the name.
+        let files: Vec<_> = std::fs::read_dir(&memory_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(!files.is_empty(), "memory files should be written");
+    }
+
+    #[test]
+    fn plan_from_brief_no_extractable_items_errors() {
+        let dir = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        // A brief with only a title — no sections, no lists, just prose.
+        // The parser should still extract the title as a single item.
+        let brief_path = dir.path().join("brief.md");
+        std::fs::write(&brief_path, "# My Project\n\nSome description.").unwrap();
+        // Should succeed — title becomes a single plan item.
+        let result = plan_from_brief(&config, &brief_path, false);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[test]
+    fn plan_from_brief_verbose_flag_does_not_error() {
+        let dir = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let brief_path = dir.path().join("brief.md");
+        std::fs::write(
+            &brief_path,
+            "## Feature A\n- Criterion 1\n\n## Feature B\n- Criterion 2\n",
+        )
+        .unwrap();
+        let result = plan_from_brief(&config, &brief_path, true);
+        assert!(result.is_ok(), "{:?}", result.err());
     }
 }

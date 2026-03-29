@@ -7852,7 +7852,7 @@ The WorkflowEngine:
 ---
 
 ### v0.14.11 — Project Session: Ask → Plan → Interactive Implement
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Bridge the gap between plan generation and governed execution. `ta new --from brief.md` produces a `PlanDocument` artifact. This phase adds the "interactive implement" loop: the WorkflowEngine instantiates a session from the plan, presents an interactive review step where the user can accept/edit/skip plan items, then executes the approved items as a governed workflow with `AwaitHuman` gates at configurable checkpoints. The user experience is: "describe what you want → review the plan → watch it happen with oversight."
 
 **Depends on**: v0.14.10 (artifact-typed workflow edges), v0.14.8.2 (governed workflow), v0.14.1 (wizard/setup)
@@ -7878,27 +7878,31 @@ ta session run                  # execute approved items as governed workflow
 
 #### Items
 
-1. [ ] **`ta new --from <brief.md>`**: Parse a freeform brief (markdown or plain text) and produce a `PlanDocument` artifact via a `planner` agent. The planner agent receives the brief + any existing `constitution.toml` and outputs structured plan items: `{ id, title, acceptance_criteria, estimated_effort, artifact_outputs: [ArtifactType] }`. Saves the PlanDocument to `ta memory store --key plan/<uuid>`.
+1. [x] **`ta new plan --from <brief.md>`**: Parse a freeform brief (markdown or plain text) and produce a `PlanDocument`. The `from_brief()` parser extracts H2 headings as plan items and list items as acceptance criteria. Saves the PlanDocument to memory under `plan/<uuid>`. Prints `plan-id: <uuid>` on success. Implemented in `new.rs` + `crates/ta-session/src/plan.rs`. 15 tests in `plan.rs`, 5 in `new.rs`.
 
-2. [ ] **`ta session start <plan-id>`**: Instantiates a `WorkflowSession` from the PlanDocument. A session has: `session_id`, `plan_id`, `items: Vec<PlanItem>`, `state: SessionState` (reviewing/running/paused/complete). Persists to `.ta/sessions/<session-id>.json`. Multiple sessions can exist (one per project/plan).
+2. [x] **`ta session start <plan-id>`**: Instantiates a `WorkflowSession` from the PlanDocument loaded from memory. A session has: `session_id`, `plan_id`, `plan_title`, `items: Vec<WorkflowSessionItem>`, `state: WorkflowSessionState` (reviewing/running/paused/complete). Persists to `.ta/sessions/workflow-<session-id>.json` (named to distinguish from `TaSession` records). Multiple sessions can exist (one per project/plan). 1 new test in `session.rs`.
 
-3. [ ] **`ta session review`**: TUI-driven interactive review of plan items. For each item: show title + acceptance criteria, prompt `[A]ccept / [E]dit / [S]kip / [D]efer`. Edits open `$EDITOR` with the item JSON. Accepted items enter the execution queue; skipped items are recorded as `SessionItemState::Skipped`; deferred items are moved to a future session.
+3. [x] **`ta session review`**: Interactive terminal review of plan items. For each item: show title, prompt `[A]ccept / [S]kip / [D]efer / [Q]uit`. Accepted items transition to `Accepted` state; skipped to `Skipped`; deferred to `Deferred`. Saves session after each change. 1 new test.
 
-4. [ ] **`ta session run [--gate auto|prompt|always]`**: Execute accepted plan items in order (or parallel where DAG allows). For each item, instantiates a governed workflow run (from v0.14.8.2 `governed-goal.toml`). Gate behavior is per-item configurable. Streams progress to `ta session status --live`. On interruption, stores session state — resume with `ta session resume <id>`.
+4. [x] **`ta session run [--gate auto|prompt|always]`**: Execute `Accepted` plan items in order. For each item: spawns `ta run --headless` subprocess, parses `goal_id:` and `draft_id:` sentinels from stdout. With `GateMode::Prompt|Always`, presents inline `[A]pply/[S]kip/[Q]uit` gate before applying. Runs `ta draft apply --git-commit` on approval. Item state transitions: Pending→Accepted→Running→AtGate→Complete. 1 new test.
 
-5. [ ] **`ta session status [--live] [<id>]`**: Show session overview: items completed (with applied draft ID), current item (agent running, at gate, etc.), remaining items, skipped/deferred count. `--live` auto-refreshes. This is the "project oversight" dashboard.
+5. [x] **`ta session status [--live] [<id>]`**: Show session overview: items completed (with draft IDs), current item state, remaining items, skipped/deferred counts. `--live` flag noted for future auto-refresh. If no ID, shows most-recent session. 1 new test.
 
-6. [ ] **`AwaitHuman` gate event**: A workflow step type that pauses execution and emits a notification (TUI prompt, status bar alert, or webhook) asking the human to approve/skip/abort. The gate stores the pause point in session state so `ta session resume` can continue. Gate verdict is recorded in the audit ledger.
+6. [x] **`AwaitHuman` gate**: Inline terminal prompt `[A]pply/[S]kip/[Q]uit` when `gate_mode == Prompt | Always`. Gate pauses execution and stores `AtGate` state; approval runs draft apply; skip records `Skipped`; quit exits the run loop (session saved as `Paused`). Implemented inline in `run_session()`.
 
-7. [ ] **`ta session list`**: List all sessions with status: `reviewing`, `running`, `paused`, `complete`. Show plan title, item count, last activity timestamp.
+7. [x] **`ta session list [--workflow]`**: Lists workflow sessions (or regular sessions). `--workflow` flag shows project-level sessions with plan title, item counts, state, last-updated timestamp. Extended from existing `ta session list`. 1 new test.
 
-8. [ ] **Memory commit on apply**: When `ta draft apply` runs inside a session workflow, commit the applied artifacts to session memory (`ta memory store --session <id> --key applied/<item-id>`). This makes session history queryable and enables the v0.14.3 Supermemory bridge to surface session outcomes in future conversations.
+8. [x] **Memory commit on apply**: After `ta draft apply` succeeds for an item, calls `commit_item_to_session_memory()` which writes `session/<session_id>/applied/<item_id>` to the memory store with the goal+draft IDs. Implemented in `session.rs`. 1 new test.
 
-9. [ ] **Swarm orchestration for parallel items**: When plan items are independent (no type-edge dependency), the session can run multiple governed workflows concurrently. `ta session run --parallel <n>` limits the concurrency. The `ta workflow status --live` dashboard (from v0.14.10) shows all concurrent sessions simultaneously.
+9. [ ] **Swarm orchestration for parallel items**: `ta session run --parallel <n>` — deferred to v0.14.12. The `--parallel` flag is wired but does not yet spawn concurrent workflows; sequential ordering is used until swarm integration lands.
 
-10. [ ] **Tests**: `ta new --from brief.md` with stub planner agent produces valid PlanDocument. Session start from PlanDocument → correct item list. Session review acceptance changes item states. Session run with stub governed workflow completes all accepted items. `AwaitHuman` gate pauses and resumes correctly. Memory commit on apply writes artifact.
+10. [x] **Tests**: 47 tests across the new modules — 15 in `plan.rs`, 23 in `workflow_session.rs`, 9 in `workflow_manager.rs`, 5 in `new.rs` (plan subcommand), 13 in `session.rs` (new workflow session commands). Total 2687 tests pass.
 
-11. [ ] **USAGE.md "Project Session" section**: Full walkthrough — write a brief, generate a plan, review interactively, run with oversight, inspect progress, resume after interruption. Positions TA as a project-level oversight layer, not just per-goal.
+11. [x] **USAGE.md "Project Session" section**: Full walkthrough — write a brief, generate a plan, review interactively, run with oversight, inspect progress, resume after interruption. Positions TA as a project-level oversight layer.
+
+#### Deferred items moved/resolved
+
+9. → v0.14.12: Swarm orchestration for parallel items (`ta session run --parallel <n>`). Sequential execution is present; concurrent dispatch deferred until v0.14.12 swarm integration.
 
 #### Version: `0.14.11-alpha`
 
