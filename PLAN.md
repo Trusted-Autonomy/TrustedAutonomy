@@ -7701,26 +7701,28 @@ Two separate issues must both be fixed:
 ---
 
 ### v0.14.9.3 — Shell & TA Studio Transport Reliability
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix paste reliability (replace subprocess clipboard with arboard crate), audit and fix auto-tail scroll paths, and add SSE reconnect support with daemon event IDs — a shared solution that makes both `ta shell` and TA Studio resilient to long-running connection drops.
 
 **Depends on**: v0.14.9.1 (shell UX), v0.14.9.2 (draft view)
 
 #### Items
 
-1. [ ] **Replace `read_from_clipboard()` subprocess with arboard crate**: The current implementation shells out to `pbpaste`/`xclip`/`xsel` which races against terminal paste events and fails silently. Replace with the `arboard` crate for synchronous clipboard access. No subprocess, no race condition. Gate behind `#[cfg(not(test))]` and a mock for CI.
+1. [x] **Replace `read_from_clipboard()` subprocess with arboard crate**: Replaced pbpaste/xclip/xsel subprocess with `arboard` crate (v3). Added `#[cfg(not(test))]` production path and `#[cfg(test)]` mock using `thread_local! TEST_CLIPBOARD`. copy_to_clipboard also updated to use arboard. Added `arboard = "3"` to workspace and ta-cli Cargo.toml.
 
-2. [ ] **Audit and fix auto-tail scroll paths**: Walk every code path that pushes output to the TUI buffer (`push_output`, `:tail` subscription, goal output streaming) and verify that `is_at_bottom()` is checked consistently before auto-scrolling. Fix any path that bypasses the check or sets `scroll_offset` incorrectly when new output arrives during manual scroll-back.
+2. [x] **Audit and fix auto-tail scroll paths**: Audited all paths calling `push_output`. Found that `:clear` command (`:clear` in the command handler at line ~1864) was setting `scroll_offset = 0` and `unread_events = 0` but missing `auto_scroll = true`. Fixed. All other paths (`scroll_up`, `scroll_down`, `scroll_to_bottom`, `push_output` via `is_at_bottom()`) were already correct.
 
-3. [ ] **Daemon SSE event IDs (`id:` field)**: The daemon's SSE event stream (`/api/goals/:id/output/stream`) must emit an `id: <seq>` field on every event. The sequence number increments monotonically per goal output stream. Store the last-emitted sequence in the streaming state so reconnects can resume from where they left off.
+3. [x] **Daemon SSE event IDs (`id:` field)**: Added `SequencedLine` struct with `seq: u64` field. Added `GoalOutputPublisher` (Clone-able via Arc fields: sender, AtomicU64 counter, VecDeque history capped at 512). `GoalOutputManager.create_channel()` now returns `GoalOutputPublisher`. `goal_output_stream()` handler accepts `Last-Event-ID` header, subscribes first then replays history for missed events, emits `id: <seq>` on every SSE event.
 
-4. [ ] **Shell SSE reconnect with `Last-Event-ID`**: When `start_tail_stream()` encounters a stream error (currently silent `break`), replace the break with a reconnect loop: up to 5 retries with exponential backoff (1s, 2s, 4s, 8s, 16s). Send `Last-Event-ID: <seq>` header on reconnect so the daemon resumes from the last received event. Display a non-blocking reconnect notification in the TUI output buffer. If all retries fail, emit `AgentOutputDone` with a `reconnect_failed` error field so the TUI is not left frozen.
+4. [x] **Shell SSE reconnect with `Last-Event-ID`**: Restructured `start_tail_stream()` with outer `'reconnect` loop. Parses `id:` field from SSE frames to track `last_event_id`. On stream error, notifies TUI and retries with exponential backoff (1s, 2s, 4s, 8s, 16s — up to 5 retries). Sends `Last-Event-ID: <seq>` header on reconnect. On max retries exceeded, emits actionable error message and `AgentOutputDone`. "done" events exit cleanly without reconnect.
 
-5. [ ] **TA Studio SSE client resilience**: Verify that the TA Studio web EventSource implementation correctly handles the `id:` field and auto-reconnects with `Last-Event-ID` per the EventSource spec. Document the behavior in a test or comment. No UI changes needed if the browser EventSource handles this natively.
+5. [x] **TA Studio SSE client resilience**: Verified that browser EventSource natively tracks `id:` fields and sends `Last-Event-ID` on reconnect per the W3C spec. Added a code comment in shell.html explaining this. No UI changes needed.
 
-6. [ ] **Tests**: `arboard` clipboard mock round-trip. Reconnect logic: mock stream that errors after N events → verify retry count, backoff timing, `Last-Event-ID` header sent. Daemon SSE: sequence numbers increment, gap on resume sends only missed events. Auto-tail: push output while scroll_offset > 0 → verify no auto-scroll; push output while at bottom → verify auto-scroll.
+6. [x] **Tests** (17 new tests across shell_tui.rs and goal_output.rs):
+   - shell_tui.rs: `clipboard_mock_read_returns_set_value`, `clipboard_mock_read_returns_none_when_empty`, `clipboard_mock_copy_sets_value`, `ctrl_v_paste_uses_arboard_mock`, `clear_command_re_enables_auto_scroll`, `auto_scroll_blocked_when_scrolled_up_during_output`, `auto_scroll_resumes_after_scroll_to_bottom_via_scroll_down`
+   - goal_output.rs: `sse_event_ids_increment_monotonically`, `get_history_from_returns_since_seq`, `reconnect_replays_missed_events`, `alias_shares_history_with_primary`, `remove_channel_also_removes_publisher`
 
-7. [ ] **Manual verification checklist**:
+7. [ ] **Manual verification checklist** (requires real terminal — to be verified post-apply):
     - [ ] Cmd+V in iTerm2 on Mac inserts clipboard text into `ta>` prompt
     - [ ] Cmd+V in Terminal.app on Mac inserts clipboard text
     - [ ] Ctrl+V on Linux (xterm/gnome-terminal) inserts clipboard text

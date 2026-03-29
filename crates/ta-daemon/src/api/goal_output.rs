@@ -3,9 +3,15 @@
 // Each background goal command gets a broadcast channel. Lines from the agent's
 // stdout/stderr are published to the channel. Clients subscribe via
 // `GET /api/goals/:id/output` (SSE).
+//
+// v0.14.9.3: Added SSE event IDs and history replay for reconnect reliability.
+// Each published line gets a monotonically-increasing sequence number. Clients
+// that reconnect with `Last-Event-ID` header receive missed events from the
+// in-memory history (capped at 512 entries per goal).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -17,28 +23,80 @@ use tokio::sync::{broadcast, Mutex};
 
 use crate::api::AppState;
 
-/// Manages per-goal output broadcast channels.
+/// History cap per goal channel.
+const HISTORY_CAP: usize = 512;
+
+/// A single line of output from the agent process, with a monotonic sequence number.
 ///
-/// Wrapped in `Arc` internally so it can be shared between AppState and
-/// spawned background tasks.
-#[derive(Clone)]
-pub struct GoalOutputManager {
-    channels: Arc<Mutex<HashMap<String, broadcast::Sender<OutputLine>>>>,
-    /// Creation order for resolving "latest" — newest entry is last (v0.12.4.1).
-    creation_order: Arc<Mutex<Vec<String>>>,
+/// Fields are flat (not nested) for ergonomic access.
+#[derive(Debug, Clone)]
+pub struct SequencedLine {
+    pub seq: u64,
+    pub stream: &'static str, // "stdout", "stderr", or "prompt"
+    pub line: String,
 }
 
 /// A single line of output from the agent process.
+///
+/// Kept for source compatibility — the broadcast channel now uses SequencedLine
+/// directly; this type is no longer constructed but kept to avoid churn.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OutputLine {
     pub stream: &'static str, // "stdout" or "stderr"
     pub line: String,
 }
 
+/// A cloneable publisher for a single goal's output channel.
+///
+/// Wraps the broadcast sender, a shared atomic counter, and the per-goal history
+/// buffer. All clones share the same underlying state (same Arc), so sequence
+/// numbers are globally monotonic across all senders for a given goal.
+#[derive(Clone)]
+pub struct GoalOutputPublisher {
+    sender: broadcast::Sender<SequencedLine>,
+    counter: Arc<AtomicU64>,
+    history: Arc<Mutex<VecDeque<SequencedLine>>>,
+}
+
+impl GoalOutputPublisher {
+    /// Publish a line of output. Atomically increments the sequence counter,
+    /// stores in history (capped at HISTORY_CAP), and broadcasts to subscribers.
+    ///
+    /// Lagged receivers will see `RecvError::Lagged` — the history buffer lets
+    /// reconnecting clients catch up without data loss (up to 512 entries).
+    pub async fn publish(&self, stream: &'static str, line: String) {
+        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
+        let sline = SequencedLine { seq, stream, line };
+        {
+            let mut history = self.history.lock().await;
+            if history.len() >= HISTORY_CAP {
+                history.pop_front();
+            }
+            history.push_back(sline.clone());
+        }
+        // Ignore send error — no active subscribers is normal.
+        let _ = self.sender.send(sline);
+    }
+}
+
+/// Manages per-goal output broadcast channels.
+///
+/// Wrapped in `Arc` internally so it can be shared between AppState and
+/// spawned background tasks.
+#[derive(Clone)]
+pub struct GoalOutputManager {
+    channels: Arc<Mutex<HashMap<String, broadcast::Sender<SequencedLine>>>>,
+    publishers: Arc<Mutex<HashMap<String, GoalOutputPublisher>>>,
+    /// Creation order for resolving "latest" — newest entry is last (v0.12.4.1).
+    creation_order: Arc<Mutex<Vec<String>>>,
+}
+
 impl GoalOutputManager {
     pub fn new() -> Self {
         Self {
             channels: Arc::new(Mutex::new(HashMap::new())),
+            publishers: Arc::new(Mutex::new(HashMap::new())),
             creation_order: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -48,33 +106,82 @@ impl GoalOutputManager {
         self.clone()
     }
 
-    /// Create a channel for a goal. Returns a Sender the spawner uses to publish lines.
-    pub async fn create_channel(&self, goal_id: &str) -> broadcast::Sender<OutputLine> {
-        let mut channels = self.channels.lock().await;
-        // Buffer 256 lines — if a subscriber falls behind, it skips.
+    /// Create a channel for a goal. Returns a GoalOutputPublisher the spawner
+    /// uses to publish lines with automatic sequence numbering and history buffering.
+    pub async fn create_channel(&self, goal_id: &str) -> GoalOutputPublisher {
         let (tx, _) = broadcast::channel(256);
-        channels.insert(goal_id.to_string(), tx.clone());
+        let publisher = GoalOutputPublisher {
+            sender: tx.clone(),
+            counter: Arc::new(AtomicU64::new(0)),
+            history: Arc::new(Mutex::new(VecDeque::new())),
+        };
+
+        let mut channels = self.channels.lock().await;
+        channels.insert(goal_id.to_string(), tx);
         drop(channels);
+
+        let mut publishers = self.publishers.lock().await;
+        publishers.insert(goal_id.to_string(), publisher.clone());
+        drop(publishers);
+
         let mut order = self.creation_order.lock().await;
         order.push(goal_id.to_string());
-        tx
+
+        publisher
     }
 
     /// Subscribe to a goal's output. Returns None if the goal has no channel.
-    pub async fn subscribe(&self, goal_id: &str) -> Option<broadcast::Receiver<OutputLine>> {
+    pub async fn subscribe(&self, goal_id: &str) -> Option<broadcast::Receiver<SequencedLine>> {
         let channels = self.channels.lock().await;
         channels.get(goal_id).map(|tx| tx.subscribe())
     }
 
-    /// Register an alias so that `alias` resolves to the same channel as `primary`.
-    /// Used to map goal UUIDs to the human-friendly output key (e.g., "v0.10.13").
+    /// Get history entries with seq >= since_seq for the given goal.
+    ///
+    /// Used by reconnecting clients to replay missed events. Returns entries
+    /// in sequence order (oldest first).
+    pub async fn get_history_from(&self, goal_id: &str, since_seq: u64) -> Vec<SequencedLine> {
+        // Clone the Arc so we can release the publishers lock before locking history.
+        let history_arc = {
+            let publishers = self.publishers.lock().await;
+            publishers.get(goal_id).map(|p| p.history.clone())
+        };
+        let Some(history_arc) = history_arc else {
+            return Vec::new();
+        };
+        let history = history_arc.lock().await;
+        history
+            .iter()
+            .filter(|sline| sline.seq >= since_seq)
+            .cloned()
+            .collect()
+    }
+
+    /// Register an alias so that `alias` resolves to the same channel and
+    /// publisher as `primary`. The alias shares the primary's history buffer and
+    /// sequence counter (same Arc), so events published through either key are
+    /// visible in the shared history.
     pub async fn add_alias(&self, alias: &str, primary: &str) {
-        let channels = self.channels.lock().await;
-        if let Some(tx) = channels.get(primary) {
-            let tx = tx.clone();
-            drop(channels);
-            let mut channels = self.channels.lock().await;
-            channels.insert(alias.to_string(), tx);
+        // Extract clones while holding each lock briefly and independently to
+        // avoid holding two locks simultaneously (prevents lock-order deadlock).
+        let tx_clone = {
+            let channels = self.channels.lock().await;
+            channels.get(primary).cloned()
+        };
+        let pub_clone = {
+            let publishers = self.publishers.lock().await;
+            publishers.get(primary).cloned()
+        };
+
+        if let (Some(tx), Some(pub_)) = (tx_clone, pub_clone) {
+            {
+                let mut channels = self.channels.lock().await;
+                channels.insert(alias.to_string(), tx);
+            }
+            {
+                let mut publishers = self.publishers.lock().await;
+                publishers.insert(alias.to_string(), pub_);
+            }
         }
     }
 
@@ -83,6 +190,11 @@ impl GoalOutputManager {
         let mut channels = self.channels.lock().await;
         channels.remove(goal_id);
         drop(channels);
+
+        let mut publishers = self.publishers.lock().await;
+        publishers.remove(goal_id);
+        drop(publishers);
+
         let mut order = self.creation_order.lock().await;
         order.retain(|id| id != goal_id);
     }
@@ -248,13 +360,26 @@ pub async fn goal_input_handler(
 }
 
 /// `GET /api/goals/:id/output` — SSE stream of live agent output.
+///
+/// Supports reconnect via the `Last-Event-ID` HTTP header (SSE spec).
+/// When a client reconnects with `Last-Event-ID: N`, missed events with
+/// seq > N are replayed from the in-memory history before streaming live events.
 pub async fn goal_output_stream(
     State(state): State<Arc<AppState>>,
     Path(goal_id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    // Parse Last-Event-ID for reconnect replay.
+    let last_event_id: Option<u64> = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
     // Try exact match first, then prefix match for short IDs.
     let resolved_id = resolve_goal_id(&state, &goal_id).await;
 
+    // Subscribe FIRST to avoid the race where events are published between
+    // get_history_from() and subscribe(). We then deduplicate against history.
     let rx = match resolved_id {
         Some(ref id) => state.goal_output.subscribe(id).await,
         None => None,
@@ -274,16 +399,51 @@ pub async fn goal_output_stream(
         return Sse::new(stream).into_response();
     };
 
+    // Fetch history for replay (after subscribe, so no events are lost).
+    let history_events: Vec<SequencedLine> = match resolved_id {
+        Some(ref id) => {
+            let since = last_event_id.map(|n| n + 1).unwrap_or(0);
+            state.goal_output.get_history_from(id, since).await
+        }
+        None => Vec::new(),
+    };
+
+    // The highest seq in history — live events with seq <= this have already
+    // been replayed from history and must be skipped to avoid duplicates.
+    let history_max_seq: Option<u64> = history_events.last().map(|s| s.seq);
+
     let stream = async_stream::stream! {
+        // Replay history events first.
+        for sline in history_events {
+            let data = serde_json::json!({
+                "stream": sline.stream,
+                "line": sline.line,
+            });
+            yield Ok::<_, Infallible>(
+                Event::default()
+                    .id(sline.seq.to_string())
+                    .event("output")
+                    .data(data.to_string())
+            );
+        }
+
+        // Stream live events, skipping any already covered by history replay.
         loop {
             match rx.recv().await {
-                Ok(line) => {
+                Ok(sline) => {
+                    // Skip events already sent via history replay.
+                    if let Some(max) = history_max_seq {
+                        if sline.seq <= max {
+                            continue;
+                        }
+                    }
                     let data = serde_json::json!({
-                        "stream": line.stream,
-                        "line": line.line,
+                        "stream": sline.stream,
+                        "line": sline.line,
                     });
                     yield Ok::<_, Infallible>(
                         Event::default()
+                            .id(sline.seq.to_string())
                             .event("output")
                             .data(data.to_string())
                     );
@@ -364,14 +524,10 @@ mod tests {
 
         // Subscribe and receive.
         let mut rx = mgr.subscribe("goal-1").await.unwrap();
-        tx.send(OutputLine {
-            stream: "stdout",
-            line: "hello".to_string(),
-        })
-        .unwrap();
-        let line = rx.recv().await.unwrap();
-        assert_eq!(line.line, "hello");
-        assert_eq!(line.stream, "stdout");
+        tx.publish("stdout", "hello".to_string()).await;
+        let sline = rx.recv().await.unwrap();
+        assert_eq!(sline.line, "hello");
+        assert_eq!(sline.stream, "stdout");
 
         // Remove.
         mgr.remove_channel("goal-1").await;
@@ -401,13 +557,9 @@ mod tests {
             .unwrap();
 
         // Send via primary key's sender — alias subscriber receives it.
-        tx.send(OutputLine {
-            stream: "stdout",
-            line: "from primary".to_string(),
-        })
-        .unwrap();
-        let line = rx.recv().await.unwrap();
-        assert_eq!(line.line, "from primary");
+        tx.publish("stdout", "from primary".to_string()).await;
+        let sline = rx.recv().await.unwrap();
+        assert_eq!(sline.line, "from primary");
     }
 
     #[tokio::test]
@@ -449,5 +601,110 @@ mod tests {
         // Remove everything — no latest.
         mgr.remove_channel("goal-a").await;
         assert!(mgr.latest_goal().await.is_none());
+    }
+
+    // ── v0.14.9.3: SSE event IDs and history replay ───────────────────────────
+
+    #[tokio::test]
+    async fn sse_event_ids_increment_monotonically() {
+        let mgr = GoalOutputManager::new();
+        let pub_ = mgr.create_channel("goal-seq").await;
+        let mut rx = mgr.subscribe("goal-seq").await.unwrap();
+
+        pub_.publish("stdout", "line 0".to_string()).await;
+        pub_.publish("stdout", "line 1".to_string()).await;
+        pub_.publish("stdout", "line 2".to_string()).await;
+
+        let s0 = rx.recv().await.unwrap();
+        let s1 = rx.recv().await.unwrap();
+        let s2 = rx.recv().await.unwrap();
+
+        assert_eq!(s0.seq, 0);
+        assert_eq!(s1.seq, 1);
+        assert_eq!(s2.seq, 2);
+        assert_eq!(s0.line, "line 0");
+        assert_eq!(s1.line, "line 1");
+        assert_eq!(s2.line, "line 2");
+    }
+
+    #[tokio::test]
+    async fn get_history_from_returns_since_seq() {
+        let mgr = GoalOutputManager::new();
+        let pub_ = mgr.create_channel("goal-hist").await;
+
+        for i in 0u64..5 {
+            pub_.publish("stdout", format!("line {}", i)).await;
+        }
+
+        // Retrieve events with seq >= 3 (should return seqs 3 and 4).
+        let history = mgr.get_history_from("goal-hist", 3).await;
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].seq, 3);
+        assert_eq!(history[1].seq, 4);
+        assert_eq!(history[0].line, "line 3");
+        assert_eq!(history[1].line, "line 4");
+    }
+
+    #[tokio::test]
+    async fn reconnect_replays_missed_events() {
+        let mgr = GoalOutputManager::new();
+        let pub_ = mgr.create_channel("goal-reconnect").await;
+
+        // Subscribe and receive 5 events.
+        let mut rx = mgr.subscribe("goal-reconnect").await.unwrap();
+        for i in 0u64..5 {
+            pub_.publish("stdout", format!("early {}", i)).await;
+        }
+        for _ in 0..5 {
+            rx.recv().await.unwrap();
+        }
+        // Client disconnects (drop rx).
+        drop(rx);
+
+        // 3 more events are published while client is gone.
+        pub_.publish("stdout", "missed 0".to_string()).await;
+        pub_.publish("stdout", "missed 1".to_string()).await;
+        pub_.publish("stdout", "missed 2".to_string()).await;
+
+        // Client reconnects with Last-Event-ID = 4 (last seq seen).
+        // Should receive seqs 5, 6, 7 (the 3 missed events).
+        let missed = mgr.get_history_from("goal-reconnect", 5).await;
+        assert_eq!(missed.len(), 3);
+        assert_eq!(missed[0].seq, 5);
+        assert_eq!(missed[1].seq, 6);
+        assert_eq!(missed[2].seq, 7);
+        assert_eq!(missed[0].line, "missed 0");
+        assert_eq!(missed[1].line, "missed 1");
+        assert_eq!(missed[2].line, "missed 2");
+    }
+
+    #[tokio::test]
+    async fn alias_shares_history_with_primary() {
+        let mgr = GoalOutputManager::new();
+        let pub_ = mgr.create_channel("primary-key").await;
+
+        pub_.publish("stdout", "event 0".to_string()).await;
+        pub_.publish("stdout", "event 1".to_string()).await;
+
+        // Add alias after publishing — alias shares the same history buffer.
+        mgr.add_alias("alias-key", "primary-key").await;
+
+        let history_via_alias = mgr.get_history_from("alias-key", 0).await;
+        assert_eq!(history_via_alias.len(), 2);
+        assert_eq!(history_via_alias[0].seq, 0);
+        assert_eq!(history_via_alias[1].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn remove_channel_also_removes_publisher() {
+        let mgr = GoalOutputManager::new();
+        mgr.create_channel("goal-rm").await;
+
+        mgr.remove_channel("goal-rm").await;
+
+        // After removal, subscribe returns None and history is empty.
+        assert!(mgr.subscribe("goal-rm").await.is_none());
+        let history = mgr.get_history_from("goal-rm", 0).await;
+        assert!(history.is_empty());
     }
 }

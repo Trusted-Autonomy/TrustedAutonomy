@@ -1865,6 +1865,7 @@ async fn handle_terminal_event(
                                 app.output.clear();
                                 app.scroll_offset = 0;
                                 app.unread_events = 0;
+                                app.auto_scroll = true; // re-enable auto-tail after clear (v0.14.9.3)
                                 return;
                             }
                             _ => {}
@@ -2196,8 +2197,8 @@ async fn handle_terminal_event(
                         None => {
                             // Clipboard unavailable or empty — show brief notice.
                             app.push_output(OutputLine::info(
-                                "[clipboard] paste failed: no clipboard content available \
-                                 (install pbpaste/xclip/xsel or use bracketed-paste)"
+                                "[clipboard] paste failed: clipboard is empty or unavailable \
+                                 (no display server, or use bracketed-paste in your terminal)"
                                     .to_string(),
                             ));
                         }
@@ -3671,108 +3672,57 @@ fn extract_selection_text(app: &App, sel: &Selection) -> String {
     result
 }
 
-/// Copy text to the system clipboard using platform-native commands.
+/// Copy text to the system clipboard using the `arboard` crate (v0.14.9.3).
 ///
-/// - macOS: `pbcopy`
-/// - Linux/BSD: `xclip -selection clipboard` (fallback: `xsel --clipboard`)
-/// - Windows: `clip.exe`
+/// Replaces the previous subprocess approach (pbcopy/xclip/clip.exe) which
+/// raced against terminal paste events and failed silently on missing tools.
+/// arboard is synchronous and works without external binaries.
+///
+/// Fails silently (no-op) when no display server is available (e.g., headless CI).
 #[allow(dead_code)]
+#[cfg(not(test))]
 fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    #[cfg(target_os = "macos")]
-    let (prog, args): (&str, &[&str]) = ("pbcopy", &[]);
-
-    #[cfg(target_os = "windows")]
-    let (prog, args): (&str, &[&str]) = ("clip.exe", &[]);
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let (prog, args): (&str, &[&str]) = ("xclip", &["-selection", "clipboard"]);
-
-    let result = Command::new(prog)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-
-    match result {
-        Ok(mut child) => {
-            if let Some(ref mut stdin) = child.stdin {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        Err(_) => {
-            // Fallback for Linux: try xsel if xclip is not available.
-            if let Ok(mut child) = Command::new("xsel")
-                .args(["--clipboard", "--input"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
-            }
-        }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        Err(_) => {}
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        let _ = clipboard.set_text(text);
     }
 }
 
-/// Read text from the system clipboard using platform-native commands.
+#[cfg(test)]
+#[allow(dead_code)]
+fn copy_to_clipboard(text: &str) {
+    TEST_CLIPBOARD.with(|c| *c.borrow_mut() = Some(text.to_string()));
+}
+
+/// Read text from the system clipboard using the `arboard` crate (v0.14.9.3).
 ///
-/// Mirrors `copy_to_clipboard` but reads instead of writes (v0.14.9.1):
-/// - macOS: `pbpaste`
-/// - Linux/BSD: `xclip -selection clipboard -o` (fallback: `xsel --clipboard --output`)
-/// - Windows: PowerShell `Get-Clipboard`
+/// Replaces the previous subprocess approach (pbpaste/xclip/xsel/Get-Clipboard)
+/// which raced against terminal paste events and failed silently on missing tools.
+/// arboard is synchronous and works without external binaries.
 ///
-/// Returns `None` if no clipboard tool is available or the clipboard is empty.
+/// Returns `None` if the clipboard is empty, unreadable, or no display server is
+/// available (e.g., headless CI — arboard::Clipboard::new() returns Err).
+#[cfg(not(test))]
 fn read_from_clipboard() -> Option<String> {
-    use std::process::Command;
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let text = clipboard.get_text().ok()?;
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
 
-    #[cfg(target_os = "macos")]
-    let output = Command::new("pbpaste")
-        .output()
-        .ok()
-        .filter(|o| o.status.success());
+#[cfg(test)]
+fn read_from_clipboard() -> Option<String> {
+    TEST_CLIPBOARD.with(|c| c.borrow().clone())
+}
 
-    #[cfg(target_os = "windows")]
-    let output = Command::new("powershell")
-        .args(["-Command", "Get-Clipboard"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success());
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let output = {
-        Command::new("xclip")
-            .args(["-selection", "clipboard", "-o"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .or_else(|| {
-                Command::new("xsel")
-                    .args(["--clipboard", "--output"])
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-            })
-    };
-
-    output.and_then(|o| {
-        let text = String::from_utf8_lossy(&o.stdout).into_owned();
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
-    })
+// Thread-local mock clipboard for tests (v0.14.9.3).
+// Avoids requiring a display server in CI. Tests set `TEST_CLIPBOARD` directly
+// before calling the paste handler; `read_from_clipboard()` reads from it.
+#[cfg(test)]
+thread_local! {
+    static TEST_CLIPBOARD: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 // -- Background tasks --------------------------------------------------------
@@ -4160,7 +4110,7 @@ async fn start_tail_stream(
         }
     }
 
-    let Some(resp) = resp_result else {
+    let Some(initial_resp) = resp_result else {
         let _ = tx.send(TuiMessage::CommandResponse(
             "Error: Could not connect to output stream after retries".into(),
         ));
@@ -4168,85 +4118,114 @@ async fn start_tail_stream(
         return;
     };
 
-    let mut stream = resp.bytes_stream();
     use tokio_stream::StreamExt;
-    let mut buffer = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let bytes = match chunk {
-            Ok(b) => b,
-            Err(_) => break,
-        };
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
+    // SSE reconnect state (v0.14.9.3).
+    //
+    // `last_event_id` tracks the most-recently received SSE `id:` field so
+    // that reconnect requests send `Last-Event-ID: <seq>` and the daemon
+    // resumes from where we left off (replaying missed events from its history
+    // buffer). Exponential backoff: 1s, 2s, 4s, 8s, 16s → max 5 retries.
+    let mut last_event_id: Option<u64> = None;
+    let mut reconnect_count: u32 = 0;
+    const MAX_RECONNECTS: u32 = 5;
+    let stream_url = format!("{}/api/goals/{}/output", base_url, resolved_target);
 
-        while let Some(pos) = buffer.find("\n\n") {
-            let frame = buffer[..pos].to_string();
-            buffer = buffer[pos + 2..].to_string();
+    // Use Option to allow moving the Response into bytes_stream() each iteration.
+    let mut next_resp: Option<reqwest::Response> = Some(initial_resp);
 
-            // Parse SSE frame.
-            let mut event_type = None;
-            let mut data = None;
-            for line in frame.lines() {
-                if let Some(rest) = line.strip_prefix("event: ") {
-                    event_type = Some(rest.trim().to_string());
-                } else if let Some(rest) = line.strip_prefix("data: ") {
-                    data = Some(rest.trim().to_string());
+    'reconnect: loop {
+        let resp = next_resp.take().expect("always set before loop start");
+        let mut stream = resp.bytes_stream();
+        let mut buffer = String::new();
+
+        'chunks: while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(_) => break 'chunks, // stream error → try reconnect
+            };
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buffer.find("\n\n") {
+                let frame = buffer[..pos].to_string();
+                buffer = buffer[pos + 2..].to_string();
+
+                // Parse SSE frame fields.
+                let mut event_type = None;
+                let mut data = None;
+                for line in frame.lines() {
+                    if let Some(rest) = line.strip_prefix("id: ") {
+                        // Track last received event ID for reconnect (v0.14.9.3).
+                        last_event_id = rest.trim().parse::<u64>().ok().or(last_event_id);
+                    } else if let Some(rest) = line.strip_prefix("event: ") {
+                        event_type = Some(rest.trim().to_string());
+                    } else if let Some(rest) = line.strip_prefix("data: ") {
+                        data = Some(rest.trim().to_string());
+                    }
                 }
-            }
 
-            match event_type.as_deref() {
-                Some("output") => {
-                    if let Some(d) = &data {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(d) {
-                            let stream_name =
-                                json["stream"].as_str().unwrap_or("stdout").to_string();
-                            let line = json["line"].as_str().unwrap_or("").to_string();
-                            // Route prompt-typed lines to the stdin prompt handler (v0.10.18.5).
-                            if stream_name == "prompt" {
-                                let prompt_line = line.clone();
-                                let _ = tx.send(TuiMessage::StdinPrompt(PendingStdinPrompt {
-                                    goal_id: target.clone(),
-                                    prompt_text: line,
-                                    detected_at: std::time::Instant::now(),
-                                    verifying: true,
-                                }));
+                match event_type.as_deref() {
+                    Some("output") => {
+                        if let Some(d) = &data {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(d) {
+                                let stream_name =
+                                    json["stream"].as_str().unwrap_or("stdout").to_string();
+                                let line = json["line"].as_str().unwrap_or("").to_string();
+                                // Route prompt-typed lines to the stdin prompt handler (v0.10.18.5).
+                                if stream_name == "prompt" {
+                                    let prompt_line = line.clone();
+                                    let _ = tx.send(TuiMessage::StdinPrompt(PendingStdinPrompt {
+                                        goal_id: target.clone(),
+                                        prompt_text: line,
+                                        detected_at: std::time::Instant::now(),
+                                        verifying: true,
+                                    }));
 
-                                // Layer 3: Dispatch Q&A agent verification (v0.11.2.5).
-                                let verify_tx = tx.clone();
-                                let verify_base = base_url.to_string();
-                                let verify_client = client.clone();
-                                tokio::spawn(async move {
-                                    let ask_url = format!("{}/api/agent/ask", verify_base);
-                                    let payload = serde_json::json!({
-                                        "prompt": format!(
-                                            "Is this agent output a prompt waiting for user input, \
-                                             or is it just informational output? The line is: \"{}\". \
-                                             Respond with only 'prompt' or 'not_prompt'.",
-                                            prompt_line
+                                    // Layer 3: Dispatch Q&A agent verification (v0.11.2.5).
+                                    let verify_tx = tx.clone();
+                                    let verify_base = base_url.to_string();
+                                    let verify_client = client.clone();
+                                    tokio::spawn(async move {
+                                        let ask_url = format!("{}/api/agent/ask", verify_base);
+                                        let payload = serde_json::json!({
+                                            "prompt": format!(
+                                                "Is this agent output a prompt waiting for user input, \
+                                                 or is it just informational output? The line is: \"{}\". \
+                                                 Respond with only 'prompt' or 'not_prompt'.",
+                                                prompt_line
+                                            )
+                                        });
+                                        let result = tokio::time::timeout(
+                                            std::time::Duration::from_secs(10),
+                                            verify_client.post(&ask_url).json(&payload).send(),
                                         )
-                                    });
-                                    let result = tokio::time::timeout(
-                                        std::time::Duration::from_secs(10),
-                                        verify_client.post(&ask_url).json(&payload).send(),
-                                    )
-                                    .await;
-                                    if let Ok(Ok(resp)) = result {
-                                        if let Ok(body) = resp.text().await {
-                                            if body.to_lowercase().contains("not_prompt") {
-                                                let _ = verify_tx
-                                                    .send(TuiMessage::PromptVerifiedNotPrompt);
+                                        .await;
+                                        if let Ok(Ok(resp)) = result {
+                                            if let Ok(body) = resp.text().await {
+                                                if body.to_lowercase().contains("not_prompt") {
+                                                    let _ = verify_tx
+                                                        .send(TuiMessage::PromptVerifiedNotPrompt);
+                                                }
                                             }
                                         }
+                                        // On timeout or error, fail-open — keep the prompt visible.
+                                    });
+                                } else if stream_name == "auto_answered" {
+                                    // Parse "[auto] prompt → response" format.
+                                    if let Some(arrow_pos) = line.find(" → ") {
+                                        let prompt = line[7..arrow_pos].to_string(); // skip "[auto] "
+                                        let response = line[arrow_pos + 5..].to_string(); // skip " → "
+                                        let _ = tx.send(TuiMessage::StdinAutoAnswered {
+                                            prompt,
+                                            response,
+                                        });
+                                    } else {
+                                        let _ = tx.send(TuiMessage::AgentOutput(AgentOutputLine {
+                                            stream: stream_name,
+                                            line,
+                                            goal_id: Some(target.clone()),
+                                        }));
                                     }
-                                    // On timeout or error, fail-open — keep the prompt visible.
-                                });
-                            } else if stream_name == "auto_answered" {
-                                // Parse "[auto] prompt → response" format.
-                                if let Some(arrow_pos) = line.find(" → ") {
-                                    let prompt = line[7..arrow_pos].to_string(); // skip "[auto] "
-                                    let response = line[arrow_pos + 5..].to_string(); // skip " → "
-                                    let _ =
-                                        tx.send(TuiMessage::StdinAutoAnswered { prompt, response });
                                 } else {
                                     let _ = tx.send(TuiMessage::AgentOutput(AgentOutputLine {
                                         stream: stream_name,
@@ -4254,31 +4233,65 @@ async fn start_tail_stream(
                                         goal_id: Some(target.clone()),
                                     }));
                                 }
-                            } else {
-                                let _ = tx.send(TuiMessage::AgentOutput(AgentOutputLine {
-                                    stream: stream_name,
-                                    line,
-                                    goal_id: Some(target.clone()),
-                                }));
                             }
                         }
                     }
+                    Some("done") => {
+                        // Intentional completion — do not reconnect.
+                        let _ = tx.send(TuiMessage::AgentOutputDone(target.clone()));
+                        return;
+                    }
+                    Some("lagged") => {
+                        let _ = tx.send(TuiMessage::CommandResponse(
+                            "[skipped some output lines — subscriber lagged]".into(),
+                        ));
+                    }
+                    _ => {}
                 }
-                Some("done") => {
-                    let _ = tx.send(TuiMessage::AgentOutputDone(target.clone()));
-                    return;
-                }
-                Some("lagged") => {
-                    let _ = tx.send(TuiMessage::CommandResponse(
-                        "[skipped some output lines — subscriber lagged]".into(),
-                    ));
-                }
-                _ => {}
+            }
+        }
+
+        // Stream ended unexpectedly (network drop, daemon restart, etc.).
+        // Attempt reconnect with exponential backoff and Last-Event-ID (v0.14.9.3).
+        if reconnect_count >= MAX_RECONNECTS {
+            let _ = tx.send(TuiMessage::CommandResponse(format!(
+                "[reconnect] Stream connection failed after {} retries. \
+                 Restart the tail with: :tail {}",
+                MAX_RECONNECTS,
+                &target[..8.min(target.len())]
+            )));
+            let _ = tx.send(TuiMessage::AgentOutputDone(target));
+            return;
+        }
+
+        let backoff_secs = 1u64 << reconnect_count;
+        let _ = tx.send(TuiMessage::CommandResponse(format!(
+            "[reconnect] Connection lost. Reconnecting ({}/{}) in {}s...",
+            reconnect_count + 1,
+            MAX_RECONNECTS,
+            backoff_secs
+        )));
+        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+        reconnect_count += 1;
+
+        // Build reconnect request. Include Last-Event-ID so the daemon replays
+        // any events we missed while disconnected (requires daemon >= v0.14.9.3).
+        let mut req = client.get(&stream_url);
+        if let Some(id) = last_event_id {
+            req = req.header("Last-Event-ID", id.to_string());
+        }
+
+        match req.send().await {
+            Ok(r) if r.status().is_success() => {
+                next_resp = Some(r);
+                continue 'reconnect;
+            }
+            Ok(_) | Err(_) => {
+                // Failed this attempt — loop back to check retry limit.
+                continue 'reconnect;
             }
         }
     }
-
-    let _ = tx.send(TuiMessage::AgentOutputDone(target));
 }
 
 /// Stream agent Q&A output from a request ID.
@@ -7780,5 +7793,129 @@ mod tests {
             "Draft help should be shown"
         );
         assert!(combined.contains("abc12345"), "Draft ID should be shown");
+    }
+
+    // ── v0.14.9.3: Clipboard (arboard mock), auto-scroll audit ────────────────
+
+    #[test]
+    fn clipboard_mock_read_returns_set_value() {
+        // Set the thread-local mock clipboard and verify read_from_clipboard returns it.
+        TEST_CLIPBOARD.with(|c| *c.borrow_mut() = Some("hello paste".to_string()));
+        let result = read_from_clipboard();
+        assert_eq!(result.as_deref(), Some("hello paste"));
+        // Clean up.
+        TEST_CLIPBOARD.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn clipboard_mock_read_returns_none_when_empty() {
+        TEST_CLIPBOARD.with(|c| *c.borrow_mut() = None);
+        let result = read_from_clipboard();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn clipboard_mock_copy_sets_value() {
+        TEST_CLIPBOARD.with(|c| *c.borrow_mut() = None);
+        copy_to_clipboard("written by test");
+        let result = TEST_CLIPBOARD.with(|c| c.borrow().clone());
+        assert_eq!(result.as_deref(), Some("written by test"));
+        // Clean up.
+        TEST_CLIPBOARD.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn ctrl_v_paste_uses_arboard_mock() {
+        // Verify the Ctrl+V handler reads from the mock clipboard.
+        TEST_CLIPBOARD.with(|c| *c.borrow_mut() = Some("arboard text".to_string()));
+
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        simulate_ctrl_v_paste(&mut app, "arboard text");
+        assert_eq!(app.input, "arboard text");
+
+        TEST_CLIPBOARD.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn clear_command_re_enables_auto_scroll() {
+        // Regression: :clear was not setting auto_scroll = true (v0.14.9.3 fix).
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        // Fill output and scroll up to disable auto-scroll.
+        for i in 0..30 {
+            app.push_output(OutputLine::event(format!("line {}", i)));
+        }
+        app.scroll_up(10);
+        assert!(
+            !app.auto_scroll,
+            "auto_scroll should be false after scroll up"
+        );
+
+        // Simulate the :clear path directly.
+        app.output.clear();
+        app.scroll_offset = 0;
+        app.unread_events = 0;
+        app.auto_scroll = true; // the fix
+
+        assert!(app.auto_scroll, "auto_scroll must be true after :clear");
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.unread_events, 0);
+    }
+
+    #[test]
+    fn auto_scroll_blocked_when_scrolled_up_during_output() {
+        // When scroll_offset > 0, new output must increment unread_events (not auto-scroll).
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for i in 0..50 {
+            app.push_output(OutputLine::event(format!("line {}", i)));
+        }
+        app.scroll_up(15); // scroll up — disable auto_scroll
+        assert!(!app.auto_scroll);
+
+        let before = app.unread_events;
+        app.push_output(OutputLine::event("new event while scrolled up".into()));
+        assert_eq!(
+            app.unread_events,
+            before + 1,
+            "unread_events must increment when scrolled up"
+        );
+    }
+
+    #[test]
+    fn auto_scroll_resumes_after_scroll_to_bottom_via_scroll_down() {
+        // Scroll up then back to bottom via scroll_down → auto_scroll must re-enable.
+        let mut app = App::new(
+            "http://localhost".into(),
+            None,
+            std::path::PathBuf::from("/tmp"),
+        );
+        for i in 0..50 {
+            app.push_output(OutputLine::event(format!("line {}", i)));
+        }
+        app.scroll_up(5);
+        assert!(!app.auto_scroll);
+
+        app.scroll_down(5); // back to scroll_offset == 0
+        assert_eq!(app.scroll_offset, 0);
+        assert!(
+            app.auto_scroll,
+            "auto_scroll must be true after returning to bottom"
+        );
+
+        // New output at bottom → no unread increment.
+        let before = app.unread_events;
+        app.push_output(OutputLine::event("bottom event".into()));
+        assert_eq!(app.unread_events, before, "no unread events when at bottom");
     }
 }

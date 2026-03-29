@@ -286,7 +286,7 @@ impl PersistentQaAgent {
     pub async fn ask(
         &self,
         prompt: &str,
-        tx: tokio::sync::broadcast::Sender<crate::api::goal_output::OutputLine>,
+        tx: crate::api::goal_output::GoalOutputPublisher,
         parallel: bool,
     ) -> Result<(), String> {
         *self.last_active.lock().await = std::time::Instant::now();
@@ -296,10 +296,8 @@ impl PersistentQaAgent {
         let continue_conversation = !parallel && *self.has_conversation.lock().await;
         let (binary, args) = resolve_agent_command(&self.agent, prompt, continue_conversation)?;
 
-        let _ = tx.send(crate::api::goal_output::OutputLine {
-            stream: "stderr",
-            line: format!("Agent ({})...", self.agent),
-        });
+        tx.publish("stderr", format!("Agent ({})...", self.agent))
+            .await;
 
         let timeout = std::time::Duration::from_secs(self.config.idle_timeout_secs.max(60));
 
@@ -335,10 +333,7 @@ impl PersistentQaAgent {
                         let mut count = 0u64;
                         while let Ok(Some(line)) = reader.next_line().await {
                             count += 1;
-                            let _ = tx.send(crate::api::goal_output::OutputLine {
-                                stream: "stdout",
-                                line,
-                            });
+                            tx.publish("stdout", line).await;
                         }
                         tracing::debug!(lines = count, "QA agent: stdout stream ended");
                     }
@@ -349,10 +344,7 @@ impl PersistentQaAgent {
                         let mut reader = BufReader::new(err).lines();
                         while let Ok(Some(line)) = reader.next_line().await {
                             tracing::debug!(line = %line, "QA agent stderr");
-                            let _ = tx2.send(crate::api::goal_output::OutputLine {
-                                stream: "stderr",
-                                line,
-                            });
+                            tx2.publish("stderr", line).await;
                         }
                     }
                 });
@@ -658,8 +650,6 @@ pub async fn ask_agent(
             // The persistent agent manages subprocess lifecycle, crash recovery,
             // and restart limits — no more cold-start per question.
             tokio::spawn(async move {
-                use crate::api::goal_output::OutputLine;
-
                 tracing::info!(
                     "Agent ask (persistent QA): agent={}, request_id={}, prompt_len={}",
                     agent,
@@ -667,17 +657,14 @@ pub async fn ask_agent(
                     prompt.len()
                 );
 
-                tracing::info!(request_id = %req_id, subscribers = tx.receiver_count(), parallel, "QA ask: starting");
+                tracing::info!(request_id = %req_id, parallel, "QA ask: starting");
                 match persistent_qa.ask(&prompt, tx.clone(), parallel).await {
                     Ok(()) => {
                         tracing::info!(request_id = %req_id, "QA ask: completed successfully");
                     }
                     Err(e) => {
                         tracing::warn!(request_id = %req_id, error = %e, "QA ask: agent error");
-                        let _ = tx.send(OutputLine {
-                            stream: "stderr",
-                            line: format!("[agent error] {}", e),
-                        });
+                        tx.publish("stderr", format!("[agent error] {}", e)).await;
                     }
                 }
 

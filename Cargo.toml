@@ -43,7 +43,7 @@ members = [
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.14.9-alpha.2"
+version = "0.14.9-alpha.3"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
@@ -141,6 +141,12 @@ ring = "0.17"
 
 # Base64 encoding — for attestation signature encoding (v0.14.1).
 base64 = "0.22"
+
+# Clipboard access — synchronous OS clipboard read/write without external tools (v0.14.9.3).
+# Replaces the subprocess approach (pbpaste/xclip/xsel) which raced against terminal events.
+# On headless environments (no display server), Clipboard::new() returns Err and we handle
+# the failure gracefully (return None / no-op).
+arboard = "3"
 
 # Testing utilities
 tempfile = "3"

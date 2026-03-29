@@ -179,7 +179,6 @@ pub async fn execute_command(
                 .stdin(std::process::Stdio::piped())
                 .spawn();
 
-            use crate::api::goal_output::OutputLine;
             match result {
                 Ok(mut child) => {
                     // Stream stdout and stderr line-by-line, collecting stderr
@@ -220,13 +219,10 @@ pub async fn execute_command(
                                         } else {
                                             "stdout"
                                         };
-                                        let _ = tx.send(OutputLine { stream, line: text });
+                                        tx.publish(stream, text).await;
                                     }
                                     ta_output_schema::ParseResult::ToolUse(name) => {
-                                        let _ = tx.send(OutputLine {
-                                            stream: "stdout",
-                                            line: format!("[tool] {}", name),
-                                        });
+                                        tx.publish("stdout", format!("[tool] {}", name)).await;
                                     }
                                     ta_output_schema::ParseResult::NotJson => {
                                         // Non-JSON lines: relay as-is.
@@ -235,7 +231,7 @@ pub async fn execute_command(
                                         } else {
                                             "stdout"
                                         };
-                                        let _ = tx.send(OutputLine { stream, line });
+                                        tx.publish(stream, line).await;
                                     }
                                     ta_output_schema::ParseResult::Model(_)
                                     | ta_output_schema::ParseResult::Suppress => {
@@ -281,10 +277,7 @@ pub async fn execute_command(
                                         }
                                     }
                                 }
-                                let _ = tx2.send(OutputLine {
-                                    stream: "stderr",
-                                    line: line.clone(),
-                                });
+                                tx2.publish("stderr", line.clone()).await;
                                 // Keep last 20 lines for failure context.
                                 let mut lines = stderr_lines2.lock().await;
                                 if lines.len() >= 20 {
@@ -409,10 +402,12 @@ pub async fn execute_command(
                             ))
                             .await;
                             elapsed += heartbeat_interval_secs;
-                            let _ = heartbeat_tx.send(OutputLine {
-                                stream: "stderr",
-                                line: format!("[heartbeat] still running... {}s elapsed", elapsed),
-                            });
+                            heartbeat_tx
+                                .publish(
+                                    "stderr",
+                                    format!("[heartbeat] still running... {}s elapsed", elapsed),
+                                )
+                                .await;
                         }
                     });
 
@@ -470,10 +465,9 @@ pub async fn execute_command(
                         Ok(s) if s.success() => {
                             tracing::info!("Background command completed: {}", cmd_str);
                             // Emit completion bookend (v0.10.18.4 item 11).
-                            let _ = tx_bookend.send(OutputLine {
-                                stream: "stdout",
-                                line: format!("\u{2713} {} completed", cmd_str),
-                            });
+                            tx_bookend
+                                .publish("stdout", format!("\u{2713} {} completed", cmd_str))
+                                .await;
                         }
                         Ok(s) => {
                             let code = s.code().unwrap_or(-1);
@@ -492,28 +486,25 @@ pub async fn execute_command(
                             for stderr_line in &tail_lines[start..] {
                                 bookend.push_str(&format!("\n  {}", stderr_line));
                             }
-                            let _ = tx_bookend.send(OutputLine {
-                                stream: "stderr",
-                                line: bookend,
-                            });
+                            tx_bookend.publish("stderr", bookend).await;
                             emit_command_failed_event(&events_dir, &cmd_str, code, &stderr_tail);
                         }
                         Err(e) => {
                             tracing::error!("Background command wait error: {} — {}", cmd_str, e);
-                            let _ = tx_bookend.send(OutputLine {
-                                stream: "stderr",
-                                line: format!("\u{2717} {} failed: {}", cmd_str, e),
-                            });
+                            tx_bookend
+                                .publish("stderr", format!("\u{2717} {} failed: {}", cmd_str, e))
+                                .await;
                             emit_command_failed_event(&events_dir, &cmd_str, -1, &e.to_string());
                         }
                     }
                 }
                 Err(e) => {
                     tracing::error!("Background command spawn error: {} — {}", cmd_str, e);
-                    let _ = tx.send(OutputLine {
-                        stream: "stderr",
-                        line: format!("\u{2717} {} failed to start: {}", cmd_str, e),
-                    });
+                    tx.publish(
+                        "stderr",
+                        format!("\u{2717} {} failed to start: {}", cmd_str, e),
+                    )
+                    .await;
                     emit_command_failed_event(
                         &events_dir,
                         &cmd_str,

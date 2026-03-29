@@ -382,7 +382,7 @@ The shell remembers your command history across sessions. Reconnect any time wit
 **Pasting text**: The shell supports two paste paths:
 
 - **Bracketed paste** (iTerm2, most Linux terminals): `Cmd+V` / `Ctrl+V` triggers `Event::Paste` automatically. Text is inserted at the cursor position.
-- **Clipboard shortcut** (Terminal.app, xterm, any terminal without bracketed-paste): `Ctrl+V` (Linux) or `Cmd+V` (macOS) reads the OS clipboard directly using `pbpaste` / `xclip` / `xsel` and inserts at the cursor. If no clipboard tool is found, a brief notice appears in the output pane.
+- **Clipboard shortcut** (Terminal.app, xterm, any terminal without bracketed-paste): `Ctrl+V` (Linux) or `Cmd+V` (macOS) reads the OS clipboard directly via the `arboard` crate — no external tools required (`pbpaste`/`xclip`/`xsel` are no longer needed). If the clipboard is empty or unavailable (e.g. headless environment), a brief notice appears in the output pane.
 
 Small pastes (under 500 chars / 10 lines) insert at the current cursor position when the prompt is active, or snap to the end of the input and scroll to the bottom if you had scrolled up to read history. Large pastes are compacted into an indicator instead of flooding the input:
 
@@ -395,6 +395,8 @@ ta> [Pasted 2,847 chars / 47 lines — Tab to preview, Esc to cancel]
 - Press **Esc** or **Ctrl-C** to discard the paste.
 
 **Auto-tail**: When streaming agent output, the shell follows new lines automatically (`tail -f` style). If you scroll up to read earlier output, auto-tail is paused. Scroll back to the bottom (mouse wheel, `PageDown`, or `Cmd+Down`) to resume — the viewport will immediately begin following new output again. `Ctrl+L` clears the output and also resumes auto-tail.
+
+**Stream reconnect**: If the connection to the daemon drops mid-stream (e.g. daemon restart, network interruption), the shell automatically reconnects — up to 5 retries with exponential backoff (1s, 2s, 4s, 8s, 16s). A non-blocking notice is shown in the output pane during reconnect. The daemon tracks a monotonic sequence number per goal stream (`id:` field in SSE), so reconnects resume from the last received event with no duplicate or lost lines. If all retries fail, an actionable message is shown and the tail session ends cleanly.
 
 ---
 

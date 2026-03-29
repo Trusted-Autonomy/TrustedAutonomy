@@ -846,6 +846,14 @@ body {
     }
 
     const url = BASE + '/api/goals/' + encodeURIComponent(goalId) + '/output';
+    // TA Studio uses the browser's native EventSource API (v0.14.9.3).
+    // Per the W3C EventSource spec:
+    //   - The browser automatically tracks the last received event `id:` field.
+    //   - On disconnect, the browser reconnects and sends `Last-Event-ID: <n>`
+    //     so the daemon can resume from the correct position in its history buffer.
+    // No custom reconnect code is needed here — the browser handles it natively.
+    // The daemon emits `id: <seq>` on every SSE event (since v0.14.9.3) to enable
+    // this standard flow.
     const sse = new EventSource(url);
     const progressGroupId = 'pg-' + goalId.substring(0, 8);
     const cmdLabel = commandLabel || label || shortId(goalId);
