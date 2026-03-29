@@ -25,6 +25,31 @@ pub enum MemoryCommands {
         /// Maximum number of entries to show (default: 50).
         #[arg(long, default_value = "50")]
         limit: usize,
+        /// Filter by scope: "local" or "team".
+        #[arg(long)]
+        scope: Option<String>,
+    },
+
+    /// Store a memory entry with optional scope tagging.
+    ///
+    /// The scope is resolved in priority order:
+    ///   1. --scope flag (explicit override)
+    ///   2. Per-key-prefix override in [memory.sharing.scopes] config
+    ///   3. Default scope from [memory.sharing] config (default: "local")
+    Store {
+        /// Memory key to store (e.g., "arch:api-design" or "decisions:auth-strategy").
+        key: String,
+        /// Value (JSON string or plain text).
+        value: String,
+        /// Optional scope override: "local" or "team".
+        #[arg(long)]
+        scope: Option<String>,
+        /// Optional category (e.g., convention, architecture, history).
+        #[arg(long, short = 'c')]
+        category: Option<String>,
+        /// Optional tags (repeatable).
+        #[arg(long, short = 't')]
+        tags: Vec<String>,
     },
 
     /// List discovered memory backend plugins and optionally probe them.
@@ -56,14 +81,38 @@ pub enum MemoryCommands {
 pub fn execute(command: &MemoryCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match command {
         MemoryCommands::Backend => show_backend(config),
-        MemoryCommands::List { category, limit } => super::context::execute(
-            &super::context::ContextCommands::List {
-                tag: vec![],
-                prefix: None,
-                category: category.clone(),
-                limit: Some(*limit),
-            },
+        MemoryCommands::List {
+            category,
+            limit,
+            scope,
+        } => {
+            if let Some(scope_filter) = scope {
+                list_by_scope(config, scope_filter, *limit)
+            } else {
+                super::context::execute(
+                    &super::context::ContextCommands::List {
+                        tag: vec![],
+                        prefix: None,
+                        category: category.clone(),
+                        limit: Some(*limit),
+                    },
+                    config,
+                )
+            }
+        }
+        MemoryCommands::Store {
+            key,
+            value,
+            scope,
+            category,
+            tags,
+        } => store_entry(
             config,
+            key,
+            value,
+            scope.as_deref(),
+            category.as_deref(),
+            tags,
         ),
         MemoryCommands::Plugin { probe } => list_plugins(config, *probe),
         MemoryCommands::Sync { dry_run } => sync_to_backend(config, *dry_run),
@@ -207,6 +256,7 @@ fn sync_to_backend(config: &GatewayConfig, dry_run: bool) -> anyhow::Result<()> 
             expires_at: entry.expires_at,
             confidence: Some(entry.confidence),
             phase_id: entry.phase_id.clone(),
+            scope: entry.scope.clone(),
         };
         match dest.store_with_params(
             &entry.key,
@@ -354,6 +404,115 @@ fn show_backend(config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `ta memory store <key> <value>` — write a memory entry with scope tagging.
+///
+/// Scope resolution order:
+/// 1. `--scope` flag (explicit override)
+/// 2. Per-key-prefix override in `[memory.sharing.scopes]` config
+/// 3. `[memory.sharing] default_scope` (default: "local")
+fn store_entry(
+    config: &GatewayConfig,
+    key: &str,
+    value: &str,
+    scope_override: Option<&str>,
+    category_str: Option<&str>,
+    tags: &[String],
+) -> anyhow::Result<()> {
+    use ta_memory::StoreParams;
+
+    let memory_config = ta_memory::key_schema::load_memory_config(&config.workspace_root);
+
+    // Resolve scope.
+    let resolved_scope = if let Some(s) = scope_override {
+        s.to_string()
+    } else {
+        memory_config.sharing.scope_for_key(key).to_string()
+    };
+
+    // Parse value as JSON if it looks like JSON, otherwise treat as plain text.
+    let json_value = if value.starts_with('{') || value.starts_with('[') || value.starts_with('"') {
+        serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
+    } else {
+        serde_json::Value::String(value.to_string())
+    };
+
+    let category = category_str.map(ta_memory::MemoryCategory::from_str_lossy);
+
+    let params = StoreParams {
+        goal_id: None,
+        category,
+        expires_at: None,
+        confidence: Some(0.9),
+        phase_id: None,
+        scope: Some(resolved_scope.clone()),
+    };
+
+    let mut store = ta_memory::memory_store_from_config(&config.workspace_root);
+    store
+        .store_with_params(key, json_value, tags.to_vec(), "ta-cli", params)
+        .map_err(|e| anyhow::anyhow!("failed to store memory entry: {}", e))?;
+
+    println!("Stored: {} [scope: {}]", key, resolved_scope);
+    Ok(())
+}
+
+/// `ta memory list --scope <scope>` — list entries filtered by sharing scope.
+fn list_by_scope(config: &GatewayConfig, scope_filter: &str, limit: usize) -> anyhow::Result<()> {
+    let store = ta_memory::memory_store_from_config(&config.workspace_root);
+    let all = store
+        .list(None)
+        .map_err(|e| anyhow::anyhow!("failed to list memory entries: {}", e))?;
+
+    let filtered: Vec<_> = all
+        .into_iter()
+        .filter(|e| {
+            let entry_scope = e.scope.as_deref().unwrap_or("local");
+            entry_scope == scope_filter
+        })
+        .take(limit)
+        .collect();
+
+    if filtered.is_empty() {
+        println!("No memory entries with scope '{}' found.", scope_filter);
+        return Ok(());
+    }
+
+    println!(
+        "Memory entries [scope: {}] ({} shown):",
+        scope_filter,
+        filtered.len()
+    );
+    println!();
+    for e in &filtered {
+        let cat = e
+            .category
+            .as_ref()
+            .map(|c| format!("[{}] ", c))
+            .unwrap_or_default();
+        let value_preview = match &e.value {
+            serde_json::Value::String(s) => {
+                if s.len() > 80 {
+                    format!("{}...", &s[..80])
+                } else {
+                    s.clone()
+                }
+            }
+            v => {
+                let s = v.to_string();
+                if s.len() > 80 {
+                    format!("{}...", &s[..80])
+                } else {
+                    s
+                }
+            }
+        };
+        println!("  {}{}", cat, e.key);
+        println!("    {}", value_preview);
+    }
+
+    Ok(())
+}
+
 /// Recursively sum the size of all files in a directory (in bytes).
 fn dir_size(path: &std::path::Path) -> u64 {
     if !path.exists() {
@@ -418,5 +577,60 @@ mod tests {
         // Should not panic with missing store directories.
         let result = show_backend(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn memory_list_scope_filter_returns_team_entries() {
+        use ta_memory::{FsMemoryStore, MemoryStore, StoreParams};
+
+        let dir = TempDir::new().unwrap();
+        let mem_dir = dir.path().join(".ta").join("memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+
+        let mut store = FsMemoryStore::new(&mem_dir);
+
+        // Store a "team" entry.
+        store
+            .store_with_params(
+                "decisions:auth",
+                serde_json::json!("use JWT"),
+                vec![],
+                "test",
+                StoreParams {
+                    scope: Some("team".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Store a "local" entry.
+        store
+            .store_with_params(
+                "scratch:notes",
+                serde_json::json!("temp note"),
+                vec![],
+                "test",
+                StoreParams {
+                    scope: Some("local".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Verify scope filtering.
+        let all = store.list(None).unwrap();
+        let team_entries: Vec<_> = all
+            .iter()
+            .filter(|e| e.scope.as_deref() == Some("team"))
+            .collect();
+        let local_entries: Vec<_> = all
+            .iter()
+            .filter(|e| e.scope.as_deref().unwrap_or("local") == "local")
+            .collect();
+
+        assert_eq!(team_entries.len(), 1, "expected 1 team entry");
+        assert_eq!(team_entries[0].key, "decisions:auth");
+        assert_eq!(local_entries.len(), 1, "expected 1 local entry");
+        assert_eq!(local_entries[0].key, "scratch:notes");
     }
 }

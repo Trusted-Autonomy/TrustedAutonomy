@@ -248,6 +248,18 @@ async fn main() -> Result<()> {
         // API server mode: start the full HTTP API.
         tracing::info!("Running in API server mode");
 
+        // Startup recovery scan (v0.14.12): detect goals left Running by a previous crash.
+        {
+            let recovered = watchdog::startup_recovery_scan(&project_root);
+            if recovered > 0 {
+                tracing::info!(
+                    recovered = recovered,
+                    "Startup recovery: {} zombie goal(s) transitioned to DraftPending/Failed",
+                    recovered
+                );
+            }
+        }
+
         // Start the watchdog loop (v0.11.2.4, power manager v0.13.1.1).
         {
             let wd_config = match &daemon_config.operations {

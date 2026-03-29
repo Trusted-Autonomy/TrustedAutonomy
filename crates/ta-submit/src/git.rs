@@ -26,6 +26,8 @@ pub struct GitAdapter {
     config: SubmitConfig,
     /// Sync configuration (strategy, remote, branch)
     sync_config: SyncConfig,
+    /// Plan file name relative to workspace root (default: "PLAN.md").
+    plan_file: String,
 }
 
 impl GitAdapter {
@@ -35,6 +37,7 @@ impl GitAdapter {
             work_dir: work_dir.into(),
             config: SubmitConfig::default(),
             sync_config: SyncConfig::default(),
+            plan_file: "PLAN.md".to_string(),
         }
     }
 
@@ -44,6 +47,7 @@ impl GitAdapter {
             work_dir: work_dir.into(),
             config,
             sync_config: SyncConfig::default(),
+            plan_file: "PLAN.md".to_string(),
         }
     }
 
@@ -57,7 +61,14 @@ impl GitAdapter {
             work_dir: work_dir.into(),
             config,
             sync_config,
+            plan_file: "PLAN.md".to_string(),
         }
+    }
+
+    /// Set the plan file name (relative to work_dir). Default: "PLAN.md".
+    pub fn with_plan_file(mut self, plan_file: impl Into<String>) -> Self {
+        self.plan_file = plan_file.into();
+        self
     }
 
     /// Run a git command in the working directory
@@ -389,10 +400,10 @@ impl SourceAdapter for GitAdapter {
                         );
                     }
                 }
-                // Still attempt to stage PLAN.md and critical files even when all
+                // Still attempt to stage the plan file and critical files even when all
                 // draft artifacts were gitignored, then check if there's anything to commit.
-                if self.work_dir.join("PLAN.md").exists() {
-                    let _ = self.git_cmd(&["add", "PLAN.md"]);
+                if self.work_dir.join(&self.plan_file).exists() {
+                    let _ = self.git_cmd(&["add", &self.plan_file]);
                 }
                 let candidates = Self::auto_stage_candidates(&self.work_dir);
                 let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
@@ -438,9 +449,9 @@ impl SourceAdapter for GitAdapter {
 
                 // Auto-stage lock files, .ta/plan_history.jsonl, and user-configured
                 // files that are modified but were not in the draft artifact list.
-                // PLAN.md is always staged if it exists (may have been updated by apply).
-                if self.work_dir.join("PLAN.md").exists() {
-                    let _ = self.git_cmd(&["add", "PLAN.md"]);
+                // The plan file is always staged if it exists (may have been updated by apply).
+                if self.work_dir.join(&self.plan_file).exists() {
+                    let _ = self.git_cmd(&["add", &self.plan_file]);
                 }
                 let candidates = Self::auto_stage_candidates(&self.work_dir);
                 let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();

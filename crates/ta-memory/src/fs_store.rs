@@ -125,6 +125,7 @@ impl MemoryStore for FsMemoryStore {
             expires_at: params.expires_at,
             confidence: params.confidence.unwrap_or(0.5),
             phase_id: params.phase_id,
+            scope: params.scope,
             created_at,
             updated_at: now,
         };

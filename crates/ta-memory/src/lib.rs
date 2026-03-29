@@ -48,7 +48,7 @@ pub use error::MemoryError;
 pub use external_adapter::ExternalMemoryAdapter;
 pub use factory::{memory_store_from_config, memory_store_strict};
 pub use fs_store::FsMemoryStore;
-pub use key_schema::{KeyDomainMap, KeySchema, ProjectType};
+pub use key_schema::{KeyDomainMap, KeySchema, MemoryConfig, MemorySharingConfig, ProjectType};
 pub use plugin_manifest::{
     discover_all_memory_plugins, find_memory_plugin, DiscoveredMemoryPlugin, MemoryPluginManifest,
     MemoryPluginSource,

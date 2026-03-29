@@ -9493,6 +9493,131 @@ ta session show <session-id>
 
 ---
 
+## Maintenance & GC
+
+TA accumulates state over time: staging directories, goal records, and event logs. Use these commands to keep the workspace healthy.
+
+### Garbage Collection
+
+Remove stale staging directories and zombie goal records:
+
+```bash
+# Preview what would be removed (no changes made).
+ta gc --dry-run
+
+# Remove goals older than 30 days (default threshold).
+ta gc
+
+# Use a custom threshold.
+ta gc --older-than 14d
+
+# Also remove the staging workspace directories.
+ta gc --include-staging
+```
+
+### Purging Old Goals
+
+Bulk-delete terminal goal records (applied, closed, denied, completed) to reclaim disk space:
+
+```bash
+# Preview purge candidates.
+ta goal purge --state closed,denied,applied --older-than 30d --dry-run
+
+# Purge a specific goal by ID prefix.
+ta goal purge --id abc12345 --confirm
+
+# Purge all completed goals older than 7 days.
+ta goal purge --state completed --older-than 7d
+```
+
+> `ta goal purge` refuses to touch active goals (Running, PrReady, UnderReview).
+> Every purge writes an audit record.
+
+### `ta doctor` GC Checks
+
+`ta doctor` includes three GC-focused health checks:
+
+| Check | Description | Recommendation |
+|---|---|---|
+| GC: stale staging dirs | Staging subdirs older than 7 days with no active goal | Run `ta gc` |
+| GC: events.jsonl size | Warns if `.ta/events/events.jsonl` exceeds 10 MB | Run `ta gc` to rotate |
+| GC: draft_pending timeouts | Goals stuck in `DraftPending` for more than 1 hour | Run `ta draft build --goal <id>` |
+
+Run the full health check:
+
+```bash
+ta doctor
+```
+
+### Auto-Recovery on Daemon Startup
+
+When the daemon starts in API mode (`ta daemon start`), it performs a startup recovery scan:
+
+- Scans all goals in `Running` state.
+- For any goal whose agent PID is no longer alive:
+  - If the staging workspace exists → transitions to `DraftPending` so you can run `ta draft build`.
+  - If staging is absent → transitions to `Failed` and writes an audit record.
+- The scan runs once at startup, before the watchdog loop begins.
+
+This prevents goals from being permanently stuck in `Running` after a daemon crash or machine restart.
+
+---
+
+## Memory Sharing
+
+TA memory entries can be tagged with a sharing scope (`"local"` or `"team"`) to control which entries are eligible for sync to a shared backend.
+
+### Configuration
+
+Add a `[memory.sharing]` section to `.ta/memory.toml`:
+
+```toml
+# Default scope for all keys not explicitly listed.
+[memory.sharing]
+default_scope = "local"
+
+# Per-key-prefix scope overrides.
+[memory.sharing.scopes]
+decisions  = "team"
+arch       = "team"
+scratch    = "local"
+```
+
+- `default_scope = "local"` — entries are not synced by default.
+- Add prefixes to `[memory.sharing.scopes]` to tag specific key families as `"team"`.
+
+### Storing with Scope
+
+```bash
+# Store an entry; scope resolved from config (arch prefix → "team").
+ta memory store arch:api-design "Use REST with OpenAPI 3.1"
+
+# Explicit scope override.
+ta memory store decisions:auth "Use JWT RS256" --scope team
+
+# With category and tags.
+ta memory store arch:db-schema "Postgres, single DB" \
+    --scope team \
+    --category architecture \
+    --tag db --tag postgres
+```
+
+### Listing by Scope
+
+```bash
+# List all "team"-scoped entries.
+ta memory list --scope team
+
+# List all "local"-scoped entries (default for untagged entries).
+ta memory list --scope local
+```
+
+### Sync Integration
+
+When `ta memory sync` copies entries to a configured backend (e.g., Supermemory, RuVector), the `scope` field is preserved on each entry. External sync adapters can use `scope = "team"` to decide which entries to share with other team members.
+
+---
+
 ## Getting Help
 
 - **Source and documentation**: [github.com/trustedautonomy/ta](https://github.com/trustedautonomy/ta)

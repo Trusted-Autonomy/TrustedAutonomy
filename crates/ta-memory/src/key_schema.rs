@@ -108,6 +108,69 @@ impl KeyDomainMap {
     }
 }
 
+/// Memory sharing scope configuration (`[memory.sharing]` in `.ta/memory.toml`).
+///
+/// Controls whether memory entries are tagged as "local" (default) or "team"
+/// for sync to a shared backend. Per-key-prefix overrides allow fine-grained
+/// control (e.g., architectural decisions are "team", scratch notes are "local").
+///
+/// Example `.ta/memory.toml`:
+/// ```toml
+/// [memory.sharing]
+/// default_scope = "local"
+///
+/// [memory.sharing.scopes]
+/// decisions = "team"
+/// arch = "team"
+/// scratch = "local"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySharingConfig {
+    /// Default scope for all keys not explicitly listed. "local" or "team".
+    #[serde(default = "default_scope_local")]
+    pub default_scope: String,
+    /// Per-key-prefix scope overrides.
+    ///
+    /// Maps key prefixes (e.g., "decisions", "arch") to scope ("local" or "team").
+    #[serde(default)]
+    pub scopes: std::collections::HashMap<String, String>,
+}
+
+fn default_scope_local() -> String {
+    "local".to_string()
+}
+
+impl Default for MemorySharingConfig {
+    fn default() -> Self {
+        Self {
+            default_scope: default_scope_local(),
+            scopes: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl MemorySharingConfig {
+    /// Resolve the scope for a given memory key.
+    ///
+    /// Checks per-prefix overrides (longest match wins), then falls back to `default_scope`.
+    pub fn scope_for_key(&self, key: &str) -> &str {
+        // Find longest matching prefix.
+        let mut best: Option<(&str, usize)> = None;
+        for (prefix, scope) in &self.scopes {
+            if key.starts_with(prefix.as_str()) {
+                let len = prefix.len();
+                if best.is_none() || len > best.unwrap().1 {
+                    best = Some((scope.as_str(), len));
+                }
+            }
+        }
+        if let Some((scope, _)) = best {
+            return scope;
+        }
+        &self.default_scope
+    }
+}
+
 /// Optional configuration from `.ta/memory.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryConfig {
@@ -128,6 +191,9 @@ pub struct MemoryConfig {
     /// 3. `ta-memory-<name>` on `$PATH`
     #[serde(default)]
     pub plugin: Option<String>,
+    /// Memory sharing configuration (`[memory.sharing]` section).
+    #[serde(default)]
+    pub sharing: MemorySharingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +392,14 @@ fn parse_memory_config(content: &str) -> MemoryConfig {
             current_section = "key_domains";
             continue;
         }
+        if trimmed == "[memory.sharing]" || trimmed == "[sharing]" {
+            current_section = "sharing";
+            continue;
+        }
+        if trimmed == "[memory.sharing.scopes]" || trimmed == "[sharing.scopes]" {
+            current_section = "sharing_scopes";
+            continue;
+        }
         if trimmed.starts_with('[') {
             current_section = "";
             continue;
@@ -357,6 +431,17 @@ fn parse_memory_config(content: &str) -> MemoryConfig {
                         "build_tool" => kd.build_tool = Some(value.to_string()),
                         _ => {}
                     }
+                }
+                "sharing" => {
+                    if key == "default_scope" {
+                        config.sharing.default_scope = value.to_string();
+                    }
+                }
+                "sharing_scopes" => {
+                    config
+                        .sharing
+                        .scopes
+                        .insert(key.to_string(), value.to_string());
                 }
                 _ => {
                     // Top-level keys.
