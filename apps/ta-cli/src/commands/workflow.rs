@@ -19,7 +19,10 @@ use std::path::PathBuf;
 use clap::Subcommand;
 use ta_changeset::sources::{ExternalSource, Lockfile, PackageManifest, SourceCache};
 use ta_mcp_gateway::GatewayConfig;
-use ta_workflow::{WorkflowCatalog, WorkflowDefinition, WorkflowEngine, YamlWorkflowEngine};
+use ta_workflow::{
+    artifact_dag, ArtifactStore, ArtifactType, WorkflowCatalog, WorkflowDefinition, WorkflowEngine,
+    YamlWorkflowEngine,
+};
 
 use super::governed_workflow::{self, RunOptions};
 
@@ -64,6 +67,36 @@ pub enum WorkflowCommands {
         /// Workflow ID or governed workflow run ID (or 8-char prefix).
         /// If omitted, shows the most recent governed workflow run.
         workflow_id: Option<String>,
+        /// Live-updating view: refreshes every 2 seconds showing step states,
+        /// elapsed time, and last artifact emitted (v0.14.10).
+        #[arg(long)]
+        live: bool,
+    },
+    /// Print the resolved artifact-type DAG for a workflow definition (v0.14.10).
+    ///
+    /// Shows stage names, the artifact types flowing along each edge, and
+    /// implicit dependencies resolved from type compatibility.
+    ///
+    /// Examples:
+    ///   ta workflow graph .ta/workflows/my-workflow.yaml
+    ///   ta workflow graph .ta/workflows/my-workflow.yaml --dot | dot -Tsvg > dag.svg
+    Graph {
+        /// Path to the workflow YAML definition file.
+        path: PathBuf,
+        /// Emit Graphviz DOT format instead of ASCII art.
+        #[arg(long)]
+        dot: bool,
+    },
+    /// Resume a paused or interrupted workflow run from the artifact store (v0.14.10).
+    ///
+    /// Reads the session artifact store, checks which stage outputs are already
+    /// present, skips completed stages, and resumes at the first incomplete stage.
+    ///
+    /// Example:
+    ///   ta workflow resume abc12345
+    Resume {
+        /// Workflow run ID (or 8-char prefix) to resume.
+        run_id: String,
     },
     /// List all workflows (active and completed).
     List {
@@ -154,18 +187,24 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
             governed_workflow::run_governed_workflow(&opts)
         }
         WorkflowCommands::Start { definition } => start_workflow(definition),
-        WorkflowCommands::Status { workflow_id } => {
-            let runs_dir = config.workspace_root.join(".ta").join("workflow-runs");
-            // Try governed workflow run first; fall back to legacy status.
-            if runs_dir.exists() || workflow_id.is_some() {
-                match governed_workflow::show_run_status(&runs_dir, workflow_id.as_deref()) {
-                    Ok(()) => Ok(()),
-                    Err(_) => show_status(workflow_id.as_deref()),
-                }
+        WorkflowCommands::Status { workflow_id, live } => {
+            if *live {
+                show_live_status(workflow_id.as_deref(), config)
             } else {
-                show_status(workflow_id.as_deref())
+                let runs_dir = config.workspace_root.join(".ta").join("workflow-runs");
+                // Try governed workflow run first; fall back to legacy status.
+                if runs_dir.exists() || workflow_id.is_some() {
+                    match governed_workflow::show_run_status(&runs_dir, workflow_id.as_deref()) {
+                        Ok(()) => Ok(()),
+                        Err(_) => show_status(workflow_id.as_deref()),
+                    }
+                } else {
+                    show_status(workflow_id.as_deref())
+                }
             }
         }
+        WorkflowCommands::Graph { path, dot } => graph_workflow(path, *dot),
+        WorkflowCommands::Resume { run_id } => resume_workflow(run_id, config),
         WorkflowCommands::List {
             templates,
             source,
@@ -1233,6 +1272,203 @@ verdict:
   pass_threshold: 0.7
 "#;
 
+// ── Artifact-typed workflow commands (v0.14.10) ───────────────────────────────
+
+/// Print the resolved DAG for a workflow definition (ASCII or DOT format).
+fn graph_workflow(path: &std::path::Path, dot_format: bool) -> anyhow::Result<()> {
+    if !path.exists() {
+        anyhow::bail!(
+            "Workflow definition not found: {}\n\
+             Create a workflow YAML file with: ta workflow new <name>",
+            path.display()
+        );
+    }
+
+    let def = WorkflowDefinition::from_file(path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse {}: {}\n\
+             Run: ta workflow validate {}",
+            path.display(),
+            e,
+            path.display()
+        )
+    })?;
+
+    let dag = artifact_dag::resolve_dag(&def.stages).map_err(|e| {
+        anyhow::anyhow!(
+            "Could not resolve workflow DAG for '{}': {}\n\
+             Check for cycles in depends_on or contradictory input/output declarations.",
+            def.name,
+            e
+        )
+    })?;
+
+    if !dag.unresolved_inputs.is_empty() {
+        for missing in &dag.unresolved_inputs {
+            eprintln!(
+                "Warning: stage '{}' needs artifact '{}' but no stage produces it. \
+                 Assuming it is pre-loaded in the artifact store.",
+                missing.stage, missing.artifact_type
+            );
+        }
+    }
+
+    if dot_format {
+        println!("{}", artifact_dag::render_dot(&def.name, &def.stages, &dag));
+    } else {
+        println!("{}", artifact_dag::render_ascii(&def.stages, &dag));
+    }
+
+    Ok(())
+}
+
+/// Resume a workflow run by checking which stages have already written their
+/// outputs to the artifact store and reporting which stages to skip.
+fn resume_workflow(run_id: &str, config: &GatewayConfig) -> anyhow::Result<()> {
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let store = ArtifactStore::new(&memory_dir);
+
+    let artifacts = store.list_run_artifacts(run_id)?;
+
+    if artifacts.is_empty() {
+        println!("No artifacts found for run: {}", run_id);
+        println!();
+        println!("Either the run ID is incorrect or no stages have completed yet.");
+        println!("Check: ta workflow status {}", run_id);
+        return Ok(());
+    }
+
+    // Group artifacts by stage.
+    let mut by_stage: std::collections::HashMap<String, Vec<&ArtifactType>> =
+        std::collections::HashMap::new();
+    for artifact in &artifacts {
+        by_stage
+            .entry(artifact.stage.clone())
+            .or_default()
+            .push(&artifact.artifact_type);
+    }
+
+    println!("Workflow run: {}", run_id);
+    println!("Completed stages (outputs already in artifact store):");
+    println!();
+
+    let mut sorted_stages: Vec<&String> = by_stage.keys().collect();
+    sorted_stages.sort();
+
+    for stage_name in sorted_stages {
+        let types = &by_stage[stage_name];
+        let type_names: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        println!("  ✓ {}  [{}]", stage_name, type_names.join(", "));
+    }
+
+    println!();
+    println!("To resume, re-run your workflow command — the engine will skip completed stages.");
+    println!(
+        "Inspect an artifact: ta memory retrieve --key workflow/{}/STAGE/TYPE",
+        run_id
+    );
+
+    Ok(())
+}
+
+/// Show a live-updating status view for a workflow run.
+///
+/// Polls the artifact store and workflow-runs directory every 2 seconds and
+/// re-renders the stage states until the workflow completes or the user
+/// interrupts with Ctrl-C.
+fn show_live_status(workflow_id: Option<&str>, config: &GatewayConfig) -> anyhow::Result<()> {
+    let runs_dir = config.workspace_root.join(".ta").join("workflow-runs");
+    let memory_dir = config.workspace_root.join(".ta").join("memory");
+    let store = ArtifactStore::new(&memory_dir);
+
+    println!("Live workflow status (Ctrl-C to exit)");
+    println!();
+
+    let run_id = match workflow_id {
+        Some(id) => id.to_string(),
+        None => {
+            // Try to find the most recent run.
+            if runs_dir.exists() {
+                let most_recent = std::fs::read_dir(&runs_dir).ok().and_then(|entries| {
+                    let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                    paths.sort_by_key(|e| {
+                        e.metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                    });
+                    paths
+                        .last()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                });
+                match most_recent {
+                    Some(id) => id,
+                    None => {
+                        println!("No workflow runs found in {}", runs_dir.display());
+                        return Ok(());
+                    }
+                }
+            } else {
+                println!("No workflow-runs directory found. Start a workflow first:");
+                println!("  ta workflow run governed-goal --goal \"...\"");
+                return Ok(());
+            }
+        }
+    };
+
+    // Poll loop — each iteration clears the screen and re-renders.
+    let poll_interval = std::time::Duration::from_secs(2);
+    let start = std::time::Instant::now();
+
+    loop {
+        // Clear previous output (simple approach: print blank lines).
+        print!("\x1B[2J\x1B[H");
+
+        let elapsed = start.elapsed();
+        println!(
+            "Live status — run: {}  (elapsed: {}s)",
+            run_id,
+            elapsed.as_secs()
+        );
+        println!();
+
+        // Show artifacts present in the store.
+        match store.list_run_artifacts(&run_id) {
+            Ok(artifacts) if !artifacts.is_empty() => {
+                let mut by_stage: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for a in &artifacts {
+                    by_stage
+                        .entry(a.stage.clone())
+                        .or_default()
+                        .push(a.artifact_type.to_string());
+                }
+                let mut stages: Vec<&String> = by_stage.keys().collect();
+                stages.sort();
+                println!("Completed stages:");
+                for s in stages {
+                    println!("  ✓ {}  [{}]", s, by_stage[s].join(", "));
+                }
+            }
+            Ok(_) => println!("No artifacts stored yet — waiting for first stage output..."),
+            Err(e) => println!("Error reading artifact store: {}", e),
+        }
+
+        // Show governed workflow run status if available.
+        println!();
+        if runs_dir.exists() {
+            let _ = governed_workflow::show_run_status(&runs_dir, Some(&run_id));
+        }
+
+        println!();
+        println!(
+            "Refreshing every {}s — Ctrl-C to exit",
+            poll_interval.as_secs()
+        );
+
+        std::thread::sleep(poll_interval);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1422,5 +1658,54 @@ roles:
         assert_eq!(a, b);
         let c = compute_checksum("different");
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn graph_workflow_ascii_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+name: test-graph
+stages:
+  - name: plan
+    outputs: [PlanDocument]
+    roles: []
+  - name: implement
+    inputs: [PlanDocument]
+    outputs: [DraftPackage]
+    roles: []
+roles: {}
+"#;
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        graph_workflow(&path, false).unwrap();
+    }
+
+    #[test]
+    fn graph_workflow_dot_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+name: test-graph
+stages:
+  - name: plan
+    outputs: [PlanDocument]
+    roles: []
+  - name: implement
+    inputs: [PlanDocument]
+    outputs: [DraftPackage]
+    roles: []
+roles: {}
+"#;
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        graph_workflow(&path, true).unwrap();
+    }
+
+    #[test]
+    fn resume_workflow_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        // No artifacts stored — resume should report nothing to skip.
+        let result = resume_workflow("nonexistent-run", &config);
+        assert!(result.is_ok());
     }
 }

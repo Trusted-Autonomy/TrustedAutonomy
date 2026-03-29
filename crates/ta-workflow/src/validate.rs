@@ -1,4 +1,4 @@
-// validate.rs — Workflow definition validation (v0.9.9.5).
+// validate.rs — Workflow definition validation (v0.9.9.5 / v0.14.10).
 //
 // Provides structural, reference, and dependency validation for workflow
 // YAML definitions and agent config YAML files.
@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::artifact_dag;
 use crate::definition::WorkflowDefinition;
 
 /// A single validation finding.
@@ -298,6 +299,46 @@ pub fn validate_workflow(
         }
     }
 
+    // 5. Artifact I/O type validation (v0.14.10).
+    // Run the DAG resolver — it warns on unresolved inputs and errors on cycles.
+    // Cycle errors are already caught above; here we surface unresolved inputs
+    // as warnings so the human knows which types need to be pre-loaded.
+    if !def.stages.is_empty() {
+        match artifact_dag::resolve_dag(&def.stages) {
+            Ok(dag) => {
+                for missing in &dag.unresolved_inputs {
+                    findings.push(ValidationFinding {
+                        severity: ValidationSeverity::Warning,
+                        location: format!("stages.{}.inputs", missing.stage),
+                        message: format!(
+                            "Stage '{}' declares input '{}' but no other stage produces it. \
+                             The artifact must be pre-loaded in the session store before the workflow runs.",
+                            missing.stage, missing.artifact_type
+                        ),
+                        suggestion: Some(format!(
+                            "Either add a stage that outputs '{}' or pre-populate with: \
+                             ta memory store --key workflow/<run-id>/{}/{}",
+                            missing.artifact_type,
+                            missing.stage,
+                            missing.artifact_type,
+                        )),
+                    });
+                }
+            }
+            Err(crate::WorkflowError::CycleDetected { .. }) => {
+                // Already reported above by stage_order() check.
+            }
+            Err(e) => {
+                findings.push(ValidationFinding {
+                    severity: ValidationSeverity::Error,
+                    location: "stages".to_string(),
+                    message: format!("Artifact DAG resolution error: {}", e),
+                    suggestion: None,
+                });
+            }
+        }
+    }
+
     // Verdict config checks.
     if let Some(verdict) = &def.verdict {
         if verdict.pass_threshold < 0.0 || verdict.pass_threshold > 1.0 {
@@ -456,6 +497,8 @@ mod tests {
                 review: None,
                 on_fail: None,
                 await_human: Default::default(),
+                inputs: vec![],
+                outputs: vec![],
             }],
             roles: {
                 let mut m = HashMap::new();
@@ -535,6 +578,8 @@ mod tests {
                     review: None,
                     on_fail: None,
                     await_human: Default::default(),
+                    inputs: vec![],
+                    outputs: vec![],
                 },
                 StageDefinition {
                     name: "b".to_string(),
@@ -544,6 +589,8 @@ mod tests {
                     review: None,
                     on_fail: None,
                     await_human: Default::default(),
+                    inputs: vec![],
+                    outputs: vec![],
                 },
             ],
             roles: HashMap::new(),
@@ -584,6 +631,8 @@ mod tests {
             review: None,
             on_fail: None,
             await_human: Default::default(),
+            inputs: vec![],
+            outputs: vec![],
         });
         let result = validate_workflow(&wf, None);
         assert!(result.has_errors());
@@ -626,5 +675,56 @@ mod tests {
         let yaml = "name: [invalid\n";
         let result = validate_agent_config(yaml);
         assert!(result.has_errors());
+    }
+
+    #[test]
+    fn artifact_unresolved_input_is_warning() {
+        // Stage declares PlanDocument as input but no stage produces it.
+        let yaml = r#"
+name: test
+stages:
+  - name: implement
+    inputs: [PlanDocument]
+    outputs: [DraftPackage]
+    roles: []
+roles: {}
+"#;
+        let def = WorkflowDefinition::from_yaml(yaml).unwrap();
+        let result = validate_workflow(&def, None);
+        assert!(!result.has_errors());
+        assert!(result.warning_count() > 0);
+        assert!(result
+            .findings
+            .iter()
+            .any(|f| f.message.contains("PlanDocument")));
+    }
+
+    #[test]
+    fn artifact_chain_no_warnings() {
+        // Complete chain: plan → PlanDocument → implement → DraftPackage.
+        // No unresolved inputs.
+        let yaml = r#"
+name: test
+stages:
+  - name: plan
+    outputs: [PlanDocument]
+    roles: []
+  - name: implement
+    inputs: [PlanDocument]
+    outputs: [DraftPackage]
+    roles: []
+roles: {}
+"#;
+        let def = WorkflowDefinition::from_yaml(yaml).unwrap();
+        let result = validate_workflow(&def, None);
+        // No errors; no unresolved-input warnings expected.
+        assert!(!result.has_errors());
+        // Filter to artifact-related warnings only.
+        let artifact_warnings: Vec<_> = result
+            .findings
+            .iter()
+            .filter(|f| f.location.contains("inputs"))
+            .collect();
+        assert!(artifact_warnings.is_empty());
     }
 }

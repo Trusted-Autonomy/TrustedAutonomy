@@ -8,6 +8,8 @@
 //   - Serial phase chains with gate evaluation (v0.13.7)
 //   - Parallel agent swarm coordination (v0.13.7)
 
+pub mod artifact_dag;
+pub mod artifact_store;
 pub mod definition;
 pub mod error;
 pub mod interaction;
@@ -20,16 +22,20 @@ pub mod validate;
 pub mod verdict;
 pub mod yaml_engine;
 
+pub use artifact_dag::{render_ascii, render_dot, MissingInput, ResolvedDag};
+pub use artifact_store::{artifact_key, run_prefix, stage_prefix, ArtifactStore, StoredArtifact};
 pub use definition::{
     FailureRouting, RoleDefinition, StageDefinition, StageReview, WorkflowCatalog,
     WorkflowDefinition,
 };
+// Re-export ArtifactType from ta-changeset for callers that only depend on ta-workflow.
 pub use error::WorkflowError;
 pub use interaction::{AwaitHumanConfig, InteractionRequest, InteractionResponse};
 pub use serial_phases::{
     evaluate_gates, run_gate, GateFailure, GateResult, SerialPhasesState, StepState, WorkflowGate,
 };
 pub use swarm::{IntegrationConfig, SubGoalSpec, SubGoalStatus, SwarmState};
+pub use ta_changeset::ArtifactType;
 pub use trigger::{TriggerCondition, TriggerConfig, TriggerWaitRecord};
 pub use verdict::{Finding, Severity, Verdict, VerdictDecision};
 pub use yaml_engine::YamlWorkflowEngine;

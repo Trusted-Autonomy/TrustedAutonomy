@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use ta_changeset::ArtifactType;
 
 use crate::interaction::AwaitHumanConfig;
 
@@ -88,6 +89,15 @@ pub struct StageDefinition {
     /// When to pause for human input.
     #[serde(default)]
     pub await_human: AwaitHumanConfig,
+    /// Artifact types this stage consumes. The WorkflowEngine uses these to
+    /// resolve implicit DAG edges — any stage whose `outputs` intersect with
+    /// this stage's `inputs` becomes an implicit dependency (v0.14.10).
+    #[serde(default)]
+    pub inputs: Vec<ArtifactType>,
+    /// Artifact types this stage produces. Written to the session artifact
+    /// store (ta memory) under `<run-id>/<stage-name>/<ArtifactType>` (v0.14.10).
+    #[serde(default)]
+    pub outputs: Vec<ArtifactType>,
 }
 
 /// Review configuration for a stage.
@@ -281,6 +291,8 @@ roles:
                     review: None,
                     on_fail: None,
                     await_human: Default::default(),
+                    inputs: vec![],
+                    outputs: vec![],
                 },
                 StageDefinition {
                     name: "build".to_string(),
@@ -290,6 +302,8 @@ roles:
                     review: None,
                     on_fail: None,
                     await_human: Default::default(),
+                    inputs: vec![],
+                    outputs: vec![],
                 },
             ],
             roles: Default::default(),
@@ -313,6 +327,8 @@ roles:
                     review: None,
                     on_fail: None,
                     await_human: Default::default(),
+                    inputs: vec![],
+                    outputs: vec![],
                 },
                 StageDefinition {
                     name: "b".to_string(),
@@ -322,6 +338,8 @@ roles:
                     review: None,
                     on_fail: None,
                     await_human: Default::default(),
+                    inputs: vec![],
+                    outputs: vec![],
                 },
             ],
             roles: Default::default(),
