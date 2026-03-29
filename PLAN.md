@@ -8116,6 +8116,134 @@ Agent permissions
 
 ---
 
+### v0.14.14 — Unreal Engine Connector Scaffold (`ta-connectors/unreal`)
+<!-- status: pending -->
+**Goal**: Build the TA→UE5 integration layer. Agents can drive the Unreal Editor via MCP tools, mediated through TA's policy/audit/draft flow. Backend is config-switchable across three community MCP servers (kvick-games, flopperam, ArtisanGameworks), enabling POC-to-production promotion without code changes.
+
+**Depends on**: v0.14.13 (TA Studio setup wizard — connector config surface)
+
+#### Items
+
+1. [ ] **Create `crates/ta-connectors/unreal/` workspace member**
+   - `UnrealBackend` trait: `spawn()`, `supported_tools()`, `name()`, `socket_addr()`
+   - `kvick` backend — wraps `kvick-games/UnrealMCP` (Python, simple scene ops). Default for POC.
+   - `flopperam` backend — wraps `flopperam/unreal-engine-mcp` (C++ plugin, full MRQ/Sequencer access). Default for production.
+   - `special_agent` backend — wraps `ArtisanGameworks/SpecialAgentPlugin` (71+ tools, environment-building). Available as opt-in.
+   - Config deserialization: `[connectors.unreal]` block in `daemon.toml` / `workflow.toml`
+
+2. [ ] **Config schema** (`[connectors.unreal]`):
+   ```toml
+   [connectors.unreal]
+   enabled = true
+   backend = "flopperam"          # "kvick" | "flopperam" | "special-agent"
+   ue_project_path = ""           # path to .uproject file
+   editor_path = ""               # auto-detect if empty
+   socket = "localhost:30100"
+
+   [connectors.unreal.backends.kvick]
+   install_path = "~/.ta/mcp-servers/unreal-kvick"
+
+   [connectors.unreal.backends.flopperam]
+   install_path = "~/.ta/mcp-servers/unreal-flopperam"
+   ```
+
+3. [ ] **`ta connector` CLI subcommand**: `install`, `list`, `status`, `start`, `stop`
+   - `ta connector install unreal --backend floppером` → clones/downloads to `~/.ta/mcp-servers/<name>`, writes config
+   - `ta connector install unreal --backend kvick`
+   - `ta connector install unity`
+   - `ta connector list` — shows installed connectors + current backend selection
+   - `ta connector status [unreal|unity]` — shows whether the MCP server process is running
+   - Prints Editor copy-to-project instructions (auto-install into UE5 Editor is not possible from CLI)
+
+4. [ ] **Register Unreal tools in `ta-mcp-gateway`**:
+   - `ue5_python_exec(script: str)` — execute a Python script in the UE5 Editor context
+   - `ue5_scene_query(level_path: str)` — return actor list and basic scene metadata
+   - `ue5_asset_list(path: str)` — list assets under a content browser path
+   - `ue5_mrq_submit(sequence_path, output_dir, config_preset)` — queue an MRQ render job
+   - `ue5_mrq_status(job_id)` — poll job completion and frame count
+
+5. [ ] **Policy capability**: `unreal://render/**` gates MRQ submissions behind human approval. `unreal://script/**` gates Python execution. Governed via `policy.yaml` capability grants.
+
+6. [ ] **Unit tests**: Mock backend process spawn/teardown. Tool routing to correct backend. Config parsing (all three backend variants). `ta connector list` output format.
+
+7. [ ] **USAGE.md "Unreal Engine Integration" section**: Installation, config, `ta connector install`, switching backends, first `ue5_scene_query` call.
+
+#### Version: `0.14.14-alpha`
+
+---
+
+### v0.14.15 — Unreal MRQ Governed Render Pipeline
+<!-- status: pending -->
+**Goal**: Extend the Unreal connector with typed MRQ tool wrappers and a governed render flow where render outputs land in TA staging, are reviewed as image artifacts in `ta draft view`, and are only promoted to the workspace after human approval. Validates with the turntable LoRA training pipeline (5 TOD × 36 PNG + EXR passes ≈ 210 images).
+
+**Depends on**: v0.14.14 (Unreal connector scaffold)
+
+#### Items
+
+1. [ ] **Typed MRQ tools** with structured parameters and return types:
+   - `ue5_mrq_submit(sequence_path, output_dir, passes: [png|depth_exr|normal_exr], tod_preset)` → `{ job_id, estimated_frames }`
+   - `ue5_mrq_status(job_id)` → `{ state: queued|running|complete|failed, frames_done, frames_total }`
+   - `ue5_sequencer_query(level_path)` → `{ sequences: [{name, path, frame_range}] }`
+   - `ue5_lighting_preset_list(level_path)` → `{ presets: [{name, type}] }`
+
+2. [ ] **Frames-to-staging**: Render output lands in `.ta/staging/<goal-id>/render_output/<preset>/<pass>/`. TA watches the output directory and ingests frames as artifacts during the MRQ run.
+
+3. [ ] **Image artifact type in `ta-changeset`**: `ArtifactKind::Image { width, height, format, frame_index }`. `ta draft view` shows frame count, resolution, TOD preset name, and pass type for image artifact sets. Binary diff is suppressed; a thumbnail count and file size delta is shown instead.
+
+4. [ ] **End-to-end validation workload**: The turntable LoRA pipeline from `Technical Artist Brief - Turntable+MRQ.docx`:
+   - 5 TOD presets × 36 PNG frames + SceneDepth EXR + WorldNormal EXR per preset
+   - ~25 supplemental pose renders
+   - 1 inference test clip
+   - Produces ~210 training images
+
+5. [ ] **USAGE.md "Governed Render Jobs" section**: MRQ submission flow, frames-in-staging review, approval → workspace promotion, image artifact diff format.
+
+#### Version: `0.14.15-alpha`
+
+---
+
+### v0.14.16 — Unity Connector (`ta-connectors/unity`)
+<!-- status: pending -->
+**Goal**: Parallel to the Unreal connector. Wraps Unity's official MCP server package (`com.unity.mcp-server`) with the same backend-switchable architecture. Agents can trigger builds, query scenes, run PlayMode tests, and export assets — all through TA's governed flow.
+
+**Depends on**: v0.14.14 (shared connector infrastructure — `ta connector` CLI, backend trait, gateway integration)
+
+#### Items
+
+1. [ ] **Create `crates/ta-connectors/unity/` workspace member**
+   - `UnityBackend` trait (same interface as `UnrealBackend`)
+   - `official` backend — Unity `com.unity.mcp-server` UPM package (primary; maintained by Unity Technologies across LTS versions)
+   - `community` backend stub — fallback for third-party servers (CoderGamester/unity-mcp, etc.)
+   - Config: `[connectors.unity]` in `daemon.toml`
+
+2. [ ] **Config schema** (`[connectors.unity]`):
+   ```toml
+   [connectors.unity]
+   enabled = true
+   backend = "official"
+   project_path = ""
+   socket = "localhost:30200"
+   ```
+
+3. [ ] **`ta connector install unity`**: Generates UPM `manifest.json` entry and prints paste-into-Unity-Package-Manager instructions. Writes config to `.ta/config.toml`.
+
+4. [ ] **Register Unity tools in `ta-mcp-gateway`**:
+   - `unity_build_trigger(target, config)` — trigger a Player or AssetBundle build
+   - `unity_scene_query(scene_path)` — return GameObject hierarchy and component summary
+   - `unity_test_run(filter)` — run EditMode or PlayMode tests, return pass/fail counts
+   - `unity_addressables_build()` — trigger Addressables content build
+   - `unity_render_capture(camera_path, output_path)` — capture a screenshot from a scene camera
+
+5. [ ] **Policy capability**: `unity://build/**` gates build triggers. `unity://test/**` gates test runs. Governed via `policy.yaml`.
+
+6. [ ] **Unit tests**: Mock backend process. Tool routing. Config parsing. `ta connector install unity` output.
+
+7. [ ] **USAGE.md "Unity Integration" section**: Installation, config, `ta connector install unity`, first `unity_scene_query` call.
+
+#### Version: `0.14.16-alpha`
+
+---
+
 ## v0.15 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
@@ -8424,26 +8552,11 @@ Federated sharing of anonymized problem→solution pairs across TA instances. Bu
 
 ### Unreal Engine MCP Plugin (`ta-mcp-unreal`)
 
-A TA plugin that exposes Unreal Engine 5 as an MCP server, allowing TA agents to interact with UE5 projects directly — triggering Movie Render Queue jobs, reading scene structure, querying asset metadata, and initiating guide render passes as part of a governed goal. Builds on the External Plugin System architecture.
-
-Key capabilities:
-- **MCP tools surfaced**: `ue5_render_queue_submit`, `ue5_scene_query`, `ue5_asset_list`, `ue5_mrq_status`, `ue5_control_pass_export` (depth, normal, motion vector)
-- **Plugin binary**: `ta-mcp-unreal` — communicates with the UE5 Editor via the existing Unreal Remote Control API (HTTP, localhost) or a bundled UE5 plugin that exposes a JSON-over-TCP socket
-- **Governed render jobs**: Render queue submissions go through TA's draft/approval flow — agent proposes a render job, human approves, TA submits. Audit trail records what was rendered, at what settings, and when.
-- **Render-to-staging**: Output frames land in TA staging, enabling diff-based review of render output changes before promotion to the workspace
-- **Use case**: AI pipeline orchestration for CG production (e.g., guide render → AI v2v → review gate → delivery), automated test renders in CI, asset extraction for LoRA training data collection
-- **Distribution**: Published as an independent package (`ta-mcp-unreal`) + a companion UE5 Marketplace plugin that installs the Remote Control extensions TA needs
+> **Promoted to versioned phases**: v0.14.14 (connector scaffold + `ta connector` CLI + `kvick`/`flopperam`/`special-agent` backends) and v0.14.15 (typed MRQ tools, frames-to-staging, image artifact type, turntable LoRA validation workload).
 
 ### Unity MCP Plugin (`ta-mcp-unity`)
 
-A TA plugin that exposes Unity as an MCP server, enabling TA agents to interact with Unity projects — triggering builds, querying scene contents, running PlayMode tests, and exporting assets. Parallel architecture to `ta-mcp-unreal`, adapted for Unity's toolchain.
-
-Key capabilities:
-- **MCP tools surfaced**: `unity_build_trigger`, `unity_scene_query`, `unity_asset_export`, `unity_test_run`, `unity_addressables_build`, `unity_render_capture`
-- **Plugin binary**: `ta-mcp-unity` — communicates with the Unity Editor via Unity's existing Editor scripting API, exposed through a companion C# Editor extension that listens on a local socket
-- **Governed builds**: Build submissions go through TA's goal/draft flow — agent proposes a build configuration, human reviews, TA triggers. Full audit trail.
-- **CI integration**: Works alongside the VCS Event Hooks (v0.14.8.2) — a git push triggers a TA workflow that calls `unity_build_trigger`, waits for result, and routes the output to a draft for review
-- **Distribution**: Published as `ta-mcp-unity` + a companion Unity Package Manager (UPM) package that installs the Editor extension
+> **Promoted to versioned phase**: v0.14.16 (Unity connector, `official` backend wrapping `com.unity.mcp-server`, `ta connector install unity`, build/test/scene tools).
 
 ### Nvidia Omniverse Integration Plugin (`ta-mcp-omniverse`)
 
