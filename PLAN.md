@@ -7957,6 +7957,87 @@ ta session run                  # execute approved items as governed workflow
 
 ---
 
+### v0.14.12.1 — Plan Audit: Integrity Check & Auto-Fix
+<!-- status: pending -->
+**Goal**: `ta plan audit [--fix]` — a single command that finds every class of stale or inconsistent state in PLAN.md and fixes what it safely can automatically. Eliminates the recurring pattern where agents complete work but leave status markers, deferred notes, or checked items in the wrong state.
+
+**Problem classes addressed**:
+
+1. **PENDING_BUT_ALL_DONE** — `<!-- status: pending -->` but every item in the phase is `[x]` or `✅`. Most common failure: agent checked all items but never updated the status marker (root cause of the v0.14.3.5 ordering warnings).
+2. **DONE_WITH_UNCHECKED** — `<!-- status: done -->` but one or more `[ ]` items exist with no `→ vX.Y` deferred note. Violates the deferred items policy in CLAUDE.md.
+3. **DEFERRED_TO_DONE_PHASE** — a `→ vX.Y:` note points to a phase that is already `<!-- status: done -->`. The work was never picked up and is now orphaned.
+4. **DEFERRED_TO_MISSING_PHASE** — a `→ vX.Y:` note references a version that does not appear anywhere in PLAN.md.
+5. **ORDER_VIOLATION** — phase N is `done` while a numerically earlier phase M is still `pending` (existing `--check-order` logic, surfaced here with root-cause context).
+6. **MIXED_NOTATION** — phase uses `✅` symbols instead of `[x]` checkboxes. `✅` is invisible to the automated item-complete detector; normalising to `[x]` makes phases parseable.
+7. **UNCHECKED_IN_PAST** — `[ ]` item in a `pending` phase that has a `→ vX.Y` note where vX.Y is already `done`. Item was deferred but the target phase completed without it.
+
+**Depends on**: v0.14.12 (GC/health checks — builds on same internal-health theme; `ta doctor` is the runtime counterpart)
+
+#### Items
+
+1. [ ] **`ta plan audit` — detect-only mode** (default):
+   - Parse PLAN.md with the existing `parse_plan()` infrastructure
+   - Emit one line per issue: `[ISSUE_KIND]  vX.Y.Z   human-readable description`
+   - Summary line: `N issues found (K auto-fixable with --fix, M need manual review)`
+   - Exit code: 0 if clean, 1 if issues found (enables CI use: `ta plan audit || fail`)
+   - Cascading suppression: once a `PENDING_BUT_ALL_DONE` is identified, suppress its child `ORDER_VIOLATION` entries — they resolve when the root is fixed
+
+2. [ ] **`ta plan audit --fix` — safe auto-fixes**:
+   - `PENDING_BUT_ALL_DONE` → flip `<!-- status: pending -->` to `<!-- status: done -->` in-place
+   - `MIXED_NOTATION` → replace `✅` with `[x]`, `❌` with `[ ]` (re-scan after for PENDING_BUT_ALL_DONE)
+   - All other issue kinds: print `[manual]` — cannot safely auto-resolve, describe what action is needed
+   - Writes a one-line summary of what was changed; does not write if no changes would be made
+   - Dry-run available: `--fix --dry-run` prints the changes without writing
+
+3. [ ] **`ta plan audit --phase vX.Y.Z`** — scope audit to a single phase (useful before `ta draft apply`):
+   - Checks only the named phase for DONE_WITH_UNCHECKED and DEFERRED_TO_DONE_PHASE
+   - Used by `ta draft apply` pre-flight (see item 5)
+
+4. [ ] **`AuditIssue` type in `ta-goal` or `plan.rs`**:
+   ```rust
+   pub struct AuditIssue {
+       pub phase_id: String,
+       pub kind: AuditIssueKind,
+       pub description: String,
+       pub auto_fixable: bool,
+   }
+
+   pub enum AuditIssueKind {
+       PendingButAllDone,
+       DoneWithUnchecked,
+       DeferredToDonePhase,
+       DeferredToMissingPhase,
+       OrderViolation,
+       MixedNotation,
+       UncheckedInPast,
+   }
+   ```
+
+5. [ ] **Pre-apply audit hook**: `ta draft apply` (and `ta draft apply --phase`) runs `audit_phase(phase_id)` before copying files. If `DONE_WITH_UNCHECKED` is found and `on_failure != "warn"`, abort with a clear message and suggested fix. If `on_failure = "warn"`, print the issues and continue. This is the same `on_failure` config that existed but now uses the structured audit output.
+
+6. [ ] **`ta doctor` integration**: Add an "Plan integrity" section to `ta doctor` output that runs `ta plan audit` internally and summarises the result. `ta doctor` remains the single health-check entry point.
+
+7. [ ] **CLAUDE.md agent instruction update**: Add to the "Verification Before Every Commit" section:
+   ```
+   ./dev ta plan audit         # must be clean (exit 0) before committing plan changes
+   ./dev ta plan audit --fix   # run first to auto-fix safe issues
+   ```
+   Agents should run `ta plan audit --fix` when finishing a phase, before the final commit.
+
+8. [ ] **Tests**:
+   - `audit_detects_pending_but_all_done` — phase with all `[x]` items, status pending → one PENDING_BUT_ALL_DONE issue
+   - `audit_detects_done_with_unchecked` — phase marked done with one bare `[ ]` → one DONE_WITH_UNCHECKED issue
+   - `audit_detects_deferred_to_done_phase` → `→ v0.14.3.5:` in a done-phase note, v0.14.3.5 is done → DEFERRED_TO_DONE_PHASE
+   - `audit_detects_mixed_notation` → `✅` in items list → MIXED_NOTATION
+   - `audit_fix_flips_status_marker` → `--fix` on PENDING_BUT_ALL_DONE → marker becomes done
+   - `audit_fix_normalises_checkmarks` → `✅` items become `[x]` after fix, re-scan then finds PENDING_BUT_ALL_DONE
+   - `audit_cascading_order_suppression` → root PENDING_BUT_ALL_DONE suppresses child ORDER_VIOLATIONs
+   - `audit_exit_code_nonzero_with_issues` → exit 1 when issues found, 0 when clean
+
+#### Version: `0.14.12.1-alpha`
+
+---
+
 ### v0.14.13 — TA Studio: Setup Wizard & Settings Management
 <!-- status: pending -->
 **Goal**: TA Studio (the web app at `http://localhost:7700`) gains a first-run Setup Wizard and a persistent Settings section that let non-engineers configure everything an engineer would do by editing YAML files — without ever seeing a YAML file. Engineers can still edit YAML directly; TA Studio is the non-engineer surface. Setup can be re-run at any time to update any setting.
