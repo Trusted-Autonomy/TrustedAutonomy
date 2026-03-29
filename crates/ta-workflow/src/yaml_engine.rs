@@ -352,6 +352,8 @@ mod tests {
                     review: None,
                     on_fail: None,
                     await_human: AwaitHumanConfig::Never,
+                    inputs: vec![],
+                    outputs: vec![],
                 },
                 StageDefinition {
                     name: "review".to_string(),
@@ -364,6 +366,8 @@ mod tests {
                         max_retries: 2,
                     }),
                     await_human: AwaitHumanConfig::Never,
+                    inputs: vec![],
+                    outputs: vec![],
                 },
             ],
             roles: HashMap::new(),

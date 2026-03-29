@@ -7283,6 +7283,104 @@ ta workflow cancel <workflow-id>
 ta workflow history <workflow-id>
 ```
 
+#### Artifact-Typed Workflows
+
+Workflow stages can declare the artifact types they consume (`inputs`) and produce (`outputs`). The engine resolves the execution DAG automatically from type compatibility — no explicit `depends_on` needed when types match.
+
+**Declaring inputs and outputs:**
+
+```yaml
+name: plan-implement-review
+stages:
+  - name: generate-plan
+    roles: [planner]
+    outputs: [PlanDocument]
+
+  - name: implement-plan
+    roles: [engineer]
+    inputs: [PlanDocument]
+    outputs: [DraftPackage]
+
+  - name: review-draft
+    roles: [reviewer]
+    inputs: [DraftPackage]
+    outputs: [ReviewVerdict]
+
+roles:
+  planner:
+    agent: claude-code
+    prompt: "Generate a structured plan."
+  engineer:
+    agent: claude-code
+    prompt: "Implement the plan."
+  reviewer:
+    agent: claude-code
+    prompt: "Review the implementation."
+```
+
+The engine automatically wires `generate-plan → implement-plan → review-draft` because the output types match the input types. No `depends_on` entries are needed.
+
+**Built-in artifact types:**
+- `GoalTitle` — short goal description string
+- `PlanDocument` — structured plan with acceptance criteria
+- `DraftPackage` — TA draft package ready for review
+- `ReviewVerdict` — pass/fail/flag from a reviewer agent
+- `AuditEntry` — audit ledger entry
+- `ConstitutionReport` — constitution compliance review output
+- `AgentMessage` — message emitted by or to an agent
+- `FileArtifact` — file or diff artifact
+- `TestResult` — test run results
+
+Custom types: any unrecognized string (use `x-` prefix by convention, e.g. `x-my-artifact`).
+
+**Visualising the DAG:**
+
+```bash
+# Print the resolved DAG as ASCII art
+ta workflow graph .ta/workflows/my-workflow.yaml
+
+# Emit Graphviz DOT format (pipe to dot for image)
+ta workflow graph .ta/workflows/my-workflow.yaml --dot | dot -Tsvg > dag.svg
+```
+
+**Inspecting artifacts during a run:**
+
+Artifacts are stored in `.ta/memory/workflow/<run-id>/<stage>/<ArtifactType>.json`. Inspect them with:
+
+```bash
+ta memory retrieve --key workflow/<run-id>/generate-plan/PlanDocument
+```
+
+**Resuming an interrupted workflow:**
+
+If a workflow crashes mid-run, any stages that already wrote their outputs to the artifact store are automatically skipped on resume:
+
+```bash
+# Check which stages completed
+ta workflow resume <run-id>
+
+# Re-run the workflow — completed stages are skipped automatically
+ta workflow run governed-goal --goal "..."
+```
+
+**Live status dashboard:**
+
+```bash
+# Watch artifact store and run state update in real time (Ctrl-C to exit)
+ta workflow status --live <run-id>
+```
+
+**Validating type declarations:**
+
+`ta workflow validate` warns on unresolved input types — stages that declare an input type for which no other stage produces an output:
+
+```bash
+ta workflow validate .ta/workflows/my-workflow.yaml
+# Warning: stage 'implement-plan' declares input 'PlanDocument' but no stage produces it.
+# Either add a stage that outputs 'PlanDocument' or pre-populate with:
+#   ta memory store --key workflow/<run-id>/implement-plan/PlanDocument
+```
+
 #### Authoring a workflow end-to-end
 
 Creating a custom workflow is a three-step process: scaffold the workflow, create any missing agent configs, then validate and run.
