@@ -210,7 +210,50 @@ pub async fn execute_command(
                     let stdout_task = tokio::spawn(async move {
                         if let Some(out) = stdout {
                             let mut reader = BufReader::new(out).lines();
+                            // State machine for accumulating tool input JSON (v0.14.10.1).
+                            // When a ToolUse event is seen, subsequent `input_json_delta`
+                            // lines build the full JSON; `content_block_stop` finalises it
+                            // and emits a human-readable summary to `ta shell`.
+                            let mut current_tool: Option<String> = None;
+                            let mut current_tool_json = String::new();
                             while let Ok(Some(line)) = reader.next_line().await {
+                                // If accumulating tool input JSON, intercept raw JSON lines
+                                // before the schema parser so we can capture delta events
+                                // that the schema suppresses.
+                                if current_tool.is_some() {
+                                    if let Ok(json) =
+                                        serde_json::from_str::<serde_json::Value>(&line)
+                                    {
+                                        if json["type"].as_str() == Some("content_block_delta")
+                                            && json["delta"]["type"].as_str()
+                                                == Some("input_json_delta")
+                                        {
+                                            if let Some(partial) =
+                                                json["delta"]["partial_json"].as_str()
+                                            {
+                                                current_tool_json.push_str(partial);
+                                            }
+                                            continue;
+                                        }
+                                        if json["type"].as_str() == Some("content_block_stop") {
+                                            if let Some(tool_name) = current_tool.take() {
+                                                if let Ok(input) =
+                                                    serde_json::from_str::<serde_json::Value>(
+                                                        &current_tool_json,
+                                                    )
+                                                {
+                                                    let summary =
+                                                        tool_input_summary(&tool_name, &input);
+                                                    if !summary.is_empty() {
+                                                        tx.publish("stdout", summary).await;
+                                                    }
+                                                }
+                                                current_tool_json.clear();
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
                                 // Schema-driven stream-json parsing (v0.11.2.2).
                                 match ta_output_schema::parse_line(&output_schema, &line) {
                                     ta_output_schema::ParseResult::Text(text) => {
@@ -223,6 +266,9 @@ pub async fn execute_command(
                                     }
                                     ta_output_schema::ParseResult::ToolUse(name) => {
                                         tx.publish("stdout", format!("[tool] {}", name)).await;
+                                        // Begin accumulating this tool's input JSON.
+                                        current_tool = Some(name);
+                                        current_tool_json.clear();
                                     }
                                     ta_output_schema::ParseResult::NotJson => {
                                         // Non-JSON lines: relay as-is.
@@ -1214,6 +1260,46 @@ fn emit_command_failed_event(
     if let Err(e) = store.append(&envelope) {
         tracing::warn!("Failed to emit command_failed event: {}", e);
     }
+}
+
+/// Format a human-readable one-liner summary of a tool call for `ta shell` display (v0.14.10.1).
+///
+/// Called after the full `input_json_delta` stream has been accumulated into `input`.
+/// Returns an empty string for tools whose summaries are not useful to show.
+fn tool_input_summary(tool_name: &str, input: &serde_json::Value) -> String {
+    match tool_name {
+        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
+            if let Some(p) = input["file_path"].as_str() {
+                return format!("  → {}", p);
+            }
+        }
+        "Bash" => {
+            if let Some(cmd) = input["command"].as_str() {
+                let preview: String = cmd.chars().take(120).collect();
+                let ellipsis = if cmd.len() > 120 { "…" } else { "" };
+                return format!("  $ {}{}", preview, ellipsis);
+            }
+        }
+        "Glob" => {
+            if let Some(pattern) = input["pattern"].as_str() {
+                return format!("  *.  {}", pattern);
+            }
+        }
+        "Grep" => {
+            if let Some(pattern) = input["pattern"].as_str() {
+                return format!("  /  {}", pattern);
+            }
+        }
+        "Agent" => {
+            if let Some(desc) = input["description"].as_str() {
+                let preview: String = desc.chars().take(80).collect();
+                let ellipsis = if desc.len() > 80 { "…" } else { "" };
+                return format!("  → {}{}", preview, ellipsis);
+            }
+        }
+        _ => {}
+    }
+    String::new()
 }
 
 /// Detect whether a line of agent output looks like an interactive prompt (v0.10.18.5 item 4).

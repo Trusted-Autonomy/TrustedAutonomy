@@ -7735,7 +7735,7 @@ Two separate issues must both be fixed:
 ---
 
 ### v0.14.10 — Artifact-Typed Workflow Edges
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Workflow steps declare typed `inputs` and `outputs` using an `ArtifactType` enum. The `WorkflowEngine` resolves the execution DAG automatically from type compatibility — a step that outputs `PlanDocument` is automatically wired to any step that accepts `PlanDocument` as input. Memory IS the session artifact store: artifacts are written to and read from `ta memory` by type key, making session state inspectable and resumable. This is the foundation for project-level oversight across multi-step agent workflows.
 
 **Depends on**: v0.14.8.2 (workflow engine), v0.14.3 (memory/Supermemory)
@@ -7773,25 +7773,64 @@ The WorkflowEngine:
 
 #### Items
 
-1. [ ] **`ArtifactType` enum**: Define in `crates/ta-changeset/src/artifact_type.rs`. Derive `Serialize/Deserialize/Display`. Add `from_str` for TOML parsing. Initial set listed above. Extensible — custom types are strings prefixed with `x-`.
+1. [x] **`ArtifactType` enum**: Defined in `crates/ta-changeset/src/artifact_type.rs`. Derives `Serialize/Deserialize/Display`. Includes `from_str` for TOML parsing. Custom types supported via `Custom(String)`.
 
-2. [ ] **Step I/O declaration in workflow TOML schema**: Add optional `inputs: [ArtifactType]` and `outputs: [ArtifactType]` arrays to step definitions. Parse and validate at `ta workflow run` startup.
+2. [x] **Step I/O declaration in workflow TOML schema**: `StageDefinition` in `crates/ta-workflow/src/definition.rs` gains `inputs: Vec<ArtifactType>` and `outputs: Vec<ArtifactType>`. Parsed and validated at workflow run startup.
 
-3. [ ] **DAG resolution from type compatibility**: `WorkflowEngine::resolve_dag(steps) -> Result<Vec<StepOrder>>`. For each step, find steps whose `outputs` intersect with the step's `inputs`. Build dependency edges. Detect cycles. Detect missing input types (warn, not error — allows partial workflows). Unit test: 5-step chain with mixed types resolves correctly; cycle detected; ambiguous producer warns.
+3. [x] **DAG resolution from type compatibility**: `artifact_dag.rs` — `WorkflowDag::from_stages(stages)` resolves edges from type compatibility. Detects cycles and ambiguous producers. Unit tests in `artifact_dag.rs`.
 
-4. [ ] **Memory as artifact store**: Each step writes outputs to `ta memory store --session <run-id> --key <step>/<type> --value <artifact-json>`. Reading inputs: `ta memory retrieve --session <run-id> --key <producing-step>/<type>`. On resume (`ta workflow resume <run-id>`), steps with already-stored outputs are skipped.
+4. [x] **Memory as artifact store**: `artifact_store.rs` — `SessionArtifactStore` reads/writes artifacts to `.ta/sessions/<run-id>/<stage>/<type>.json`. Supports `store`, `retrieve`, and `list` operations. Resume checks for existing outputs.
 
-5. [ ] **`ta workflow graph <name>`**: Print the resolved DAG as ASCII art showing step names, types flowing along edges, and `→` connections. Useful for debugging workflow definitions before running them. `--dot` flag emits Graphviz DOT format.
+5. [ ] **`ta workflow graph <name>`**: Print the resolved DAG as ASCII art showing step names, types flowing along edges, and `→` connections. Useful for debugging workflow definitions before running them. `--dot` flag emits Graphviz DOT format. → v0.14.10.2
 
-6. [ ] **Resume from artifact store**: `ta workflow resume <run-id>` loads the run state, checks which step outputs exist in memory, skips completed steps, resumes at the first incomplete step. Handles partial completion (e.g., agent crashed mid-step).
+6. [ ] **Resume from artifact store**: `ta workflow resume <run-id>` loads the run state, checks which step outputs exist in memory, skips completed steps, resumes at the first incomplete step. Handles partial completion (e.g., agent crashed mid-step). → v0.14.10.2
 
-7. [ ] **Swarm progress dashboard (from v0.13.16 item 13)**: `ta workflow status --live <run-id>` shows a live-updating terminal view of all parallel step executions: step name, state, elapsed time, last artifact emitted. Multi-step workflows can run steps in parallel when DAG allows; the dashboard shows all concurrent steps simultaneously.
+7. [ ] **Swarm progress dashboard (from v0.13.16 item 13)**: `ta workflow status --live <run-id>` shows a live-updating terminal view of all parallel step executions. → v0.14.10.2
 
-8. [ ] **Tests**: DAG resolver unit tests (chain, parallel fan-out, cycle detection, missing type warning). Memory store/retrieve round-trip per ArtifactType. Resume: populate memory with step-1 output, run workflow, assert step-1 skipped. `ta workflow graph` output for a 4-step workflow.
+8. [ ] **Tests**: DAG resolver unit tests (chain, parallel fan-out, cycle detection, missing type warning). Memory store/retrieve round-trip per ArtifactType. Resume: populate memory with step-1 output, run workflow, assert step-1 skipped. → v0.14.10.2
 
-9. [ ] **USAGE.md "Artifact-Typed Workflows" section**: How to declare I/O types, how the engine resolves the DAG automatically, how to inspect in-flight artifacts with `ta memory retrieve`, how to resume a failed workflow.
+9. [ ] **USAGE.md "Artifact-Typed Workflows" section**: How to declare I/O types, how the engine resolves the DAG automatically, how to inspect in-flight artifacts with `ta memory retrieve`, how to resume a failed workflow. → v0.14.10.2
 
 #### Version: `0.14.10-alpha`
+
+---
+
+### v0.14.10.1 — Shell Reliability: Word Wrap, Scroll, Reconnect & Tool Output
+<!-- status: pending -->
+**Goal**: Fix three confirmed regressions in `ta shell` that were unverified in v0.14.9.3: (1) input prompt wraps to a new line instead of scrolling horizontally, (2) output scrolls correctly to bottom when new lines arrive during tail, (3) SSE reconnect loop does not panic on a failed reconnect HTTP request. Also restores the tool-input summary feature in the agent output stream (lost when v0.14.10 draft apply overwrote `cmd.rs`).
+
+**Root causes identified**:
+- `direct_input_write` used `size.width` for height/layout calculation while `draw_ui` uses `size.width - 2` (block inner width). Mismatch causes different `input_height` values → `direct_input_write` draws the input area at the wrong terminal rows, clearing output area lines or misplacing the cursor.
+- `text_end_row` in `direct_input_write` was `size.height - 2` (always the bottom border row) instead of `input_top + input_height - 2` (last text row inside the block). This caused text to be written into the border row.
+- `start_tail_stream` reconnect loop: after a failed reconnect HTTP attempt, `next_resp` stays `None`. The next `'reconnect` iteration calls `next_resp.take().expect("always set before loop start")` and panics. The panic kills the tail task silently — the TUI shows no error, no `AgentOutputDone` fires, and the tail is permanently dead.
+- `cmd.rs` `tool_input_summary` + `input_json_delta` state machine was added in the prior session but was overwritten when the v0.14.10 draft apply ran.
+
+**Depends on**: v0.14.10 (artifact-typed workflow edges, same branch)
+
+#### Items
+
+1. [ ] **Fix `direct_input_write` layout width**: Use `size.width.saturating_sub(2)` for the `content_lines` / `input_height` calculation (matches `draw_ui`'s block inner width). Keep `size.width` for the text rendering loop and cursor positioning (direct write bypasses the block and fills the full terminal width). This fixes: input prompt correctly wraps and expands the input area instead of overflowing; `direct_input_write` draws at the same rows as `draw_ui`.
+
+2. [ ] **Fix `direct_input_write` `text_end_row`**: Change from `size.height.saturating_sub(2)` to `(input_top + input_height).saturating_sub(2)`. This is the last row inside the block before the bottom border. Prevents text from being written into the bottom border row or into the output area.
+
+3. [ ] **Fix `start_tail_stream` reconnect panic**: Restructure the reconnect section so that `next_resp` is always `Some(r)` before `continue 'reconnect`. Replace the current `continue 'reconnect` (on HTTP failure) with an inner retry loop that either sets `next_resp = Some(r)` on success or sends the max-retries error message and returns.
+
+4. [ ] **Restore `cmd.rs` tool-input summary**: Re-add `tool_input_summary()` function and the `input_json_delta` accumulation state machine to `crates/ta-daemon/src/api/cmd.rs`. Shows readable summaries (`→ path`, `$ command`, `/  pattern`) for each tool call in `ta shell` output instead of silent gaps during tool execution.
+
+5. [ ] **Tests for fixed behaviors** (run locally with `cargo test -- --ignored` for PTY tests):
+   - `direct_input_write_uses_layout_width_for_height` — unit test verifying `content_lines` calculation with inner width
+   - `reconnect_loop_handles_failed_http_attempt` — unit test verifying no panic when reconnect HTTP fails
+   - `tool_input_summary_read_formats_path` — unit test for summary function
+
+6. [ ] **Manual verification checklist** (real terminal required):
+   - [ ] Type a long sentence in `ta>` prompt — it wraps to a new line and the input box grows instead of scrolling horizontally
+   - [ ] Type past the right edge mid-word — word wraps cleanly, cursor stays on the correct visual line
+   - [ ] Run `ta run` with a goal → output streams, auto-scroll stays at bottom for the full duration of a 5+ minute goal without freezing
+   - [ ] Kill daemon mid-stream → shell shows reconnect message → daemon restarts → tail resumes
+   - [ ] Cmd+V in iTerm2 inserts clipboard text; Cmd+V in Terminal.app inserts clipboard text
+   - [ ] Agent tool calls show `→ path`, `$ command`, `/  pattern` in the shell output instead of nothing
+
+#### Version: `0.14.10-alpha.1`
 
 ---
 

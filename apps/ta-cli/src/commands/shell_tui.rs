@@ -2804,15 +2804,21 @@ fn direct_input_write(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &A
     };
 
     // Compute input area position — same layout logic as draw_ui.
+    //
+    // layout_width matches draw_ui's block inner width (border takes 1 char each side).
+    // This ensures direct_input_write and draw_ui agree on input_height and input_top.
+    // render_width is the full terminal width since direct write bypasses the block.
     let prompt = app.prompt_str();
     let display = format!("{}{}", prompt, app.input);
-    let inner_width = size.width.max(1) as usize;
-    let content_lines = word_wrap_metrics(&display, display.len(), inner_width).2;
+    let layout_width = size.width.saturating_sub(2).max(1) as usize;
+    let render_width = size.width.max(1) as usize;
+    let content_lines = word_wrap_metrics(&display, display.len(), layout_width).2;
     let input_height = (content_lines + 2).min(size.height / 2).max(3);
     // Input area: top border at (size.height - 1 - input_height), text starts 1 below.
     let input_top = size.height.saturating_sub(1 + input_height);
     let text_start_row = input_top + 1; // skip top border
-    let text_end_row = size.height.saturating_sub(2); // before bottom border + status bar
+                                        // Last text row is the row before the bottom border (input_top + input_height - 2).
+    let text_end_row = (input_top + input_height).saturating_sub(2);
 
     let backend = terminal.backend_mut();
 
@@ -2827,6 +2833,7 @@ fn direct_input_write(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &A
     }
 
     // Write the display string with word-boundary wrapping (matches ratatui Wrap { trim: false }).
+    // Use render_width (full terminal width) since direct write has no block borders.
     let _ = backend.queue(MoveTo(0, text_start_row));
     let chars_vec: Vec<(usize, char)> = display.char_indices().collect();
     let mut widx = 0;
@@ -2849,7 +2856,7 @@ fn direct_input_write(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &A
                 .iter()
                 .take_while(|(_, c)| *c != ' ' && *c != '\n')
                 .count();
-            if col + 1 + next_word_len > inner_width {
+            if col + 1 + next_word_len > render_width {
                 row += 1;
                 col = 0;
                 widx += 1;
@@ -2859,7 +2866,7 @@ fn direct_input_write(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &A
                 continue;
             }
         }
-        if col >= inner_width {
+        if col >= render_width {
             row += 1;
             col = 0;
             if row > text_end_row {
@@ -2872,9 +2879,9 @@ fn direct_input_write(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &A
         widx += 1;
     }
 
-    // Position cursor using the same word-wrap metrics.
+    // Position cursor using the same word-wrap metrics as draw_input (layout_width).
     let cursor_byte = prompt.len() + app.cursor;
-    let (crow, ccol, _) = word_wrap_metrics(&display, cursor_byte, inner_width);
+    let (crow, ccol, _) = word_wrap_metrics(&display, cursor_byte, layout_width);
     let cx = (ccol as u16).min(size.width.saturating_sub(1));
     let cy = (text_start_row + crow).min(text_end_row);
     let _ = backend.queue(MoveTo(cx, cy));
@@ -4253,44 +4260,51 @@ async fn start_tail_stream(
 
         // Stream ended unexpectedly (network drop, daemon restart, etc.).
         // Attempt reconnect with exponential backoff and Last-Event-ID (v0.14.9.3).
-        if reconnect_count >= MAX_RECONNECTS {
+        //
+        // Structured as an inner loop so that failed HTTP attempts keep retrying
+        // without returning to the top of 'reconnect (which would panic on a None
+        // next_resp). We only `continue 'reconnect` once we have a live response.
+        loop {
+            if reconnect_count >= MAX_RECONNECTS {
+                let _ = tx.send(TuiMessage::CommandResponse(format!(
+                    "[reconnect] Stream connection failed after {} retries. \
+                     Restart the tail with: :tail {}",
+                    MAX_RECONNECTS,
+                    &target[..8.min(target.len())]
+                )));
+                let _ = tx.send(TuiMessage::AgentOutputDone(target));
+                return;
+            }
+
+            let backoff_secs = 1u64 << reconnect_count;
             let _ = tx.send(TuiMessage::CommandResponse(format!(
-                "[reconnect] Stream connection failed after {} retries. \
-                 Restart the tail with: :tail {}",
+                "[reconnect] Connection lost. Reconnecting ({}/{}) in {}s...",
+                reconnect_count + 1,
                 MAX_RECONNECTS,
-                &target[..8.min(target.len())]
+                backoff_secs
             )));
-            let _ = tx.send(TuiMessage::AgentOutputDone(target));
-            return;
-        }
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            reconnect_count += 1;
 
-        let backoff_secs = 1u64 << reconnect_count;
-        let _ = tx.send(TuiMessage::CommandResponse(format!(
-            "[reconnect] Connection lost. Reconnecting ({}/{}) in {}s...",
-            reconnect_count + 1,
-            MAX_RECONNECTS,
-            backoff_secs
-        )));
-        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-        reconnect_count += 1;
-
-        // Build reconnect request. Include Last-Event-ID so the daemon replays
-        // any events we missed while disconnected (requires daemon >= v0.14.9.3).
-        let mut req = client.get(&stream_url);
-        if let Some(id) = last_event_id {
-            req = req.header("Last-Event-ID", id.to_string());
-        }
-
-        match req.send().await {
-            Ok(r) if r.status().is_success() => {
-                next_resp = Some(r);
-                continue 'reconnect;
+            // Build reconnect request. Include Last-Event-ID so the daemon replays
+            // any events we missed while disconnected (requires daemon >= v0.14.9.3).
+            let mut req = client.get(&stream_url);
+            if let Some(id) = last_event_id {
+                req = req.header("Last-Event-ID", id.to_string());
             }
-            Ok(_) | Err(_) => {
-                // Failed this attempt — loop back to check retry limit.
-                continue 'reconnect;
+
+            match req.send().await {
+                Ok(r) if r.status().is_success() => {
+                    next_resp = Some(r);
+                    break; // Have a live response — proceed to 'reconnect processing.
+                }
+                Ok(_) | Err(_) => {
+                    // This attempt failed — loop to check retry limit and try again.
+                    continue;
+                }
             }
         }
+        continue 'reconnect;
     }
 }
 
