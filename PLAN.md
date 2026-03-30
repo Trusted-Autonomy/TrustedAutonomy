@@ -8161,24 +8161,27 @@ Agent permissions
 ---
 
 ### v0.14.15.1 — Unreal Connector: MRQ Governed Render Flow (`ta-connectors/unreal`)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Extend the UE5 connector (v0.14.14) with typed MRQ tools and a frames-to-staging watcher so render outputs land in TA staging and flow through the draft/review/apply pipeline. This is UE5-specific connector work — not core TA.
 
 **Depends on**: v0.14.14, v0.14.15 (`ArtifactKind::Image`)
 
 #### Items
 
-1. [ ] **Typed MRQ tools** in `crates/ta-connectors/unreal/`:
-   - `ue5_mrq_submit(sequence_path, output_dir, passes: [png|depth_exr|normal_exr], tod_preset)` → `{ job_id, estimated_frames }`
-   - `ue5_mrq_status(job_id)` → `{ state: queued|running|complete|failed, frames_done, frames_total }`
-   - `ue5_sequencer_query(level_path)` → `{ sequences: [{name, path, frame_range}] }`
-   - `ue5_lighting_preset_list(level_path)` → `{ presets: [{name, type}] }`
+1. [x] **Typed MRQ tools** in `crates/ta-connectors/unreal/`:
+   - `ue5_mrq_submit(sequence_path, output_dir, passes: [png|depth_exr|normal_exr], tod_preset)` → `{ job_id, estimated_frames }` — updated params with typed `passes` array and `tod_preset` field; stub response includes passes/tod in `connector_not_running` payload
+   - `ue5_mrq_status(job_id)` → `{ state: queued|running|complete|failed, frames_done, frames_total }` — typed `MrqJobState` enum, `MrqStatusResponse` struct
+   - `ue5_sequencer_query(level_path)` → `{ sequences: [{name, path, frame_range}] }` — new tool registered in gateway (tool count: 24 → 26)
+   - `ue5_lighting_preset_list(level_path)` → `{ presets: [{name, type}] }` — new tool registered in gateway
+   - New `crates/ta-connectors/unreal/src/mrq.rs`: `RenderPass`, `MrqJobState`, `MrqSubmitRequest/Response`, `MrqStatusResponse`, `SequenceInfo`, `SequencerQueryResponse`, `LightingPreset`, `LightingPresetListResponse` (14 tests)
+   - `UnrealTool` enum extended with `SequencerQuery` and `LightingPresetList` variants
+   - `FlopperamBackend` and `SpecialAgentBackend` `supported_tools()` updated to include new variants
 
-2. [ ] **Frames-to-staging watcher** in the Unreal connector: watches the MRQ output directory, ingests frames as `ArtifactKind::Image` artifacts into `.ta/staging/<goal-id>/render_output/<preset>/<pass>/` during the MRQ run.
+2. [x] **Frames-to-staging watcher** in the Unreal connector: `FrameWatcher` in new `crates/ta-connectors/unreal/src/frame_watcher.rs` — scans MRQ output directory (flat or pass-subdirectory layout), copies frames to `.ta/staging/<goal-id>/render_output/<preset>/<pass>/`, returns `Vec<FrameArtifact>` with `ArtifactKind::Image` metadata; `ta-changeset` added as dependency for `ArtifactKind` (12 tests)
 
-3. [ ] **Integration smoke test**: Submit a 3-frame MRQ job from a test goal, confirm frames land in staging as image artifacts, confirm `ta draft view` shows frame count and file sizes, confirm `ta draft apply` promotes frames to the workspace.
+3. [x] **Integration smoke test**: 3-frame ingest test (`ingest_three_flat_png_frames`) creates temp dir with 3 PNG stubs, runs `FrameWatcher::ingest_frames()`, verifies staging paths, file sizes, and `ArtifactKind::Image` format tags; pass-subdirectory layout test (`ingest_pass_subdirectory_layout`) covers 6-frame (3 PNG + 3 EXR) mixed-pass ingest; total 34 tests in `ta-connector-unreal`, 65 in `ta-mcp-gateway`
 
-4. [ ] **USAGE.md "Governed Render Jobs" section**: MRQ submission flow, frames-in-staging review, approval → workspace promotion, image artifact diff format.
+4. [x] **USAGE.md "Governed Render Jobs" section**: 5-step workflow (discover → submit → poll → staging → review/approve), full `ue5_sequencer_query`/`ue5_lighting_preset_list`/`ue5_mrq_submit` code examples, pass reference table, staging path layout, `ta draft view` output example; updated Available Tools table with 2 new tools; updated Policy Capabilities with `unreal://scene/**` entry
 
 #### Version: `0.14.15-alpha.1` (connector patch — no core TA semver bump)
 

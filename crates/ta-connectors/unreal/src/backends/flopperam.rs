@@ -65,6 +65,8 @@ impl UnrealBackend for FlopperamBackend {
             UnrealTool::AssetList,
             UnrealTool::MrqSubmit,
             UnrealTool::MrqStatus,
+            UnrealTool::SequencerQuery,
+            UnrealTool::LightingPresetList,
         ]
     }
 
