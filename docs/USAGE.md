@@ -76,13 +76,37 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
 
 ---
 
+## Getting Started
+
+The fastest way to get started is the setup wizard — no YAML editing required:
+
+1. **Install TA** — download the installer from the [latest release](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest) and run it, or build from source.
+
+2. **Run `ta install`** — this starts the TA daemon and opens the web wizard in your browser:
+   ```bash
+   ta install
+   ```
+
+3. **Complete the setup wizard at `http://localhost:7700/setup`** — the 5-step wizard guides you through:
+   - Choosing an AI agent system (Claude, OpenAI, or Ollama)
+   - Connecting your version control (Git or Perforce)
+   - Setting up optional notifications (Discord, Slack)
+   - Creating your first project
+   - Reviewing your configuration summary
+
+Once the wizard is complete, the TA Studio dashboard is your home for starting goals, reviewing drafts, and answering agent questions — no command line needed.
+
+> If you're an engineer and prefer the CLI, see the [Quick Start](#quick-start) section below.
+
 ## Getting Started (No Terminal)
 
-If you prefer working in a browser, start the TA daemon and open the web dashboard:
+If you prefer working in a browser, run `ta install` or start the daemon manually:
 
 ```bash
+ta install          # starts daemon + opens setup wizard
+# or, if already set up:
 ta daemon start
-open http://localhost:7700/ui
+open http://localhost:7700
 ```
 
 From the dashboard you can:
@@ -91,6 +115,7 @@ From the dashboard you can:
 - **Review Drafts** — see proposed changes, approve or deny with one click
 - **Answer Agent Questions** — respond to agents that need your input
 - **Browse Memory** — inspect and manage what the agents remember about your project
+- **Settings** — update your configuration through the browser UI
 
 No CLI commands are needed for the review loop once the daemon is running.
 
@@ -7125,6 +7150,8 @@ ta> draft approve latest
 - BMAD's QA persona pairs well with TA's `[validate]` commands in `constitution.toml` — the QA persona writes the tests, and TA's validation gate runs them before the draft is built.
 
 ### Governed Workflow
+
+> **Before you start**: Make sure TA is configured for your project. Run `ta install` to open the setup wizard, or `ta doctor` to check your current configuration. The wizard handles API keys, VCS credentials, and project setup without any YAML editing.
 
 The **governed workflow** is the canonical safe autonomous coding loop built into TA. It runs a goal through a five-stage governance sequence — agent work, independent review, human gate, apply, and PR sync — as a single composable command.
 

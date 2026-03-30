@@ -136,8 +136,15 @@
     <div class="tab" onclick="switchTab('drafts')">Review Drafts</div>
     <div class="tab" onclick="switchTab('questions')" id="tab-questions">Agent Questions</div>
     <div class="tab" onclick="switchTab('memory')">Memory</div>
+    <div class="tab" onclick="switchTab('settings')">Settings</div>
   </div>
   <div id="app"><div class="loading">Loading...</div></div>
+  <!-- Setup Wizard Overlay -->
+  <div id="wizard-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:1000;overflow-y:auto;">
+    <div style="max-width:620px;margin:3rem auto;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:2rem;">
+      <div id="wizard-content"></div>
+    </div>
+  </div>
 </div>
 <script>
 const app = document.getElementById('app');
@@ -184,6 +191,7 @@ function switchTab(tab) {
   else if (tab === 'drafts') loadDrafts();
   else if (tab === 'questions') loadQuestions();
   else if (tab === 'memory') loadMemory();
+  else if (tab === 'settings') loadSettings();
 }
 
 // ── Dashboard ─────────────────────────────────────────────────
@@ -743,8 +751,454 @@ async function createMemory() {
   } catch (e) { alert('Network error'); }
 }
 
+// ── Setup Wizard ──────────────────────────────────────────────
+let wizardStep = 1;
+const wizardData = { agent: {}, vcs: {}, notifications: {}, project: {} };
+
+async function checkWizard() {
+  try {
+    const resp = await fetch('/api/setup/status');
+    if (!resp.ok) return;
+    const status = await resp.json();
+    if (!status.wizard_complete) {
+      wizardStep = status.step || 1;
+      showWizardOverlay();
+    }
+  } catch (e) { /* daemon not ready yet */ }
+}
+
+function showWizardOverlay() {
+  document.getElementById('wizard-overlay').style.display = 'block';
+  renderWizardStep(wizardStep);
+}
+
+function hideWizardOverlay() {
+  document.getElementById('wizard-overlay').style.display = 'none';
+}
+
+async function saveWizardProgress(step, complete) {
+  try {
+    await fetch('/api/setup/progress', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ step, wizard_complete: !!complete })
+    });
+  } catch (e) { /* best-effort */ }
+}
+
+function wizardProgressBar(step) {
+  const steps = ['Agent', 'VCS', 'Notifications', 'Project', 'Done'];
+  const bars = steps.map((s, i) => {
+    const active = i + 1 === step ? 'color:var(--accent);font-weight:700' : (i + 1 < step ? 'color:var(--green)' : 'color:var(--muted)');
+    return `<span style="${active};margin:0 0.5rem">${i + 1 < step ? '✓' : (i + 1 === step ? '●' : '○')} ${esc(s)}</span>`;
+  }).join('');
+  return `<div style="text-align:center;margin-bottom:1.5rem;font-size:0.85rem">${bars}</div>`;
+}
+
+function renderWizardStep(step) {
+  const wc = document.getElementById('wizard-content');
+  if (!wc) return;
+  if (step === 1) {
+    wc.innerHTML = `
+      <h2 style="margin-bottom:0.5rem">Welcome to Trusted Autonomy</h2>
+      <p style="color:var(--muted);margin-bottom:1.5rem">Let's get you set up in 5 quick steps.</p>
+      ${wizardProgressBar(1)}
+      <h3 style="margin-bottom:1rem">Step 1: Choose Your Agent System</h3>
+      <div class="form-group">
+        <label>AI Framework</label>
+        <select id="wiz-framework">
+          <option value="claude-code">Claude (Anthropic)</option>
+          <option value="openai">OpenAI / GPT</option>
+          <option value="ollama">Ollama (local)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <input id="wiz-api-key" type="password" placeholder="sk-... or leave blank for Ollama">
+      </div>
+      <div class="actions">
+        <button class="btn btn-ghost btn-sm" onclick="validateWizardApiKey()">Validate Key</button>
+        <span id="wiz-validate-result" style="color:var(--muted);font-size:0.85rem"></span>
+      </div>
+      <div class="actions" style="margin-top:1.5rem">
+        <button class="btn btn-primary" onclick="wizardNext(1)">Next →</button>
+        <button class="btn btn-ghost" onclick="hideWizardOverlay()">Skip wizard</button>
+      </div>`;
+  } else if (step === 2) {
+    wc.innerHTML = `
+      ${wizardProgressBar(2)}
+      <h3 style="margin-bottom:1rem">Step 2: Version Control</h3>
+      <div class="form-group">
+        <label>VCS Type</label>
+        <select id="wiz-vcs-type">
+          <option value="git">Git</option>
+          <option value="p4">Perforce</option>
+          <option value="none">None</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Repository URL (optional)</label>
+        <input id="wiz-repo-url" type="text" placeholder="https://github.com/you/repo">
+      </div>
+      <div class="form-group">
+        <label>Access Token (optional)</label>
+        <input id="wiz-vcs-token" type="password" placeholder="GitHub PAT or leave blank">
+      </div>
+      <div class="actions">
+        <button class="btn btn-ghost btn-sm" onclick="checkWizardVcs()">Test Connection</button>
+        <span id="wiz-vcs-result" style="color:var(--muted);font-size:0.85rem"></span>
+      </div>
+      <div class="actions" style="margin-top:1.5rem">
+        <button class="btn btn-ghost" onclick="wizardBack(2)">← Back</button>
+        <button class="btn btn-primary" onclick="wizardNext(2)">Next →</button>
+      </div>`;
+  } else if (step === 3) {
+    wc.innerHTML = `
+      ${wizardProgressBar(3)}
+      <h3 style="margin-bottom:1rem">Step 3: Notifications (optional)</h3>
+      <p style="color:var(--muted);margin-bottom:1rem;font-size:0.9rem">Get notified when goals complete or drafts are ready.</p>
+      <div class="form-group">
+        <label>Discord Webhook URL</label>
+        <input id="wiz-discord-url" type="text" placeholder="https://discord.com/api/webhooks/...">
+        <button class="btn btn-ghost btn-sm" style="margin-top:0.35rem" onclick="testWizardNotification('discord')">Test</button>
+        <span id="wiz-discord-result" style="color:var(--muted);font-size:0.85rem;margin-left:0.5rem"></span>
+      </div>
+      <div class="form-group">
+        <label>Slack Webhook URL</label>
+        <input id="wiz-slack-url" type="text" placeholder="https://hooks.slack.com/services/...">
+        <button class="btn btn-ghost btn-sm" style="margin-top:0.35rem" onclick="testWizardNotification('slack')">Test</button>
+        <span id="wiz-slack-result" style="color:var(--muted);font-size:0.85rem;margin-left:0.5rem"></span>
+      </div>
+      <div class="actions" style="margin-top:1.5rem">
+        <button class="btn btn-ghost" onclick="wizardBack(3)">← Back</button>
+        <button class="btn btn-primary" onclick="wizardNext(3)">Next →</button>
+        <button class="btn btn-ghost" onclick="wizardNext(3)">Skip</button>
+      </div>`;
+  } else if (step === 4) {
+    wc.innerHTML = `
+      ${wizardProgressBar(4)}
+      <h3 style="margin-bottom:1rem">Step 4: Your First Project</h3>
+      <div class="form-group">
+        <label>Project Name</label>
+        <input id="wiz-proj-name" type="text" placeholder="My Awesome Project">
+      </div>
+      <div class="form-group">
+        <label>Description (optional)</label>
+        <textarea id="wiz-proj-desc" placeholder="What are you building?"></textarea>
+      </div>
+      <div class="form-group">
+        <label>First Goal (optional)</label>
+        <input id="wiz-proj-goal" type="text" placeholder="e.g. Add user authentication">
+      </div>
+      <div class="form-group">
+        <label>Approval Gate</label>
+        <select id="wiz-approval">
+          <option value="always">Always require approval</option>
+          <option value="auto">Auto-approve low-risk changes</option>
+          <option value="off">No approval required</option>
+        </select>
+      </div>
+      <div class="actions" style="margin-top:1.5rem">
+        <button class="btn btn-ghost" onclick="wizardBack(4)">← Back</button>
+        <button class="btn btn-primary" onclick="wizardNext(4)">Next →</button>
+      </div>`;
+  } else if (step === 5) {
+    wc.innerHTML = `
+      ${wizardProgressBar(5)}
+      <h3 style="margin-bottom:1rem">Setup Complete!</h3>
+      <p style="color:var(--muted);margin-bottom:1.5rem">Here's a summary of your configuration:</p>
+      <div class="card">
+        <div class="card-title">Agent</div>
+        <div class="card-meta">Framework: ${esc(wizardData.agent.framework || 'claude-code')}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">VCS</div>
+        <div class="card-meta">Type: ${esc(wizardData.vcs.type || 'git')} ${wizardData.vcs.url ? '| URL: ' + esc(wizardData.vcs.url) : ''}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Notifications</div>
+        <div class="card-meta">${wizardData.notifications.discord || wizardData.notifications.slack ? 'Configured' : 'Skipped'}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Project</div>
+        <div class="card-meta">${esc(wizardData.project.name || 'Not set')}</div>
+      </div>
+      <div class="actions" style="margin-top:1.5rem">
+        <button class="btn btn-primary" onclick="finishWizard()">Go to Dashboard</button>
+      </div>`;
+  }
+}
+
+async function validateWizardApiKey() {
+  const key = document.getElementById('wiz-api-key').value.trim();
+  const el = document.getElementById('wiz-validate-result');
+  try {
+    const resp = await fetch('/api/settings/agent/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: key })
+    });
+    const data = await resp.json();
+    el.style.color = resp.ok ? 'var(--green)' : 'var(--red)';
+    el.textContent = data.message || data.status;
+  } catch (e) { el.textContent = 'Network error'; el.style.color = 'var(--red)'; }
+}
+
+async function checkWizardVcs() {
+  const url = document.getElementById('wiz-repo-url').value.trim();
+  const token = document.getElementById('wiz-vcs-token').value.trim();
+  const el = document.getElementById('wiz-vcs-result');
+  try {
+    const resp = await fetch('/api/settings/vcs/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, token })
+    });
+    const data = await resp.json();
+    el.style.color = resp.ok ? 'var(--green)' : 'var(--red)';
+    el.textContent = data.message || data.status;
+  } catch (e) { el.textContent = 'Network error'; el.style.color = 'var(--red)'; }
+}
+
+async function testWizardNotification(channel) {
+  const urlEl = document.getElementById('wiz-' + channel + '-url');
+  const resultEl = document.getElementById('wiz-' + channel + '-result');
+  if (!urlEl || !resultEl) return;
+  try {
+    const resp = await fetch('/api/settings/notifications/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: urlEl.value.trim(), channel })
+    });
+    const data = await resp.json();
+    resultEl.style.color = resp.ok ? 'var(--green)' : 'var(--red)';
+    resultEl.textContent = data.message || data.status;
+  } catch (e) { resultEl.textContent = 'Network error'; resultEl.style.color = 'var(--red)'; }
+}
+
+function wizardBack(fromStep) {
+  wizardStep = fromStep - 1;
+  saveWizardProgress(wizardStep, false);
+  renderWizardStep(wizardStep);
+}
+
+function wizardNext(fromStep) {
+  // Collect data from current step.
+  if (fromStep === 1) {
+    wizardData.agent.framework = document.getElementById('wiz-framework').value;
+    wizardData.agent.apiKey = document.getElementById('wiz-api-key').value;
+  } else if (fromStep === 2) {
+    wizardData.vcs.type = document.getElementById('wiz-vcs-type').value;
+    wizardData.vcs.url = document.getElementById('wiz-repo-url').value;
+    wizardData.vcs.token = document.getElementById('wiz-vcs-token').value;
+  } else if (fromStep === 3) {
+    wizardData.notifications.discord = document.getElementById('wiz-discord-url').value;
+    wizardData.notifications.slack = document.getElementById('wiz-slack-url').value;
+  } else if (fromStep === 4) {
+    wizardData.project.name = document.getElementById('wiz-proj-name').value;
+    wizardData.project.desc = document.getElementById('wiz-proj-desc').value;
+    wizardData.project.goal = document.getElementById('wiz-proj-goal').value;
+    wizardData.project.approval = document.getElementById('wiz-approval').value;
+  }
+  wizardStep = fromStep + 1;
+  saveWizardProgress(wizardStep, false);
+  renderWizardStep(wizardStep);
+}
+
+async function finishWizard() {
+  await saveWizardProgress(5, true);
+  hideWizardOverlay();
+  switchTab('dashboard');
+}
+
+// ── Settings Tab ───────────────────────────────────────────────
+let settingsSection = 'agent';
+
+async function loadSettings() {
+  app.innerHTML = `
+    <div style="display:flex;gap:1.5rem;align-items:flex-start">
+      <div style="min-width:150px">
+        <div class="dash-section-title">Settings</div>
+        ${['agent','vcs','workflow','policy','constitution','notifications','memory','advanced'].map(s =>
+          `<div class="tab" style="display:block;border:none;padding:0.4rem 0.75rem;border-radius:6px;margin-bottom:0.25rem;${settingsSection===s?'background:var(--surface);color:var(--accent)':''}" onclick="loadSettingsSection('${s}')">${s.charAt(0).toUpperCase()+s.slice(1)}</div>`
+        ).join('')}
+      </div>
+      <div id="settings-main" style="flex:1"></div>
+    </div>`;
+  loadSettingsSection(settingsSection);
+}
+
+async function loadSettingsSection(section) {
+  settingsSection = section;
+  const el = document.getElementById('settings-main');
+  if (!el) return;
+  el.innerHTML = '<div class="loading">Loading...</div>';
+  // Re-render the sidebar to highlight active section.
+  document.querySelectorAll('.tab[onclick^="loadSettingsSection"]').forEach(t => {
+    const s = t.getAttribute('onclick').match(/'(\w+)'/)?.[1];
+    t.style.color = s === section ? 'var(--accent)' : '';
+    t.style.background = s === section ? 'var(--surface)' : '';
+  });
+
+  if (section === 'advanced') {
+    el.innerHTML = `
+      <h3 style="margin-bottom:1rem">Advanced — Raw Config Editors</h3>
+      <p style="color:var(--muted);font-size:0.9rem;margin-bottom:1rem">Edit configuration files directly. Changes take effect on next daemon restart.</p>
+      <div class="form-group">
+        <label>daemon.toml path: <code>.ta/daemon.toml</code></label>
+        <textarea id="raw-daemon" style="min-height:200px;font-family:monospace" placeholder="Loading..."></textarea>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="saveRawConfig()">Save daemon.toml</button>
+      </div>`;
+    return;
+  }
+
+  try {
+    const resp = await fetch('/api/settings/' + section);
+    if (!resp.ok) { el.innerHTML = '<div class="empty">Section not available.</div>'; return; }
+    const result = await resp.json();
+    const data = result.data || {};
+    el.innerHTML = renderSettingsForm(section, data);
+  } catch (e) { el.innerHTML = '<div class="empty">Could not load settings.</div>'; }
+}
+
+function renderSettingsForm(section, data) {
+  const field = (key, label, type, val, placeholder) =>
+    `<div class="form-group"><label>${label}</label><input id="setting-${key}" type="${type}" value="${esc(val)}" placeholder="${esc(placeholder||'')}"></div>`;
+  const select = (key, label, options, val) =>
+    `<div class="form-group"><label>${label}</label><select id="setting-${key}">${options.map(([v,l])=>`<option value="${v}"${val===v?' selected':''}>${l}</option>`).join('')}</select></div>`;
+  const toggle = (key, label, val) =>
+    `<div class="form-group" style="display:flex;align-items:center;gap:0.75rem"><input id="setting-${key}" type="checkbox"${val?' checked':''}><label for="setting-${key}">${label}</label></div>`;
+
+  let html = `<h3 style="margin-bottom:1rem;text-transform:capitalize">${section} Settings</h3>`;
+
+  if (section === 'agent') {
+    html += select('default_framework', 'AI Framework', [['claude-code','Claude (Anthropic)'],['openai','OpenAI'],['ollama','Ollama (local)']], data.default_framework);
+    html += field('default_agent', 'Agent Binary', 'text', data.default_agent, 'claude-code');
+    html += field('timeout_secs', 'Timeout (seconds)', 'number', data.timeout_secs, '300');
+    html += field('max_sessions', 'Max Sessions', 'number', data.max_sessions, '5');
+    html += `<div class="actions"><button class="btn btn-ghost btn-sm" onclick="testAgentConnection()">Test Connection</button><span id="agent-test-result" style="color:var(--muted);font-size:0.85rem;margin-left:0.5rem"></span></div>`;
+  } else if (section === 'vcs') {
+    html += select('vcs_type', 'VCS Type', [['git','Git'],['p4','Perforce'],['none','None']], data.vcs_type || 'git');
+    html += field('remote_url', 'Remote URL', 'text', data.remote_url, 'https://github.com/...');
+    html += field('token', 'Access Token', 'password', data.token, 'GitHub PAT or P4 password');
+    html += `<div class="actions"><button class="btn btn-ghost btn-sm" onclick="checkVcsConnection()">Check Connection</button><span id="vcs-check-result" style="color:var(--muted);font-size:0.85rem;margin-left:0.5rem"></span></div>`;
+  } else if (section === 'workflow') {
+    html += field('bind', 'Bind Address', 'text', data.bind, '127.0.0.1');
+    html += field('port', 'Port', 'number', data.port, '7700');
+  } else if (section === 'policy') {
+    html += toggle('file_read', 'Allow file reads', data.file_read);
+    html += toggle('file_write', 'Allow file writes', data.file_write);
+    html += toggle('shell_commands', 'Allow shell command execution', data.shell_commands);
+    html += toggle('network', 'Allow network requests', data.network);
+    html += toggle('git_push_protected', 'Protect git push to main/master', data.git_push_protected);
+  } else if (section === 'constitution') {
+    html += `<p style="color:var(--muted);font-size:0.9rem;margin-bottom:1rem">Quality rules applied to all agent goals.</p>`;
+    (data.rules || []).forEach(r =>
+      html += toggle('rule-' + r.id, r.label, r.enabled)
+    );
+    html += field('custom_rule', 'Custom Rule', 'text', data.custom_rule, 'Add a custom quality rule...');
+  } else if (section === 'notifications') {
+    html += field('discord_token', 'Discord Bot Token', 'password', data.discord_token, 'Bot token from Discord developer portal');
+    html += field('slack_token', 'Slack Bot Token', 'password', data.slack_token, 'xoxb-... from Slack app settings');
+    html += `<div class="actions">
+      <button class="btn btn-ghost btn-sm" onclick="testNotification('discord')">Test Discord</button>
+      <button class="btn btn-ghost btn-sm" onclick="testNotification('slack')">Test Slack</button>
+      <span id="notif-test-result" style="color:var(--muted);font-size:0.85rem;margin-left:0.5rem"></span>
+    </div>`;
+  } else if (section === 'memory') {
+    html += select('scope', 'Scope', [['project','Project'],['global','Global']], data.scope || 'project');
+    html += field('retention_days', 'Retention (days)', 'number', data.retention_days, '90');
+    html += `<div class="actions"><button class="btn btn-deny btn-sm" onclick="if(confirm('Clear local memory?'))clearMemoryStore()">Clear Local Memory</button></div>`;
+  }
+
+  html += `<div class="actions" style="margin-top:1.5rem">
+    <button class="btn btn-primary" onclick="saveSettings('${section}')">Save</button>
+    <span id="settings-save-result" style="color:var(--muted);font-size:0.85rem;margin-left:0.5rem"></span>
+  </div>`;
+  return html;
+}
+
+async function saveSettings(section) {
+  const resultEl = document.getElementById('settings-save-result');
+  const data = {};
+  document.querySelectorAll('[id^="setting-"]').forEach(el => {
+    const key = el.id.replace('setting-', '');
+    data[key] = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value) : el.value);
+  });
+  try {
+    const resp = await fetch('/api/settings/' + section, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data })
+    });
+    const result = await resp.json();
+    if (resultEl) {
+      resultEl.style.color = resp.ok ? 'var(--green)' : 'var(--red)';
+      resultEl.textContent = resp.ok ? 'Saved.' : (result.error || 'Error saving settings.');
+    }
+  } catch (e) { if (resultEl) { resultEl.style.color = 'var(--red)'; resultEl.textContent = 'Network error'; } }
+}
+
+async function testAgentConnection() {
+  const framework = document.getElementById('setting-default_framework')?.value || '';
+  const el = document.getElementById('agent-test-result');
+  try {
+    const resp = await fetch('/api/settings/agent/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: framework })
+    });
+    const data = await resp.json();
+    if (el) { el.style.color = resp.ok ? 'var(--green)' : 'var(--red)'; el.textContent = data.message || data.status; }
+  } catch (e) { if (el) { el.style.color = 'var(--red)'; el.textContent = 'Network error'; } }
+}
+
+async function checkVcsConnection() {
+  const url = document.getElementById('setting-remote_url')?.value || '';
+  const token = document.getElementById('setting-token')?.value || '';
+  const el = document.getElementById('vcs-check-result');
+  try {
+    const resp = await fetch('/api/settings/vcs/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, token })
+    });
+    const data = await resp.json();
+    if (el) { el.style.color = resp.ok ? 'var(--green)' : 'var(--red)'; el.textContent = data.message || data.status; }
+  } catch (e) { if (el) { el.style.color = 'var(--red)'; el.textContent = 'Network error'; } }
+}
+
+async function testNotification(channel) {
+  const tokenEl = document.getElementById('setting-' + channel + '_token');
+  const el = document.getElementById('notif-test-result');
+  try {
+    const resp = await fetch('/api/settings/notifications/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: tokenEl?.value || '', channel })
+    });
+    const data = await resp.json();
+    if (el) { el.style.color = resp.ok ? 'var(--green)' : 'var(--red)'; el.textContent = data.message || data.status; }
+  } catch (e) { if (el) { el.style.color = 'var(--red)'; el.textContent = 'Network error'; } }
+}
+
+async function clearMemoryStore() {
+  try {
+    await fetch('/api/memory', { method: 'DELETE' });
+    alert('Local memory cleared.');
+  } catch (e) { alert('Could not clear memory: ' + e); }
+}
+
+async function saveRawConfig() {
+  const content = document.getElementById('raw-daemon')?.value || '';
+  alert('Raw config save is not yet implemented. Edit .ta/daemon.toml directly and restart the daemon.');
+}
+
 // ── Boot ──────────────────────────────────────────────────────
 loadDashboard();
+checkWizard();
 </script>
 </body>
 </html>

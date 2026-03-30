@@ -20,6 +20,7 @@ pub mod input;
 pub mod interactions;
 pub mod notifications;
 pub mod project_new;
+pub mod settings;
 pub mod status;
 pub mod webhooks;
 pub mod workflow;
@@ -28,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::middleware;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 
 use crate::config::{DaemonConfig, ShellConfig, TokenStore};
@@ -338,6 +339,22 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/project/new", post(project_new::create_project))
         // Proactive notifications (v0.13.1.6).
         .route("/api/notifications", get(notifications::get_notifications))
+        // Settings API (v0.14.13).
+        .route(
+            "/api/settings/{section}",
+            get(settings::get_settings).put(settings::put_settings),
+        )
+        .route("/api/setup/status", get(settings::get_setup_status))
+        .route("/api/setup/progress", put(settings::put_setup_progress))
+        .route(
+            "/api/settings/agent/validate",
+            post(settings::validate_api_key),
+        )
+        .route(
+            "/api/settings/notifications/test",
+            post(settings::test_notification),
+        )
+        .route("/api/settings/vcs/check", post(settings::check_vcs))
         // Daemon lifecycle routes (v0.10.10).
         .route("/api/shutdown", post(shutdown_daemon))
         // Auth middleware on all API routes.

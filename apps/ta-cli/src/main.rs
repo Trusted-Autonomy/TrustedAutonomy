@@ -315,6 +315,14 @@ enum Commands {
         #[command(subcommand)]
         command: commands::setup::SetupCommands,
     },
+    /// Open the TA Studio setup wizard in your browser.
+    ///
+    /// Starts the daemon if not already running, then opens the web UI at
+    /// http://localhost:7700/setup so you can complete the 5-step wizard:
+    /// agent system, VCS, notifications, first project, and summary.
+    ///
+    /// Run this once after installation to get started.
+    Install,
     /// Initialize a new TA-managed project from a template.
     Init {
         #[command(subcommand)]
@@ -793,6 +801,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Constitution { command } => commands::constitution::execute(command, &config),
         Commands::Memory { command } => commands::memory::execute(command, &config),
         Commands::Adapter { command } => commands::adapter::execute(command, &project_root),
+        Commands::Install => commands::install::execute(&project_root),
         Commands::Setup { command } => commands::setup::execute(command, &config),
         Commands::Init { command } => commands::init::execute(command, &config),
         Commands::New { command } => commands::new::execute(command, &config),

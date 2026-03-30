@@ -18,6 +18,7 @@ pub mod gc;
 pub mod goal;
 pub mod governed_workflow;
 pub mod init;
+pub mod install;
 pub mod memory;
 pub mod new;
 pub mod notify;
