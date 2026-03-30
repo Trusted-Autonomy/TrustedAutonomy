@@ -49,11 +49,15 @@ pub struct Ue5AssetListParams {
 pub struct Ue5MrqSubmitParams {
     /// Content-browser path to the Level Sequence to render.
     pub sequence_path: String,
-    /// Output directory for rendered frames.
+    /// Filesystem output directory for rendered frames.
     pub output_dir: String,
-    /// Name of the Movie Render Queue preset config to use.
+    /// Render passes to produce per frame: `"png"`, `"depth_exr"`, `"normal_exr"`.
+    /// Defaults to `["png"]` if omitted.
     #[serde(default)]
-    pub config_preset: Option<String>,
+    pub passes: Vec<String>,
+    /// Time-of-day lighting preset name to apply before rendering (optional).
+    #[serde(default)]
+    pub tod_preset: Option<String>,
     #[serde(default)]
     pub goal_run_id: Option<String>,
 }
@@ -63,6 +67,24 @@ pub struct Ue5MrqSubmitParams {
 pub struct Ue5MrqStatusParams {
     /// MRQ job ID returned by `ue5_mrq_submit`.
     pub job_id: String,
+    #[serde(default)]
+    pub goal_run_id: Option<String>,
+}
+
+/// Parameters for `ue5_sequencer_query`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct Ue5SequencerQueryParams {
+    /// Content-browser path to the level to inspect (e.g., "/Game/Maps/ProductionLevel").
+    pub level_path: String,
+    #[serde(default)]
+    pub goal_run_id: Option<String>,
+}
+
+/// Parameters for `ue5_lighting_preset_list`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct Ue5LightingPresetListParams {
+    /// Content-browser path to the level whose lighting presets to enumerate.
+    pub level_path: String,
     #[serde(default)]
     pub goal_run_id: Option<String>,
 }
@@ -194,11 +216,19 @@ pub fn handle_ue5_mrq_submit(
     let decision = check_unreal_policy(&state.policy_engine, &agent_id, "submit", &resource)?;
     enforce_policy(&decision)?;
 
+    // Default passes to ["png"] if caller omitted the field.
+    let passes = if params.passes.is_empty() {
+        vec!["png".to_string()]
+    } else {
+        params.passes.clone()
+    };
+
     let response = json!({
         "status": "connector_not_running",
         "sequence_path": params.sequence_path,
         "output_dir": params.output_dir,
-        "config_preset": params.config_preset,
+        "passes": passes,
+        "tod_preset": params.tod_preset,
         "message": "Unreal Editor is not running or the MCP plugin is not loaded.",
         "hint": "Start the Unreal Editor with the plugin enabled, then retry."
     });
@@ -224,6 +254,62 @@ pub fn handle_ue5_mrq_status(
     let response = json!({
         "status": "connector_not_running",
         "job_id": params.job_id,
+        "message": "Unreal Editor is not running or the MCP plugin is not loaded.",
+        "hint": "Start the Unreal Editor with the plugin enabled, then retry."
+    });
+
+    Ok(CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(&response).unwrap_or_default(),
+    )]))
+}
+
+pub fn handle_ue5_sequencer_query(
+    state: &Arc<Mutex<GatewayState>>,
+    params: Ue5SequencerQueryParams,
+) -> Result<CallToolResult, McpError> {
+    let state = state
+        .lock()
+        .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
+
+    let agent_id = resolve_agent_id(&state, params.goal_run_id.as_deref());
+    let resource = format!(
+        "unreal://scene/{}",
+        params.level_path.trim_start_matches('/')
+    );
+    let decision = check_unreal_policy(&state.policy_engine, &agent_id, "read", &resource)?;
+    enforce_policy(&decision)?;
+
+    let response = json!({
+        "status": "connector_not_running",
+        "level_path": params.level_path,
+        "message": "Unreal Editor is not running or the MCP plugin is not loaded.",
+        "hint": "Start the Unreal Editor with the plugin enabled, then retry."
+    });
+
+    Ok(CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(&response).unwrap_or_default(),
+    )]))
+}
+
+pub fn handle_ue5_lighting_preset_list(
+    state: &Arc<Mutex<GatewayState>>,
+    params: Ue5LightingPresetListParams,
+) -> Result<CallToolResult, McpError> {
+    let state = state
+        .lock()
+        .map_err(|e| McpError::internal_error(format!("lock poisoned: {}", e), None))?;
+
+    let agent_id = resolve_agent_id(&state, params.goal_run_id.as_deref());
+    let resource = format!(
+        "unreal://scene/{}",
+        params.level_path.trim_start_matches('/')
+    );
+    let decision = check_unreal_policy(&state.policy_engine, &agent_id, "read", &resource)?;
+    enforce_policy(&decision)?;
+
+    let response = json!({
+        "status": "connector_not_running",
+        "level_path": params.level_path,
         "message": "Unreal Editor is not running or the MCP plugin is not loaded.",
         "hint": "Start the Unreal Editor with the plugin enabled, then retry."
     });

@@ -51,13 +51,15 @@ impl UnrealBackend for SpecialAgentBackend {
     }
 
     fn supported_tools(&self) -> Vec<UnrealTool> {
-        // SpecialAgentPlugin exposes 71+ tools; we model the core five here.
+        // SpecialAgentPlugin exposes 71+ tools; we model the seven TA-gated tools here.
         vec![
             UnrealTool::PythonExec,
             UnrealTool::SceneQuery,
             UnrealTool::AssetList,
             UnrealTool::MrqSubmit,
             UnrealTool::MrqStatus,
+            UnrealTool::SequencerQuery,
+            UnrealTool::LightingPresetList,
         ]
     }
 

@@ -2,10 +2,17 @@ pub mod backend;
 pub mod backends;
 pub mod config;
 pub mod error;
+pub mod frame_watcher;
+pub mod mrq;
 
 pub use backend::UnrealBackend;
 pub use config::UnrealConnectorConfig;
 pub use error::UnrealConnectorError;
+pub use frame_watcher::{FrameArtifact, FrameWatcher};
+pub use mrq::{
+    LightingPreset, LightingPresetListResponse, MrqJobState, MrqStatusResponse, MrqSubmitRequest,
+    MrqSubmitResponse, RenderPass, SequenceInfo, SequencerQueryResponse,
+};
 
 #[cfg(test)]
 mod tests {
@@ -137,6 +144,33 @@ install_path = "/opt/ta-mcp/special-agent"
         assert_eq!(UnrealTool::AssetList.mcp_name(), "ue5_asset_list");
         assert_eq!(UnrealTool::MrqSubmit.mcp_name(), "ue5_mrq_submit");
         assert_eq!(UnrealTool::MrqStatus.mcp_name(), "ue5_mrq_status");
+        assert_eq!(UnrealTool::SequencerQuery.mcp_name(), "ue5_sequencer_query");
+        assert_eq!(
+            UnrealTool::LightingPresetList.mcp_name(),
+            "ue5_lighting_preset_list"
+        );
+    }
+
+    #[test]
+    fn flopperam_backend_tools_include_sequencer_and_lighting() {
+        use crate::backend::UnrealTool;
+        use crate::backends::FlopperamBackend;
+        let cfg = UnrealConnectorConfig::default();
+        let b = FlopperamBackend::new(&cfg);
+        let tools = b.supported_tools();
+        assert!(tools.contains(&UnrealTool::SequencerQuery));
+        assert!(tools.contains(&UnrealTool::LightingPresetList));
+    }
+
+    #[test]
+    fn special_agent_backend_tools_include_sequencer_and_lighting() {
+        use crate::backend::UnrealTool;
+        use crate::backends::SpecialAgentBackend;
+        let cfg = UnrealConnectorConfig::default();
+        let b = SpecialAgentBackend::new(&cfg);
+        let tools = b.supported_tools();
+        assert!(tools.contains(&UnrealTool::SequencerQuery));
+        assert!(tools.contains(&UnrealTool::LightingPresetList));
     }
 
     #[test]

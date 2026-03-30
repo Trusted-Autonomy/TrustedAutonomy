@@ -22,6 +22,10 @@ pub enum UnrealTool {
     MrqSubmit,
     /// Poll MRQ job completion.
     MrqStatus,
+    /// Query Level Sequences available in the level.
+    SequencerQuery,
+    /// List available lighting presets in the level.
+    LightingPresetList,
 }
 
 impl UnrealTool {
@@ -32,6 +36,8 @@ impl UnrealTool {
             Self::AssetList => "ue5_asset_list",
             Self::MrqSubmit => "ue5_mrq_submit",
             Self::MrqStatus => "ue5_mrq_status",
+            Self::SequencerQuery => "ue5_sequencer_query",
+            Self::LightingPresetList => "ue5_lighting_preset_list",
         }
     }
 }

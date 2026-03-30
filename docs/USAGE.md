@@ -9744,6 +9744,8 @@ If the Editor is not running, the tool returns a structured response with `statu
 | `ue5_asset_list` | List assets under a Content Browser path | kvick, flopperam, special-agent |
 | `ue5_mrq_submit` | Submit a Movie Render Queue (MRQ) render job | flopperam, special-agent |
 | `ue5_mrq_status` | Poll MRQ job completion and frame progress | flopperam, special-agent |
+| `ue5_sequencer_query` | List Level Sequences and their frame ranges | flopperam, special-agent |
+| `ue5_lighting_preset_list` | Enumerate available lighting presets (time-of-day, HDRI) | flopperam, special-agent |
 
 ### Policy Capabilities
 
@@ -9751,6 +9753,7 @@ Two capability URIs control access:
 
 - **`unreal://script/**`** — gates Python execution (`ue5_python_exec`). Add this capability to an agent's profile in `policy.yaml` to allow script execution.
 - **`unreal://render/**`** — gates MRQ submissions (`ue5_mrq_submit`). Submissions require `RequireApproval` and will be routed through the human review channel before execution.
+- **`unreal://scene/**`** — gates scene and sequencer queries (`ue5_scene_query`, `ue5_sequencer_query`, `ue5_lighting_preset_list`). Read-only access.
 
 Example `policy.yaml` grant:
 
@@ -9767,6 +9770,102 @@ capabilities:
       - resource: "unreal://render/**"
         verbs: [submit]
         require_approval: true
+```
+
+### Governed Render Jobs
+
+The MRQ governed render flow lets agents submit render jobs that produce frame artifacts reviewable through the standard `ta draft view` / `ta draft apply` pipeline. Rendered frames land in TA staging — not the project workspace — until the reviewer explicitly approves them.
+
+#### Step 1 — Discover sequences and lighting presets
+
+Before submitting a render, use the query tools to find what's available in the level:
+
+```python
+# List all Level Sequences in the level.
+sequences = mcp.call("ue5_sequencer_query", {
+    "level_path": "/Game/Maps/ProductionLevel",
+    "goal_run_id": "<goal-run-id>"
+})
+# Returns: { "sequences": [{ "name": "TurntableShot", "path": "...", "frame_start": 0, "frame_end": 239 }] }
+
+# List available lighting presets.
+presets = mcp.call("ue5_lighting_preset_list", {
+    "level_path": "/Game/Maps/ProductionLevel",
+    "goal_run_id": "<goal-run-id>"
+})
+# Returns: { "presets": [{ "name": "GoldenHour", "type": "time_of_day" }, ...] }
+```
+
+#### Step 2 — Submit the MRQ job
+
+Specify which passes to render and an optional time-of-day preset:
+
+```python
+job = mcp.call("ue5_mrq_submit", {
+    "sequence_path": "/Game/Sequences/TurntableShot",
+    "output_dir": "/tmp/render_output/turntable",
+    "passes": ["png", "depth_exr"],
+    "tod_preset": "GoldenHour",
+    "goal_run_id": "<goal-run-id>"
+})
+# Returns: { "job_id": "mrq-abc123", "estimated_frames": 480 }
+```
+
+Supported passes:
+
+| Pass | Format | Description |
+|---|---|---|
+| `png` | PNG | Standard RGB colour frames |
+| `depth_exr` | EXR | Linear 32-bit depth buffer |
+| `normal_exr` | EXR | Linear 32-bit surface normals |
+
+#### Step 3 — Poll for completion
+
+```python
+import time
+while True:
+    status = mcp.call("ue5_mrq_status", {
+        "job_id": job["job_id"],
+        "goal_run_id": "<goal-run-id>"
+    })
+    if status["state"] in ("complete", "failed"):
+        break
+    time.sleep(5)
+```
+
+#### Step 4 — Frames arrive in staging
+
+As MRQ writes frames, the TA connector ingests them into the staging directory:
+
+```
+.ta/staging/<goal-id>/render_output/<preset_name>/<pass>/frame_0000.png
+.ta/staging/<goal-id>/render_output/<preset_name>/<pass>/frame_0001.png
+...
+```
+
+Each frame is tracked as an `ArtifactKind::Image` artifact in the draft package.
+
+#### Step 5 — Review and approve
+
+```bash
+# View the draft — shows frame count, sizes, and format for each pass.
+ta draft view
+
+# Approve to promote all frames to the workspace.
+ta draft apply
+
+# Or deny to discard the render outputs.
+ta draft deny
+```
+
+The `ta draft view` output shows a human-readable image summary instead of a binary diff:
+
+```
+render_output/GoldenHour/png/frame_0000.png   PNG image  (1.2 MB)
+render_output/GoldenHour/png/frame_0001.png   PNG image  (1.2 MB)
+render_output/GoldenHour/depth_exr/frame_0000.exr  EXR image  (4.1 MB)
+...
+480 frames total across 2 passes
 ```
 
 ---

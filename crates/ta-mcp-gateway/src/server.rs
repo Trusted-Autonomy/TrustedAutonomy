@@ -1200,6 +1200,42 @@ impl TaGatewayServer {
         tools::unreal::handle_ue5_mrq_status(&self.state, params)
     }
 
+    #[tool(
+        description = "Query Level Sequences available in a UE5 level. Returns sequence names, content-browser paths, and frame ranges. Requires `unreal://scene/**` capability grant."
+    )]
+    fn ue5_sequencer_query(
+        &self,
+        Parameters(params): Parameters<tools::unreal::Ue5SequencerQueryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ue5_sequencer_query",
+            Some(&format!(
+                "unreal://scene/{}",
+                params.level_path.trim_start_matches('/')
+            )),
+            None,
+        );
+        tools::unreal::handle_ue5_sequencer_query(&self.state, params)
+    }
+
+    #[tool(
+        description = "List available lighting presets in a UE5 level (time-of-day, HDRI, static). Used to select a tod_preset before calling ue5_mrq_submit. Requires `unreal://scene/**` capability grant."
+    )]
+    fn ue5_lighting_preset_list(
+        &self,
+        Parameters(params): Parameters<tools::unreal::Ue5LightingPresetListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ue5_lighting_preset_list",
+            Some(&format!(
+                "unreal://scene/{}",
+                params.level_path.trim_start_matches('/')
+            )),
+            None,
+        );
+        tools::unreal::handle_ue5_lighting_preset_list(&self.state, params)
+    }
+
     // ── External Action Governance (v0.13.4) ─────────────────────
 
     #[tool(
@@ -1290,7 +1326,7 @@ mod tests {
     fn tool_count_matches_expected() {
         let (server, _dir) = test_server();
         let tools = server.tool_router.list_all();
-        // 24 tools: goal_start, goal_status, goal_list,
+        // 26 tools: goal_start, goal_status, goal_list,
         //           fs_read, fs_write, fs_list, fs_diff,
         //           pr_build, pr_status,
         //           ta_draft, ta_goal_inner, ta_plan, ta_plan_status (v0.14.3.2),
@@ -1298,9 +1334,10 @@ mod tests {
         //           ta_workflow (v0.9.8.2), ta_ask_human (v0.9.9.1),
         //           ta_external_action (v0.13.4),
         //           ue5_python_exec, ue5_scene_query, ue5_asset_list,
-        //           ue5_mrq_submit, ue5_mrq_status (v0.14.14)
+        //           ue5_mrq_submit, ue5_mrq_status (v0.14.14),
+        //           ue5_sequencer_query, ue5_lighting_preset_list (v0.14.15.1)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 24, "expected 24 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 26, "expected 26 tools, got: {:?}", names);
     }
 
     #[test]
