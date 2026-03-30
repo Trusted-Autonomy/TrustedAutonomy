@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Trusted Autonomy MSI installer definition.
-  Built with cargo-wix (WiX Toolset v4 wrapper).
+  Built with WiX v4 (dotnet tool install --global wix).
 
   Usage (from workspace root):
-    cargo wix --nocapture -p ta-cli --bin-path target\x86_64-pc-windows-msvc\release
+    wix build apps/ta-cli/wix/main.wxs -d SourceDir=target\x86_64-pc-windows-msvc\release \
+      -d Version=0.14.17.0 -d Platform=x64 -arch x64 -o ta.msi
 
   The installer:
   - Places ta.exe and ta-daemon.exe at %ProgramFiles%\TrustedAutonomy\

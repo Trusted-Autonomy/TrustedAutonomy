@@ -95,6 +95,15 @@ jobs:
             sed "s/^\*\*Version\*\*:.*/**Version**: ${{ steps.get_version.outputs.version }}/" \
               docs/USAGE.md > staging/USAGE.md
           fi
+          # Generate USAGE.html — pandoc is available on macOS runners; use <pre> fallback on Linux musl
+          if command -v pandoc >/dev/null 2>&1; then
+            pandoc staging/USAGE.md -s --metadata title="Trusted Autonomy Usage Guide" \
+              -c https://cdn.simplecss.org/simple.min.css \
+              -o staging/USAGE.html
+          else
+            printf '<!DOCTYPE html><html><meta charset="utf-8"><title>Trusted Autonomy Usage Guide</title><body><pre>%s</pre></body></html>' \
+              "$(cat staging/USAGE.md)" > staging/USAGE.html
+          fi
           cp DISCLAIMER.md staging/ 2>/dev/null || true
           cp LICENSE staging/ 2>/dev/null || true
           cp .release-draft.md staging/RELEASE-NOTES.md 2>/dev/null || true
@@ -131,46 +140,51 @@ jobs:
             (Get-Content "docs/USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: ${{ steps.get_version.outputs.version }}" |
               Set-Content "staging/USAGE.md"
           }
+          # Generate USAGE.html using HtmlEncode fallback (pandoc not pre-installed on windows-latest)
+          $md = [System.IO.File]::ReadAllText("staging\USAGE.md")
+          $escaped = [System.Net.WebUtility]::HtmlEncode($md)
+          ("<!DOCTYPE html><html><meta charset='utf-8'>" +
+           "<title>Trusted Autonomy Usage Guide</title><body><pre>$escaped</pre></body></html>") |
+            Out-File -Encoding utf8 "staging\USAGE.html"
           foreach ($f in @("DISCLAIMER.md", "LICENSE", ".release-draft.md")) {
             if (Test-Path $f) { Copy-Item $f staging/ }
           }
           Compress-Archive -Path staging/* -DestinationPath "artifacts/${{ env.BINARY_NAME }}-${{ steps.get_version.outputs.version }}-${{ matrix.target }}.zip"
 
-      # ── Windows MSI (v0.13.11) ────────────────────────────────────────────────
+      # ── Windows MSI ───────────────────────────────────────────────────────────
       - name: Build Windows MSI
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        continue-on-error: true
         shell: pwsh
         env:
           TAG: ${{ steps.get_version.outputs.version }}
         run: |
-          # Install cargo-wix (WiX Toolset v4 wrapper).
-          cargo install cargo-wix 2>&1 | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning "cargo-wix install failed — MSI build skipped"
-            exit 0
-          }
+          # Install WiX v4 .NET global tool (~10s; windows-latest ships .NET SDK).
+          dotnet tool install --global wix
 
           # Extract version digits from any tag format:
           # "v0.13.12-alpha" → "0.13.12.0"
           # "public-alpha-v0.13.12" → "0.13.12.0"
-          # Approach: find last occurrence of vN.N.N or N.N.N in the tag.
           $versionMatch = [regex]::Match("$env:TAG", 'v?(\d+\.\d+\.\d+)')
           if (-not $versionMatch.Success) {
-            Write-Warning "Could not extract version from tag '$env:TAG' — MSI build skipped"
-            exit 0
+            Write-Error "Could not extract version from tag '$env:TAG' — aborting MSI build"
+            exit 1
           }
           $msiVersion = $versionMatch.Groups[1].Value + ".0"
           Write-Host "MSI version: $msiVersion (from tag $env:TAG)"
 
-          # Generate USAGE.html from docs/USAGE.md for bundling in the MSI.
+          # Generate USAGE.html into the release dir for bundling in the MSI.
+          # main.wxs references $(var.SourceDir)\USAGE.html as a required file.
           $releaseDir = "target\x86_64-pc-windows-msvc\release"
+          $md = [System.IO.File]::ReadAllText("docs\USAGE.md")
+          $escaped = [System.Net.WebUtility]::HtmlEncode($md)
+          ("<!DOCTYPE html><html><meta charset='utf-8'>" +
+           "<title>Trusted Autonomy Usage Guide</title><body><pre>$escaped</pre></body></html>") |
+            Out-File -Encoding utf8 "$releaseDir\USAGE.html"
+          # Pandoc upgrade path: overwrite with richer output if available.
           if (Get-Command pandoc -ErrorAction SilentlyContinue) {
-            pandoc docs/USAGE.md -s --metadata title="Trusted Autonomy Usage Guide" -o "$releaseDir\USAGE.html"
-          } else {
-            # Minimal HTML fallback if pandoc is not available.
-            $md = Get-Content docs/USAGE.md -Raw
-            "<html><body><pre>$md</pre></body></html>" | Out-File -Encoding utf8 "$releaseDir\USAGE.html"
+            pandoc docs/USAGE.md -s --metadata title="Trusted Autonomy Usage Guide" `
+              -c https://cdn.simplecss.org/simple.min.css `
+              -o "$releaseDir\USAGE.html"
           }
 
           # Copy vcs-perforce plugin files for MSI bundling.
@@ -182,27 +196,15 @@ jobs:
             Copy-Item "plugins\vcs-perforce.toml" "$releaseDir\plugins\vcs\vcs-perforce.toml"
           }
 
-          # Build the MSI using cargo-wix.
-          # Pass --install-version explicitly so WiX gets a clean 4-part dotted
-          # version (e.g., "0.13.11.0") rather than having to strip the
-          # pre-release suffix from the Cargo.toml version string.
-          cargo wix --nocapture -p ta-cli `
-            --bin-path "target\x86_64-pc-windows-msvc\release" `
-            --install-version "$msiVersion" 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning "cargo-wix build failed — MSI skipped (non-fatal)"
-            exit 0
-          }
-
-          # Find and copy the MSI to artifacts/.
-          $msi = Get-ChildItem -Path target\wix -Filter "*.msi" -Recurse | Select-Object -First 1
-          if ($msi) {
-            $dest = "artifacts\${{ env.BINARY_NAME }}-$env:TAG-x86_64-pc-windows-msvc.msi"
-            Copy-Item $msi.FullName $dest
-            Write-Host "MSI created: $dest"
-          } else {
-            Write-Warning "cargo-wix did not produce an MSI — skipping (non-fatal)"
-          }
+          # Build the MSI with WiX v4 directly (main.wxs uses v4 schema).
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          wix build apps/ta-cli/wix/main.wxs `
+            -d SourceDir="$releaseDir" `
+            -d Version="$msiVersion" `
+            -d Platform=x64 `
+            -arch x64 `
+            -o "artifacts\${{ env.BINARY_NAME }}-$env:TAG-x86_64-pc-windows-msvc.msi"
+          Write-Host "MSI created: artifacts\${{ env.BINARY_NAME }}-$env:TAG-x86_64-pc-windows-msvc.msi"
 
       # ── macOS pkg + DMG (v0.13.11) ───────────────────────────────────────────
       # Build on ARM runner (aarch64-apple-darwin) — one DMG covers both arches.
@@ -454,6 +456,7 @@ jobs:
             "ta-${TAG}-x86_64-unknown-linux-musl.tar.gz"
             "ta-${TAG}-aarch64-unknown-linux-musl.tar.gz"
             "ta-${TAG}-x86_64-pc-windows-msvc.zip"
+            "ta-${TAG}-x86_64-pc-windows-msvc.msi"
             "SHA256SUMS.txt"
           )
           MISSING=()
@@ -472,7 +475,6 @@ jobs:
           # Report optional installers (non-fatal if absent).
           OPTIONAL=(
             "ta-${TAG}-macos.dmg"
-            "ta-${TAG}-x86_64-pc-windows-msvc.msi"
           )
           for f in "${OPTIONAL[@]}"; do
             if [ -f "artifacts/$f" ]; then
@@ -530,6 +532,7 @@ jobs:
             "ta-${TAG}-x86_64-unknown-linux-musl.tar.gz"
             "ta-${TAG}-aarch64-unknown-linux-musl.tar.gz"
             "ta-${TAG}-x86_64-pc-windows-msvc.zip"
+            "ta-${TAG}-x86_64-pc-windows-msvc.msi"
             "SHA256SUMS.txt"
           )
 
