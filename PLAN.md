@@ -8347,6 +8347,64 @@ ta-connectors/comfyui/
 
 ---
 
+### v0.15.4 — Agent-Run Contextual Asset Diffs in Draft Review
+<!-- status: pending -->
+**Goal**: During `ta draft view`, for image and video artifacts, invoke a lightweight agent call to independently analyze before/after and produce a text summary of what changed. A supervisor agent then cross-checks that summary against the goal agent's stated intent and reports a confidence score. An optional visual diff (localized crop comparison or color bar) is appended when configured, giving reviewers the easiest possible signal for whether the change is what they expected.
+
+**Why this phase exists**: Image and video artifacts can't be reviewed from a text diff — the reviewer needs to understand *semantically* what changed (lighting shifted, character moved left, background color changed). An agent-generated diff summary replaces manual visual inspection for small/medium changes and flags unexpected changes before the reviewer even opens the files.
+
+**Depends on**: v0.14.15 (`ArtifactKind::Image`), v0.15.1 (`ArtifactKind::Video`), configured agent (Claude with vision)
+
+#### Architecture
+
+```
+ta draft view <id>
+  └─ for each image/video artifact pair (before + after):
+       1. DiffSummaryAgent — sees both files, produces text summary
+       2. SupervisorAgent  — sees goal intent + diff summary, scores confidence
+       3. VisualDiffRenderer (optional) — produces inline visual diff for terminal/web
+```
+
+The diff summary is generated **without** reading the goal agent's summary first, ensuring an independent perspective. The supervisor sees both and reports agreement or flags divergence.
+
+#### Config (`[draft.asset_diff]` in `workflow.toml`)
+
+```toml
+[draft.asset_diff]
+enabled = true            # generate text summary (default: true if agent configured)
+visual_diff = false       # also render visual diff output (default: false)
+visual_diff_threshold = 0.3  # max fraction of image that can change for localized crop
+                              # above threshold → full-image color bar instead
+supervisor = true         # run supervisor confidence check (default: true)
+```
+
+#### Items
+
+1. [ ] **`DiffSummaryAgent`** in `crates/ta-changeset/src/asset_diff.rs`: Takes `(before_path, after_path, artifact_kind)`, calls the configured agent with vision (Claude multimodal). Produces `AssetDiffSummary { text: String, change_type: ChangeType }`. `ChangeType`: `Localized`, `Tonal`, `Structural`, `Minor`, `Identical`. Agent prompt instructs: describe what visually changed — do not speculate about intent.
+
+2. [ ] **`SupervisorAgent`** in the same module: Takes `(goal_intent: &str, diff_summary: &AssetDiffSummary)`. Produces `SupervisorVerdict { confidence: f32, match_assessment: String, flags: Vec<String> }`. A `confidence` of 1.0 means the diff summary is fully consistent with stated intent; below 0.7 prints a warning in `ta draft view`.
+
+3. [ ] **Visual diff renderer** (`VisualDiffRenderer`): Enabled by config. For `ChangeType::Localized` — extracts the changed region bounding box, writes a side-by-side PNG crop to the staging dir, shows path in `ta draft view`. For `ChangeType::Tonal` — generates a horizontal color bar: left half sampled from `before`, right half from `after`, shows dominant hue shift. For video — extracts representative keyframes (first, middle, last), runs image diff on each, summarizes motion/tonal shift across keyframes.
+
+4. [ ] **Integration with `ta draft view`**: After the existing artifact listing, each image/video artifact shows:
+   ```
+   [image] renders/frame_0042.png  (1024×1024, PNG)
+     Agent diff: Lighting shifted from warm to cool; left-side shadow deepened.
+                 ChangeType: Tonal
+     Supervisor: confidence 0.91 — consistent with goal "adjust TOD preset to dusk"
+     Visual diff: .ta/staging/<id>/diffs/frame_0042_colordiff.png
+   ```
+
+5. [ ] **Graceful degradation**: If no vision-capable agent is configured, skip agent diff and show `(asset diff unavailable — no vision agent configured)`. If `visual_diff = false`, skip renderer. Never block draft view from loading.
+
+6. [ ] **Unit tests**: `DiffSummaryAgent` with stub agent returns expected `AssetDiffSummary`. `SupervisorAgent` scores 1.0 for matching intent/summary, <0.7 for mismatch. Visual diff renderer produces expected output paths for localized and tonal inputs. Config parsing for all fields and defaults.
+
+7. [ ] **USAGE.md "Asset Diff in Draft Review" section**: How it works, config options, example output, how to interpret confidence score, how to enable visual diff.
+
+#### Version: `0.15.4-alpha`
+
+---
+
 ## v0.16 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
