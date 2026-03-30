@@ -9645,6 +9645,132 @@ When `ta memory sync` copies entries to a configured backend (e.g., Supermemory,
 
 ---
 
+## Unreal Engine Integration
+
+TA can drive the Unreal Editor via MCP tools, with all agent actions mediated through TA's policy, audit, and draft review flow. Three community backends are supported and selectable without code changes.
+
+### Supported Backends
+
+| Backend | Source | Use case |
+|---|---|---|
+| `flopperam` (default) | `github.com/flopperam/unreal-engine-mcp` | Production — C++ UE5 plugin, full MRQ/Sequencer access |
+| `kvick` | `github.com/kvick-games/UnrealMCP` | POC/development — Python server, simple scene ops |
+| `special-agent` | `github.com/ArtisanGameworks/SpecialAgentPlugin` | Opt-in — 71+ tools, environment-building |
+
+### Installation
+
+Run `ta connector install` to get exact setup instructions for the chosen backend:
+
+```bash
+# Print install steps for the flopperam backend (default for production).
+ta connector install unreal --backend flopperam
+
+# Print install steps for the kvick backend (default for POC).
+ta connector install unreal --backend kvick
+
+# Print install steps for the special-agent backend.
+ta connector install unreal --backend special-agent
+```
+
+The command prints:
+1. The `git clone` command to download the backend to `~/.ta/mcp-servers/unreal-<backend>`.
+2. Plugin copy instructions (for UE5 plugin backends).
+3. The TOML config block to paste into your `workflow.toml`.
+
+### Configuration
+
+Add a `[connectors.unreal]` block to `.ta/workflow.toml`:
+
+```toml
+[connectors.unreal]
+enabled = true
+backend = "flopperam"          # "kvick" | "flopperam" | "special-agent"
+ue_project_path = "/path/to/MyGame/MyGame.uproject"
+editor_path = ""               # auto-detect if empty
+socket = "localhost:30100"
+
+[connectors.unreal.backends.kvick]
+install_path = "~/.ta/mcp-servers/unreal-kvick"
+
+[connectors.unreal.backends.flopperam]
+install_path = "~/.ta/mcp-servers/unreal-flopperam"
+
+[connectors.unreal.backends."special-agent"]
+install_path = "~/.ta/mcp-servers/unreal-special-agent"
+```
+
+### Switching Backends
+
+Change `backend` in the config, then restart the connector:
+
+```bash
+# Switch to kvick for a quick POC.
+# In workflow.toml: backend = "kvick"
+ta connector stop unreal
+ta connector start unreal
+ta connector status unreal
+```
+
+### Listing and Status
+
+```bash
+# List all connectors and their install status.
+ta connector list
+
+# Check whether the Unreal MCP server is reachable.
+ta connector status unreal
+```
+
+### First Scene Query
+
+Once the Unreal Editor is open with the plugin loaded, agents can call the `ue5_scene_query` MCP tool. From within a `ta run` goal:
+
+```python
+# The agent calls this tool via the MCP gateway.
+result = mcp.call("ue5_scene_query", {
+    "level_path": "/Game/Maps/TestLevel",
+    "goal_run_id": "<goal-run-id>"
+})
+```
+
+If the Editor is not running, the tool returns a structured response with `status: connector_not_running` and a hint to start the Editor.
+
+### Available Tools
+
+| Tool | Description | Backend support |
+|---|---|---|
+| `ue5_python_exec` | Execute a Python script in the UE5 Editor context | kvick, flopperam, special-agent |
+| `ue5_scene_query` | Query actors and metadata from a level | kvick, flopperam, special-agent |
+| `ue5_asset_list` | List assets under a Content Browser path | kvick, flopperam, special-agent |
+| `ue5_mrq_submit` | Submit a Movie Render Queue (MRQ) render job | flopperam, special-agent |
+| `ue5_mrq_status` | Poll MRQ job completion and frame progress | flopperam, special-agent |
+
+### Policy Capabilities
+
+Two capability URIs control access:
+
+- **`unreal://script/**`** — gates Python execution (`ue5_python_exec`). Add this capability to an agent's profile in `policy.yaml` to allow script execution.
+- **`unreal://render/**`** — gates MRQ submissions (`ue5_mrq_submit`). Submissions require `RequireApproval` and will be routed through the human review channel before execution.
+
+Example `policy.yaml` grant:
+
+```yaml
+capabilities:
+  - agent_id: claude-code
+    grants:
+      - resource: "unreal://scene/**"
+        verbs: [read]
+      - resource: "unreal://assets/**"
+        verbs: [read]
+      - resource: "unreal://script/**"
+        verbs: [execute]
+      - resource: "unreal://render/**"
+        verbs: [submit]
+        require_approval: true
+```
+
+---
+
 ## Getting Help
 
 - **Source and documentation**: [github.com/trustedautonomy/ta](https://github.com/trustedautonomy/ta)

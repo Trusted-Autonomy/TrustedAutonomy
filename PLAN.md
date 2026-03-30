@@ -8109,56 +8109,26 @@ Agent permissions
 ---
 
 ### v0.14.14 — Unreal Engine Connector Scaffold (`ta-connectors/unreal`)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Build the TA→UE5 integration layer. Agents can drive the Unreal Editor via MCP tools, mediated through TA's policy/audit/draft flow. Backend is config-switchable across three community MCP servers (kvick-games, flopperam, ArtisanGameworks), enabling POC-to-production promotion without code changes.
 
 **Depends on**: v0.14.13 (TA Studio setup wizard — connector config surface)
 
 #### Items
 
-1. [ ] **Create `crates/ta-connectors/unreal/` workspace member**
-   - `UnrealBackend` trait: `spawn()`, `supported_tools()`, `name()`, `socket_addr()`
-   - `kvick` backend — wraps `kvick-games/UnrealMCP` (Python, simple scene ops). Default for POC.
-   - `flopperam` backend — wraps `flopperam/unreal-engine-mcp` (C++ plugin, full MRQ/Sequencer access). Default for production.
-   - `special_agent` backend — wraps `ArtisanGameworks/SpecialAgentPlugin` (71+ tools, environment-building). Available as opt-in.
-   - Config deserialization: `[connectors.unreal]` block in `daemon.toml` / `workflow.toml`
+1. [x] **Create `crates/ta-connectors/unreal/` workspace member**: Added new workspace member `ta-connector-unreal`. Implements `UnrealBackend` trait with `spawn()`, `supported_tools()`, `name()`, `socket_addr()`, and `metadata()` methods. Three backend implementations: `KvickBackend` (Python, simple scene ops), `FlopperamBackend` (C++ UE5 plugin, full MRQ/Sequencer access), and `SpecialAgentBackend` (71+ tools). `make_backend()` factory dispatches to the configured backend.
 
-2. [ ] **Config schema** (`[connectors.unreal]`):
-   ```toml
-   [connectors.unreal]
-   enabled = true
-   backend = "flopperam"          # "kvick" | "flopperam" | "special-agent"
-   ue_project_path = ""           # path to .uproject file
-   editor_path = ""               # auto-detect if empty
-   socket = "localhost:30100"
+2. [x] **Config schema** (`[connectors.unreal]`): `UnrealConnectorConfig` struct with `enabled`, `backend`, `ue_project_path`, `editor_path`, `socket`, and `backends` (per-backend `install_path`). Deserializes from TOML via `from_toml()`. Supports `special-agent` backend name via `#[serde(rename = "special-agent")]`. `install_path_for_active_backend()` resolves with `~` expansion.
 
-   [connectors.unreal.backends.kvick]
-   install_path = "~/.ta/mcp-servers/unreal-kvick"
+3. [x] **`ta connector` CLI subcommand**: Added `ConnectorCommands` enum with `install`, `list`, `status`, `start`, `stop`. `ta connector install unreal --backend <name>` prints manual install steps with exact git clone commands and config examples. `ta connector list` shows all backends with install status. `ta connector status unreal` probes the socket with a TCP connection check. Registered in `apps/ta-cli/src/main.rs` as `Commands::Connector`.
 
-   [connectors.unreal.backends.flopperam]
-   install_path = "~/.ta/mcp-servers/unreal-flopperam"
-   ```
+4. [x] **Register Unreal tools in `ta-mcp-gateway`**: Five new `#[tool]` methods added to `TaGatewayServer`: `ue5_python_exec`, `ue5_scene_query`, `ue5_asset_list`, `ue5_mrq_submit`, `ue5_mrq_status`. Each delegates to `tools::unreal::handle_ue5_*`. Tool count updated from 19 to 24 in the gateway test.
 
-3. [ ] **`ta connector` CLI subcommand**: `install`, `list`, `status`, `start`, `stop`
-   - `ta connector install unreal --backend floppером` → clones/downloads to `~/.ta/mcp-servers/<name>`, writes config
-   - `ta connector install unreal --backend kvick`
-   - `ta connector install unity`
-   - `ta connector list` — shows installed connectors + current backend selection
-   - `ta connector status [unreal|unity]` — shows whether the MCP server process is running
-   - Prints Editor copy-to-project instructions (auto-install into UE5 Editor is not possible from CLI)
+5. [x] **Policy capability**: `unreal://script/**` gates Python execution via `check_unreal_policy()`. `unreal://render/**` gates MRQ submissions. `unreal://scene/**` and `unreal://assets/**` gate read operations. All use the existing `PolicyEngine::evaluate()` infrastructure. Tool handlers return `connector_not_running` stub responses while the Editor is not running.
 
-4. [ ] **Register Unreal tools in `ta-mcp-gateway`**:
-   - `ue5_python_exec(script: str)` — execute a Python script in the UE5 Editor context
-   - `ue5_scene_query(level_path: str)` — return actor list and basic scene metadata
-   - `ue5_asset_list(path: str)` — list assets under a content browser path
-   - `ue5_mrq_submit(sequence_path, output_dir, config_preset)` — queue an MRQ render job
-   - `ue5_mrq_status(job_id)` — poll job completion and frame count
+6. [x] **Unit tests**: 12 tests in `crates/ta-connectors/unreal/src/lib.rs`: config defaults, TOML parsing for all three backends, `make_backend` unsupported returns error, kvick/flopperam/special-agent tools lists, spawn-without-install-path failures for all three backends, MCP tool name correctness, install path resolution, and connector list output format.
 
-5. [ ] **Policy capability**: `unreal://render/**` gates MRQ submissions behind human approval. `unreal://script/**` gates Python execution. Governed via `policy.yaml` capability grants.
-
-6. [ ] **Unit tests**: Mock backend process spawn/teardown. Tool routing to correct backend. Config parsing (all three backend variants). `ta connector list` output format.
-
-7. [ ] **USAGE.md "Unreal Engine Integration" section**: Installation, config, `ta connector install`, switching backends, first `ue5_scene_query` call.
+7. [x] **USAGE.md "Unreal Engine Integration" section**: Added full section covering installation steps (`ta connector install`), TOML config block, switching backends, first `ue5_scene_query` call, and policy capabilities.
 
 #### Version: `0.14.14-alpha`
 

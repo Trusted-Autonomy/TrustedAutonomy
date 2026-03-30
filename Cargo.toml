@@ -35,6 +35,7 @@ members = [
     "crates/ta-connectors/slack",
     "crates/ta-connectors/discord",
     "crates/ta-connectors/email",
+    "crates/ta-connectors/unreal",
     "apps/ta-cli",
     "crates/ta-agent-ollama",
     "crates/ta-extension",
@@ -43,7 +44,7 @@ members = [
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.14.13-alpha"
+version = "0.14.14-alpha"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.

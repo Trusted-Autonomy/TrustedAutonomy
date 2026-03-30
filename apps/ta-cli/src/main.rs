@@ -475,6 +475,19 @@ enum Commands {
         json: bool,
     },
 
+    /// Manage connector MCP servers (Unreal Engine, Unity).
+    ///
+    /// Subcommands: `install`, `list`, `status`, `start`, `stop`.
+    ///
+    /// Examples:
+    ///   ta connector install unreal --backend flopperam
+    ///   ta connector list
+    ///   ta connector status unreal
+    Connector {
+        #[command(subcommand)]
+        command: commands::connector::ConnectorCommands,
+    },
+
     /// Test and manage inbound VCS webhook triggers (v0.14.8.3).
     ///
     /// Simulates webhook events locally to verify trigger configuration
@@ -871,6 +884,7 @@ fn main() -> anyhow::Result<()> {
         ),
         Commands::Operations { command } => commands::operations::execute(command, &config),
         Commands::Runbook { command } => commands::runbook::execute(command, &config),
+        Commands::Connector { command } => commands::connector::execute(command, &config),
         Commands::Webhook { command } => commands::webhook::execute(command, &config),
         Commands::Serve => commands::serve::execute(&project_root),
         Commands::Build { test } => commands::build::execute(&config, *test),

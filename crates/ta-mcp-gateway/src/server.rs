@@ -1118,6 +1118,88 @@ impl TaGatewayServer {
         tools::human::handle_ask_human(&self.state, params)
     }
 
+    // ── Unreal Engine 5 tools (v0.14.14) ─────────────────────────────
+
+    #[tool(
+        description = "Execute a Python script in the UE5 Editor context via the active backend (kvick/flopperam/special-agent). Gated behind `unreal://script/**` capability. Returns connector_not_running when the Editor is not open."
+    )]
+    fn ue5_python_exec(
+        &self,
+        Parameters(params): Parameters<tools::unreal::Ue5PythonExecParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("ue5_python_exec", Some("unreal://script/python_exec"), None);
+        tools::unreal::handle_ue5_python_exec(&self.state, params)
+    }
+
+    #[tool(
+        description = "Query actors and metadata from an Unreal Engine level. Returns actor list, transform data, and scene metadata. Gated behind `unreal://scene/**` capability."
+    )]
+    fn ue5_scene_query(
+        &self,
+        Parameters(params): Parameters<tools::unreal::Ue5SceneQueryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ue5_scene_query",
+            Some(&format!(
+                "unreal://scene/{}",
+                params.level_path.trim_start_matches('/')
+            )),
+            None,
+        );
+        tools::unreal::handle_ue5_scene_query(&self.state, params)
+    }
+
+    #[tool(
+        description = "List assets under a Content Browser path in an Unreal Engine project. Gated behind `unreal://assets/**` capability."
+    )]
+    fn ue5_asset_list(
+        &self,
+        Parameters(params): Parameters<tools::unreal::Ue5AssetListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ue5_asset_list",
+            Some(&format!(
+                "unreal://assets/{}",
+                params.path.trim_start_matches('/')
+            )),
+            None,
+        );
+        tools::unreal::handle_ue5_asset_list(&self.state, params)
+    }
+
+    #[tool(
+        description = "Submit a Movie Render Queue (MRQ) render job in Unreal Engine. Requires `unreal://render/**` capability grant (human approval gated). Returns a job_id for polling with ue5_mrq_status."
+    )]
+    fn ue5_mrq_submit(
+        &self,
+        Parameters(params): Parameters<tools::unreal::Ue5MrqSubmitParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ue5_mrq_submit",
+            Some(&format!(
+                "unreal://render/{}",
+                params.sequence_path.trim_start_matches('/')
+            )),
+            None,
+        );
+        tools::unreal::handle_ue5_mrq_submit(&self.state, params)
+    }
+
+    #[tool(
+        description = "Poll the status of an MRQ render job submitted via ue5_mrq_submit. Returns job state (queued/running/complete/failed) and frame progress."
+    )]
+    fn ue5_mrq_status(
+        &self,
+        Parameters(params): Parameters<tools::unreal::Ue5MrqStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "ue5_mrq_status",
+            Some(&format!("unreal://render/status/{}", params.job_id)),
+            None,
+        );
+        tools::unreal::handle_ue5_mrq_status(&self.state, params)
+    }
+
     // ── External Action Governance (v0.13.4) ─────────────────────
 
     #[tool(
@@ -1208,15 +1290,17 @@ mod tests {
     fn tool_count_matches_expected() {
         let (server, _dir) = test_server();
         let tools = server.tool_router.list_all();
-        // 19 tools: goal_start, goal_status, goal_list,
+        // 24 tools: goal_start, goal_status, goal_list,
         //           fs_read, fs_write, fs_list, fs_diff,
         //           pr_build, pr_status,
         //           ta_draft, ta_goal_inner, ta_plan, ta_plan_status (v0.14.3.2),
         //           ta_context, ta_agent_status (v0.9.6), ta_event_subscribe (v0.9.4),
         //           ta_workflow (v0.9.8.2), ta_ask_human (v0.9.9.1),
-        //           ta_external_action (v0.13.4)
+        //           ta_external_action (v0.13.4),
+        //           ue5_python_exec, ue5_scene_query, ue5_asset_list,
+        //           ue5_mrq_submit, ue5_mrq_status (v0.14.14)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 19, "expected 19 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 24, "expected 24 tools, got: {:?}", names);
     }
 
     #[test]
@@ -1225,8 +1309,8 @@ mod tests {
         let tools = server.tool_router.list_all();
         for tool in &tools {
             assert!(
-                tool.name.starts_with("ta_"),
-                "tool '{}' should be prefixed with 'ta_'",
+                tool.name.starts_with("ta_") || tool.name.starts_with("ue5_"),
+                "tool '{}' should be prefixed with 'ta_' or 'ue5_'",
                 tool.name
             );
         }
