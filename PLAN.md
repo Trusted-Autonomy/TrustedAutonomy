@@ -8207,6 +8207,60 @@ Agent permissions
 
 ---
 
+### v0.14.17 — Release Packaging Cleanup (Windows MSI + USAGE.html in zip)
+<!-- status: pending -->
+**Goal**: Fix two release packaging bugs that are blocking a clean rc.2:
+
+1. **Windows MSI silently fails** — `continue-on-error: true` swallows the failure. Root cause: `apps/ta-cli/wix/main.wxs` uses the WiX v4 schema (`xmlns="http://wixtoolset.org/schemas/v4/wxs"`) but CI only installs `cargo-wix`, which invokes WiX v3 tools. WiX v4 is a separate .NET global tool (`dotnet tool install --global wix`). Without it, `cargo-wix` cannot compile the v4 manifest and fails silently.
+2. **USAGE.html missing from Windows zip** — HTML generation runs only on the macOS Intel matrix job. The Windows packaging step writes `staging/USAGE.md` but never generates `USAGE.html`, so `Compress-Archive staging/*` never includes it. The MSI build step does generate `USAGE.html` internally, but that step is currently failing (see #1) and the HTML goes into the WiX binary dir, not into `staging/`.
+
+**Does not depend on**: any other pending phase — pure CI/packaging fixes.
+
+#### Root causes
+
+| Bug | Where | Cause |
+|---|---|---|
+| MSI silent fail | `Build Windows MSI` step | WiX v4 .NET tool not installed; `cargo-wix` falls back to WiX v3 tools which reject the v4 manifest; `continue-on-error: true` hides the error |
+| USAGE.html not in zip | `Package binary with docs (Windows)` step | HTML generation only in `Generate HTML docs (macOS Intel only)` job; Windows step copies `USAGE.md` but never runs a conversion |
+
+#### Items
+
+1. [ ] **Fix MSI build** in `.github/workflows/release.yml`:
+   - Add `dotnet tool install --global wix` step before the MSI build step. `windows-latest` runners have .NET SDK pre-installed; this is fast (~10s).
+   - Replace the `cargo wix` invocation with a direct `wix build` call, which accepts the v4 manifest natively:
+     ```powershell
+     wix build apps/ta-cli/wix/main.wxs `
+       -d SourceDir="target\x86_64-pc-windows-msvc\release" `
+       -d Version="$msiVersion" `
+       -d Platform=x64 `
+       -arch x64 `
+       -o "artifacts\ta-$TAG-x86_64-pc-windows-msvc.msi"
+     ```
+   - Remove `continue-on-error: true`. MSI failure should surface as a build failure, not be silently skipped.
+   - Keep the `cargo install cargo-wix` step removed (no longer needed when calling `wix build` directly).
+   - The `vcs-perforce` and `vcs-perforce.toml` copy steps remain unchanged — those files exist in `plugins/` and the WiX manifest references them.
+
+2. [ ] **Add USAGE.html to Windows zip** in the `Package binary with docs (Windows)` step — after writing `staging/USAGE.md`, generate `staging/USAGE.html` so `Compress-Archive staging/*` picks it up automatically:
+   ```powershell
+   # pandoc is not pre-installed on windows-latest; use minimal HTML fallback
+   $md = [System.IO.File]::ReadAllText("staging\USAGE.md")
+   $escaped = [System.Net.WebUtility]::HtmlEncode($md)
+   "<!DOCTYPE html><html><meta charset='utf-8'>" +
+   "<title>Trusted Autonomy Usage Guide</title><body><pre>$escaped</pre></body></html>" |
+     Out-File -Encoding utf8 "staging\USAGE.html"
+   ```
+   (If pandoc is available, use it for richer output — keep the pandoc-or-fallback pattern already used in the MSI step.)
+
+3. [ ] **Verify MSI installs cleanly**: Run the MSI on a Windows machine (or CI matrix). Confirm `ta.exe` appears in `%ProgramFiles%\TrustedAutonomy\`, the directory is on PATH, the Start Menu shortcut launches `ta shell`, and the docs shortcut opens `USAGE.html` from the install dir.
+
+4. [ ] **Update artifact validation** in `Validate artifacts before publish`: move the MSI from the `OPTIONAL` list to the `REQUIRED` list (alongside the zip). A release without a Windows installer should fail the gate, not proceed silently.
+
+5. [ ] **Smoke test the zip**: Verify the zip contains both `USAGE.md` and `USAGE.html` after the fix.
+
+#### Version: `0.14.17-alpha`
+
+---
+
 > **Unity Connector** → moved to v0.15.3 (Content Pipeline phases).
 
 ---
