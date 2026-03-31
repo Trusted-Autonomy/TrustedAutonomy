@@ -33,7 +33,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "daemon.log",
     "daemon.pid",
     "local.workflow.toml",
-    "memory.rvf",           // binary HNSW index, auto-rebuilt from shared memory/ dir
+    "memory.rvf", // binary HNSW index, auto-rebuilt from shared memory/ dir
     "staging/",
     "store/",
     "goals/",
@@ -48,7 +48,7 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "audit.jsonl",          // raw per-action agent log; large, machine-local
     "events.jsonl",
     "operations.jsonl",
-    "change_summary.json",  // staging artifact only, never in project .ta/
+    "change_summary.json", // staging artifact only, never in project .ta/
     "consent.json",
     "interactions/",
 ];
