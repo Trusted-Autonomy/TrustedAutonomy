@@ -49,6 +49,9 @@ pub struct ProjectStatus {
     /// Number of community resources with stale or missing caches (v0.14.7).
     /// A resource is "pending" if its cache is older than 30 days or has never been synced.
     pub community_pending_count: usize,
+    /// Absolute path of the currently active project root (v0.14.18).
+    /// None if no valid project root has been set (triggers Projects tab redirect in TA Studio).
+    pub active_project_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,17 +85,25 @@ pub struct AgentInfo {
 
 /// `GET /api/status` — Project dashboard as JSON.
 pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let project_name = state
-        .project_root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    // Determine active project root and whether it's valid.
+    let (active_root, active_project_path) = {
+        let root = state.active_project_root.read().unwrap().clone();
+        let valid = root.join(".ta").exists();
+        let path_str = if valid {
+            Some(root.display().to_string())
+        } else {
+            None
+        };
+        (root, path_str)
+    };
+
+    let project_name = crate::api::project_browser::read_project_name(&active_root);
 
     let version = env!("CARGO_PKG_VERSION").to_string();
 
     // Current plan phase.
     let current_phase = {
-        let plan_path = state.project_root.join("PLAN.md");
+        let plan_path = active_root.join("PLAN.md");
         if plan_path.exists() {
             std::fs::read_to_string(&plan_path)
                 .ok()
@@ -176,7 +187,7 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 
     // Community cache staleness check (v0.14.7).
     // Count resources whose cache is missing or older than 30 days.
-    let community_pending_count = count_stale_community_resources(&state.project_root);
+    let community_pending_count = count_stale_community_resources(&active_root);
 
     Json(ProjectStatus {
         project: project_name,
@@ -197,6 +208,7 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         no_heartbeat_alert_secs: state.daemon_config.shell.ui.no_heartbeat_alert_secs,
         power_assertion_active,
         community_pending_count,
+        active_project_path,
     })
 }
 

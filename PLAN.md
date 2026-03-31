@@ -8374,7 +8374,7 @@ Agent permissions
 ---
 
 ### v0.14.18 — TA Studio: Multi-Project Support, Project Browser & Platform Launchers
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: TA Studio (the web app at `http://localhost:7700`) gains a Project Browser so non-engineers can open, switch between, and discover TA projects without using a terminal. Alongside this, each platform gets a one-click launcher so non-engineers never need to open a terminal at all: the launcher starts the daemon and opens TA Studio in the browser.
 
 **Depends on**: v0.14.8 (TA Studio web shell), v0.14.13 (setup wizard)

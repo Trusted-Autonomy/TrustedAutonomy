@@ -82,6 +82,14 @@
           </Component>
         </Directory>
 
+        <Component Id="TaStudioBat" Guid="B7C8D9E0-F1A2-4B3C-4D5E-6F7A8B9C0D1E">
+          <File
+            Id="TaStudioBatFile"
+            Name="ta-studio.bat"
+            Source="$(var.SourceDir)\ta-studio.bat"
+            KeyPath="yes" />
+        </Component>
+
         <Directory Id="PluginsDir" Name="plugins">
           <Directory Id="VcsPluginsDir" Name="vcs">
             <Component Id="VcsPerforce" Guid="F5A6B7C8-D9E0-4F1A-2B3C-4D5E6F7A8B9C">
@@ -120,6 +128,12 @@
             Description="View Trusted Autonomy documentation"
             Target="[DocsDir]USAGE.html"
             WorkingDirectory="INSTALLFOLDER" />
+          <Shortcut
+            Id="TaStudioShortcut"
+            Name="TA Studio"
+            Description="Open TA Studio — the visual project browser and review dashboard"
+            Target="[INSTALLFOLDER]ta-studio.bat"
+            WorkingDirectory="INSTALLFOLDER" />
           <RemoveFolder Id="CleanUpShortCut" On="uninstall" />
           <RegistryValue
             Root="HKCU"
@@ -139,6 +153,7 @@
       <ComponentRef Id="UsageDoc" />
       <ComponentRef Id="VcsPerforce" />
       <ComponentRef Id="VcsPerforceManifest" />
+      <ComponentRef Id="TaStudioBat" />
     </Feature>
 
   </Package>

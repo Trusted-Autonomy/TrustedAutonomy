@@ -115,7 +115,51 @@ From the dashboard you can:
 - **Review Drafts** — see proposed changes, approve or deny with one click
 - **Answer Agent Questions** — respond to agents that need your input
 - **Browse Memory** — inspect and manage what the agents remember about your project
+- **Projects** — open, switch, and browse recent TA projects (see below)
 - **Settings** — update your configuration through the browser UI
+
+## Opening a Project with TA Studio
+
+TA Studio includes a built-in **Project Browser** so you can open, switch between, and discover TA projects without using a terminal.
+
+### Platform Launchers (Zero-Terminal)
+
+Each platform provides a one-click launcher that starts the daemon and opens TA Studio:
+
+| Platform | Launcher |
+|----------|----------|
+| **macOS** | `TA Studio.app` (included in DMG) — double-click to launch |
+| **Windows** | Start Menu → **TA Studio** (installed by MSI) |
+| **Linux** | Run `ta-studio` in a terminal, or use the `.desktop` shortcut |
+
+All launchers follow the same logic:
+1. Check if the daemon is already running at `http://localhost:7700/health`.
+2. If not, run `ta daemon start --background`.
+3. Wait up to 5 seconds for the daemon to respond.
+4. Open `http://localhost:7700` in the system default browser.
+5. If the daemon fails to start, show a platform-appropriate error dialog.
+
+### Projects Tab
+
+The **Projects** tab in TA Studio provides:
+
+- **Recent Projects** — a list of previously-opened TA workspaces with project name, path, and last-opened date. Click any project to switch to it instantly.
+- **Open from Path** — enter an absolute path to any directory that contains a `.ta/` folder, then click **Open Project**.
+- **Browse** — click the "Browse…" button to open a native OS directory picker and select a project visually.
+- **Open from Git** — clone a repository from GitHub or GitLab and open it as a TA project (coming soon).
+
+When no active project is set, the dashboard automatically redirects to the Projects tab.
+
+### Setting a Project Name
+
+By default, TA Studio uses the directory name as the project label. To set a friendlier name, add a `[project]` section to your `.ta/workflow.toml`:
+
+```toml
+[project]
+name = "My Pipeline Project"
+```
+
+This name appears in the Recent Projects list and in the dashboard subtitle.
 
 No CLI commands are needed for the review loop once the daemon is running.
 

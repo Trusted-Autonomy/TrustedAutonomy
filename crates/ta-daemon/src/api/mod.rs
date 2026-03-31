@@ -19,6 +19,7 @@ pub mod health;
 pub mod input;
 pub mod interactions;
 pub mod notifications;
+pub mod project_browser;
 pub mod project_new;
 pub mod settings;
 pub mod status;
@@ -58,6 +59,8 @@ pub struct AppState {
     pub bootstrap_sessions: project_new::BootstrapSessionManager,
     /// Persistent QA agent for shell sessions (v0.11.4.2).
     pub persistent_qa: Arc<agent::PersistentQaAgent>,
+    /// Currently active project root for TA Studio multi-project support (v0.14.18).
+    pub active_project_root: Arc<std::sync::RwLock<PathBuf>>,
 }
 
 impl AppState {
@@ -86,6 +89,7 @@ impl AppState {
             project_registry: Arc::new(registry),
             bootstrap_sessions: project_new::BootstrapSessionManager::new(),
             persistent_qa,
+            active_project_root: Arc::new(std::sync::RwLock::new(project_root.clone())),
             project_root,
             daemon_config,
         }
@@ -337,6 +341,13 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/office/reload", post(reload_office))
         // Project bootstrapping routes (v0.10.17).
         .route("/api/project/new", post(project_new::create_project))
+        // Project browser routes (v0.14.18).
+        .route("/api/project/open", post(project_browser::open_project))
+        .route("/api/project/list", get(project_browser::list_projects))
+        .route(
+            "/api/project/browse",
+            post(project_browser::browse_projects),
+        )
         // Proactive notifications (v0.13.1.6).
         .route("/api/notifications", get(notifications::get_notifications))
         // Settings API (v0.14.13).

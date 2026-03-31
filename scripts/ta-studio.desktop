@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=TA Studio
+GenericName=Trusted Autonomy Studio
+Comment=Launch TA Studio — the visual project browser and review dashboard
+Exec=ta-studio
+Icon=ta
+Type=Application
+Categories=Development;Utility;
+Keywords=ai;agent;autonomy;review;studio;
+Terminal=false
+StartupNotify=true

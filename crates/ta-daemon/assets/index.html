@@ -136,6 +136,7 @@
     <div class="tab" onclick="switchTab('drafts')">Review Drafts</div>
     <div class="tab" onclick="switchTab('questions')" id="tab-questions">Agent Questions</div>
     <div class="tab" onclick="switchTab('memory')">Memory</div>
+    <div class="tab" onclick="switchTab('projects')" id="tab-projects">Projects</div>
     <div class="tab" onclick="switchTab('settings')">Settings</div>
   </div>
   <div id="app"><div class="loading">Loading...</div></div>
@@ -191,6 +192,7 @@ function switchTab(tab) {
   else if (tab === 'drafts') loadDrafts();
   else if (tab === 'questions') loadQuestions();
   else if (tab === 'memory') loadMemory();
+  else if (tab === 'projects') loadProjects();
   else if (tab === 'settings') loadSettings();
 }
 
@@ -226,6 +228,12 @@ async function loadDashboard() {
     } else {
       qTab.textContent = 'Agent Questions';
       qTab.style.color = '';
+    }
+
+    // Redirect to Projects tab if no active project is set (v0.14.18).
+    if (status && status.active_project_path === null) {
+      switchTab('projects');
+      return;
     }
 
     renderDashboard(draftsData, questions, status);
@@ -1194,6 +1202,121 @@ async function clearMemoryStore() {
 async function saveRawConfig() {
   const content = document.getElementById('raw-daemon')?.value || '';
   alert('Raw config save is not yet implemented. Edit .ta/daemon.toml directly and restart the daemon.');
+}
+
+// ── Projects (v0.14.18) ───────────────────────────────────────
+async function loadProjects() {
+  app.innerHTML = '<div class="loading">Loading projects...</div>';
+  try {
+    const resp = await fetch('/api/project/list');
+    const projects = resp.ok ? await resp.json() : [];
+    renderProjects(projects);
+  } catch (e) {
+    renderProjects([]);
+  }
+}
+
+function renderProjects(projects) {
+  let html = '';
+
+  // Recent projects
+  html += '<div class="section"><h3>Recent Projects</h3>';
+  if (projects.length === 0) {
+    html += '<div class="card"><div class="card-meta">No recent projects. Open a project below to get started.</div></div>';
+  } else {
+    projects.forEach(p => {
+      html += `<div class="card clickable" onclick="openProject(${JSON.stringify(p.path)})">
+        <div class="card-header"><span class="card-title">${esc(p.name)}</span></div>
+        <div class="card-meta">${esc(p.path)} &mdash; ${timeAgo(p.last_opened)}</div>
+      </div>`;
+    });
+  }
+  html += '</div>';
+
+  // Open from path
+  html += `<div class="section"><h3>Open from Path</h3>
+    <div class="card">
+      <div class="form-group">
+        <label>Project directory (must contain a .ta/ folder)</label>
+        <input type="text" id="open-path-input" placeholder="/path/to/your/project" style="font-family:monospace">
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="openProjectFromInput()">Open Project</button>
+        <button class="btn btn-ghost" onclick="browseForProject()">Browse\u2026</button>
+      </div>
+      <div id="open-path-status" style="margin-top:0.75rem;font-size:0.85rem;"></div>
+    </div>
+  </div>`;
+
+  // Open from Git
+  html += `<div class="section"><h3>Open from GitHub / GitLab</h3>
+    <div class="card">
+      <div class="card-meta" style="padding:0.5rem 0">Clone a repository and open it as a TA project.</div>
+      <div class="form-group">
+        <label>Repository URL</label>
+        <input type="text" id="clone-url-input" placeholder="https://github.com/org/repo">
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" disabled title="Git clone support coming soon">Clone &amp; Open</button>
+      </div>
+    </div>
+  </div>`;
+
+  app.innerHTML = html;
+}
+
+async function openProject(path) {
+  try {
+    const resp = await fetch('/api/project/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    });
+    const result = await resp.json();
+    if (result.ok) {
+      switchTab('dashboard');
+    } else {
+      alert('Failed to open project: ' + (result.error || 'Unknown error'));
+    }
+  } catch (e) {
+    alert('Error opening project: ' + e.message);
+  }
+}
+
+async function openProjectFromInput() {
+  const input = document.getElementById('open-path-input');
+  const status = document.getElementById('open-path-status');
+  const path = input ? input.value.trim() : '';
+  if (!path) { if (status) status.textContent = 'Please enter a project path.'; return; }
+  if (status) status.textContent = 'Opening...';
+  try {
+    const resp = await fetch('/api/project/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    });
+    const result = await resp.json();
+    if (result.ok) {
+      switchTab('dashboard');
+    } else {
+      if (status) { status.textContent = 'Error: ' + (result.error || 'Could not open project.'); status.style.color = 'var(--red)'; }
+    }
+  } catch (e) {
+    if (status) { status.textContent = 'Network error: ' + e.message; status.style.color = 'var(--red)'; }
+  }
+}
+
+async function browseForProject() {
+  try {
+    const resp = await fetch('/api/project/browse', { method: 'POST' });
+    const result = await resp.json();
+    if (!result.cancelled && result.path) {
+      const input = document.getElementById('open-path-input');
+      if (input) input.value = result.path;
+    }
+  } catch (e) {
+    // Browse not available on this platform - ignore
+  }
 }
 
 // ── Boot ──────────────────────────────────────────────────────

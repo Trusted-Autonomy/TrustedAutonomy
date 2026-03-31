@@ -147,6 +147,15 @@ pub struct WorkflowConfig {
     /// ```
     #[serde(default)]
     pub commit: CommitConfig,
+
+    /// Project metadata shown in TA Studio (v0.14.18).
+    ///
+    /// ```toml
+    /// [project]
+    /// name = "My Pipeline Project"
+    /// ```
+    #[serde(default)]
+    pub project: ProjectSection,
 }
 
 /// Commit auto-staging configuration (v0.14.3.7).
@@ -165,6 +174,19 @@ pub struct CommitConfig {
     /// Each entry is matched against working-tree paths using simple glob rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auto_stage: Vec<String>,
+}
+
+/// Project metadata section in workflow.toml (v0.14.18).
+///
+/// ```toml
+/// [project]
+/// name = "My Pipeline Project"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectSection {
+    /// Human-readable project name shown in TA Studio.
+    pub name: Option<String>,
 }
 
 /// Apply conflict resolution configuration (v0.14.3.5).
@@ -333,12 +355,9 @@ impl Default for TaLocalPaths {
 fn default_local_exclude_paths() -> Vec<String> {
     // Mirror of ta-workspace::partitioning::LOCAL_TA_PATHS — kept in sync manually.
     // These are `.ta/` paths that are machine-local only (gitignored, never shared).
-    // Note: taignore, goal-history.jsonl, goal-audit.jsonl moved to SHARED_TA_PATHS.
     vec![
         "daemon.toml".to_string(),
         "daemon.local.toml".to_string(),
-        "daemon.log".to_string(),
-        "daemon.pid".to_string(),
         "local.workflow.toml".to_string(),
         "memory.rvf".to_string(),
         "staging/".to_string(),
@@ -346,17 +365,10 @@ fn default_local_exclude_paths() -> Vec<String> {
         "goals/".to_string(),
         "events/".to_string(),
         "sessions/".to_string(),
-        "backups/".to_string(),
-        "pr_packages/".to_string(),
-        "interactive_sessions/".to_string(),
         "release.lock".to_string(),
         "velocity-stats.jsonl".to_string(),
         "audit-ledger.jsonl".to_string(),
-        "audit.jsonl".to_string(),
-        "events.jsonl".to_string(),
-        "operations.jsonl".to_string(),
-        "change_summary.json".to_string(),
-        "consent.json".to_string(),
+        "taignore".to_string(),
         "interactions/".to_string(),
     ]
 }
@@ -2262,5 +2274,21 @@ file = "ROADMAP.md"
 "#;
         let config: WorkflowConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.plan.file, "ROADMAP.md");
+    }
+
+    #[test]
+    fn project_section_parses_name() {
+        let toml = r#"
+[project]
+name = "My Pipeline Project"
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.project.name.as_deref(), Some("My Pipeline Project"));
+    }
+
+    #[test]
+    fn project_section_defaults_to_none_name() {
+        let config = WorkflowConfig::default();
+        assert!(config.project.name.is_none());
     }
 }

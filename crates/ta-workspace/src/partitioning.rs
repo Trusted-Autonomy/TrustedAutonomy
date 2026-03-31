@@ -20,9 +20,6 @@ pub const SHARED_TA_PATHS: &[&str] = &[
     "templates/",
     "plan_history.jsonl",   // append-only audit trail of plan phase completions
     "release-history.json", // append-only project release changelog
-    "taignore",             // staging exclusion patterns — project config, shared with team
-    "goal-history.jsonl",   // GC-compacted history of goal outcomes — team-visible
-    "goal-audit.jsonl",     // high-level audit trail: one entry per apply/deny — team-visible
 ];
 
 /// Paths inside `.ta/` that are local runtime state and must NOT be committed.
@@ -30,26 +27,17 @@ pub const SHARED_TA_PATHS: &[&str] = &[
 pub const LOCAL_TA_PATHS: &[&str] = &[
     "daemon.toml",
     "daemon.local.toml",
-    "daemon.log",
-    "daemon.pid",
     "local.workflow.toml",
-    "memory.rvf", // binary HNSW index, auto-rebuilt from shared memory/ dir
+    "memory.rvf",
     "staging/",
     "store/",
     "goals/",
     "events/",
     "sessions/",
-    "backups/",
-    "pr_packages/",
-    "interactive_sessions/",
     "release.lock",
-    "velocity-stats.jsonl", // raw per-machine log; committed aggregate is velocity-history.jsonl (v0.15.7)
-    "audit-ledger.jsonl",   // stale name — real file is goal-audit.jsonl (now in SHARED_TA_PATHS)
-    "audit.jsonl",          // raw per-action agent log; large, machine-local
-    "events.jsonl",
-    "operations.jsonl",
-    "change_summary.json", // staging artifact only, never in project .ta/
-    "consent.json",
+    "velocity-stats.jsonl",
+    "audit-ledger.jsonl",
+    "taignore",
     "interactions/",
 ];
 
