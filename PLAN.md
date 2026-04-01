@@ -8440,6 +8440,69 @@ All three launchers follow the same logic:
 
 ---
 
+### v0.14.19 — TA Studio: Plan Tab (Phase Browser, One-Click Run & Custom Goals)
+<!-- status: pending -->
+**Goal**: Replace the "Start a Goal" tab in TA Studio with a **Plan** tab that surfaces the PLAN.md phase queue visually. Users see upcoming phases as expandable cards, can run any phase with one click, enter a custom ad-hoc goal, and interactively add or annotate plan phases — all without touching a terminal. This is the rc3 demo experience: non-engineers can see what's coming and kick off work from the browser.
+
+**Depends on**: v0.14.18 (TA Studio project browser), v0.14.8 (TA Studio web shell)
+
+#### Design
+
+The Plan tab replaces the current single-input "Start a Goal" form. Layout:
+
+```
+[ Plan ]  [ Goals ]  [ Drafts ]  [ Memory ]  [ Settings ]
+
+┌─ Next Up ──────────────────────────────────────────────────────┐
+│  ▶  v0.14.19  TA Studio: Plan Tab           [Run This Phase]  │
+│  ▶  v0.15.0   Generic Binary & Text Assets                     │
+│  ▶  v0.15.1   Video Artifact Support                           │
+│     ...                                                         │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ Custom Goal ──────────────────────────────────────────────────┐
+│  [ Describe what you want to build or fix...          ] [Run]  │
+│  [ ] Link to plan phase  [ v0.14.19 ▼ ]                        │
+└────────────────────────────────────────────────────────────────┘
+
+┌─ Edit Plan ────────────────────────────────────────────────────┐
+│  [ + Add phase ]  [ Reorder ]                                   │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Phase cards** (collapsed by default, expand on click):
+- Phase ID, title, status badge (`pending` / `in_progress` / `done`)
+- Expanded: checklist of items from PLAN.md, description, depends-on
+- "Run This Phase" button calls `POST /api/goal/start { phase_id }` — same as `ta run --phase`
+
+**Custom goal**: freeform prompt input + optional phase link dropdown. Calls `POST /api/goal/start { title, prompt, phase_id? }`.
+
+**Add phase**: inline form — title, description, optional depends-on. Appends to PLAN.md via `POST /api/plan/phase/add`. No syntax knowledge required.
+
+#### Items
+
+1. [ ] **`GET /api/plan/phases`**: Parses PLAN.md, returns array of `{ id, title, status, description, items: [{ text, done }], depends_on }` for all phases. Pending phases ordered by their position in PLAN.md.
+
+2. [ ] **`POST /api/plan/phase/add`**: Appends a new `<!-- status: pending -->` phase to PLAN.md with provided title and description. Returns the new phase object. Used by the "Add phase" form.
+
+3. [ ] **Plan tab — phase list**: Renders pending phases as expandable cards. Collapsed: phase ID + title + status badge + "Run" button. Expanded: description, items checklist (read-only), depends-on. Loads from `/api/plan/phases`, filters to `status: pending`.
+
+4. [ ] **Phase card "Run This Phase"**: Calls `POST /api/goal/start` with `phase_id`. Navigates to the Goals tab with the new goal highlighted. Disabled (greyed) if a goal for that phase is already running.
+
+5. [ ] **Custom goal form**: Textarea for prompt, optional phase dropdown (all pending phases), "Run" button. Calls `POST /api/goal/start { title, prompt, phase_id? }`. Replaces the existing single-input form entirely.
+
+6. [ ] **"Add phase" inline form**: Title input + description textarea + "Add to Plan" button. Calls `/api/plan/phase/add`. New phase appears at bottom of phase list immediately.
+
+7. [ ] **Tab rename**: "Start a Goal" → "Plan" in the nav. Update any references in the existing HTML/JS.
+
+8. [ ] **Tests**: `/api/plan/phases` parses pending/done/in_progress correctly; `/api/plan/phase/add` appends valid PLAN.md syntax; phase card "Run" button disabled when goal already running for that phase.
+
+9. [ ] **USAGE.md**: Update "Starting a Goal" section to describe the Plan tab — phase cards, custom goal, adding phases.
+
+#### Version: `0.14.19-alpha`
+
+---
+
 > **Unity Connector** → moved to v0.15.3 (Content Pipeline phases).
 
 ---
