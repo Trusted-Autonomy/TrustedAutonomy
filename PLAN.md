@@ -7559,6 +7559,7 @@ For SA cloud hybrid: SA provides a webhook relay service (publicly-accessible HT
 
 ### v0.14.8.4 — TA Studio: Multi-Project Support, Project Browser & Platform Launchers
 <!-- status: pending -->
+> **⚠ Post-v0.14.20 cleanup needed**: This phase is out of order — v0.14.12 is already `done` but this v0.14.8.4 is still `pending`. The work was delivered as v0.14.18 (PR #314, merged 2026-03-31). When v0.14.20 lands, mark this phase `done` with a note pointing to v0.14.18, and verify no items here were missed by the v0.14.18 delivery.
 **Goal**: TA Studio (the web app at `http://localhost:7700`) gains a Project Browser so non-engineers can open, switch between, and discover TA projects without using a terminal. Alongside this, each platform gets a one-click launcher so non-engineers never need to open a terminal at all: the launcher starts the daemon and opens TA Studio in the browser.
 
 **Depends on**: v0.14.8 (TA Studio web shell), v0.14.13 (setup wizard)
@@ -8646,7 +8647,7 @@ Flags bypass prompts for scripted/CI use: `ta init run --template python-ml --vc
 **`ta plan new`** — the project's first goal run:
 
 ```bash
-# From a short description:
+# From a short description (single agent pass):
 ta plan new "Orchestrates ComfyUI for AI cinematic rendering — LoRA loading,
              workflow templates, batch render pipeline, output validation"
 
@@ -8656,15 +8657,25 @@ ta plan new --file docs/product-spec.md
 # From stdin (pipe in a document):
 cat requirements.md | ta plan new --stdin
 
-# All three go through: agent → PLAN.md draft → ta draft view → ta draft approve
+# With BMAD planning roles (recommended for larger/complex projects):
+ta plan new --file docs/product-spec.md --framework bmad
+
+# With GSD research→plan flow:
+ta plan new --file docs/product-spec.md --framework gsd
+
+# All variants go through: agent → PLAN.md draft → ta draft view → ta draft approve
 ```
 
-The agent is given an optimized prompt:
+**`--framework` for plan generation**: When omitted, a single optimised agent pass produces the PLAN.md. For larger or more complex projects, `--framework bmad` is recommended — BMAD's structured planning roles (Analyst → Architect → Product Manager) produce richer phase decomposition, better dependency analysis, and more accurately sized milestones. When BMAD is installed and the project template included it (`ta init run --template python-ml`), `ta plan new` defaults to `--framework bmad` automatically unless overridden with `--framework default`.
+
+The agent/BMAD is given an optimized planning prompt:
 > "Convert this description/document into a PLAN.md. Structure as semver phases starting at v0.1.0. Each phase should be completable in 1–2 days of agent work. Include: goal, depends-on, items checklist, version target. Group related work into logical milestones."
 
 Result is a full PLAN.md proposal in the draft queue — same `ta draft view` / `ta draft approve` flow as any goal. Approving writes PLAN.md and commits it (if `--git-commit` is set). The project is now ready for `ta run --phase v0.1.0`.
 
 **`ta plan new` also works on existing projects** to regenerate or extend a plan from an updated spec.
+
+> **Post-v0.14.20 note**: When v0.14.20 lands, update this phase and USAGE.md to align Studio wizard items with the `ta plan new` command surface and `--framework` flag. The Studio "Generate Plan" flow should expose the same framework choice.
 
 #### Items
 
@@ -8680,7 +8691,7 @@ Result is a full PLAN.md proposal in the draft queue — same `ta draft view` / 
 
 6. [ ] **`ta plan new --stdin`**: Reads from stdin. Enables `cat spec.md | ta plan new --stdin` and pipe-based workflows.
 
-7. [ ] **Plan generation agent prompt**: Tuned system prompt that produces well-structured PLAN.md output — semver phases, properly sized items, depends-on links, status markers. Tested against 3 example inputs (short description, medium spec, long document).
+7. [ ] **Plan generation agent prompt**: Tuned system prompt that produces well-structured PLAN.md output — semver phases, properly sized items, depends-on links, status markers. Tested against 3 example inputs (short description, medium spec, long document). When `--framework bmad` (or auto-detected), delegates to BMAD planning roles rather than a single agent pass.
 
 8. [ ] **`POST /api/plan/new`** (daemon endpoint): Accepts `{ description?, file_content?, stdin? }`. Spawns the plan-generation goal. Returns `{ goal_id }` so Studio can poll for the draft. Used by the Studio New Project wizard and the standalone Plan tab "Generate Plan" button.
 
