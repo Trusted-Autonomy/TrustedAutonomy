@@ -8736,6 +8736,142 @@ supervisor = true         # run supervisor confidence check (default: true)
 
 ---
 
+### v0.15.8 — Windows ProjFS Staging (Virtual Workspace on NTFS)
+<!-- status: pending -->
+**Goal**: On Windows NTFS volumes (where APFS/Btrfs CoW cloning is unavailable), use the Windows Projected File System (ProjFS) to make staging creation near-instant and zero-disk-cost. Files appear present in the staging directory but are hydrated on-demand from source as the agent reads them. Writes go to a real scratch store. Only files the agent actually touches are physically copied.
+
+**Depends on**: v0.14.18 (Windows platform investment confirmed), v0.13.13 (staging strategy enum)
+
+**Why**: On large workspaces (UE5 projects, Unity repos, large Node.js codebases), full-copy staging on Windows takes 5–30 seconds and duplicates gigabytes of files the agent never touches. ProjFS eliminates both costs — staging is instant and disk usage is proportional to agent activity, not workspace size.
+
+**Design**:
+- New `StagingStrategy::ProjFs` variant in `ta-workspace`
+- ProjFS provider: placeholder-based virtual directory at staging root; callbacks hydrate files on agent access
+- Write interception: modified files redirected to a real scratch directory, overlaid transparently in diffs
+- Auto-detection: check `Client-ProjFS` Windows optional feature at startup; fall back to `Smart` if not enabled
+- Windows installer (`main.wxs`) gains an opt-in component to enable the feature via DISM at install time
+
+#### Items
+
+1. [ ] **`StagingStrategy::ProjFs` variant**: Add to `overlay.rs`. Auto-selected on Windows when `Client-ProjFS` is enabled; falls back to `Smart` otherwise.
+
+2. [ ] **ProjFS provider (`projfs_strategy.rs`)**: Implement `IRequiredCallbacks` (enumerate, get-placeholder-info, get-file-data). Directory listings reflect source tree; file reads trigger hydration from source.
+
+3. [ ] **Scratch overlay for writes**: Modified/created files land in `<staging>/.projfs-scratch/`. Diff engine reads scratch for modified/created and source for deleted — presents a unified view identical to full-copy layout.
+
+4. [ ] **Feature detection**: `crates/ta-workspace/src/windows_features.rs` — registry check for `Client-ProjFS`. Used at strategy selection time with clear log output when falling back.
+
+5. [ ] **Installer integration**: `apps/ta-cli/wix/main.wxs` — optional `<Feature Id="ProjFS">` that runs `Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart`. Checkbox in installer UI: "Enable fast virtual workspace (requires Windows 10 1809+)".
+
+6. [ ] **Tests**: Provider enumerates source tree; file read triggers hydration; write lands in scratch and appears in diff; delete shows as `Deleted`. All `#[cfg(target_os = "windows")]`.
+
+7. [ ] **USAGE.md**: "Fast staging on Windows" section — how to enable ProjFS, what it does, when to use vs. Smart strategy.
+
+#### Version: `0.15.8-alpha`
+
+---
+
+### v0.15.9 — Email Connector: Provider Integration & Filter Config
+<!-- status: pending -->
+**Goal**: A pluggable email connector that polls configured mailboxes (Gmail, Outlook/Microsoft 365, or any IMAP provider), applies user-defined filter rules to incoming messages, and delivers matched emails as TA artifacts into the draft pipeline. Lays the foundation for auto-response in v0.15.10.
+
+**Depends on**: v0.15.0 (generic artifact kinds), v0.14.14 (connector infrastructure)
+
+**Design**:
+- `ta-connectors/email` crate — `EmailProvider` trait with OAuth (Gmail, Outlook) and IMAP generic implementations
+- Config: `.ta/connectors/email.toml` per-project (or `~/.config/ta/email.toml` for personal inbox)
+- `ta email setup <provider>` — OAuth wizard (opens browser for consent) or IMAP credential prompt; stores tokens in OS keychain
+- Filter rules: sender address glob, domain glob, subject regex, body keywords — evaluated in order, first match wins
+- `ta email poll` — one-shot check; daemon runs it on a configurable interval (`poll_interval_minutes`)
+- Matched emails surface as `EmailArtifact { message_id, from, subject, body_text, body_html, thread_id }` in a new `email-inbox` draft queue
+
+#### Items
+
+1. [ ] **`EmailProvider` trait** (`crates/ta-connectors/email/src/provider.rs`): `async fn poll(&self, since: DateTime) -> Vec<EmailMessage>`, `async fn send(&self, reply: EmailReply) -> Result<()>`. Implementations: `GmailProvider` (OAuth2 + Gmail API), `OutlookProvider` (OAuth2 + Graph API), `ImapProvider` (generic IMAP + SMTP).
+
+2. [ ] **OAuth flow** (`ta email setup gmail|outlook`): Opens system browser to consent URL, listens on localhost callback, stores refresh token in OS keychain (`keyring` crate). Prints confirmation with connected address and quota.
+
+3. [ ] **IMAP/SMTP setup** (`ta email setup imap`): Prompts for host, port, username, password (app password). Validates connection before storing. Supports TLS and STARTTLS.
+
+4. [ ] **Filter config schema** (`.ta/connectors/email.toml`):
+   ```toml
+   [filter]
+   [[filter.rules]]
+   name = "support-requests"
+   from_domain = ["*.example.com"]
+   subject_contains = ["help", "issue", "support"]
+   action = "stage"   # stage | ignore | auto_reply
+
+   [[filter.rules]]
+   name = "spam-domains"
+   from_domain = ["*.promo.net"]
+   action = "ignore"
+   ```
+
+5. [ ] **`ta email poll`**: Fetches messages since last watermark, applies filter rules, creates `EmailDraft` entries in `.ta/email-inbox/` for matched messages. Prints count of staged / ignored / skipped.
+
+6. [ ] **Daemon integration**: `[connectors.email] poll_interval_minutes = 15` in `daemon.toml` schedules `ta email poll` via the daemon's internal scheduler. Can also be driven externally by cron (just run `ta email poll`).
+
+7. [ ] **`ta email list`**: Shows staged emails pending review — message ID, from, subject, received time, matched rule.
+
+8. [ ] **Tests**: Filter rule evaluation (domain glob, subject regex, action routing); OAuth token refresh flow (mock server); IMAP poll watermark advances correctly; `ignore` action produces no artifact.
+
+9. [ ] **USAGE.md**: "Email Connector" section — setup for each provider, filter rule syntax, polling config, how staged emails appear in the draft queue.
+
+#### Version: `0.15.9-alpha`
+
+---
+
+### v0.15.10 — Email Auto-Response Workflow: Agent Matching, Staging & Auto-Approve
+<!-- status: pending -->
+**Goal**: Agent-driven auto-response for emails that match filter rules. The agent reads the email and the project constitution, drafts a reply, and stages it for human review. Configurable auto-approve rules allow specific senders or domains to bypass manual review for trusted correspondence. Periodic polling or cron integration keeps the inbox continuously attended.
+
+**Depends on**: v0.15.9 (email connector + filter config), v0.13.9 (constitution framework)
+
+**Design**:
+- For each staged `EmailDraft`, an agent goal is spawned with the email body + constitution as context
+- Agent produces a reply draft (`EmailReply`) as a TA artifact
+- Reply goes through standard draft → review → approve → send pipeline
+- Auto-approve rules allow trusted senders/domains to skip manual review
+- `ta email workflow run` — process all pending staged emails; can be called by cron or daemon scheduler
+- Approved replies are sent immediately via the configured provider
+
+#### Items
+
+1. [ ] **Email response agent goal type**: New `GoalKind::EmailResponse { draft_id }`. Agent prompt includes: email body, conversation thread history (if available), project constitution, configured reply tone/persona from email.toml. Agent produces structured `EmailReply { to, subject, body }`.
+
+2. [ ] **Reply staging**: Agent-produced reply stored as `EmailReplyArtifact` in the draft package. `ta draft view <id>` shows the original email + proposed reply side-by-side. `ta draft approve <id>` sends the reply via the provider.
+
+3. [ ] **Auto-approve rules** (`.ta/connectors/email.toml`):
+   ```toml
+   [[auto_approve]]
+   from_address = ["noreply@github.com"]
+   action = "discard"        # don't reply to notification emails
+
+   [[auto_approve]]
+   from_domain = ["trusted-partner.com"]
+   reply_filter = "support-requests"   # only auto-approve if matched this filter
+   max_confidence = 0.85     # agent must rate confidence ≥ 0.85 to skip review
+   ```
+
+4. [ ] **Confidence scoring**: Agent includes `confidence: f32` (0.0–1.0) in its reply artifact. Low-confidence replies always require human review regardless of auto-approve rules. Confidence shown in `ta draft view`.
+
+5. [ ] **`ta email workflow run`**: Processes all pending staged emails in order. For each: spawn agent goal → build draft → apply auto-approve rules → either send immediately or queue for human review. Prints summary: N sent, M queued for review, K skipped.
+
+6. [ ] **Daemon scheduler**: `[connectors.email] workflow_interval_minutes = 30` in `daemon.toml` runs `ta email workflow run` on schedule. Shares the poll interval or can be set independently.
+
+7. [ ] **Cron compatibility**: `ta email workflow run` is fully headless — exits 0 on success, 1 on error, prints machine-readable JSON summary with `--json`. Suitable for `crontab` or Windows Task Scheduler without daemon running.
+
+8. [ ] **`ta email status`**: Shows inbox stats — pending staged, pending review, sent today, auto-approved today, provider connection health.
+
+9. [ ] **Tests**: Agent reply staged correctly; auto-approve fires on domain match + confidence threshold; low-confidence reply held for review; `ta email workflow run --dry-run` prints plan without sending; cron exit codes correct.
+
+10. [ ] **USAGE.md**: "Email Auto-Response" section — how agent matching works, constitution influence on replies, auto-approve rule syntax, cron setup example, how to review and approve staged replies.
+
+#### Version: `0.15.10-alpha`
+
+---
+
 ## v0.16 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
