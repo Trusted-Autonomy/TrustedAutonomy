@@ -8610,9 +8610,9 @@ Current state: `/api/workflows` lists workflows, `/api/workflow/{id}/input` acce
 
 ---
 
-## v0.15 — Content Pipeline Artifact Types & Connectors
+## v0.15 — Content Pipeline, Platform Integrations & Onboarding
 
-> **Focus**: Generic artifact types (binary, text, video) and content-production connectors (ComfyUI, Unity) to support creator workflows and the Studio Wildcard cinematic pipeline. These phases complete the content pipeline story before IDE integration.
+> **Focus**: Generic artifact types (binary, text, video) and content-production connectors (ComfyUI, Unity) for creator workflows; plus platform integrations (ProjFS, messaging adapters) and the post-install onboarding wizard that closes the first-run configuration gap before IDE integration.
 
 ### v0.15.0 — Generic Binary & Text Asset Support (`ta-changeset`)
 <!-- status: pending -->
@@ -9049,6 +9049,115 @@ min_confidence = 0.85        # agent self-rates; below threshold → human revie
 10. [ ] **USAGE.md**: "Email Manager Workflow" section — init, constitution format, filter + auto-approve config, scheduling options, `--since` usage, reviewing staged replies.
 
 #### Version: `0.15.10-alpha`
+
+---
+
+### v0.15.11 — Post-Install Onboarding Wizard (`ta onboard`)
+<!-- status: pending -->
+**Goal**: A guided first-run setup experience that runs automatically after installation (or on demand) to configure the user's AI provider, default implementation agent, planning framework, and optional components. Runs as a TUI wizard in the terminal (ratatui, same as the existing shell TUI); offers `--web` to open the Studio setup page instead. Written once; called from all three per-platform installer post-install hooks.
+
+**Why this phase exists**: New users currently land after install with no configured API key, no default agent, and no idea BMAD or Claude-Flow exist as options. The onboarding gap causes the most common support issue: "ta run says no agent configured." This wizard eliminates that gap — the user leaves the installer with a working, opinionated setup and a clear mental model of what was installed.
+
+**Scope**: Global user config (`~/.config/ta/config.toml`) only. Project-level setup (`ta init`, `ta setup wizard`) is a separate concern.
+
+**Depends on**: v0.15.5 (terms acceptance gate — wizard re-uses the same gate as step 0), v0.14.20 (persona system for default persona selection), v0.13.11 (platform installers that call the wizard)
+
+**Design**:
+
+#### Wizard steps (TUI flow)
+
+```
+Step 0  — Terms & Telemetry (re-use existing acceptance gate; skip if already accepted)
+Step 1  — AI Provider
+          ● Claude (Anthropic)  ← default
+            › API key mode: detects ANTHROPIC_API_KEY env; prompts if absent; validates with
+              a lightweight /v1/models call; stores in OS keychain via `keyring` crate
+            › Max subscription mode: explain claude.ai browser auth; note "set
+              ANTHROPIC_API_KEY in your shell profile or run 'ta config set api_key <key>'"
+          ○ Ollama (local)
+            › Auto-detects running Ollama instance (http://localhost:11434)
+            › Lists available models; user picks one; stored as `ollama_base_url` + `ollama_model`
+          ○ Skip for now  (can complete later with 'ta onboard')
+Step 2  — Implementation Agent
+          ● claude-code  ← default; detects binary on PATH
+          ○ codex        (detects binary on PATH; grayed out with install hint if absent)
+          ○ claude-flow  (detects npm package; offers to install if absent: `npm i -g claude-flow`)
+          ○ Custom       (enter binary path)
+Step 3  — Planning Framework
+          ● Default (single-pass)  ← simplest; works with no extra install
+          ○ BMAD              — structured multi-role planning (Analyst → Architect → PM)
+            › Detects ~/.bmad/; offers `git clone https://github.com/bmadcode/bmad-method ~/.bmad`
+            › After install: sets `planning_framework = "bmad"` and `bmad_home = "~/.bmad"`
+          ○ GSD               — goal-structured decomposition
+Step 4  — Optional Components
+          [ ] claude-flow agent framework  (npm install -g claude-flow)
+          [ ] BMAD planning library        (git clone to ~/.bmad)
+          (pre-checked based on selections in steps 2–3)
+Step 5  — Summary & Confirm
+          Shows what will be installed / configured. User confirms or goes back.
+          On confirm: writes ~/.config/ta/config.toml [defaults], installs selected components,
+          prints: "Setup complete. Run 'ta studio' to open TA Studio, or 'ta run <goal>' to start."
+```
+
+#### Config written (`~/.config/ta/config.toml`)
+
+```toml
+[provider]
+type       = "anthropic"      # anthropic | ollama
+# api_key stored in OS keychain, not written to file
+# For Ollama:
+# type           = "ollama"
+# base_url       = "http://localhost:11434"
+# model          = "qwen2.5-coder:7b"
+
+[defaults]
+agent              = "claude-code"    # implementation agent
+planning_framework = "bmad"           # default | bmad | gsd
+bmad_home          = "~/.bmad"        # set when bmad selected
+```
+
+#### Installer integration
+
+- **macOS** (`.pkg` post-install script): `"$PREFIX/bin/ta" onboard` — runs in the Terminal app that the `.pkg` installer opens, or the user's current terminal
+- **Windows** (MSI custom action): `ta.exe onboard --non-interactive --from-installer` — launches a new `cmd.exe` window post-install (WiX `<CustomAction>` with `Execute="deferred"`)
+- **Linux** (`.deb`/`.rpm` post-install): `ta onboard` in `postinst` hook; gracefully skips if stdin is not a tty (package manager piped install)
+- **First-run hint**: If `~/.config/ta/config.toml` has no `[provider]` section and the user runs `ta run` or `ta serve`, print: `"TA is not configured yet. Run 'ta onboard' to set up your AI provider and defaults (takes ~2 minutes)."`
+
+#### Items
+
+1. [ ] **`ta onboard` command** (`apps/ta-cli/src/commands/onboard.rs`): Entry point. Checks if already configured (`~/.config/ta/config.toml` has `[provider]`). With `--force` or if unconfigured, runs wizard. With `--non-interactive` accepts flags: `--agent <name>`, `--provider anthropic|ollama`, `--api-key <key>`, `--planning-framework default|bmad|gsd`. Exits 0 on success.
+
+2. [ ] **TUI wizard** (`apps/ta-cli/src/commands/onboard_tui.rs`): ratatui 5-step wizard. Each step is a screen with arrow-key selection and inline help text explaining each option. `←`/`Esc` goes back, `→`/`Enter` advances, `q` quits (prompts to confirm). Progress bar at bottom.
+
+3. [ ] **`--web` flag**: Starts daemon (if not running), opens `http://localhost:<port>/setup` in the default browser. Studio renders `/setup` as a wizard with the same steps. Falls back to TUI if daemon start fails.
+
+4. [ ] **Provider detection**: At wizard start, detect `ANTHROPIC_API_KEY` env var (pre-fill API key field), detect Ollama at `localhost:11434`, detect installed agent binaries on `$PATH`. Pre-select detected options to minimise typing.
+
+5. [ ] **API key validation**: After entry, make a lightweight Anthropic `/v1/models` request (2s timeout). Show spinner; on success show "✓ API key valid"; on failure show error with link to console.anthropic.com. Store in OS keychain via `keyring` crate (same as `ta credentials` — share the keychain key `ta/anthropic_api_key`).
+
+6. [ ] **BMAD install step**: If BMAD selected and `~/.bmad/` absent, `git clone --depth=1 https://github.com/bmadcode/bmad-method ~/.bmad` with a progress spinner. Validates clone by checking for `~/.bmad/agents/` directory. On failure: warn and fall back to `default` planning framework with message.
+
+7. [ ] **Claude-Flow install step**: If selected and `claude-flow` not on PATH, run `npm install -g claude-flow` (checks npm availability first; if npm absent, shows install instructions and skips). Validates with `claude-flow --version`.
+
+8. [ ] **Config write**: Writes `~/.config/ta/config.toml` `[provider]` and `[defaults]` sections atomically (write to `.tmp`, rename). Preserves any existing keys not touched by the wizard. On success prints the config path.
+
+9. [ ] **Installer hook — macOS**: Update `install.sh` and the DMG post-install script to call `ta onboard` at the end. Guard with `[ -t 0 ]` (only if stdin is a tty). If not a tty (non-interactive install), print the first-run hint instead.
+
+10. [ ] **Installer hook — Windows**: Add WiX `<CustomAction>` in the MSI to launch `ta.exe onboard --non-interactive --from-installer` in a new console window after install completes. Pass flags collected from MSI UI (if MSI UI is extended to include provider/agent dropdowns in a future phase).
+
+11. [ ] **Installer hook — Linux**: Update `.deb` `postinst` and `.rpm` `%post` scripts to call `ta onboard` if stdin is a tty; otherwise print first-run hint.
+
+12. [ ] **First-run gate in `ta run` / `ta serve`**: If `[provider]` section absent from global config, print the first-run hint and exit 1 (with `--skip-onboard-check` escape hatch for CI).
+
+13. [ ] **`ta onboard --status`**: Prints a summary of current configuration (provider type, agent, planning framework, BMAD path, whether API key is set in keychain) without running the wizard.
+
+14. [ ] **`ta onboard --reset`**: Clears `[provider]` and `[defaults]` from global config and removes keychain entry, then re-runs wizard. Useful when switching from one provider to another.
+
+15. [ ] **Tests**: Unit tests for config read/write round-trip; mock provider validation (stub HTTP); BMAD install idempotency (already present → skip clone); `--non-interactive` flag combinations; first-run gate triggers correctly; `--status` output with and without config present.
+
+16. [ ] **USAGE.md**: "First-Time Setup" section — what `ta onboard` does, how to re-run it, `--status` and `--reset` flags, how to configure API key separately (`ta config set api_key`), note on BMAD and Claude-Flow as optional but recommended for complex projects.
+
+#### Version: `0.15.11-alpha`
 
 ---
 
