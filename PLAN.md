@@ -7559,6 +7559,7 @@ For SA cloud hybrid: SA provides a webhook relay service (publicly-accessible HT
 
 ### v0.14.8.4 — TA Studio: Multi-Project Support, Project Browser & Platform Launchers
 <!-- status: pending -->
+> **⚠ Post-v0.14.20 cleanup needed**: This phase is out of order — v0.14.12 is already `done` but this v0.14.8.4 is still `pending`. The work was delivered as v0.14.18 (PR #314, merged 2026-03-31). When v0.14.20 lands, mark this phase `done` with a note pointing to v0.14.18, and verify no items here were missed by the v0.14.18 delivery.
 **Goal**: TA Studio (the web app at `http://localhost:7700`) gains a Project Browser so non-engineers can open, switch between, and discover TA projects without using a terminal. Alongside this, each platform gets a one-click launcher so non-engineers never need to open a terminal at all: the launcher starts the daemon and opens TA Studio in the browser.
 
 **Depends on**: v0.14.8 (TA Studio web shell), v0.14.13 (setup wizard)
@@ -8603,6 +8604,98 @@ Current state: `/api/workflows` lists workflows, `/api/workflow/{id}/input` acce
 15. [x] **USAGE.md**: "Agent Personas" section (format, usage in goals and workflows), "Workflows" section (Studio tab, creation from description), "New Project" section (wizard flow, plan generation, semver bootstrap).
 
 #### Version: `0.14.20-alpha`
+
+---
+
+### v0.14.21 — Unified Project Init & `ta plan new`
+<!-- status: pending -->
+**Goal**: Make project initialization a single, guided command that handles VCS setup, gitignore, remote creation, and version bootstrap — with no boilerplate knowledge required. Plan creation is deliberately separate: `ta plan new` is the project's **first goal run**, producing a PLAN.md draft that the user reviews and approves before any development begins. Works identically from CLI, `ta shell`, and Studio.
+
+**Depends on**: v0.14.20 (New Project wizard in Studio, `/api/project/init`)
+
+**Why separate init from plan**: `ta init` is mechanical and fast — no agent, no API call, no draft cycle. The plan is a real deliverable that warrants agent reasoning, a rich input document, and human review. Conflating them would force every init to wait for an agent and would hide the plan behind an opaque wizard step. Keeping them separate also means existing projects can generate or regenerate their plan at any time.
+
+#### Design
+
+**`ta init run` becomes fully interactive** when no flags are given:
+
+```
+$ ta init run
+
+? Project name: cinepipe
+? Template [python-ml]:
+? VCS: (auto-detected: git) ✓          ← prompts if not detectable: git/perforce/svn/none
+? Create GitHub remote? [Y/n] Y
+? Org/name [amplifiedxai/cinepipe]:
+? Visibility [private]:
+
+✓ .ta/ initialized
+✓ .gitignore updated
+✓ Remote created: github.com/amplifiedxai/cinepipe
+✓ version = "0.1.0-alpha" set
+✓ Initial commit pushed
+
+Next: generate your project plan
+  ta plan new "description"
+  ta plan new --file product-spec.md
+```
+
+Flags bypass prompts for scripted/CI use: `ta init run --template python-ml --vcs git --remote github.com/org/repo --non-interactive`.
+
+---
+
+**`ta plan new`** — the project's first goal run:
+
+```bash
+# From a short description (single agent pass):
+ta plan new "Orchestrates ComfyUI for AI cinematic rendering — LoRA loading,
+             workflow templates, batch render pipeline, output validation"
+
+# With BMAD planning roles (recommended for larger/complex projects):
+ta plan new --file docs/product-spec.md --framework bmad
+
+# With GSD research→plan flow:
+ta plan new --file docs/product-spec.md --framework gsd
+
+# From stdin (pipe in a document):
+cat requirements.md | ta plan new --stdin
+
+# All variants go through: agent → PLAN.md draft → ta draft view → ta draft approve
+```
+
+**`--framework` for plan generation**: When omitted, a single optimised agent pass produces the PLAN.md. For larger or more complex projects, `--framework bmad` is recommended — BMAD's structured planning roles (Analyst → Architect → Product Manager) produce richer phase decomposition, better dependency analysis, and more accurately sized milestones. When BMAD is installed and the project template included it (`ta init run --template python-ml`), `ta plan new` defaults to `--framework bmad` automatically unless overridden with `--framework default`.
+
+**`ta plan new` also works on existing projects** to regenerate or extend a plan from an updated spec.
+
+> **Post-v0.14.20 note**: When v0.14.20 lands, update this phase and USAGE.md to align Studio wizard items with the `ta plan new` command surface and `--framework` flag. The Studio "Generate Plan" flow should expose the same framework choice.
+
+#### Items
+
+1. [ ] **Interactive `ta init run` wizard**: Detect VCS from `.git`/`.p4config` presence; prompt if ambiguous or absent. Detect template from project files; prompt to confirm or change. Optional GitHub remote creation via `gh repo create`. All prompts skippable with flags for non-interactive use.
+
+2. [ ] **`ta init run` calls `ta setup vcs` automatically**: After creating `.ta/`, always run `ta setup vcs` with the detected or chosen VCS. No manual step required. Report what was written.
+
+3. [ ] **Version bootstrap in `ta init run`**: Write `version = "0.1.0-alpha"` to `.ta/project.toml` (or equivalent config). Sets the starting point for the semver process before any phases exist.
+
+4. [ ] **`ta plan new <description>`**: Subcommand under `ta plan`. Runs a lightweight plan-generation goal with the description as input. Agent produces a complete PLAN.md. Result enters the draft queue.
+
+5. [ ] **`ta plan new --file <path>`**: Reads the file (Markdown, plain text, or PDF via text extraction). Passes full contents to the agent as the planning input. Supports large specs — agent is instructed to produce appropriately sized phases regardless of input length.
+
+6. [ ] **`ta plan new --stdin`**: Reads from stdin. Enables `cat spec.md | ta plan new --stdin` and pipe-based workflows.
+
+7. [ ] **Plan generation agent prompt**: Tuned system prompt that produces well-structured PLAN.md output — semver phases, properly sized items, depends-on links, status markers. Tested against 3 example inputs (short description, medium spec, long document). When `--framework bmad` (or auto-detected), delegates to BMAD planning roles rather than a single agent pass.
+
+8. [ ] **`POST /api/plan/new`** (daemon endpoint): Accepts `{ description?, file_content?, stdin? }`. Spawns the plan-generation goal. Returns `{ goal_id }` so Studio can poll for the draft. Used by the Studio New Project wizard and the standalone Plan tab "Generate Plan" button.
+
+9. [ ] **Studio integration**: New Project wizard (v0.14.20 item 12) calls `/api/plan/new` after init. Plan tab gains a "Generate Plan from file" button for existing projects. Both show the draft inline for review before applying.
+
+10. [ ] **Shell integration**: `ta shell` exposes `plan new` as a shell command. Interactive prompt for description if not provided as argument.
+
+11. [ ] **Tests**: Init wizard detects git correctly; init without git prompts for VCS; `ta setup vcs` called automatically; `ta plan new "desc"` produces valid PLAN.md draft; `--file` reads and passes full content; draft approve writes and commits PLAN.md; `--non-interactive` bypasses all prompts.
+
+12. [ ] **USAGE.md**: Replace multi-step boilerplate setup with the new unified flow. Document `ta plan new` variants with examples for cinepipe-style projects.
+
+#### Version: `0.14.21-alpha`
 
 ---
 
