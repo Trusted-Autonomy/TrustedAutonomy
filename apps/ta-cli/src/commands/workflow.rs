@@ -47,6 +47,11 @@ pub enum WorkflowCommands {
         /// Agent to use for the run_goal stage.
         #[arg(long, default_value = "claude-code")]
         agent: String,
+        /// PLAN.md phase ID to focus on (e.g. "v0.4.0"). When set:
+        ///   - injected into the agent's CLAUDE.md context via `ta run --phase`
+        ///   - passed to `ta draft apply --phase` to mark the phase done in PLAN.md
+        #[arg(long)]
+        phase: Option<String>,
         /// Print the stage graph without executing any stages.
         #[arg(long)]
         dry_run: bool,
@@ -173,6 +178,7 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
             name,
             goal,
             agent,
+            phase,
             dry_run,
             resume,
         } => {
@@ -183,6 +189,7 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
                 dry_run: *dry_run,
                 resume_run_id: resume.as_deref(),
                 agent,
+                plan_phase: phase.as_deref(),
             };
             governed_workflow::run_governed_workflow(&opts)
         }
