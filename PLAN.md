@@ -7558,8 +7558,8 @@ For SA cloud hybrid: SA provides a webhook relay service (publicly-accessible HT
 ---
 
 ### v0.14.8.4 — TA Studio: Multi-Project Support, Project Browser & Platform Launchers
-<!-- status: pending -->
-> **⚠ Post-v0.14.20 cleanup needed**: This phase is out of order — v0.14.12 is already `done` but this v0.14.8.4 is still `pending`. The work was delivered as v0.14.18 (PR #314, merged 2026-03-31). When v0.14.20 lands, mark this phase `done` with a note pointing to v0.14.18, and verify no items here were missed by the v0.14.18 delivery.
+<!-- status: done -->
+> **Delivered as v0.14.18** (PR #314, merged 2026-03-31). Items were delivered out of order; marked done 2026-04-01.
 **Goal**: TA Studio (the web app at `http://localhost:7700`) gains a Project Browser so non-engineers can open, switch between, and discover TA projects without using a terminal. Alongside this, each platform gets a one-click launcher so non-engineers never need to open a terminal at all: the launcher starts the daemon and opens TA Studio in the browser.
 
 **Depends on**: v0.14.8 (TA Studio web shell), v0.14.13 (setup wizard)
@@ -8696,6 +8696,26 @@ cat requirements.md | ta plan new --stdin
 12. [x] **USAGE.md**: Updated project initialization section with unified workflow. Documented `ta plan new` with description/--file/--stdin variants and examples.
 
 #### Version: `0.14.21-alpha`
+
+---
+
+### v0.14.22 — Studio Polish: Plan Queue Collapse, Wizard Guard & Default Personas
+<!-- status: done -->
+**Goal**: Fix three Studio UX regressions and add default personas so the personas system works out of the box.
+
+**Depends on**: v0.14.21 (Studio plan tab, setup wizard)
+
+#### Items
+
+1. [x] **Plan tab: collapse queue** — `renderPlan()` in `index.html` shows only the first pending phase as "Next Up"; remaining phases are hidden behind a "▼ Show N more phases" toggle. Prevents the plan list from dominating the page on projects with many pending phases.
+
+2. [x] **Setup wizard guard** — `read_setup_progress()` in `api/settings.rs` now returns `wizard_complete: true` for existing configured projects (detects `.ta/daemon.toml` or `.ta/workflow.toml`). Previously, opening Studio in any project without a `setup-progress.json` would launch the wizard regardless of whether the project was already configured.
+
+3. [x] **Default personas** — Added three default persona files in `.ta/personas/`: `implementer.toml`, `reviewer.toml`, `planner.toml`. These ship with new project init so `ta agent list --personas` returns results immediately.
+
+4. [x] **PLAN.md phase cleanup** — Marked `v0.14.8.4` as `done` (was incorrectly left `pending`; work delivered as v0.14.18, PR #314).
+
+#### Version: `0.14.22-alpha`
 
 ---
 

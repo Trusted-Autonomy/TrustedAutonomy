@@ -67,6 +67,10 @@ fn daemon_toml_path(project_root: &std::path::Path) -> PathBuf {
 }
 
 /// Read setup progress from `.ta/setup-progress.json`, returning defaults if absent.
+///
+/// If the progress file doesn't exist but the project already has `.ta/daemon.toml`
+/// or `.ta/workflow.toml`, the project was set up before the wizard existed — treat
+/// it as complete so the wizard doesn't interrupt an existing project on first open.
 fn read_setup_progress(project_root: &std::path::Path) -> SetupProgress {
     let path = setup_progress_path(project_root);
     if path.exists() {
@@ -75,6 +79,17 @@ fn read_setup_progress(project_root: &std::path::Path) -> SetupProgress {
                 return progress;
             }
         }
+    }
+    // No progress file — check whether this is an existing configured project.
+    // If daemon.toml or workflow.toml is already present the user ran `ta onboard`
+    // or `ta init run` previously; skip the wizard.
+    let is_existing_project = project_root.join(".ta").join("daemon.toml").exists()
+        || project_root.join(".ta").join("workflow.toml").exists();
+    if is_existing_project {
+        return SetupProgress {
+            wizard_complete: true,
+            step: 5,
+        };
     }
     SetupProgress::default()
 }

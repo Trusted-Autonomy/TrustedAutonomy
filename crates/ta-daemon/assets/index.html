@@ -335,14 +335,16 @@ async function loadPlan() {
   renderPlan();
 }
 
+let planQueueExpanded = false;
+
 function renderPlan() {
   const pending = planPhases.filter(p => p.status === 'pending' || p.status === 'in_progress');
   let html = '';
 
-  // ── Next Up (phase list) ────────────────────────────────────
+  // ── Next Up — show only the first pending phase; rest collapsible ───
   html += '<div class="dash-section">';
-  html += '<div class="dash-section-title">Next Up</div>';
   if (pending.length === 0) {
+    html += '<div class="dash-section-title">Next Up</div>';
     html += '<div class="card"><div class="card-meta">';
     if (planPhases.length === 0) {
       html += 'No PLAN.md found. Add phases below or run <code>ta plan create</code> in your project.';
@@ -351,35 +353,21 @@ function renderPlan() {
     }
     html += '</div></div>';
   } else {
-    pending.forEach(ph => {
-      const statusColor = ph.status === 'in_progress' ? 'var(--yellow)' : 'var(--accent)';
-      const runningBadge = ph.running
-        ? '<span class="badge badge-active" style="margin-left:0.5rem">Running</span>'
-        : '';
-      html += `<div class="card" id="phase-card-${esc(ph.id)}">
-        <div class="card-header">
-          <div style="display:flex;align-items:center;gap:0.5rem;flex:1;min-width:0">
-            <span style="color:var(--muted);font-family:monospace;font-size:0.8rem;flex-shrink:0">${esc(ph.id)}</span>
-            <span class="card-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ph.title)}</span>
-            ${runningBadge}
-          </div>
-          <div style="display:flex;gap:0.5rem;flex-shrink:0">
-            <button class="btn btn-sm btn-ghost" onclick="togglePhaseExpand('${esc(ph.id)}')">Details</button>
-            <button class="btn btn-sm btn-primary" id="run-btn-${esc(ph.id)}"
-              onclick="runPhase('${esc(ph.id)}')"
-              ${ph.running ? 'disabled title="A goal for this phase is already running"' : ''}>
-              Run
-            </button>
-          </div>
-        </div>
-        <div class="card-meta" id="phase-desc-${esc(ph.id)}" style="margin-top:0.35rem">
-          ${ph.description ? esc(ph.description) : ''}
-        </div>
-        <div id="phase-expand-${esc(ph.id)}" style="display:none;margin-top:0.75rem">
-          ${renderPhaseDetails(ph)}
-        </div>
+    const next = pending[0];
+    const rest = pending.slice(1);
+    html += `<div class="dash-section-title">Next Up${rest.length > 0 ? ' <span style="color:var(--muted);font-size:0.8rem;font-weight:normal">(+' + rest.length + ' queued)</span>' : ''}</div>`;
+    html += renderPhaseCard(next);
+
+    if (rest.length > 0) {
+      html += `<div style="margin-top:0.5rem">
+        <button class="btn btn-ghost btn-sm" onclick="togglePlanQueue()" id="plan-queue-toggle">
+          ${planQueueExpanded ? '▲ Hide queue' : '▼ Show ' + rest.length + ' more phase' + (rest.length !== 1 ? 's' : '')}
+        </button>
       </div>`;
-    });
+      html += `<div id="plan-queue-list" style="display:${planQueueExpanded ? 'block' : 'none'};margin-top:0.5rem">`;
+      rest.forEach(ph => { html += renderPhaseCard(ph); });
+      html += '</div>';
+    }
   }
   html += '</div>';
 
@@ -433,6 +421,46 @@ function renderPlan() {
   </div>`;
 
   app.innerHTML = html;
+}
+
+function togglePlanQueue() {
+  planQueueExpanded = !planQueueExpanded;
+  const list = document.getElementById('plan-queue-list');
+  const btn = document.getElementById('plan-queue-toggle');
+  if (list) list.style.display = planQueueExpanded ? 'block' : 'none';
+  if (btn) {
+    const rest = planPhases.filter(p => p.status === 'pending' || p.status === 'in_progress').slice(1);
+    btn.textContent = planQueueExpanded ? '▲ Hide queue' : '▼ Show ' + rest.length + ' more phase' + (rest.length !== 1 ? 's' : '');
+  }
+}
+
+function renderPhaseCard(ph) {
+  const runningBadge = ph.running
+    ? '<span class="badge badge-active" style="margin-left:0.5rem">Running</span>'
+    : '';
+  return `<div class="card" id="phase-card-${esc(ph.id)}">
+    <div class="card-header">
+      <div style="display:flex;align-items:center;gap:0.5rem;flex:1;min-width:0">
+        <span style="color:var(--muted);font-family:monospace;font-size:0.8rem;flex-shrink:0">${esc(ph.id)}</span>
+        <span class="card-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ph.title)}</span>
+        ${runningBadge}
+      </div>
+      <div style="display:flex;gap:0.5rem;flex-shrink:0">
+        <button class="btn btn-sm btn-ghost" onclick="togglePhaseExpand('${esc(ph.id)}')">Details</button>
+        <button class="btn btn-sm btn-primary" id="run-btn-${esc(ph.id)}"
+          onclick="runPhase('${esc(ph.id)}')"
+          ${ph.running ? 'disabled title="A goal for this phase is already running"' : ''}>
+          Run
+        </button>
+      </div>
+    </div>
+    <div class="card-meta" id="phase-desc-${esc(ph.id)}" style="margin-top:0.35rem">
+      ${ph.description ? esc(ph.description) : ''}
+    </div>
+    <div id="phase-expand-${esc(ph.id)}" style="display:none;margin-top:0.75rem">
+      ${renderPhaseDetails(ph)}
+    </div>
+  </div>`;
 }
 
 function renderPhaseDetails(ph) {
