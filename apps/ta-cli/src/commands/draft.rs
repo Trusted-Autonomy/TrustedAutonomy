@@ -3197,6 +3197,125 @@ fn capture_phase_complete_to_memory(
     do_write(&mut fs_store);
 }
 
+/// Bump the canonical version fields in Cargo.toml, CLAUDE.md, and .release.toml
+/// to `new_version`.
+///
+/// Called automatically by `draft apply --phase` after the plan update so that
+/// version tracking stays in sync without requiring agent or human intervention.
+/// Agents should NOT bump the version manually — this function is the authority.
+///
+/// Files modified (if present in `workspace_dir`):
+///   Cargo.toml       — first `^version = "..."` line (workspace package version)
+///   CLAUDE.md        — `**Current version**: \`...\`` line
+///   .release.toml    — `prerelease = ...` set to `true`; other fields left intact
+///
+/// Returns the list of files that were actually modified (for inclusion in git commit).
+pub fn bump_workspace_version(
+    workspace_dir: &Path,
+    new_version: &str,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let mut modified = Vec::new();
+
+    // --- Cargo.toml ---
+    let cargo_path = workspace_dir.join("Cargo.toml");
+    if cargo_path.exists() {
+        let original = std::fs::read_to_string(&cargo_path)?;
+        let mut replaced = false;
+        let updated: String = original
+            .lines()
+            .map(|line| {
+                // Match the workspace-level `version = "..."` — must be at column 0
+                // (not inside a [[package]] table) and not already the correct value.
+                if !replaced && line.starts_with("version = \"") {
+                    replaced = true;
+                    format!("version = \"{}\"", new_version)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + if original.ends_with('\n') { "\n" } else { "" };
+
+        if updated != original {
+            std::fs::write(&cargo_path, &updated)?;
+            modified.push(cargo_path);
+        }
+    }
+
+    // --- CLAUDE.md ---
+    let claude_path = workspace_dir.join("CLAUDE.md");
+    if claude_path.exists() {
+        let original = std::fs::read_to_string(&claude_path)?;
+        // Replace: **Current version**: `<old>` → **Current version**: `<new>`
+        let updated = regex_replace_first(
+            &original,
+            r"\*\*Current version\*\*: `[^`]*`",
+            &format!("**Current version**: `{}`", new_version),
+        );
+        if updated != original {
+            std::fs::write(&claude_path, &updated)?;
+            modified.push(claude_path);
+        }
+    }
+
+    // --- .release.toml ---
+    let release_toml_path = workspace_dir.join(".release.toml");
+    if release_toml_path.exists() {
+        let original = std::fs::read_to_string(&release_toml_path)?;
+        // Ensure prerelease = true (all phase-apply bumps are pre-release by definition).
+        let updated = regex_replace_first(&original, r"(?m)^prerelease = .*", "prerelease = true");
+        if updated != original {
+            std::fs::write(&release_toml_path, &updated)?;
+            modified.push(release_toml_path);
+        }
+    }
+
+    Ok(modified)
+}
+
+/// Simple line-by-line regex replacement helper (first match only, no external crate needed).
+/// Pattern must match the full text of a line. Replacement is a literal string.
+fn regex_replace_first(text: &str, pattern: &str, replacement: &str) -> String {
+    // We avoid pulling in the `regex` crate — the patterns here are simple enough
+    // to implement with manual matching.
+    match pattern {
+        // **Current version**: `...`
+        p if p.contains("Current version") => {
+            let mut replaced = false;
+            text.lines()
+                .map(|line| {
+                    if !replaced && line.contains("**Current version**: `") && line.contains('`') {
+                        replaced = true;
+                        replacement.to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + if text.ends_with('\n') { "\n" } else { "" }
+        }
+        // prerelease = ...
+        p if p.contains("prerelease") => {
+            let mut replaced = false;
+            text.lines()
+                .map(|line| {
+                    if !replaced && line.starts_with("prerelease = ") {
+                        replaced = true;
+                        replacement.to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + if text.ends_with('\n') { "\n" } else { "" }
+        }
+        _ => text.to_string(),
+    }
+}
+
 /// Selective review patterns for artifact disposition.
 #[derive(Default)]
 struct SelectiveReviewPatterns<'a> {
@@ -4221,6 +4340,32 @@ fn apply_package(
 
             std::fs::write(&plan_path, &content)?;
 
+            // Auto-bump workspace version to match the completed phase.
+            // Agents should NOT set the version — this is the single authority.
+            if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
+                match bump_workspace_version(&target_dir, &new_ver) {
+                    Ok(bumped) if !bumped.is_empty() => {
+                        println!("[version] Phase {} → bumped to {}", last_phase_id, new_ver);
+                    }
+                    Ok(_) => {
+                        // Already at target version — no change needed.
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            phase = %last_phase_id,
+                            version = %new_ver,
+                            "auto version bump failed: {}",
+                            e
+                        );
+                        eprintln!(
+                            "[version] Warning: could not auto-bump version to {} — run \
+                             ./scripts/bump-version.sh {} manually",
+                            new_ver, new_ver
+                        );
+                    }
+                }
+            }
+
             // v0.12.5: Write plan phase completion into memory for future context injection.
             for phase in &phase_ids {
                 let phase_title = super::plan::parse_plan(&content)
@@ -4410,6 +4555,32 @@ fn apply_package(
                         }
 
                         std::fs::write(&plan_path, &content)?;
+
+                        // Auto-bump workspace version to match the completed phase.
+                        if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
+                            match bump_workspace_version(&target_dir, &new_ver) {
+                                Ok(bumped) if !bumped.is_empty() => {
+                                    println!(
+                                        "[version] Phase {} → bumped to {}",
+                                        last_phase_id, new_ver
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::warn!(
+                                        phase = %last_phase_id,
+                                        version = %new_ver,
+                                        "auto version bump failed: {}",
+                                        e
+                                    );
+                                    eprintln!(
+                                        "[version] Warning: could not auto-bump version to \
+                                         {} — run ./scripts/bump-version.sh {} manually",
+                                        new_ver, new_ver
+                                    );
+                                }
+                            }
+                        }
 
                         for phase in &phase_ids {
                             let phase_title = super::plan::parse_plan(&content)
@@ -11134,5 +11305,98 @@ fn run() {
             "extra.txt should be rejected"
         );
         let _ = pkg_id; // suppress unused warning
+    }
+
+    // ── bump_workspace_version ────────────────────────────────────────────────
+
+    #[test]
+    fn bump_version_updates_cargo_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace.package]\nversion = \"0.14.22-rc.4\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+
+        let modified = bump_workspace_version(dir.path(), "0.14.23-alpha").unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        assert!(
+            content.contains("version = \"0.14.23-alpha\""),
+            "Cargo.toml should have new version"
+        );
+        assert!(modified.iter().any(|p| p.ends_with("Cargo.toml")));
+    }
+
+    #[test]
+    fn bump_version_updates_claude_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "# Instructions\n\n- **Current version**: `0.14.22-rc.4`\n- See PLAN.md\n",
+        )
+        .unwrap();
+
+        bump_workspace_version(dir.path(), "0.15.0-alpha").unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            content.contains("**Current version**: `0.15.0-alpha`"),
+            "CLAUDE.md should have new version"
+        );
+        assert!(
+            !content.contains("0.14.22-rc.4"),
+            "old version should be gone"
+        );
+    }
+
+    #[test]
+    fn bump_version_updates_release_toml_prerelease() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".release.toml"),
+            "prerelease = false\ntitle_suffix = \"Foo\"\n",
+        )
+        .unwrap();
+
+        bump_workspace_version(dir.path(), "0.15.0-alpha").unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(".release.toml")).unwrap();
+        assert!(
+            content.contains("prerelease = true"),
+            ".release.toml should set prerelease=true on phase apply"
+        );
+    }
+
+    #[test]
+    fn bump_version_no_change_when_already_at_target() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.0-alpha\"\n",
+        )
+        .unwrap();
+
+        let modified = bump_workspace_version(dir.path(), "0.15.0-alpha").unwrap();
+
+        // No modification — file was already at target.
+        assert!(
+            modified.is_empty(),
+            "no files should be modified if already at target"
+        );
+    }
+
+    #[test]
+    fn bump_version_missing_files_are_skipped() {
+        // Workspace with no CLAUDE.md or .release.toml — should not error.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.14.0-alpha\"\n",
+        )
+        .unwrap();
+
+        let result = bump_workspace_version(dir.path(), "0.15.0-alpha");
+        assert!(result.is_ok(), "missing optional files should not error");
     }
 }

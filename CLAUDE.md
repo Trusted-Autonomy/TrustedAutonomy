@@ -101,20 +101,20 @@ All outcomes must be **observable** (with details and logging) and **actionable*
 
 **Single source of truth**: `Cargo.toml [workspace.package] version`. Everything else is derived from it.
 
-When completing a phase, you MUST update versions as part of the work — use the bump script to update all locations atomically:
+**Version bumping is automatic.** When `ta draft apply --phase <id>` runs, the system auto-bumps `Cargo.toml`, `CLAUDE.md`, and `.release.toml` to the semver derived from the phase ID. **Agents must NOT manually set the version** — the system is the authority.
 
-```bash
-./scripts/bump-version.sh <new-version> [--last-tag <previous-tag>] [--title-suffix "..."] [--stable]
-```
-
-This updates:
-1. **`Cargo.toml`** — workspace `version` (authoritative semver)
-2. **`CLAUDE.md`** — "Current version" line (this file, for agent context)
-3. **`.release.toml`** — `last_release_tag`, `prerelease`, `title_suffix` (non-semver release metadata)
+Phase ID → semver mapping:
+- `v0.15.0` → `0.15.0-alpha`
+- `v0.15.13.2` → `0.15.13-alpha.2`
 
 CI (`version-check` job) enforces that `Cargo.toml` and `CLAUDE.md` agree — a mismatch is a build failure.
 
-**Do NOT manually edit the version in multiple places.** Run `bump-version.sh` instead.
+**Manual override** (release pinning, re-alignment): use `./scripts/bump-version.sh` which updates all locations atomically:
+```bash
+./scripts/bump-version.sh 0.14.22-rc.5 --last-tag public-alpha-v0.14.22.4
+```
+
+`last_release_tag` and `title_suffix` in `.release.toml` are human-controlled via `bump-version.sh` — updated when publishing a release, not on every phase.
 
    **Anti-regression rule scope**: Agents must not set the version to a value that would skip or re-order plan phases. Human-initiated version changes (e.g., re-aligning after divergence, pinning for a public release) are permitted with an explicit commit message explaining the intent.
 

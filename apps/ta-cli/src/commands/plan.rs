@@ -1175,6 +1175,26 @@ fn parse_semver_id(id: &str) -> Option<Vec<u32>> {
     parts
 }
 
+/// Convert a plan phase ID to the canonical workspace semver string.
+///
+/// Phase ID mapping (per CLAUDE.md version policy):
+///   v0.14.22       → "0.14.22-alpha"
+///   v0.14.22.1     → "0.14.22-alpha.1"
+///   v0.14.22.2     → "0.14.22-alpha.2"
+///   v0.15.0        → "0.15.0-alpha"
+///
+/// Non-semver phase IDs (e.g., "4b", "Phase 1") return `None` — no auto-bump.
+pub fn phase_id_to_semver(phase_id: &str) -> Option<String> {
+    let parts = parse_semver_id(phase_id)?;
+    match parts.as_slice() {
+        // Three-part: v0.14.22 → "0.14.22-alpha"
+        [major, minor, patch] => Some(format!("{}.{}.{}-alpha", major, minor, patch)),
+        // Four-part: v0.14.22.1 → "0.14.22-alpha.1"
+        [major, minor, patch, sub] => Some(format!("{}.{}.{}-alpha.{}", major, minor, patch, sub)),
+        _ => None,
+    }
+}
+
 /// Check for out-of-order phases: a `Done` phase appears after a `Pending` phase
 /// in document order (for phases with semver-style IDs only).
 ///
@@ -4106,5 +4126,48 @@ Build it.
         let large_input = "x".repeat(200_000);
         let prompt = build_plan_new_prompt(&large_input, "default");
         assert!(prompt.contains("truncated"));
+    }
+
+    // ── phase_id_to_semver ────────────────────────────────────────────────────
+
+    #[test]
+    fn phase_id_to_semver_three_part() {
+        assert_eq!(
+            phase_id_to_semver("v0.14.22"),
+            Some("0.14.22-alpha".to_string())
+        );
+        assert_eq!(
+            phase_id_to_semver("v0.15.0"),
+            Some("0.15.0-alpha".to_string())
+        );
+        assert_eq!(
+            phase_id_to_semver("v1.0.0"),
+            Some("1.0.0-alpha".to_string())
+        );
+    }
+
+    #[test]
+    fn phase_id_to_semver_four_part_sub_phase() {
+        assert_eq!(
+            phase_id_to_semver("v0.14.22.1"),
+            Some("0.14.22-alpha.1".to_string())
+        );
+        assert_eq!(
+            phase_id_to_semver("v0.13.17.3"),
+            Some("0.13.17-alpha.3".to_string())
+        );
+        assert_eq!(
+            phase_id_to_semver("v0.15.13.2"),
+            Some("0.15.13-alpha.2".to_string())
+        );
+    }
+
+    #[test]
+    fn phase_id_to_semver_non_semver_returns_none() {
+        assert_eq!(phase_id_to_semver("4b"), None);
+        assert_eq!(phase_id_to_semver("Phase 1"), None);
+        assert_eq!(phase_id_to_semver(""), None);
+        assert_eq!(phase_id_to_semver("v0.14"), None); // two-part, not handled
+        assert_eq!(phase_id_to_semver("alpha"), None);
     }
 }
