@@ -13,11 +13,11 @@ prerelease = true
 
 # Human-readable description appended after "TA v<version> — " in the release title.
 # Update when the release cycle's theme changes (not on every rc bump).
-title_suffix = "TA Studio + Governed Workflow Phase Targeting"
+title_suffix = "Generic Asset Types + Governed Workflow Fix"
 
 # Tag of the immediately preceding release (used in "Changes since" footer and delta
 # comparisons). Update to the tag you just published when bumping for the next cycle.
-last_release_tag = "public-alpha-v0.14.22.3"
+last_release_tag = "public-alpha-v0.14.22.4"
 
 # Tag of the last stable (non-prerelease) release.
 # Used for "stable upgrade path" notes and long-running delta summaries.
