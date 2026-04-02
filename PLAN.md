@@ -9378,6 +9378,266 @@ Each goal produces one or more `SocialDraftRecord` entries in `.ta/social-audit.
 
 ---
 
+### v0.15.13 — Hierarchical Workflows: Sub-Workflow Steps & Serial Chaining
+<!-- status: pending -->
+**Goal**: Allow a workflow step to invoke another named workflow as a sub-workflow, running it to completion before proceeding to the next step. This is the foundation for composable, reusable workflow building-blocks and enables the `build_phases.sh` pattern to be expressed as a single TOML workflow definition.
+
+**Depends on**: v0.14.10 (artifact-typed workflow edges), v0.14.8.2 (governed workflow engine)
+
+**Design**:
+
+A new step type `kind = "workflow"` in the workflow TOML:
+
+```toml
+[[stage]]
+name = "implement_phase"
+kind = "workflow"
+workflow = "build"               # name of .ta/workflows/build.toml
+goal = "{{phase.goal_title}}"    # templated from parent workflow context
+phase = "{{phase.id}}"           # passed as --phase to child workflow
+depends_on = ["plan_next"]
+```
+
+The child workflow runs synchronously in the same process context. Its artifacts are surfaced as outputs of the calling step, available to downstream stages. The parent workflow's `run_id` is recorded in the child run's metadata for tracing.
+
+**Phase loop as a workflow** (`plan-build-loop.toml`):
+
+```toml
+[workflow]
+name = "plan-build-loop"
+description = "Run all pending plan phases through the governed build workflow."
+
+[workflow.config]
+max_phases = 99
+stop_on_flag = true    # stop if reviewer flags; require manual resume
+
+[[stage]]
+name = "plan_next"
+kind = "plan_next"     # reads ta plan next, outputs: phase_id, phase_title, done=bool
+
+[[stage]]
+name = "run_phase"
+kind = "workflow"
+workflow = "build"
+goal = "{{plan_next.phase_id}} — {{plan_next.phase_title}}"
+phase = "{{plan_next.phase_id}}"
+depends_on = ["plan_next"]
+condition = "!plan_next.done"   # stops cleanly when all phases complete
+
+[[stage]]
+name = "loop"
+kind = "goto"
+target = "plan_next"
+depends_on = ["run_phase"]
+condition = "!plan_next.done"
+```
+
+**Items**:
+
+1. [ ] **`kind = "workflow"` step executor** (`governed_workflow.rs`): `stage_run_subworkflow()` — resolves the child workflow definition, constructs `RunOptions` with goal/phase from template context, calls `run_governed_workflow()` recursively (depth-limited to 5). Child run ID is stored in `SubworkflowRecord { parent_run_id, child_run_id, stage_name }`.
+
+2. [ ] **`kind = "plan_next"` step** (`governed_workflow.rs`): Shells out to `ta plan next`, parses output into structured `PlanNextOutput { phase_id, phase_title, done }`. Outputs are available to downstream templates as `{{plan_next.*}}`.
+
+3. [ ] **`kind = "goto"` step with `condition`**: A loop-back step that re-enters the graph at `target` when `condition` evaluates to true. Depth guard: after `max_phases` iterations, emit `CHECKPOINT` and halt with actionable message.
+
+4. [ ] **Template interpolation in stage fields** (`goal`, `phase`, `condition`): `{{stage_name.field}}` resolves from the current workflow run's output map. Uses a simple `{{` / `}}` tokenizer — no Tera/Handlebars dependency.
+
+5. [ ] **`condition` evaluator**: Supports `!field` (boolean not), `field == "value"`, `field != "value"`. Evaluated against the run's output map. Invalid expressions are a hard error at graph validation time, not at runtime.
+
+6. [ ] **Workflow template** (`templates/workflows/plan-build-loop.toml`): Ships as a built-in template. `ta workflow run plan-build-loop` replaces `./build_phases.sh`.
+
+7. [ ] **`ta workflow run plan-build-loop --dry-run`**: Prints the plan (calls `ta plan next` once, shows what phase would run, estimates iteration count from pending phases). Does not start any sub-workflows.
+
+8. [ ] **Sub-workflow run IDs in status output**: `ta workflow status <run-id>` shows sub-workflow run IDs for each `workflow`-kind step with their current state. `ta workflow status <child-run-id>` works independently.
+
+9. [ ] **Tests**: sub-workflow step resolves and executes child workflow; `plan_next` step parses `ta plan next` output correctly; `goto` loops correctly up to `max_phases`; `condition` evaluator covers `!bool`, `==`, `!=`; depth guard fires at limit 5; `dry-run` for `plan-build-loop` prints correct plan.
+
+10. [ ] **USAGE.md**: "Workflow Loops & Sub-workflows" section — `kind = "workflow"`, template syntax, `plan-build-loop` replacing the shell script, `--dry-run` preview.
+
+#### Version: `0.15.13-alpha`
+
+---
+
+### v0.15.14 — Hierarchical Workflows: Parallel Fan-Out & Milestone Draft
+<!-- status: pending -->
+**Goal**: Fan-out multiple sub-workflows in parallel, wait for all to complete, and aggregate their drafts into a single **Milestone Draft** — a composite changeset spanning all phases that can be reviewed and approved as one unit. This is the native TA equivalent of running `build_phases.sh` and getting all changes in a single PR.
+
+**Depends on**: v0.15.13 (sub-workflow steps, serial chaining)
+
+**Design**:
+
+A `parallel:` block in the workflow TOML groups steps that run concurrently:
+
+```toml
+[[stage]]
+name = "security_review"
+kind = "workflow"
+workflow = "review-security"
+goal = "{{parent.goal}}"
+parallel_group = "review_panel"
+
+[[stage]]
+name = "arch_review"
+kind = "workflow"
+workflow = "review-arch"
+goal = "{{parent.goal}}"
+parallel_group = "review_panel"
+
+[[stage]]
+name = "join_reviews"
+kind = "join"
+parallel_group = "review_panel"   # waits for all members of the group
+depends_on = ["security_review", "arch_review"]
+```
+
+For milestone aggregation, a `kind = "aggregate_draft"` step:
+
+```toml
+[[stage]]
+name = "milestone"
+kind = "aggregate_draft"
+source_stages = ["run_phase_1", "run_phase_2", "run_phase_3"]
+milestone_title = "v0.4 — Captioning & ComfyUI Milestone"
+depends_on = ["run_phase_1", "run_phase_2", "run_phase_3"]
+```
+
+**Items**:
+
+1. [ ] **`parallel_group` on stages**: Stages with the same `parallel_group` are dispatched concurrently using `std::thread::spawn`. Each runs its own `run_governed_workflow()` or primitive step executor in a worker thread. Results (output map + artifacts) are collected at the `join` step.
+
+2. [ ] **`kind = "join"` step**: Blocks until all members of `parallel_group` complete. Fails the workflow if any member fails (unless `on_partial_failure = "continue"` is set). Merges output maps: conflicting keys are prefixed with stage name (`security_review.verdict`, `arch_review.verdict`).
+
+3. [ ] **`kind = "aggregate_draft"` step**: Reads `draft_id` from each listed source stage's output. For each draft, fetches the `DraftPackage` from the draft store. Merges artifact lists (dedup by URI, last-writer-wins within a phase). Creates a new `MilestoneDraft` record with `source_drafts: Vec<DraftId>`, `milestone_title`, and a combined summary. The milestone draft is treated as a standard draft for the `review_draft → human_gate → apply_draft` pipeline.
+
+4. [ ] **`MilestoneDraft` struct** (`ta-changeset`): Wraps a `DraftPackage` with `source_drafts: Vec<String>` and `milestone_title: String`. `ta draft view <milestone-id>` shows per-phase sections. `ta draft apply <milestone-id>` applies all constituent drafts in phase order.
+
+5. [ ] **`plan-build-loop-milestone.toml`** template: Extended variant of `plan-build-loop` that runs phases in parallel batches (configurable `batch_size`) and aggregates into a milestone draft rather than applying each phase immediately.
+
+6. [ ] **Parallel execution scheduler**: Thread pool with configurable `max_parallel` (default 3). Sub-workflows beyond the pool limit are queued. Ensures at most N concurrent agent processes per workflow run.
+
+7. [ ] **Milestone draft review in `ta workflow status`**: Shows constituent drafts, per-phase status (applied / pending / failed), and the milestone aggregate summary.
+
+8. [ ] **Tests**: parallel stages start concurrently (mock clock); join waits for all before proceeding; `on_partial_failure = "continue"` proceeds despite one failure; `aggregate_draft` merges two draft packages correctly; `MilestoneDraft` apply applies phases in order; max_parallel cap queues correctly.
+
+9. [ ] **USAGE.md**: "Parallel Workflows & Milestone Drafts" section — `parallel_group`, `join`, `aggregate_draft`, `plan-build-loop-milestone` usage, reviewing a milestone draft.
+
+#### Version: `0.15.14-alpha`
+
+---
+
+### v0.15.15 — Multi-Agent Consensus Review Workflow
+<!-- status: pending -->
+**Goal**: A workflow template for multi-agent panel reviews where specialist agents run in parallel, each producing a structured verdict with a score and findings, and a final consensus step aggregates their outputs into a readiness score and recommendation. Ships with a `code-review-consensus` template covering architect, security, principal engineer, and PM roles.
+
+**Depends on**: v0.15.14 (parallel fan-out, join step)
+
+**Design**:
+
+A `kind = "consensus_review"` step, or equivalently expressed via the generic parallel + join system:
+
+```toml
+# templates/workflows/code-review-consensus.toml
+
+[workflow]
+name = "code-review-consensus"
+description = """
+Multi-agent panel review. Four specialist agents review in parallel:
+  - architect: architecture & design quality
+  - security:  threat model & attack surface
+  - principal: code correctness, tests, maintainability
+  - pm:        product fit, scope, user impact
+Aggregated into a consensus readiness score (0.0–1.0).
+Blocks apply if score < gate_threshold.
+"""
+
+[workflow.config]
+gate_threshold = 0.75     # minimum consensus score to auto-proceed
+reviewer_timeout_mins = 30
+
+[[stage]]
+name = "architect_review"
+kind = "workflow"
+workflow = "review-specialist"
+goal = "{{parent.goal}}"
+agent = "claude-code"
+objective = "Review as a software architect. Focus: system design, modularity, \
+             dependency graph, API contracts. Score 0.0–1.0."
+parallel_group = "panel"
+
+[[stage]]
+name = "security_review"
+kind = "workflow"
+workflow = "review-specialist"
+goal = "{{parent.goal}}"
+agent = "claude-code"
+objective = "Review as a security engineer. Focus: OWASP top-10, trust boundaries, \
+             secrets handling, input validation. Score 0.0–1.0."
+parallel_group = "panel"
+
+[[stage]]
+name = "principal_review"
+kind = "workflow"
+workflow = "review-specialist"
+goal = "{{parent.goal}}"
+agent = "claude-code"
+objective = "Review as a principal engineer. Focus: correctness, edge cases, \
+             test coverage, performance, maintainability. Score 0.0–1.0."
+parallel_group = "panel"
+
+[[stage]]
+name = "pm_review"
+kind = "workflow"
+workflow = "review-specialist"
+goal = "{{parent.goal}}"
+agent = "claude-code"
+objective = "Review as a product manager. Focus: goal alignment, scope, \
+             user-visible impact, backwards compatibility. Score 0.0–1.0."
+parallel_group = "panel"
+
+[[stage]]
+name = "consensus"
+kind = "consensus"
+parallel_group = "panel"
+inputs = ["architect_review.score", "security_review.score",
+          "principal_review.score", "pm_review.score"]
+weights = { architect = 1.0, security = 1.5, principal = 1.0, pm = 0.5 }
+gate_threshold = "{{workflow.config.gate_threshold}}"
+depends_on = ["architect_review", "security_review", "principal_review", "pm_review"]
+
+[[stage]]
+name = "apply"
+kind = "apply_draft"
+depends_on = ["consensus"]
+condition = "consensus.proceed"
+```
+
+**Items**:
+
+1. [ ] **`kind = "consensus"` step**: Reads `score` and `findings` from each input stage's output map. Computes `weighted_average(scores, weights)`. If `weighted_avg >= gate_threshold` → output `proceed = true`. Otherwise → output `proceed = false`, surface all findings grouped by reviewer role.
+
+2. [ ] **`review-specialist` base workflow template** (`templates/workflows/review-specialist.toml`): Minimal governed review workflow. Runs a single agent with the `--objective` prompt, produces `verdict.json` with `score: f64` (0.0–1.0), `findings: Vec<String>`, `role: String`. The `score` field is the primary output consumed by the `consensus` step.
+
+3. [ ] **`WeightedConsensus` struct** (`governed_workflow.rs`): `scores: HashMap<String, f64>`, `weights: HashMap<String, f64>`, `threshold: f64`. `compute() -> ConsensusResult { score, proceed, findings_by_role }`. Exposed as a standalone function so it can be unit-tested without spawning agents.
+
+4. [ ] **`ta workflow run code-review-consensus --goal "Add rate limiting to auth"` UX**:
+   - Shows live status as each reviewer completes (same live-status machinery as `ta workflow status --live`)
+   - On completion: prints consensus score, per-reviewer scores, and top findings
+   - On `proceed = false`: prints blockage message with all findings, suggests `--override` with audit log
+
+5. [ ] **`--override` flag on governed workflow run**: Bypasses `consensus.proceed = false` and applies the draft with an `OVERRIDE` entry in the audit trail. Requires the user to supply `--override-reason "..."`. Logged to `goal-audit.jsonl` and flagged in `ta workflow status` output.
+
+6. [ ] **Reviewer timeout**: Each specialist review has `reviewer_timeout_mins` (default 30). If a reviewer doesn't complete in time, its slot is omitted from the consensus calculation and flagged in the result (not a hard failure unless `require_all_reviewers = true`).
+
+7. [ ] **Tests**: `WeightedConsensus::compute` with equal weights; weighted average with security 1.5x; threshold gate proceeds on 0.80 with gate 0.75; threshold gate blocks on 0.70; missing reviewer slot with `require_all = false` omits from average; `--override` adds OVERRIDE to audit trail; timeout produces flagged-but-omitted slot.
+
+8. [ ] **Workflow template** (`templates/workflows/code-review-consensus.toml`): Ships as a built-in template. `ta workflow run code-review-consensus --goal "..."` is the primary UX.
+
+9. [ ] **USAGE.md**: "Multi-Agent Consensus Review" section — running `code-review-consensus`, interpreting the score, reviewer roles, configuring weights and threshold, override with audit log.
+
+#### Version: `0.15.15-alpha`
+
+---
+
 ## v0.16 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
