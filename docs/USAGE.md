@@ -10136,6 +10136,60 @@ render_output/GoldenHour/depth_exr/frame_0000.exr  EXR image  (4.1 MB)
 
 ---
 
+## Generic Binary and Text Assets
+
+TA supports two catch-all artifact kinds for assets that don't have a more specific type: `Binary` for opaque binary files and `Text` for raw text files. Any connector or agent can produce these artifacts and they flow through the standard draft/review/apply pipeline.
+
+### Binary artifacts
+
+Use `ArtifactKind::Binary` for compiled outputs, archives, model weights, or any file whose content cannot be meaningfully diffed as text.
+
+```json
+{
+  "type": "binary",
+  "mime_type": "application/zip",
+  "byte_size": 13107200
+}
+```
+
+In `ta draft view`, binary artifacts show a size summary instead of a diff:
+
+```
+output/model.bin   binary (application/octet-stream)   [Binary file, 12.5 MB — text diff suppressed]
+```
+
+The summary line at the end of the view shows the total size of all binary files:
+```
+3 binary files (37.2 MB total)
+```
+
+### Text artifacts
+
+Use `ArtifactKind::Text` for generated scripts, config files, data files, or any text output that should render a full unified diff.
+
+```json
+{
+  "type": "text",
+  "encoding": "utf-8",
+  "line_count": 84
+}
+```
+
+In `ta draft view`, text artifacts show their encoding and line count, then render the full diff normally:
+
+```
+scripts/setup.sh   text (utf-8)   84 lines
++#!/bin/bash
++echo "setting up..."
+```
+
+The summary line at the end shows the count:
+```
+2 text files
+```
+
+---
+
 ## Getting Help
 
 - **Source and documentation**: [github.com/trustedautonomy/ta](https://github.com/trustedautonomy/ta)

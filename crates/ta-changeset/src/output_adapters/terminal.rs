@@ -9,6 +9,22 @@ use crate::output_adapters::{
 };
 use crate::pr_package::{Artifact, ChangeType};
 
+/// Format a byte count as a human-readable size string (e.g. "1.0 MB", "512 B").
+fn format_byte_size(bytes: u64) -> String {
+    const KB: u64 = 1_024;
+    const MB: u64 = KB * 1_024;
+    const GB: u64 = MB * 1_024;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 #[derive(Default)]
 pub struct TerminalAdapter {
     color: bool,
@@ -259,6 +275,41 @@ impl TerminalAdapter {
             return output;
         }
 
+        // Binary artifacts: suppress diff; show size summary.
+        if let Some(ArtifactKind::Binary {
+            mime_type,
+            byte_size,
+        }) = &artifact.kind
+        {
+            output.push_str(&format!("\n    {bold}Binary artifact:{reset}\n"));
+            if let Some(mime) = mime_type {
+                output.push_str(&format!("    {dim}MIME type:{reset} {}\n", mime));
+            }
+            let size_str = byte_size
+                .map(format_byte_size)
+                .unwrap_or_else(|| "unknown size".to_string());
+            output.push_str(&format!(
+                "    {dim}[Binary file, {size_str} — text diff suppressed]{reset}\n"
+            ));
+            return output;
+        }
+
+        // Text artifacts: show kind label then render diff normally below.
+        if let Some(ArtifactKind::Text {
+            encoding,
+            line_count,
+        }) = &artifact.kind
+        {
+            output.push_str(&format!("\n    {bold}Text artifact:{reset}\n"));
+            if let Some(enc) = encoding {
+                output.push_str(&format!("    {dim}Encoding:{reset} {}\n", enc));
+            }
+            if let Some(lc) = line_count {
+                output.push_str(&format!("    {dim}Lines:{reset} {}\n", lc));
+            }
+            // Fall through to diff rendering below.
+        }
+
         // Fetch and display full diff if provider is available
         if let Some(provider) = ctx.diff_provider {
             match provider.get_diff(&artifact.diff_ref) {
@@ -345,6 +396,61 @@ impl TerminalAdapter {
             parts.push(format!("{}×{}", w, h));
         }
         parts.join(", ")
+    }
+
+    /// Build a human-readable summary for a set of binary artifacts.
+    ///
+    /// Returns a line like `"3 binary files (12.4 MB total)"` or an empty string
+    /// if there are no `ArtifactKind::Binary` artifacts in the set.
+    pub fn render_binary_artifact_set_summary(artifacts: &[&Artifact]) -> String {
+        let binary_artifacts: Vec<_> = artifacts
+            .iter()
+            .filter(|a| a.kind.as_ref().map(|k| k.is_binary()).unwrap_or(false))
+            .collect();
+
+        if binary_artifacts.is_empty() {
+            return String::new();
+        }
+
+        let count = binary_artifacts.len();
+        let total_bytes: Option<u64> = binary_artifacts.iter().try_fold(0u64, |acc, a| {
+            if let Some(ArtifactKind::Binary {
+                byte_size: Some(b), ..
+            }) = &a.kind
+            {
+                Some(acc + b)
+            } else {
+                None // any unknown size → can't compute total
+            }
+        });
+
+        if let Some(total) = total_bytes {
+            format!(
+                "{} binary file{} ({} total)",
+                count,
+                if count == 1 { "" } else { "s" },
+                format_byte_size(total)
+            )
+        } else {
+            format!("{} binary file{}", count, if count == 1 { "" } else { "s" })
+        }
+    }
+
+    /// Build a human-readable summary for a set of text artifacts.
+    ///
+    /// Returns a line like `"2 text files"` or an empty string if there are no
+    /// `ArtifactKind::Text` artifacts in the set.
+    pub fn render_text_artifact_set_summary(artifacts: &[&Artifact]) -> String {
+        let count = artifacts
+            .iter()
+            .filter(|a| a.kind.as_ref().map(|k| k.is_text()).unwrap_or(false))
+            .count();
+
+        if count == 0 {
+            return String::new();
+        }
+
+        format!("{} text file{}", count, if count == 1 { "" } else { "s" })
     }
 
     /// Group artifacts by module (top-level directory) for the "What Changed" section (v0.9.5).
@@ -1323,5 +1429,290 @@ mod tests {
         let refs: Vec<&Artifact> = package.changes.artifacts.iter().collect();
         let summary = TerminalAdapter::render_image_artifact_set_summary(&refs);
         assert_eq!(summary, "", "no images → empty summary");
+    }
+
+    // ── v0.15.0 Binary artifact rendering tests ──
+
+    fn binary_artifact(uri: &str, mime: Option<&str>, byte_size: Option<u64>) -> Artifact {
+        Artifact {
+            resource_uri: uri.to_string(),
+            change_type: ChangeType::Add,
+            diff_ref: "changeset:bin0".to_string(),
+            tests_run: vec![],
+            disposition: ArtifactDisposition::Pending,
+            rationale: Some("Binary asset".to_string()),
+            dependencies: vec![],
+            explanation_tiers: None,
+            comments: None,
+            amendment: None,
+            kind: Some(crate::artifact_kind::ArtifactKind::Binary {
+                mime_type: mime.map(|s| s.to_string()),
+                byte_size,
+            }),
+        }
+    }
+
+    fn text_artifact(uri: &str, encoding: Option<&str>, line_count: Option<u64>) -> Artifact {
+        Artifact {
+            resource_uri: uri.to_string(),
+            change_type: ChangeType::Add,
+            diff_ref: "changeset:txt0".to_string(),
+            tests_run: vec![],
+            disposition: ArtifactDisposition::Pending,
+            rationale: Some("Generated text".to_string()),
+            dependencies: vec![],
+            explanation_tiers: None,
+            comments: None,
+            amendment: None,
+            kind: Some(crate::artifact_kind::ArtifactKind::Text {
+                encoding: encoding.map(|s| s.to_string()),
+                line_count,
+            }),
+        }
+    }
+
+    #[test]
+    fn binary_artifact_full_view_suppresses_diff() {
+        // Binary artifact in full detail should show size info, not call diff provider.
+        let adapter = TerminalAdapter::new();
+        let mut package = test_package();
+        package.changes.artifacts = vec![binary_artifact(
+            "fs://workspace/output/model.bin",
+            Some("application/octet-stream"),
+            Some(1_048_576),
+        )];
+
+        struct AlwaysPanic;
+        impl crate::output_adapters::DiffProvider for AlwaysPanic {
+            fn get_diff(&self, _: &str) -> Result<String, ChangeSetError> {
+                panic!("get_diff must not be called for binary artifacts");
+            }
+        }
+
+        let provider = AlwaysPanic;
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Full,
+            file_filters: vec![],
+            diff_provider: Some(&provider),
+            section_filter: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(
+            output.contains("Binary artifact"),
+            "should show 'Binary artifact' header; got: {}",
+            output
+        );
+        assert!(
+            output.contains("Binary file") || output.contains("binary file"),
+            "should indicate diff suppression; got: {}",
+            output
+        );
+        assert!(
+            output.contains("1.0 MB"),
+            "should show size; got: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn binary_artifact_full_view_shows_mime() {
+        let adapter = TerminalAdapter::new();
+        let mut package = test_package();
+        package.changes.artifacts = vec![binary_artifact(
+            "fs://workspace/output/archive.zip",
+            Some("application/zip"),
+            Some(512),
+        )];
+
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Full,
+            file_filters: vec![],
+            diff_provider: None,
+            section_filter: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(
+            output.contains("application/zip"),
+            "should show MIME type; got: {}",
+            output
+        );
+        assert!(
+            output.contains("512 B"),
+            "should show size in bytes; got: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn binary_artifact_set_summary_with_sizes() {
+        let artifacts = [
+            binary_artifact("fs://workspace/a.bin", None, Some(1_024)),
+            binary_artifact("fs://workspace/b.bin", None, Some(2_048)),
+            binary_artifact("fs://workspace/c.bin", None, Some(1_024)),
+        ];
+        let refs: Vec<&Artifact> = artifacts.iter().collect();
+        let summary = TerminalAdapter::render_binary_artifact_set_summary(&refs);
+        assert!(
+            summary.contains("3 binary files"),
+            "should say '3 binary files'; got: {}",
+            summary
+        );
+        assert!(
+            summary.contains("4.0 KB"),
+            "should show total size; got: {}",
+            summary
+        );
+    }
+
+    #[test]
+    fn binary_artifact_set_summary_unknown_size() {
+        // When byte_size is absent for any artifact, total is omitted.
+        let artifacts = [
+            binary_artifact("fs://workspace/a.bin", None, Some(1_024)),
+            binary_artifact("fs://workspace/b.bin", None, None),
+        ];
+        let refs: Vec<&Artifact> = artifacts.iter().collect();
+        let summary = TerminalAdapter::render_binary_artifact_set_summary(&refs);
+        assert!(
+            summary.contains("2 binary files"),
+            "should say '2 binary files'; got: {}",
+            summary
+        );
+        // No total should appear because b.bin has unknown size.
+        assert!(
+            !summary.contains("total"),
+            "should not show total when size unknown; got: {}",
+            summary
+        );
+    }
+
+    #[test]
+    fn binary_artifact_set_summary_single() {
+        let artifacts = [binary_artifact("fs://workspace/x.bin", None, Some(256))];
+        let refs: Vec<&Artifact> = artifacts.iter().collect();
+        let summary = TerminalAdapter::render_binary_artifact_set_summary(&refs);
+        assert!(
+            summary.contains("1 binary file"),
+            "singular form; got: {}",
+            summary
+        );
+        assert!(
+            !summary.contains("1 binary files"),
+            "no plural 's'; got: {}",
+            summary
+        );
+    }
+
+    #[test]
+    fn binary_artifact_set_summary_empty() {
+        let refs: Vec<&Artifact> = vec![];
+        let summary = TerminalAdapter::render_binary_artifact_set_summary(&refs);
+        assert_eq!(summary, "", "no binaries → empty summary");
+    }
+
+    // ── v0.15.0 Text artifact rendering tests ──
+
+    #[test]
+    fn text_artifact_full_view_renders_diff() {
+        // Text artifact should fall through to diff rendering.
+        let adapter = TerminalAdapter::new();
+        let mut package = test_package();
+        package.changes.artifacts = vec![text_artifact(
+            "fs://workspace/scripts/setup.sh",
+            Some("utf-8"),
+            Some(42),
+        )];
+
+        struct FixedDiff;
+        impl crate::output_adapters::DiffProvider for FixedDiff {
+            fn get_diff(&self, _: &str) -> Result<String, ChangeSetError> {
+                Ok("+#!/bin/bash\n+echo hello\n".to_string())
+            }
+        }
+
+        let provider = FixedDiff;
+        let ctx = RenderContext {
+            package: &package,
+            detail_level: DetailLevel::Full,
+            file_filters: vec![],
+            diff_provider: Some(&provider),
+            section_filter: None,
+        };
+        let output = adapter.render(&ctx).unwrap();
+        assert!(
+            output.contains("Text artifact"),
+            "should show 'Text artifact' header; got: {}",
+            output
+        );
+        assert!(
+            output.contains("utf-8"),
+            "should show encoding; got: {}",
+            output
+        );
+        assert!(
+            output.contains("42"),
+            "should show line count; got: {}",
+            output
+        );
+        // diff should be rendered (not suppressed)
+        assert!(
+            output.contains("echo hello"),
+            "should render diff content; got: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn text_artifact_set_summary_multiple() {
+        let artifacts = [
+            text_artifact("fs://workspace/a.sh", None, None),
+            text_artifact("fs://workspace/b.sh", None, None),
+        ];
+        let refs: Vec<&Artifact> = artifacts.iter().collect();
+        let summary = TerminalAdapter::render_text_artifact_set_summary(&refs);
+        assert_eq!(summary, "2 text files");
+    }
+
+    #[test]
+    fn text_artifact_set_summary_single() {
+        let artifacts = [text_artifact("fs://workspace/a.conf", None, None)];
+        let refs: Vec<&Artifact> = artifacts.iter().collect();
+        let summary = TerminalAdapter::render_text_artifact_set_summary(&refs);
+        assert_eq!(summary, "1 text file");
+    }
+
+    #[test]
+    fn text_artifact_set_summary_empty() {
+        let refs: Vec<&Artifact> = vec![];
+        let summary = TerminalAdapter::render_text_artifact_set_summary(&refs);
+        assert_eq!(summary, "");
+    }
+
+    // ── format_byte_size helper tests ──
+
+    #[test]
+    fn format_byte_size_bytes() {
+        assert_eq!(super::format_byte_size(0), "0 B");
+        assert_eq!(super::format_byte_size(512), "512 B");
+        assert_eq!(super::format_byte_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_byte_size_kb() {
+        assert_eq!(super::format_byte_size(1024), "1.0 KB");
+        assert_eq!(super::format_byte_size(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn format_byte_size_mb() {
+        assert_eq!(super::format_byte_size(1_048_576), "1.0 MB");
+        assert_eq!(super::format_byte_size(5 * 1_048_576), "5.0 MB");
+    }
+
+    #[test]
+    fn format_byte_size_gb() {
+        assert_eq!(super::format_byte_size(1_073_741_824), "1.0 GB");
     }
 }

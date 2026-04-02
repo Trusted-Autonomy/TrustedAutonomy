@@ -11,6 +11,7 @@ Focus on:
 - Observability: errors should be actionable, not bare "failed" messages
 - Conventions: does this follow the patterns already in the codebase?
 - Test coverage: are edge cases covered?
+- VCS hygiene: any new runtime directory created under .ta/ (e.g. workflow-runs/, sessions/) must appear in .gitignore. Flag if a new .ta/ subdirectory is introduced without a matching .gitignore entry.
 
 Do NOT flag:
 - Style preferences already handled by cargo fmt

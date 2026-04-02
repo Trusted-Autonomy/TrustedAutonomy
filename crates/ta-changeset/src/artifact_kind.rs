@@ -1,4 +1,4 @@
-// artifact_kind.rs — ArtifactKind enum for typed artifact metadata (v0.14.15).
+// artifact_kind.rs — ArtifactKind enum for typed artifact metadata (v0.14.15+).
 //
 // Describes the semantic kind of an artifact so the draft review pipeline can
 // render appropriate summaries. For example, binary image artifacts suppress
@@ -39,6 +39,29 @@ pub enum ArtifactKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         frame_index: Option<u32>,
     },
+    /// An opaque binary artifact (compiled output, archive, model weights, …).
+    ///
+    /// Text diff is suppressed — `ta draft view` shows a hex summary or
+    /// `(binary file, N bytes)` instead.
+    Binary {
+        /// MIME type string, e.g. `"application/octet-stream"`, `"application/zip"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        /// File size in bytes, if known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        byte_size: Option<u64>,
+    },
+    /// A raw text artifact (generated script, config file, data file, …).
+    ///
+    /// Full unified diff is rendered in `ta draft view`.
+    Text {
+        /// Character encoding, e.g. `"utf-8"`, `"latin-1"`. Defaults to UTF-8 if absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encoding: Option<String>,
+        /// Number of lines in the file, if known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line_count: Option<u64>,
+    },
 }
 
 impl ArtifactKind {
@@ -47,12 +70,30 @@ impl ArtifactKind {
         matches!(self, Self::Image { .. })
     }
 
+    /// Returns true if this is a binary kind (diff should be suppressed).
+    pub fn is_binary(&self) -> bool {
+        matches!(self, Self::Binary { .. })
+    }
+
+    /// Returns true if this is a text kind (full diff should be rendered).
+    pub fn is_text(&self) -> bool {
+        matches!(self, Self::Text { .. })
+    }
+
     /// Returns a short human-readable label for display (e.g. `"PNG image"`).
     pub fn display_label(&self) -> String {
         match self {
             Self::Image { format, .. } => match format.as_deref() {
                 Some(fmt) => format!("{} image", fmt),
                 None => "image".to_string(),
+            },
+            Self::Binary { mime_type, .. } => match mime_type.as_deref() {
+                Some(mime) => format!("binary ({})", mime),
+                None => "binary".to_string(),
+            },
+            Self::Text { encoding, .. } => match encoding.as_deref() {
+                Some(enc) => format!("text ({})", enc),
+                None => "text".to_string(),
             },
         }
     }
@@ -148,5 +189,137 @@ mod tests {
             frame_index: None,
         };
         assert_eq!(kind.display_label(), "image");
+    }
+
+    // ── Binary variant tests ──
+
+    #[test]
+    fn binary_roundtrip_full() {
+        let kind = ArtifactKind::Binary {
+            mime_type: Some("application/zip".to_string()),
+            byte_size: Some(1_048_576),
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: ArtifactKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, back);
+    }
+
+    #[test]
+    fn binary_roundtrip_minimal() {
+        let kind = ArtifactKind::Binary {
+            mime_type: None,
+            byte_size: None,
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: ArtifactKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, back);
+        assert_eq!(json, r#"{"type":"binary"}"#, "json: {}", json);
+    }
+
+    #[test]
+    fn binary_serialized_has_type_tag() {
+        let kind = ArtifactKind::Binary {
+            mime_type: Some("application/octet-stream".to_string()),
+            byte_size: Some(512),
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        assert!(json.contains("\"type\":\"binary\""), "json: {}", json);
+        assert!(json.contains("application/octet-stream"));
+        assert!(json.contains("512"));
+    }
+
+    #[test]
+    fn is_binary() {
+        let kind = ArtifactKind::Binary {
+            mime_type: None,
+            byte_size: None,
+        };
+        assert!(kind.is_binary());
+        assert!(!kind.is_image());
+        assert!(!kind.is_text());
+    }
+
+    #[test]
+    fn binary_display_label_with_mime() {
+        let kind = ArtifactKind::Binary {
+            mime_type: Some("application/zip".to_string()),
+            byte_size: None,
+        };
+        assert_eq!(kind.display_label(), "binary (application/zip)");
+    }
+
+    #[test]
+    fn binary_display_label_no_mime() {
+        let kind = ArtifactKind::Binary {
+            mime_type: None,
+            byte_size: None,
+        };
+        assert_eq!(kind.display_label(), "binary");
+    }
+
+    // ── Text variant tests ──
+
+    #[test]
+    fn text_roundtrip_full() {
+        let kind = ArtifactKind::Text {
+            encoding: Some("utf-8".to_string()),
+            line_count: Some(200),
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: ArtifactKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, back);
+    }
+
+    #[test]
+    fn text_roundtrip_minimal() {
+        let kind = ArtifactKind::Text {
+            encoding: None,
+            line_count: None,
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: ArtifactKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, back);
+        assert_eq!(json, r#"{"type":"text"}"#, "json: {}", json);
+    }
+
+    #[test]
+    fn text_serialized_has_type_tag() {
+        let kind = ArtifactKind::Text {
+            encoding: Some("latin-1".to_string()),
+            line_count: Some(42),
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        assert!(json.contains("\"type\":\"text\""), "json: {}", json);
+        assert!(json.contains("latin-1"));
+        assert!(json.contains("42"));
+    }
+
+    #[test]
+    fn is_text() {
+        let kind = ArtifactKind::Text {
+            encoding: None,
+            line_count: None,
+        };
+        assert!(kind.is_text());
+        assert!(!kind.is_image());
+        assert!(!kind.is_binary());
+    }
+
+    #[test]
+    fn text_display_label_with_encoding() {
+        let kind = ArtifactKind::Text {
+            encoding: Some("utf-8".to_string()),
+            line_count: None,
+        };
+        assert_eq!(kind.display_label(), "text (utf-8)");
+    }
+
+    #[test]
+    fn text_display_label_no_encoding() {
+        let kind = ArtifactKind::Text {
+            encoding: None,
+            line_count: None,
+        };
+        assert_eq!(kind.display_label(), "text");
     }
 }

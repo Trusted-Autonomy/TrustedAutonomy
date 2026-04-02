@@ -1,0 +1,67 @@
+extends = "ta-default"
+
+[rules.injection_cleanup]
+inject_fns = [
+    "inject_claude_md",
+    "inject_credentials",
+]
+restore_fns = [
+    "restore_claude_md",
+    "restore_credentials",
+]
+patterns = []
+severity = "high"
+
+[rules.error_paths]
+inject_fns = []
+restore_fns = []
+patterns = ["return Err("]
+severity = "medium"
+
+[rules.identifier-consistency]
+description = "All identifiers surfaced in command output must be accepted as input by the same command family. Draft IDs shown in `ta draft list` must resolve via `ta draft view/approve/apply`. Goal IDs shown in `ta goal list` must resolve via `ta goal status/recover/cancel`. Enforced by routing all ID lookups through a unified resolver that accepts full UUID, UUID prefix, shortref/seq (e.g. `6ebf85ab/1`), and display_id formats."
+inject_fns = []
+restore_fns = []
+patterns = []
+severity = "high"
+
+[rules.vcs-ignore-coverage]
+description = "Every runtime directory TA creates under .ta/ must be listed in .gitignore before it can appear in a committed branch. When adding a new runtime subdirectory (e.g. workflow-runs/, sessions/, interactions/), update .gitignore in the same PR. The reviewer must check that `git status --short` shows no untracked .ta/ paths. Adding to .gitignore is required even if the directory is otherwise harmless — untracked paths pollute `git status` for all contributors and can leak machine-specific state into reviews."
+inject_fns = []
+restore_fns = []
+patterns = []
+severity = "medium"
+
+[scan]
+include = ["src/"]
+exclude = [
+    "src/tests/",
+    "target/",
+]
+on_violation = "warn"
+
+[release]
+checklist_gate = true
+agent_review = false
+
+[[validate]]
+stage = "pre_draft_build"
+commands = ["cargo clippy --workspace --all-targets -- -D warnings"]
+on_failure = "block"
+
+[[validate]]
+# vcs-ignore-coverage: fail if any .ta/ subdirectory is untracked (not in .gitignore).
+# This catches new runtime directories added by TA features before they reach a PR.
+stage = "pre_draft_build"
+commands = [
+    "bash -c 'untracked=$(git status --short | grep \"^?? .ta/\" | grep \"/$\"); if [ -n \"$untracked\" ]; then echo \"ERROR: Untracked .ta/ subdirectories not in .gitignore — add them:\"; echo \"$untracked\"; exit 1; fi'",
+]
+on_failure = "block"
+
+[[validate]]
+stage = "pre_draft_apply"
+commands = [
+    "cargo test --workspace",
+    "cargo fmt --all -- --check",
+]
+on_failure = "warn"

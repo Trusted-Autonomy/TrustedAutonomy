@@ -8728,20 +8728,20 @@ cat requirements.md | ta plan new --stdin
 > **Focus**: Generic artifact types (binary, text, video) and content-production connectors (ComfyUI, Unity) for creator workflows; plus platform integrations (ProjFS, messaging adapters) and the post-install onboarding wizard that closes the first-run configuration gap before IDE integration.
 
 ### v0.15.0 — Generic Binary & Text Asset Support (`ta-changeset`)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Add `ArtifactKind::Binary` and `ArtifactKind::Text` to core TA so any connector can produce opaque binary or raw text artifacts that flow through the standard draft/review/apply pipeline. Provides a catch-all for asset types not specifically modeled (scripts, config files, arbitrary data files).
 
 **Depends on**: v0.14.15 (`ArtifactKind::Image`)
 
 #### Items
 
-1. [ ] **`ArtifactKind::Binary` in `ta-changeset`**: `ArtifactKind::Binary { mime_type: Option<String>, byte_size: Option<u64> }`. `is_binary()` and `display_label()` helpers. Binary diff suppressed in `ta draft view` — shows hex summary or `(binary file, N bytes)` instead.
+1. [x] **`ArtifactKind::Binary` in `ta-changeset`**: `ArtifactKind::Binary { mime_type: Option<String>, byte_size: Option<u64> }`. `is_binary()` and `display_label()` helpers. Binary diff suppressed in `ta draft view` — shows hex summary or `(binary file, N bytes)` instead.
 
-2. [ ] **`ArtifactKind::Text` in `ta-changeset`**: `ArtifactKind::Text { encoding: Option<String>, line_count: Option<u64> }`. Text artifacts render full diff in `ta draft view`. Useful for generated scripts, configs, and data files.
+2. [x] **`ArtifactKind::Text` in `ta-changeset`**: `ArtifactKind::Text { encoding: Option<String>, line_count: Option<u64> }`. Text artifacts render full diff in `ta draft view`. Useful for generated scripts, configs, and data files.
 
-3. [ ] **`ta draft view` rendering**: Binary artifacts suppress diff and show file size. Text artifacts render standard unified diff. Summary lines: "3 binary files (12.4 KB total)" / "2 text files".
+3. [x] **`ta draft view` rendering**: Binary artifacts suppress diff and show file size. Text artifacts render standard unified diff. Summary lines: "3 binary files (12.4 KB total)" / "2 text files".
 
-4. [ ] **Unit tests**: Round-trip serialize/deserialize for both variants. `is_binary()`, `display_label()`. Draft view renders binary artifact without calling diff provider. Text artifact renders diff.
+4. [x] **Unit tests**: Round-trip serialize/deserialize for both variants. `is_binary()`, `display_label()`. Draft view renders binary artifact without calling diff provider. Text artifact renders diff.
 
 #### Version: `0.15.0-alpha`
 
