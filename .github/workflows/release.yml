@@ -425,11 +425,10 @@ jobs:
               | sed "s/\${title_suffix}/${TITLE_SUFFIX}/g" \
               | sed "s/\${changes_since}/${CHANGES_SINCE}/g" \
               | sed "s/\${last_release_tag}/${LAST_RELEASE_TAG}/g")
-            BODY="${BODY}
-
----
-
-"
+            # Append separator — use $'...' to keep --- off its own line in YAML
+            # (a bare --- at the start of a YAML literal block line is parsed as
+            # a document separator, truncating the generated shell script).
+            BODY="${BODY}"$'\n\n---\n\n'
           fi
 
           # Append installation instructions
