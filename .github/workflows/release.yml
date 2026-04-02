@@ -187,6 +187,11 @@ jobs:
               -o "$releaseDir\USAGE.html"
           }
 
+          # Copy ta-studio.bat launcher for MSI bundling.
+          if (Test-Path "scripts\ta-studio.bat") {
+            Copy-Item "scripts\ta-studio.bat" "$releaseDir\ta-studio.bat"
+          }
+
           # Copy vcs-perforce plugin files for MSI bundling.
           New-Item -ItemType Directory -Force -Path "$releaseDir\plugins\vcs" | Out-Null
           if (Test-Path "plugins\vcs-perforce") {
