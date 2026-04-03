@@ -1093,6 +1093,164 @@ fn strip_ta_injection_from_staging(staging_path: &Path) -> anyhow::Result<bool> 
     }
 }
 
+/// Pre-apply working-tree cleanliness check.
+///
+/// Runs `git status --porcelain` in `target_dir` and handles known TA-managed
+/// artifacts so that a subsequent `git pull --rebase` (or any VCS operation)
+/// never fails due to leftover TA injection residue.
+///
+/// Handling rules:
+/// - `CLAUDE.md` modified: if the TA injection header is present, strip it
+///   (same logic as `strip_ta_injection_from_staging`). If the file is still
+///   dirty after stripping (or injection was already gone), discard the
+///   working-copy change via `git restore CLAUDE.md` — the committed version
+///   is authoritative for apply purposes.
+/// - Paths under `.ta/` (untracked): skipped silently — these are
+///   TA-internal and should be gitignored.
+/// - Any other modified tracked file: warn and continue (non-blocking).
+///
+/// This is best-effort: it logs and continues rather than returning an error.
+/// Only actual git command failures are surfaced as errors.
+fn check_and_clean_working_tree(target_dir: &std::path::Path) {
+    let run_git = |args: &[&str]| -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(target_dir)
+            .output()
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    std::str::from_utf8(&out.stdout).ok().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+    };
+
+    let status_output = match run_git(&["status", "--porcelain"]) {
+        Some(s) => s,
+        None => {
+            // Not a git repo or git not available — skip silently.
+            return;
+        }
+    };
+
+    if status_output.trim().is_empty() {
+        return; // Working tree already clean — nothing to do.
+    }
+
+    let mut other_modified: Vec<String> = Vec::new();
+
+    for line in status_output.lines() {
+        if line.len() < 3 {
+            continue;
+        }
+        // porcelain format: "XY path" where XY are status codes and there is
+        // one space before the path.
+        let xy = &line[..2];
+        let path = line[3..].trim();
+
+        // Skip untracked paths under `.ta/` — TA-internal, should be gitignored.
+        if xy.contains('?') && (path.starts_with(".ta/") || path == ".ta") {
+            continue;
+        }
+
+        if path == "CLAUDE.md" {
+            // Try stripping the TA injection in-place first.
+            let claude_md = target_dir.join("CLAUDE.md");
+            let mut stripped = false;
+            if claude_md.exists() {
+                if let Ok(content) = std::fs::read_to_string(&claude_md) {
+                    if content.starts_with("# Trusted Autonomy \u{2014} Mediated Goal") {
+                        let separator = "\n---\n";
+                        if let Some(sep_pos) = content.find(separator) {
+                            let after_sep = &content[sep_pos + separator.len()..];
+                            let after_blank = after_sep.strip_prefix('\n').unwrap_or(after_sep);
+                            let original = after_blank.strip_suffix('\n').unwrap_or(after_blank);
+                            if original.trim().is_empty() {
+                                let _ = std::fs::remove_file(&claude_md);
+                                eprintln!(
+                                    "[apply] Stripped TA injection from CLAUDE.md \
+                                     (no original content — file removed)"
+                                );
+                            } else {
+                                let _ = std::fs::write(&claude_md, original);
+                                eprintln!(
+                                    "[apply] Stripped TA injection from CLAUDE.md \
+                                     (leftover from previous run)"
+                                );
+                            }
+                            stripped = true;
+                        }
+                    }
+                }
+            }
+
+            // Whether or not we stripped, discard any remaining working-copy
+            // changes to CLAUDE.md so VCS operations are unblocked.
+            if !stripped || claude_md.exists() {
+                // `git restore` discards unstaged changes.
+                let _ = std::process::Command::new("git")
+                    .args(["restore", "CLAUDE.md"])
+                    .current_dir(target_dir)
+                    .output();
+                if !stripped {
+                    eprintln!(
+                        "[apply] Discarded working-tree changes to CLAUDE.md \
+                         (committed version is authoritative)"
+                    );
+                }
+            }
+        } else if xy.contains('?') && (path.starts_with(".ta/") || path == ".ta") {
+            // Already handled above — unreachable but kept for clarity.
+        } else if xy.contains('?') {
+            // Other untracked files — warn but do not touch.
+            eprintln!(
+                "[apply] Untracked file in working tree: {} \
+                 (not touching — commit or gitignore it if needed)",
+                path
+            );
+        } else {
+            // Modified tracked file that isn't CLAUDE.md — warn only.
+            other_modified.push(path.to_string());
+        }
+    }
+
+    for f in &other_modified {
+        eprintln!(
+            "[apply] Warning: working tree has uncommitted changes to '{}'. \
+             Consider committing or stashing before continuing.",
+            f
+        );
+    }
+
+    // Final status summary.
+    let remaining = match run_git(&["status", "--porcelain"]) {
+        Some(s) => s
+            .lines()
+            .filter(|l| {
+                let l = l.trim();
+                if l.len() < 3 {
+                    return false;
+                }
+                let path = l[3..].trim();
+                // Don't count untracked .ta/ paths in summary.
+                !(l[..2].contains('?') && (path.starts_with(".ta/") || path == ".ta"))
+            })
+            .count(),
+        None => 0,
+    };
+
+    if remaining == 0 {
+        eprintln!("[apply] Working tree clean — proceeding.");
+    } else {
+        eprintln!(
+            "[apply] {} file(s) modified (see above) — proceeding with apply.",
+            remaining
+        );
+    }
+}
+
 pub(crate) fn build_package(
     config: &GatewayConfig,
     goal_id: &str,
@@ -3739,6 +3897,10 @@ fn apply_package(
             .clone()
             .unwrap_or_else(|| config.workspace_root.clone()),
     };
+
+    // Pre-apply: clean any TA-managed working-tree artifacts that could
+    // block git operations (injection-polluted CLAUDE.md, etc.).
+    check_and_clean_working_tree(&target_dir);
 
     // ── VCS pre-flight: branch creation BEFORE any file writes ───────────────
     // Files must never land on a protected branch (main/master/etc.). We create
