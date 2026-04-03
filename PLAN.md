@@ -9963,6 +9963,72 @@ thinking-mode configuration, and troubleshooting.
 
 ---
 
+### v0.16.3.1 — Gemma 4 Agent Profiles (ta-agent-ollama plugin)
+<!-- status: pending -->
+**Goal**: Add first-class Gemma 4 model profiles to the `ta-agent-ollama` standalone plugin
+so users can run Gemma 4 locally with zero configuration, at the right size for their hardware.
+Follows the same pattern as the Qwen3.5 profiles added in v0.14.9.
+
+**Depends on**: v0.16.3 (ta-agent-ollama extracted to standalone plugin)
+
+**Why Gemma 4**: Google's Gemma 4 family (released April 2025) has strong coding and reasoning
+performance in the sub-14B tier, making it the best choice for M1/M2 Macs and mid-range
+Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 8GB VRAM
+or 16GB unified memory. The 27B variant matches or exceeds Qwen3.5-27B on code tasks on
+high-VRAM machines.
+
+#### Hardware sizing
+
+| Profile name | Model | Min VRAM / RAM | Target hardware |
+|---|---|---|---|
+| `gemma4-4b` | `gemma4:4b` | 8 GB VRAM / 16 GB unified | M1 Mac (base), RTX 3060, most mid-range cards |
+| `gemma4-12b` | `gemma4:12b` | 16 GB VRAM / 24 GB unified | M1 Pro/Max, RTX 4080, RTX 5080 |
+| `gemma4-27b` | `gemma4:27b` | 24 GB+ VRAM / 48 GB unified | RTX 4090, RTX 5090, A6000 (48 GB) |
+
+#### Items
+
+1. [ ] **`agents/gemma4-4b.toml`** in `ta-agent-ollama` plugin repo:
+   ```toml
+   [agent]
+   name        = "gemma4-4b"
+   description = "Gemma 4 4B via Ollama — fast local agent for 8 GB VRAM / M1 Macs"
+   framework   = "ta-agent-ollama"
+
+   [framework.options]
+   model       = "gemma4:4b"
+   temperature = 0.2
+   max_turns   = 40
+
+   [hardware]
+   min_vram_gb     = 8
+   min_unified_gb  = 16
+   ```
+
+2. [ ] **`agents/gemma4-12b.toml`**: Same pattern with `gemma4:12b`, `min_vram_gb = 16`, `min_unified_gb = 24`. Good balance of quality and speed for M1 Pro/Max and RTX 4080-class cards.
+
+3. [ ] **`agents/gemma4-27b.toml`**: `gemma4:27b`, `min_vram_gb = 24`. Recommended for RTX 5090 / A6000 / H100 where quality matters more than speed.
+
+4. [ ] **`ta agent install gemma4`** shorthand: When user runs `ta agent install gemma4`, `ta doctor` detects available VRAM/unified memory and auto-selects the largest profile that fits. Prints:
+   ```
+   Detected: Apple M1 — 16 GB unified memory
+   Installing: gemma4-4b (best fit for your hardware)
+   Pulling gemma4:4b via Ollama...
+   ```
+
+5. [ ] **`ta doctor` Gemma 4 check**: If `gemma4:*` is pulled in Ollama but no matching profile is installed, emit:
+   ```
+   [warn] Gemma 4 model detected in Ollama but no ta-agent-ollama profile installed.
+          Run: ta agent install gemma4
+   ```
+
+6. [ ] **Plugin README — Gemma 4 section**: Add hardware sizing table above to the plugin README's "Model Catalog" section. Include a note that Gemma 4 uses SentencePiece tokenization (not tiktoken) — impacts thinking-mode token budget estimates.
+
+7. [ ] **Tests**: Profile TOML round-trips. `ta doctor` hardware detection selects correct tier. `ta agent install gemma4` on a simulated 8 GB system installs `gemma4-4b` not `gemma4-27b`.
+
+#### Version: `0.16.3.1-alpha`
+
+---
+
 ## v0.17 — Release Management
 
 > **Focus**: A unified, extensible `ta release` subsystem that works for any release type — binary distributions, content deliveries, service deployments — via a pluggable `ReleaseAdapter` abstraction. Replaces the current ad-hoc dispatch/channel/VCS approach with a single coherent model and a simplified command surface.
@@ -10126,6 +10192,45 @@ Code releases use semver. Content releases don't. Decide:
 - Rebuild TUI from scratch with a different library
 
 If the decision is to keep TUI, the original v0.13.6 items (survey Rust TUI apps, test `?1000h`, evaluate hybrid approach, mouse mode toggle) should be re-promoted to a numbered phase.
+
+---
+
+## TA → SA Development Pivot
+
+> **When TA development pauses and SA (Secure Autonomy / SecureTA) development begins.**
+
+### Pivot trigger: completion of v0.17.2
+
+TA core development pauses when **v0.17.2** is shipped and stable. At that point:
+
+- The full TA feature surface is complete (staging, drafts, governance, IDE plugins, release management, local models, content pipeline).
+- The extension-point traits that SA depends on are stable and versioned: `RuntimeAdapter` (v0.13.3), `AttestationBackend` (v0.14.1), `DaemonExtension` (v0.14.4), `MessagingAdapter` (v0.15.9), `ReleaseAdapter` (v0.17.1).
+- TA enters **maintenance mode**: bug fixes, security patches, and minor improvements only. No new feature phases.
+
+### Why v0.17.2 specifically
+
+| Milestone | Unlocks for SA |
+|---|---|
+| v0.14.4 — Daemon extension surface | SA can register OCI/VM runtimes without forking TA |
+| v0.15.x — Content pipeline connectors | SA can govern AI-generated content pipelines (e.g., ARK/meerkat) |
+| v0.16.x — IDE plugins | SA inherits VS Code / JetBrains UI without rebuilding it |
+| v0.17.x — Release management | SA can govern its own release pipeline through TA |
+
+SA cannot productively start until TA's extension surface is stable — building SA on a moving trait API creates constant rework. v0.17.2 is the point where all planned traits exist and have shipped.
+
+### What SA development looks like
+
+SA is a **separate repository** that depends on TA as a library/daemon. It does not fork TA. The first SA phases (rough order):
+
+1. **SA-v0.1** — OCI/gVisor runtime plugin (`sa-runtime-oci`): containerized agent execution, wraps `RuntimeAdapter` from v0.13.3. Validates isolation model.
+2. **SA-v0.2** — Hardware-bound attestation plugins: TPM 2.0 (`sa-attest-tpm`) and Apple Secure Enclave (`sa-attest-enclave`). Requires TA v0.14.1 `AttestationBackend`.
+3. **SA-v0.3** — Kernel-level network policy: agent network egress rules enforced at the container level, not just by constitution. Requires SA-v0.1 (OCI runtime).
+4. **SA-v0.4** — Multi-party governance: RBAC, org-level policy, audit export for compliance (ISO/IEC 42001, EU AI Act). Requires TA v0.14.4 daemon extension surface.
+5. **SA-v0.5** — Cloud deployment: multi-tenant daemon, SSO, secrets management. This is the commercial tier that external teams pay for.
+
+### How to track the decision
+
+Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, SA design work (ADRs, architecture documents, plugin interface sketches) can happen in parallel — just no implementation that depends on unstable TA traits.
 
 ---
 
