@@ -48,6 +48,7 @@ ta-memory = { path = "../../crates/ta-memory" }
 ta-changeset = { path = "../../crates/ta-changeset" }
 ta-connector-fs = { path = "../../crates/ta-connectors/fs" }
 ta-connector-unreal = { path = "../../crates/ta-connectors/unreal" }
+ta-connector-comfyui = { path = "../../crates/ta-connectors/comfyui" }
 ta-goal = { path = "../../crates/ta-goal" }
 ta-mcp-gateway = { path = "../../crates/ta-mcp-gateway" }
 ta-policy = { path = "../../crates/ta-policy" }
