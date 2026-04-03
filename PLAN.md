@@ -8860,21 +8860,44 @@ ta-connectors/comfyui/
 
 7. [ ] **USAGE.md "Unity Integration" section**: Installation, config, `ta connector install unity`, first `unity_scene_query` call.
 
-8. [ ] **Sanitize URI inputs before policy engine** *(reviewer-flagged SECURITY: minor)*:
-   - In `tools/unity.rs`: validate `params.target` (build target) and `params.camera_path` against an allowlist or reject values containing path separators (`/`, `\`, `..`) before interpolating into `unity://build/{target}` and `unity://render/capture/{camera_path}`.
-   - Return a structured error (`invalid_parameter`) if validation fails rather than passing the raw value to the policy engine.
-   - Currently low-risk (stub responses never reach the backend), but must be in place before backend wiring.
-   - 2 new tests: crafted `target='StandaloneOSX/../render/capture/foo'` is rejected; valid `target='StandaloneOSX'` is accepted.
-
-9. [ ] **Suppress dead-code warnings on `OfficialBackend`** *(reviewer-flagged DEAD CODE)*:
-   - Add `#[allow(dead_code)]` to the `OfficialBackend` struct and its methods in `official.rs`, with a comment:
-     ```rust
-     // TODO(backend-wiring): Remove allow(dead_code) when gateway tools delegate
-     // to OfficialBackend. Tracked: connector live-wiring phase (post-v0.15.3).
-     ```
-   - Ensures `cargo clippy --workspace --all-targets -- -D warnings` passes in the scaffold phase without suppressing real warnings elsewhere.
-
 #### Version: `0.15.3-alpha`
+
+---
+
+### v0.15.3.1 — Unity Connector Fix-Pass (reviewer findings)
+<!-- status: pending -->
+**Goal**: Address the three code-level findings flagged during v0.15.3 draft review. The
+always-stub pattern is confirmed intentional (see v0.15.3 architect note); the items below
+are the actionable fixes that must land before the connector is considered production-ready.
+
+**Depends on**: v0.15.3
+
+1. [ ] **Sanitize URI inputs before policy engine** *(SECURITY — minor)*:
+   - In `ta-mcp-gateway/src/tools/unity.rs`: validate `params.target` and `params.camera_path`
+     against an allowlist or reject values containing path separators (`/`, `\`, `..`) before
+     interpolating into `unity://build/{target}` and `unity://render/capture/{camera_path}`.
+   - Return a structured `invalid_parameter` error if validation fails.
+   - Low-risk while stubs are active, but must be in place before backend wiring.
+   - 2 new tests: `target='StandaloneOSX/../render/capture/foo'` rejected; `target='StandaloneOSX'` accepted.
+
+2. [ ] **Suppress dead-code clippy warnings on `OfficialBackend`** *(DEAD CODE)*:
+   - Add `#[allow(dead_code)]` to the `OfficialBackend` struct and its public methods in `official.rs`:
+     ```rust
+     // TODO(backend-wiring): remove when gateway tools delegate to OfficialBackend.
+     #[allow(dead_code)]
+     ```
+   - Ensures `cargo clippy --workspace --all-targets -- -D warnings` passes without suppressing
+     real warnings elsewhere in the crate.
+
+3. [ ] **Gateway handler tests** *(TEST GAP — item 6 in v0.15.3 promised tool-routing tests but delivered zero)*:
+   - Add 5 tests in `ta-mcp-gateway` (one per `unity_*` tool handler):
+     `unity_build_trigger`, `unity_scene_query`, `unity_test_run`,
+     `unity_addressables_build`, `unity_render_capture`.
+   - Each test verifies: (a) `connector_not_running` stub response structure, (b) policy
+     capability URI is well-formed (no path traversal accepted).
+   - Brings Unity in line with ComfyUI gateway coverage.
+
+#### Version: `0.15.3.1-alpha`
 
 ---
 
