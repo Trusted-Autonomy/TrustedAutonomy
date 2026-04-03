@@ -13,7 +13,6 @@ use crate::{
 pub struct FlopperamBackend {
     install_path: String,
     socket: String,
-    ue_project_path: String,
 }
 
 impl FlopperamBackend {
@@ -21,7 +20,6 @@ impl FlopperamBackend {
         Self {
             install_path: config.backends.flopperam.install_path.clone(),
             socket: config.socket.clone(),
-            ue_project_path: config.ue_project_path.clone(),
         }
     }
 }
@@ -33,23 +31,10 @@ impl UnrealBackend for FlopperamBackend {
 
     fn spawn(&self) -> Result<BackendHandle, UnrealConnectorError> {
         // The flopperam backend is a UE5 C++ plugin — it runs inside the Unreal Editor.
-        // The MCP server is started when the Editor loads the plugin.
-        // This spawn() call checks that the plugin is installed (install_path exists)
-        // and that the UE project path is configured.
-        if self.install_path.is_empty() {
-            return Err(UnrealConnectorError::NotInstalled("flopperam".to_string()));
-        }
-        let install = std::path::Path::new(&self.install_path);
-        if !install.exists() {
-            return Err(UnrealConnectorError::NotInstalled("flopperam".to_string()));
-        }
-        if self.ue_project_path.is_empty() {
-            return Err(UnrealConnectorError::Config(
-                "ue_project_path must be set for flopperam backend".to_string(),
-            ));
-        }
-        // The C++ plugin starts automatically when the Editor loads.
-        // We return a synthetic "pid 0" handle — the Editor owns the process.
+        // The MCP server starts automatically when the Editor loads the plugin.
+        // TA does not spawn a process; it returns a synthetic pid=0 handle.
+        // The plugin source at install_path is only needed to copy the plugin into a UE5
+        // project — it is not required for TA to connect to a running Editor session.
         let addr = SocketAddr::from_str(&self.socket)
             .map_err(|e| UnrealConnectorError::Config(e.to_string()))?;
         Ok(BackendHandle {

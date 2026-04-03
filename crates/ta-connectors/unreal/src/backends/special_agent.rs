@@ -30,18 +30,9 @@ impl UnrealBackend for SpecialAgentBackend {
     }
 
     fn spawn(&self) -> Result<BackendHandle, UnrealConnectorError> {
-        if self.install_path.is_empty() {
-            return Err(UnrealConnectorError::NotInstalled(
-                "special-agent".to_string(),
-            ));
-        }
-        let install = std::path::Path::new(&self.install_path);
-        if !install.exists() {
-            return Err(UnrealConnectorError::NotInstalled(
-                "special-agent".to_string(),
-            ));
-        }
-        // SpecialAgentPlugin is a UE5 plugin — starts inside the Editor.
+        // SpecialAgentPlugin is a UE5 C++ plugin — it starts inside the Editor.
+        // TA does not spawn a process; install_path is the plugin source for reference only,
+        // not a runtime requirement.
         let addr = SocketAddr::from_str(&self.socket)
             .map_err(|e| UnrealConnectorError::Config(e.to_string()))?;
         Ok(BackendHandle {
