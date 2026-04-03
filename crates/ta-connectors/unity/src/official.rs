@@ -26,11 +26,15 @@ use crate::{
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
+// TODO(backend-wiring): remove when gateway tools delegate to OfficialBackend.
+#[allow(dead_code)]
 pub struct OfficialBackend {
     socket: String,
 }
 
 impl OfficialBackend {
+    // TODO(backend-wiring): remove when gateway tools delegate to OfficialBackend.
+    #[allow(dead_code)]
     pub fn new(config: &UnityConnectorConfig) -> Self {
         Self {
             socket: config.socket.clone(),
