@@ -8827,13 +8827,13 @@ ta-connectors/comfyui/
 
 #### Items
 
-1. [ ] **Create `crates/ta-connectors/unity/` workspace member**
+1. [x] **Create `crates/ta-connectors/unity/` workspace member**
    - `UnityBackend` trait (same interface as `UnrealBackend`)
    - `official` backend — Unity `com.unity.mcp-server` UPM package (primary; maintained by Unity Technologies across LTS versions)
    - `community` backend stub — fallback for third-party servers (CoderGamester/unity-mcp, etc.)
    - Config: `[connectors.unity]` in `daemon.toml`
 
-2. [ ] **Config schema** (`[connectors.unity]`):
+2. [x] **Config schema** (`[connectors.unity]`):
    ```toml
    [connectors.unity]
    enabled = true
@@ -8842,23 +8842,27 @@ ta-connectors/comfyui/
    socket = "localhost:30200"
    ```
 
-3. [ ] **`ta connector install unity`**: Generates UPM `manifest.json` entry and prints paste-into-Unity-Package-Manager instructions. Writes config to `.ta/config.toml`.
+3. [x] **`ta connector install unity`**: Generates UPM `manifest.json` entry and prints paste-into-Unity-Package-Manager instructions. Writes config to `.ta/config.toml`.
 
-4. [ ] **Register Unity tools in `ta-mcp-gateway`**:
+4. [x] **Register Unity tools in `ta-mcp-gateway`**:
    - `unity_build_trigger(target, config)` — trigger a Player or AssetBundle build
    - `unity_scene_query(scene_path)` — return GameObject hierarchy and component summary
    - `unity_test_run(filter)` — run EditMode or PlayMode tests, return pass/fail counts
    - `unity_addressables_build()` — trigger Addressables content build
    - `unity_render_capture(camera_path, output_path)` — capture a screenshot from a scene camera
 
-5. [ ] **Policy capability**: `unity://build/**` gates build triggers. `unity://test/**` gates test runs. Governed via `policy.yaml`.
+5. [x] **Policy capability**: `unity://build/**` gates build triggers. `unity://test/**` gates test runs. Governed via `policy.yaml`.
 
-6. [ ] **Unit tests** (17 tests in `ta-connector-unity` + 5 gateway handler tests):
+6. [x] **Unit tests** (17 tests in `ta-connector-unity` + 5 gateway handler tests):
    - `ta-connector-unity`: mock backend process, config parsing, `ta connector install unity` output, backend trait round-trip
    - `ta-mcp-gateway`: one test per tool handler (`unity_build_trigger`, `unity_scene_query`, `unity_test_run`, `unity_addressables_build`, `unity_render_capture`) — each verifies the `connector_not_running` stub response structure and that the policy capability URI (`unity://build/StandaloneOSX`, `unity://render/capture/Main Camera`, etc.) is well-formed
    - Total gateway tool count updated (was N tools; add 5 more)
 
-7. [ ] **USAGE.md "Unity Integration" section**: Installation, config, `ta connector install unity`, first `unity_scene_query` call.
+7. [x] **USAGE.md "Unity Integration" section**: Installation, config, `ta connector install unity`, first `unity_scene_query` call.
+
+#### Human Review
+
+- [ ] Smoke-test `ta connector install unity` output against a real Unity project — verify the UPM manifest entry is correct for LTS 2022 and 2023.
 
 #### Version: `0.15.3-alpha`
 
@@ -9552,6 +9556,89 @@ depends_on = ["run_phase_1", "run_phase_2", "run_phase_3"]
 9. [ ] **USAGE.md**: "Parallel Workflows & Milestone Drafts" section — `parallel_group`, `join`, `aggregate_draft`, `plan-build-loop-milestone` usage, reviewing a milestone draft.
 
 #### Version: `0.15.14-alpha`
+
+---
+
+### v0.15.14.1 — Human Review Items: Plan Schema & Tracking
+<!-- status: pending -->
+**Goal**: Distinguish agent-completable implementation items from steps that require a human to verify, test, or sign off. Today both types live in the same flat checklist, so phases get marked `done` while human verification steps remain unchecked indefinitely — no reminder, no tracking, no deferral. This phase adds a `#### Human Review` subsection to the plan schema, a lightweight store for tracking open review items, a `ta plan review` command, and surfacing in `ta status` and `build_phases.sh`.
+
+**Why this phase exists**: Repeated incidents where `ta draft apply` marks a phase done but leaves human-only steps (e.g. "test connector in Editor", "sign off on UX wording") silently unchecked. The human has no reminder and the plan looks complete when it isn't. The root cause is conflating "agent verified" with "human verified" in a single flat list.
+
+**Depends on**: v0.15.14 (for ordering; no hard code dependency)
+
+#### Plan schema change
+
+Phases may include a `#### Human Review` subsection (4th-level heading). Items under it are human-only — an agent must never check them off:
+
+```markdown
+### v0.15.X — Some Phase <!-- status: done -->
+
+#### Items
+- [x] Agent writes code
+- [x] Tests pass in CI
+
+#### Human Review
+- [ ] Smoke-test the connector against a real project
+- [ ] Confirm UX wording with stakeholder
+```
+
+- The `#### Human Review` heading is reserved. Parser detects it by exact text match.
+- Items under `#### Human Review` are extracted by `ta draft apply` when a phase is marked done.
+- Implementation items and human review items are displayed separately by `ta plan status`.
+
+#### Storage: `.ta/human-review.jsonl`
+
+One JSON record per item, appended by `ta draft apply`:
+
+```json
+{"phase": "v0.15.3", "idx": 0, "item": "Smoke-test connector in Editor", "status": "pending", "created_at": "2026-04-03T00:00:00Z", "deferred_to": null}
+```
+
+`status`: `"pending"` | `"complete"` | `"deferred"`
+
+#### Items
+
+1. [ ] **Plan parser extension** (`apps/ta-cli/src/commands/plan.rs`): `parse_plan()` detects `#### Human Review` subsection within each phase. Returns `phase.human_review_items: Vec<PlanItem>` alongside `phase.items`. `PlanItem` gains an `is_human_review: bool` field. `format_plan_checklist()` renders human review items in a separate indented block with a `[Human Review]` label.
+
+2. [ ] **`HumanReviewStore`** (`crates/ta-goal/src/human_review.rs`): JSONL-backed store at `.ta/human-review.jsonl`. Methods: `append(phase, idx, item_text)`, `list() -> Vec<HumanReviewRecord>`, `complete(phase, idx)`, `defer(phase, idx, to_phase)`, `pending() -> Vec<HumanReviewRecord>`. Follows the same append-only pattern as `GoalAuditStore`.
+
+3. [ ] **`ta draft apply` integration** (`apps/ta-cli/src/commands/draft.rs`): After marking a phase done, call `plan.human_review_items_for_phase(phase_id)`. For each unchecked item, call `store.append(...)`. Print a summary block:
+   ```
+   Phase v0.15.3 marked done.
+
+   Human review items require your attention (2):
+     [1] Smoke-test connector in Editor
+     [2] Confirm USAGE.md wording
+
+   Run 'ta plan review complete v0.15.3 <N>' when done, or
+       'ta plan review defer v0.15.3 <N> --to <phase>' to reschedule.
+   ```
+   If no human review items, print nothing extra.
+
+4. [ ] **`ta plan review` command** (`apps/ta-cli/src/commands/plan.rs`): New subcommand group:
+   - `ta plan review` — list all pending human review items across all phases, grouped by phase, with index
+   - `ta plan review --phase v0.15.3` — filter to one phase
+   - `ta plan review complete <phase> <N>` — mark item N done (updates `.ta/human-review.jsonl`)
+   - `ta plan review defer <phase> <N> --to <target-phase>` — set status to `deferred`, record `deferred_to`
+
+5. [ ] **`ta status` surfacing**: If `HumanReviewStore::pending()` returns any items, add a line to `ta status` output:
+   ```
+   Human review: 3 items pending  (run 'ta plan review' to see them)
+   ```
+   Shown above the plan summary, below active goals.
+
+6. [ ] **`build_phases.sh` integration** (`utils/build_phases.sh` in ARK project templates and meerkat-poc): After each `ta workflow run build` succeeds, run `ta plan review --phase "$PHASE_ID"` and print any pending items before moving to the next phase. If the command is not available (older TA), skip silently.
+
+7. [ ] **`ta plan status` display**: `ta plan status` shows each done phase with a count of pending human review items: `v0.15.3 — done (1 human review pending)`. Clicking through (`--phase v0.15.3`) shows the human review section items.
+
+8. [ ] **Tests**: `parse_plan()` extracts human review items from a phase with `#### Human Review` subsection. `HumanReviewStore` append/list/complete/defer roundtrip. `ta draft apply` calls `append()` for each unchecked human review item in the applied phase. `ta plan review` output groups by phase. `ta status` shows pending count when items exist. Store gracefully handles missing `.ta/human-review.jsonl` (returns empty list).
+
+9. [ ] **USAGE.md "Human Review Items"** section: What the `#### Human Review` subsection is for, how to add one to a phase spec, what happens when `ta draft apply` runs (items extracted, printed, stored), how to use `ta plan review` to track and close them, how to defer to a later phase.
+
+> **Note**: The format upgrade for existing projects (backfilling `#### Human Review` sections in old done phases) is handled by the project upgrade step in v0.15.18 (`ta upgrade`). Leave it there.
+
+#### Version: `0.15.14.1-alpha`
 
 ---
 
