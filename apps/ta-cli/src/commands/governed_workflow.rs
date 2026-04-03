@@ -1231,10 +1231,67 @@ fn stage_apply_draft(
         );
     }
 
-    // Extract PR URL from output if present.
+    // Extract PR URL and branch from output.
+    // `ta draft apply` prints indented lines like:
+    //   "  Branch:  feature/abc-xyz"
+    //   "  PR:      https://github.com/..."
+    // so we trim leading whitespace before matching.
+    let mut branch_from_output: Option<String> = None;
     for line in stdout.lines() {
-        if line.starts_with("PR: ") || line.starts_with("PR:") {
-            run.pr_url = Some(line.trim_start_matches("PR:").trim().to_string());
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("PR:") {
+            let candidate = rest.trim().to_string();
+            // Ignore the "not created" fallback message; only accept URLs.
+            if candidate.starts_with("http") {
+                run.pr_url = Some(candidate);
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("Branch:") {
+            branch_from_output = Some(rest.trim().to_string());
+        }
+    }
+
+    // Fallback: if no URL was found in the output but we have the branch name,
+    // ask the VCS adapter (gh pr list) to locate the PR.
+    if run.pr_url.is_none() {
+        if let Some(ref branch) = branch_from_output {
+            println!(
+                "  [pr_url] Not found in output — querying gh pr list for branch '{}'...",
+                branch
+            );
+            let gh_out = std::process::Command::new("gh")
+                .args([
+                    "pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url",
+                ])
+                .current_dir(opts.workspace_root)
+                .output();
+            match gh_out {
+                Ok(o) if o.status.success() => {
+                    let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if url.starts_with("http") {
+                        println!("  [pr_url] Found via gh: {}", url);
+                        run.pr_url = Some(url);
+                    } else {
+                        println!(
+                            "  [pr_url] gh returned no matching PR for branch '{}'",
+                            branch
+                        );
+                    }
+                }
+                Ok(o) => {
+                    println!(
+                        "  [pr_url] gh pr list returned non-zero ({}): {}",
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                }
+                Err(e) => {
+                    println!("  [pr_url] Could not invoke gh: {}", e);
+                }
+            }
+        } else {
+            println!(
+                "  [pr_url] No PR URL and no branch name in output — cannot auto-discover PR."
+            );
         }
     }
 
