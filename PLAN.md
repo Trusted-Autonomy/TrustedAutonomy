@@ -8766,7 +8766,7 @@ cat requirements.md | ta plan new --stdin
 ---
 
 ### v0.15.2 — ComfyUI Inference Connector (`ta-connectors/comfyui`)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Wrap ComfyUI's REST API as a TA connector so agents can submit Wan2.1 video-to-video inference jobs, poll status, and land output video frames in TA staging — flowing through the draft/review/apply pipeline with `ArtifactKind::Video` and `ArtifactKind::Image` artifacts.
 
 **Depends on**: v0.14.14 (connector infrastructure), v0.14.15 (`ArtifactKind::Image`), v0.15.1 (`ArtifactKind::Video`)
@@ -8787,9 +8787,9 @@ ta-connectors/comfyui/
 
 #### Items
 
-1. [ ] **Create `crates/ta-connectors/comfyui/` workspace member**: `ComfyUiBackend` trait — `submit_workflow(workflow_json, inputs) → job_id`, `poll_job(job_id) → { state, progress, output_files }`, `cancel_job(job_id)`. `RestBackend` hits `POST /prompt`, `GET /history/{id}`. `StubBackend` for tests.
+1. [x] **Create `crates/ta-connectors/comfyui/` workspace member**: `ComfyUiBackend` trait — `submit_workflow(workflow_json, inputs) → job_id`, `poll_job(job_id) → { state, progress, output_files }`, `cancel_job(job_id)`. `RestBackend` hits `POST /prompt`, `GET /history/{id}`. `StubBackend` for tests.
 
-2. [ ] **Config schema** (`[connectors.comfyui]`):
+2. [x] **Config schema** (`[connectors.comfyui]`):
    ```toml
    [connectors.comfyui]
    enabled = true
@@ -8797,21 +8797,21 @@ ta-connectors/comfyui/
    output_dir = ""   # ComfyUI output directory to watch
    ```
 
-3. [ ] **`ta connector install comfyui`**: Validates ComfyUI URL is reachable, writes config, prints next steps (install Wan2.1 model, set output dir).
+3. [x] **`ta connector install comfyui`**: Validates ComfyUI URL is reachable, writes config, prints next steps (install Wan2.1 model, set output dir).
 
-4. [ ] **Register ComfyUI tools in `ta-mcp-gateway`**:
+4. [x] **Register ComfyUI tools in `ta-mcp-gateway`**:
    - `comfyui_workflow_submit(workflow_json, inputs)` → `{ job_id }`
    - `comfyui_job_status(job_id)` → `{ state, progress, output_files }`
    - `comfyui_job_cancel(job_id)`
    - `comfyui_model_list()` → `{ models: [{ name, type }] }`
 
-5. [ ] **Output watcher**: Scans ComfyUI output directory for new files after job completion. Copies video/image files to `.ta/staging/<goal-id>/comfyui_output/`. Tags with `ArtifactKind::Video` (`.mp4`/`.mov`/`.webm`) or `ArtifactKind::Image` (`.png`/`.jpg`/`.exr`).
+5. [x] **Output watcher**: Scans ComfyUI output directory for new files after job completion. Copies video/image files to `.ta/staging/<goal-id>/comfyui_output/`. Tags with `ArtifactKind::Video` (`.mp4`/`.mov`/`.webm`) or `ArtifactKind::Image` (`.png`/`.jpg`/`.exr`).
 
-6. [ ] **Policy capabilities**: `comfyui://workflow/**` gates workflow submission. `comfyui://model/**` gates model listing.
+6. [x] **Policy capabilities**: `comfyui://workflow/**` gates workflow submission. `comfyui://model/**` gates model listing.
 
-7. [ ] **Unit tests**: Tool routing. Config parsing. Stub backend round-trip. Output watcher copies files and assigns correct `ArtifactKind`. `ta connector install comfyui` output.
+7. [x] **Unit tests**: Tool routing. Config parsing. Stub backend round-trip. Output watcher copies files and assigns correct `ArtifactKind`. `ta connector install comfyui` output. (20 tests in `ta-connector-comfyui`, 4 new tools in gateway test count)
 
-8. [ ] **USAGE.md "ComfyUI Integration" section**: Installation, config, Wan2.1 workflow example, `comfyui_workflow_submit` call, output staging path, reviewing video artifacts in `ta draft view`.
+8. [x] **USAGE.md "ComfyUI Integration" section**: Installation, config, Wan2.1 workflow example, `comfyui_workflow_submit` call, output staging path, reviewing video artifacts in `ta draft view`.
 
 #### Version: `0.15.2-alpha`
 

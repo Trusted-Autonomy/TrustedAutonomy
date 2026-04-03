@@ -10136,6 +10136,180 @@ render_output/GoldenHour/depth_exr/frame_0000.exr  EXR image  (4.1 MB)
 
 ---
 
+## ComfyUI Integration
+
+TA wraps [ComfyUI](https://github.com/comfyanonymous/ComfyUI)'s REST API as a connector so agents can submit inference workflows (e.g., Wan2.1 video-to-video), poll job status, and land output video/image files in TA staging — flowing through the draft/review/apply pipeline.
+
+### Installation
+
+**Step 1 — Install ComfyUI** (if not already running):
+
+```bash
+git clone https://github.com/comfyanonymous/ComfyUI
+cd ComfyUI && pip install -r requirements.txt
+```
+
+**Step 2 — Download model weights** (Wan2.1 example):
+
+```bash
+huggingface-cli download Wan-AI/Wan2.1-T2V-14B \
+  --local-dir ~/.comfyui/models/checkpoints/
+```
+
+**Step 3 — Start ComfyUI**:
+
+```bash
+cd /path/to/ComfyUI && python main.py --listen
+```
+
+**Step 4 — Get TA setup instructions**:
+
+```bash
+ta connector install comfyui --url http://localhost:8188
+```
+
+**Step 5 — Verify connectivity**:
+
+```bash
+ta connector status comfyui
+# comfyui connector:
+#   status:  running
+#   url:     http://localhost:8188
+```
+
+### Configuration
+
+Add a `[connectors.comfyui]` block to `.ta/workflow.toml`:
+
+```toml
+[connectors.comfyui]
+enabled = true
+url = "http://localhost:8188"
+output_dir = "/path/to/ComfyUI/output"   # where ComfyUI writes generated files
+```
+
+### Submitting a Wan2.1 Workflow
+
+Once ComfyUI is running, agents can submit a workflow JSON via the `comfyui_workflow_submit` MCP tool:
+
+```python
+# Load a saved ComfyUI workflow (exported as JSON from the ComfyUI web UI).
+with open("wan2_video_workflow.json") as f:
+    workflow_json = f.read()
+
+# Submit the workflow.
+result = mcp.call("comfyui_workflow_submit", {
+    "workflow_json": workflow_json,
+    "inputs": {
+        "6": {"inputs": {"text": "A cinematic drone shot over a mountain lake at sunrise"}}
+    },
+    "goal_run_id": "<goal-run-id>"
+})
+# Returns: { "job_id": "3f7a2c1d-..." }
+```
+
+### Polling Job Status
+
+```python
+import time
+
+while True:
+    status = mcp.call("comfyui_job_status", {
+        "job_id": result["job_id"],
+        "goal_run_id": "<goal-run-id>"
+    })
+    # status["state"]: "queued" | "running" | "complete" | "failed" | "cancelled"
+    if status["state"] in ("complete", "failed"):
+        break
+    time.sleep(3)
+
+print("Output files:", status["output_files"])
+# e.g. ["ComfyUI_00001_.mp4", "ComfyUI_00001_.png"]
+```
+
+### Cancelling a Job
+
+```python
+mcp.call("comfyui_job_cancel", {
+    "job_id": result["job_id"],
+    "goal_run_id": "<goal-run-id>"
+})
+```
+
+### Listing Available Models
+
+```python
+models = mcp.call("comfyui_model_list", {
+    "goal_run_id": "<goal-run-id>"
+})
+# Returns: { "models": [{ "name": "wan2.1_t2v_14B.safetensors", "model_type": "checkpoints" }, ...] }
+```
+
+### Output Staging
+
+After a job completes, the `ComfyUiOutputWatcher` copies media files from ComfyUI's output directory into TA staging:
+
+```
+.ta/staging/<goal-id>/comfyui_output/ComfyUI_00001_.mp4
+.ta/staging/<goal-id>/comfyui_output/ComfyUI_00001_.png
+```
+
+| Extension | ArtifactKind | Display |
+|---|---|---|
+| `.mp4` | `Video { format: "MP4" }` | `MP4 video` |
+| `.mov` | `Video { format: "MOV" }` | `MOV video` |
+| `.webm` | `Video { format: "WebM" }` | `WebM video` |
+| `.png` | `Image { format: "PNG" }` | `PNG image` |
+| `.jpg`/`.jpeg` | `Image { format: "JPEG" }` | `JPEG image` |
+| `.exr` | `Image { format: "EXR" }` | `EXR image` |
+
+### Reviewing Video Artifacts
+
+```bash
+# View the draft — shows file type and size for each output.
+ta draft view
+# comfyui_output/ComfyUI_00001_.mp4   MP4 video  (48.3 MB)
+# comfyui_output/ComfyUI_00001_.png   PNG image  (2.1 MB)
+
+# Approve to promote output files to the workspace.
+ta draft apply
+
+# Or deny to discard.
+ta draft deny
+```
+
+Video artifacts suppress the text diff and show a metadata label instead (no binary content is shown to the reviewer).
+
+### Policy Capabilities
+
+Two capability URIs control access:
+
+- **`comfyui://workflow/**`** — gates workflow submission (`comfyui_workflow_submit`), status polling (`comfyui_job_status`), and cancellation (`comfyui_job_cancel`).
+- **`comfyui://model/**`** — gates model listing (`comfyui_model_list`).
+
+Example `policy.yaml` grant:
+
+```yaml
+capabilities:
+  - agent_id: claude-code
+    grants:
+      - resource: "comfyui://workflow/**"
+        verbs: [submit, read, cancel]
+      - resource: "comfyui://model/**"
+        verbs: [read]
+```
+
+### Available Tools
+
+| Tool | Description |
+|---|---|
+| `comfyui_workflow_submit` | Submit a workflow JSON for inference. Returns `job_id`. Gated behind `comfyui://workflow/**`. |
+| `comfyui_job_status` | Poll job state and output file paths. |
+| `comfyui_job_cancel` | Cancel a queued or running job. |
+| `comfyui_model_list` | List available checkpoints, LoRAs, and VAEs. Gated behind `comfyui://model/**`. |
+
+---
+
 ## Generic Binary and Text Assets
 
 TA supports two catch-all artifact kinds for assets that don't have a more specific type: `Binary` for opaque binary files and `Text` for raw text files. Any connector or agent can produce these artifacts and they flow through the standard draft/review/apply pipeline.

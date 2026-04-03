@@ -7,6 +7,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+use ta_connector_comfyui::config::ComfyUiConnectorConfig;
 use ta_connector_unreal::{backends::make_backend, config::UnrealConnectorConfig};
 
 use ta_mcp_gateway::GatewayConfig;
@@ -21,13 +22,17 @@ pub enum ConnectorCommands {
     /// Examples:
     ///   ta connector install unreal --backend flopperam
     ///   ta connector install unreal --backend kvick
+    ///   ta connector install comfyui --url http://localhost:8188
     Install {
-        /// Connector to install: "unreal" or "unity".
+        /// Connector to install: "unreal", "comfyui", or "unity".
         connector: String,
         /// Backend implementation to install.
         /// For unreal: "kvick", "flopperam", "special-agent".
         #[arg(long, default_value = "flopperam")]
         backend: String,
+        /// For comfyui: base URL of the ComfyUI server.
+        #[arg(long)]
+        url: Option<String>,
     },
     /// List installed connectors and their current backend selection.
     List,
@@ -50,7 +55,11 @@ pub enum ConnectorCommands {
 
 pub fn execute(command: &ConnectorCommands, _config: &GatewayConfig) -> Result<()> {
     match command {
-        ConnectorCommands::Install { connector, backend } => install(connector, backend),
+        ConnectorCommands::Install {
+            connector,
+            backend,
+            url,
+        } => install(connector, backend, url.as_deref()),
         ConnectorCommands::List => list(),
         ConnectorCommands::Status { connector } => status(connector.as_deref()),
         ConnectorCommands::Start { connector } => start(connector),
@@ -58,21 +67,56 @@ pub fn execute(command: &ConnectorCommands, _config: &GatewayConfig) -> Result<(
     }
 }
 
-fn install(connector: &str, backend: &str) -> Result<()> {
+fn install(connector: &str, backend: &str, url: Option<&str>) -> Result<()> {
     match connector {
         "unreal" => install_unreal(backend),
+        "comfyui" => install_comfyui(url),
         "unity" => {
             println!(
-                "Unity connector is planned for v0.14.16. Use `ta connector install unreal` for now."
+                "Unity connector is planned for v0.15.3. Use `ta connector install unreal` for now."
             );
             Ok(())
         }
         other => anyhow::bail!(
-            "Unknown connector '{}'. Available connectors: unreal\n\
+            "Unknown connector '{}'. Available connectors: unreal, comfyui\n\
              Run `ta connector list` to see installed connectors.",
             other
         ),
     }
+}
+
+fn install_comfyui(url: Option<&str>) -> Result<()> {
+    let url = url.unwrap_or("http://localhost:8188");
+
+    println!("Setting up ComfyUI connector...");
+    println!();
+    println!("  ComfyUI REST API URL: {}", url);
+    println!();
+    println!("  Prerequisites:");
+    println!("    1. Install ComfyUI: https://github.com/comfyanonymous/ComfyUI");
+    println!("    2. Download Wan2.1 model weights into ComfyUI's models/checkpoints/ directory.");
+    println!(
+        "       e.g.: huggingface-cli download Wan-AI/Wan2.1-T2V-14B --local-dir ~/.comfyui/models/checkpoints/"
+    );
+    println!("    3. Start ComfyUI:");
+    println!("       cd /path/to/ComfyUI && python main.py --listen");
+    println!();
+    println!("  Enable in config (daemon.toml or workflow.toml):");
+    println!("    [connectors.comfyui]");
+    println!("    enabled = true");
+    println!("    url = \"{}\"", url);
+    println!("    output_dir = \"/path/to/ComfyUI/output\"");
+    println!();
+    println!("  Available MCP tools after enabling:");
+    println!("    comfyui_workflow_submit  — submit a workflow JSON for inference");
+    println!("    comfyui_job_status       — poll job state and output file paths");
+    println!("    comfyui_job_cancel       — cancel a queued or running job");
+    println!("    comfyui_model_list       — list available checkpoints, LoRAs, VAEs");
+    println!();
+    println!(
+        "  After starting ComfyUI, run `ta connector status comfyui` to verify the connection."
+    );
+    Ok(())
 }
 
 fn install_unreal(backend: &str) -> Result<()> {
@@ -209,17 +253,44 @@ fn list() -> Result<()> {
     }
 
     println!();
-    println!("  unity (Unity Engine)");
-    println!("    [ not installed] — planned for v0.14.16");
+
+    // ComfyUI connector.
+    let comfyui_cfg = ComfyUiConnectorConfig::default();
+    println!("  comfyui (ComfyUI Inference)");
+    println!(
+        "  URL: {} (configure via [connectors.comfyui] in workflow.toml)",
+        comfyui_cfg.url
+    );
+    let comfyui_reachable = std::net::TcpStream::connect_timeout(
+        &comfyui_cfg
+            .url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:8188".parse().unwrap()),
+        std::time::Duration::from_millis(200),
+    )
+    .is_ok();
+    let comfyui_status = if comfyui_reachable {
+        "✓ running"
+    } else {
+        "  not running"
+    };
+    println!("    [{}] — REST API", comfyui_status);
     println!();
-    println!("Run `ta connector install <name> --backend <backend>` to install.");
+    println!("  unity (Unity Engine)");
+    println!("    [ not installed] — planned for v0.15.3");
+    println!();
+    println!(
+        "Run `ta connector install <name>` to install. For comfyui: `ta connector install comfyui --url <url>`"
+    );
     Ok(())
 }
 
 fn status(connector: Option<&str>) -> Result<()> {
     let targets: Vec<&str> = match connector {
         Some(c) => vec![c],
-        None => vec!["unreal"],
+        None => vec!["unreal", "comfyui"],
     };
 
     for target in targets {
@@ -239,6 +310,30 @@ fn status(connector: Option<&str>) -> Result<()> {
                     println!("  hint:    Start the Unreal Editor with the plugin enabled, or run `ta connector start unreal`");
                 }
             }
+            "comfyui" => {
+                println!("comfyui connector:");
+                let cfg = ComfyUiConnectorConfig::default();
+                let url = &cfg.url;
+                // Parse the host:port from the URL for a TCP probe.
+                let addr = url
+                    .trim_start_matches("http://")
+                    .trim_start_matches("https://");
+                let running = std::net::TcpStream::connect_timeout(
+                    &addr
+                        .parse()
+                        .unwrap_or_else(|_| "127.0.0.1:8188".parse().unwrap()),
+                    std::time::Duration::from_millis(500),
+                )
+                .is_ok();
+                if running {
+                    println!("  status:  running");
+                    println!("  url:     {}", url);
+                } else {
+                    println!("  status:  not running");
+                    println!("  url:     {} (not reachable)", url);
+                    println!("  hint:    Start ComfyUI with `python main.py --listen`, or check `[connectors.comfyui] url` in config.");
+                }
+            }
             other => {
                 println!("{}: unknown connector", other);
             }
@@ -249,6 +344,11 @@ fn status(connector: Option<&str>) -> Result<()> {
 
 fn start(connector: &str) -> Result<()> {
     match connector {
+        "comfyui" => {
+            println!("ComfyUI is a standalone server — start it manually:");
+            println!("  cd /path/to/ComfyUI && python main.py --listen");
+            println!("Then run `ta connector status comfyui` to verify.");
+        }
         "unreal" => {
             let cfg = UnrealConnectorConfig::default();
             match make_backend(&cfg) {
@@ -282,7 +382,7 @@ fn start(connector: &str) -> Result<()> {
             }
         }
         other => {
-            anyhow::bail!("Unknown connector '{}'. Available: unreal", other);
+            anyhow::bail!("Unknown connector '{}'. Available: unreal, comfyui", other);
         }
     }
     Ok(())
@@ -290,6 +390,10 @@ fn start(connector: &str) -> Result<()> {
 
 fn stop(connector: &str) -> Result<()> {
     match connector {
+        "comfyui" => {
+            println!("To stop the comfyui connector:");
+            println!("  Kill the `python main.py` process running ComfyUI.");
+        }
         "unreal" => {
             println!("To stop the unreal connector:");
             println!("  For kvick backend: kill the `python3 server.py` process.");
@@ -298,7 +402,7 @@ fn stop(connector: &str) -> Result<()> {
             );
         }
         other => {
-            anyhow::bail!("Unknown connector '{}'. Available: unreal", other);
+            anyhow::bail!("Unknown connector '{}'. Available: unreal, comfyui", other);
         }
     }
     Ok(())

@@ -1236,6 +1236,64 @@ impl TaGatewayServer {
         tools::unreal::handle_ue5_lighting_preset_list(&self.state, params)
     }
 
+    // ── ComfyUI Inference Connector (v0.15.2) ─────────────────────
+
+    #[tool(
+        description = "Submit a ComfyUI workflow for inference (e.g., Wan2.1 video-to-video). Gated behind `comfyui://workflow/**` capability. Returns a job_id to poll with comfyui_job_status."
+    )]
+    fn comfyui_workflow_submit(
+        &self,
+        Parameters(params): Parameters<tools::comfyui::ComfyUiWorkflowSubmitParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "comfyui_workflow_submit",
+            Some("comfyui://workflow/submit"),
+            None,
+        );
+        tools::comfyui::handle_comfyui_workflow_submit(&self.state, params)
+    }
+
+    #[tool(
+        description = "Poll the status of a ComfyUI inference job. Returns job state (queued/running/complete/failed) and output file paths."
+    )]
+    fn comfyui_job_status(
+        &self,
+        Parameters(params): Parameters<tools::comfyui::ComfyUiJobStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "comfyui_job_status",
+            Some(&format!("comfyui://workflow/status/{}", params.job_id)),
+            None,
+        );
+        tools::comfyui::handle_comfyui_job_status(&self.state, params)
+    }
+
+    #[tool(
+        description = "Cancel a queued or running ComfyUI inference job. Requires `comfyui://workflow/**` capability."
+    )]
+    fn comfyui_job_cancel(
+        &self,
+        Parameters(params): Parameters<tools::comfyui::ComfyUiJobCancelParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit(
+            "comfyui_job_cancel",
+            Some(&format!("comfyui://workflow/cancel/{}", params.job_id)),
+            None,
+        );
+        tools::comfyui::handle_comfyui_job_cancel(&self.state, params)
+    }
+
+    #[tool(
+        description = "List models available in the connected ComfyUI instance (checkpoints, LoRAs, VAEs). Gated behind `comfyui://model/**` capability."
+    )]
+    fn comfyui_model_list(
+        &self,
+        Parameters(params): Parameters<tools::comfyui::ComfyUiModelListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("comfyui_model_list", Some("comfyui://model/list"), None);
+        tools::comfyui::handle_comfyui_model_list(&self.state, params)
+    }
+
     // ── External Action Governance (v0.13.4) ─────────────────────
 
     #[tool(
@@ -1337,7 +1395,7 @@ mod tests {
         //           ue5_mrq_submit, ue5_mrq_status (v0.14.14),
         //           ue5_sequencer_query, ue5_lighting_preset_list (v0.14.15.1)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 26, "expected 26 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 30, "expected 30 tools, got: {:?}", names);
     }
 
     #[test]
@@ -1346,8 +1404,10 @@ mod tests {
         let tools = server.tool_router.list_all();
         for tool in &tools {
             assert!(
-                tool.name.starts_with("ta_") || tool.name.starts_with("ue5_"),
-                "tool '{}' should be prefixed with 'ta_' or 'ue5_'",
+                tool.name.starts_with("ta_")
+                    || tool.name.starts_with("ue5_")
+                    || tool.name.starts_with("comfyui_"),
+                "tool '{}' should be prefixed with 'ta_', 'ue5_', or 'comfyui_'",
                 tool.name
             );
         }

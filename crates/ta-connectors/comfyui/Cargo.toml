@@ -1,0 +1,19 @@
+[package]
+name = "ta-connector-comfyui"
+version.workspace = true
+edition = "2021"
+description = "ComfyUI inference connector for Trusted Autonomy"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+toml = { workspace = true }
+reqwest = { workspace = true }
+ta-changeset = { path = "../../ta-changeset" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -3343,7 +3343,7 @@ dependencies = [
 
 [[package]]
 name = "ta-actions"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3357,7 +3357,7 @@ dependencies = [
 
 [[package]]
 name = "ta-agent-ollama"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -3372,7 +3372,7 @@ dependencies = [
 
 [[package]]
 name = "ta-audit"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3388,7 +3388,7 @@ dependencies = [
 
 [[package]]
 name = "ta-build"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -3400,7 +3400,7 @@ dependencies = [
 
 [[package]]
 name = "ta-changeset"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3419,7 +3419,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3440,6 +3440,7 @@ dependencies = [
  "ta-audit",
  "ta-build",
  "ta-changeset",
+ "ta-connector-comfyui",
  "ta-connector-fs",
  "ta-connector-unreal",
  "ta-credentials",
@@ -3466,8 +3467,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ta-connector-comfyui"
+version = "0.15.2-alpha"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "ta-changeset",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "ta-connector-discord"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3481,7 +3497,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-email"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3495,7 +3511,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-fs"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3512,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-drive"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3521,7 +3537,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-gmail"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3530,7 +3546,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-slack"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3544,7 +3560,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-unreal"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "anyhow",
  "serde",
@@ -3558,7 +3574,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-web"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3567,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "ta-credentials"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3581,7 +3597,7 @@ dependencies = [
 
 [[package]]
 name = "ta-daemon"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3626,7 +3642,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-overlay"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3640,7 +3656,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-proxy"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3653,7 +3669,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-proxy-sqlite"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -3669,7 +3685,7 @@ dependencies = [
 
 [[package]]
 name = "ta-events"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3686,7 +3702,7 @@ dependencies = [
 
 [[package]]
 name = "ta-extension"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3703,7 +3719,7 @@ dependencies = [
 
 [[package]]
 name = "ta-goal"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3718,7 +3734,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mcp-gateway"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "regex",
@@ -3730,6 +3746,7 @@ dependencies = [
  "ta-actions",
  "ta-audit",
  "ta-changeset",
+ "ta-connector-comfyui",
  "ta-connector-fs",
  "ta-connector-unreal",
  "ta-events",
@@ -3748,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mediation"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3763,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "ta-memory"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "glob",
@@ -3781,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "ta-output-schema"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -3793,7 +3810,7 @@ dependencies = [
 
 [[package]]
 name = "ta-policy"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "glob",
@@ -3808,7 +3825,7 @@ dependencies = [
 
 [[package]]
 name = "ta-runtime"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "dirs",
  "libc",
@@ -3825,7 +3842,7 @@ dependencies = [
 
 [[package]]
 name = "ta-sandbox"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -3838,7 +3855,7 @@ dependencies = [
 
 [[package]]
 name = "ta-session"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3853,7 +3870,7 @@ dependencies = [
 
 [[package]]
 name = "ta-submit"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "libc",
@@ -3870,7 +3887,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workflow"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3887,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workspace"
-version = "0.15.1-alpha"
+version = "0.15.2-alpha"
 dependencies = [
  "chrono",
  "libc",
