@@ -9868,6 +9868,20 @@ acknowledged_omissions = [".ta/review/"]  # user intentionally removed; suppress
 
 9. [ ] **USAGE.md**: "Upgrading an Existing Project" section covering `ta upgrade`, `--dry-run`, `--force`, `--acknowledge`, and the `project-meta.toml` file.
 
+10. [ ] **GC: prune staging for old `pr_ready` goals** *(gap found Apr 2026 — disk exhaustion)*:
+    - `ta gc` and `ta doctor` currently only detect staging dirs with **no active goal JSON** as stale (v0.14.12 item 10). Goals whose PRs are merged directly on GitHub without `ta draft apply` remain `pr_ready` forever with full staging intact.
+    - Add a second GC check: staging dirs for goals in `pr_ready` state older than `gc_pr_ready_staging_days` (default 14, configurable in `[gc]` section of `daemon.toml`) are flagged by `ta doctor` and removed by `ta gc`.
+    - `ta doctor` output: `[warn] 3 pr_ready goals have staging older than 14d (23 GB). Run 'ta gc' to reclaim.`
+    - `ta gc` output: prints each goal ID + title + size freed, updates goal state to `closed` with `close_reason: "gc: staging pruned after pr_ready timeout"`.
+    - `--dry-run` support: lists what would be removed without deleting.
+    - 3 new tests: `gc_prunes_old_pr_ready_staging`, `gc_respects_dry_run`, `doctor_warns_on_old_pr_ready_staging`.
+
+11. [ ] **Verify `target/` exclusion is enforced at staging copy time** *(gap found Apr 2026)*:
+    - `overlay.rs` has built-in `target/` in `exclude_patterns()` but staging dirs created March 2026 contained full compiled `target/` (~6–7 GB each), suggesting the exclusion was not effective or was added after those goals started.
+    - Audit `copy_workspace_to_staging()` call path: confirm `ExcludePatterns` are applied before any file is copied, not just filtered post-copy.
+    - Add a test: staging copy of a workspace with a non-empty `target/` dir results in staging that contains no `target/` entries.
+    - If the exclude was retroactively added: add an upgrade step (seeded here alongside item 7) that warns: `[warn] Old staging dirs may contain target/ artifacts. Run 'ta gc' to reclaim disk space.`
+
 #### Version: `0.15.18-alpha`
 
 ---
