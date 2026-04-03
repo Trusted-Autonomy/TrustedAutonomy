@@ -8860,20 +8860,6 @@ ta-connectors/comfyui/
 
 7. [ ] **USAGE.md "Unity Integration" section**: Installation, config, `ta connector install unity`, first `unity_scene_query` call.
 
-8. [ ] **Sanitize URI inputs before policy engine** *(reviewer-flagged SECURITY: minor)*:
-   - In `tools/unity.rs`: validate `params.target` (build target) and `params.camera_path` against an allowlist or reject values containing path separators (`/`, `\`, `..`) before interpolating into `unity://build/{target}` and `unity://render/capture/{camera_path}`.
-   - Return a structured error (`invalid_parameter`) if validation fails rather than passing the raw value to the policy engine.
-   - Currently low-risk (stub responses never reach the backend), but must be in place before backend wiring.
-   - 2 new tests: crafted `target='StandaloneOSX/../render/capture/foo'` is rejected; valid `target='StandaloneOSX'` is accepted.
-
-9. [ ] **Suppress dead-code warnings on `OfficialBackend`** *(reviewer-flagged DEAD CODE)*:
-   - Add `#[allow(dead_code)]` to the `OfficialBackend` struct and its methods in `official.rs`, with a comment:
-     ```rust
-     // TODO(backend-wiring): Remove allow(dead_code) when gateway tools delegate
-     // to OfficialBackend. Tracked: connector live-wiring phase (post-v0.15.3).
-     ```
-   - Ensures `cargo clippy --workspace --all-targets -- -D warnings` passes in the scaffold phase without suppressing real warnings elsewhere.
-
 #### Version: `0.15.3-alpha`
 
 ---
