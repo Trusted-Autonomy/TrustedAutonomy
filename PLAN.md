@@ -9758,6 +9758,78 @@ Output (auth not configured):
 
 ---
 
+### v0.15.18 — Project TA Version Tracking & Upgrade Path
+<!-- status: pending -->
+**Goal**: Track the TA version a project was initialized with (and each subsequent upgrade), so TA can detect when a project was created with an older version, identify what project-level changes are required to be compatible with the current version, and apply or warn about them automatically. This closes the gap where new TA versions add entries to `.gitignore`, `.taignore`, `workflow.toml`, or `.ta/config.toml` format — but existing projects silently miss those changes until something breaks.
+
+**Depends on**: v0.15.17 (`ta doctor`), v0.13.13 (VCS-aware team setup)
+
+**Background**: When `.ta/review/` was added as a required gitignore entry, existing projects had no way to know they needed it. Every TA release can introduce project-level requirements (new ignore paths, config schema fields, workflow.toml keys). Without version tracking, users only discover missing entries when something fails (e.g., `git pull --rebase` blocked by an untracked `.ta/review/`). The fix belongs in an upgrade path, not in user-facing error messages.
+
+**Design**:
+
+`.ta/project-meta.toml` (written by `ta init`, updated by `ta upgrade`):
+```toml
+# Written by ta init, updated by ta upgrade.
+# Do not edit manually — managed by TA.
+initialized_with = "0.15.5-alpha"   # TA version at project creation
+last_upgraded    = "0.15.18-alpha"  # TA version of last successful upgrade run
+```
+
+Upgrade manifest (embedded in TA binary, `crates/ta-core/src/upgrade_manifest.rs`):
+```rust
+// Each entry: min_from version that needs this change, a description,
+// a check fn (is this already applied?), and an apply fn.
+UpgradeStep {
+    introduced_in: "0.15.18",
+    description: "add .ta/review/ to .gitignore",
+    check: |root| gitignore_contains(root, ".ta/review/"),
+    apply: |root| append_gitignore(root, ".ta/review/"),
+}
+```
+
+`ta upgrade` command:
+```
+ta upgrade
+  [ok]  .ta/review/ already in .gitignore
+  [fix] Added .ta/review/ to .taignore
+  [ok]  workflow.toml schema is current
+  Upgraded project from 0.15.5-alpha → 0.15.18-alpha
+```
+
+Silencing intentional omissions — add to `.ta/config.local.toml`:
+```toml
+[upgrade]
+acknowledged_omissions = [".ta/review/"]  # user intentionally removed; suppress warning
+```
+
+**Items**:
+
+1. [ ] **`.ta/project-meta.toml`**: Written by `ta init` with `initialized_with` = current TA semver. Read by `ta upgrade` and `ta doctor`. If absent (pre-v0.15.18 project), treated as `initialized_with = "0.0.0"` (apply all steps).
+
+2. [ ] **`UpgradeStep` type** (`crates/ta-core/src/upgrade_manifest.rs`): Struct with `introduced_in: &str`, `description: &str`, `check: fn(&Path) -> bool` (returns true if already applied / not needed), `apply: fn(&Path) -> anyhow::Result<()>`. `UPGRADE_STEPS: &[UpgradeStep]` const array — all steps in version order.
+
+3. [ ] **`ta upgrade` command** (`apps/ta-cli/src/commands/upgrade.rs`): Iterates `UPGRADE_STEPS` for steps with `introduced_in > last_upgraded` (or all steps if `project-meta.toml` absent). For each step: runs `check()` — if already applied, prints `[ok]`. If not applied: runs `apply()`, prints `[fix]`. On success: writes updated `last_upgraded` to `project-meta.toml`. Supports `--dry-run` (check only, no writes). Supports `--force` (re-run all steps regardless of version).
+
+4. [ ] **`ta upgrade --acknowledge <pattern>`**: Adds `pattern` to `acknowledged_omissions` in `.ta/config.local.toml` so the step is skipped silently in future runs. Prevents false warnings for users who intentionally diverge from TA defaults.
+
+5. [ ] **`ta doctor` integration** (v0.15.17): Add a "Project up to date" check that calls `ta upgrade --dry-run` internally. If any steps would be applied, emit `[warn] Project has N pending upgrade steps — run 'ta upgrade' to apply`.
+
+6. [ ] **Daemon start-up check**: When the daemon starts against a project root, if `project-meta.toml` is present and `last_upgraded` is more than 1 minor version behind the running daemon, log a warning to the daemon log and emit it on next `ta status` output.
+
+7. [ ] **Initial upgrade steps** (seeded at v0.15.18):
+   - Add `.ta/review/` to `.gitignore` if present and missing
+   - Add `.ta/review/` to `.taignore` if present and missing
+   - Ensure `workflow.toml` has `[config] pr_poll_interval_secs` (default 60 if absent)
+
+8. [ ] **Tests**: Upgrade step `check`/`apply` round-trip; `ta upgrade --dry-run` exits non-zero when steps pending; `acknowledged_omissions` suppresses a step; `project-meta.toml` written correctly on `ta init`; upgrade from `0.0.0` applies all steps.
+
+9. [ ] **USAGE.md**: "Upgrading an Existing Project" section covering `ta upgrade`, `--dry-run`, `--force`, `--acknowledge`, and the `project-meta.toml` file.
+
+#### Version: `0.15.18-alpha`
+
+---
+
 ## v0.16 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
