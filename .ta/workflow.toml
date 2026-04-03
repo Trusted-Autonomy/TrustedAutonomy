@@ -1,3 +1,6 @@
+[workflow]
+context_budget_chars = 100000   # reviewer agent budget (default 40k is too small for this codebase)
+
 [verify]
 commands = [
     "./dev 'cargo fmt --all -- --check'",
