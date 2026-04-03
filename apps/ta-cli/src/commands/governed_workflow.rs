@@ -1067,6 +1067,14 @@ fn stage_review_draft(
 fn build_reviewer_prompt(workspace_root: &Path, draft_id: &str) -> anyhow::Result<String> {
     let draft_dir = workspace_root.join(".ta").join("drafts").join(draft_id);
     let summary_path = draft_dir.join("change_summary.json");
+    // Absolute path so the agent writes to the source .ta/review/, not its staging copy.
+    // The reviewer runs inside a staging workspace where .ta/ is excluded from diffs;
+    // a relative path would silently write there instead of the expected location.
+    let verdict_path = workspace_root
+        .join(".ta")
+        .join("review")
+        .join(draft_id)
+        .join("verdict.json");
 
     let summary_text = if summary_path.exists() {
         std::fs::read_to_string(&summary_path).unwrap_or_default()
@@ -1087,7 +1095,8 @@ fn build_reviewer_prompt(workspace_root: &Path, draft_id: &str) -> anyhow::Resul
          - Breaking changes without migration path\n\
          - Constitution violations\n\
          \n\
-         Write your verdict to .ta/review/{}/verdict.json with this exact format:\n\
+         Write your verdict to this exact absolute path: {}\n\
+         Use this exact JSON format:\n\
          {{\n\
            \"verdict\": \"approve\" | \"flag\" | \"reject\",\n\
            \"findings\": [\"finding 1\", \"finding 2\"],\n\
@@ -1097,7 +1106,9 @@ fn build_reviewer_prompt(workspace_root: &Path, draft_id: &str) -> anyhow::Resul
          Use \"approve\" if the change is acceptable.\n\
          Use \"flag\" if there are concerns but it could be acceptable with human review.\n\
          Use \"reject\" if there are serious issues that must be fixed before applying.",
-        draft_id, summary_text, draft_id
+        draft_id,
+        summary_text,
+        verdict_path.display()
     ))
 }
 
