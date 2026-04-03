@@ -78,6 +78,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub supervisor: SupervisorConfig,
 
+    /// Draft review configuration (v0.15.4)
+    #[serde(default)]
+    pub draft: DraftReviewConfig,
+
     /// Workflow behavior configuration (v0.14.3)
     #[serde(default)]
     pub workflow: WorkflowSection,
@@ -733,6 +737,84 @@ impl Default for SupervisorConfig {
             api_key_env: None,
         }
     }
+}
+
+/// Asset diff configuration for `[draft.asset_diff]` in `workflow.toml` (v0.15.4).
+///
+/// Controls whether `ta draft view` runs an agent diff summary and supervisor
+/// confidence check for image and video artifacts.
+///
+/// ```toml
+/// [draft.asset_diff]
+/// enabled = true
+/// supervisor = true
+/// visual_diff = false
+/// visual_diff_threshold = 0.3
+/// agent = "builtin"
+/// timeout_secs = 60
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetDiffConfig {
+    /// Enable agent diff summaries for image/video artifacts (default: true).
+    #[serde(default = "default_asset_diff_enabled")]
+    pub enabled: bool,
+
+    /// Write a visual diff placeholder file alongside the review (default: false).
+    #[serde(default)]
+    pub visual_diff: bool,
+
+    /// Threshold (0–1) for classifying localized vs. global changes (default: 0.3).
+    #[serde(default = "default_visual_diff_threshold")]
+    pub visual_diff_threshold: f32,
+
+    /// Run supervisor confidence check (default: true).
+    #[serde(default = "default_asset_diff_supervisor")]
+    pub supervisor: bool,
+
+    /// Agent binary: "builtin"/"claude-code" → `claude` CLI, others by name (default: "builtin").
+    #[serde(default = "default_asset_diff_agent")]
+    pub agent: String,
+
+    /// Timeout per agent call in seconds (default: 60).
+    #[serde(default = "default_asset_diff_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_asset_diff_enabled() -> bool {
+    true
+}
+fn default_visual_diff_threshold() -> f32 {
+    0.3
+}
+fn default_asset_diff_supervisor() -> bool {
+    true
+}
+fn default_asset_diff_agent() -> String {
+    "builtin".to_string()
+}
+fn default_asset_diff_timeout() -> u64 {
+    60
+}
+
+impl Default for AssetDiffConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_asset_diff_enabled(),
+            visual_diff: false,
+            visual_diff_threshold: default_visual_diff_threshold(),
+            supervisor: default_asset_diff_supervisor(),
+            agent: default_asset_diff_agent(),
+            timeout_secs: default_asset_diff_timeout(),
+        }
+    }
+}
+
+/// Draft review configuration (groups settings that apply during `ta draft view`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DraftReviewConfig {
+    /// Asset diff configuration (v0.15.4).
+    #[serde(default)]
+    pub asset_diff: AssetDiffConfig,
 }
 
 /// Context injection mode for CLAUDE.md (v0.14.3.2).

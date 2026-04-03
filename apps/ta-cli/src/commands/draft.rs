@@ -2798,6 +2798,124 @@ fn view_package(
         }
     }
 
+    // Asset diffs for image/video artifacts (v0.15.4).
+    // Only run if there are image/video artifacts and the goal store can resolve the staging path.
+    if effective_detail != DetailLevel::Top {
+        let image_video_artifacts: Vec<_> = pkg
+            .changes
+            .artifacts
+            .iter()
+            .filter(|a| {
+                a.kind
+                    .as_ref()
+                    .map(|k| k.is_image() || k.is_video())
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if !image_video_artifacts.is_empty() {
+            let workflow_config = ta_submit::WorkflowConfig::load_or_default(
+                &config.workspace_root.join(".ta/workflow.toml"),
+            );
+            let asset_diff_cfg = &workflow_config.draft.asset_diff;
+
+            if asset_diff_cfg.enabled {
+                if let Ok(goal_store) = GoalRunStore::new(&config.goals_dir) {
+                    if let Ok(goals) = goal_store.list() {
+                        if let Some(goal) = goals.iter().find(|g| {
+                            g.goal_run_id.to_string() == pkg.goal.goal_id
+                                || g.pr_package_id == Some(package_id)
+                        }) {
+                            let staging_path = &goal.workspace_path;
+                            let source_path = &config.workspace_root;
+                            let goal_intent = pkg.goal.title.clone();
+
+                            // Convert AssetDiffConfig from workflow config.
+                            let diff_cfg = ta_changeset::AssetDiffConfig {
+                                enabled: asset_diff_cfg.enabled,
+                                visual_diff: asset_diff_cfg.visual_diff,
+                                visual_diff_threshold: asset_diff_cfg.visual_diff_threshold,
+                                supervisor: asset_diff_cfg.supervisor,
+                                agent: asset_diff_cfg.agent.clone(),
+                                timeout_secs: asset_diff_cfg.timeout_secs,
+                            };
+
+                            println!();
+                            println!(
+                                "ASSET DIFFS ({} image/video artifact(s)):",
+                                image_video_artifacts.len()
+                            );
+                            println!("{}", "=".repeat(60));
+
+                            for artifact in &image_video_artifacts {
+                                // Extract relative path from resource_uri.
+                                let rel_path = artifact
+                                    .resource_uri
+                                    .strip_prefix("fs://workspace/")
+                                    .unwrap_or(&artifact.resource_uri);
+
+                                let before = source_path.join(rel_path);
+                                let after = staging_path.join(rel_path);
+
+                                // safe: filtered above to only image/video
+                                let kind = artifact.kind.as_ref().unwrap();
+                                let result = ta_changeset::run_asset_diff(
+                                    &before,
+                                    &after,
+                                    kind,
+                                    &goal_intent,
+                                    &diff_cfg,
+                                    staging_path,
+                                );
+
+                                let kind_label = kind.display_label();
+                                println!();
+                                println!("  [{}] {}", kind_label, rel_path);
+
+                                match result.skipped_reason {
+                                    Some(reason) => {
+                                        println!("    (asset diff unavailable — {})", reason);
+                                    }
+                                    None => {
+                                        if let Some(ref summary) = result.summary {
+                                            println!("    Agent diff: {}", summary.text);
+                                            println!(
+                                                "                ChangeType: {:?}",
+                                                summary.change_type
+                                            );
+                                        }
+                                        if let Some(ref verdict) = result.supervisor {
+                                            let warning = if verdict.confidence < 0.7 {
+                                                " [!] LOW CONFIDENCE"
+                                            } else {
+                                                ""
+                                            };
+                                            println!(
+                                                "    Supervisor: confidence {:.2} — {}{}",
+                                                verdict.confidence,
+                                                verdict.match_assessment,
+                                                warning
+                                            );
+                                            for flag in &verdict.flags {
+                                                println!("      Flag: {}", flag);
+                                            }
+                                        }
+                                        if let Some(ref vdiff) = result.visual_diff {
+                                            println!(
+                                                "    Visual diff: {}",
+                                                vdiff.diff_path.display()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Show ignored artifacts if any (v0.13.17.5).
     if !pkg.ignored_artifacts.is_empty() {
         println!();
