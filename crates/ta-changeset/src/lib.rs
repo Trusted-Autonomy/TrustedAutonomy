@@ -10,6 +10,7 @@
 
 pub mod artifact_kind;
 pub mod artifact_type;
+pub mod asset_diff;
 pub mod changeset;
 pub mod channel_registry;
 pub mod diff;
@@ -40,6 +41,10 @@ pub mod webhook_channel;
 
 pub use artifact_kind::ArtifactKind;
 pub use artifact_type::ArtifactType;
+pub use asset_diff::{
+    run_asset_diff, AssetDiffConfig, AssetDiffResult, AssetDiffSummary, AssetSupervisorVerdict,
+    ChangeType as AssetChangeType, VisualDiffOutput, VisualDiffType,
+};
 pub use changeset::{ChangeKind, ChangeSet, CommitIntent};
 pub use channel_registry::{
     ChannelCapabilitySet, ChannelFactory, ChannelRegistry, ChannelRouteConfig,

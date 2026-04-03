@@ -896,6 +896,61 @@ The output file must match:
 }
 ```
 
+### Asset Diff in Draft Review
+
+During `ta draft view`, image and video artifacts automatically receive an agent-generated diff summary that describes what visually changed between the before and after versions. A supervisor agent then cross-checks the summary against the goal's stated intent and reports a confidence score.
+
+**How it works**
+
+For each image or video artifact in a draft:
+
+1. A **diff summary agent** independently describes what changed visually (lighting, position, color, structure). It does not speculate about intent.
+2. A **supervisor agent** reads both the diff summary and the goal's title, then reports a confidence score (0–1.0) on whether the change is consistent with the goal.
+3. An optional **visual diff** can be enabled to write a diff file alongside the draft.
+
+Example output in `ta draft view`:
+
+```
+ASSET DIFFS (2 image/video artifact(s)):
+============================================================
+
+  [PNG image] renders/frame_0042.png
+    Agent diff: Lighting shifted from warm to cool; left-side shadow deepened.
+                ChangeType: Tonal
+    Supervisor: confidence 0.91 — consistent with goal "adjust TOD preset to dusk"
+
+  [MP4 video] sequences/hero_shot.mp4
+    Agent diff: Camera angle shifted 15° left; background color unchanged.
+                ChangeType: Structural
+    Supervisor: confidence 0.74 — partially consistent with goal
+```
+
+Confidence below 0.70 is flagged with `[!] LOW CONFIDENCE` — review carefully before approving.
+
+**Configuration** (`.ta/workflow.toml`):
+
+```toml
+[draft.asset_diff]
+enabled = true                # enable agent diff summaries (default: true)
+supervisor = true             # run supervisor confidence check (default: true)
+visual_diff = false           # write visual diff files (default: false)
+visual_diff_threshold = 0.3   # localized crop threshold (default: 0.3)
+agent = "builtin"             # agent to use: "builtin"/"claude-code" (default)
+timeout_secs = 60             # agent timeout in seconds (default: 60)
+```
+
+If no vision-capable agent is configured, or the agent call fails, `ta draft view` shows `(asset diff unavailable — <reason>)` and continues without blocking. The feature is silently skipped when `enabled = false`.
+
+**Change types**
+
+| Type | Meaning |
+|---|---|
+| `Localized` | Change confined to a region of the image/frame |
+| `Tonal` | Color, brightness, or contrast shifted globally |
+| `Structural` | Major rearrangement of scene elements |
+| `Minor` | Small, difficult-to-notice change |
+| `Identical` | Files appear visually identical |
+
 ### Agents
 
 TA wraps any agent framework. Out of the box it supports:

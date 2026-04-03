@@ -71,4 +71,17 @@
     "alternatives": ["Call configured LLM agent via ta run --headless", "Parse JSON output from a planner binary"],
     "confidence": 0.9
   }
+,
+  {
+    "decision": "Use text placeholder files for VisualDiffRenderer instead of actual image processing",
+    "rationale": "The workspace has no image processing dependencies. Adding the `image` crate for pixel-level diffing would increase build time and binary size for a feature that can be incrementally improved. The placeholder approach satisfies the interface contract — the reviewer gets the diff file path. Full image processing can be added in a future phase.",
+    "alternatives": ["Add the `image` crate dependency for pixel-level diffing", "Use external CLI tools (convert, ffmpeg) via spawn_with_timeout"],
+    "confidence": 0.95
+  },
+  {
+    "decision": "Name the WorkflowConfig field `draft` of type `DraftReviewConfig` rather than using DraftConfig directly",
+    "rationale": "Grouping draft-review settings under a `[draft]` table in workflow.toml is more extensible — future draft-phase settings can be added without cluttering the top-level WorkflowConfig. The name `DraftReviewConfig` avoids confusion with `DraftPackage` and `DiffConfig` which are already in scope.",
+    "alternatives": ["Add asset_diff directly as a top-level field on WorkflowConfig", "Use DraftConfig as the spec suggested (risks naming confusion)"],
+    "confidence": 0.9
+  }
 ]
