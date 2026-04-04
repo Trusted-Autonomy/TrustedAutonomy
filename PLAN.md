@@ -8862,7 +8862,7 @@ ta-connectors/comfyui/
 
 #### Human Review
 
-- [ ] Smoke-test `ta connector install unity` output against a real Unity project — verify the UPM manifest entry is correct for LTS 2022 and 2023.
+- [ ] Smoke-test `ta connector install unity` output against a real Unity project — verify the UPM manifest entry is correct for LTS 2022 and 2023. → v0.15.14.1 (tracked via human-review system once implemented)
 
 #### Version: `0.15.3-alpha`
 
@@ -8985,7 +8985,7 @@ supervisor = true         # run supervisor confidence check (default: true)
 ---
 
 ### v0.15.6 — Config File Naming Consistency
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Standardise all `.ta/` config override files to the `<name>.local.toml` pattern. Currently `local.workflow.toml` is the odd one out — `daemon.local.toml` already follows the correct convention. Rename the override file and update every reference so all local overrides are consistently discoverable as `*.local.toml`.
 
 **Files affected**:
@@ -8997,17 +8997,17 @@ supervisor = true         # run supervisor confidence check (default: true)
 
 #### Items
 
-1. [ ] **Rename the load path** in `crates/ta-submit/src/config.rs` `WorkflowConfig::load()`: look for `workflow.local.toml` after loading `workflow.toml`, merge/override fields (same semantics as before). If `local.workflow.toml` still exists on disk, log a one-time deprecation warning: _"local.workflow.toml is deprecated — rename it to workflow.local.toml"_.
+1. [x] **Rename the load path** in `crates/ta-submit/src/config.rs` `WorkflowConfig::load()`: look for `workflow.local.toml` after loading `workflow.toml`, merge/override fields (same semantics as before). If `local.workflow.toml` still exists on disk, log a one-time deprecation warning: _"local.workflow.toml is deprecated — rename it to workflow.local.toml"_.
 
-2. [ ] **Update `LOCAL_TA_PATHS`** in `crates/ta-workspace/src/partitioning.rs`: replace `"local.workflow.toml"` with `"workflow.local.toml"`.
+2. [x] **Update `LOCAL_TA_PATHS`** in `crates/ta-workspace/src/partitioning.rs`: replace `"local.workflow.toml"` with `"workflow.local.toml"` (old name retained with comment so existing files stay gitignored).
 
-3. [ ] **Update the mirror** in `crates/ta-submit/src/config.rs` `default_local_exclude_paths()`: same rename.
+3. [x] **Update the mirror** in `crates/ta-submit/src/config.rs` `default_local_exclude_paths()`: same rename.
 
-4. [ ] **Update `examples/workflow.toml`** comment (if any) and `docs/USAGE.md` to reflect the new name.
+4. [x] **Update `docs/USAGE.md`** to reflect the new name (was already using `workflow.local.toml`; added migration note).
 
-5. [ ] **Migration note in USAGE.md**: one sentence — if you have a `local.workflow.toml`, rename it.
+5. [x] **Migration note in USAGE.md**: added blockquote — if you have a `local.workflow.toml`, rename it.
 
-6. [ ] **Tests**: confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied (backwards compatibility for one release cycle).
+6. [ ] **Tests**: confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied (backwards compatibility for one release cycle). → deferred to v0.15.7 as follow-up.
 
 #### Version: `0.15.6-alpha`
 

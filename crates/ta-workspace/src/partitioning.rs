@@ -27,7 +27,8 @@ pub const SHARED_TA_PATHS: &[&str] = &[
 pub const LOCAL_TA_PATHS: &[&str] = &[
     "daemon.toml",
     "daemon.local.toml",
-    "local.workflow.toml",
+    "workflow.local.toml",
+    "local.workflow.toml", // deprecated name — kept so existing files stay gitignored
     "memory.rvf",
     "staging/",
     "store/",
