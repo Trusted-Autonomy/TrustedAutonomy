@@ -28,6 +28,19 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Auto-clean target/ if it exceeds 150GB to prevent disk exhaustion.
+# The build that follows will repopulate only what is needed.
+_AUTO_CLEAN_GB=150
+if [[ -d target ]]; then
+    _target_kb=$(du -sk target 2>/dev/null | cut -f1 || echo 0)
+    _target_gb=$(( _target_kb / 1048576 ))
+    if (( _target_gb >= _AUTO_CLEAN_GB )); then
+        echo "NOTE: target/ is ${_target_gb}GB (>= ${_AUTO_CLEAN_GB}GB threshold) — cleaning before build..."
+        rm -rf target
+        echo "  target/ removed. Build will recreate only what is needed."
+    fi
+fi
+
 # Build target list.
 BUILD_PACKAGES="-p ta-cli"
 if [[ "$BUILD_DAEMON" == true ]]; then
