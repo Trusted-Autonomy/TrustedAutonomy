@@ -3373,6 +3373,8 @@ ceiling_always = true         # Always set GIT_CEILING_DIRECTORIES
 git_mode = "inherit-read"   # override for this machine only
 ```
 
+> **Migration note:** If you have an existing `.ta/local.workflow.toml` file, rename it to `.ta/workflow.local.toml` — all local override files now follow the `<name>.local.toml` pattern. The old name still works but logs a deprecation warning.
+
 **Checking active isolation mode:** The active mode appears in `ta goal status` output:
 
 ```

@@ -362,7 +362,8 @@ fn default_local_exclude_paths() -> Vec<String> {
     vec![
         "daemon.toml".to_string(),
         "daemon.local.toml".to_string(),
-        "local.workflow.toml".to_string(),
+        "workflow.local.toml".to_string(),
+        "local.workflow.toml".to_string(), // deprecated name — kept so existing files stay gitignored
         "memory.rvf".to_string(),
         "staging/".to_string(),
         "store/".to_string(),
@@ -1660,16 +1661,60 @@ pub fn check_disk_space_mb(path: &std::path::Path) -> Result<u64, String> {
 }
 
 impl WorkflowConfig {
-    /// Load workflow config from .ta/workflow.toml
+    /// Load workflow config from .ta/workflow.toml, merging any local override file on top.
+    ///
+    /// Override file resolution (first found wins):
+    ///   1. `<dir>/workflow.local.toml`  — canonical name
+    ///   2. `<dir>/local.workflow.toml`  — deprecated name (warns and falls back)
     pub fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
-        let config = toml::from_str(&content)?;
+        let mut base: toml::Value = toml::from_str(&content)?;
+
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
+        let canonical_local = dir.join("workflow.local.toml");
+        let deprecated_local = dir.join("local.workflow.toml");
+
+        let local_path = if canonical_local.exists() {
+            Some(canonical_local)
+        } else if deprecated_local.exists() {
+            tracing::warn!(
+                path = %deprecated_local.display(),
+                "'.ta/local.workflow.toml' is deprecated — rename to '.ta/workflow.local.toml'"
+            );
+            Some(deprecated_local)
+        } else {
+            None
+        };
+
+        if let Some(local) = local_path {
+            let local_content = std::fs::read_to_string(&local)?;
+            let local_val: toml::Value = toml::from_str(&local_content)?;
+            merge_toml_values(&mut base, local_val);
+        }
+
+        let config = base.try_into()?;
         Ok(config)
     }
 
     /// Try to load config, returning default if file doesn't exist
     pub fn load_or_default(path: &std::path::Path) -> Self {
         Self::load(path).unwrap_or_default()
+    }
+}
+
+/// Recursively merge `overrides` into `base`. Tables are merged key-by-key;
+/// all other values are replaced by the override.
+fn merge_toml_values(base: &mut toml::Value, overrides: toml::Value) {
+    match (base, overrides) {
+        (toml::Value::Table(base_map), toml::Value::Table(override_map)) => {
+            for (k, v) in override_map {
+                let entry = base_map
+                    .entry(k)
+                    .or_insert(toml::Value::Table(Default::default()));
+                merge_toml_values(entry, v);
+            }
+        }
+        (base, overrides) => *base = overrides,
     }
 }
 

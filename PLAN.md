@@ -8862,7 +8862,7 @@ ta-connectors/comfyui/
 
 #### Human Review
 
-- [ ] Smoke-test `ta connector install unity` output against a real Unity project — verify the UPM manifest entry is correct for LTS 2022 and 2023.
+- [ ] Smoke-test `ta connector install unity` output against a real Unity project — verify the UPM manifest entry is correct for LTS 2022 and 2023. → v0.15.14.1 (tracked via human-review system once implemented)
 
 #### Version: `0.15.3-alpha`
 
@@ -8985,7 +8985,7 @@ supervisor = true         # run supervisor confidence check (default: true)
 ---
 
 ### v0.15.6 — Config File Naming Consistency
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Standardise all `.ta/` config override files to the `<name>.local.toml` pattern. Currently `local.workflow.toml` is the odd one out — `daemon.local.toml` already follows the correct convention. Rename the override file and update every reference so all local overrides are consistently discoverable as `*.local.toml`.
 
 **Files affected**:
@@ -8997,19 +8997,50 @@ supervisor = true         # run supervisor confidence check (default: true)
 
 #### Items
 
-1. [ ] **Rename the load path** in `crates/ta-submit/src/config.rs` `WorkflowConfig::load()`: look for `workflow.local.toml` after loading `workflow.toml`, merge/override fields (same semantics as before). If `local.workflow.toml` still exists on disk, log a one-time deprecation warning: _"local.workflow.toml is deprecated — rename it to workflow.local.toml"_.
+1. [x] **Rename the load path** in `crates/ta-submit/src/config.rs` `WorkflowConfig::load()`: look for `workflow.local.toml` after loading `workflow.toml`, merge/override fields (same semantics as before). If `local.workflow.toml` still exists on disk, log a one-time deprecation warning: _"local.workflow.toml is deprecated — rename it to workflow.local.toml"_.
 
-2. [ ] **Update `LOCAL_TA_PATHS`** in `crates/ta-workspace/src/partitioning.rs`: replace `"local.workflow.toml"` with `"workflow.local.toml"`.
+2. [x] **Update `LOCAL_TA_PATHS`** in `crates/ta-workspace/src/partitioning.rs`: replace `"local.workflow.toml"` with `"workflow.local.toml"` (old name retained with comment so existing files stay gitignored).
 
-3. [ ] **Update the mirror** in `crates/ta-submit/src/config.rs` `default_local_exclude_paths()`: same rename.
+3. [x] **Update the mirror** in `crates/ta-submit/src/config.rs` `default_local_exclude_paths()`: same rename.
 
-4. [ ] **Update `examples/workflow.toml`** comment (if any) and `docs/USAGE.md` to reflect the new name.
+4. [x] **Update `docs/USAGE.md`** to reflect the new name (was already using `workflow.local.toml`; added migration note).
 
-5. [ ] **Migration note in USAGE.md**: one sentence — if you have a `local.workflow.toml`, rename it.
+5. [x] **Migration note in USAGE.md**: added blockquote — if you have a `local.workflow.toml`, rename it.
 
-6. [ ] **Tests**: confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied (backwards compatibility for one release cycle).
+6. [ ] **Tests**: confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied (backwards compatibility for one release cycle). → deferred to v0.15.7 as follow-up.
 
 #### Version: `0.15.6-alpha`
+
+---
+
+### v0.15.6.1 — Draft Package: Embedded Patches (Staging-Free Apply)
+<!-- status: pending -->
+**Goal**: Store the actual unified diffs inside the draft package JSON at `ta draft build` time so that `ta draft apply` can succeed even when the staging directory no longer exists (deleted by `ta gc`, disk cleanup, or a crash between build and apply).
+
+**Root cause of prior incident**: `ta draft apply` computes what to copy back by diffing staging vs source at apply-time. The package JSON stores only metadata (`diff_ref: "changeset:N"` pointers) — no actual patch bytes. Deleting staging (even accidentally) makes the draft permanently un-appliable, requiring manual re-implementation.
+
+**Design**:
+- Add `embedded_patch: Option<String>` to `Artifact` in `ta-changeset/src/draft_package.rs` — a unified diff string (output of `diff -u source staging`) embedded at build time
+- For new files: embed full file content (base64 or raw text). For deleted files: embed the tombstone only.
+- `ta draft build` (`apps/ta-cli/src/commands/draft.rs`): after computing the overlay diff, serialize each changeset diff into `artifact.embedded_patch` before writing the package JSON
+- `ta draft apply`: try staging-dir apply first (current behavior, fast path). If staging is absent AND `embedded_patch` is present on all artifacts, apply via `patch -p0` from embedded content. If staging is absent AND any artifact lacks an embedded patch, error with the existing message plus a note that the package predates v0.15.6.1.
+- Binary files: encode as base64 in `embedded_patch`; apply by decoding and writing directly (no `patch`)
+
+#### Items
+
+1. [ ] **`Artifact.embedded_patch`** (`ta-changeset/src/draft_package.rs`): add `embedded_patch: Option<String>` field. Backwards-compatible (`#[serde(default)]`).
+
+2. [ ] **Embed at build time** (`apps/ta-cli/src/commands/draft.rs` `build_package`): after the overlay diff loop, for each modified/added/deleted artifact, compute a unified diff against the source baseline and store in `artifact.embedded_patch`. Use the `DiffContent` already computed — serialize it as a standard `-u` diff string.
+
+3. [ ] **Fallback apply** (`apply_package` in `draft.rs`): when `goal.workspace_path` does not exist, check that all artifacts have `embedded_patch`. If yes, apply each patch to source using the `diffy` crate (already in workspace) or `patch` subprocess. If any artifact lacks it, keep the existing error message and add: "This package predates embedded-patch support (v0.15.6.1). Re-run the goal to regenerate."
+
+4. [ ] **`ta draft view` display**: when `embedded_patch` is present, `--diff` flag can show it without staging. Currently `ta draft view --diff` fails silently when staging is absent.
+
+5. [ ] **Tests**: build a package → delete staging dir → apply succeeds from embedded patch. New-file case. Binary-file case (base64 roundtrip). Package without `embedded_patch` keeps old error path.
+
+6. [ ] **Tests for v0.15.6 `workflow.local.toml` merge** (deferred from v0.15.6 item 6): confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied.
+
+#### Version: `0.15.6.1-alpha`
 
 ---
 
