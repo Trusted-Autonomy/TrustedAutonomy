@@ -6,7 +6,7 @@ set -euo pipefail
 
 # Warn if target/ is getting large (threshold: 80GB).
 # Run 'just clean' to free space; install_local.sh auto-cleans above 150GB.
-_TARGET_WARN_GB=80
+_TARGET_WARN_GB=75
 if [[ -d target ]]; then
     _target_kb=$(du -sk target 2>/dev/null | cut -f1 || echo 0)
     _target_gb=$(( _target_kb / 1048576 ))
