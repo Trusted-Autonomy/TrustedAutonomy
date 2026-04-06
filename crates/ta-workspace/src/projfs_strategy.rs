@@ -53,13 +53,15 @@ mod windows_impl {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
-    use windows::core::{GUID, PCWSTR};
-    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, STATUS_SUCCESS};
+    use windows::core::{GUID, HRESULT, PCWSTR};
+    use windows::Win32::Foundation::{
+        ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, E_INVALIDARG,
+    };
     use windows::Win32::Storage::ProjectedFileSystem::{
         PrjFillDirEntryBuffer, PrjMarkDirectoryAsPlaceholder, PrjStartVirtualizing,
-        PrjStopVirtualizing, PrjWriteFileData, PrjWritePlaceholderInfo, PRJ_CALLBACK_DATA,
-        PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN, PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO,
-        PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_PLACEHOLDER_INFO, PRJ_VIRTUALIZATION_CALLBACKS,
+        PrjStopVirtualizing, PrjWriteFileData, PrjWritePlaceholderInfo, PRJ_CALLBACKS,
+        PRJ_CALLBACK_DATA, PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN, PRJ_DIR_ENTRY_BUFFER_HANDLE,
+        PRJ_FILE_BASIC_INFO, PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_PLACEHOLDER_INFO,
     };
 
     /// Per-enumeration-session state.
@@ -111,7 +113,7 @@ mod windows_impl {
             });
             let state_ptr = Box::into_raw(state);
 
-            let callbacks = PRJ_VIRTUALIZATION_CALLBACKS {
+            let callbacks = PRJ_CALLBACKS {
                 StartDirectoryEnumerationCallback: Some(start_enum_cb),
                 EndDirectoryEnumerationCallback: Some(end_enum_cb),
                 GetDirectoryEnumerationCallback: Some(get_enum_cb),
@@ -153,9 +155,8 @@ mod windows_impl {
             let start_res = unsafe {
                 PrjStartVirtualizing(
                     PCWSTR(root_wide.as_ptr()),
-                    &callbacks,
+                    &callbacks as *const PRJ_CALLBACKS,
                     Some(state_ptr as *const std::ffi::c_void),
-                    None,
                     &mut virt_ctx,
                 )
             };
@@ -242,7 +243,7 @@ mod windows_impl {
     unsafe extern "system" fn start_enum_cb(
         callback_data: *const PRJ_CALLBACK_DATA,
         enumeration_id: *const GUID,
-    ) -> windows::Win32::Foundation::HRESULT {
+    ) -> HRESULT {
         let state = state_from_cb(callback_data);
         let id = guid_to_string(&*enumeration_id);
         let rel_path = pcwstr_to_string((*callback_data).FilePathName);
@@ -264,17 +265,17 @@ mod windows_impl {
 
         let mut enums = state.enumerations.lock().unwrap();
         enums.insert(id, EnumSession { entries, index: 0 });
-        STATUS_SUCCESS.into()
+        HRESULT(0)
     }
 
     unsafe extern "system" fn end_enum_cb(
         callback_data: *const PRJ_CALLBACK_DATA,
         enumeration_id: *const GUID,
-    ) -> windows::Win32::Foundation::HRESULT {
+    ) -> HRESULT {
         let state = state_from_cb(callback_data);
         let id = guid_to_string(&*enumeration_id);
         state.enumerations.lock().unwrap().remove(&id);
-        STATUS_SUCCESS.into()
+        HRESULT(0)
     }
 
     unsafe extern "system" fn get_enum_cb(
@@ -282,7 +283,7 @@ mod windows_impl {
         enumeration_id: *const GUID,
         _search_expression: PCWSTR,
         dir_entry_buffer_handle: PRJ_DIR_ENTRY_BUFFER_HANDLE,
-    ) -> windows::Win32::Foundation::HRESULT {
+    ) -> HRESULT {
         let state = state_from_cb(callback_data);
         let id = guid_to_string(&*enumeration_id);
         let flags = (*callback_data).Flags;
@@ -291,7 +292,7 @@ mod windows_impl {
         let mut enums = state.enumerations.lock().unwrap();
         let session = match enums.get_mut(&id) {
             Some(s) => s,
-            None => return windows::Win32::Foundation::E_INVALIDARG,
+            None => return E_INVALIDARG,
         };
 
         // Restart scan if requested.
@@ -327,18 +328,18 @@ mod windows_impl {
             );
             // HRESULT for ERROR_INSUFFICIENT_BUFFER means the buffer is full — stop and
             // leave the index pointing at the current entry for the next call.
-            if hr == windows::Win32::Foundation::HRESULT::from(ERROR_INSUFFICIENT_BUFFER) {
+            if hr == HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0) {
                 break;
             }
             session.index += 1;
         }
 
-        STATUS_SUCCESS.into()
+        HRESULT(0)
     }
 
     unsafe extern "system" fn get_placeholder_cb(
         callback_data: *const PRJ_CALLBACK_DATA,
-    ) -> windows::Win32::Foundation::HRESULT {
+    ) -> HRESULT {
         let state = state_from_cb(callback_data);
         let rel_path = pcwstr_to_string((*callback_data).FilePathName);
         let source_path = state.source_dir.join(rel_path.replace('\\', "/"));
@@ -349,9 +350,7 @@ mod windows_impl {
             let size = source_path.metadata().map(|m| m.len()).unwrap_or(0);
             (false, size)
         } else {
-            return windows::Win32::Foundation::HRESULT(
-                windows::Win32::Foundation::ERROR_FILE_NOT_FOUND.0 as i32,
-            );
+            return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
         };
 
         let placeholder_info = PRJ_PLACEHOLDER_INFO {
@@ -378,7 +377,7 @@ mod windows_impl {
         callback_data: *const PRJ_CALLBACK_DATA,
         byte_offset: u64,
         length: u32,
-    ) -> windows::Win32::Foundation::HRESULT {
+    ) -> HRESULT {
         let state = state_from_cb(callback_data);
         let rel_path = pcwstr_to_string((*callback_data).FilePathName);
         let source_path = state.source_dir.join(rel_path.replace('\\', "/"));
@@ -386,16 +385,14 @@ mod windows_impl {
         let data = match std::fs::read(&source_path) {
             Ok(d) => d,
             Err(_) => {
-                return windows::Win32::Foundation::HRESULT(
-                    windows::Win32::Foundation::ERROR_FILE_NOT_FOUND.0 as i32,
-                );
+                return HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
             }
         };
 
         let start = byte_offset as usize;
         let end = (start + length as usize).min(data.len());
         if start >= data.len() {
-            return STATUS_SUCCESS.into();
+            return HRESULT(0);
         }
         let chunk = &data[start..end];
 

@@ -36,8 +36,7 @@ fn windows_check() -> bool {
     // Primary check: try to load ProjectedFSLib.dll.
     // The DLL is present in System32 only when Client-ProjFS is installed.
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HMODULE;
-    use windows::Win32::System::LibraryLoader::{FreeLibrary, LoadLibraryW};
+    use windows::Win32::System::LibraryLoader::LoadLibraryW;
 
     let dll_name: Vec<u16> = "ProjectedFSLib.dll\0".encode_utf16().collect();
 
@@ -47,10 +46,10 @@ fn windows_check() -> bool {
 
     let dll_present = match hmod {
         Ok(h) if !h.is_invalid() => {
-            // SAFETY: h is a valid module handle returned by LoadLibraryW.
-            unsafe {
-                let _ = FreeLibrary(h);
-            }
+            // Intentionally do not call FreeLibrary — this is a one-time
+            // feature-detection call at startup; the handle is released when
+            // the process exits.
+            let _ = h;
             true
         }
         _ => false,
