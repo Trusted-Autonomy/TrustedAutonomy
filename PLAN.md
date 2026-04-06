@@ -9116,6 +9116,88 @@ supervisor = true         # run supervisor confidence check (default: true)
 
 ---
 
+### v0.15.7.1 — Background Process Lifecycle: Heartbeat, Event Notification & Reviewer Resilience
+<!-- status: pending -->
+**Goal**: Replace the static finalizing timeout with a heartbeat-based liveness model. Surface background draft build completion inline (shell/Studio notification, no opaque CTA). Fix reviewer agents so they work from the draft package — never from staging — making them resilient to GC and staging cleanup.
+
+**Why this phase exists**: v0.15.6.2 solved the timeout by raising it from 300s→600s and moving draft build to background. But the underlying model is still wrong:
+- **Static timeout**: the watchdog kills at T+600s regardless of whether the background process is actively working. A slow machine building a large workspace will time out even though the process is healthy.
+- **Silent background**: the user gets "Agent exited. Draft build running in background (PID 17374). Run `ta draft list`..." — an opaque CTA that doesn't tell them when it's done.
+- **Reviewer failures**: the governed-goal workflow spawns a reviewer agent that inherits a staging dir reference. When GC cleans that dir (4h for failed goals, startup pass), the reviewer fails. The reviewer doesn't need staging — it needs the draft package. Since v0.15.6.1 added embedded patches to every artifact, reviewers can read the diff directly from the package without touching disk.
+
+**Not in scope**: Changing the background spawn model itself (it's correct — agents should exit fast). Changing GC retention (4h is right). Only the heartbeat, notification, and reviewer agent wiring change.
+
+---
+
+#### Design: Heartbeat-based watchdog
+
+**Current**: `WatchdogConfig { finalize_timeout_secs: 600 }` — static wall-clock timer from goal start.
+
+**New**: `WatchdogConfig { heartbeat_interval_secs: 30, heartbeat_timeout_secs: 120 }` — watchdog checks `.ta/heartbeats/<goal-id>` mtime. If mtime is older than `heartbeat_timeout_secs`, goal is considered hung. Background processes write heartbeats every `heartbeat_interval_secs`. Wall-clock timeout is removed entirely for background processes; it remains only for the initial agent spawn (up to `agent_start_timeout_secs: 60`).
+
+```toml
+# daemon.toml [timeouts]
+heartbeat_interval_secs = 30   # how often background process writes heartbeat
+heartbeat_timeout_secs  = 120  # watchdog: if no heartbeat for this long, kill
+agent_start_timeout_secs = 60  # timeout for initial agent process to start
+```
+
+Background draft build loop:
+```
+spawn ta draft build <goal_id> --apply-context-file <path>
+  → every 30s: touch .ta/heartbeats/<goal-id>
+  → watchdog: if .ta/heartbeats/<goal-id> mtime > 120s ago → kill, mark failed
+  → on completion: write .ta/heartbeats/<goal-id>.done, emit DraftBuilt event
+```
+
+#### Design: Draft-built event notification
+
+The daemon event bus already has `draft_built` events (from v0.14.8.3). When background draft build completes, it writes a sentinel file `.ta/heartbeats/<goal-id>.done`. The daemon's file watcher picks this up and emits `EventKind::DraftBuilt { goal_id, draft_id }` on the event bus.
+
+`ta shell` is already subscribed to events. When `DraftBuilt` fires, the shell prints inline:
+```
+  ✓ Draft ready: "v0.15.7 — Velocity Stats" [f3eb3516]
+    → ta draft view f3eb3516   (11 files changed)
+```
+
+TA Studio already has an event SSE stream. When `DraftBuilt` fires, Studio shows a toast notification and updates the Goals tab — no page refresh required.
+
+#### Design: Reviewer agent resilience
+
+The reviewer agent (spawned by `governed-goal.toml` `review_draft` step) currently receives a `staging_path` in its context and tries to access files there. Fix: inject the **draft package** (embedded patches, artifact list, decision log, summary) as the reviewer's primary context. Staging path becomes optional — used only if it still exists, ignored otherwise.
+
+Reviewer system prompt change: "You are reviewing draft `{draft_id}` for goal `{title}`. The draft contains embedded patches for all {n} artifacts — you do not need the staging directory. Read the patches below. Assess correctness, side effects, and alignment with the project constitution. If staging is available at `{staging_path}`, you may use `ta_fs_read` for additional context."
+
+The reviewer goal never marks `failed` because staging was absent — it marks `failed` only if the review itself produces no verdict. Remove item 9 from v0.15.19 (auto-closing reviewer goals) — fix the root cause instead.
+
+---
+
+#### Items
+
+1. [ ] **Heartbeat writer in background draft build** (`apps/ta-cli/src/commands/draft.rs`): In the `--apply-context-file` code path (background build), spawn a heartbeat thread that `touch`es `.ta/heartbeats/<goal-id>` every `heartbeat_interval_secs`. Stop the thread on build completion or error. Write `.ta/heartbeats/<goal-id>.done` on success, `.ta/heartbeats/<goal-id>.failed` on error.
+
+2. [ ] **Heartbeat-based watchdog** (`crates/ta-daemon/src/watchdog.rs`): Replace `finalize_timeout_secs` with `heartbeat_timeout_secs` (default 120) and `agent_start_timeout_secs` (default 60). For goals in `Finalizing` state with a background process: check `.ta/heartbeats/<goal-id>` mtime instead of wall-clock elapsed. If mtime > `heartbeat_timeout_secs` or `.failed` sentinel exists → mark goal `Failed`. Remove the 600s static check. Retain wall-clock for `Running` state (agent hasn't started writing heartbeats yet).
+
+3. [ ] **`DraftBuilt` event from file watcher** (`crates/ta-daemon/src/main.rs` or `crates/ta-events/src/`): File watcher already watches `.ta/store/`. Extend to watch `.ta/heartbeats/`. When `<goal-id>.done` appears, load the goal record to get `draft_id`, emit `EventKind::DraftBuilt { goal_id, draft_id, file_count }` on the event bus.
+
+4. [ ] **Shell inline notification** (`apps/ta-cli/src/commands/shell_tui.rs`): When a `DraftBuilt` event arrives on the shell event stream, print the inline notification: `✓ Draft ready: "{title}" [{draft_id_short}]\n  → ta draft view {draft_id_short}   ({n} files changed)`. No "check ta status" message; this replaces the CTA printed at agent exit.
+
+5. [ ] **Studio toast notification** (`crates/ta-daemon/src/api/events.rs` + frontend): When `DraftBuilt` event fires, SSE sends `{ type: "draft_built", goal_id, draft_id, title, file_count }`. Frontend JS shows a non-blocking toast: "Draft ready: v0.15.7 — 11 files. [View]". Goals tab refreshes the active goal card to show "draft ready" state.
+
+6. [ ] **Reviewer agent resilience** (`templates/workflows/governed-goal.toml` + `crates/ta-workflow/`): In the `review_draft` step: serialize the full draft package (artifact list with embedded patches, decision log, summary) into the reviewer's CLAUDE.md injection. Set `staging_required = false` on the step — reviewer proceeds even if staging dir is absent. Add `"staging absent — using embedded patches"` to the reviewer's fallback path log. Reviewer marks `Failed` only if it produces no verdict JSON, not on staging absence.
+
+7. [ ] **Remove static exit CTA** (`apps/ta-cli/src/commands/run.rs`): Replace `"Agent exited. Draft build running in background (PID {pid}).\nRun \`ta draft list\` or \`ta status\` to check when the draft is ready."` with `"Agent exited. Building draft in background — you'll be notified when it's ready."`. The shell notification (item 4) delivers the actual result.
+
+8. [ ] **`ta status` URGENT filter** (`apps/ta-cli/src/commands/status.rs`): A reviewer goal whose parent draft is `Applied` or `Denied` is not a user-actionable failure — don't show it as URGENT. Filter: if `goal.title` matches `"Review draft * for governed workflow"` and the referenced draft is terminal, show in a collapsible "system" section at most, not URGENT. This is a display fix, not a lifecycle change — the goal record stays as-is.
+
+9. [ ] **Tests**: Heartbeat writer creates and updates `.ta/heartbeats/<goal-id>` during build. Watchdog marks goal failed when heartbeat mtime > timeout (no `.done` file). `DraftBuilt` event emitted when `.done` appears. Shell prints inline notification on `DraftBuilt` event. Reviewer proceeds without staging when `staging_required = false`. Reviewer `Failed` only on no-verdict, not on staging absence.
+
+10. [ ] **USAGE.md update**: Replace "Agent exited — check ta draft list" docs with "You'll be notified inline when the draft is ready." Document heartbeat config in `[timeouts]` section. Document reviewer resilience (staging not required).
+
+#### Version: `0.15.7.1-alpha`
+
+---
+
 ### v0.15.8 — Windows ProjFS Staging (Virtual Workspace on NTFS)
 <!-- status: pending -->
 **Goal**: On Windows NTFS volumes (where APFS/Btrfs CoW cloning is unavailable), use the Windows Projected File System (ProjFS) to make staging creation near-instant and zero-disk-cost. Files appear present in the staging directory but are hydrated on-demand from source as the agent reads them. Writes go to a real scratch store. Only files the agent actually touches are physically copied.
@@ -10175,7 +10257,7 @@ draft built
 
 8. [ ] **Constitution gate for auto-apply**: Gate agent must not call `ta_draft apply` without `ta_ask_human` receiving explicit human approval, unless `gate_auto_approve = true` is in the project constitution. `ConstitutionChecker::check_gate_auto_approve()` enforces this. Error: "Gate auto-approve requires explicit consent in `.ta/constitution.toml`: `gate_auto_approve = true`."
 
-9. [ ] **Suppressed reviewer-goal noise**: Failed auto-reviewer goals (spawned by governed-goal workflow) must not appear as URGENT in `ta status`. Filter: if `goal.title` matches `"Review draft * for governed workflow"` and the referenced draft is already `Applied` or `Denied`, auto-mark the reviewer goal `Closed` on `ta gc` pass rather than `Failed`. Add `closed` state to `GoalRunState` for system-spawned goals that are moot.
+9. [ ] **Reviewer goal noise filter in gate context**: When the gate agent is active, `ta status` must not surface failed system-reviewer goals as URGENT interruptions to the gate conversation. ~~Do not auto-close reviewer goals~~ — the real fix is in v0.15.6.3 (embedded patch injection + `staging_required = false` so reviewer goals don't fail on GC'd staging). This item is the gate-specific filter: if a reviewer goal's parent draft is the one currently at the gate, suppress its `URGENT` banner from `ta status` output during the gate session. Reviewer goals that complete with a verdict are surfaced normally through the gate agent's context.
 
 10. [ ] **Tests**: `GateMode::from_str("agent")` parses correctly. `spawn_gate_agent` builds correct context from draft + session memory. Gate agent receives apply signal → session item transitions to Complete. Gate agent receives deny signal → item transitions to Skipped. Follow-up spawned from gate → accumulated diff presented. Constitution gate blocks auto-apply without consent. Reviewer goal marked Closed when parent draft is Applied. `ta shell` routes input to gate channel when session gate is active.
 
