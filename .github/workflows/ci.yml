@@ -61,7 +61,7 @@ jobs:
         timeout-minutes: 30
 
       - name: Run tests
-        run: nix develop --command bash -c "cargo test --workspace"
+        run: nix develop --command bash -c "cargo test --workspace -- --test-threads=4"
         timeout-minutes: 15
 
       - name: Run clippy
@@ -97,7 +97,7 @@ jobs:
         timeout-minutes: 30
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=4
         timeout-minutes: 15
 
       - name: Run clippy
