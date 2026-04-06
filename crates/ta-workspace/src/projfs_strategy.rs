@@ -423,8 +423,8 @@ mod windows_impl {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
         use super::super::DeletionRecord;
+        use super::*;
         use tempfile::TempDir;
 
         /// Verify that ProjFsProvider::start returns an error gracefully
