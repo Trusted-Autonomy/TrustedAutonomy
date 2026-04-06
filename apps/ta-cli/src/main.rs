@@ -426,9 +426,10 @@ enum Commands {
     },
     /// Feature velocity stats and outcome telemetry (v0.13.10).
     ///
-    /// `ta stats velocity` shows aggregate build time and outcome breakdown.
+    /// `ta stats velocity` shows aggregate, per-contributor breakdown, and phase conflicts.
     /// `ta stats velocity-detail` shows a per-goal breakdown table.
     /// `ta stats export` exports full history as JSON or CSV.
+    /// `ta stats migrate` promotes local history to the committed shared file.
     Stats {
         #[command(subcommand)]
         command: commands::stats::StatsCommands,

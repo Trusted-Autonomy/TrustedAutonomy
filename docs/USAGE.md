@@ -8619,18 +8619,33 @@ community://api-docs/stripe-payment-intents
 
 ## Feature Velocity Stats
 
-`ta stats` tracks per-goal timing and outcomes in `.ta/velocity-stats.jsonl`. Data is recorded automatically when goals complete (applied, denied, cancelled, or timed out by GC).
+`ta stats` tracks per-goal timing and outcomes. Data is recorded automatically when goals complete (applied, denied, cancelled, or timed out by GC).
+
+**Two files, two purposes:**
+
+| File | Location | Purpose |
+|------|----------|---------|
+| `velocity-stats.jsonl` | `.ta/` (gitignored) | Per-machine raw log — written on every goal terminal state |
+| `velocity-history.jsonl` | `.ta/` (committed) | Shared cross-machine log — written on `ta draft apply --submit` |
+
+Each entry in `velocity-history.jsonl` carries a `machine_id` (first 8 hex chars of SHA-256(hostname)) and a `committer` (from `git config user.name`). Multi-machine appends are unique lines that merge without conflicts.
 
 ### Viewing aggregate stats
 
 ```bash
-ta stats velocity                      # overall summary
+ta stats velocity                      # aggregate + per-contributor + conflict warnings
 ta stats velocity --since 2026-01-01   # since a date
 ta stats velocity --workflow code      # filter by workflow type
-ta stats velocity --json               # raw JSON output
+ta stats velocity --json               # raw JSON (includes by_contributor, phase_conflicts)
 ```
 
-Output example:
+`ta stats velocity` merges both files (dedup by goal_id) and always shows three sections:
+
+1. **Overall aggregate** — totals, outcomes, build time percentiles
+2. **Per-contributor breakdown** — from committed history entries only (requires `velocity-history.jsonl`)
+3. **Phase conflict warnings** — plan phases where more than one person submitted work
+
+Example output:
 
 ```
 Velocity Stats
@@ -8645,25 +8660,56 @@ Velocity Stats
   P90 build time:     28m 5s
   Avg rework time:    2m 0s
   Total rework:       1h 24m
+
+CONTRIBUTOR              GOALS   APPLIED    AVG BUILD
+────────────────────────────────────────────────────────
+alice                       28        25     12m 30s
+bob                         10         9     18m 45s
+a3f1bc20                     4         4      9m 10s
+
+⚠  Phase conflicts detected (1 phase):
+   v0.15.7 — 3 entries from: alice, bob
+   Review these phases to ensure work is not being duplicated.
 ```
+
+Phase conflicts flag any plan phase where committed entries exist from more than one contributor — useful for catching parallel work before it causes merge problems.
 
 ### Per-goal breakdown
 
 ```bash
-ta stats velocity-detail               # latest 20 goals
+ta stats velocity-detail               # latest 20 goals (merged)
 ta stats velocity-detail --limit 50    # show more
 ta stats velocity-detail --outcome applied   # filter by outcome
 ta stats velocity-detail --since 2026-03-01 --json
 ```
 
+The `SOURCE` column shows `shared` for entries present in the committed history or `[local]` for entries that exist only on this machine.
+
+### Migrating local history to shared
+
+If you have goals recorded before `velocity-history.jsonl` was introduced (or run on a machine that hasn't committed the history yet), use migrate:
+
+```bash
+ta stats migrate --dry-run    # preview what would be promoted
+ta stats migrate              # promote all local-only entries
+```
+
+After migrating, commit `.ta/velocity-history.jsonl` to share with your team:
+
+```bash
+git add .ta/velocity-history.jsonl
+git commit -m "chore: promote local velocity history to shared"
+```
+
 ### Exporting history
 
 ```bash
-ta stats export               # JSON (default)
+ta stats export               # JSON (default, merged view)
 ta stats export --format csv  # CSV for spreadsheets
+ta stats export --committed-only --format csv  # only committed history
 ```
 
-The velocity stats file is at `.ta/velocity-stats.jsonl` — one JSON entry per line, human-readable, and easy to query with `jq`.
+The CSV export includes `machine_id` and `committer` columns in addition to the standard fields.
 
 ---
 

@@ -20,6 +20,7 @@ pub const SHARED_TA_PATHS: &[&str] = &[
     "templates/",
     "plan_history.jsonl",   // append-only audit trail of plan phase completions
     "release-history.json", // append-only project release changelog
+    "velocity-history.jsonl", // append-only committed velocity log (multi-machine)
 ];
 
 /// Paths inside `.ta/` that are local runtime state and must NOT be committed.
