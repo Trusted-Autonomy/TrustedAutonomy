@@ -47,11 +47,10 @@ pub fn load_deletions(scratch_dir: &Path) -> Vec<DeletionRecord> {
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
-    use super::DeletionRecord;
     use crate::error::WorkspaceError;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     use windows::core::{GUID, HRESULT, PCWSTR};
     use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, E_INVALIDARG};

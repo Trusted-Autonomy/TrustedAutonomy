@@ -214,8 +214,10 @@ pub struct OverlayWorkspace {
     copy_stat: Option<CopyStat>,
     /// Active ProjFS virtualization provider (Windows only, v0.15.8).
     /// Must outlive the workspace root directory. `None` on non-Windows or
-    /// when ProjFS mode is not in use.
+    /// when ProjFS mode is not in use. Held for RAII drop — intentionally
+    /// not read after construction.
     #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
     projfs_provider: Option<crate::projfs_strategy::ProjFsProvider>,
 }
 
