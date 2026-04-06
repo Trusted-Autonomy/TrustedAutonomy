@@ -103,6 +103,9 @@ pub enum SessionEvent {
         goal_id: Uuid,
         draft_id: Uuid,
         artifact_count: usize,
+        /// Human-readable goal title for display in notifications (v0.15.7.1).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        title: String,
     },
 
     /// A draft was submitted for review.
@@ -666,6 +669,7 @@ mod tests {
             goal_id: Uuid::new_v4(),
             draft_id,
             artifact_count: 5,
+            title: String::new(),
         };
         let envelope = EventEnvelope::new(event);
         assert_eq!(envelope.actions.len(), 3);
@@ -709,6 +713,7 @@ mod tests {
             goal_id: Uuid::new_v4(),
             draft_id: Uuid::new_v4(),
             artifact_count: 2,
+            title: String::new(),
         };
         let envelope = EventEnvelope::new(event);
         let json = serde_json::to_string(&envelope).unwrap();
@@ -779,6 +784,7 @@ mod tests {
                 goal_id: gid,
                 draft_id: did,
                 artifact_count: 3,
+                title: String::new(),
             },
             SessionEvent::DraftSubmitted {
                 goal_id: gid,
@@ -957,6 +963,7 @@ mod tests {
             goal_id: gid,
             draft_id: Uuid::new_v4(),
             artifact_count: 1,
+            title: String::new(),
         };
         assert_eq!(event.goal_id(), Some(gid));
 

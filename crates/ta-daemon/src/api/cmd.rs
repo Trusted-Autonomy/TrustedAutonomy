@@ -1197,6 +1197,7 @@ fn emit_draft_ready_events(
             goal_id,
             draft_id,
             artifact_count,
+            title: title.to_string(),
         },
     );
     emit_sse_event(

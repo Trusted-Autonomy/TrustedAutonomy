@@ -2257,8 +2257,12 @@ max_staging_gb = 20                  # Total staging cap before auto-GC before n
 gc_interval_hours = 6                # How often the daemon runs periodic GC (default: 6)
 
 [timeouts]
-finalizing_s = 600   # Watchdog timeout for the draft-build finalizing phase (default: 600)
+finalizing_s = 600        # Fallback watchdog timeout when no heartbeat is present (default: 600)
+heartbeat_timeout_secs = 120   # Max seconds between heartbeats before build is declared stuck (default: 120)
+agent_start_timeout_secs = 60  # Grace period for first heartbeat after background build starts (default: 60)
 ```
+
+**Heartbeat-based liveness** (background draft builds): When `ta run` exits, it spawns `ta draft build` as a background process. That process writes a heartbeat file to `.ta/heartbeats/<goal-id>` every 30 seconds. The daemon watchdog checks the heartbeat mtime — if no heartbeat for `heartbeat_timeout_secs`, the build is declared stuck and the goal is marked Failed. On completion, the background process writes `.ta/heartbeats/<goal-id>.done` and the watchdog stops checking. You'll see the notification inline in `ta shell` when the draft is ready — no need to poll `ta draft list`.
 
 Setting `failed_staging_retention_hours = 0` disables the failed-goal window (they are cleaned up on the next GC pass regardless of age). Setting `max_staging_gb = 0` disables the cap check.
 
@@ -7647,6 +7651,16 @@ Reviewer flagged issues — apply anyway? [y/N]:
 Answering **y** overrides the flag and proceeds to apply. Answering **n** (or Enter) denies the draft and stops the workflow.
 
 When the reviewer rejects outright, the draft is automatically denied and the workflow stops with a clear error message listing the findings.
+
+#### Reviewer resilience
+
+The reviewer agent reads the draft package directly — it does **not** need access to the staging workspace directory. The draft's change summary, artifact list, and decision log are embedded in the reviewer prompt. This means:
+
+- The reviewer works correctly even if staging has been cleaned up by GC.
+- The reviewer marks `Failed` only if it produces no `verdict.json` — not on staging absence.
+- If staging is available, the reviewer may use `ta_fs_read` for additional context but will proceed without it.
+
+Reviewer goals with the title `"Review draft <id> for governed workflow"` are system artifacts. If such a goal appears as Failed in `ta status`, it is only shown as URGENT if the associated draft has not yet been reviewed — not if the draft was already Applied or Denied.
 
 #### Customising the workflow
 

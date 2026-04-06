@@ -709,6 +709,7 @@ fn start_goal_recovery_tasks(app_state: &std::sync::Arc<crate::api::AppState>) {
                                 goal_id,
                                 draft_id: d.package_id,
                                 artifact_count: d.changes.artifacts.len(),
+                                title: goal.title.clone(),
                             };
                             let _ = event_store.append(&EventEnvelope::new(built));
                             let review = SessionEvent::ReviewRequested {

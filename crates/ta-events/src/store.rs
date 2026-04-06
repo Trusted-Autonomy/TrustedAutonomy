@@ -280,6 +280,7 @@ mod tests {
                 goal_id: gid,
                 draft_id: uuid::Uuid::new_v4(),
                 artifact_count: 3,
+                title: String::new(),
             }))
             .unwrap();
         store
@@ -287,6 +288,7 @@ mod tests {
                 goal_id: uuid::Uuid::new_v4(),
                 draft_id: uuid::Uuid::new_v4(),
                 artifact_count: 1,
+                title: String::new(),
             }))
             .unwrap();
 

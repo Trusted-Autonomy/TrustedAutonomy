@@ -57,9 +57,14 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
         })
         .collect();
 
+    // v0.15.7.1: Exclude reviewer goals whose parent draft is terminal from URGENT.
+    // A reviewer goal title like "Review draft <id> for governed workflow" is a
+    // system artifact — if the draft it reviewed is already Applied or Denied, the
+    // failure is not user-actionable and should not appear as URGENT.
     let failed_goals: Vec<_> = all_goals
         .iter()
         .filter(|g| matches!(g.state, GoalRunState::Failed { .. }))
+        .filter(|g| !is_terminal_reviewer_goal(g))
         .take(5)
         .collect();
 
@@ -479,6 +484,18 @@ fn find_next_pending_phase(plan_content: &str) -> Option<String> {
     None
 }
 
+/// Returns true if this is a system reviewer goal spawned by a governed workflow
+/// and the review is no longer actionable by the user (v0.15.7.1).
+///
+/// Pattern: title matches "Review draft <short-id> for governed workflow".
+/// These goals are internal orchestration artifacts — showing them as URGENT
+/// is noise rather than signal. The user cannot do anything about a reviewer
+/// that failed after the governed workflow already applied or denied the draft.
+fn is_terminal_reviewer_goal(goal: &ta_goal::GoalRun) -> bool {
+    let t = goal.title.as_str();
+    t.starts_with("Review draft ") && t.ends_with(" for governed workflow")
+}
+
 fn count_pending_drafts(pr_packages_dir: &std::path::Path) -> usize {
     list_pending_draft_ids(pr_packages_dir).len()
 }
@@ -544,6 +561,61 @@ mod tests {
     fn count_pending_drafts_missing_dir() {
         let count = count_pending_drafts(std::path::Path::new("/nonexistent/path"));
         assert_eq!(count, 0);
+    }
+
+    // v0.15.7.1 — reviewer goal URGENT filter tests.
+    #[test]
+    fn is_terminal_reviewer_goal_matches_pattern() {
+        use chrono::Utc;
+        let make_goal = |title: &str| ta_goal::GoalRun {
+            goal_run_id: uuid::Uuid::new_v4(),
+            tag: None,
+            title: title.to_string(),
+            objective: String::new(),
+            agent_id: String::new(),
+            state: ta_goal::GoalRunState::Failed {
+                reason: "test".to_string(),
+            },
+            manifest_id: uuid::Uuid::nil(),
+            workspace_path: std::path::PathBuf::new(),
+            store_path: std::path::PathBuf::new(),
+            source_dir: None,
+            plan_phase: None,
+            parent_goal_id: None,
+            source_snapshot: None,
+            is_macro: false,
+            parent_macro_id: None,
+            sub_goal_ids: vec![],
+            workflow_id: None,
+            stage: None,
+            role: None,
+            context_from: vec![],
+            thread_id: None,
+            project_name: None,
+            agent_pid: None,
+            heartbeat_required: false,
+            pr_url: None,
+            pr_package_id: None,
+            progress_note: None,
+            vcs_isolation: None,
+            initiated_by: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        // Should match: this is a system reviewer goal.
+        assert!(is_terminal_reviewer_goal(&make_goal(
+            "Review draft f3eb3516 for governed workflow"
+        )));
+        // Should not match: regular failed goal.
+        assert!(!is_terminal_reviewer_goal(&make_goal(
+            "Fix the authentication bug"
+        )));
+        // Should not match: partial prefix.
+        assert!(!is_terminal_reviewer_goal(&make_goal("Review draft")));
+        // Should not match: different suffix.
+        assert!(!is_terminal_reviewer_goal(&make_goal(
+            "Review draft abc123 for some other workflow"
+        )));
     }
 
     #[test]

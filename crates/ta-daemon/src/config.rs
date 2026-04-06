@@ -104,7 +104,7 @@ pub struct DaemonConfig {
     pub gc: GcConfig,
 }
 
-/// Per-operation timeout configuration (v0.15.6.2).
+/// Per-operation timeout configuration (v0.15.6.2 / v0.15.7.1).
 ///
 /// Provides fine-grained timeout control per operation type without requiring
 /// changes to `[operations]` defaults.
@@ -113,20 +113,53 @@ pub struct DaemonConfig {
 pub struct TimeoutsConfig {
     /// Seconds a goal may spend in `Finalizing` state (draft build) before the
     /// watchdog declares it stuck. Default: 600s (10 min). Set to 0 to disable.
-    /// The watchdog only fires when the `ta run` process is confirmed dead — live
-    /// processes are never interrupted regardless of this setting.
+    /// Kept for backward compatibility; superseded by `heartbeat_timeout_secs`
+    /// for goals that write heartbeats (v0.15.7.1).
     #[serde(default = "default_finalizing_timeout_s")]
     pub finalizing_s: u64,
+
+    /// Seconds without a heartbeat before the watchdog declares a Finalizing
+    /// background draft-build stuck and transitions the goal to Failed (v0.15.7.1).
+    ///
+    /// The background draft-build process writes a heartbeat to
+    /// `.ta/heartbeats/<goal-id>` every `heartbeat_interval_secs`. If the mtime
+    /// on that file exceeds this threshold, the build is considered hung.
+    ///
+    /// Default: 120s. Set to 0 to disable heartbeat checking (fall back to
+    /// `finalizing_s`).
+    #[serde(default = "default_heartbeat_timeout_s")]
+    pub heartbeat_timeout_secs: u64,
+
+    /// Seconds allowed for the background draft-build to write its first
+    /// heartbeat before the watchdog considers it stuck (v0.15.7.1).
+    ///
+    /// This is the startup grace period: the background process may take a few
+    /// seconds to initialise before writing its first heartbeat. After this
+    /// window, the watchdog expects heartbeats at `heartbeat_interval_secs`.
+    ///
+    /// Default: 60s.
+    #[serde(default = "default_agent_start_timeout_s")]
+    pub agent_start_timeout_secs: u64,
 }
 
 fn default_finalizing_timeout_s() -> u64 {
     600
 }
 
+fn default_heartbeat_timeout_s() -> u64 {
+    120
+}
+
+fn default_agent_start_timeout_s() -> u64 {
+    60
+}
+
 impl Default for TimeoutsConfig {
     fn default() -> Self {
         Self {
             finalizing_s: default_finalizing_timeout_s(),
+            heartbeat_timeout_secs: default_heartbeat_timeout_s(),
+            agent_start_timeout_secs: default_agent_start_timeout_s(),
         }
     }
 }

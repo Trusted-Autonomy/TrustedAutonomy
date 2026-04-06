@@ -2705,11 +2705,7 @@ pub fn execute(
                 "draft_build_spawned",
                 &format!("draft build spawned as background process PID {}", bg_pid),
             );
-            println!(
-                "\nAgent exited. Draft build running in background (PID {}).",
-                bg_pid
-            );
-            println!("Run `ta draft list` or `ta status` to check when the draft is ready.");
+            println!("\nAgent exited. Building draft in background — you'll be notified when it's ready.");
         } else {
             // Synchronous build (headless mode or spawn failed — fall back to inline).
             update_finalize_note("diffing workspace files");
