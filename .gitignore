@@ -89,6 +89,7 @@ result-*
 .ta/memory/
 .ta/velocity-stats.jsonl
 .ta/operations.jsonl
+.ta/heartbeats/
 
 # Local override files — personal settings, never team-shared
 .ta/*.local.toml
