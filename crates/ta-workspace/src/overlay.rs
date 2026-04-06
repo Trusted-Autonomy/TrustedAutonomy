@@ -32,6 +32,12 @@ pub enum OverlayStagingMode {
     Smart,
     /// Windows ReFS CoW clone — auto-falls back to `Smart` on non-ReFS volumes.
     RefsCow,
+    /// Windows Projected File System — zero-disk-cost virtual workspace (v0.15.8).
+    ///
+    /// Files appear in staging instantly via kernel-level projection from source.
+    /// Reads hydrate on-demand; writes land in `.projfs-scratch/`. Auto-falls back
+    /// to `Smart` when `Client-ProjFS` is not installed.
+    ProjFs,
 }
 
 use crate::conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
@@ -206,6 +212,11 @@ pub struct OverlayWorkspace {
     source_snapshot: Option<SourceSnapshot>, // v0.2.1: Conflict detection
     /// Statistics from staging creation (strategy, duration, file count).
     copy_stat: Option<CopyStat>,
+    /// Active ProjFS virtualization provider (Windows only, v0.15.8).
+    /// Must outlive the workspace root directory. `None` on non-Windows or
+    /// when ProjFS mode is not in use.
+    #[cfg(target_os = "windows")]
+    projfs_provider: Option<crate::projfs_strategy::ProjFsProvider>,
 }
 
 impl OverlayWorkspace {
@@ -275,7 +286,19 @@ impl OverlayWorkspace {
         );
 
         let start = Instant::now();
-        let mut stat = CopyStat::new(copy_strategy);
+
+        // For ProjFs mode, use the Virtual strategy (no file I/O needed).
+        let effective_copy_strategy = if effective_mode == OverlayStagingMode::ProjFs {
+            crate::copy_strategy::CopyStrategy::Virtual
+        } else {
+            copy_strategy
+        };
+
+        let mut stat = CopyStat::new(effective_copy_strategy);
+
+        // Track the ProjFS provider (Windows only).
+        #[cfg(target_os = "windows")]
+        let mut projfs_provider: Option<crate::projfs_strategy::ProjFsProvider> = None;
 
         match effective_mode {
             OverlayStagingMode::Smart => {
@@ -287,6 +310,45 @@ impl OverlayWorkspace {
                     copy_strategy,
                     &mut stat,
                 )?;
+            }
+            OverlayStagingMode::ProjFs => {
+                // Start ProjFS virtualization. No file copying needed.
+                #[cfg(target_os = "windows")]
+                {
+                    match crate::projfs_strategy::ProjFsProvider::start(&source_dir, &staging_dir) {
+                        Ok(provider) => {
+                            projfs_provider = Some(provider);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "ProjFS start failed — falling back to smart staging"
+                            );
+                            // Fall back: do a smart copy instead.
+                            copy_dir_recursive_smart(
+                                &source_dir,
+                                &staging_dir,
+                                &source_dir,
+                                &excludes,
+                                copy_strategy,
+                                &mut stat,
+                            )?;
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    // Should not be reachable: resolve_staging_mode maps ProjFs → Smart
+                    // on non-Windows. This is a safety fallback.
+                    copy_dir_recursive_smart(
+                        &source_dir,
+                        &staging_dir,
+                        &source_dir,
+                        &excludes,
+                        copy_strategy,
+                        &mut stat,
+                    )?;
+                }
             }
             _ => {
                 // Full or RefsCow-resolved-to-full.
@@ -325,6 +387,8 @@ impl OverlayWorkspace {
             excludes,
             source_snapshot: snapshot,
             copy_stat: Some(stat),
+            #[cfg(target_os = "windows")]
+            projfs_provider,
         })
     }
 
@@ -342,6 +406,8 @@ impl OverlayWorkspace {
             excludes,
             source_snapshot: None, // Snapshot must be loaded separately if needed.
             copy_stat: None,       // Not available when reopening an existing workspace.
+            #[cfg(target_os = "windows")]
+            projfs_provider: None, // Not available when reopening an existing workspace.
         }
     }
 
@@ -1062,7 +1128,9 @@ fn extract_path_from_conflict(description: &str) -> Option<String> {
 
 /// Resolve the effective staging mode at workspace creation time.
 ///
-/// `RefsCow` auto-falls back to `Smart` when not on a Windows ReFS volume.
+/// - `RefsCow` auto-falls back to `Smart` when not on a Windows ReFS volume.
+/// - `ProjFs` auto-falls back to `Smart` when `Client-ProjFS` is not available
+///   (non-Windows or feature not installed).
 fn resolve_staging_mode(mode: OverlayStagingMode, _staging_dir: &Path) -> OverlayStagingMode {
     match mode {
         OverlayStagingMode::RefsCow => {
@@ -1072,6 +1140,19 @@ fn resolve_staging_mode(mode: OverlayStagingMode, _staging_dir: &Path) -> Overla
             } else {
                 tracing::info!(
                     "refs-cow requested but volume is not ReFS — falling back to smart staging"
+                );
+                OverlayStagingMode::Smart
+            }
+        }
+        OverlayStagingMode::ProjFs => {
+            // ProjFS is Windows-only. On non-Windows always fall back to Smart.
+            if crate::windows_features::is_projfs_available() {
+                OverlayStagingMode::ProjFs
+            } else {
+                tracing::info!(
+                    "projfs requested but Client-ProjFS is not available — \
+                     falling back to smart staging. \
+                     Enable with: Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart"
                 );
                 OverlayStagingMode::Smart
             }
@@ -1400,7 +1481,13 @@ fn should_skip_for_diff(path: &str, excludes: &ExcludePatterns) -> bool {
     // Agent infrastructure directories (created at runtime, not work product).
     // Note: VCS metadata dirs (e.g., .git/, .svn/) are excluded via adapter-contributed
     // patterns merged into ExcludePatterns, not hardcoded here.
-    const INFRA_DIRS: &[&str] = &[".ta", ".claude-flow", ".hive-mind", ".swarm"];
+    const INFRA_DIRS: &[&str] = &[
+        ".ta",
+        ".claude-flow",
+        ".hive-mind",
+        ".swarm",
+        ".projfs-scratch", // ProjFS scratch directory — v0.15.8
+    ];
 
     for dir in INFRA_DIRS {
         if path == *dir

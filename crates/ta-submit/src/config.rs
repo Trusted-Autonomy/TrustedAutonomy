@@ -1592,6 +1592,12 @@ pub enum StagingStrategy {
     Smart,
     /// Windows ReFS CoW clone. Auto-falls back to `smart` on non-ReFS volumes.
     RefsCow,
+    /// Windows Projected File System — zero-disk-cost virtual workspace (v0.15.8).
+    ///
+    /// Files appear in staging instantly; reads hydrate from source on demand.
+    /// Writes land in `.projfs-scratch/`. Auto-falls back to `smart` when
+    /// `Client-ProjFS` is not installed (requires Windows 10 1809+).
+    ProjFs,
 }
 
 impl StagingStrategy {
@@ -1600,6 +1606,7 @@ impl StagingStrategy {
             Self::Full => "full",
             Self::Smart => "smart",
             Self::RefsCow => "refs-cow",
+            Self::ProjFs => "projfs",
         }
     }
 }

@@ -648,6 +648,42 @@ warn_above_gb = 2.0   # warn in `ta doctor` if staging exceeds this size (0 = si
 
 Use `ta staging inspect` to see which strategy is active, file counts, disk usage, and current exclude patterns.
 
+**Fast staging on Windows (ProjFS)**
+
+On Windows 10 version 1809 or later, TA supports the Windows Projected File System (`Client-ProjFS`) for near-instant, zero-disk-cost staging. Files appear in the staging directory immediately without any copying — the kernel projects them on-demand from the source tree. Only files the agent actually reads are physically accessed, and only files the agent writes are stored on disk.
+
+To enable ProjFS:
+
+1. **Via the TA installer**: check "Enable fast virtual workspace (requires Windows 10 1809+)" during installation. The installer runs `Dism.exe` to activate the optional feature.
+
+2. **Manually (PowerShell as Administrator)**:
+   ```powershell
+   Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart
+   ```
+
+3. **Verify it's active**:
+   ```powershell
+   Get-WindowsOptionalFeature -Online -FeatureName Client-ProjFS
+   ```
+   The `State` should read `Enabled`.
+
+Once `Client-ProjFS` is installed, set the staging strategy in `.ta/workflow.toml`:
+
+```toml
+[staging]
+strategy = "projfs"
+```
+
+If `Client-ProjFS` is not installed, TA falls back to `smart` staging automatically with a log message explaining how to enable it. You can always check with `ta doctor`.
+
+How ProjFS staging works:
+- **Modified files**: when the agent writes a file, the write lands in `.projfs-scratch/` — a real on-disk store in the staging root. The source file is never touched.
+- **Created files**: new files go directly into the staging root as real files.
+- **Deleted files**: the agent's deletion is recorded as a tombstone entry in `.projfs-scratch/.ta-deletes.jsonl`. The diff engine reads these tombstones to report the file as `Deleted`.
+- **Unmodified files**: appear as zero-cost placeholders. Content reads return source bytes without any disk I/O on the staging volume.
+
+The existing `diff_all()` logic works transparently with ProjFS — no special handling is needed by reviewers or by `ta draft apply`.
+
 **Auto-generating `.taignore`**: When you run `ta setup vcs`, TA now detects your project type and automatically adds appropriate exclude patterns to `.taignore`. For example, a Rust project gets `target/`, a Node project gets `node_modules/`, and an Unreal project gets `Binaries/`, `Intermediate/`, etc. Existing entries are never overwritten — only new patterns are appended.
 
 ### Goals
