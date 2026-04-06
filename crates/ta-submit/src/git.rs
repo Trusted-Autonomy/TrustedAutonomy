@@ -231,6 +231,7 @@ impl GitAdapter {
         // Always include TA state files.
         candidates.push(".ta/plan_history.jsonl".to_string());
         candidates.push(".ta/goal-audit.jsonl".to_string());
+        candidates.push(".ta/velocity-history.jsonl".to_string());
         // Merge user-configured entries from [commit] auto_stage.
         let workflow_path = work_dir.join(".ta/workflow.toml");
         let workflow = crate::config::WorkflowConfig::load_or_default(&workflow_path);
@@ -1928,8 +1929,9 @@ mod tests {
         // Built-in lock files must be present.
         assert!(candidates.iter().any(|c| c == "Cargo.lock"));
         assert!(candidates.iter().any(|c| c == "go.sum"));
-        // TA state file must be present.
+        // TA state files must be present.
         assert!(candidates.iter().any(|c| c == ".ta/plan_history.jsonl"));
+        assert!(candidates.iter().any(|c| c == ".ta/velocity-history.jsonl"));
     }
 
     #[test]

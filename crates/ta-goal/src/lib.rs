@@ -34,4 +34,8 @@ pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
 pub use operations::{ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog};
 pub use persona::{PersonaCapabilities, PersonaConfig, PersonaInner, PersonaStyle, PersonaSummary};
 pub use store::GoalRunStore;
-pub use velocity::{GoalOutcome, VelocityAggregate, VelocityEntry, VelocityStore};
+pub use velocity::{
+    aggregate_by_contributor, detect_phase_conflicts, merge_velocity_entries,
+    migrate_local_to_history, ContributorAggregate, GoalOutcome, PhaseConflict, VelocityAggregate,
+    VelocityEntry, VelocityHistoryStore, VelocityStore,
+};

@@ -5355,11 +5355,24 @@ fn apply_package(
 
     // §8b: record velocity entry for the applied goal.
     {
-        use ta_goal::{GoalOutcome, VelocityEntry, VelocityStore};
+        use ta_goal::{GoalOutcome, VelocityEntry, VelocityHistoryStore, VelocityStore};
         let vs = VelocityStore::for_project(&config.workspace_root);
         let entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied);
         if let Err(e) = vs.append(&entry) {
             tracing::warn!("Failed to record velocity entry: {}", e);
+        }
+
+        // §8c: when committing to VCS, also append to the shared velocity-history.jsonl.
+        // This file is committed alongside plan_history.jsonl so multi-machine stats
+        // are visible to the whole team via `ta stats velocity --team`.
+        if git_commit {
+            let history_entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied)
+                .with_machine_id()
+                .with_committer(&target_dir);
+            let hs = VelocityHistoryStore::for_project(&target_dir);
+            if let Err(e) = hs.append(&history_entry) {
+                tracing::warn!("Failed to record velocity history entry: {}", e);
+            }
         }
     }
 
@@ -8867,6 +8880,24 @@ fn run() {
         assert!(full_msg.contains("README.md"));
         // No Debug-format change types like "Modify" — should use ~ + - > icons.
         assert!(!full_msg.contains("Modify  "));
+
+        // v0.15.7: velocity-history.jsonl written on --git-commit apply.
+        let history_path = project.path().join(".ta/velocity-history.jsonl");
+        assert!(
+            history_path.exists(),
+            "velocity-history.jsonl should exist after git-commit apply"
+        );
+        let history_content = std::fs::read_to_string(&history_path).unwrap();
+        assert!(
+            !history_content.trim().is_empty(),
+            "velocity-history.jsonl should not be empty"
+        );
+        let history_entry: serde_json::Value =
+            serde_json::from_str(history_content.trim()).unwrap();
+        assert_eq!(history_entry["outcome"], "applied");
+        // machine_id should be set (8 hex chars).
+        let mid = history_entry["machine_id"].as_str().unwrap_or("");
+        assert_eq!(mid.len(), 8, "machine_id should be 8 chars");
     }
 
     /// v0.14.16 — Branch restore: after `ta draft apply --git-commit`, the working

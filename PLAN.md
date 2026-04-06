@@ -9081,7 +9081,7 @@ supervisor = true         # run supervisor confidence check (default: true)
 ---
 
 ### v0.15.7 — Velocity Stats: Committed Aggregate & Multi-Machine Rollup
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Make velocity data committable, team-visible, and conflict-free. Currently `velocity-stats.jsonl` is purely local (gitignored), so stats never aggregate across machines or team members. This phase introduces a committed `velocity-history.jsonl` that is auto-staged on `ta draft apply --git-commit`, using the same append-only pattern as `plan_history.jsonl`.
 
 **Design**:
@@ -9094,23 +9094,23 @@ supervisor = true         # run supervisor confidence check (default: true)
 
 #### Items
 
-1. [ ] **`velocity-history.jsonl` schema**: extend `VelocityEntry` with `machine_id: String` (first 8 chars of SHA256(hostname)) and `committer: Option<String>` (from `git config user.name`). Keep backwards-compatible with existing local entries (both fields optional via `#[serde(default)]`).
+1. [x] **`velocity-history.jsonl` schema**: extended `VelocityEntry` with `machine_id: String` (first 8 chars of SHA256(hostname)) and `committer: Option<String>` (from `git config user.name`). Both `#[serde(default)]` — backwards-compatible. Added `machine_id()` helper (SHA-256 hostname hash), `git_committer()` helper, `with_machine_id()` / `with_committer()` builder methods. `VelocityHistoryStore` added alongside `VelocityStore`.
 
-2. [ ] **Write on apply**: in `apps/ta-cli/src/commands/run.rs` `apply_draft()`, after writing `plan_history.jsonl`, append the velocity entry to `.ta/velocity-history.jsonl`. Only when `--git-commit` is active (same guard as plan_history write).
+2. [x] **Write on apply**: `apply_package` §8c block in `apps/ta-cli/src/commands/draft.rs` writes to `.ta/velocity-history.jsonl` when `git_commit=true`, stamped with `machine_id` and `committer`. Uses `VelocityHistoryStore::for_project(target_dir)` — writes to the source project, not staging, so it's captured by `adapter.commit()`.
 
-3. [ ] **Add to `SHARED_TA_PATHS`** in `partitioning.rs` and remove from `LOCAL_TA_PATHS` / `default_local_exclude_paths()`. Auto-stage it in `commit.auto_stage` defaults alongside `plan_history.jsonl`.
+3. [x] **Add to `SHARED_TA_PATHS`** in `partitioning.rs` (`velocity-history.jsonl` added). Auto-staged via `git.rs` `auto_stage_candidates()` alongside `plan_history.jsonl`.
 
-4. [ ] **`ta stats velocity` deduplication**: merge local `velocity-stats.jsonl` and committed `velocity-history.jsonl`, dedup by `goal_id`, sort by `started_at`. Local-only entries (not yet committed) appear marked `[local]` in the detail view.
+4. [x] **`ta stats velocity` deduplication**: `merge_velocity_entries()` in `velocity.rs` merges local + committed, dedup by `goal_id`, sort by `started_at`. `velocity-detail` marks local-only entries as `[local]` in the `SOURCE` column.
 
-5. [ ] **`ta stats velocity --team`**: reads only `velocity-history.jsonl`, groups by `committer` or `machine_id`, shows per-person and aggregate throughput. Useful for multi-developer projects.
+5. [x] **`ta stats velocity` team + conflict view**: `--team` flag removed in favour of always showing per-contributor breakdown and phase conflict warnings. `aggregate_by_contributor()` groups committed entries by committer/machine_id. `detect_phase_conflicts()` flags plan phases with entries from more than one contributor. Both shown automatically in `ta stats velocity` output. `PhaseConflict` struct added to `velocity.rs`. 2 new tests: `detect_phase_conflicts_flags_multi_contributor_phases`, `detect_phase_conflicts_no_conflicts_when_single_contributor`.
 
-6. [ ] **`ta stats velocity --export`**: unchanged — exports from the merged view. Update the CSV/JSON header to include `machine_id` and `committer`.
+6. [x] **`ta stats export`**: updated CSV header includes `machine_id` and `committer` columns. `--committed-only` flag added to export only the shared history.
 
-7. [ ] **Migration**: on first run after upgrade, if `velocity-stats.jsonl` exists locally, offer `ta stats migrate` to promote all local entries into `velocity-history.jsonl` with the current machine's `machine_id`. Non-destructive — local file stays.
+7. [x] **Migration**: `ta stats migrate` (new `Migrate` subcommand in `stats.rs`) promotes all local-only entries to `velocity-history.jsonl` with current `machine_id`. `--dry-run` to preview. `migrate_local_to_history()` in `velocity.rs`.
 
-8. [ ] **Tests**: apply with `--git-commit` writes to velocity-history; dedup works across both files; `--team` flag aggregates correctly; migration path handles missing fields gracefully.
+8. [x] **Tests**: `velocity_history_store_append_and_load`, `velocity_history_empty_when_no_file`, `merge_deduplicates_by_goal_id`, `migrate_promotes_local_entries_to_history`, `aggregate_by_contributor_groups_by_committer`, `old_entry_without_machine_id_deserializes_ok`, `machine_id_is_eight_hex_chars`, `machine_id_is_stable` (8 tests in `velocity.rs`). `apply_with_git_commit` extended to assert `velocity-history.jsonl` is written with correct fields. `auto_stage_candidates_includes_builtin_and_plan_history` updated.
 
-9. [ ] **USAGE.md**: "Team velocity" section explaining the two-file design, how to read cross-machine stats, and the `--team` flag.
+9. [x] **USAGE.md**: Revised velocity section: two-file design table, example output showing contributor table and phase conflict warning, `ta stats migrate` workflow, export docs. `--team` flag removed from docs.
 
 #### Version: `0.15.7-alpha`
 
@@ -10026,15 +10026,57 @@ Secrets required (GitHub Actions repository secrets):
 
 ---
 
-### v0.15.17 — `ta doctor`: Auth Validation & First-Class Subscription Support
+### v0.15.17 — `ta doctor`: Auth Validation & Agent-Agnostic Auth Spec
 <!-- status: pending -->
-**Goal**: A `ta doctor` command that validates the full TA runtime chain and reports the active authentication mode with clear, actionable output. Claude supports two auth modes -- API key (`ANTHROPIC_API_KEY`) and subscription session (claude.ai login via `claude auth login`) -- but TA has no first-class awareness of which mode is active or whether auth will succeed before an agent run starts. This causes confusing silent failures when auth is misconfigured. `ta doctor` makes the auth state explicit and validates the entire stack in one command.
+**Goal**: A `ta doctor` command that validates the full TA runtime chain and reports the active authentication mode with clear, actionable output. Auth checking must be abstracted at the `AgentFrameworkManifest` level so it works for any configured agent — not just Claude. Each framework declares what auth methods it accepts; `ta doctor` checks whichever framework is active.
 
 **Depends on**: v0.13.11 (platform installers), v0.15.5 (terms acceptance gate)
 
-**Background**: Subscription users (claude.ai) authenticate via a session stored in the OS config directory (`~/.config/claude/` on Mac/Linux, `%APPDATA%\Claude\` on Windows). There is no environment variable to check -- auth is transparent to subprocesses that invoke `claude`. API key users set `ANTHROPIC_API_KEY`. Both modes work, but TA currently has no way to report which mode is active or warn when neither is configured. This was surfaced when `diagnose_ta.py` incorrectly flagged subscription users as unauthenticated.
+**Background**: Different agent frameworks require different auth:
+- `claude-code`: API key (`ANTHROPIC_API_KEY`) **or** subscription session (`~/.config/claude/`)
+- `codex`: API key (`OPENAI_API_KEY`)
+- `ollama`: local service, but auth has two layers — (1) the Ollama service itself can require an API key (`OLLAMA_API_KEY`, added in v0.5) for protected instances, and (2) the models Ollama serves can be hosted on remote providers (OpenAI-compatible APIs, gated Hugging Face repos) that require their own credentials. A bare `ollama` install with only local models needs no credentials; an `ollama` instance proxying a subscription model does.
+- custom/external frameworks: arbitrary env vars, session files, or local service endpoints
 
-**Design**:
+TA currently has no agent-agnostic auth model. Claude-specific auth is hardcoded in ad-hoc checks that cannot generalize. When the active framework is `codex` or `ollama`, TA cannot validate auth at all. The fix is to declare auth requirements in `AgentFrameworkManifest` and drive all checking from that spec.
+
+**Design — `AgentAuthSpec` in `AgentFrameworkManifest`**:
+
+```toml
+# In a user-defined agent manifest (.ta/agents/my-agent.yaml):
+[auth]
+required = true       # false = service being absent is not a fatal error
+methods = [
+  { type = "env_var",      name = "MY_API_KEY",          label = "API key",        setup = "export MY_API_KEY=..." },
+  { type = "session_file", config_dir = "~/.config/myagent/", check_cmd = "myagent auth status", label = "session" },
+  { type = "local_service", url_env = "MYAGENT_HOST", default_url = "http://localhost:8080", health = "/health",
+    service_auth = [{ type = "env_var", name = "MYAGENT_API_KEY", required = false }],
+    upstream_auth = [] },
+]
+```
+
+`AuthMethodSpec` variants:
+- `EnvVar { name, label, setup_hint, required }` — passes if env var is non-empty; `required=false` means absence is a soft warning, not a failure
+- `SessionFile { config_dir_unix, config_dir_windows, check_cmd }` — passes if config dir or check_cmd exits 0
+- `LocalService { url_env_var, default_url, health_endpoint, service_auth, upstream_auth }` — two-phase check:
+  - **Phase 1 — reachability**: HTTP GET to `health_endpoint` returns 2xx. If unreachable and `required=false`, the whole method is skipped (soft pass). If unreachable and `required=true`, fail with "service not running" guidance.
+  - **Phase 2 — credentials** (only runs if phase 1 passes): Check `service_auth` methods in order (e.g., `OLLAMA_API_KEY` for a protected Ollama instance). Then check `upstream_auth` methods in order (e.g., `OPENAI_API_KEY` for an OpenAI-compatible model Ollama is proxying). Each inner method can be `required=false` to emit a warning rather than fail. Both lists default to empty (no credential check).
+- `None` — always passes (framework needs no auth)
+
+`detect_auth_mode(spec: &AgentAuthSpec) -> AuthCheckResult` tries each top-level method in order, returns the first that passes all its phases. If `required=true` and none pass, returns `AuthCheckResult::Missing { tried: Vec<(AuthMethodSpec, String)> }` with all attempted methods so the error can enumerate every option.
+
+Built-in manifests get `auth` populated:
+
+| Framework | Auth methods |
+|-----------|-------------|
+| `claude-code` | `EnvVar(ANTHROPIC_API_KEY)` then `SessionFile(~/.config/claude/, "claude auth status")` |
+| `codex` | `EnvVar(OPENAI_API_KEY)` |
+| `claude-flow` | Inherits `claude-code` auth (delegates to Claude) |
+| `ollama` | `LocalService(OLLAMA_HOST, localhost:11434, /api/tags, service_auth=[EnvVar(OLLAMA_API_KEY, required=false)], upstream_auth=[])`, `required=false` |
+
+Ollama's built-in manifest starts with no upstream credentials. Users who configure Ollama to proxy a remote provider (e.g., `OPENAI_API_KEY` for an OpenAI-compatible endpoint) add the upstream method to their local manifest override in `.ta/agents/ollama.yaml`. `ta doctor` then validates both layers and reports each independently.
+
+User-defined manifests set `[auth]` freely. `ta doctor` reads the active framework's manifest and runs `detect_auth_mode` — it needs no knowledge of any specific agent.
 
 ```
 ta doctor
@@ -10046,8 +10088,8 @@ TA Doctor -- Runtime Validation
 
   [ok] TA CLI         0.15.17-alpha (328ac82d)
   [ok] Daemon         0.15.17-alpha -- connected at http://127.0.0.1:7700
-  [ok] Auth           Subscription session (claude.ai) -- ~/.config/claude/
-  [ok] Agent (claude) Found at /usr/local/bin/claude -- v1.x.x
+  [ok] Auth (claude-code)  Subscription session -- ~/.config/claude/
+  [ok] Agent binary   /usr/local/bin/claude -- v1.x.x
   [ok] gh CLI         Found at /usr/local/bin/gh -- github.com authenticated
   [ok] Project root   /Users/michael/dev/myproject
   [ok] .ta/config     Loaded -- agent: claude-code, model: claude-sonnet-4-6
@@ -10056,36 +10098,68 @@ TA Doctor -- Runtime Validation
 All checks passed.
 ```
 
-Output (auth not configured):
+Output (auth not configured, any agent):
 ```
-  [FAIL] Auth  No authentication found.
-         Option 1 (subscription): claude auth login
-         Option 2 (API key):      export ANTHROPIC_API_KEY=sk-ant-...
-         See: https://docs.anthropic.com/en/docs/claude-code
+  [FAIL] Auth (claude-code)  No authentication found.
+         Tried:
+           env var   ANTHROPIC_API_KEY — not set
+           session   ~/.config/claude/ — not found
+         Fix one of:
+           Option 1 (subscription): claude auth login
+           Option 2 (API key):      export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Output (Ollama — service running, no credentials needed):
+```
+  [ok] Auth (ollama)  Service reachable at http://localhost:11434 — no credentials required
+```
+
+Output (Ollama — protected instance, API key missing):
+```
+  [warn] Auth (ollama)  Service reachable but OLLAMA_API_KEY not set.
+         This Ollama instance may require a key if access control is enabled.
+         Fix: export OLLAMA_API_KEY=<your-key>
+              (or unset if this Ollama instance has no access control)
+```
+
+Output (Ollama — proxying a remote provider, upstream key missing):
+```
+  [warn] Auth (ollama)  Service reachable. Upstream provider credentials not configured.
+         Your ollama manifest declares upstream_auth requiring OPENAI_API_KEY — not set.
+         Fix: export OPENAI_API_KEY=<your-key>
+              (or remove upstream_auth from .ta/agents/ollama.yaml if not needed)
 ```
 
 **Items**:
 
-1. [ ] **`ta doctor` command** (`apps/ta-cli/src/commands/doctor.rs`): Runs the following checks in order, prints a pass/fail line for each, exits non-zero if any check fails:
-   - CLI version (always passes; shows version + git hash)
-   - Daemon connection (calls `GET /health`; shows URL + version; warns on version mismatch)
-   - Auth mode detection: check `ANTHROPIC_API_KEY` (API key mode), then check OS config dirs for Claude session (subscription mode), then check `claude auth status` output; report mode + location
-   - `claude` binary presence (`which claude` / `where claude`)
+1. [ ] **`AgentAuthSpec` in `crates/ta-runtime/src/auth_spec.rs`**: Define `AgentAuthSpec { required: bool, methods: Vec<AuthMethodSpec> }` and `AuthMethodSpec` enum:
+   - `EnvVar { name, label, setup_hint, required: bool }` — `required=false` means missing is a soft warning
+   - `SessionFile { config_dir_unix, config_dir_windows, check_cmd }`
+   - `LocalService { url_env_var, default_url, health_endpoint, service_auth: Vec<AuthMethodSpec>, upstream_auth: Vec<AuthMethodSpec> }` — `service_auth` lists credentials the service itself requires (e.g., `OLLAMA_API_KEY`); `upstream_auth` lists credentials for any remote provider the service is proxying (e.g., `OPENAI_API_KEY` when Ollama proxies an OpenAI-compatible endpoint)
+   - `None` — always passes
+
+   Add `#[serde(default)] pub auth: AgentAuthSpec` to `AgentFrameworkManifest`. Populate built-in manifests: `claude-code` (EnvVar + SessionFile), `codex` (EnvVar), `claude-flow` (inherits claude-code), `ollama` (LocalService with `service_auth=[EnvVar(OLLAMA_API_KEY, required=false)]`, `upstream_auth=[]`, `required=false`). User-defined YAML manifests override/extend via the `[auth]` section, including adding `upstream_auth` entries for Ollama deployments that proxy remote providers.
+
+2. [ ] **`detect_auth_mode`** (`crates/ta-runtime/src/auth_spec.rs`): `detect_auth_mode(spec: &AgentAuthSpec) -> AuthCheckResult` where `AuthCheckResult` is `Ok(AuthMethodSpec)` (first passing method) or `Missing { tried: Vec<(AuthMethodSpec, String)> }` (all failed, with reason per method). `LocalService` runs a two-phase check: (1) HTTP GET health endpoint — if unreachable and `required=false`, soft-pass; if unreachable and `required=true`, fail with "not running" message. (2) If reachable: run `service_auth` checks (fail or warn per `required`), then run `upstream_auth` checks (fail or warn per `required`). All inner `required=false` failures are collected as warnings, not fatal errors, and surfaced in `ta doctor` as `[warn]` lines.
+
+3. [ ] **`ta doctor` command** (`apps/ta-cli/src/commands/doctor.rs`): Runs the following checks in order, prints a pass/fail line for each, exits non-zero if any fail:
+   - CLI version (always passes)
+   - Daemon connection (`GET /health`; warns on version mismatch)
+   - Auth check: load active framework manifest, call `detect_auth_mode`, report method + detail
+   - Agent binary presence (`which`/`where` the manifest's `command`)
    - `gh` CLI presence and auth (`gh auth status`)
-   - Project root detection (`.ta/config.toml` present)
-   - Plan state (`ta plan next` output summarized)
+   - Project root detection
+   - Plan state
 
-2. [ ] **Auth mode detection** (`crates/ta-core/src/auth.rs` or inline in `doctor.rs`): `detect_auth_mode() -> AuthMode` where `AuthMode` is an enum: `ApiKey`, `Subscription { config_dir: PathBuf }`, `Unknown`. Checks in order: `ANTHROPIC_API_KEY` env var, OS config dirs, `claude auth status` subprocess. Returns `Unknown` if none found.
+4. [ ] **Auth errors in `ta run`**: When an agent exits immediately with an auth-looking failure, call `detect_auth_mode` for the active framework and append the result to the error message. Replace generic "agent failed" with framework-specific fix hints drawn from `AuthMethodSpec.setup_hint`.
 
-3. [ ] **`AuthMode` used in error messages**: When `ta run` or `ta workflow run` fails due to auth, the error message should report the detected `AuthMode` and suggest the appropriate fix (re-login for subscription, check key for API key). Replace the current generic "agent failed" messages with auth-aware suggestions.
+5. [ ] **`ta doctor --json`**: Machine-readable output. Each check is `{ "name", "status": "ok"|"warn"|"fail", "detail", "fix" }`.
 
-4. [ ] **`ta doctor --json`**: Machine-readable output for CI and `diagnose_ta.py` integration. Each check is a JSON object with `name`, `status` (`ok`/`warn`/`fail`), `detail`, and `fix` (actionable string on fail).
+6. [ ] **`ta doctor` in `ta onboard`** (v0.15.11 integration): Onboarding wizard runs `ta doctor` as its first step and blocks on any `fail` with a guided fix flow.
 
-5. [ ] **`ta doctor` in `ta onboard`** (v0.15.11 integration): The post-install onboarding wizard runs `ta doctor` as its first step and blocks on any `fail` result with a guided fix flow.
+7. [ ] **Tests**: `detect_auth_mode` with `ANTHROPIC_API_KEY` set; with fake session config dir; with neither (returns `Missing`); with `LocalService` and mock HTTP server returning 200 (soft pass); `LocalService` unreachable + `required=false` (soft pass, no error); `LocalService` reachable + `service_auth` env var missing + `required=false` (warns but passes); `LocalService` reachable + `upstream_auth` env var set (passes with upstream detail); `LocalService` reachable + `upstream_auth` env var missing + `required=true` (fails with upstream guidance); ollama built-in manifest YAML round-trips with service_auth and empty upstream_auth; custom manifest YAML with upstream_auth entries round-trips correctly; `ta doctor --json` output is valid JSON; version mismatch warns but does not fail.
 
-6. [ ] **USAGE.md**: "ta doctor" section covering: what each check tests, how to fix common failures (version mismatch, auth not found, daemon not running), how to use `--json` for scripted validation.
-
-7. [ ] **Tests**: `AuthMode` detection with `ANTHROPIC_API_KEY` set; detection with fake config dir present; detection with neither (returns `Unknown`); `ta doctor --json` output is valid JSON; each check failure produces a non-zero exit code; version mismatch check warns but does not fail (daemon continues to work across minor versions).
+8. [ ] **USAGE.md**: "ta doctor" section — what each check tests, common fix paths, `--json` for CI, and how to declare `[auth]` in a custom agent manifest. Include a subsection on Ollama: how `service_auth` covers `OLLAMA_API_KEY` for protected instances, and how to add `upstream_auth` in `.ta/agents/ollama.yaml` when Ollama is proxying a remote provider that requires its own credentials.
 
 #### Version: `0.15.17-alpha`
 

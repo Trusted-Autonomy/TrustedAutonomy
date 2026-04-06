@@ -2,6 +2,11 @@
 //
 // Tracks per-goal timing and outcome data in `.ta/velocity-stats.json`.
 // Append-only: one entry per goal terminal outcome.
+//
+// v0.15.7: Added `velocity-history.jsonl` — a committed, shared log written on
+// `ta draft apply --git-commit`. Each entry tagged with machine_id + committer
+// so multi-machine appends are conflict-free. `ta stats velocity` merges both
+// files (dedup by goal_id). `ta stats velocity --team` reads shared history only.
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -13,6 +18,58 @@ use uuid::Uuid;
 
 use crate::error::GoalError;
 use crate::goal_run::GoalRun;
+
+/// Compute a stable 8-character machine identifier: first 8 hex chars of
+/// SHA-256(hostname). Falls back to `"unknown"` if hostname is unavailable.
+pub fn machine_id() -> String {
+    use sha2::{Digest, Sha256};
+    let hostname = hostname_str();
+    let mut hasher = Sha256::new();
+    hasher.update(hostname.as_bytes());
+    let result = hasher.finalize();
+    // Encode as lowercase hex, take first 8 characters.
+    let hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
+    hex[..8].to_string()
+}
+
+/// Return the current system hostname as a string, or `"unknown"` on failure.
+fn hostname_str() -> String {
+    // std::net::gethostname is not stable; use the hostname via env or process.
+    // Prefer HOSTNAME env var (set on Linux), fall back to running `hostname`.
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        if !h.is_empty() {
+            return h;
+        }
+    }
+    // Try the `hostname` command as a cross-platform fallback.
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Read `git config user.name` from the given directory (or the global config).
+/// Returns `None` if git is unavailable or the config is not set.
+pub fn git_committer(work_dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["config", "user.name"])
+        .current_dir(work_dir)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    } else {
+        None
+    }
+}
 
 /// Outcome of a goal run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +133,14 @@ pub struct VelocityEntry {
     pub denial_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
+    /// First 8 hex chars of SHA-256(hostname) — identifies the machine that applied.
+    /// Added in v0.15.7; absent in entries written by earlier versions.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub machine_id: String,
+    /// Git committer name at apply time (`git config user.name`).
+    /// Added in v0.15.7; absent in entries written by earlier versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<String>,
 }
 
 impl VelocityEntry {
@@ -112,6 +177,8 @@ impl VelocityEntry {
             rework_seconds: 0,
             denial_reason: None,
             cancel_reason: None,
+            machine_id: String::new(),
+            committer: None,
         }
     }
 
@@ -130,6 +197,18 @@ impl VelocityEntry {
     /// Set the workflow type.
     pub fn with_workflow(mut self, workflow: impl Into<String>) -> Self {
         self.workflow = workflow.into();
+        self
+    }
+
+    /// Stamp with the current machine_id (SHA-256 hostname hash).
+    pub fn with_machine_id(mut self) -> Self {
+        self.machine_id = machine_id();
+        self
+    }
+
+    /// Stamp with the git committer name from the given working directory.
+    pub fn with_committer(mut self, work_dir: &Path) -> Self {
+        self.committer = git_committer(work_dir);
         self
     }
 }
@@ -293,6 +372,257 @@ impl VelocityStore {
     }
 }
 
+/// The committed shared velocity history: `.ta/velocity-history.jsonl`.
+///
+/// Written by `ta draft apply --git-commit` (same moment as `plan_history.jsonl`).
+/// Each entry carries `machine_id` and `committer` so multi-machine appends produce
+/// unique lines that merge without conflicts.
+///
+/// This store is intentionally separate from `VelocityStore` (local log) so the two
+/// files can evolve independently.
+pub struct VelocityHistoryStore {
+    path: PathBuf,
+}
+
+impl VelocityHistoryStore {
+    /// Create a store backed by the given path.
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Convenience constructor: `.ta/velocity-history.jsonl` relative to project root.
+    pub fn for_project(project_root: impl AsRef<Path>) -> Self {
+        Self::new(project_root.as_ref().join(".ta/velocity-history.jsonl"))
+    }
+
+    /// Append an entry to the committed history store.
+    pub fn append(&self, entry: &VelocityEntry) -> Result<(), GoalError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|source| GoalError::IoError {
+                path: parent.display().to_string(),
+                source,
+            })?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|source| GoalError::IoError {
+                path: self.path.display().to_string(),
+                source,
+            })?;
+        let line = serde_json::to_string(entry)?;
+        writeln!(file, "{}", line).map_err(|source| GoalError::IoError {
+            path: self.path.display().to_string(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    /// Load all entries from the committed history.
+    pub fn load_all(&self) -> Result<Vec<VelocityEntry>, GoalError> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = fs::File::open(&self.path).map_err(|source| GoalError::IoError {
+            path: self.path.display().to_string(),
+            source,
+        })?;
+        let reader = BufReader::new(file);
+        let mut entries = Vec::new();
+        for line in reader.lines() {
+            let line = line.map_err(|source| GoalError::IoError {
+                path: self.path.display().to_string(),
+                source,
+            })?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<VelocityEntry>(trimmed) {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+}
+
+/// Merge local (`velocity-stats.jsonl`) and committed (`velocity-history.jsonl`) entries,
+/// deduplicating by `goal_id`. Entries that appear in the committed store are canonical;
+/// local-only entries are included but flagged by the caller as `[local]` if needed.
+///
+/// Result is sorted by `started_at` ascending.
+pub fn merge_velocity_entries(
+    local: Vec<VelocityEntry>,
+    committed: Vec<VelocityEntry>,
+) -> (Vec<VelocityEntry>, std::collections::HashSet<Uuid>) {
+    use std::collections::{HashMap, HashSet};
+
+    let committed_ids: HashSet<Uuid> = committed.iter().map(|e| e.goal_id).collect();
+
+    // Build a map from goal_id -> entry, starting with local, overwritten by committed.
+    let mut by_id: HashMap<Uuid, VelocityEntry> =
+        local.into_iter().map(|e| (e.goal_id, e)).collect();
+    for entry in committed {
+        by_id.insert(entry.goal_id, entry);
+    }
+
+    let mut merged: Vec<VelocityEntry> = by_id.into_values().collect();
+    merged.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+
+    (merged, committed_ids)
+}
+
+/// Per-committer or per-machine aggregate for `--team` view.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContributorAggregate {
+    /// Name or machine-id of the contributor.
+    pub contributor: String,
+    pub total_goals: usize,
+    pub applied: usize,
+    pub avg_build_seconds: i64,
+    pub total_build_seconds: i64,
+}
+
+/// Aggregate committed history by committer (falls back to machine_id).
+pub fn aggregate_by_contributor(entries: &[VelocityEntry]) -> Vec<ContributorAggregate> {
+    use std::collections::HashMap;
+    let mut map: HashMap<String, Vec<&VelocityEntry>> = HashMap::new();
+    for entry in entries {
+        let key = entry.committer.clone().unwrap_or_else(|| {
+            if entry.machine_id.is_empty() {
+                "unknown".to_string()
+            } else {
+                entry.machine_id.clone()
+            }
+        });
+        map.entry(key).or_default().push(entry);
+    }
+
+    let mut result: Vec<ContributorAggregate> = map
+        .into_iter()
+        .map(|(contributor, es)| {
+            let total_goals = es.len();
+            let applied = es
+                .iter()
+                .filter(|e| e.outcome == GoalOutcome::Applied)
+                .count();
+            let total_build_seconds: i64 = es.iter().map(|e| e.build_seconds).sum();
+            let avg_build_seconds = if total_goals > 0 {
+                total_build_seconds / total_goals as i64
+            } else {
+                0
+            };
+            ContributorAggregate {
+                contributor,
+                total_goals,
+                applied,
+                avg_build_seconds,
+                total_build_seconds,
+            }
+        })
+        .collect();
+    result.sort_by(|a, b| b.total_goals.cmp(&a.total_goals));
+    result
+}
+
+/// A plan phase that had contributions from more than one committer/machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseConflict {
+    /// The plan phase ID (e.g. "v0.15.7").
+    pub phase_id: String,
+    /// Contributors who each have at least one entry for this phase.
+    pub contributors: Vec<String>,
+    /// Number of entries for this phase across all contributors.
+    pub entry_count: usize,
+}
+
+/// Detect plan phases that appear in committed history entries from more than one
+/// distinct contributor (committer or machine_id). These indicate parallel work
+/// that may need coordination.
+///
+/// Only entries with a non-empty `plan_phase` are considered.
+pub fn detect_phase_conflicts(committed: &[VelocityEntry]) -> Vec<PhaseConflict> {
+    use std::collections::{HashMap, HashSet};
+
+    // phase_id -> set of contributor keys
+    let mut phase_contributors: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut phase_counts: HashMap<String, usize> = HashMap::new();
+
+    for entry in committed {
+        let phase = match &entry.plan_phase {
+            Some(p) if !p.is_empty() => p.clone(),
+            _ => continue,
+        };
+        let contributor = entry.committer.clone().unwrap_or_else(|| {
+            if entry.machine_id.is_empty() {
+                "unknown".to_string()
+            } else {
+                entry.machine_id.clone()
+            }
+        });
+        phase_contributors
+            .entry(phase.clone())
+            .or_default()
+            .insert(contributor);
+        *phase_counts.entry(phase).or_default() += 1;
+    }
+
+    let mut conflicts: Vec<PhaseConflict> = phase_contributors
+        .into_iter()
+        .filter(|(_, contributors)| contributors.len() > 1)
+        .map(|(phase_id, contributors)| {
+            let entry_count = phase_counts[&phase_id];
+            let mut sorted: Vec<String> = contributors.into_iter().collect();
+            sorted.sort();
+            PhaseConflict {
+                phase_id,
+                contributors: sorted,
+                entry_count,
+            }
+        })
+        .collect();
+    conflicts.sort_by(|a, b| a.phase_id.cmp(&b.phase_id));
+    conflicts
+}
+
+/// Migrate all entries from a local VelocityStore into the VelocityHistoryStore,
+/// stamping each entry with the current machine_id. Skips entries already present
+/// in the history store (by goal_id). Non-destructive — local file is unchanged.
+///
+/// Returns the number of entries written.
+pub fn migrate_local_to_history(
+    local_store: &VelocityStore,
+    history_store: &VelocityHistoryStore,
+    work_dir: &Path,
+) -> Result<usize, GoalError> {
+    let local_entries = local_store.load_all()?;
+    let committed_entries = history_store.load_all()?;
+    let committed_ids: std::collections::HashSet<Uuid> =
+        committed_entries.iter().map(|e| e.goal_id).collect();
+
+    let mid = machine_id();
+    let committer = git_committer(work_dir);
+    let mut written = 0;
+
+    for mut entry in local_entries {
+        if committed_ids.contains(&entry.goal_id) {
+            continue;
+        }
+        if entry.machine_id.is_empty() {
+            entry.machine_id = mid.clone();
+        }
+        if entry.committer.is_none() {
+            entry.committer = committer.clone();
+        }
+        history_store.append(&entry)?;
+        written += 1;
+    }
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +691,195 @@ mod tests {
         assert_eq!(agg.applied, 3);
         assert_eq!(agg.failed, 1);
         assert!(agg.avg_build_seconds > 0);
+    }
+
+    #[test]
+    fn machine_id_is_eight_hex_chars() {
+        let mid = machine_id();
+        assert_eq!(mid.len(), 8);
+        assert!(mid.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn machine_id_is_stable() {
+        // Two calls must produce the same value.
+        assert_eq!(machine_id(), machine_id());
+    }
+
+    #[test]
+    fn velocity_history_store_append_and_load() {
+        let dir = tempdir().unwrap();
+        let history = VelocityHistoryStore::new(dir.path().join("velocity-history.jsonl"));
+
+        let goal = make_goal();
+        let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied)
+            .with_machine_id()
+            .with_committer(dir.path());
+        history.append(&entry).unwrap();
+
+        let loaded = history.load_all().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].goal_id, goal.goal_run_id);
+        assert_eq!(loaded[0].machine_id.len(), 8);
+    }
+
+    #[test]
+    fn velocity_history_empty_when_no_file() {
+        let dir = tempdir().unwrap();
+        let history = VelocityHistoryStore::new(dir.path().join("velocity-history.jsonl"));
+        assert!(history.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn merge_deduplicates_by_goal_id() {
+        let dir = tempdir().unwrap();
+        let local_store = VelocityStore::new(dir.path().join("velocity-stats.jsonl"));
+        let history_store = VelocityHistoryStore::new(dir.path().join("velocity-history.jsonl"));
+
+        let goal = make_goal();
+        // Same goal appears in both local and committed.
+        let local_entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied);
+        let mut committed_entry = local_entry.clone();
+        committed_entry.machine_id = "aabbccdd".to_string();
+
+        local_store.append(&local_entry).unwrap();
+        history_store.append(&committed_entry).unwrap();
+
+        // Unique goal only in local.
+        let local_only = make_goal();
+        local_store
+            .append(&VelocityEntry::from_goal(&local_only, GoalOutcome::Failed))
+            .unwrap();
+
+        let local = local_store.load_all().unwrap();
+        let committed = history_store.load_all().unwrap();
+        let (merged, committed_ids) = merge_velocity_entries(local, committed);
+
+        // 2 unique goal_ids after dedup.
+        assert_eq!(merged.len(), 2);
+        assert!(committed_ids.contains(&goal.goal_run_id));
+        assert!(!committed_ids.contains(&local_only.goal_run_id));
+
+        // The merged entry for the shared goal takes the committed version (has machine_id).
+        let shared = merged
+            .iter()
+            .find(|e| e.goal_id == goal.goal_run_id)
+            .unwrap();
+        assert_eq!(shared.machine_id, "aabbccdd");
+    }
+
+    #[test]
+    fn migrate_promotes_local_entries_to_history() {
+        let dir = tempdir().unwrap();
+        let local_store = VelocityStore::new(dir.path().join("velocity-stats.jsonl"));
+        let history_store = VelocityHistoryStore::new(dir.path().join("velocity-history.jsonl"));
+
+        // Two goals in local.
+        let goal1 = make_goal();
+        let goal2 = make_goal();
+        local_store
+            .append(&VelocityEntry::from_goal(&goal1, GoalOutcome::Applied))
+            .unwrap();
+        local_store
+            .append(&VelocityEntry::from_goal(&goal2, GoalOutcome::Denied))
+            .unwrap();
+
+        // Pre-populate history with goal1 — should be skipped during migrate.
+        let mut pre = VelocityEntry::from_goal(&goal1, GoalOutcome::Applied);
+        pre.machine_id = "existing1".to_string();
+        history_store.append(&pre).unwrap();
+
+        let written = migrate_local_to_history(&local_store, &history_store, dir.path()).unwrap();
+
+        // Only goal2 is new.
+        assert_eq!(written, 1);
+
+        let all = history_store.load_all().unwrap();
+        assert_eq!(all.len(), 2);
+
+        // goal1's entry in history retains the original machine_id.
+        let g1 = all.iter().find(|e| e.goal_id == goal1.goal_run_id).unwrap();
+        assert_eq!(g1.machine_id, "existing1");
+    }
+
+    #[test]
+    fn aggregate_by_contributor_groups_by_committer() {
+        let _dir = tempdir().unwrap();
+        let make_entry = |committer: &str, outcome: GoalOutcome| {
+            let goal = make_goal();
+            let mut e = VelocityEntry::from_goal(&goal, outcome);
+            e.committer = Some(committer.to_string());
+            e.machine_id = "abc12345".to_string();
+            e
+        };
+
+        let entries = vec![
+            make_entry("alice", GoalOutcome::Applied),
+            make_entry("alice", GoalOutcome::Applied),
+            make_entry("bob", GoalOutcome::Denied),
+        ];
+
+        let agg = aggregate_by_contributor(&entries);
+        let alice = agg.iter().find(|a| a.contributor == "alice").unwrap();
+        let bob = agg.iter().find(|a| a.contributor == "bob").unwrap();
+
+        assert_eq!(alice.total_goals, 2);
+        assert_eq!(alice.applied, 2);
+        assert_eq!(bob.total_goals, 1);
+        assert_eq!(bob.applied, 0);
+    }
+
+    #[test]
+    fn detect_phase_conflicts_flags_multi_contributor_phases() {
+        let make_entry = |committer: &str, phase: Option<&str>| {
+            let goal = make_goal();
+            let mut e = VelocityEntry::from_goal(&goal, GoalOutcome::Applied);
+            e.committer = Some(committer.to_string());
+            e.machine_id = "abc12345".to_string();
+            e.plan_phase = phase.map(|s| s.to_string());
+            e
+        };
+
+        let entries = vec![
+            make_entry("alice", Some("v0.15.7")),
+            make_entry("bob", Some("v0.15.7")), // conflict: same phase, different person
+            make_entry("alice", Some("v0.15.8")), // no conflict: only alice
+            make_entry("alice", None),          // no phase: ignored
+        ];
+
+        let conflicts = detect_phase_conflicts(&entries);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].phase_id, "v0.15.7");
+        assert_eq!(conflicts[0].contributors.len(), 2);
+        assert!(conflicts[0].contributors.contains(&"alice".to_string()));
+        assert!(conflicts[0].contributors.contains(&"bob".to_string()));
+        assert_eq!(conflicts[0].entry_count, 2);
+    }
+
+    #[test]
+    fn detect_phase_conflicts_no_conflicts_when_single_contributor() {
+        let make_entry = |committer: &str, phase: &str| {
+            let goal = make_goal();
+            let mut e = VelocityEntry::from_goal(&goal, GoalOutcome::Applied);
+            e.committer = Some(committer.to_string());
+            e.plan_phase = Some(phase.to_string());
+            e
+        };
+
+        let entries = vec![
+            make_entry("alice", "v0.15.7"),
+            make_entry("alice", "v0.15.8"),
+        ];
+        let conflicts = detect_phase_conflicts(&entries);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn old_entry_without_machine_id_deserializes_ok() {
+        // Simulate an entry written before v0.15.7 (no machine_id / committer fields).
+        let old_json = r#"{"goal_id":"550e8400-e29b-41d4-a716-446655440000","title":"old","workflow":"","agent":"claude","outcome":"applied","started_at":"2025-01-01T00:00:00Z","build_seconds":300,"review_seconds":0,"total_seconds":300,"amended":false,"follow_up_count":0,"rework_seconds":0}"#;
+        let entry: VelocityEntry = serde_json::from_str(old_json).unwrap();
+        assert!(entry.machine_id.is_empty());
+        assert!(entry.committer.is_none());
     }
 }
