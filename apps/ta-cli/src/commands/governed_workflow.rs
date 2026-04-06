@@ -1063,10 +1063,16 @@ fn stage_review_draft(
     Ok(Some(summary))
 }
 
-/// Build the reviewer agent objective prompt.
+/// Build the reviewer agent objective prompt (v0.15.7.1 — staging-independent).
+///
+/// The reviewer reads the draft package directly (change_summary, artifact list,
+/// decision log). It does NOT require access to the staging directory — embedded
+/// context is sufficient. Staging is offered as optional supplementary context
+/// only if the directory still exists.
+///
+/// The reviewer marks `Failed` only if it produces no verdict JSON, not on
+/// staging absence.
 fn build_reviewer_prompt(workspace_root: &Path, draft_id: &str) -> anyhow::Result<String> {
-    let draft_dir = workspace_root.join(".ta").join("drafts").join(draft_id);
-    let summary_path = draft_dir.join("change_summary.json");
     // Absolute path so the agent writes to the source .ta/review/, not its staging copy.
     // The reviewer runs inside a staging workspace where .ta/ is excluded from diffs;
     // a relative path would silently write there instead of the expected location.
@@ -1076,17 +1082,96 @@ fn build_reviewer_prompt(workspace_root: &Path, draft_id: &str) -> anyhow::Resul
         .join(draft_id)
         .join("verdict.json");
 
+    // Load the draft package for embedded context (v0.15.7.1).
+    // This makes the reviewer independent of the staging directory.
+    let pkg_dir = workspace_root.join(".ta").join("drafts").join(draft_id);
+    let summary_path = pkg_dir.join("change_summary.json");
+    let decision_log_path = pkg_dir.join("decision_log.json");
+
     let summary_text = if summary_path.exists() {
         std::fs::read_to_string(&summary_path).unwrap_or_default()
     } else {
-        "(no change summary available)".to_string()
+        // Fall back to the draft package JSON (pr_packages dir).
+        let pkg_json_path = workspace_root
+            .join(".ta")
+            .join("pr_packages")
+            .join(format!("{}.json", draft_id));
+        if pkg_json_path.exists() {
+            // Extract summary from the draft package JSON.
+            std::fs::read_to_string(&pkg_json_path)
+                .ok()
+                .and_then(|s| {
+                    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+                    let summary = v.get("summary")?;
+                    serde_json::to_string_pretty(summary).ok()
+                })
+                .unwrap_or_else(|| "(no change summary available)".to_string())
+        } else {
+            "(no change summary available)".to_string()
+        }
+    };
+
+    let decision_log_text = if decision_log_path.exists() {
+        let text = std::fs::read_to_string(&decision_log_path).unwrap_or_default();
+        if text.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\nAgent decision log:\n{}\n", text)
+        }
+    } else {
+        String::new()
+    };
+
+    // Artifact list from draft package JSON (if available).
+    let artifact_list_text = {
+        let pkg_json_path = workspace_root
+            .join(".ta")
+            .join("pr_packages")
+            .join(format!("{}.json", draft_id));
+        if pkg_json_path.exists() {
+            std::fs::read_to_string(&pkg_json_path)
+                .ok()
+                .and_then(|s| {
+                    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+                    let artifacts = v.get("changes")?.get("artifacts")?.as_array()?;
+                    let lines: Vec<String> = artifacts
+                        .iter()
+                        .filter_map(|a| {
+                            let uri = a.get("resource_uri")?.as_str()?;
+                            let change_type = a
+                                .get("change_type")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("modified");
+                            Some(format!("  {} {}", change_type, uri))
+                        })
+                        .collect();
+                    if lines.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "\nArtifacts ({}):\n{}",
+                            lines.len(),
+                            lines.join("\n")
+                        ))
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
     };
 
     Ok(format!(
         "You are a code reviewer performing a governance review of a draft change set.\n\
          \n\
-         Draft ID: {}\n\
-         Change summary:\n{}\n\
+         IMPORTANT: You do NOT need access to the staging workspace directory. \
+         All relevant context is embedded below. If staging is unavailable, \
+         log 'staging absent — using embedded patches' and proceed with the review.\n\
+         \n\
+         Draft ID: {draft_id}\n\
+         Change summary:\n{summary_text}\n\
+         {decision_log_text}\
+         {artifact_list_text}\n\
          \n\
          Review the changes for:\n\
          - Correctness and completeness relative to the stated goal\n\
@@ -1095,7 +1180,7 @@ fn build_reviewer_prompt(workspace_root: &Path, draft_id: &str) -> anyhow::Resul
          - Breaking changes without migration path\n\
          - Constitution violations\n\
          \n\
-         Write your verdict to this exact absolute path: {}\n\
+         Write your verdict to this exact absolute path: {verdict_path}\n\
          Use this exact JSON format:\n\
          {{\n\
            \"verdict\": \"approve\" | \"flag\" | \"reject\",\n\
@@ -1105,10 +1190,15 @@ fn build_reviewer_prompt(workspace_root: &Path, draft_id: &str) -> anyhow::Resul
          \n\
          Use \"approve\" if the change is acceptable.\n\
          Use \"flag\" if there are concerns but it could be acceptable with human review.\n\
-         Use \"reject\" if there are serious issues that must be fixed before applying.",
-        draft_id,
-        summary_text,
-        verdict_path.display()
+         Use \"reject\" if there are serious issues that must be fixed before applying.\n\
+         \n\
+         You MUST write verdict.json. Failure to produce a verdict is the only \
+         condition under which this review is considered failed.",
+        draft_id = draft_id,
+        summary_text = summary_text,
+        decision_log_text = decision_log_text,
+        artifact_list_text = artifact_list_text,
+        verdict_path = verdict_path.display(),
     ))
 }
 

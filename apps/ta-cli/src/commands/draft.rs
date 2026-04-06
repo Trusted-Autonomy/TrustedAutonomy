@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::mpsc;
 
 use chrono::{Duration, Utc};
 use clap::Subcommand;
@@ -477,6 +478,76 @@ pub fn check_stale_drafts(config: &GatewayConfig) {
     }
 }
 
+/// Heartbeat writer for background draft-build processes (v0.15.7.1).
+///
+/// Spawns a background thread that touches `.ta/heartbeats/<goal-id>` every 30s.
+/// On drop, the thread is stopped. Call `finish_ok()` or `finish_err()` before
+/// dropping to write the appropriate sentinel file.
+struct BackgroundHeartbeat {
+    heartbeats_dir: std::path::PathBuf,
+    goal_id: String,
+    stop_tx: mpsc::SyncSender<()>,
+}
+
+impl BackgroundHeartbeat {
+    /// Start writing heartbeats for `goal_id`.
+    fn start(config: &ta_mcp_gateway::GatewayConfig, goal_id: &str) -> Self {
+        let heartbeats_dir = config.workspace_root.join(".ta").join("heartbeats");
+        let _ = std::fs::create_dir_all(&heartbeats_dir);
+        let hb_path = heartbeats_dir.join(goal_id);
+        // Write initial heartbeat so the watchdog sees it immediately.
+        let _ = std::fs::write(&hb_path, b"");
+
+        let (stop_tx, stop_rx) = mpsc::sync_channel::<()>(1);
+        let hb_path_thread = hb_path.clone();
+        std::thread::spawn(move || loop {
+            match stop_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Update mtime by writing the file again.
+                    let _ = std::fs::write(&hb_path_thread, b"");
+                }
+            }
+        });
+
+        tracing::debug!(goal_id = goal_id, "Background heartbeat started");
+        Self {
+            heartbeats_dir,
+            goal_id: goal_id.to_string(),
+            stop_tx,
+        }
+    }
+
+    /// Stop the heartbeat thread and write a `.done` sentinel.
+    fn finish_ok(self) {
+        let _ = self.stop_tx.send(());
+        let done = self.heartbeats_dir.join(format!("{}.done", self.goal_id));
+        let _ = std::fs::write(&done, b"");
+        tracing::debug!(
+            goal_id = self.goal_id,
+            "Background heartbeat: wrote .done sentinel"
+        );
+    }
+
+    /// Stop the heartbeat thread and write a `.failed` sentinel.
+    fn finish_err(self) {
+        let _ = self.stop_tx.send(());
+        let failed = self.heartbeats_dir.join(format!("{}.failed", self.goal_id));
+        let _ = std::fs::write(&failed, b"");
+        tracing::warn!(
+            goal_id = self.goal_id,
+            "Background heartbeat: wrote .failed sentinel"
+        );
+    }
+}
+
+impl Drop for BackgroundHeartbeat {
+    fn drop(&mut self) {
+        // Best-effort stop if finish_ok/finish_err was not called.
+        let _ = self.stop_tx.try_send(());
+    }
+}
+
 pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()> {
     match cmd {
         DraftCommands::Build {
@@ -485,14 +556,42 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             latest,
             apply_context_file,
         } => {
-            build_package(config, goal_id, summary, *latest)?;
-            // Apply deferred build context if present (v0.15.6.2 async draft build).
-            if let Some(ctx_path) = apply_context_file {
-                if ctx_path.exists() {
-                    apply_draft_build_context(config, goal_id, ctx_path)?;
+            // v0.15.7.1: Start heartbeat writer when invoked as background build
+            // (apply_context_file is only set by the background spawn from `ta run`).
+            // The heartbeat thread touches .ta/heartbeats/<goal-id> every 30s so
+            // the daemon watchdog can distinguish a healthy build from a hung one.
+            let heartbeat = if apply_context_file.is_some() && !goal_id.is_empty() {
+                Some(BackgroundHeartbeat::start(config, goal_id))
+            } else {
+                None
+            };
+
+            let build_result = build_package(config, goal_id, summary, *latest);
+            let ctx_result = match &build_result {
+                Ok(()) => {
+                    if let Some(ctx_path) = apply_context_file {
+                        if ctx_path.exists() {
+                            apply_draft_build_context(config, goal_id, ctx_path)
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(_) => build_result,
+            };
+
+            // Write .done or .failed sentinel and stop heartbeat thread.
+            if let Some(hb) = heartbeat {
+                if ctx_result.is_ok() {
+                    hb.finish_ok();
+                } else {
+                    hb.finish_err();
                 }
             }
-            Ok(())
+
+            ctx_result
         }
         DraftCommands::List {
             goal,
@@ -1974,6 +2073,7 @@ pub(crate) fn build_package(
             goal_id: goal.goal_run_id,
             draft_id: package_id,
             artifact_count: pkg.changes.artifacts.len(),
+            title: goal.title.clone(),
         };
         if let Err(e) = event_store.append(&EventEnvelope::new(event)) {
             tracing::warn!("Failed to persist DraftBuilt event: {}", e);

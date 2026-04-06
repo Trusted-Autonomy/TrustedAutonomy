@@ -202,6 +202,7 @@ mod tests {
             goal_id,
             draft_id,
             artifact_count: 5,
+            title: String::new(),
         };
         store.append(&EventEnvelope::new(built)).unwrap();
 

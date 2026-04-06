@@ -102,6 +102,7 @@ pub fn handle_pr_build(
             goal_id: goal_run_id,
             draft_id: package_id,
             artifact_count,
+            title: String::new(),
         };
         if let Err(e) = event_store.append(&EventEnvelope::new(event)) {
             tracing::warn!("Failed to persist DraftBuilt event: {}", e);
@@ -275,6 +276,7 @@ fn handle_draft_build(
             goal_id: goal_run_id,
             draft_id: package_id,
             artifact_count,
+            title: String::new(),
         };
         if let Err(e) = event_store.append(&EventEnvelope::new(event)) {
             tracing::warn!("Failed to persist DraftBuilt event: {}", e);

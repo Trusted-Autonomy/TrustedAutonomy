@@ -232,7 +232,7 @@ pub enum TuiMessage {
     AgentOutputDone(String),
     /// "Agent is working..." indicator — pushed as a heartbeat so AgentOutputDone clears it (v0.12.7).
     WorkingIndicator(String),
-    /// A draft is ready for review (v0.10.11).
+    /// A draft is ready for review (v0.10.11 / v0.15.7.1).
     DraftReady {
         #[allow(dead_code)]
         goal_id: String,
@@ -240,6 +240,7 @@ pub enum TuiMessage {
         draft_id: String,
         display_id: String,
         title: String,
+        artifact_count: usize,
     },
     /// Tail stream successfully connected to a goal — track in active set (v0.12.3).
     TailStarted { goal_id: String },
@@ -2713,6 +2714,7 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             draft_id: _,
             display_id,
             title,
+            artifact_count,
         } => {
             // Clear any lingering working-indicator heartbeats (v0.14.7.1 item 3).
             clear_all_heartbeats(&mut app.output);
@@ -2720,9 +2722,23 @@ fn handle_tui_message(app: &mut App, msg: TuiMessage) {
             if !goal_id.is_empty() {
                 app.active_tailing_goals.remove(&goal_id);
             }
+            // v0.15.7.1: Inline notification with file count (replaces opaque CTA).
+            let file_note = if artifact_count > 0 {
+                format!(
+                    "  ({} file{} changed)",
+                    artifact_count,
+                    if artifact_count == 1 { "" } else { "s" }
+                )
+            } else {
+                String::new()
+            };
             app.push_output(OutputLine::notification(format!(
-                "[draft ready] \"{}\" ({}) — run: draft view {}",
-                title, display_id, display_id
+                "Draft ready: \"{}\" [{}]{}",
+                title, display_id, file_note
+            )));
+            app.push_output(OutputLine::notification(format!(
+                "  → ta draft view {}",
+                display_id
             )));
             app.scroll_to_bottom();
         }
@@ -3778,6 +3794,7 @@ async fn background_sse(
                         draft_id: dr.1,
                         display_id: dr.2,
                         title: dr.3,
+                        artifact_count: dr.4,
                     });
                     // Also render the generic SSE event for the log.
                     if let Some(rendered) = super::shell::render_sse_event(&frame) {
@@ -4563,9 +4580,9 @@ fn parse_goal_started(frame: &str) -> Option<(String, String)> {
     Some((goal_id, title))
 }
 
-/// Parse an SSE frame for a `draft_built` event (v0.10.11 item 4).
-/// Returns `Some((goal_id, draft_id, display_id, title))`.
-fn parse_draft_built(frame: &str) -> Option<(String, String, String, String)> {
+/// Parse an SSE frame for a `draft_built` event (v0.10.11 item 4 / v0.15.7.1).
+/// Returns `Some((goal_id, draft_id, display_id, title, artifact_count))`.
+fn parse_draft_built(frame: &str) -> Option<(String, String, String, String, usize)> {
     let mut event_type = None;
     let mut data = None;
     for line in frame.lines() {
@@ -4591,9 +4608,11 @@ fn parse_draft_built(frame: &str) -> Option<(String, String, String, String)> {
         .unwrap_or_else(|| draft_id[..8.min(draft_id.len())].to_string());
     let title = payload["title"]
         .as_str()
+        .filter(|s| !s.is_empty())
         .unwrap_or("(untitled)")
         .to_string();
-    Some((goal_id, draft_id, display_id, title))
+    let artifact_count = payload["artifact_count"].as_u64().unwrap_or(0) as usize;
+    Some((goal_id, draft_id, display_id, title, artifact_count))
 }
 
 /// Parse an SSE frame for any terminal goal state (failed, cancelled, denied, pr_ready).
@@ -5218,15 +5237,17 @@ mod tests {
             "\"goal_id\":\"aaaa1111-2222-3333-4444-555555555555\",",
             "\"draft_id\":\"bbbb1111-2222-3333-4444-555555555555\",",
             "\"display_id\":\"aaaa1111-01\",",
-            "\"title\":\"v0.10.11 — Shell TUI UX Overhaul\"",
+            "\"title\":\"v0.10.11 — Shell TUI UX Overhaul\",",
+            "\"artifact_count\":11",
             "}}"
         );
-        let (goal_id, draft_id, display_id, title) =
+        let (goal_id, draft_id, display_id, title, artifact_count) =
             parse_draft_built(frame).expect("should parse");
         assert_eq!(goal_id, "aaaa1111-2222-3333-4444-555555555555");
         assert_eq!(draft_id, "bbbb1111-2222-3333-4444-555555555555");
         assert_eq!(display_id, "aaaa1111-01");
         assert_eq!(title, "v0.10.11 — Shell TUI UX Overhaul");
+        assert_eq!(artifact_count, 11);
     }
 
     #[test]
@@ -5241,8 +5262,9 @@ mod tests {
             "\"title\":\"test\"",
             "}}"
         );
-        let (_, _, display_id, _) = parse_draft_built(frame).expect("should parse");
+        let (_, _, display_id, _, artifact_count) = parse_draft_built(frame).expect("should parse");
         assert_eq!(display_id, "bbbb1111"); // falls back to 8-char prefix
+        assert_eq!(artifact_count, 0); // no artifact_count in payload
     }
 
     #[test]
@@ -5380,11 +5402,15 @@ mod tests {
                 draft_id: "draft-1".into(),
                 display_id: "aaaa1111-01".into(),
                 title: "v0.10.11 — Shell TUI UX Overhaul".into(),
+                artifact_count: 11,
             },
         );
         assert!(!app.output.is_empty());
-        assert!(app.output.last().unwrap().text.contains("draft ready"));
+        // Second line shows the ta draft view command.
         assert!(app.output.last().unwrap().text.contains("aaaa1111-01"));
+        // First notification line contains the title.
+        let has_title = app.output.iter().any(|l| l.text.contains("v0.10.11"));
+        assert!(has_title, "notification should contain goal title");
     }
 
     #[test]

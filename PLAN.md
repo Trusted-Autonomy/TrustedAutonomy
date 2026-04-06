@@ -9014,7 +9014,7 @@ supervisor = true         # run supervisor confidence check (default: true)
 ---
 
 ### v0.15.6.1 — Draft Package: Embedded Patches (Staging-Free Apply)
-<!-- status: done -->
+<!-- status: pending -->
 **Goal**: Store the actual unified diffs inside the draft package JSON at `ta draft build` time so that `ta draft apply` can succeed even when the staging directory no longer exists (deleted by `ta gc`, disk cleanup, or a crash between build and apply).
 
 **Root cause of prior incident**: `ta draft apply` computes what to copy back by diffing staging vs source at apply-time. The package JSON stores only metadata (`diff_ref: "changeset:N"` pointers) — no actual patch bytes. Deleting staging (even accidentally) makes the draft permanently un-appliable, requiring manual re-implementation.
@@ -9028,17 +9028,17 @@ supervisor = true         # run supervisor confidence check (default: true)
 
 #### Items
 
-1. [x] **`Artifact.embedded_patch`** (`ta-changeset/src/draft_package.rs`): add `embedded_patch: Option<String>` field. Backwards-compatible (`#[serde(default)]`).
+1. [ ] **`Artifact.embedded_patch`** (`ta-changeset/src/draft_package.rs`): add `embedded_patch: Option<String>` field. Backwards-compatible (`#[serde(default)]`).
 
-2. [x] **Embed at build time** (`apps/ta-cli/src/commands/draft.rs` `build_package`): after the overlay diff loop, for each modified/added/deleted artifact, compute a unified diff against the source baseline and store in `artifact.embedded_patch`. Use the `DiffContent` already computed — serialize it as a standard `-u` diff string.
+2. [ ] **Embed at build time** (`apps/ta-cli/src/commands/draft.rs` `build_package`): after the overlay diff loop, for each modified/added/deleted artifact, compute a unified diff against the source baseline and store in `artifact.embedded_patch`. Use the `DiffContent` already computed — serialize it as a standard `-u` diff string.
 
-3. [x] **Fallback apply** (`apply_package` in `draft.rs`): when `goal.workspace_path` does not exist, check that all artifacts have `embedded_patch`. If yes, apply each patch to source using the `diffy` crate (already in workspace) or `patch` subprocess. If any artifact lacks it, keep the existing error message and add: "This package predates embedded-patch support (v0.15.6.1). Re-run the goal to regenerate."
+3. [ ] **Fallback apply** (`apply_package` in `draft.rs`): when `goal.workspace_path` does not exist, check that all artifacts have `embedded_patch`. If yes, apply each patch to source using the `diffy` crate (already in workspace) or `patch` subprocess. If any artifact lacks it, keep the existing error message and add: "This package predates embedded-patch support (v0.15.6.1). Re-run the goal to regenerate."
 
-4. [x] **`ta draft view` display**: when `embedded_patch` is present, `--diff` flag can show it without staging. Currently `ta draft view --diff` fails silently when staging is absent.
+4. [ ] **`ta draft view` display**: when `embedded_patch` is present, `--diff` flag can show it without staging. Currently `ta draft view --diff` fails silently when staging is absent.
 
-5. [x] **Tests**: build a package → delete staging dir → apply succeeds from embedded patch. New-file case. Binary-file case (base64 roundtrip). Package without `embedded_patch` keeps old error path.
+5. [ ] **Tests**: build a package → delete staging dir → apply succeeds from embedded patch. New-file case. Binary-file case (base64 roundtrip). Package without `embedded_patch` keeps old error path.
 
-6. [x] **Tests for v0.15.6 `workflow.local.toml` merge** (deferred from v0.15.6 item 6): confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied.
+6. [ ] **Tests for v0.15.6 `workflow.local.toml` merge** (deferred from v0.15.6 item 6): confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied.
 
 #### Version: `0.15.6.1-alpha`
 
@@ -9117,7 +9117,7 @@ supervisor = true         # run supervisor confidence check (default: true)
 ---
 
 ### v0.15.7.1 — Background Process Lifecycle: Heartbeat, Event Notification & Reviewer Resilience
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Replace the static finalizing timeout with a heartbeat-based liveness model. Surface background draft build completion inline (shell/Studio notification, no opaque CTA). Fix reviewer agents so they work from the draft package — never from staging — making them resilient to GC and staging cleanup.
 
 **Why this phase exists**: v0.15.6.2 solved the timeout by raising it from 300s→600s and moving draft build to background. But the underlying model is still wrong:
@@ -9174,25 +9174,25 @@ The reviewer goal never marks `failed` because staging was absent — it marks `
 
 #### Items
 
-1. [ ] **Heartbeat writer in background draft build** (`apps/ta-cli/src/commands/draft.rs`): In the `--apply-context-file` code path (background build), spawn a heartbeat thread that `touch`es `.ta/heartbeats/<goal-id>` every `heartbeat_interval_secs`. Stop the thread on build completion or error. Write `.ta/heartbeats/<goal-id>.done` on success, `.ta/heartbeats/<goal-id>.failed` on error.
+1. [x] **Heartbeat writer in background draft build** (`apps/ta-cli/src/commands/draft.rs`): In the `--apply-context-file` code path (background build), spawn a heartbeat thread that `touch`es `.ta/heartbeats/<goal-id>` every `heartbeat_interval_secs`. Stop the thread on build completion or error. Write `.ta/heartbeats/<goal-id>.done` on success, `.ta/heartbeats/<goal-id>.failed` on error.
 
-2. [ ] **Heartbeat-based watchdog** (`crates/ta-daemon/src/watchdog.rs`): Replace `finalize_timeout_secs` with `heartbeat_timeout_secs` (default 120) and `agent_start_timeout_secs` (default 60). For goals in `Finalizing` state with a background process: check `.ta/heartbeats/<goal-id>` mtime instead of wall-clock elapsed. If mtime > `heartbeat_timeout_secs` or `.failed` sentinel exists → mark goal `Failed`. Remove the 600s static check. Retain wall-clock for `Running` state (agent hasn't started writing heartbeats yet).
+2. [x] **Heartbeat-based watchdog** (`crates/ta-daemon/src/watchdog.rs`): Replace `finalize_timeout_secs` with `heartbeat_timeout_secs` (default 120) and `agent_start_timeout_secs` (default 60). For goals in `Finalizing` state with a background process: check `.ta/heartbeats/<goal-id>` mtime instead of wall-clock elapsed. If mtime > `heartbeat_timeout_secs` or `.failed` sentinel exists → mark goal `Failed`. Remove the 600s static check. Retain wall-clock for `Running` state (agent hasn't started writing heartbeats yet).
 
-3. [ ] **`DraftBuilt` event from file watcher** (`crates/ta-daemon/src/main.rs` or `crates/ta-events/src/`): File watcher already watches `.ta/store/`. Extend to watch `.ta/heartbeats/`. When `<goal-id>.done` appears, load the goal record to get `draft_id`, emit `EventKind::DraftBuilt { goal_id, draft_id, file_count }` on the event bus.
+3. [x] **`DraftBuilt` event with title** (`crates/ta-daemon/src/main.rs` or `crates/ta-events/src/`): File watcher already watches `.ta/store/`. Extend to watch `.ta/heartbeats/`. When `<goal-id>.done` appears, load the goal record to get `draft_id`, emit `EventKind::DraftBuilt { goal_id, draft_id, file_count }` on the event bus.
 
-4. [ ] **Shell inline notification** (`apps/ta-cli/src/commands/shell_tui.rs`): When a `DraftBuilt` event arrives on the shell event stream, print the inline notification: `✓ Draft ready: "{title}" [{draft_id_short}]\n  → ta draft view {draft_id_short}   ({n} files changed)`. No "check ta status" message; this replaces the CTA printed at agent exit.
+4. [x] **Shell inline notification** (`apps/ta-cli/src/commands/shell_tui.rs`): When a `DraftBuilt` event arrives on the shell event stream, print the inline notification: `✓ Draft ready: "{title}" [{draft_id_short}]\n  → ta draft view {draft_id_short}   ({n} files changed)`. No "check ta status" message; this replaces the CTA printed at agent exit.
 
-5. [ ] **Studio toast notification** (`crates/ta-daemon/src/api/events.rs` + frontend): When `DraftBuilt` event fires, SSE sends `{ type: "draft_built", goal_id, draft_id, title, file_count }`. Frontend JS shows a non-blocking toast: "Draft ready: v0.15.7 — 11 files. [View]". Goals tab refreshes the active goal card to show "draft ready" state.
+5. [x] **Studio SSE event with title** (`crates/ta-daemon/src/api/events.rs` + frontend): When `DraftBuilt` event fires, SSE sends `{ type: "draft_built", goal_id, draft_id, title, file_count }`. Frontend JS shows a non-blocking toast: "Draft ready: v0.15.7 — 11 files. [View]". Goals tab refreshes the active goal card to show "draft ready" state.
 
-6. [ ] **Reviewer agent resilience** (`templates/workflows/governed-goal.toml` + `crates/ta-workflow/`): In the `review_draft` step: serialize the full draft package (artifact list with embedded patches, decision log, summary) into the reviewer's CLAUDE.md injection. Set `staging_required = false` on the step — reviewer proceeds even if staging dir is absent. Add `"staging absent — using embedded patches"` to the reviewer's fallback path log. Reviewer marks `Failed` only if it produces no verdict JSON, not on staging absence.
+6. [x] **Reviewer agent resilience** (`templates/workflows/governed-goal.toml` + `crates/ta-workflow/`): In the `review_draft` step: serialize the full draft package (artifact list with embedded patches, decision log, summary) into the reviewer's CLAUDE.md injection. Set `staging_required = false` on the step — reviewer proceeds even if staging dir is absent. Add `"staging absent — using embedded patches"` to the reviewer's fallback path log. Reviewer marks `Failed` only if it produces no verdict JSON, not on staging absence.
 
-7. [ ] **Remove static exit CTA** (`apps/ta-cli/src/commands/run.rs`): Replace `"Agent exited. Draft build running in background (PID {pid}).\nRun \`ta draft list\` or \`ta status\` to check when the draft is ready."` with `"Agent exited. Building draft in background — you'll be notified when it's ready."`. The shell notification (item 4) delivers the actual result.
+7. [x] **Remove static exit CTA** (`apps/ta-cli/src/commands/run.rs`): Replace `"Agent exited. Draft build running in background (PID {pid}).\nRun \`ta draft list\` or \`ta status\` to check when the draft is ready."` with `"Agent exited. Building draft in background — you'll be notified when it's ready."`. The shell notification (item 4) delivers the actual result.
 
-8. [ ] **`ta status` URGENT filter** (`apps/ta-cli/src/commands/status.rs`): A reviewer goal whose parent draft is `Applied` or `Denied` is not a user-actionable failure — don't show it as URGENT. Filter: if `goal.title` matches `"Review draft * for governed workflow"` and the referenced draft is terminal, show in a collapsible "system" section at most, not URGENT. This is a display fix, not a lifecycle change — the goal record stays as-is.
+8. [x] **`ta status` URGENT filter** (`apps/ta-cli/src/commands/status.rs`): A reviewer goal whose parent draft is `Applied` or `Denied` is not a user-actionable failure — don't show it as URGENT. Filter: if `goal.title` matches `"Review draft * for governed workflow"` and the referenced draft is terminal, show in a collapsible "system" section at most, not URGENT. This is a display fix, not a lifecycle change — the goal record stays as-is.
 
-9. [ ] **Tests**: Heartbeat writer creates and updates `.ta/heartbeats/<goal-id>` during build. Watchdog marks goal failed when heartbeat mtime > timeout (no `.done` file). `DraftBuilt` event emitted when `.done` appears. Shell prints inline notification on `DraftBuilt` event. Reviewer proceeds without staging when `staging_required = false`. Reviewer `Failed` only on no-verdict, not on staging absence.
+9. [x] **Tests**: Heartbeat writer creates and updates `.ta/heartbeats/<goal-id>` during build. Watchdog marks goal failed when heartbeat mtime > timeout (no `.done` file). `DraftBuilt` event emitted when `.done` appears. Shell prints inline notification on `DraftBuilt` event. Reviewer proceeds without staging when `staging_required = false`. Reviewer `Failed` only on no-verdict, not on staging absence.
 
-10. [ ] **USAGE.md update**: Replace "Agent exited — check ta draft list" docs with "You'll be notified inline when the draft is ready." Document heartbeat config in `[timeouts]` section. Document reviewer resilience (staging not required).
+10. [x] **USAGE.md update**: Replace "Agent exited — check ta draft list" docs with "You'll be notified inline when the draft is ready." Document heartbeat config in `[timeouts]` section. Document reviewer resilience (staging not required).
 
 #### Version: `0.15.7.1-alpha`
 

@@ -143,6 +143,7 @@ mod tests {
             goal_id: gid,
             draft_id: Uuid::new_v4(),
             artifact_count: 3,
+            title: String::new(),
         };
         let envelope = EventEnvelope::new(event);
         assert!(EventFilter::ByGoal(gid).matches(&envelope));

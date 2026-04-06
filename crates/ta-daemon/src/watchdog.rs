@@ -38,12 +38,21 @@ pub struct WatchdogConfig {
     pub wake_grace_secs: u64,
     /// URL to ping for connectivity check after waking from sleep (v0.13.1.1).
     pub connectivity_check_url: String,
-    /// Maximum seconds a goal may spend in `Finalizing` state with a dead
-    /// `ta run` process before the watchdog declares it stuck (v0.13.14).
+    /// Fallback: maximum seconds a goal may spend in `Finalizing` state when
+    /// the background build does NOT write heartbeats (v0.13.14).
     ///
-    /// Default: 600s (10 min) — raised from 300s in v0.15.6.2.
-    /// Configurable via `[timeouts] finalizing_s` in daemon.toml.
+    /// Used only when no `.ta/heartbeats/<goal-id>` file exists and the
+    /// background process PID is dead. Superseded by `heartbeat_timeout_secs`
+    /// for goals that write heartbeats (v0.15.7.1).
     pub finalize_timeout_secs: u64,
+    /// Seconds without a heartbeat update before the watchdog marks a
+    /// Finalizing background draft-build as stuck (v0.15.7.1).
+    ///
+    /// Checked against the mtime of `.ta/heartbeats/<goal-id>`.
+    pub heartbeat_timeout_secs: u64,
+    /// Startup grace period: seconds to wait for the first heartbeat before
+    /// applying `heartbeat_timeout_secs` (v0.15.7.1).
+    pub agent_start_timeout_secs: u64,
 }
 
 impl Default for WatchdogConfig {
@@ -55,6 +64,8 @@ impl Default for WatchdogConfig {
             wake_grace_secs: 60,
             connectivity_check_url: "https://api.anthropic.com".to_string(),
             finalize_timeout_secs: 600,
+            heartbeat_timeout_secs: 120,
+            agent_start_timeout_secs: 60,
         }
     }
 }
@@ -64,15 +75,20 @@ impl WatchdogConfig {
     ///
     /// `[timeouts] finalizing_s` takes precedence over the legacy
     /// `[operations] finalize_timeout_secs` field (v0.15.6.2).
+    /// Heartbeat timeouts come from `[timeouts]` section (v0.15.7.1).
     pub fn from_config(
         ops: &crate::config::OperationsConfig,
         power: &crate::config::PowerConfig,
         timeouts: Option<&crate::config::TimeoutsConfig>,
     ) -> Self {
-        let finalize = if let Some(t) = timeouts {
-            t.finalizing_s
+        let (finalize, heartbeat_timeout, agent_start_timeout) = if let Some(t) = timeouts {
+            (
+                t.finalizing_s,
+                t.heartbeat_timeout_secs,
+                t.agent_start_timeout_secs,
+            )
         } else {
-            ops.finalize_timeout_secs
+            (ops.finalize_timeout_secs, 120, 60)
         };
         Self {
             interval_secs: ops.watchdog_interval_secs,
@@ -81,6 +97,8 @@ impl WatchdogConfig {
             wake_grace_secs: power.wake_grace_secs,
             connectivity_check_url: power.connectivity_check_url.clone(),
             finalize_timeout_secs: finalize,
+            heartbeat_timeout_secs: heartbeat_timeout,
+            agent_start_timeout_secs: agent_start_timeout,
         }
     }
 
@@ -93,6 +111,8 @@ impl WatchdogConfig {
             wake_grace_secs: 60,
             connectivity_check_url: "https://api.anthropic.com".to_string(),
             finalize_timeout_secs: ops.finalize_timeout_secs,
+            heartbeat_timeout_secs: 120,
+            agent_start_timeout_secs: 60,
         }
     }
 }
@@ -704,11 +724,21 @@ fn check_running_goal(
     }
 }
 
-/// Check a goal in `Finalizing` state (v0.13.14).
+/// Check a goal in `Finalizing` state (v0.13.14 / v0.15.7.1).
 ///
-/// `Finalizing` means the agent exited cleanly and draft creation is in progress.
-/// The watchdog should leave it alone unless the timeout is exceeded (indicating
-/// the draft-build process was interrupted).
+/// `Finalizing` means the agent exited cleanly and draft creation is in progress
+/// (background `ta draft build` process).
+///
+/// v0.15.7.1 heartbeat-based logic:
+/// 1. `.done` sentinel → build completed successfully; skip.
+/// 2. `.failed` sentinel → build failed; transition to Failed immediately.
+/// 3. Heartbeat file exists → check mtime:
+///    - Recent (< heartbeat_timeout_secs) → still running, skip.
+///    - Stale → stuck (hung process); transition to Failed.
+/// 4. No heartbeat file:
+///    - Within agent_start_timeout_secs → startup grace, skip.
+///    - run_pid alive → old-style build (no heartbeats), skip.
+///    - run_pid dead and elapsed > finalize_timeout_secs → transition to Failed.
 #[allow(clippy::too_many_arguments)]
 fn check_finalizing_goal(
     goal: &GoalRun,
@@ -720,34 +750,186 @@ fn check_finalizing_goal(
     issues: &mut Vec<HealthIssue>,
     project_root: &Path,
 ) {
-    // If the ta run process is still alive, it is actively building the draft.
-    // Never fire the timeout while the builder process is running — only catch
-    // the case where ta run died mid-build and the state is stuck (v0.13.17).
+    let goal_id_str = goal.goal_run_id.to_string();
+    let heartbeats_dir = project_root.join(".ta").join("heartbeats");
+    let done_path = heartbeats_dir.join(format!("{}.done", goal_id_str));
+    let failed_path = heartbeats_dir.join(format!("{}.failed", goal_id_str));
+    let hb_path = heartbeats_dir.join(&goal_id_str);
+
+    // ── 1. .done sentinel: build completed successfully. ─────────────────
+    if done_path.exists() {
+        tracing::debug!(
+            goal_id = %goal.goal_run_id,
+            ".done sentinel found — background draft build completed"
+        );
+        return;
+    }
+
+    // ── 2. .failed sentinel: build failed. ───────────────────────────────
+    if failed_path.exists() {
+        let detail = format!(
+            "Background draft build for goal '{}' wrote a .failed sentinel — \
+             the build process encountered an error. \
+             Run: ta goal recover {}",
+            goal.display_tag(),
+            &goal_id_str[..8],
+        );
+        tracing::warn!(
+            goal_id = %goal.goal_run_id,
+            prev_state = "finalizing",
+            new_state = "failed",
+            reason = "heartbeat_failed_sentinel",
+            "Watchdog: background draft build wrote .failed sentinel"
+        );
+        issues.push(HealthIssue {
+            kind: "finalize_build_failed".to_string(),
+            goal_id: Some(goal.goal_run_id),
+            detail: detail.clone(),
+        });
+        write_watchdog_audit_entry(
+            project_root,
+            goal,
+            run_pid,
+            "background draft build wrote .failed sentinel",
+        );
+        let reason = format!(
+            "Background draft build failed (wrote .failed sentinel). \
+             Run `ta goal recover {}` to restore state.",
+            &goal_id_str[..8],
+        );
+        if let Err(e) = store.transition(goal.goal_run_id, GoalRunState::Failed { reason }) {
+            tracing::warn!(
+                goal_id = %goal.goal_run_id,
+                "Watchdog: failed to transition goal to failed after .failed sentinel: {}",
+                e
+            );
+        }
+        return;
+    }
+
+    // ── 3. Heartbeat file exists: check mtime. ───────────────────────────
+    let hb_age_secs: Option<u64> = std::fs::metadata(&hb_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|mt| mt.elapsed().ok())
+        .map(|d| d.as_secs());
+
+    if let Some(age) = hb_age_secs {
+        if age < config.heartbeat_timeout_secs {
+            // Heartbeat is recent — background build is actively running.
+            tracing::debug!(
+                goal_id = %goal.goal_run_id,
+                heartbeat_age_secs = age,
+                timeout_secs = config.heartbeat_timeout_secs,
+                "Goal in Finalizing — heartbeat active"
+            );
+            return;
+        }
+
+        // Heartbeat is stale — build is stuck.
+        let pid_context = match run_pid {
+            Some(pid) => format!(
+                "run_pid={} ({})",
+                pid,
+                if is_process_alive(pid) {
+                    "alive"
+                } else {
+                    "dead"
+                }
+            ),
+            None => "run_pid=none".to_string(),
+        };
+        let detail = format!(
+            "Background draft build for goal '{}' has not written a heartbeat for {}s \
+             (timeout: {}s, {}). The build process appears stuck. \
+             Run: ta goal recover {}",
+            goal.display_tag(),
+            age,
+            config.heartbeat_timeout_secs,
+            pid_context,
+            &goal_id_str[..8],
+        );
+        tracing::warn!(
+            goal_id = %goal.goal_run_id,
+            heartbeat_age_secs = age,
+            timeout_secs = config.heartbeat_timeout_secs,
+            run_pid = ?run_pid,
+            prev_state = "finalizing",
+            new_state = "failed",
+            reason = "heartbeat_stale",
+            "Watchdog: goal state transition finalizing -> failed (heartbeat stale)"
+        );
+        issues.push(HealthIssue {
+            kind: "heartbeat_stale".to_string(),
+            goal_id: Some(goal.goal_run_id),
+            detail: detail.clone(),
+        });
+        write_watchdog_audit_entry(
+            project_root,
+            goal,
+            run_pid,
+            &format!(
+                "heartbeat_stale: no heartbeat for {}s (timeout {}s)",
+                age, config.heartbeat_timeout_secs,
+            ),
+        );
+        let reason = format!(
+            "Background draft build stuck: no heartbeat for {}s (timeout {}s). \
+             Run `ta goal recover {}` to restore state.",
+            age,
+            config.heartbeat_timeout_secs,
+            &goal_id_str[..8],
+        );
+        if let Err(e) = store.transition(goal.goal_run_id, GoalRunState::Failed { reason }) {
+            tracing::warn!(
+                goal_id = %goal.goal_run_id,
+                "Watchdog: failed to transition stuck-heartbeat goal to failed: {}",
+                e
+            );
+        }
+        return;
+    }
+
+    // ── 4. No heartbeat file. ─────────────────────────────────────────────
+    let elapsed_secs = (*now - finalize_started_at).num_seconds().unsigned_abs();
+
+    // Within startup grace period — background process may not have written yet.
+    if elapsed_secs < config.agent_start_timeout_secs {
+        tracing::debug!(
+            goal_id = %goal.goal_run_id,
+            elapsed_secs = elapsed_secs,
+            grace_secs = config.agent_start_timeout_secs,
+            "Goal in Finalizing — within startup grace (no heartbeat yet)"
+        );
+        return;
+    }
+
+    // If the ta run/build process is still alive, it is actively building the draft
+    // (old-style build without heartbeats, or heartbeat dir not created yet).
+    // Never fire the timeout while the builder process is running (v0.13.17).
     if let Some(pid) = run_pid {
         if is_process_alive(pid) {
             tracing::debug!(
                 goal_id = %goal.goal_run_id,
                 run_pid = pid,
-                "Goal in Finalizing — ta run process is alive, skipping timeout check"
+                "Goal in Finalizing — builder PID alive (no heartbeat file), skipping timeout"
             );
             return;
         }
     }
 
-    let elapsed_secs = (*now - finalize_started_at).num_seconds().unsigned_abs();
-
+    // No heartbeat, process dead (or no PID). Fall back to wall-clock timeout.
     if elapsed_secs < config.finalize_timeout_secs {
-        // Within timeout — draft creation is still in progress. Do nothing.
         tracing::debug!(
             goal_id = %goal.goal_run_id,
             elapsed_secs = elapsed_secs,
             timeout_secs = config.finalize_timeout_secs,
-            "Goal in Finalizing state — draft creation in progress"
+            "Goal in Finalizing state — draft creation in progress (no heartbeat)"
         );
         return;
     }
 
-    // v0.13.17.2: Emit structured context about which operation timed out.
+    // Wall-clock timeout exceeded — draft creation was interrupted or very slow.
     let pid_context = match run_pid {
         Some(pid) => format!(
             "run_pid={} ({})",
@@ -769,7 +951,6 @@ fn check_finalizing_goal(
         .and_then(|g| g.progress_note.clone())
         .unwrap_or_else(|| "(no progress note)".to_string());
 
-    // Timeout exceeded — draft creation was interrupted or very slow.
     let detail = format!(
         "Goal '{}' has been in Finalizing state for {}s (timeout: {}s, {}). \
          Last operation: '{}'. Draft creation may have been interrupted. \
@@ -779,7 +960,7 @@ fn check_finalizing_goal(
         config.finalize_timeout_secs,
         pid_context,
         progress_note,
-        &goal.goal_run_id.to_string()[..8],
+        &goal_id_str[..8],
     );
 
     tracing::warn!(
@@ -807,10 +988,9 @@ fn check_finalizing_goal(
         config.finalize_timeout_secs,
         pid_context,
         progress_note,
-        &goal.goal_run_id.to_string()[..8],
+        &goal_id_str[..8],
     );
 
-    // v0.14.7.2: Write audit record before transitioning to Failed.
     write_watchdog_audit_entry(
         project_root,
         goal,
