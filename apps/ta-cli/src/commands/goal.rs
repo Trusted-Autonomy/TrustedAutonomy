@@ -584,6 +584,7 @@ fn start_goal(
             ta_submit::config::StagingStrategy::RefsCow => {
                 ta_workspace::OverlayStagingMode::RefsCow
             }
+            ta_submit::config::StagingStrategy::ProjFs => ta_workspace::OverlayStagingMode::ProjFs,
         };
         let overlay = OverlayWorkspace::create_with_strategy(
             &goal_id,
@@ -3394,6 +3395,10 @@ pub fn doctor(config: &GatewayConfig) -> anyhow::Result<()> {
             }
             ta_submit::config::StagingStrategy::RefsCow => {
                 println!("refs-cow (ok — Windows ReFS CoW)");
+                pass += 1;
+            }
+            ta_submit::config::StagingStrategy::ProjFs => {
+                println!("projfs (ok — Windows ProjFS virtual workspace)");
                 pass += 1;
             }
         }

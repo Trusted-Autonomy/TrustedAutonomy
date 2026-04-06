@@ -29,6 +29,12 @@ pub enum CopyStrategy {
     ApfsClone,
     /// Btrfs reflink via `FICLONE` ioctl (Linux, zero-cost until write).
     BtrfsReflink,
+    /// Windows ProjFS virtual workspace — no file I/O at staging time (v0.15.8).
+    ///
+    /// Files are served on-demand from source via the ProjFS kernel driver.
+    /// Writes land in `.projfs-scratch/`. This strategy is only selected when
+    /// `Client-ProjFS` is installed and `OverlayStagingMode::ProjFs` is active.
+    Virtual,
 }
 
 impl CopyStrategy {
@@ -38,12 +44,18 @@ impl CopyStrategy {
             Self::Full => "full copy",
             Self::ApfsClone => "APFS clone (COW)",
             Self::BtrfsReflink => "Btrfs reflink (COW)",
+            Self::Virtual => "ProjFS virtual (Windows)",
         }
     }
 
     /// Returns true if this strategy uses copy-on-write (zero I/O until first write).
     pub fn is_cow(&self) -> bool {
         matches!(self, Self::ApfsClone | Self::BtrfsReflink)
+    }
+
+    /// Returns true if this strategy uses virtual filesystem projection (no file I/O).
+    pub fn is_virtual(&self) -> bool {
+        matches!(self, Self::Virtual)
     }
 }
 
@@ -79,7 +91,12 @@ impl CopyStat {
 
     /// Format a human-readable staging size report.
     pub fn size_report(&self) -> String {
-        if self.symlinks_created > 0 {
+        if self.strategy.is_virtual() {
+            format!(
+                "Staging: ProjFS virtual workspace (zero disk cost, files hydrated on demand) in {:.1}s",
+                self.duration.as_secs_f64()
+            )
+        } else if self.symlinks_created > 0 {
             let copied_mb = self.bytes_total as f64 / (1024.0 * 1024.0);
             let symlinked_gb = self.bytes_symlinked as f64 / (1024.0 * 1024.0 * 1024.0);
             let reduction = if self.bytes_total > 0 && self.bytes_symlinked > 0 {

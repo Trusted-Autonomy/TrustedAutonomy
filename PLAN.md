@@ -9199,7 +9199,7 @@ The reviewer goal never marks `failed` because staging was absent — it marks `
 ---
 
 ### v0.15.8 — Windows ProjFS Staging (Virtual Workspace on NTFS)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: On Windows NTFS volumes (where APFS/Btrfs CoW cloning is unavailable), use the Windows Projected File System (ProjFS) to make staging creation near-instant and zero-disk-cost. Files appear present in the staging directory but are hydrated on-demand from source as the agent reads them. Writes go to a real scratch store. Only files the agent actually touches are physically copied.
 
 **Depends on**: v0.14.18 (Windows platform investment confirmed), v0.13.13 (staging strategy enum)
@@ -9215,19 +9215,19 @@ The reviewer goal never marks `failed` because staging was absent — it marks `
 
 #### Items
 
-1. [ ] **`StagingStrategy::ProjFs` variant**: Add to `overlay.rs`. Auto-selected on Windows when `Client-ProjFS` is enabled; falls back to `Smart` otherwise.
+1. [x] **`StagingStrategy::ProjFs` variant**: Added to `crates/ta-submit/src/config.rs` (`StagingStrategy::ProjFs`), `crates/ta-workspace/src/overlay.rs` (`OverlayStagingMode::ProjFs`), `crates/ta-workspace/src/copy_strategy.rs` (`CopyStrategy::Virtual`). Wired in `run.rs` and `goal.rs` (both match sites). Auto-selected on Windows when `Client-ProjFS` is enabled; falls back to `Smart` otherwise.
 
-2. [ ] **ProjFS provider (`projfs_strategy.rs`)**: Implement `IRequiredCallbacks` (enumerate, get-placeholder-info, get-file-data). Directory listings reflect source tree; file reads trigger hydration from source.
+2. [x] **ProjFS provider (`projfs_strategy.rs`)**: NEW FILE `crates/ta-workspace/src/projfs_strategy.rs`. Implements all 5 ProjFS callbacks: `StartDirectoryEnumeration`, `EndDirectoryEnumeration`, `GetDirectoryEnumeration`, `GetPlaceholderInfo`, `GetFileData`. All behind `#[cfg(target_os = "windows")]`. Non-Windows stub compiles on all platforms.
 
-3. [ ] **Scratch overlay for writes**: Modified/created files land in `<staging>/.projfs-scratch/`. Diff engine reads scratch for modified/created and source for deleted — presents a unified view identical to full-copy layout.
+3. [x] **Scratch overlay for writes**: `.projfs-scratch/` created by `ProjFsProvider::start()`. `DeletionRecord` + `load_deletions()` for tombstone JSONL. `.projfs-scratch` added to `INFRA_DIRS` in `should_skip_for_diff()` so it never appears in diffs.
 
-4. [ ] **Feature detection**: `crates/ta-workspace/src/windows_features.rs` — registry check for `Client-ProjFS`. Used at strategy selection time with clear log output when falling back.
+4. [x] **Feature detection**: NEW FILE `crates/ta-workspace/src/windows_features.rs` — DLL probe (`ProjectedFSLib.dll`) + CBS registry fallback. Returns `false` on non-Windows. Used in `resolve_staging_mode()` with actionable fallback log message.
 
-5. [ ] **Installer integration**: `apps/ta-cli/wix/main.wxs` — optional `<Feature Id="ProjFS">` that runs `Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart`. Checkbox in installer UI: "Enable fast virtual workspace (requires Windows 10 1809+)".
+5. [x] **Installer integration**: `apps/ta-cli/wix/main.wxs` — optional `<Feature Id="ProjFS">` with descriptive title/description. Custom action `EnableClientProjFS` runs `Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart` on install when feature is selected.
 
-6. [ ] **Tests**: Provider enumerates source tree; file read triggers hydration; write lands in scratch and appears in diff; delete shows as `Deleted`. All `#[cfg(target_os = "windows")]`.
+6. [x] **Tests**: 7 cross-platform tests for `DeletionRecord` serialization and `load_deletions()`; 4 Windows-only tests (`#[cfg(target_os = "windows")]`) covering provider start, enumeration, write-to-scratch, and tombstone recording. Plus `non_windows_returns_false` test for `windows_features.rs`.
 
-7. [ ] **USAGE.md**: "Fast staging on Windows" section — how to enable ProjFS, what it does, when to use vs. Smart strategy.
+7. [x] **USAGE.md**: "Fast staging on Windows (ProjFS)" section added after the Copy-on-write staging paragraph — covers installation via installer or DISM, `strategy = "projfs"` config, fallback behavior, and how modified/created/deleted/unmodified files are handled.
 
 #### Version: `0.15.8-alpha`
 

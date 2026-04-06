@@ -32,4 +32,8 @@ pub enum WorkspaceError {
     /// Conflict detected between source and staging (v0.2.1).
     #[error("Concurrent session conflict detected:\n{}", .conflicts.join("\n"))]
     ConflictDetected { conflicts: Vec<String> },
+
+    /// A Windows Projected File System operation failed (v0.15.8).
+    #[error("ProjFS error: {0}")]
+    ProjFsError(String),
 }

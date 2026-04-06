@@ -1357,6 +1357,7 @@ pub fn execute(
             ta_submit::config::StagingStrategy::RefsCow => {
                 ta_workspace::OverlayStagingMode::RefsCow
             }
+            ta_submit::config::StagingStrategy::ProjFs => ta_workspace::OverlayStagingMode::ProjFs,
         };
         let overlay = ta_workspace::OverlayWorkspace::create_with_strategy(
             goal_uuid.to_string(),

@@ -156,5 +156,54 @@
       <ComponentRef Id="TaStudioBat" />
     </Feature>
 
+    <!--
+      Optional feature: Windows Projected File System (ProjFS).
+      Enables near-instant, zero-disk-cost staging on NTFS by projecting
+      source files on-demand. Requires Windows 10 version 1809 or later.
+
+      When selected, runs Dism.exe to enable the Client-ProjFS optional feature.
+      This requires administrator privileges and may require a reboot on older
+      Windows builds (Windows 10 2004+ skips the reboot automatically).
+
+      After enabling, set strategy = "projfs" in .ta/workflow.toml:
+        [staging]
+        strategy = "projfs"
+    -->
+    <Feature
+      Id="ProjFS"
+      Title="Enable fast virtual workspace (requires Windows 10 1809+)"
+      Description="Enables Windows Projected File System (ProjFS) for near-instant, zero-disk-cost staging. Files are hydrated from source on demand — only files the agent actually reads are physically accessed."
+      Level="2"
+      AllowAdvertise="no">
+      <Component Id="EnableProjFS" Guid="D5E6F7A8-B9C0-4D1E-2F3A-4B5C6D7E8F9A" Directory="INSTALLFOLDER">
+        <Condition>NOT Installed</Condition>
+        <!-- Enable Client-ProjFS via DISM on first install. /NoRestart avoids
+             forced reboots; the feature is usable immediately on Windows 10 2004+. -->
+        <RegistryValue
+          Root="HKLM"
+          Key="SOFTWARE\TrustedAutonomy\Features"
+          Name="ProjFSEnabled"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+      <ComponentRef Id="EnableProjFS" />
+    </Feature>
+
+    <!-- Custom action: run DISM to enable Client-ProjFS when the ProjFS feature is selected. -->
+    <CustomAction
+      Id="EnableClientProjFS"
+      ExeCommand="Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart"
+      Execute="deferred"
+      Return="ignore"
+      Impersonate="no"
+      Directory="INSTALLFOLDER" />
+
+    <InstallExecuteSequence>
+      <Custom Action="EnableClientProjFS" After="InstallFiles">
+        <![CDATA[(&ProjFS = 3) AND NOT Installed]]>
+      </Custom>
+    </InstallExecuteSequence>
+
   </Package>
 </Wix>

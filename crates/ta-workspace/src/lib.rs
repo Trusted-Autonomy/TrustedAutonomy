@@ -21,8 +21,10 @@ pub mod copy_strategy;
 pub mod error;
 pub mod overlay;
 pub mod partitioning;
+pub mod projfs_strategy;
 pub mod staging;
 pub mod store;
+pub mod windows_features;
 
 pub use conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
 pub use copy_strategy::{CopyStat, CopyStrategy};
