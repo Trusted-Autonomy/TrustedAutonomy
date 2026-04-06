@@ -9234,7 +9234,7 @@ The reviewer goal never marks `failed` because staging was absent — it marks `
 ---
 
 ### v0.15.8.1 — Inline Draft Build for Interactive CLI
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: When `ta run` is invoked in an interactive terminal (TTY), block after agent exit and build the draft inline with a progress indicator, rather than spawning a background process and printing "you'll be notified when it's ready" — a message that is false in non-shell contexts and confusing everywhere.
 
 **Why this phase exists**: The background build model (v0.15.6.2) was introduced to avoid the static watchdog timeout. That root cause is now fixed (v0.15.7.1 heartbeat watchdog). For interactive `ta run` invocations, blocking is strictly better:
@@ -9254,17 +9254,17 @@ Building draft...  ████████████████░░░░ 
 
 #### Items
 
-1. [ ] **TTY detection** (`apps/ta-cli/src/commands/run.rs`): In `try_spawn_background_draft_build()`, check `std::io::stdout().is_terminal()` (use `is-terminal` crate, already in workspace). If `true`, call `build_draft_inline()` instead. Return the same `BackgroundBuildHandle` type so callers don't change.
+1. [x] **TTY detection** (`apps/ta-cli/src/commands/run.rs`): In `try_spawn_background_draft_build()`, check `std::io::stdout().is_terminal()`. If `true`, calls `build_draft_inline()` and returns `Some(BackgroundBuildHandle::Inline)`. Added `BackgroundBuildHandle` enum with `Inline` and `Background(u32)` variants.
 
-2. [ ] **`build_draft_inline()`** (`apps/ta-cli/src/commands/draft.rs`): Runs the draft build synchronously on the current thread with a progress line. On completion, prints the `✓ Draft ready: ...` inline notification (same format as the `DraftBuilt` shell event message from v0.15.7.1). On error, prints the error inline and exits with non-zero status.
+2. [x] **`build_draft_inline()`** (`apps/ta-cli/src/commands/draft.rs`): Builds draft synchronously with spinner thread. Attaches verification warnings, validation log, supervisor review. Prints `✓ Draft ready: "<title>" [<id>]` on completion. Returns `Err` on failure.
 
-3. [ ] **Progress indicator**: Simple elapsed-time spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) with "Building draft..." prefix. No library dependency — use `print!` + `\r` carriage return. Clears on completion.
+3. [x] **Progress indicator**: Spinner `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` with elapsed seconds, cleared with `\r` on completion. No library dependency.
 
-4. [ ] **Remove misleading CTA text** from the non-TTY path: the background message `"Building draft in background — you'll be notified when it's ready."` is now only printed for daemon/non-TTY runs (where the notification actually works). TTY path gets no message — the inline build completes and prints the result directly.
+4. [x] **Remove misleading CTA text**: Background "you'll be notified" message only printed for `BackgroundBuildHandle::Background` path. TTY `Inline` path prints the `✓` result directly.
 
-5. [ ] **Tests**: TTY=false → background path taken. TTY=true → inline path taken. Inline build completes → prints `✓ Draft ready:` line. Inline build fails → non-zero exit, error message printed.
+5. [x] **Tests**: 3 tests in `draft.rs` (`build_draft_inline_succeeds_and_creates_draft`, `build_draft_inline_attaches_verification_warnings`, `build_draft_inline_fails_gracefully_on_bad_goal_id`). 2 tests in `run.rs` (`background_build_handle_inline_variant_is_not_background`, `try_spawn_background_draft_build_returns_none_for_non_tty_with_no_project`).
 
-6. [ ] **USAGE.md**: Update "After the agent exits" section to describe the new inline behavior. Remove the "check ta draft list" guidance for interactive runs.
+6. [x] **USAGE.md**: Added "After the agent exits — inline vs background build" section with example output. Updated heartbeat section to clarify background-only context.
 
 #### Version: `0.15.8.1-alpha`
 

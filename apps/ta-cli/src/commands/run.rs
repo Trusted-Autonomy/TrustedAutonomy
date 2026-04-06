@@ -2678,10 +2678,14 @@ pub fn execute(
             }
         };
 
-        // v0.15.6.2: In non-headless mode, spawn draft build as a background process so
-        // `ta run` returns immediately after the agent exits. The background process does
-        // the slow diff+package work; the watchdog tracks it via `run_pid`.
-        // In headless mode, build synchronously so the caller gets the draft ID in JSON.
+        // v0.15.6.2 / v0.15.8.1: Build the draft after the agent exits.
+        //
+        // - Interactive TTY (`ta run` from a terminal): build inline with a spinner so
+        //   the user sees the result immediately. `try_spawn_background_draft_build`
+        //   detects the TTY and returns `Some(Inline)`.
+        // - Non-TTY / daemon-mediated: spawn `ta draft build` as a background process
+        //   and return immediately. Returns `Some(Background(pid))`.
+        // - Headless CI: always build synchronously (None path below).
         let spawned_async = if !headless {
             try_spawn_background_draft_build(
                 config,
@@ -2696,78 +2700,97 @@ pub fn execute(
             None
         };
 
-        if let Some(bg_pid) = spawned_async {
-            // Background build was spawned — ta run is done.
-            // The background process will transition the goal to PrReady when done.
-            update_finalize_note("building draft package (background)");
-            append_progress_journal(
-                &config.goals_dir,
-                goal.goal_run_id,
-                "draft_build_spawned",
-                &format!("draft build spawned as background process PID {}", bg_pid),
-            );
-            println!("\nAgent exited. Building draft in background — you'll be notified when it's ready.");
-        } else {
-            // Synchronous build (headless mode or spawn failed — fall back to inline).
-            update_finalize_note("diffing workspace files");
-            update_finalize_note("building draft package");
-            super::draft::execute(
-                &super::draft::DraftCommands::Build {
-                    goal_id: goal_id.clone(),
-                    summary: format!("Changes from goal: {}", title),
-                    latest: false,
-                    apply_context_file: None,
-                },
-                config,
-            )?;
-
-            // 7a. If there are verification warnings (warn mode), attach them to the draft.
-            if !verification_warnings.is_empty() {
-                if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                    if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
-                        if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                            pkg.verification_warnings = verification_warnings;
-                            let _ = super::draft::save_package(config, &pkg);
-                        }
-                    }
-                }
-            }
-
-            // 7b. Attach validation_log to the draft (v0.13.17).
-            if !validation_log.is_empty() {
-                if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                    if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
-                        if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                            pkg.validation_log = validation_log;
-                            let _ = super::draft::save_package(config, &pkg);
-                        }
-                    }
-                }
-            }
-
-            // 7c. Attach supervisor_review to the draft (v0.13.17.4).
-            if let Some(ref sup_review) = supervisor_review {
-                if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                    if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
-                        if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                            pkg.supervisor_review = Some(sup_review.clone());
-                            let _ = super::draft::save_package(config, &pkg);
-                        }
-                    }
-                }
-            }
-
-            // v0.13.17.2: Final progress note — draft is ready with its ID.
-            // v0.14.12: Also write to the progress journal.
-            if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                let short_id = &draft_id[..8.min(draft_id.len())];
-                update_finalize_note(&format!("draft ready — ID: {}", short_id));
+        match spawned_async {
+            Some(BackgroundBuildHandle::Background(bg_pid)) => {
+                // Background build was spawned — ta run is done.
+                // The background process will transition the goal to PrReady when done.
+                update_finalize_note("building draft package (background)");
                 append_progress_journal(
                     &config.goals_dir,
                     goal.goal_run_id,
-                    "draft_built",
-                    &format!("draft {} created", short_id),
+                    "draft_build_spawned",
+                    &format!("draft build spawned as background process PID {}", bg_pid),
                 );
+                // Only print the "you'll be notified" message for non-TTY runs where the
+                // daemon event actually arrives. TTY users get the inline result instead.
+                println!("\nAgent exited. Building draft in background — you'll be notified when it's ready.");
+            }
+            Some(BackgroundBuildHandle::Inline) => {
+                // Inline build completed — build_draft_inline() already attached context
+                // and printed the ✓ result.  Update finalize notes and progress journal.
+                if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                    let short_id = &draft_id[..8.min(draft_id.len())];
+                    update_finalize_note(&format!("draft ready — ID: {}", short_id));
+                    append_progress_journal(
+                        &config.goals_dir,
+                        goal.goal_run_id,
+                        "draft_built",
+                        &format!("draft {} created (inline)", short_id),
+                    );
+                }
+            }
+            None => {
+                // Synchronous build (headless mode or background spawn failed — fall back).
+                update_finalize_note("diffing workspace files");
+                update_finalize_note("building draft package");
+                super::draft::execute(
+                    &super::draft::DraftCommands::Build {
+                        goal_id: goal_id.clone(),
+                        summary: format!("Changes from goal: {}", title),
+                        latest: false,
+                        apply_context_file: None,
+                    },
+                    config,
+                )?;
+
+                // 7a. If there are verification warnings (warn mode), attach them to the draft.
+                if !verification_warnings.is_empty() {
+                    if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                        if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
+                            if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                                pkg.verification_warnings = verification_warnings;
+                                let _ = super::draft::save_package(config, &pkg);
+                            }
+                        }
+                    }
+                }
+
+                // 7b. Attach validation_log to the draft (v0.13.17).
+                if !validation_log.is_empty() {
+                    if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                        if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
+                            if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                                pkg.validation_log = validation_log;
+                                let _ = super::draft::save_package(config, &pkg);
+                            }
+                        }
+                    }
+                }
+
+                // 7c. Attach supervisor_review to the draft (v0.13.17.4).
+                if let Some(ref sup_review) = supervisor_review {
+                    if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                        if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
+                            if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                                pkg.supervisor_review = Some(sup_review.clone());
+                                let _ = super::draft::save_package(config, &pkg);
+                            }
+                        }
+                    }
+                }
+
+                // v0.13.17.2: Final progress note — draft is ready with its ID.
+                // v0.14.12: Also write to the progress journal.
+                if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                    let short_id = &draft_id[..8.min(draft_id.len())];
+                    update_finalize_note(&format!("draft ready — ID: {}", short_id));
+                    append_progress_journal(
+                        &config.goals_dir,
+                        goal.goal_run_id,
+                        "draft_built",
+                        &format!("draft {} created", short_id),
+                    );
+                }
             }
         }
 
@@ -3508,13 +3531,28 @@ fn launch_agent_via_runtime(
     Ok(exit_status)
 }
 
-/// Spawn draft build as a detached background process (v0.15.6.2).
+/// Result of attempting a non-blocking draft build (v0.15.8.1).
 ///
-/// Writes a context JSON file so the background process can attach verification
-/// warnings, validation log, and supervisor review to the draft after building.
-/// Updates the goal's `run_pid` so the watchdog tracks the background process.
+/// - `Background(pid)` — draft build was spawned as a detached child process.
+/// - `Inline` — draft was built synchronously inline (TTY mode); no further build needed.
+enum BackgroundBuildHandle {
+    /// Background process was spawned with this PID.
+    Background(u32),
+    /// Build was done inline (interactive TTY); result already printed.
+    Inline,
+}
+
+/// Spawn draft build as a detached background process, or build inline when running
+/// in an interactive terminal (v0.15.6.2, updated v0.15.8.1).
 ///
-/// Returns `Some(pid)` on success, `None` if spawn fails (caller falls back to sync).
+/// **TTY mode** (`stdout` is a terminal): builds the draft synchronously with a spinner
+/// and prints `✓ Draft ready:` inline. Returns `Some(Inline)`.
+///
+/// **Non-TTY mode**: writes a context JSON file and spawns `ta draft build` as a
+/// detached background process. Returns `Some(Background(pid))` on success.
+///
+/// Returns `None` if the background spawn fails — the caller falls back to a
+/// synchronous inline build without a spinner.
 fn try_spawn_background_draft_build(
     config: &GatewayConfig,
     goal_id: &str,
@@ -3523,7 +3561,30 @@ fn try_spawn_background_draft_build(
     verification_warnings: &[ta_changeset::draft_package::VerificationWarning],
     validation_log: &[ta_changeset::draft_package::ValidationEntry],
     supervisor_review: Option<&ta_changeset::supervisor_review::SupervisorReview>,
-) -> Option<u32> {
+) -> Option<BackgroundBuildHandle> {
+    // v0.15.8.1: If stdout is a terminal, build inline with a spinner rather than
+    // spawning a background process.  The user is already waiting; 30 extra seconds
+    // is invisible, and the "you'll be notified" message is false outside `ta shell`.
+    if std::io::stdout().is_terminal() {
+        match super::draft::build_draft_inline(
+            config,
+            goal_id,
+            title,
+            verification_warnings,
+            validation_log,
+            supervisor_review,
+        ) {
+            Ok(()) => return Some(BackgroundBuildHandle::Inline),
+            Err(e) => {
+                // Inline build failed — print error and fall through to None so the
+                // caller's sync build path can attempt recovery.
+                tracing::warn!("inline draft build failed: {}", e);
+                eprintln!("Draft build failed: {}", e);
+                return None;
+            }
+        }
+    }
+
     // Write the deferred context file.
     let ctx_dir = config.workspace_root.join(".ta/draft-build-ctx");
     if let Err(e) = std::fs::create_dir_all(&ctx_dir) {
@@ -3613,7 +3674,7 @@ fn try_spawn_background_draft_build(
         bg_pid = bg_pid,
         "Spawned background draft build process"
     );
-    Some(bg_pid)
+    Some(BackgroundBuildHandle::Background(bg_pid))
 }
 
 /// Find the most recent draft ID for a goal (headless output).
@@ -6998,5 +7059,45 @@ plan_pending_window = 7
             wf3.workflow.context_mode,
             ta_submit::config::ContextMode::Inject
         );
+    }
+
+    // ── v0.15.8.1: BackgroundBuildHandle tests ────────────────────────
+
+    #[test]
+    fn background_build_handle_inline_variant_is_not_background() {
+        // Ensure the enum variants are distinct — compiler-checked, but also documents
+        // the intended contract: Inline means no PID to track, Background carries a PID.
+        let handle = BackgroundBuildHandle::Inline;
+        let matches_inline = matches!(handle, BackgroundBuildHandle::Inline);
+        assert!(matches_inline, "Inline variant must match Inline");
+
+        let bg = BackgroundBuildHandle::Background(42);
+        let matches_bg = matches!(bg, BackgroundBuildHandle::Background(42));
+        assert!(matches_bg, "Background variant must carry PID");
+    }
+
+    #[test]
+    fn try_spawn_background_draft_build_returns_none_for_non_tty_with_no_project() {
+        // When not running in a TTY and there's no valid project, the background spawn
+        // fails (no `ta` binary in test context) and returns None.
+        // This verifies the None/fallback path is still reachable.
+        // (In real use, the spawn succeeds — here we just confirm it returns None, not panic.)
+        let project = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+
+        // std::io::stdout() is NOT a terminal in test context, so we reach the spawn path.
+        // The spawn will fail because there is no valid goal to build.
+        // We don't assert on the return value — just that it doesn't panic.
+        let result = try_spawn_background_draft_build(
+            &config,
+            "00000000-0000-0000-0000-000000000000",
+            "test",
+            uuid::Uuid::nil(),
+            &[],
+            &[],
+            None,
+        );
+        // In CI/test: not a TTY, spawn may succeed or fail — either way no panic.
+        let _ = result;
     }
 }

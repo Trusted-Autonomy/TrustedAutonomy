@@ -2298,7 +2298,20 @@ heartbeat_timeout_secs = 120   # Max seconds between heartbeats before build is 
 agent_start_timeout_secs = 60  # Grace period for first heartbeat after background build starts (default: 60)
 ```
 
-**Heartbeat-based liveness** (background draft builds): When `ta run` exits, it spawns `ta draft build` as a background process. That process writes a heartbeat file to `.ta/heartbeats/<goal-id>` every 30 seconds. The daemon watchdog checks the heartbeat mtime — if no heartbeat for `heartbeat_timeout_secs`, the build is declared stuck and the goal is marked Failed. On completion, the background process writes `.ta/heartbeats/<goal-id>.done` and the watchdog stops checking. You'll see the notification inline in `ta shell` when the draft is ready — no need to poll `ta draft list`.
+**After the agent exits — inline vs background build**: When `ta run` is invoked directly in an interactive terminal, the draft is built inline before `ta run` returns. You'll see a spinner and then the result:
+
+```
+Agent exited.
+Building draft... ⠸ ~12s
+✓ Draft ready: "v0.15.8 — Windows ProjFS Staging" [8b459eac]
+  → ta draft view 8b459eac
+```
+
+No need to poll `ta draft list` — the draft is ready when the command returns.
+
+When `ta run` is invoked in a non-interactive context (daemon-mediated, CI, `ta shell`), the draft is built as a background process and you'll see a notification in `ta shell` when it's ready.
+
+**Heartbeat-based liveness** (background draft builds): When the background build is used, the subprocess writes a heartbeat file to `.ta/heartbeats/<goal-id>` every 30 seconds. The daemon watchdog checks the heartbeat mtime — if no heartbeat for `heartbeat_timeout_secs`, the build is declared stuck and the goal is marked Failed. On completion, the background process writes `.ta/heartbeats/<goal-id>.done` and the watchdog stops checking.
 
 Setting `failed_staging_retention_hours = 0` disables the failed-goal window (they are cleaned up on the next GC pass regardless of age). Setting `max_staging_gb = 0` disables the cap check.
 

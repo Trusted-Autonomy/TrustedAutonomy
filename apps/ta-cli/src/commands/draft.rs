@@ -6833,6 +6833,97 @@ pub fn apply_draft_build_context(
     Ok(())
 }
 
+/// Build a draft inline with a progress spinner (v0.15.8.1).
+///
+/// Called when `ta run` is invoked in an interactive terminal (TTY=true).
+/// Blocks while building, displaying a spinner, then prints the `✓ Draft ready:` result.
+/// Attaches verification warnings, validation log, and supervisor review to the draft.
+///
+/// On error, returns `Err` so the caller can propagate and exit non-zero.
+pub fn build_draft_inline(
+    config: &GatewayConfig,
+    goal_id: &str,
+    title: &str,
+    verification_warnings: &[VerificationWarning],
+    validation_log: &[ta_changeset::draft_package::ValidationEntry],
+    supervisor_review: Option<&ta_changeset::supervisor_review::SupervisorReview>,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    println!("\nAgent exited.");
+
+    // Spinner thread — runs until the build completes.
+    let done = Arc::new(AtomicBool::new(false));
+    let done_clone = done.clone();
+    let spinner_thread = std::thread::spawn(move || {
+        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let start = std::time::Instant::now();
+        let mut i = 0usize;
+        while !done_clone.load(Ordering::Relaxed) {
+            let elapsed = start.elapsed().as_secs();
+            print!(
+                "\rBuilding draft... {} ~{}s ",
+                frames[i % frames.len()],
+                elapsed
+            );
+            let _ = std::io::stdout().flush();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            i += 1;
+        }
+        // Clear the spinner line so the final message renders cleanly.
+        print!("\r{}\r", " ".repeat(40));
+        let _ = std::io::stdout().flush();
+    });
+
+    // Run the actual draft build synchronously.
+    let build_result = build_package(
+        config,
+        goal_id,
+        &format!("Changes from goal: {}", title),
+        false,
+    );
+
+    // Stop the spinner regardless of build outcome.
+    done.store(true, Ordering::Relaxed);
+    let _ = spinner_thread.join();
+
+    build_result?;
+
+    // Attach deferred context and print result.
+    // Use load_all_packages to find the latest draft by package_id (not display canonical ID,
+    // which can be `shortref/seq` format that isn't a raw UUID).
+    let latest_pkg = load_all_packages(config).ok().and_then(|mut pkgs| {
+        pkgs.retain(|p| p.goal.goal_id == goal_id);
+        pkgs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        pkgs.into_iter().next()
+    });
+
+    if let Some(mut pkg) = latest_pkg {
+        if !verification_warnings.is_empty() {
+            pkg.verification_warnings = verification_warnings.to_vec();
+        }
+        if !validation_log.is_empty() {
+            pkg.validation_log = validation_log.to_vec();
+        }
+        if let Some(sup) = supervisor_review {
+            pkg.supervisor_review = Some(sup.clone());
+        }
+        let _ = save_package(config, &pkg);
+
+        // Print the ✓ result line using the canonical display ID.
+        let canonical = ta_changeset::draft_resolver::draft_canonical_id(&pkg);
+        let short_id = &canonical[..8.min(canonical.len())];
+        println!("✓ Draft ready: \"{}\" [{}]", title, short_id);
+        println!("  → ta draft view {}", short_id);
+    } else {
+        println!("✓ Draft built (run `ta draft list` to see it)");
+    }
+
+    Ok(())
+}
+
 /// Resolve a draft ID from user input.
 ///
 /// Accepts:
@@ -11912,5 +12003,114 @@ fn run() {
 
         let result = bump_workspace_version(dir.path(), "0.15.0-alpha");
         assert!(result.is_ok(), "missing optional files should not error");
+    }
+
+    // ── v0.15.8.1: build_draft_inline tests ──────────────────────────
+
+    /// Build a minimal overlay workspace suitable for inline-build testing.
+    fn setup_inline_build_project() -> (TempDir, TempDir, ta_mcp_gateway::GatewayConfig) {
+        let source = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+
+        // Source project: one file.
+        std::fs::write(source.path().join("README.md"), "# Source\n").unwrap();
+
+        // Staging has a modification the agent "made".
+        std::fs::write(staging.path().join("README.md"), "# Modified by agent\n").unwrap();
+
+        let config = ta_mcp_gateway::GatewayConfig::for_project(source.path());
+
+        // Create a goal so build_package can find it.
+        let goal_store = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        let mut goal = ta_goal::GoalRun::new(
+            "Test goal",
+            "Test objective",
+            "claude-code",
+            staging.path().to_path_buf(),
+            config.goals_dir.clone(),
+        );
+        goal.state = ta_goal::GoalRunState::Finalizing {
+            run_pid: None,
+            exit_code: 0,
+            finalize_started_at: chrono::Utc::now(),
+        };
+        goal.source_dir = Some(source.path().to_path_buf());
+        goal_store.save(&goal).unwrap();
+
+        (source, staging, config)
+    }
+
+    #[test]
+    fn build_draft_inline_succeeds_and_creates_draft() {
+        let (source, staging, config) = setup_inline_build_project();
+
+        // Find the goal ID from the store.
+        let goal_store = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        assert_eq!(goals.len(), 1, "should have exactly one goal");
+        let goal_id = goals[0].goal_run_id.to_string();
+
+        let result = build_draft_inline(&config, &goal_id, "Test goal", &[], &[], None);
+        assert!(
+            result.is_ok(),
+            "build_draft_inline should succeed: {:?}",
+            result
+        );
+
+        // A draft package should now exist.
+        let packages = load_all_packages(&config).unwrap();
+        assert_eq!(packages.len(), 1, "should have created one draft package");
+
+        drop(source);
+        drop(staging);
+    }
+
+    #[test]
+    fn build_draft_inline_attaches_verification_warnings() {
+        let (source, staging, config) = setup_inline_build_project();
+
+        let goal_store = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        let goal_id = goal_store.list().unwrap()[0].goal_run_id.to_string();
+
+        let warnings = vec![ta_changeset::draft_package::VerificationWarning {
+            command: "cargo test".to_string(),
+            exit_code: Some(1),
+            output: "1 test failed".to_string(),
+        }];
+
+        let result = build_draft_inline(&config, &goal_id, "Test goal", &warnings, &[], None);
+        assert!(result.is_ok());
+
+        let packages = load_all_packages(&config).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(
+            packages[0].verification_warnings.len(),
+            1,
+            "verification warning should be attached to draft"
+        );
+        assert_eq!(packages[0].verification_warnings[0].command, "cargo test");
+
+        drop(source);
+        drop(staging);
+    }
+
+    #[test]
+    fn build_draft_inline_fails_gracefully_on_bad_goal_id() {
+        let source = TempDir::new().unwrap();
+        let config = ta_mcp_gateway::GatewayConfig::for_project(source.path());
+
+        // No goal exists — build should fail with a descriptive error.
+        let result = build_draft_inline(
+            &config,
+            "00000000-0000-0000-0000-000000000000",
+            "Nonexistent goal",
+            &[],
+            &[],
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "build_draft_inline should fail when goal does not exist"
+        );
     }
 }
