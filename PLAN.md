@@ -9234,7 +9234,7 @@ The reviewer goal never marks `failed` because staging was absent — it marks `
 ---
 
 ### v0.15.8.1 — Inline Draft Build for Interactive CLI
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: When `ta run` is invoked in an interactive terminal (TTY), block after agent exit and build the draft inline with a progress indicator, rather than spawning a background process and printing "you'll be notified when it's ready" — a message that is false in non-shell contexts and confusing everywhere.
 
 **Why this phase exists**: The background build model (v0.15.6.2) was introduced to avoid the static watchdog timeout. That root cause is now fixed (v0.15.7.1 heartbeat watchdog). For interactive `ta run` invocations, blocking is strictly better:
