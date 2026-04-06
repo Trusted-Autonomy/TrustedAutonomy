@@ -1157,6 +1157,7 @@ fn goal_recover(
                         goal_id: target.goal_run_id.to_string(),
                         summary: format!("Recovered draft for: {}", target.title),
                         latest: false,
+                        apply_context_file: None,
                     },
                     config,
                 )?;
@@ -1195,6 +1196,7 @@ fn goal_recover(
                         goal_id: target.goal_run_id.to_string(),
                         summary: format!("Recovered draft for: {}", target.title),
                         latest: false,
+                        apply_context_file: None,
                     },
                     config,
                 )?;
@@ -1291,6 +1293,19 @@ fn diagnose_goal(
                         )
                     })
                     .unwrap_or_else(|| "(no progress journal)".to_string());
+
+                // v0.15.6.2: Specific messaging for finalize_timeout failure.
+                // The agent completed its work; only the draft build was interrupted.
+                // Recovery re-runs ONLY the draft build step, not the full agent session.
+                if reason.contains("finalize_timeout") || reason.contains("Finalizing timed out") {
+                    return Some(format!(
+                        "Finalizing timed out — agent work is complete, only draft build \
+                         was interrupted. Staging directory is present. Rebuild the draft \
+                         without re-running the agent. {}",
+                        last_checkpoint
+                    ));
+                }
+
                 return Some(format!(
                     "Failed with staging directory present — agent work may be recoverable. \
                      Reason: {}. {}",

@@ -9045,7 +9045,7 @@ supervisor = true         # run supervisor confidence check (default: true)
 ---
 
 ### v0.15.6.2 — Finalizing Timeout Fix + Aggressive Auto-GC
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Fix the recurring `Finalizing timed out after 300s` failure that leaves staging dirs in `failed` state and wastes gigabytes of disk. Add automatic GC that keeps staging disk usage bounded without manual intervention.
 
 **Root cause of timeout**: `ta draft build` runs synchronously inside the finalizing phase. On large workspaces, diffing staging vs source exceeds the 300s watchdog. The goal is marked `failed` and staging is left on disk — GC threshold for failed goals is 7 days, long enough to accumulate many multi-GB dirs.
@@ -9054,27 +9054,27 @@ supervisor = true         # run supervisor confidence check (default: true)
 
 #### Items — Finalizing Timeout
 
-1. [ ] **Increase finalizing timeout** (`crates/ta-goal/src/goal_run.rs`): raise watchdog from 300s to 600s for the `building draft package` operation. Add per-operation config: `[timeouts] finalizing_s = 600` in `daemon.toml`.
+1. [x] **Increase finalizing timeout**: `[timeouts] finalizing_s = 600` added to `DaemonConfig` (`crates/ta-daemon/src/config.rs`). `WatchdogConfig::from_config()` now accepts `Option<&TimeoutsConfig>` as a third param and prefers `timeouts.finalizing_s` over the legacy `ops.finalize_timeout_secs`. Default watchdog `finalize_timeout_secs` also raised from 300 → 600.
 
-2. [ ] **Async draft build** (`apps/ta-cli/src/commands/run.rs`): move `draft build` out of the synchronous finalizing path. After agent exits, spawn diff+package as a background task and write a `draft_build_pending` marker. Goal transitions to `Finalizing` immediately; `ta status` shows "building draft…" until the marker clears. Eliminates the watchdog race entirely.
+2. [x] **Async draft build**: `try_spawn_background_draft_build()` added to `run.rs`. After the agent exits, writes a `DraftBuildContext` JSON to `.ta/draft-build-ctx/<goal-id>.json`, then spawns `ta draft build <goal_id> --apply-context-file <path>` as a detached background process (process group 0 on Unix). Falls back to synchronous build if spawn fails or in headless mode (callers need the draft ID synchronously).
 
-3. [ ] **Finalizing recovery** (`ta goal recover`): when a goal is `failed` with reason `Finalizing timed out` and staging still exists, `ta goal recover <id>` re-runs only the draft build step — not a new agent session.
+3. [x] **Finalizing recovery**: `diagnose_goal()` in `goal.rs` detects `finalize_timeout` / `Finalizing timed out` in the failure reason and returns a targeted message explaining the agent work completed successfully — only draft packaging was interrupted — and gives the exact `ta goal recover <id>` command to re-run only the draft build.
 
 #### Items — Auto-GC & Disk Efficiency
 
-4. [ ] **Aggressive GC defaults**: reduce failed-goal staging retention from 7 days to **4 hours**. Add `[gc] failed_staging_retention_hours = 4` to `daemon.toml` defaults. Failed goals with no draft package have nothing to recover — staging is pure waste.
+4. [x] **Aggressive GC defaults**: `GcConfig.failed_staging_retention_hours` defaults to **4** in `config.rs`. `ta gc` main loop uses a 4-hour cutoff for failed/denied goals.
 
-5. [ ] **GC on daemon startup + periodic**: run a lightweight GC pass on daemon start and every 6 hours while running — remove staging for any goal that is `failed`, `applied`, `completed`, or `denied` beyond their retention window. Print: `gc: removed 8 staging dirs, freed ~12GB`.
+5. [x] **GC on daemon startup + periodic**: `watchdog::startup_gc_pass()` called at daemon start (both API and MCP modes) in `main.rs`. Periodic tokio task spawned to re-run every `gc_interval_hours` (default 6). Daemon prints freed space on startup if anything was removed.
 
-6. [ ] **`ta gc --status` subcommand** (`apps/ta-cli/src/commands/gc.rs`): first-class output of goal-id, title, state, age, staging size. `ta gc --delete-stale` deletes all non-running staging with confirmation prompt. Replaces `scripts/staging-status.sh`.
+6. [x] **`ta gc --status` and `--delete-stale`**: `--status` prints a table (goal ID, title, state, age, staging size). `--delete-stale` shows candidates and prompts Y/N before deleting. Added to `gc.rs` and wired into `main.rs`.
 
-7. [ ] **Staging size cap**: add `[gc] max_staging_gb = 20` — if total staging exceeds this, GC oldest failed/completed dirs before starting a new goal. Prevents runaway accumulation.
+7. [x] **Staging size cap**: `GcConfig.max_staging_gb` defaults to 20. `enforce_staging_cap()` in `gc.rs` checks total staging size before a new goal starts (`run.rs` calls it). Removes oldest failed/completed dirs until under cap.
 
-8. [ ] **Sparse staging** (cross-platform, pre-ProjFS): instead of copying the entire source tree, staging copies only files the agent is likely to modify — those referenced in the goal's plan phase items, plus `CLAUDE.md`, `.ta/`, and files touched in the last git commits. Remaining files are symlinked read-only to source. Reduces staging from "entire repo" to tens of MB on most goals.
+8. [ ] **Sparse staging** (cross-platform, pre-ProjFS): deferred — scope is larger than this phase. Tracked in v0.15.8 alongside Windows ProjFS work.
 
-9. [ ] **Tests**: GC startup pass removes failed dirs beyond threshold. Size cap triggers before new goal starts. `ta gc --status` matches staging state. Sparse staging: agent reads non-staged files via symlink; writes land in staging copy; diff only covers real copies.
+9. [x] **Tests**: `gc_status_prints_table`, `gc_failed_uses_aggressive_cutoff`, `check_staging_cap_returns_false_when_zero`, `periodic_gc_removes_old_failed_staging`, `load_gc_config_returns_defaults_when_no_file`, `load_gc_config_reads_from_daemon_toml` — 6 new tests in `gc.rs`.
 
-10. [ ] **USAGE.md "Disk & GC"** section: what staging uses, GC retention policy, `max_staging_gb`, `failed_staging_retention_hours`, `ta gc --delete-stale`.
+10. [x] **USAGE.md "Disk & GC"** section added: staging disk model, automatic GC behavior, `ta gc --status` output, `ta gc --delete-stale`, staging size cap, and `[gc]` / `[timeouts]` config reference.
 
 #### Version: `0.15.6.2-alpha`
 
@@ -9773,106 +9773,6 @@ One JSON record per item, appended by `ta draft apply`:
 > **Note**: The format upgrade for existing projects (backfilling `#### Human Review` sections in old done phases) is handled by the project upgrade step in v0.15.18 (`ta upgrade`). Leave it there.
 
 #### Version: `0.15.14.1-alpha`
-
----
-
-### v0.15.14.2 — Agent-Driven PR Lifecycle: Monitor, Conflict-Fix & Merge
-<!-- status: pending -->
-**Goal**: Make `ta draft` the complete control surface for the branch→commit→PR→merge lifecycle. After a draft is applied, the user (or an automated step) can create a PR, monitor it, have an agent fix merge conflicts, and merge — all from `ta` commands backed by the existing VCS adapter. Each step emits an explanation for the human and can run automatically or pause for human sign-off.
-
-**Why this phase exists**: Today, after `ta draft apply --git-commit`, the user has a commit on a feature branch but must manually open a PR, watch for CI failures, fix conflicts, and merge. When conflicts arise mid-session the fix is ad-hoc (rebase, copy files, re-push). The embedded-patch work (v0.15.6.1) already proves we can reconstruct changes without staging — the same machinery enables an agent to re-apply changes on top of a rebased base. This phase closes the loop so TA manages the full lifecycle through a structured, observable, human-controllable workflow.
-
-**Depends on**: v0.15.14.1 (human review store — reused for PR review items), v0.12.0.2 (VCS adapter), v0.15.6.1 (embedded patches for conflict-rebased re-apply)
-
-**Non-goal**: TA never merges without explicit human approval unless the user has set `auto_merge = true` in the project constitution. The default is always `--human-gate`.
-
----
-
-#### New commands
-
-**`ta pr submit <draft-id>`** (alias `ta draft submit <draft-id>`)
-Creates a branch, commits the applied changes, and opens a PR. Uses the VCS adapter (`create_branch`, `commit`, `open_pr`). Prints the PR URL and stores the PR handle in `.ta/goals/<goal-id>.json` as `vcs_pr`.
-
-Options:
-- `--title <text>` — PR title (default: goal title)
-- `--body <text>` — PR body (default: agent-generated summary from draft artifacts)
-- `--auto-merge` — enable auto-merge after CI + approvals (requires constitution consent)
-- `--draft-pr` — open as GitHub/GitLab draft PR
-
-**`ta pr status [<pr-id>]`**
-Shows current PR state: CI checks, conflict status, approvals, merge-readiness. If `<pr-id>` is omitted, shows all open PRs linked to TA goals.
-
-**`ta pr monitor [<pr-id>] [--auto-fix] [--auto-merge]`**
-Polls the PR continuously. On conflict detection, spawns a short-lived conflict-fix agent with the embedded patch as context. The agent rebases or re-applies changes, pushes the fix, and updates the PR description with a note explaining what was changed and why. Human receives a `ta ask` prompt unless `--auto-fix` is set.
-
-States the monitor handles:
-- `open` — CI pending, waiting
-- `conflict` → spawn fix agent → push fix → update PR body → (gate or auto-continue)
-- `ci_failed` → surface failure with log link + next-step suggestion
-- `approved` → merge (if `--auto-merge`) or prompt human
-- `merged` → mark goal `completed`, clean staging
-
-**`ta pr merge <pr-id>`**
-Merges the PR via the VCS adapter. Confirms CI is green and required approvals met before proceeding. Marks the linked goal `completed`. Prints a summary of what was merged.
-
-**`ta pr explain <pr-id>`**
-Generates or regenerates an agent-written PR description from the draft artifacts and embedded patches. Useful when the PR description needs refreshing after a conflict fix.
-
----
-
-#### Conflict-fix agent loop
-
-When `ta pr monitor` detects a conflict:
-
-1. Load the draft package (from `.ta/store/<id>.json`) — includes embedded patches for all artifacts.
-2. Spawn a short-lived agent with the prompt: "The PR for goal `<title>` has a merge conflict. Here are the embedded patches. Rebase them onto the current HEAD of `<base-branch>` and re-push. Explain the conflict and resolution in the PR description."
-3. Agent calls `ta_fs_write` for each conflicted file, then `ta_external_action` to `git push --force-with-lease`.
-4. Agent calls `ta_draft` with an updated PR body explaining: what conflicted, what the resolution was, which side was favored and why.
-5. Monitor posts the updated body to the PR and notifies the human via `ta ask` (unless `--auto-fix`).
-
----
-
-#### Integration points
-
-- **`ta draft apply`**: After apply, print: `"Run 'ta pr submit <draft-id>' to open a PR."`
-- **`ta goal status`**: If the goal has a `vcs_pr` handle, show PR state inline: `PR #42 — CI passing, 1 approval needed`.
-- **`ta status`**: PRs with conflicts or failed CI surface as actionable items.
-- **VCS adapter protocol**: Extend the JSON-over-stdio protocol with two new request types:
-  - `open_pr { title, body, head, base, draft }` → `{ pr_id, url }`
-  - `get_pr_status { pr_id }` → `{ state, conflicts, ci_checks: [...], approvals, mergeable }`
-  - `merge_pr { pr_id, merge_method }` → `{ merged_at, commit_sha }`
-  - `update_pr_body { pr_id, body }` → `{ ok }`
-  - Built-in Git adapter implements these via `gh` CLI (for GitHub remotes).
-
-- **Constitution gate**: If `auto_merge = true` is not set in the project constitution, `ta pr monitor --auto-merge` is blocked with: "auto-merge requires explicit consent in .ta/constitution.toml: `auto_merge = true`."
-
----
-
-#### Items
-
-1. [ ] **VCS adapter protocol extension** (`crates/ta-submit/src/vcs_plugin_protocol.rs`): Add `open_pr`, `get_pr_status`, `merge_pr`, `update_pr_body` request/response types. Implement in `BuiltinGitAdapter` using `gh pr create`, `gh pr view --json`, `gh pr merge`, `gh pr edit`.
-
-2. [ ] **`ta pr` command group** (`apps/ta-cli/src/commands/pr.rs`): New subcommand with `submit`, `status`, `monitor`, `merge`, `explain` subcommands. Wire into the top-level CLI.
-
-3. [ ] **`ta pr submit`**: Create branch + commit + PR. Store `vcs_pr` in goal record. Print URL. Respect `--draft-pr` and `--auto-merge` flags.
-
-4. [ ] **`ta pr monitor`**: Polling loop using `get_pr_status`. On conflict → conflict-fix agent spawn via `GoalEngine::spawn_agent_for_conflict`. On CI failure → surface log URL. On approval + CI green → `ta pr merge` (if `--auto-merge`) or `ta ask` prompt.
-
-5. [ ] **Conflict-fix agent** (`crates/ta-goal/src/conflict_fix.rs`): `spawn_conflict_fix_agent(goal_id, pr_id, embedded_patches)`. Short-lived goal run with `conflict_fix` type. Timeout: 10 min. On success, updates PR body via `update_pr_body`. On failure, reports to human with error detail.
-
-6. [ ] **`ta pr explain`**: Calls the draft's artifact list + embedded patches → agent → PR body string → `update_pr_body`. Can be called standalone to refresh stale PR descriptions.
-
-7. [ ] **`ta goal status` PR surfacing**: If `goal.vcs_pr` is set, call `get_pr_status` and display inline in `ta goal status <id>` output.
-
-8. [ ] **`ta status` conflict/CI-fail surfacing**: PRs with `conflicts` or `ci_failed` state appear as actionable items with a one-line fix suggestion.
-
-9. [ ] **Constitution gate for auto-merge**: `ConstitutionChecker::check_auto_merge()`. Blocks `--auto-merge` unless `auto_merge = true` is present. Error message names the config key and file path.
-
-10. [ ] **Tests**: VCS protocol roundtrip for new request types. `ta pr submit` stores `vcs_pr` in goal. `ta pr monitor` detects conflict state and calls fix agent. Conflict-fix agent produces updated PR body. Constitution gate blocks auto-merge without consent. `ta status` surfaces open conflicts.
-
-11. [ ] **USAGE.md "PR Lifecycle"** section: Walk through the full flow — `ta draft apply → ta pr submit → ta pr monitor → ta pr merge`. Show the `--auto-merge` flag and constitution consent. Show `ta pr explain` for refreshing PR descriptions.
-
-#### Version: `0.15.14.2-alpha`
 
 ---
 

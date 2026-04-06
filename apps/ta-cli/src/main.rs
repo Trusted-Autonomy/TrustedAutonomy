@@ -245,7 +245,8 @@ enum Commands {
         /// Show what would be cleaned without making changes.
         #[arg(long)]
         dry_run: bool,
-        /// Stale threshold in days (default: 7).
+        /// Stale threshold in days for applied/completed goals (default: 7).
+        /// Failed goals use [gc] failed_staging_retention_hours from daemon.toml (default: 4h).
         #[arg(long, default_value = "7")]
         threshold_days: u32,
         /// Ignore threshold — GC everything in terminal state.
@@ -267,6 +268,13 @@ enum Commands {
         /// Run GC even if a release pipeline lockfile is present.
         #[arg(long)]
         force: bool,
+        /// Show a status table of all goals with staging dirs: state, age, size (v0.15.6.2).
+        #[arg(long)]
+        status: bool,
+        /// Delete all staging dirs for non-running terminal goals (v0.15.6.2).
+        /// Prompts for confirmation unless --dry-run is also set.
+        #[arg(long)]
+        delete_stale: bool,
     },
     /// System-wide health check: toolchain, agent binaries, daemon, plugins, .ta integrity.
     Doctor,
@@ -890,6 +898,8 @@ fn main() -> anyhow::Result<()> {
             compact,
             compact_after_days,
             force,
+            status,
+            delete_stale,
         } => commands::gc::execute(
             &config,
             *dry_run,
@@ -900,6 +910,8 @@ fn main() -> anyhow::Result<()> {
             *compact,
             *compact_after_days,
             *force,
+            *status,
+            *delete_stale,
         ),
         Commands::Operations { command } => commands::operations::execute(command, &config),
         Commands::Runbook { command } => commands::runbook::execute(command, &config),

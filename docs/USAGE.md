@@ -2197,6 +2197,71 @@ compact_after_days = 30
 discard = ["staging_copy", "draft_package"]
 ```
 
+### Disk Usage & Automatic GC
+
+Each active goal creates a staging directory — a full copy of your project. On a typical Rust workspace (~500 MB of source), each goal uses roughly that much disk. Without GC, failed goals accumulate until you reclaim the space manually.
+
+#### How automatic GC works
+
+The daemon runs a GC pass on startup and every 6 hours while running. It removes staging directories for goals that are in a terminal state and past their retention window:
+
+- **Failed goals**: retention window is **4 hours** by default. A failed goal with no draft package has nothing to recover — staging is pure waste.
+- **Applied / completed goals**: staging is removed after **7 days** by default. The VCS record is the source of truth once a goal is applied.
+- **Denied goals**: treated the same as failed (4-hour window).
+
+On startup, the daemon prints how much was freed:
+
+```
+gc: removed 3 staging dir(s), freed ~2.1 GB
+```
+
+#### Viewing staging status
+
+```bash
+# Table view: goal ID, title, state, age, staging size
+ta gc --status
+```
+
+Example output:
+
+```
+GOAL ID   TITLE                       STATE    AGE    SIZE
+abc123    fix login timeout           failed   6h     412 MB
+def456    add CSV export              applied  2d     388 MB
+ghi789    refactor auth middleware    running  1h     501 MB
+```
+
+#### Reclaiming space manually
+
+```bash
+# Show what would be deleted (terminal goals past their retention window)
+ta gc --delete-stale --dry-run
+
+# Delete stale staging dirs with a confirmation prompt
+ta gc --delete-stale
+```
+
+`--delete-stale` prompts before deleting. Type `y` to confirm.
+
+#### Staging size cap
+
+If total staging size exceeds the cap, the oldest failed and completed staging directories are removed before a new goal is allowed to start. This prevents runaway accumulation even if the daemon was offline.
+
+#### Configuration
+
+```toml
+# .ta/daemon.toml
+[gc]
+failed_staging_retention_hours = 4   # How long to keep failed/denied staging (default: 4)
+max_staging_gb = 20                  # Total staging cap before auto-GC before new goal (default: 20)
+gc_interval_hours = 6                # How often the daemon runs periodic GC (default: 6)
+
+[timeouts]
+finalizing_s = 600   # Watchdog timeout for the draft-build finalizing phase (default: 600)
+```
+
+Setting `failed_staging_retention_hours = 0` disables the failed-goal window (they are cleaned up on the next GC pass regardless of age). Setting `max_staging_gb = 0` disables the cap check.
+
 ### Autonomous Operations (`ta operations`)
 
 The daemon watchdog continuously monitors goal health, disk space, and system status. When it detects issues, it records **corrective action proposals** to `.ta/operations.jsonl`. Use `ta operations log` to review what the daemon has detected:

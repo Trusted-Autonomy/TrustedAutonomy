@@ -58,6 +58,10 @@ pub enum DraftCommands {
         /// Use the most recent running goal instead of specifying an ID.
         #[arg(long)]
         latest: bool,
+        /// Path to a JSON context file to patch into the draft after building
+        /// (used by background draft-build spawned from `ta run`, v0.15.6.2).
+        #[arg(long, hide = true)]
+        apply_context_file: Option<std::path::PathBuf>,
     },
     /// List all draft packages.
     List {
@@ -479,7 +483,17 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             goal_id,
             summary,
             latest,
-        } => build_package(config, goal_id, summary, *latest),
+            apply_context_file,
+        } => {
+            build_package(config, goal_id, summary, *latest)?;
+            // Apply deferred build context if present (v0.15.6.2 async draft build).
+            if let Some(ctx_path) = apply_context_file {
+                if ctx_path.exists() {
+                    apply_draft_build_context(config, goal_id, ctx_path)?;
+                }
+            }
+            Ok(())
+        }
         DraftCommands::List {
             goal,
             stale,
@@ -6641,6 +6655,68 @@ pub fn save_package(config: &GatewayConfig, pkg: &DraftPackage) -> anyhow::Resul
         .join(format!("{}.json", pkg.package_id));
     let json = serde_json::to_string_pretty(pkg)?;
     fs::write(&path, json)?;
+    Ok(())
+}
+
+/// Serializable context produced by `ta run` before spawning an async draft build
+/// (v0.15.6.2). Written to `.ta/draft-build-ctx/<goal-id>.json`; read back by
+/// the background `ta draft build --apply-context-file` invocation.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DraftBuildContext {
+    pub goal_id: String,
+    pub verification_warnings: Vec<VerificationWarning>,
+    pub validation_log: Vec<ta_changeset::draft_package::ValidationEntry>,
+    pub supervisor_review: Option<ta_changeset::supervisor_review::SupervisorReview>,
+}
+
+/// Apply a `DraftBuildContext` file to the most recently built draft for `goal_id`.
+///
+/// Called by the background draft-build process after `build_package()` succeeds.
+/// Patches the draft in-place and removes the context file.
+pub fn apply_draft_build_context(
+    config: &GatewayConfig,
+    goal_id: &str,
+    ctx_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let ctx_json = fs::read_to_string(ctx_path)?;
+    let ctx: DraftBuildContext = serde_json::from_str(&ctx_json)?;
+
+    // Find the latest draft for this goal.
+    let Some(draft_id_str) = super::run::find_latest_draft_id(config, goal_id) else {
+        tracing::warn!(
+            goal_id = goal_id,
+            "apply_draft_build_context: no draft found for goal"
+        );
+        // Remove the context file even on failure — it's stale either way.
+        let _ = fs::remove_file(ctx_path);
+        return Ok(());
+    };
+    let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id_str) else {
+        let _ = fs::remove_file(ctx_path);
+        anyhow::bail!(
+            "apply_draft_build_context: invalid draft UUID '{}'",
+            draft_id_str
+        );
+    };
+    let mut pkg = load_package(config, draft_uuid)?;
+
+    if !ctx.verification_warnings.is_empty() {
+        pkg.verification_warnings = ctx.verification_warnings;
+    }
+    if !ctx.validation_log.is_empty() {
+        pkg.validation_log = ctx.validation_log;
+    }
+    if let Some(sup) = ctx.supervisor_review {
+        pkg.supervisor_review = Some(sup);
+    }
+
+    save_package(config, &pkg)?;
+    let _ = fs::remove_file(ctx_path);
+    tracing::info!(
+        goal_id = goal_id,
+        draft_id = %draft_uuid,
+        "apply_draft_build_context: patched draft with deferred build context"
+    );
     Ok(())
 }
 

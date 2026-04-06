@@ -260,10 +260,40 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Startup GC pass (v0.15.6.2): remove staging for failed/applied goals that
+        // have exceeded their retention window. Keeps disk usage bounded on restart.
+        {
+            let gc_root = project_root.clone();
+            let gc_config = daemon_config.gc.clone();
+            let (removed, freed) = watchdog::startup_gc_pass(
+                &gc_root,
+                gc_config.failed_staging_retention_hours,
+                7, // applied retention days (non-configurable for now)
+            );
+            if removed > 0 {
+                tracing::info!(
+                    removed = removed,
+                    freed_bytes = freed,
+                    "Startup GC: removed {} staging dir(s), freed ~{}",
+                    removed,
+                    watchdog::format_bytes(freed),
+                );
+                println!(
+                    "gc: removed {} staging dir(s), freed ~{}",
+                    removed,
+                    watchdog::format_bytes(freed)
+                );
+            }
+        }
+
         // Start the watchdog loop (v0.11.2.4, power manager v0.13.1.1).
         {
             let wd_config = match &daemon_config.operations {
-                Some(ops) => watchdog::WatchdogConfig::from_config(ops, &daemon_config.power),
+                Some(ops) => watchdog::WatchdogConfig::from_config(
+                    ops,
+                    &daemon_config.power,
+                    Some(&daemon_config.timeouts),
+                ),
                 None => watchdog::WatchdogConfig::default(),
             };
             let pm = Arc::new(power_manager::PowerManager::new(
@@ -271,9 +301,33 @@ async fn main() -> Result<()> {
             ));
             let wd_root = project_root.clone();
             let wd_shutdown = shutdown.clone();
+            let gc_interval_hours = daemon_config.gc.gc_interval_hours;
+            let gc_failed_hours = daemon_config.gc.failed_staging_retention_hours;
             tokio::spawn(async move {
                 watchdog::run_watchdog(wd_root, wd_config, Some(pm), wd_shutdown).await;
             });
+
+            // Periodic GC task: run every `gc_interval_hours` (default 6h).
+            if gc_interval_hours > 0 {
+                let gc_project_root = project_root.clone();
+                tokio::spawn(async move {
+                    let interval = std::time::Duration::from_secs(gc_interval_hours as u64 * 3600);
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        let (removed, freed) =
+                            watchdog::startup_gc_pass(&gc_project_root, gc_failed_hours, 7);
+                        if removed > 0 {
+                            tracing::info!(
+                                removed = removed,
+                                freed_bytes = freed,
+                                "Periodic GC: removed {} staging dir(s), freed ~{} bytes",
+                                removed,
+                                freed,
+                            );
+                        }
+                    }
+                });
+            }
         }
 
         // Optionally also serve the legacy web UI on a separate port.
@@ -329,7 +383,11 @@ async fn main() -> Result<()> {
         // Start the watchdog loop in MCP mode too (v0.11.2.4, power manager v0.13.1.1).
         {
             let wd_config = match &daemon_config.operations {
-                Some(ops) => watchdog::WatchdogConfig::from_config(ops, &daemon_config.power),
+                Some(ops) => watchdog::WatchdogConfig::from_config(
+                    ops,
+                    &daemon_config.power,
+                    Some(&daemon_config.timeouts),
+                ),
                 None => watchdog::WatchdogConfig::default(),
             };
             let pm = Arc::new(power_manager::PowerManager::new(

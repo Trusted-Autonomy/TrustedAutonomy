@@ -82,6 +82,104 @@ pub struct DaemonConfig {
     /// ```
     #[serde(default)]
     pub webhooks: WebhooksConfig,
+
+    /// Per-operation timeout overrides (v0.15.6.2).
+    ///
+    /// ```toml
+    /// [timeouts]
+    /// finalizing_s = 600   # seconds allowed for draft build after agent exits
+    /// ```
+    #[serde(default)]
+    pub timeouts: TimeoutsConfig,
+
+    /// Garbage collection policy (v0.15.6.2).
+    ///
+    /// ```toml
+    /// [gc]
+    /// failed_staging_retention_hours = 4   # delete failed-goal staging after 4h (default)
+    /// max_staging_gb = 20                  # GC oldest dirs when total staging exceeds this
+    /// gc_interval_hours = 6               # periodic GC interval (default: 6h)
+    /// ```
+    #[serde(default)]
+    pub gc: GcConfig,
+}
+
+/// Per-operation timeout configuration (v0.15.6.2).
+///
+/// Provides fine-grained timeout control per operation type without requiring
+/// changes to `[operations]` defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TimeoutsConfig {
+    /// Seconds a goal may spend in `Finalizing` state (draft build) before the
+    /// watchdog declares it stuck. Default: 600s (10 min). Set to 0 to disable.
+    /// The watchdog only fires when the `ta run` process is confirmed dead — live
+    /// processes are never interrupted regardless of this setting.
+    #[serde(default = "default_finalizing_timeout_s")]
+    pub finalizing_s: u64,
+}
+
+fn default_finalizing_timeout_s() -> u64 {
+    600
+}
+
+impl Default for TimeoutsConfig {
+    fn default() -> Self {
+        Self {
+            finalizing_s: default_finalizing_timeout_s(),
+        }
+    }
+}
+
+/// Garbage collection policy (v0.15.6.2).
+///
+/// Controls how aggressively TA reclaims disk space used by staging directories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GcConfig {
+    /// Hours to retain staging directories for `failed` goals (default: 4).
+    ///
+    /// Failed goals with no draft package have nothing to recover — staging is pure
+    /// waste. 4 hours is enough for a human to notice and recover if needed.
+    /// Set to 0 to delete failed staging immediately on the next GC pass.
+    #[serde(default = "default_failed_staging_retention_hours")]
+    pub failed_staging_retention_hours: u32,
+
+    /// Maximum total staging size in GB before GC auto-runs on new goal start (default: 20).
+    ///
+    /// When total staging space exceeds this cap, the oldest failed/completed dirs
+    /// are removed before a new goal is allowed to start. Set to 0 to disable the cap.
+    #[serde(default = "default_max_staging_gb")]
+    pub max_staging_gb: u32,
+
+    /// How often (in hours) the daemon runs a periodic GC pass (default: 6).
+    ///
+    /// Each pass removes staging for goals in `failed`, `applied`, `completed`, or
+    /// `denied` state that have exceeded their retention window. Set to 0 to disable.
+    #[serde(default = "default_gc_interval_hours")]
+    pub gc_interval_hours: u32,
+}
+
+fn default_failed_staging_retention_hours() -> u32 {
+    4
+}
+
+fn default_max_staging_gb() -> u32 {
+    20
+}
+
+fn default_gc_interval_hours() -> u32 {
+    6
+}
+
+impl Default for GcConfig {
+    fn default() -> Self {
+        Self {
+            failed_staging_retention_hours: default_failed_staging_retention_hours(),
+            max_staging_gb: default_max_staging_gb(),
+            gc_interval_hours: default_gc_interval_hours(),
+        }
+    }
 }
 
 /// Top-level inbound webhook configuration (v0.14.8.3).
@@ -305,9 +403,9 @@ pub struct OperationsConfig {
     /// `ta run` process before the watchdog declares it stuck and transitions
     /// to `Failed` (v0.13.17).
     ///
-    /// Default: 1800s (30 min). If the `ta run` process is still alive, the
-    /// watchdog never fires — this timeout only catches interrupted builds.
-    /// Increase for very large workspaces where the file diff takes longer.
+    /// Default: 1800s (30 min). Prefer `[timeouts] finalizing_s` (v0.15.6.2)
+    /// which takes precedence and defaults to 600s. This field is retained for
+    /// backward compatibility with existing daemon.toml files.
     #[serde(default = "default_finalize_timeout")]
     pub finalize_timeout_secs: u64,
 }

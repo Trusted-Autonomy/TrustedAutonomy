@@ -130,6 +130,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             goal_id: goal_id.clone(),
             summary: summary.clone(),
             latest: *latest,
+            apply_context_file: None,
         },
         PrCommands::List { goal } => draft::DraftCommands::List {
             goal: goal.clone(),

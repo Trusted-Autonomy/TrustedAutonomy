@@ -1324,6 +1324,11 @@ pub fn execute(
         }
     }
 
+    // Staging size cap check (v0.15.6.2): if total staging exceeds [gc] max_staging_gb,
+    // GC the oldest terminal dirs before allocating a new workspace.
+    // This runs before the goal is created so we don't start work we can't store.
+    super::gc::enforce_staging_cap(config);
+
     // 1. Start the goal (creates overlay workspace), or reuse an existing one
     //    when --goal-id is passed (v0.9.5.1: prevents duplicate goal creation
     //    when the MCP orchestrator's ta_goal_start already created the goal).
@@ -2672,65 +2677,101 @@ pub fn execute(
             }
         };
 
-        update_finalize_note("diffing workspace files");
+        // v0.15.6.2: In non-headless mode, spawn draft build as a background process so
+        // `ta run` returns immediately after the agent exits. The background process does
+        // the slow diff+package work; the watchdog tracks it via `run_pid`.
+        // In headless mode, build synchronously so the caller gets the draft ID in JSON.
+        let spawned_async = if !headless {
+            try_spawn_background_draft_build(
+                config,
+                &goal_id,
+                title,
+                goal.goal_run_id,
+                &verification_warnings,
+                &validation_log,
+                supervisor_review.as_ref(),
+            )
+        } else {
+            None
+        };
 
-        update_finalize_note("building draft package");
-        super::draft::execute(
-            &super::draft::DraftCommands::Build {
-                goal_id: goal_id.clone(),
-                summary: format!("Changes from goal: {}", title),
-                latest: false,
-            },
-            config,
-        )?;
-
-        // 7a. If there are verification warnings (warn mode), attach them to the draft.
-        if !verification_warnings.is_empty() {
-            if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
-                    if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                        pkg.verification_warnings = verification_warnings;
-                        let _ = super::draft::save_package(config, &pkg);
-                    }
-                }
-            }
-        }
-
-        // 7b. Attach validation_log to the draft (v0.13.17).
-        if !validation_log.is_empty() {
-            if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
-                    if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                        pkg.validation_log = validation_log;
-                        let _ = super::draft::save_package(config, &pkg);
-                    }
-                }
-            }
-        }
-
-        // 7c. Attach supervisor_review to the draft (v0.13.17.4).
-        if let Some(ref sup_review) = supervisor_review {
-            if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
-                    if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                        pkg.supervisor_review = Some(sup_review.clone());
-                        let _ = super::draft::save_package(config, &pkg);
-                    }
-                }
-            }
-        }
-
-        // v0.13.17.2: Final progress note — draft is ready with its ID.
-        // v0.14.12: Also write to the progress journal.
-        if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-            let short_id = &draft_id[..8.min(draft_id.len())];
-            update_finalize_note(&format!("draft ready — ID: {}", short_id));
+        if let Some(bg_pid) = spawned_async {
+            // Background build was spawned — ta run is done.
+            // The background process will transition the goal to PrReady when done.
+            update_finalize_note("building draft package (background)");
             append_progress_journal(
                 &config.goals_dir,
                 goal.goal_run_id,
-                "draft_built",
-                &format!("draft {} created", short_id),
+                "draft_build_spawned",
+                &format!("draft build spawned as background process PID {}", bg_pid),
             );
+            println!(
+                "\nAgent exited. Draft build running in background (PID {}).",
+                bg_pid
+            );
+            println!("Run `ta draft list` or `ta status` to check when the draft is ready.");
+        } else {
+            // Synchronous build (headless mode or spawn failed — fall back to inline).
+            update_finalize_note("diffing workspace files");
+            update_finalize_note("building draft package");
+            super::draft::execute(
+                &super::draft::DraftCommands::Build {
+                    goal_id: goal_id.clone(),
+                    summary: format!("Changes from goal: {}", title),
+                    latest: false,
+                    apply_context_file: None,
+                },
+                config,
+            )?;
+
+            // 7a. If there are verification warnings (warn mode), attach them to the draft.
+            if !verification_warnings.is_empty() {
+                if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                    if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
+                        if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                            pkg.verification_warnings = verification_warnings;
+                            let _ = super::draft::save_package(config, &pkg);
+                        }
+                    }
+                }
+            }
+
+            // 7b. Attach validation_log to the draft (v0.13.17).
+            if !validation_log.is_empty() {
+                if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                    if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
+                        if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                            pkg.validation_log = validation_log;
+                            let _ = super::draft::save_package(config, &pkg);
+                        }
+                    }
+                }
+            }
+
+            // 7c. Attach supervisor_review to the draft (v0.13.17.4).
+            if let Some(ref sup_review) = supervisor_review {
+                if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                    if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
+                        if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                            pkg.supervisor_review = Some(sup_review.clone());
+                            let _ = super::draft::save_package(config, &pkg);
+                        }
+                    }
+                }
+            }
+
+            // v0.13.17.2: Final progress note — draft is ready with its ID.
+            // v0.14.12: Also write to the progress journal.
+            if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
+                let short_id = &draft_id[..8.min(draft_id.len())];
+                update_finalize_note(&format!("draft ready — ID: {}", short_id));
+                append_progress_journal(
+                    &config.goals_dir,
+                    goal.goal_run_id,
+                    "draft_built",
+                    &format!("draft {} created", short_id),
+                );
+            }
         }
 
         true
@@ -3470,11 +3511,119 @@ fn launch_agent_via_runtime(
     Ok(exit_status)
 }
 
+/// Spawn draft build as a detached background process (v0.15.6.2).
+///
+/// Writes a context JSON file so the background process can attach verification
+/// warnings, validation log, and supervisor review to the draft after building.
+/// Updates the goal's `run_pid` so the watchdog tracks the background process.
+///
+/// Returns `Some(pid)` on success, `None` if spawn fails (caller falls back to sync).
+fn try_spawn_background_draft_build(
+    config: &GatewayConfig,
+    goal_id: &str,
+    title: &str,
+    goal_run_id: uuid::Uuid,
+    verification_warnings: &[ta_changeset::draft_package::VerificationWarning],
+    validation_log: &[ta_changeset::draft_package::ValidationEntry],
+    supervisor_review: Option<&ta_changeset::supervisor_review::SupervisorReview>,
+) -> Option<u32> {
+    // Write the deferred context file.
+    let ctx_dir = config.workspace_root.join(".ta/draft-build-ctx");
+    if let Err(e) = std::fs::create_dir_all(&ctx_dir) {
+        tracing::warn!("background draft build: could not create ctx dir: {}", e);
+        return None;
+    }
+    let ctx_path = ctx_dir.join(format!("{}.json", goal_id));
+    let ctx = super::draft::DraftBuildContext {
+        goal_id: goal_id.to_string(),
+        verification_warnings: verification_warnings.to_vec(),
+        validation_log: validation_log.to_vec(),
+        supervisor_review: supervisor_review.cloned(),
+    };
+    if let Err(e) = std::fs::write(
+        &ctx_path,
+        serde_json::to_string_pretty(&ctx).unwrap_or_default(),
+    ) {
+        tracing::warn!(
+            "background draft build: could not write context file: {}",
+            e
+        );
+        return None;
+    }
+
+    // Locate the ta binary.
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("background draft build: could not find ta binary: {}", e);
+            let _ = std::fs::remove_file(&ctx_path);
+            return None;
+        }
+    };
+
+    // Spawn: ta --project-root <workspace_root> draft build <goal_id>
+    //            --apply-context-file <ctx_path>
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--project-root")
+        .arg(&config.workspace_root)
+        .arg("draft")
+        .arg("build")
+        .arg(goal_id)
+        .arg("--summary")
+        .arg(format!("Changes from goal: {}", title))
+        .arg("--apply-context-file")
+        .arg(&ctx_path)
+        // Detach from terminal — background process runs independently.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Create a new process group so the child doesn't die when the terminal closes.
+        cmd.process_group(0);
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("background draft build: spawn failed: {}", e);
+            let _ = std::fs::remove_file(&ctx_path);
+            return None;
+        }
+    };
+    let bg_pid = child.id();
+
+    // Update the goal's run_pid so the watchdog tracks the background process.
+    if let Ok(store) = GoalRunStore::new(&config.goals_dir) {
+        if let Ok(Some(mut g)) = store.get(goal_run_id) {
+            if let ta_goal::GoalRunState::Finalizing {
+                ref mut run_pid, ..
+            } = g.state
+            {
+                *run_pid = Some(bg_pid);
+            }
+            let _ = store.save(&g);
+        }
+    }
+
+    // Detach (don't wait for the child; it runs independently).
+    std::mem::forget(child);
+
+    tracing::info!(
+        goal_id = goal_id,
+        bg_pid = bg_pid,
+        "Spawned background draft build process"
+    );
+    Some(bg_pid)
+}
+
 /// Find the most recent draft ID for a goal (headless output).
 ///
 /// Returns the canonical display ID (`<shortref>/<seq>` when available, else UUID prefix)
 /// so that the ID shown in completion messages resolves via `ta draft view/approve/apply`.
-fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Option<String> {
+pub(crate) fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Option<String> {
     use ta_changeset::draft_package::DraftPackage;
     use ta_changeset::draft_resolver::draft_canonical_id;
 

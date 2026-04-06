@@ -38,10 +38,11 @@ pub struct WatchdogConfig {
     pub wake_grace_secs: u64,
     /// URL to ping for connectivity check after waking from sleep (v0.13.1.1).
     pub connectivity_check_url: String,
-    /// Maximum seconds a goal may spend in `Finalizing` state before being
-    /// declared stuck and transitioned to `Failed` (v0.13.14).
+    /// Maximum seconds a goal may spend in `Finalizing` state with a dead
+    /// `ta run` process before the watchdog declares it stuck (v0.13.14).
     ///
-    /// Default: 300s (5 min) — enough for diff + draft creation on any workspace size.
+    /// Default: 600s (10 min) — raised from 300s in v0.15.6.2.
+    /// Configurable via `[timeouts] finalizing_s` in daemon.toml.
     pub finalize_timeout_secs: u64,
 }
 
@@ -53,28 +54,37 @@ impl Default for WatchdogConfig {
             stale_question_threshold_secs: 3600,
             wake_grace_secs: 60,
             connectivity_check_url: "https://api.anthropic.com".to_string(),
-            finalize_timeout_secs: 300,
+            finalize_timeout_secs: 600,
         }
     }
 }
 
 impl WatchdogConfig {
     /// Build from daemon config (operations + power sections).
+    ///
+    /// `[timeouts] finalizing_s` takes precedence over the legacy
+    /// `[operations] finalize_timeout_secs` field (v0.15.6.2).
     pub fn from_config(
         ops: &crate::config::OperationsConfig,
         power: &crate::config::PowerConfig,
+        timeouts: Option<&crate::config::TimeoutsConfig>,
     ) -> Self {
+        let finalize = if let Some(t) = timeouts {
+            t.finalizing_s
+        } else {
+            ops.finalize_timeout_secs
+        };
         Self {
             interval_secs: ops.watchdog_interval_secs,
             zombie_transition_delay_secs: ops.zombie_transition_delay_secs,
             stale_question_threshold_secs: ops.stale_question_threshold_secs,
             wake_grace_secs: power.wake_grace_secs,
             connectivity_check_url: power.connectivity_check_url.clone(),
-            finalize_timeout_secs: ops.finalize_timeout_secs,
+            finalize_timeout_secs: finalize,
         }
     }
 
-    /// Build from daemon OperationsConfig only (uses power defaults).
+    /// Build from daemon OperationsConfig only (uses power and timeout defaults).
     pub fn from_operations(ops: &crate::config::OperationsConfig) -> Self {
         Self {
             interval_secs: ops.watchdog_interval_secs,
@@ -1095,6 +1105,105 @@ pub fn startup_recovery_scan(project_root: &Path) -> usize {
     }
 
     recovered
+}
+
+/// Startup/periodic GC pass (v0.15.6.2).
+///
+/// Removes staging directories for goals in terminal states that have exceeded
+/// their configured retention window. Called once on daemon start and periodically
+/// thereafter (`[gc] gc_interval_hours`).
+///
+/// Returns `(dirs_removed, bytes_freed)`.
+pub fn startup_gc_pass(
+    project_root: &Path,
+    failed_staging_retention_hours: u32,
+    applied_retention_days: u32,
+) -> (u32, u64) {
+    let goals_dir = project_root.join(".ta").join("goals");
+    let store = match GoalRunStore::new(&goals_dir) {
+        Ok(s) => s,
+        Err(_) => return (0, 0),
+    };
+    let goals = match store.list() {
+        Ok(g) => g,
+        Err(_) => return (0, 0),
+    };
+
+    let now = chrono::Utc::now();
+    let failed_cutoff = now - chrono::Duration::hours(failed_staging_retention_hours as i64);
+    let applied_cutoff = now - chrono::Duration::days(applied_retention_days as i64);
+
+    let mut removed = 0u32;
+    let mut freed_bytes = 0u64;
+
+    for goal in &goals {
+        let is_failed = matches!(goal.state, GoalRunState::Failed { .. });
+        let is_applied_completed = matches!(
+            goal.state,
+            GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Merged
+        );
+
+        let past_cutoff = if is_failed {
+            goal.updated_at < failed_cutoff
+        } else if is_applied_completed {
+            goal.updated_at < applied_cutoff
+        } else {
+            false
+        };
+
+        if past_cutoff
+            && !goal.workspace_path.as_os_str().is_empty()
+            && goal.workspace_path.exists()
+        {
+            let sz = walkdir_size_wd(&goal.workspace_path);
+            if std::fs::remove_dir_all(&goal.workspace_path).is_ok() {
+                removed += 1;
+                freed_bytes += sz;
+                tracing::info!(
+                    goal_id = %goal.goal_run_id,
+                    state = %goal.state,
+                    freed_bytes = sz,
+                    "startup_gc_pass: removed staging for terminal goal"
+                );
+            } else {
+                tracing::warn!(
+                    goal_id = %goal.goal_run_id,
+                    path = %goal.workspace_path.display(),
+                    "startup_gc_pass: failed to remove staging"
+                );
+            }
+        }
+    }
+
+    (removed, freed_bytes)
+}
+
+fn walkdir_size_wd(path: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total += meta.len();
+                } else if meta.is_dir() {
+                    total += walkdir_size_wd(&entry.path());
+                }
+            }
+        }
+    }
+    total
+}
+
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.1} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 #[cfg(test)]
