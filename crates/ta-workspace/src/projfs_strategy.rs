@@ -147,25 +147,29 @@ mod windows_impl {
                 )));
             }
 
-            let mut virt_ctx = PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT::default();
+            // In windows 0.58, PrjStartVirtualizing returns the virtualization context
+            // rather than taking it as an out-parameter.
             // SAFETY: root_wide is valid; callbacks are well-formed function pointers;
             // state_ptr is valid for the lifetime of ProjFsProvider.
-            let start_res = unsafe {
+            let virt_ctx = unsafe {
                 PrjStartVirtualizing(
                     PCWSTR(root_wide.as_ptr()),
                     &callbacks as *const PRJ_CALLBACKS,
                     Some(state_ptr as *const std::ffi::c_void),
-                    &mut virt_ctx,
+                    None, // PRJ_STARTVIRTUALIZING_OPTIONS — not needed
                 )
             };
-            if start_res.is_err() {
-                // SAFETY: state_ptr was created by Box::into_raw above.
-                let _ = unsafe { Box::from_raw(state_ptr) };
-                return Err(WorkspaceError::ProjFsError(format!(
-                    "PrjStartVirtualizing failed: {:?}",
-                    start_res
-                )));
-            }
+            let virt_ctx = match virt_ctx {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    // SAFETY: state_ptr was created by Box::into_raw above.
+                    let _ = unsafe { Box::from_raw(state_ptr) };
+                    return Err(WorkspaceError::ProjFsError(format!(
+                        "PrjStartVirtualizing failed: {:?}",
+                        e
+                    )));
+                }
+            };
 
             tracing::info!(
                 source = %source_dir.display(),
