@@ -9233,6 +9233,43 @@ The reviewer goal never marks `failed` because staging was absent — it marks `
 
 ---
 
+### v0.15.8.1 — Inline Draft Build for Interactive CLI
+<!-- status: pending -->
+**Goal**: When `ta run` is invoked in an interactive terminal (TTY), block after agent exit and build the draft inline with a progress indicator, rather than spawning a background process and printing "you'll be notified when it's ready" — a message that is false in non-shell contexts and confusing everywhere.
+
+**Why this phase exists**: The background build model (v0.15.6.2) was introduced to avoid the static watchdog timeout. That root cause is now fixed (v0.15.7.1 heartbeat watchdog). For interactive `ta run` invocations, blocking is strictly better:
+- The user is already waiting — the agent ran for minutes. 30 more seconds is invisible.
+- "You'll be notified" only works if you're in `ta shell`. From a bare terminal, no event arrives and the CTA is misleading.
+- Inline build gives the user immediate next-step output without any follow-up command.
+
+**Background model stays for**: daemon-mediated runs (no TTY), `ta shell` (stays open to receive the event), headless CI invocations.
+
+**Target output (interactive TTY)**:
+```
+Agent exited.
+Building draft...  ████████████████░░░░  ~15s
+✓ Draft ready: "v0.15.8 — Windows ProjFS Staging" [8b459eac]  (14 files changed)
+  → ta draft view 8b459eac
+```
+
+#### Items
+
+1. [ ] **TTY detection** (`apps/ta-cli/src/commands/run.rs`): In `try_spawn_background_draft_build()`, check `std::io::stdout().is_terminal()` (use `is-terminal` crate, already in workspace). If `true`, call `build_draft_inline()` instead. Return the same `BackgroundBuildHandle` type so callers don't change.
+
+2. [ ] **`build_draft_inline()`** (`apps/ta-cli/src/commands/draft.rs`): Runs the draft build synchronously on the current thread with a progress line. On completion, prints the `✓ Draft ready: ...` inline notification (same format as the `DraftBuilt` shell event message from v0.15.7.1). On error, prints the error inline and exits with non-zero status.
+
+3. [ ] **Progress indicator**: Simple elapsed-time spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) with "Building draft..." prefix. No library dependency — use `print!` + `\r` carriage return. Clears on completion.
+
+4. [ ] **Remove misleading CTA text** from the non-TTY path: the background message `"Building draft in background — you'll be notified when it's ready."` is now only printed for daemon/non-TTY runs (where the notification actually works). TTY path gets no message — the inline build completes and prints the result directly.
+
+5. [ ] **Tests**: TTY=false → background path taken. TTY=true → inline path taken. Inline build completes → prints `✓ Draft ready:` line. Inline build fails → non-zero exit, error message printed.
+
+6. [ ] **USAGE.md**: Update "After the agent exits" section to describe the new inline behavior. Remove the "check ta draft list" guidance for interactive runs.
+
+#### Version: `0.15.8.1-alpha`
+
+---
+
 ### v0.15.9 — `MessagingAdapter` Trait & Email Provider Plugins
 <!-- status: pending -->
 **Goal**: A pluggable messaging adapter layer — the same external plugin protocol used by VCS adapters — extended to cover mailbox access. Email providers (Gmail, Outlook, IMAP/SMTP) are discoverable plugins that speak a common `MessagingAdapter` JSON-over-stdio protocol. No bespoke `ta email` command surface; credentials live in the OS keychain. This phase delivers the adapter trait, the plugin protocol, and three built-in provider plugins. The workflow in v0.15.10 drives them.
