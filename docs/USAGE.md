@@ -3630,6 +3630,149 @@ See the built-in `plugins/messaging/ta-messaging-imap/` source for a complete re
 
 ---
 
+### Email Assistant Workflow
+
+The `email-manager` workflow automates email triage and reply drafting. It fetches new messages, evaluates filter rules, runs a reply-drafting agent goal per message, runs a supervisor check, and pushes approved drafts to your email Drafts folder. You review, edit, and send — TA never sends.
+
+#### Setup
+
+```bash
+# 1. Install a messaging adapter
+ta adapter setup messaging/gmail
+
+# 2. Create your config and email constitution
+ta workflow init email-manager
+
+# 3. Edit your constitution to match your voice and policy
+#    ~/.config/ta/email-constitution.md
+
+# 4. Edit your config to set your account
+#    ~/.config/ta/workflows/email-manager.toml
+#    Set account = "you@example.com"
+
+# 5. Run
+ta workflow run email-manager
+```
+
+#### Config (`email-manager.toml`)
+
+```toml
+[workflow]
+name            = "email-manager"
+adapter         = "messaging/gmail"
+account         = "me@example.com"
+run_every       = "30min"           # optional — enables daemon scheduling
+constitution    = "~/.config/ta/email-constitution.md"
+max_messages_per_run = 50
+
+[supervisor]
+# Confidence below this → review queue instead of Drafts
+min_confidence  = 0.80
+# Always flag if these phrases appear in the reply body
+flag_if_contains = ["I promise", "I guarantee", "by tomorrow"]
+
+[[filter]]
+name            = "newsletters"
+subject_contains = ["unsubscribe", "newsletter"]
+action          = "ignore"
+
+[[filter]]
+name            = "legal"
+subject_contains = ["legal notice", "lawsuit"]
+action          = "escalate"
+```
+
+**Filter actions:**
+
+| Action | Behaviour |
+|--------|-----------|
+| `reply` | Draft a reply and run supervisor check |
+| `ignore` | Drop silently — no draft, no flag |
+| `flag` | Send directly to review queue without drafting |
+| `escalate` | Review queue with "requires human judgment" note |
+
+No matching rule → defaults to `reply`.
+
+#### Email Constitution
+
+The constitution is a Markdown file that defines your voice and policy. TA injects it verbatim into every reply-drafting goal prompt and supervisor check.
+
+Key sections to configure:
+- **Voice & Tone** — writing style, formality level
+- **Topics to Engage** — what you're comfortable replying to automatically
+- **Topics to Escalate** — what must always go to human review (legal, HR, pricing)
+- **Forbidden Phrases** — belt-and-suspenders checks (`flag_if_contains` in config)
+- **Sign-Off Format** — how every reply ends
+
+Run `ta workflow init email-manager` to create a starter constitution at `~/.config/ta/email-constitution.md`.
+
+#### Supervisor Check
+
+After each reply goal completes, the supervisor checks:
+1. Confidence ≥ `min_confidence` (default 0.80)
+2. Body does not contain any `flag_if_contains` phrases
+
+**Pass** → `create_draft` is called; draft appears in your email client's Drafts folder.  
+**Fail** → Entry added to `.ta/email-review-queue.jsonl`; no draft is created until you approve.
+
+#### Reviewing Flagged Items
+
+```bash
+# Show queue and last run stats
+ta workflow status email-manager
+
+# Show the draft audit log
+ta audit messaging
+```
+
+The review queue shows flagged/escalated messages with the supervisor's flag reason. Items with an attached draft show `[draft attached]`.
+
+#### One-Off Catch-Up Run
+
+```bash
+# Fetch and process everything since a specific date
+ta workflow run email-manager --since 2026-04-01T00:00:00Z
+
+# Dry run — shows what would happen, creates no drafts
+ta workflow run email-manager --dry-run
+```
+
+#### Scheduling
+
+**Daemon scheduler** (requires `ta serve` running):
+
+Add `run_every = "30min"` to `[workflow]` in `email-manager.toml`. The daemon will register the schedule automatically on next start.
+
+**Cron** (no daemon required):
+
+```cron
+# Run every 30 minutes
+*/30 * * * * /usr/local/bin/ta workflow run email-manager
+```
+
+**Windows Task Scheduler**:
+
+```
+Action: Start a program
+Program: C:\Users\<you>\.cargo\bin\ta.exe
+Arguments: workflow run email-manager
+Schedule: Every 30 minutes
+```
+
+#### Draft Audit Log
+
+Every created draft is recorded in `.ta/messaging-audit.jsonl`:
+
+```bash
+ta audit messaging             # all drafts
+ta audit messaging -n 10       # 10 most recent
+ta audit messaging --state drafted  # only unsent drafts
+```
+
+Fields logged per draft: `draft_id`, `provider`, `to`, `subject`, `created_at`, `state` (drafted/sent/discarded), `supervisor_score`, `constitution_check_passed`.
+
+---
+
 ### VCS Adapters
 
 TA uses pluggable adapters for version control operations. When `submit.adapter` is not explicitly set, TA auto-detects the VCS from the project directory:

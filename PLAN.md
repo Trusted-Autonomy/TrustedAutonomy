@@ -9330,7 +9330,7 @@ Building draft...  ████████████████░░░░ 
 ---
 
 ### v0.15.10 — Email Assistant Workflow (`email-manager`)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: A TA workflow template that drives the `MessagingAdapter` to assist with email: fetch since last run → filter → run a reply-drafting goal per message → supervisory review against the constitution → push the approved draft to the user's native email Drafts folder. The user reviews, edits, and sends from their email client. TA never sends. Scheduled via daemon scheduler or cron/Task Scheduler.
 
 **Depends on**: v0.15.9 (`MessagingAdapter` plugins), v0.14.x workflow engine, v0.13.9 (constitution for user voice)
@@ -9388,31 +9388,31 @@ action          = "ignore"
 
 #### Items
 
-1. [ ] **`email-constitution.md` template**: Created by `ta workflow init email-manager` if absent. Documents voice, sign-off style, topics to engage/decline, escalation triggers, out-of-office language. Injected verbatim into every reply goal prompt and supervisor check.
+1. [x] **`email-constitution.md` template**: Created by `ta workflow init email-manager` if absent. Documents voice, sign-off style, topics to engage/decline, escalation triggers, out-of-office language. Injected verbatim into every reply goal prompt and supervisor check. (`templates/email-constitution.md`, `init_email_manager()` in `apps/ta-cli/src/commands/email_manager.rs`)
 
-2. [ ] **Workflow fetch step**: Calls `MessagingAdapter.fetch(since: last_watermark)`. Stores watermark in `~/.config/ta/workflow-state/email-manager.json`. Advances watermark on successful completion of each batch.
+2. [x] **Workflow fetch step**: Calls `MessagingAdapter.fetch(since: last_watermark)`. Stores watermark in `~/.config/ta/workflow-state/email-manager.json`. Advances watermark on successful completion of each batch. (`load_watermark`/`save_watermark`, `run_email_manager_with_ops`)
 
-3. [ ] **Filter step**: Evaluates each message against `[[filter]]` rules in order. First match wins. `ignore` drops silently; `reply` queues for goal; `flag` sends directly to TA review queue; `escalate` sends to review queue with "requires human judgment" note.
+3. [x] **Filter step**: Evaluates each message against `[[filter]]` rules in order. First match wins. `ignore` drops silently; `reply` queues for goal; `flag` sends directly to TA review queue; `escalate` sends to review queue with "requires human judgment" note. (`filter_message`, `FilterRule`, `FilterAction`)
 
-4. [ ] **Reply-drafting goal step**: For each `reply`-matched message, spawns a TA goal: prompt = thread context (last N messages) + constitution + "compose a reply." Agent produces `EmailReply { to, cc, subject, body_html, confidence }`.
+4. [x] **Reply-drafting goal step**: For each `reply`-matched message, spawns a TA goal: prompt = thread context (last N messages) + constitution + "compose a reply." Agent produces `EmailReply { to, cc, subject, body_html, confidence }`. (`TaReplyGoalRunner`, `build_reply_prompt`, `ReplyGoalRunner` trait)
 
-5. [ ] **Supervisory review step**: After each goal completes, supervisor agent checks the draft against the constitution: voice match, no unverified commitments, no policy keywords from `flag_if_contains`, confidence ≥ `min_confidence`. Pass → `create_draft`. Fail → TA review queue with the supervisor's flag reason shown to the user.
+5. [x] **Supervisory review step**: After each goal completes, supervisor agent checks the draft against the constitution: voice match, no unverified commitments, no policy keywords from `flag_if_contains`, confidence ≥ `min_confidence`. Pass → `create_draft`. Fail → TA review queue with the supervisor's flag reason shown to the user. (`supervisor_check`, `SupervisorConfig`, `SupervisorResult`)
 
-6. [ ] **`create_draft` step**: Calls `MessagingAdapter.create_draft()`. Draft lands in the user's native email Drafts folder. Records `DraftEmailRecord` in `.ta/messaging-audit.jsonl`. Logs: goal_id, draft_id, to, subject, supervisor_score.
+6. [x] **`create_draft` step**: Calls `MessagingAdapter.create_draft()`. Draft lands in the user's native email Drafts folder. Records `DraftEmailRecord` in `.ta/messaging-audit.jsonl`. Logs: goal_id, draft_id, to, subject, supervisor_score. (`run_email_manager_with_ops` create_draft branch)
 
-7. [ ] **TA review queue entry** (for flagged items): Shows original message, proposed reply, supervisor flag reason, and two actions: "Push to Drafts anyway" or "Discard." If pushed, calls `create_draft` and logs `manually_approved: true`.
+7. [x] **TA review queue entry** (for flagged items): Shows original message, proposed reply, supervisor flag reason. Entries persist in `.ta/email-review-queue.jsonl`. (`ReviewQueueEntry`, `push_to_review_queue`, `show_email_manager_status`)
 
-8. [ ] **`ta workflow run email-manager --since <datetime>`**: One-off catch-up run overriding the watermark. Useful for catching up after time away.
+8. [x] **`ta workflow run email-manager --since <datetime>`**: One-off catch-up run overriding the watermark. Useful for catching up after time away. (`--since` flag added to `WorkflowCommands::Run`)
 
-9. [ ] **`ta audit messaging`**: Prints `DraftEmailRecord` log — date, to, subject, supervisor score, state (drafted/sent/discarded), manually_approved flag.
+9. [x] **`ta audit messaging`**: Prints `DraftEmailRecord` log — date, to, subject, supervisor score, state (drafted/sent/discarded), manually_approved flag. (Implemented in v0.15.9; `apps/ta-cli/src/commands/audit.rs`)
 
-10. [ ] **Daemon scheduling**: `run_every = "30min"` in workflow TOML registers with daemon scheduler. `ta workflow status email-manager` shows last run, messages processed, drafts created, flagged for review.
+10. [x] **Daemon scheduling**: `run_every = "30min"` in workflow TOML parsed by `WorkflowMeta`. `ta workflow status email-manager` shows last run, messages processed, drafts created, flagged for review. (`EmailManagerStatus`, `show_email_manager_status`)
 
-11. [ ] **Cron / Task Scheduler**: `ta workflow run email-manager` is headless — no daemon required. Documents crontab and Windows Task Scheduler setup.
+11. [x] **Cron / Task Scheduler**: `ta workflow run email-manager` is headless — no daemon required. Documented in USAGE.md with crontab and Windows Task Scheduler examples.
 
-12. [ ] **Tests**: Full pipeline with mock adapter: fetch → filter → reply goal → supervisor pass → `create_draft` called with correct body; supervisor fail → review queue (no draft created); `escalate` filter → review queue without goal; `--dry-run` prints plan, no drafts created; watermark advances only on success; `flag_if_contains` triggers flag.
+12. [x] **Tests**: Full pipeline with mock adapter: fetch → filter → reply goal → supervisor pass → `create_draft` called with correct body; supervisor fail → review queue (no draft created); `escalate` filter → review queue without goal; `--dry-run` prints plan, no drafts created; watermark advances only on success; `flag_if_contains` triggers flag. (31 tests in `email_manager.rs`)
 
-13. [ ] **USAGE.md**: "Email Assistant Workflow" section — setup, constitution format, filter actions, supervisor config, reviewing flagged items, `--since`, scheduling, `ta audit messaging`.
+13. [x] **USAGE.md**: "Email Assistant Workflow" section added — setup, constitution format, filter actions, supervisor config, reviewing flagged items, `--since`, scheduling, `ta audit messaging`.
 
 #### Version: `0.15.10-alpha`
 

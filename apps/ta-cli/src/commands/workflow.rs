@@ -2,6 +2,8 @@
 //
 // Commands:
 //   ta workflow run <name> --goal "<title>"  — execute a named governed workflow
+//   ta workflow run email-manager [--since <iso>]  — run email assistant workflow
+//   ta workflow init <name>                  — scaffold a built-in workflow (e.g. email-manager)
 //   ta workflow start <definition.yaml>      — start a workflow from YAML
 //   ta workflow status [run-id]              — show workflow / run status
 //   ta workflow list [--templates|--source external]  — list workflows
@@ -24,6 +26,7 @@ use ta_workflow::{
     YamlWorkflowEngine,
 };
 
+use super::email_manager;
 use super::governed_workflow::{self, RunOptions};
 
 #[derive(Subcommand)]
@@ -33,18 +36,24 @@ pub enum WorkflowCommands {
     /// Runs the five-stage governance loop:
     ///   run_goal → review_draft → human_gate → apply_draft → pr_sync
     ///
+    /// For the email-manager workflow (v0.15.10), runs the email assistant pipeline:
+    ///   fetch → filter → reply-draft goal → supervisor → create_draft
+    ///
     /// Examples:
     ///   ta workflow run governed-goal --goal "Fix the auth bug"
     ///   ta workflow run governed-goal --goal "Add rate limiting" --dry-run
-    ///   ta workflow run governed-goal --goal "..." --resume <run-id>
+    ///   ta workflow run email-manager
+    ///   ta workflow run email-manager --since 2026-04-01T00:00:00Z
+    ///   ta workflow run email-manager --dry-run
     Run {
-        /// Workflow name (e.g. "governed-goal"). Resolved from .ta/workflows/<name>.toml
-        /// then templates/workflows/<name>.toml.
+        /// Workflow name (e.g. "governed-goal", "email-manager").
+        /// Resolved from .ta/workflows/<name>.toml then templates/workflows/<name>.toml.
         name: String,
-        /// Goal title to execute through the workflow.
+        /// Goal title to execute through the workflow (required for governed-goal;
+        /// unused for email-manager).
         #[arg(long)]
-        goal: String,
-        /// Agent to use for the run_goal stage.
+        goal: Option<String>,
+        /// Agent to use for the run_goal / reply-drafting stage.
         #[arg(long, default_value = "claude-code")]
         agent: String,
         /// PLAN.md phase ID to focus on (e.g. "v0.4.0"). When set:
@@ -52,12 +61,29 @@ pub enum WorkflowCommands {
         ///   - passed to `ta draft apply --phase` to mark the phase done in PLAN.md
         #[arg(long)]
         phase: Option<String>,
-        /// Print the stage graph without executing any stages.
+        /// Print the execution plan without running any stages or creating drafts.
         #[arg(long)]
         dry_run: bool,
-        /// Resume a paused workflow run at the next pending stage.
+        /// Resume a paused governed-workflow run at the next pending stage.
         #[arg(long)]
         resume: Option<String>,
+        /// Override the fetch watermark for email-manager (ISO-8601 datetime).
+        /// Useful for catching up after time away. Example: --since 2026-04-01T00:00:00Z
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// Initialise a built-in workflow template (v0.15.10).
+    ///
+    /// Creates config and supporting files for a named workflow if they are absent.
+    ///
+    /// Supported names:
+    ///   email-manager — creates email-constitution.md and email-manager.toml
+    ///
+    /// Example:
+    ///   ta workflow init email-manager
+    Init {
+        /// Built-in workflow name to initialise.
+        name: String,
     },
     /// Start a workflow from a YAML definition file.
     Start {
@@ -181,11 +207,30 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
             phase,
             dry_run,
             resume,
+            since,
         } => {
+            // email-manager uses a different pipeline.
+            if name == "email-manager" {
+                return email_manager::run_email_manager(
+                    &config.workspace_root,
+                    since.as_deref(),
+                    *dry_run,
+                    agent,
+                );
+            }
+            // Governed-goal and other TOML-based workflows require --goal.
+            let goal_title = goal.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--goal is required for workflow '{}'\n\
+                     Usage: ta workflow run {} --goal \"<title>\"",
+                    name,
+                    name
+                )
+            })?;
             let opts = RunOptions {
                 workspace_root: &config.workspace_root,
                 workflow_name: name,
-                goal_title: goal,
+                goal_title,
                 dry_run: *dry_run,
                 resume_run_id: resume.as_deref(),
                 agent,
@@ -193,8 +238,21 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
             };
             governed_workflow::run_governed_workflow(&opts)
         }
+        WorkflowCommands::Init { name } => match name.as_str() {
+            "email-manager" => email_manager::init_email_manager(&config.workspace_root),
+            other => anyhow::bail!(
+                "Unknown built-in workflow '{}'. Supported: email-manager\n\
+                     To scaffold a custom workflow definition, use: ta workflow new {}",
+                other,
+                other
+            ),
+        },
         WorkflowCommands::Start { definition } => start_workflow(definition),
         WorkflowCommands::Status { workflow_id, live } => {
+            // email-manager has its own status view.
+            if workflow_id.as_deref() == Some("email-manager") {
+                return email_manager::show_email_manager_status(&config.workspace_root);
+            }
             if *live {
                 show_live_status(workflow_id.as_deref(), config)
             } else {

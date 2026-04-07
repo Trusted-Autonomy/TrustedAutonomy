@@ -1,0 +1,78 @@
+# email-manager.toml — Email Assistant Workflow config template (v0.15.10).
+#
+# Copy this file to one of:
+#   ~/.config/ta/workflows/email-manager.toml   (user-global — recommended)
+#   .ta/workflows/email-manager.toml            (project-local)
+#
+# Or run: ta workflow init email-manager
+# to have TA create both this config and a starter constitution for you.
+
+[workflow]
+name            = "email-manager"
+
+# Messaging adapter to use. Format: "messaging/<provider>".
+# Supported: messaging/gmail, messaging/outlook, messaging/imap
+# Install an adapter with: ta adapter setup messaging/gmail
+adapter         = "messaging/gmail"
+
+# Email account address (leave blank to use the plugin's configured default).
+account         = "me@example.com"
+
+# How often to run automatically (registered with daemon scheduler).
+# Formats: "30min", "1h", "2h". Remove this line to disable scheduling.
+run_every       = "30min"
+
+# Path to your email constitution (voice, policy, sign-off style).
+# Run 'ta workflow init email-manager' to create a starter constitution.
+constitution    = "~/.config/ta/email-constitution.md"
+
+# Maximum messages to fetch and process per run.
+max_messages_per_run = 50
+
+[supervisor]
+# Confidence below this threshold → review queue instead of Drafts folder.
+# Range: 0.0 – 1.0. Raise to be more conservative; lower to allow more drafts.
+min_confidence  = 0.80
+
+# Always flag if the reply body contains any of these phrases.
+# These are belt-and-suspenders checks on top of the confidence threshold.
+flag_if_contains = [
+    "I promise",
+    "I guarantee",
+    "by tomorrow",
+    "committed to",
+    "legally binding",
+]
+
+# ── Filter rules ────────────────────────────────────────────────────────────
+# Rules are evaluated in order. First match wins.
+# Actions: reply | ignore | flag | escalate
+#
+#   reply    — draft a reply (goes through supervisor before Drafts)
+#   ignore   — drop silently; no draft, no flag
+#   flag     — send directly to TA review queue without drafting
+#   escalate — send to review queue with "requires human judgment" note
+
+[[filter]]
+name            = "newsletters"
+subject_contains = ["unsubscribe", "newsletter", "mailing list"]
+action          = "ignore"
+
+[[filter]]
+name            = "auto-replies"
+subject_contains = ["out of office", "auto-reply", "automatic reply", "noreply"]
+action          = "ignore"
+
+[[filter]]
+name            = "legal-hr"
+subject_contains = ["legal notice", "compliance violation", "lawsuit", "hr matter", "termination"]
+action          = "escalate"
+
+[[filter]]
+name            = "client-questions"
+from_domain     = []   # Add client domains here, e.g. ["bigclient.com", "partner.org"]
+subject_contains = ["?", "question", "help", "inquiry"]
+action          = "reply"
+
+# Default for any message not matched above: attempt a reply.
+# (No explicit rule needed — the workflow defaults to "reply" if no rule matches.)
