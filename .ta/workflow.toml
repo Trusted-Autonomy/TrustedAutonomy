@@ -15,7 +15,8 @@ timeout = 600            # seconds per command
 # Add any file that TA writes outside the draft artifact list.
 # Merged with built-in lock files (Cargo.lock, package-lock.json, etc.).
 auto_stage = [
-    ".ta/goal-audit.jsonl",   # TA appends on every goal state change; shared audit trail
+    ".ta/goal-audit.jsonl",        # TA appends on every goal state change; shared audit trail
+    ".ta/velocity-history.jsonl",  # TA appends velocity entries on draft apply; team-shared
     # Do NOT add .ta/workflow-runs/*.json — those are transient per-machine execution state
 ]
 
