@@ -9527,6 +9527,33 @@ bmad_home          = "~/.bmad"        # set when bmad selected
 
 ---
 
+### v0.15.11.1 — Draft Apply Lock & Co-Dev Guard
+<!-- status: pending -->
+**Goal**: Prevent conflicting git operations (branch switches, manual commits) while `ta draft apply` is in progress. Introduces a `.ta/apply.lock` file written at the start of `apply_package` and removed on exit (success or failure). Claude Code should check this lock before any `git checkout`, `git commit`, or `git push` — and TA itself should detect the lock at apply startup to warn about concurrent applies.
+
+**Why this phase exists**: A race between a manual `git checkout` (or `git add -A && git commit`) and a running `ta draft apply --submit` caused the apply to find "no changes to commit" and roll back. The fix requires TA to advertise its apply state externally so any co-developer process (human or AI assistant) can detect it before making git mutations. This is also needed for parallel goal runs where two drafts must not apply concurrently to the same workspace.
+
+**Design**:
+- **Lock file**: `.ta/apply.lock` — contains `{"draft_id": "...", "pid": 12345, "started_at": "..."}`. Written at entry to `apply_package`, removed in a `defer`-style cleanup (even on panic/early return).
+- **Stale lock detection**: If lock exists but `pid` is no longer alive → remove and continue (previous apply crashed without cleanup).
+- **Concurrent apply guard**: If lock exists and pid is alive → fail immediately with actionable error: `"Draft apply already in progress (PID X, draft Y). Wait for it to finish or kill PID X if it has crashed."`
+- **Claude Code behavioral rule**: Before any `git checkout`, `git commit`, or `git push` operation, check for `.ta/apply.lock`. If present and pid is alive, print warning and ask user whether to wait or abort.
+- **`ta draft apply --status`**: Shows whether an apply is in progress (reads lock file). Useful for scripts.
+- **`.gitignore`**: `.ta/apply.lock` added to gitignore (ephemeral, per-machine).
+
+**Deliverables**:
+- [ ] `ApplyLock` struct (`draft.rs`): `acquire()` writes lock, `Drop` removes it
+- [ ] `apply_package` acquires lock at entry, releases on exit
+- [ ] Concurrent apply detection with actionable error message
+- [ ] Stale lock (dead pid) auto-cleanup
+- [ ] `.ta/apply.lock` added to `.gitignore`
+- [ ] Claude Code CLAUDE.md rule: check for apply lock before git branch/commit/push operations
+- [ ] `ta draft apply --status` flag shows active lock info
+
+#### Version: `0.15.11-alpha.1`
+
+---
+
 ### v0.15.12 — `SocialAdapter` Trait & Social Media Plugins
 <!-- status: pending -->
 **Goal**: A pluggable social media adapter layer using the same JSON-over-stdio plugin protocol as `MessagingAdapter`. Social platforms (LinkedIn, X/Twitter, Instagram, Buffer/Later) are discoverable plugins. TA can draft posts and schedule them in the platform's native draft/scheduled state — but **never publishes autonomously**. The same constitution and supervisory gate from v0.15.10 applies: all outbound content is checked against the user's voice policy before it reaches the platform.

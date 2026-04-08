@@ -51,6 +51,7 @@ This applies to both manual work and TA-mediated goals. When `ta pr apply --git-
 ## Rules
 
 - Never commit directly to `main` — always use a feature branch + PR
+- **Before any `git checkout`, `git commit`, or `git push`**: check for `.ta/apply.lock`. If it exists and the PID inside is alive, a `ta draft apply` is in progress — wait for it to finish before touching the git repo. Doing git operations mid-apply causes "no changes to commit" rollbacks. (v0.15.11.1 will enforce this at the TA level; until then, enforce manually.)
 - Never disable or skip tests
 - Run tests after every code change, before committing
 - Always run `cargo fmt --all -- --check` before every `git push`
