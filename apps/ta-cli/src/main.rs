@@ -173,6 +173,12 @@ enum Commands {
         /// and merges the results into a single coherent output.
         #[arg(long)]
         integrate: bool,
+        /// Skip the provider-configured check (for CI/scripted use).
+        ///
+        /// By default, `ta run` checks that a provider has been configured via
+        /// `ta onboard`. Pass this flag to bypass that check in CI or automation.
+        #[arg(long)]
+        skip_onboard_check: bool,
     },
     /// Review and manage draft packages.
     Draft {
@@ -278,6 +284,59 @@ enum Commands {
     },
     /// System-wide health check: toolchain, agent binaries, daemon, plugins, .ta integrity.
     Doctor,
+
+    // ── ONBOARDING ──────────────────────────────────────────────────────────
+    /// First-time setup wizard: configure AI provider, agent, and planning framework.
+    ///
+    /// Guides you through selecting an AI provider (Anthropic Claude or Ollama),
+    /// entering your API key, choosing an implementation agent (claude-code, codex,
+    /// claude-flow), and selecting a planning framework (default, BMAD, GSD).
+    ///
+    /// Configuration is written to ~/.config/ta/config.toml.
+    ///
+    /// Examples:
+    ///   ta onboard                     # interactive TUI wizard
+    ///   ta onboard --status            # show current configuration
+    ///   ta onboard --reset             # clear config and re-run wizard
+    ///   ta onboard --force             # re-run even if already configured
+    ///   ta onboard --web               # open Studio setup page in browser
+    ///   ta onboard --non-interactive --provider anthropic --api-key sk-ant-...
+    Onboard {
+        /// Open the Studio setup page in your browser instead of the TUI.
+        #[arg(long)]
+        web: bool,
+        /// Non-interactive mode: configure using flags without prompting.
+        #[arg(long)]
+        non_interactive: bool,
+        /// Called from a platform installer; implies --non-interactive with installer defaults.
+        #[arg(long, hide = true)]
+        from_installer: bool,
+        /// Re-run the wizard even if TA is already configured.
+        #[arg(long)]
+        force: bool,
+        /// Show current configuration without running the wizard.
+        #[arg(long)]
+        status: bool,
+        /// Clear configuration and re-run the wizard.
+        #[arg(long)]
+        reset: bool,
+        /// AI provider to use (anthropic or ollama). Used with --non-interactive.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Anthropic API key. Used with --non-interactive --provider anthropic.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Implementation agent to set as default (claude-code, codex, claude-flow).
+        #[arg(long)]
+        agent: Option<String>,
+        /// Planning framework to use (default, bmad, gsd). Used with --non-interactive.
+        #[arg(long)]
+        planning_framework: Option<String>,
+        /// Skip the provider-configured check (for CI/scripted use).
+        /// Only used internally; callers should use --non-interactive.
+        #[arg(long, hide = true)]
+        skip_onboard_check: bool,
+    },
 
     // ── ADVANCED ────────────────────────────────────────────────────────────
     /// Review and manage PR packages (deprecated: use 'draft').
@@ -771,7 +830,11 @@ fn main() -> anyhow::Result<()> {
             gates,
             sub_goals,
             integrate,
+            skip_onboard_check,
         } => {
+            // First-run gate: warn if provider is not yet configured.
+            commands::onboard::check_provider_configured(*skip_onboard_check)?;
+
             // Phase-aware title resolution: if the positional title looks like
             // a phase ID (e.g., "v0.9.8.1", "0.9.8.1", "phase 0.9.8.1"),
             // look it up in PLAN.md and use the phase title + set --phase.
@@ -918,7 +981,13 @@ fn main() -> anyhow::Result<()> {
         Commands::Runbook { command } => commands::runbook::execute(command, &config),
         Commands::Connector { command } => commands::connector::execute(command, &config),
         Commands::Webhook { command } => commands::webhook::execute(command, &config),
-        Commands::Serve => commands::serve::execute(&project_root),
+        Commands::Serve => {
+            // First-run gate: warn if provider is not yet configured.
+            // TA_SKIP_ONBOARD_CHECK=1 bypasses in CI.
+            let skip = std::env::var("TA_SKIP_ONBOARD_CHECK").is_ok_and(|v| v == "1");
+            commands::onboard::check_provider_configured(skip)?;
+            commands::serve::execute(&project_root)
+        }
         Commands::Build { test } => commands::build::execute(&config, *test),
         Commands::Sync => commands::sync::execute(&config),
         Commands::Verify { goal_id } => commands::verify::execute(&config, goal_id.as_deref()),
@@ -926,6 +995,31 @@ fn main() -> anyhow::Result<()> {
         Commands::Conversation { goal_id, json } => {
             commands::conversation::execute(&config, goal_id, *json)
         }
+        Commands::Onboard {
+            web,
+            non_interactive,
+            from_installer,
+            force,
+            status,
+            reset,
+            provider,
+            api_key,
+            agent,
+            planning_framework,
+            skip_onboard_check: _,
+        } => commands::onboard::execute(
+            *web,
+            *non_interactive,
+            *from_installer,
+            *force,
+            *status,
+            *reset,
+            provider.as_deref(),
+            api_key.as_deref(),
+            agent.as_deref(),
+            planning_framework.as_deref(),
+            &project_root,
+        ),
         // Already handled above.
         Commands::AcceptTerms { .. }
         | Commands::ViewTerms

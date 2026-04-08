@@ -239,6 +239,22 @@ print_instructions() {
 }
 
 # Main execution
+run_onboarding() {
+    # Only run the onboarding wizard if stdin is an interactive terminal.
+    if [ -t 0 ] && [ -t 1 ]; then
+        echo ""
+        echo -e "${GREEN}Running first-time setup wizard...${NC}"
+        echo ""
+        "${INSTALL_DIR}/${BINARY_NAME}" onboard || true
+    else
+        # Non-interactive install (piped or CI) — print the first-run hint.
+        echo ""
+        echo -e "${YELLOW}TA is not configured yet.${NC}"
+        echo "Run 'ta onboard' in an interactive terminal to set up your AI provider"
+        echo "and defaults (takes ~2 minutes)."
+    fi
+}
+
 main() {
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}Trusted Autonomy Installer${NC}"
@@ -251,6 +267,7 @@ main() {
     verify_installation
     check_path
     print_instructions
+    run_onboarding
 }
 
 main

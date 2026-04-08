@@ -10,6 +10,7 @@ Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent w
 
 1. [Quick Start](#quick-start)
    - [Install](#install)
+   - [First-Time Setup](#first-time-setup)
    - [Set up your project](#set-up-your-project)
    - [Start a development session](#start-a-development-session)
    - [Your first goal](#your-first-goal)
@@ -448,6 +449,78 @@ To regenerate all icon formats from the master 1024px PNG:
 just icons
 # Generates: PNG sizes (16-512), ta.ico (Windows), ta.icns (macOS)
 ```
+
+### First-Time Setup
+
+After installation, run the onboarding wizard to configure your AI provider, default agent, and planning framework:
+
+```bash
+ta onboard
+```
+
+The wizard walks you through five steps in a terminal UI:
+
+1. **AI Provider** — choose Anthropic Claude (API key) or Ollama (local models). If `ANTHROPIC_API_KEY` is already set in your environment, the key is detected automatically.
+2. **Implementation Agent** — choose `claude-code`, `codex`, `claude-flow`, or a custom binary. TA detects which are already on your `$PATH`.
+3. **Planning Framework** — choose Default (single-pass), BMAD (multi-role structured planning), or GSD (goal-structured decomposition).
+4. **Optional Components** — optionally install `claude-flow` (via npm) and/or BMAD (cloned to `~/.bmad`).
+5. **Summary & Confirm** — review your selections and confirm.
+
+Configuration is written to `~/.config/ta/config.toml`. Your API key is stored securely in `~/.config/ta/secrets/` (mode 0600).
+
+#### Managing your configuration
+
+```bash
+# View current configuration
+ta onboard --status
+
+# Re-run the wizard (e.g., to switch from Anthropic to Ollama)
+ta onboard --reset
+
+# Force re-run even if already configured
+ta onboard --force
+
+# Open Studio setup page in browser instead of TUI
+ta onboard --web
+
+# Non-interactive (CI / scripts)
+ta onboard --non-interactive --provider anthropic --api-key sk-ant-...
+ta onboard --non-interactive --provider ollama --agent claude-code
+```
+
+#### Provider options
+
+**Anthropic Claude** (recommended): requires an API key from [console.anthropic.com](https://console.anthropic.com). The wizard validates the key with a lightweight API call before storing it.
+
+**Ollama** (local): no API key needed. Install Ollama from [ollama.com](https://ollama.com) and ensure it's running at `http://localhost:11434` before running `ta onboard`.
+
+#### Configuring API key separately
+
+If you prefer to manage your API key outside of the wizard:
+
+```bash
+# Set in your shell profile (~/.zshrc, ~/.bashrc)
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Or use ta config (coming in a future release)
+ta config set api_key sk-ant-...
+```
+
+TA always checks `ANTHROPIC_API_KEY` first, then falls back to the stored key.
+
+#### BMAD and Claude-Flow
+
+[BMAD](https://github.com/bmadcode/bmad-method) provides structured multi-role AI planning (Analyst → Architect → PM). Select it in Step 3 of the wizard, and TA will clone it to `~/.bmad` automatically.
+
+[Claude-Flow](https://github.com/ruvnet/claude-flow) is a multi-agent orchestration framework. Install it at any time with:
+
+```bash
+npm install -g claude-flow
+```
+
+Both are optional — the Default planning framework works without any extra installs.
+
+---
 
 ### Set up your project
 

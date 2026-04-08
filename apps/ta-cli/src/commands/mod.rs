@@ -25,6 +25,7 @@ pub mod memory;
 pub mod new;
 pub mod notify;
 pub mod office;
+pub mod onboard;
 pub mod operations;
 pub mod persona;
 pub mod plan;
