@@ -669,9 +669,9 @@ command = "ta-messaging-imap"
                 br#"#!/bin/sh
 read -r line
 case "$line" in
-  *CreateDraft*) echo '{"ok":true,"draft_id":"mock-draft-abc123"}' ;;
-  *Fetch*)       echo '{"ok":true,"messages":[]}' ;;
-  *)             echo '{"ok":true,"address":"me@example.com","provider":"mock"}' ;;
+  *create_draft*) echo '{"ok":true,"draft_id":"mock-draft-abc123"}' ;;
+  *fetch*)        echo '{"ok":true,"messages":[]}' ;;
+  *)              echo '{"ok":true,"address":"me@example.com","provider":"mock"}' ;;
 esac
 "#,
             )
