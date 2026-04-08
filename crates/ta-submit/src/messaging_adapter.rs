@@ -642,43 +642,56 @@ command = "ta-messaging-imap"
         assert_eq!(MessagingPluginSource::Path.to_string(), "PATH");
     }
 
+    /// Return the path to a shared mock plugin binary, writing it exactly once per process.
+    ///
+    /// Using OnceLock prevents concurrent write+exec races (ETXTBSY) on overlayfs-backed
+    /// /tmp in Nix CI, where writing and immediately exec-ing a file can race kernel copy-up.
+    /// The script dispatches on op type so both health and create_draft tests can share it.
     #[cfg(unix)]
-    #[test]
-    fn external_adapter_calls_mock_plugin() {
+    fn shared_mock_plugin_path() -> &'static std::path::Path {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
+        use std::sync::OnceLock;
 
-        let _dir = tempfile::tempdir().unwrap();
+        static MOCK_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+        MOCK_PATH.get_or_init(|| {
+            let pid = std::process::id();
+            let name = format!("ta-msg-mock-shared-{}", pid);
 
-        // Write a mock plugin script.
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static CTR: AtomicU32 = AtomicU32::new(0);
-        let n = CTR.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let name = format!("ta-msg-mock-{}-{}", pid, n);
+            #[cfg(target_os = "linux")]
+            let path = std::path::PathBuf::from("/tmp").join(&name);
+            #[cfg(not(target_os = "linux"))]
+            let path = std::env::temp_dir().join(&name);
 
-        #[cfg(target_os = "linux")]
-        let plugin_path = std::path::PathBuf::from("/tmp").join(&name);
-        #[cfg(not(target_os = "linux"))]
-        let plugin_path = _dir.path().join(&name);
-
-        {
-            use std::io::Write;
-            let mut f = std::fs::File::create(&plugin_path).unwrap();
-            // Respond to any op with a health success response.
+            let mut f = std::fs::File::create(&path).unwrap();
+            // Dispatch on op type so both health and create_draft tests use this binary.
             f.write_all(
                 br#"#!/bin/sh
 read -r line
-echo '{"ok":true,"address":"me@example.com","provider":"mock"}'
+case "$line" in
+  *create_draft*) echo '{"ok":true,"draft_id":"mock-draft-abc123"}' ;;
+  *fetch*)        echo '{"ok":true,"messages":[]}' ;;
+  *)              echo '{"ok":true,"address":"me@example.com","provider":"mock"}' ;;
+esac
 "#,
             )
             .unwrap();
             f.sync_all().unwrap();
-        }
-        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&plugin_path, perms).unwrap();
-        let _ = std::fs::metadata(&plugin_path).unwrap();
+            drop(f);
 
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+            // Read back to force page-cache flush on overlayfs before any exec.
+            let _ = std::fs::metadata(&path).unwrap();
+            path
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_adapter_calls_mock_plugin() {
+        let plugin_path = shared_mock_plugin_path();
         let manifest = MessagingPluginManifest {
             name: "mock".to_string(),
             version: "0.1.0".to_string(),
@@ -700,39 +713,7 @@ echo '{"ok":true,"address":"me@example.com","provider":"mock"}'
     #[cfg(unix)]
     #[test]
     fn external_adapter_create_draft_returns_id() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static CTR: AtomicU32 = AtomicU32::new(100);
-        let n = CTR.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let name = format!("ta-msg-mock-draft-{}-{}", pid, n);
-
-        // Keep tempdir alive for the duration of the test on non-Linux.
-        #[cfg(not(target_os = "linux"))]
-        let _dir = tempfile::tempdir().unwrap();
-
-        #[cfg(target_os = "linux")]
-        let plugin_path = std::path::PathBuf::from("/tmp").join(&name);
-        #[cfg(not(target_os = "linux"))]
-        let plugin_path = _dir.path().join(&name);
-
-        {
-            use std::io::Write;
-            let mut f = std::fs::File::create(&plugin_path).unwrap();
-            f.write_all(
-                br#"#!/bin/sh
-read -r line
-echo '{"ok":true,"draft_id":"mock-draft-abc123"}'
-"#,
-            )
-            .unwrap();
-            f.sync_all().unwrap();
-        }
-        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&plugin_path, perms).unwrap();
-        let _ = std::fs::metadata(&plugin_path).unwrap();
-
+        let plugin_path = shared_mock_plugin_path();
         let manifest = MessagingPluginManifest {
             name: "mock".to_string(),
             version: "0.1.0".to_string(),

@@ -9419,7 +9419,7 @@ action          = "ignore"
 ---
 
 ### v0.15.11 — Post-Install Onboarding Wizard (`ta onboard`)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: A guided first-run setup experience that runs automatically after installation (or on demand) to configure the user's AI provider, default implementation agent, planning framework, and optional components. Runs as a TUI wizard in the terminal (ratatui, same as the existing shell TUI); offers `--web` to open the Studio setup page instead. Written once; called from all three per-platform installer post-install hooks.
 
 **Why this phase exists**: New users currently land after install with no configured API key, no default agent, and no idea BMAD or Claude-Flow exist as options. The onboarding gap causes the most common support issue: "ta run says no agent configured." This wizard eliminates that gap — the user leaves the installer with a working, opinionated setup and a clear mental model of what was installed.
@@ -9491,39 +9491,66 @@ bmad_home          = "~/.bmad"        # set when bmad selected
 
 #### Items
 
-1. [ ] **`ta onboard` command** (`apps/ta-cli/src/commands/onboard.rs`): Entry point. Checks if already configured (`~/.config/ta/config.toml` has `[provider]`). With `--force` or if unconfigured, runs wizard. With `--non-interactive` accepts flags: `--agent <name>`, `--provider anthropic|ollama`, `--api-key <key>`, `--planning-framework default|bmad|gsd`. Exits 0 on success.
+1. [x] **`ta onboard` command** (`apps/ta-cli/src/commands/onboard.rs`): Entry point. Checks if already configured (`~/.config/ta/config.toml` has `[provider]`). With `--force` or if unconfigured, runs wizard. With `--non-interactive` accepts flags: `--agent <name>`, `--provider anthropic|ollama`, `--api-key <key>`, `--planning-framework default|bmad|gsd`. Exits 0 on success.
 
-2. [ ] **TUI wizard** (`apps/ta-cli/src/commands/onboard_tui.rs`): ratatui 5-step wizard. Each step is a screen with arrow-key selection and inline help text explaining each option. `←`/`Esc` goes back, `→`/`Enter` advances, `q` quits (prompts to confirm). Progress bar at bottom.
+2. [x] **TUI wizard** (`apps/ta-cli/src/commands/onboard.rs` — integrated): ratatui 5-step wizard. Each step is a screen with arrow-key selection and inline help text explaining each option. `←`/`Esc` goes back, `→`/`Enter` advances, `q` quits. Progress gauge at bottom.
 
-3. [ ] **`--web` flag**: Starts daemon (if not running), opens `http://localhost:<port>/setup` in the default browser. Studio renders `/setup` as a wizard with the same steps. Falls back to TUI if daemon start fails.
+3. [x] **`--web` flag**: Starts daemon (if not running), opens `http://localhost:<port>/setup` in the default browser. Falls back to TUI if daemon start fails.
 
-4. [ ] **Provider detection**: At wizard start, detect `ANTHROPIC_API_KEY` env var (pre-fill API key field), detect Ollama at `localhost:11434`, detect installed agent binaries on `$PATH`. Pre-select detected options to minimise typing.
+4. [x] **Provider detection**: At wizard start, detect `ANTHROPIC_API_KEY` env var (pre-fill API key field), detect Ollama at `localhost:11434`, detect installed agent binaries on `$PATH`. Pre-select detected options to minimise typing.
 
-5. [ ] **API key validation**: After entry, make a lightweight Anthropic `/v1/models` request (2s timeout). Show spinner; on success show "✓ API key valid"; on failure show error with link to console.anthropic.com. Store in OS keychain via `keyring` crate (same as `ta credentials` — share the keychain key `ta/anthropic_api_key`).
+5. [x] **API key validation**: After entry, make a lightweight Anthropic `/v1/models` request (5s timeout). Show "Validating API key..." message; on success show "✓ API key valid"; on failure show error with link to console.anthropic.com. Store in `~/.config/ta/secrets/` (mode 0600) — same pattern as `ta adapter`.
 
-6. [ ] **BMAD install step**: If BMAD selected and `~/.bmad/` absent, `git clone --depth=1 https://github.com/bmadcode/bmad-method ~/.bmad` with a progress spinner. Validates clone by checking for `~/.bmad/agents/` directory. On failure: warn and fall back to `default` planning framework with message.
+6. [x] **BMAD install step**: If BMAD selected and `~/.bmad/` absent, `git clone --depth=1 https://github.com/bmadcode/bmad-method ~/.bmad`. Validates clone by checking for `~/.bmad/agents/` directory. On failure: warns and continues.
 
-7. [ ] **Claude-Flow install step**: If selected and `claude-flow` not on PATH, run `npm install -g claude-flow` (checks npm availability first; if npm absent, shows install instructions and skips). Validates with `claude-flow --version`.
+7. [x] **Claude-Flow install step**: If selected and `claude-flow` not on PATH, run `npm install -g claude-flow` (checks npm availability first; if npm absent, shows install instructions and skips). Validates with `which claude-flow`.
 
-8. [ ] **Config write**: Writes `~/.config/ta/config.toml` `[provider]` and `[defaults]` sections atomically (write to `.tmp`, rename). Preserves any existing keys not touched by the wizard. On success prints the config path.
+8. [x] **Config write**: Writes `~/.config/ta/config.toml` `[provider]` and `[defaults]` sections atomically (write to `.tmp`, rename). Preserves any existing keys not touched by the wizard. On success prints the config path.
 
-9. [ ] **Installer hook — macOS**: Update `install.sh` and the DMG post-install script to call `ta onboard` at the end. Guard with `[ -t 0 ]` (only if stdin is a tty). If not a tty (non-interactive install), print the first-run hint instead.
+9. [x] **Installer hook — macOS/Linux**: Updated `install.sh` to call `ta onboard` at the end. Guards with `[ -t 0 ] && [ -t 1 ]` (only if stdin/stdout are a tty). If not a tty (non-interactive install), prints the first-run hint instead.
 
-10. [ ] **Installer hook — Windows**: Add WiX `<CustomAction>` in the MSI to launch `ta.exe onboard --non-interactive --from-installer` in a new console window after install completes. Pass flags collected from MSI UI (if MSI UI is extended to include provider/agent dropdowns in a future phase).
+10. [ ] **Installer hook — Windows**: Add WiX `<CustomAction>` in the MSI to launch `ta.exe onboard --non-interactive --from-installer` in a new console window after install completes. (Deferred — Windows MSI build tooling separate from CLI source.)
 
-11. [ ] **Installer hook — Linux**: Update `.deb` `postinst` and `.rpm` `%post` scripts to call `ta onboard` if stdin is a tty; otherwise print first-run hint.
+11. [ ] **Installer hook — Linux deb/rpm**: Update `.deb` `postinst` and `.rpm` `%post` scripts to call `ta onboard` if stdin is a tty; otherwise print first-run hint. (Deferred — package scripts are generated by CI, not in-tree source.)
 
-12. [ ] **First-run gate in `ta run` / `ta serve`**: If `[provider]` section absent from global config, print the first-run hint and exit 1 (with `--skip-onboard-check` escape hatch for CI).
+12. [x] **First-run gate in `ta run` / `ta serve`**: If `[provider]` section absent from global config, print the first-run hint and exit 1 (with `--skip-onboard-check` escape hatch for CI in `ta run`; `TA_SKIP_ONBOARD_CHECK=1` env var for `ta serve`).
 
-13. [ ] **`ta onboard --status`**: Prints a summary of current configuration (provider type, agent, planning framework, BMAD path, whether API key is set in keychain) without running the wizard.
+13. [x] **`ta onboard --status`**: Prints a summary of current configuration (provider type, agent, planning framework, BMAD path, whether API key is set in keychain) without running the wizard.
 
-14. [ ] **`ta onboard --reset`**: Clears `[provider]` and `[defaults]` from global config and removes keychain entry, then re-runs wizard. Useful when switching from one provider to another.
+14. [x] **`ta onboard --reset`**: Clears `[provider]` and `[defaults]` from global config and removes keychain entry, then re-runs wizard. Useful when switching from one provider to another.
 
-15. [ ] **Tests**: Unit tests for config read/write round-trip; mock provider validation (stub HTTP); BMAD install idempotency (already present → skip clone); `--non-interactive` flag combinations; first-run gate triggers correctly; `--status` output with and without config present.
+15. [x] **Tests**: 16 unit tests — config read/write round-trip (Anthropic + Ollama); `is_configured_at` true/false; clear preserves other sections; API key store/read/delete; env var priority; first-run gate passes with skip flag; first-run gate produces "ta onboard" error message; atomic write leaves no `.tmp`; BMAD detection idempotency; claude-flow detection smoke test; extra-section preservation on rewrite.
 
-16. [ ] **USAGE.md**: "First-Time Setup" section — what `ta onboard` does, how to re-run it, `--status` and `--reset` flags, how to configure API key separately (`ta config set api_key`), note on BMAD and Claude-Flow as optional but recommended for complex projects.
+16. [x] **USAGE.md**: "First-Time Setup" section added — what `ta onboard` does, how to re-run it, `--status`/`--reset`/`--force`/`--web`/`--non-interactive` flags, API key configuration separately, BMAD and Claude-Flow notes.
 
 #### Version: `0.15.11-alpha`
+
+---
+
+### v0.15.11.1 — Draft Apply Lock & Co-Dev Guard
+<!-- status: pending -->
+**Goal**: Prevent conflicting git operations (branch switches, manual commits) while `ta draft apply` is in progress. Introduces a `.ta/apply.lock` file written at the start of `apply_package` and removed on exit (success or failure). Claude Code should check this lock before any `git checkout`, `git commit`, or `git push` — and TA itself should detect the lock at apply startup to warn about concurrent applies.
+
+**Why this phase exists**: A race between a manual `git checkout` (or `git add -A && git commit`) and a running `ta draft apply --submit` caused the apply to find "no changes to commit" and roll back. The fix requires TA to advertise its apply state externally so any co-developer process (human or AI assistant) can detect it before making git mutations. This is also needed for parallel goal runs where two drafts must not apply concurrently to the same workspace.
+
+**Design**:
+- **Lock file**: `.ta/apply.lock` — contains `{"draft_id": "...", "pid": 12345, "started_at": "..."}`. Written at entry to `apply_package`, removed in a `defer`-style cleanup (even on panic/early return).
+- **Stale lock detection**: If lock exists but `pid` is no longer alive → remove and continue (previous apply crashed without cleanup).
+- **Concurrent apply guard**: If lock exists and pid is alive → fail immediately with actionable error: `"Draft apply already in progress (PID X, draft Y). Wait for it to finish or kill PID X if it has crashed."`
+- **Claude Code behavioral rule**: Before any `git checkout`, `git commit`, or `git push` operation, check for `.ta/apply.lock`. If present and pid is alive, print warning and ask user whether to wait or abort.
+- **`ta draft apply --status`**: Shows whether an apply is in progress (reads lock file). Useful for scripts.
+- **`.gitignore`**: `.ta/apply.lock` added to gitignore (ephemeral, per-machine).
+
+**Deliverables**:
+- [ ] `ApplyLock` struct (`draft.rs`): `acquire()` writes lock, `Drop` removes it
+- [ ] `apply_package` acquires lock at entry, releases on exit
+- [ ] Concurrent apply detection with actionable error message
+- [ ] Stale lock (dead pid) auto-cleanup
+- [ ] `.ta/apply.lock` added to `.gitignore`
+- [ ] Claude Code CLAUDE.md rule: check for apply lock before git branch/commit/push operations
+- [ ] `ta draft apply --status` flag shows active lock info
+
+#### Version: `0.15.11-alpha.1`
 
 ---
 

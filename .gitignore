@@ -73,7 +73,7 @@ result-*
 
 # Runtime / machine-specific files
 .ta/*.log
-.ta/*.lock
+.ta/*.lock      # includes apply.lock (written by ta draft apply, ephemeral per-machine)
 .ta/*.pid
 .ta/daemon.toml
 .ta/change_summary.json
