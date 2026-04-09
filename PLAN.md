@@ -9554,6 +9554,37 @@ bmad_home          = "~/.bmad"        # set when bmad selected
 
 ---
 
+### v0.15.11.2 — PR CI Failure Recovery Workflow
+<!-- status: pending -->
+**Goal**: Surface CI check failures for TA-submitted PRs directly inside TA (Studio, shell, and CLI) and provide a one-action "fix CI failure" path that spawns a targeted agent, applies the fix to the existing PR branch, and notifies the user — without requiring git knowledge or manual branch switching.
+
+**Why this phase exists**: Today, fixing a CI failure on an open PR requires an engineer to manually check GitHub, check out the branch, fix the error, and push. `--follow-up` is the wrong tool (it inherits full parent staging, re-surfaces all parent changes as a new diff, and produces a redundant draft). Non-engineers have no actionable path at all. The fix should be surfaced where the user already is and require a single action.
+
+**Design — polling for now, push later**:
+- **Studio / shell**: Poll PR check status via the GitHub API on a configurable interval (default 60s) while a PR is open. Surface failures inline — "PR #350: Windows Build failed" — with a "Fix CI Failure" action.
+- **CLI**: `ta pr checks <goal-shortref>` — manual poll, prints check status table with actionable next step on failure.
+- **Slack / Discord / Email** (channels): Deliver the same CI failure notification to configured channels when a PR check fails. Uses the existing channel adapter surface.
+- **Push notifications** (future, tracked separately): VCS adapter webhook support to eliminate polling. The adapter would receive a push event from GitHub/GitLab and emit a `PrCheckFailed` event internally. Not in this phase.
+
+**"Fix CI Failure" action mechanics**:
+- Fetches the failing check's log from the GitHub API (or VCS adapter equivalent).
+- Spawns a targeted agent goal with: (a) the error log as the primary context, (b) explicit instruction to modify only the files named in the error, (c) explicit instruction not to touch PLAN.md or unrelated files.
+- On draft build, applies the fix **directly to the existing PR branch** (not a new branch, not a new draft cycle) — a lightweight "micro-fix" path bypassing the full goal→draft→approve→apply flow.
+- Pushes to the PR branch. CI re-runs automatically.
+
+**Deliverables**:
+- [ ] `ta pr checks <shortref>` CLI subcommand — polls check status, prints table, exits non-zero if any check failed
+- [ ] Studio PR card shows live check status with "Fix CI Failure" button on failure
+- [ ] Shell notification on `PrCheckFailed` event (extends v0.15.7.1 event notification surface)
+- [ ] Channel delivery of CI failure notifications (Slack, Discord, Email via existing adapters)
+- [ ] Micro-fix agent spawn: targeted prompt with error log, file scope constraints, no PLAN.md mutation
+- [ ] Direct PR-branch apply path: pushes fix commit to existing branch without new draft lifecycle
+- [ ] `ta pr fix <shortref>` CLI shorthand: fetches logs, spawns agent, applies, pushes in one command
+
+#### Version: `0.15.11-alpha.2`
+
+---
+
 ### v0.15.12 — `SocialAdapter` Trait & Social Media Plugins
 <!-- status: pending -->
 **Goal**: A pluggable social media adapter layer using the same JSON-over-stdio plugin protocol as `MessagingAdapter`. Social platforms (LinkedIn, X/Twitter, Instagram, Buffer/Later) are discoverable plugins. TA can draft posts and schedule them in the platform's native draft/scheduled state — but **never publishes autonomously**. The same constitution and supervisory gate from v0.15.10 applies: all outbound content is checked against the user's voice policy before it reaches the platform.
