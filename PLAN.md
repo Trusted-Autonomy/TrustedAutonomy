@@ -9542,13 +9542,13 @@ bmad_home          = "~/.bmad"        # set when bmad selected
 - **`.gitignore`**: `.ta/apply.lock` added to gitignore (ephemeral, per-machine).
 
 **Deliverables**:
-- [ ] `ApplyLock` struct (`draft.rs`): `acquire()` writes lock, `Drop` removes it
-- [ ] `apply_package` acquires lock at entry, releases on exit
-- [ ] Concurrent apply detection with actionable error message
-- [ ] Stale lock (dead pid) auto-cleanup
-- [ ] `.ta/apply.lock` added to `.gitignore`
-- [ ] Claude Code CLAUDE.md rule: check for apply lock before git branch/commit/push operations
-- [ ] `ta draft apply --status` flag shows active lock info
+- [x] `ApplyLock` struct (`draft.rs`): `acquire()` writes lock, `Drop` removes it
+- [x] `apply_package` acquires lock at entry, releases on exit
+- [x] Concurrent apply detection with actionable error message
+- [x] Stale lock (dead pid) auto-cleanup
+- [x] `.ta/apply.lock` added to `.gitignore` (already covered by `.ta/*.lock` rule added in v0.15.11.1 parent)
+- [x] Claude Code CLAUDE.md rule: check for apply lock before git branch/commit/push operations (already in CLAUDE.md Rules section)
+- [x] `ta draft apply --status` flag shows active lock info
 
 #### Version: `0.15.11-alpha.1`
 
