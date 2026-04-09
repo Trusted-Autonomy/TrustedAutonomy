@@ -2629,6 +2629,81 @@ ta draft pr-status <draft-id>
 ta draft pr-list
 ```
 
+### PR CI Failure Recovery
+
+When a PR's CI checks fail, TA can surface the failure and fix it automatically.
+
+**Check CI status:**
+
+```bash
+# Poll check status and print a table (exits non-zero on failure)
+ta pr checks <shortref>
+
+# Examples
+ta pr checks 2159d87e          # by goal shortref (first 8 chars of goal ID)
+ta pr checks 2159d87e/01       # by draft shortref/seq
+```
+
+The `<shortref>` accepts the same formats as `ta draft view`: goal shortref, draft shortref/seq, draft ID prefix, or goal/draft title substring.
+
+On failure, the command prints the failing checks and exits non-zero, making it usable in scripts:
+
+```
+=== CI Checks: My PR title ===
+
+Draft:   2159d87e
+Branch:  feature/add-auth
+PR:      https://github.com/org/repo/pull/42
+State:   OPEN
+
+CHECK                                      STATUS   DETAILS
+------------------------------------------------------------------------------------------
+Windows Build                              FAIL     https://github.com/...
+Clippy                                     PASS     https://github.com/...
+
+Result:  1/2 passed, 1 failed
+
+Failed checks:
+  - Windows Build
+
+To fix automatically:  ta pr fix 2159d87e
+```
+
+**Fix CI failures automatically:**
+
+```bash
+# Fetch failure logs, spawn micro-fix agent, push fix to PR branch
+ta pr fix <shortref>
+
+# Commit the fix locally but don't push (review before pushing)
+ta pr fix <shortref> --no-push
+
+# Set up workspace without launching the agent
+ta pr fix <shortref> --no-launch
+```
+
+`ta pr fix` performs the full recovery loop in one command:
+1. Fetches the failing check logs from the PR.
+2. Writes a scoped context file (`.ta/pr-fix-context.md`) with the error log and instructions constraining the agent to only touch files mentioned in the error — PLAN.md and unrelated files are explicitly off-limits.
+3. Checks out the existing PR branch and launches the agent.
+4. After the agent exits, commits and pushes to the PR branch so CI re-runs automatically.
+
+**Event routing for CI failures:**
+
+`ta pr checks` emits a `pr_check_failed` event when checks fail. This event can be routed to Slack, Discord, or email via `.ta/event-routing.yaml`:
+
+```yaml
+responders:
+  - event: pr_check_failed
+    strategy: notify          # default: send notification to configured channels
+    # Or spawn an agent automatically:
+    # strategy: agent
+    # agent: claude-code
+    # prompt: "Run ta pr fix to address the failing CI checks."
+```
+
+The event carries the PR URL, branch, failing check names, and goal title — enough context for any notification channel to render a useful alert.
+
 ### Merging a PR and Syncing Main
 
 After `ta draft apply --submit` creates a PR, complete the loop with `ta draft merge` or `ta draft watch`:

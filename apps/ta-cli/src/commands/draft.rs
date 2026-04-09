@@ -7106,7 +7106,7 @@ pub fn build_draft_inline(
 ///
 /// Returns the resolved draft package ID as a string, or an error with
 /// actionable guidance.
-fn resolve_draft_id_flexible(
+pub(crate) fn resolve_draft_id_flexible(
     config: &GatewayConfig,
     input: Option<&str>,
 ) -> anyhow::Result<String> {
@@ -7966,7 +7966,7 @@ fn draft_follow_up(
 }
 
 /// Fetch CI failure context from a PR using `gh`.
-fn fetch_ci_failure_context(pr_url: &str, working_dir: &std::path::Path) -> String {
+pub(crate) fn fetch_ci_failure_context(pr_url: &str, working_dir: &std::path::Path) -> String {
     let checks = std::process::Command::new("gh")
         .args(["pr", "checks", pr_url])
         .current_dir(working_dir)

@@ -77,6 +77,17 @@ responders:
   - event: agent_needs_input
     strategy: notify
 
+  - event: pr_check_failed
+    strategy: notify
+    # To automatically fix CI failures with an agent, change to:
+    # strategy: agent
+    # agent: claude-code
+    # prompt: |
+    #   A PR CI check has failed. Run `ta pr fix <shortref>` to spawn a
+    #   targeted fix agent that will address the failing check and push
+    #   a fix commit to the PR branch automatically.
+    # require_approval: false
+
   - event: plan_phase_completed
     strategy: notify
 

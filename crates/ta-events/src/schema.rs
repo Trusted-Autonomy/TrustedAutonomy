@@ -400,6 +400,26 @@ pub enum SessionEvent {
         /// CL description (first line).
         description: String,
     },
+
+    /// A PR CI check has failed (v0.15.11.2).
+    ///
+    /// Emitted by `ta pr checks` when one or more CI checks on an open PR fail.
+    /// Triggers shell notifications and can be routed to Slack/Discord/email
+    /// via event-routing.yaml to alert the team that a PR needs a fix.
+    PrCheckFailed {
+        /// Goal that produced the draft associated with this PR.
+        goal_id: Uuid,
+        /// Draft package ID.
+        draft_id: Uuid,
+        /// GitHub/GitLab PR URL.
+        pr_url: String,
+        /// Branch name for this PR.
+        branch: String,
+        /// Names of the CI checks that failed (e.g. ["Windows Build", "Clippy"]).
+        failed_checks: Vec<String>,
+        /// PR title (for display in notifications).
+        title: String,
+    },
 }
 
 /// A single issue found during a watchdog health check (v0.11.2.4).
@@ -454,6 +474,7 @@ impl SessionEvent {
             Self::VcsPrMerged { .. } => "vcs.pr_merged",
             Self::VcsBranchPushed { .. } => "vcs.branch_pushed",
             Self::VcsChangelistSubmitted { .. } => "vcs.changelist_submitted",
+            Self::PrCheckFailed { .. } => "pr_check_failed",
         }
     }
 
@@ -480,6 +501,7 @@ impl SessionEvent {
                 Some(*goal_id)
             }
             Self::RuntimeError { goal_id, .. } => *goal_id,
+            Self::PrCheckFailed { goal_id, .. } => Some(*goal_id),
             _ => None,
         }
     }
@@ -622,6 +644,34 @@ impl SessionEvent {
                         format!("Inspect goal {}", short_id),
                     ),
                 ]
+            }
+            Self::PrCheckFailed {
+                goal_id,
+                draft_id,
+                failed_checks,
+                ..
+            } => {
+                let goal_short = &goal_id.to_string()[..8];
+                let draft_short = &draft_id.to_string()[..8];
+                let mut actions = vec![EventAction::new(
+                    "fix",
+                    format!("ta pr fix {}", goal_short),
+                    format!(
+                        "Fix {} failing CI check(s) automatically",
+                        failed_checks.len()
+                    ),
+                )];
+                actions.push(EventAction::new(
+                    "checks",
+                    format!("ta pr checks {}", goal_short),
+                    "Re-poll CI check status".to_string(),
+                ));
+                actions.push(EventAction::new(
+                    "follow-up",
+                    format!("ta draft follow-up {} --ci-failure", draft_short),
+                    "Manual follow-up with CI failure context".to_string(),
+                ));
+                actions
             }
             // All other events have no suggested actions.
             _ => vec![],
@@ -949,11 +999,61 @@ mod tests {
                 submitter: "carol".into(),
                 description: "Fix login bug".into(),
             },
+            SessionEvent::PrCheckFailed {
+                goal_id: gid,
+                draft_id: Uuid::new_v4(),
+                pr_url: "https://github.com/org/repo/pull/42".into(),
+                branch: "feature/fix".into(),
+                failed_checks: vec!["Windows Build".into(), "Clippy".into()],
+                title: "Fix auth bug".into(),
+            },
         ];
         for e in &events {
             assert!(!e.event_type().is_empty());
         }
-        assert_eq!(events.len(), 32);
+        assert_eq!(events.len(), 33);
+    }
+
+    #[test]
+    fn pr_check_failed_event() {
+        let goal_id = Uuid::new_v4();
+        let draft_id = Uuid::new_v4();
+        let event = SessionEvent::PrCheckFailed {
+            goal_id,
+            draft_id,
+            pr_url: "https://github.com/org/repo/pull/42".into(),
+            branch: "feature/ci-fix".into(),
+            failed_checks: vec!["Windows Build".into(), "Clippy".into()],
+            title: "My PR title".into(),
+        };
+
+        // Event type name is stable.
+        assert_eq!(event.event_type(), "pr_check_failed");
+
+        // Goal ID is extractable.
+        assert_eq!(event.goal_id(), Some(goal_id));
+
+        // Suggested actions include fix and re-poll.
+        let actions = event.suggested_actions();
+        assert!(!actions.is_empty());
+        let verbs: Vec<&str> = actions.iter().map(|a| a.verb.as_str()).collect();
+        assert!(
+            verbs.contains(&"fix"),
+            "expected 'fix' action, got: {:?}",
+            verbs
+        );
+        assert!(
+            verbs.contains(&"checks"),
+            "expected 'checks' action, got: {:?}",
+            verbs
+        );
+
+        // Envelope round-trips through JSON.
+        let envelope = EventEnvelope::new(event);
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let restored: EventEnvelope = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.event_type, "pr_check_failed");
+        assert_eq!(restored.actions.len(), actions.len());
     }
 
     #[test]

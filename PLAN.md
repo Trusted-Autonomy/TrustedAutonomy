@@ -9555,7 +9555,7 @@ bmad_home          = "~/.bmad"        # set when bmad selected
 ---
 
 ### v0.15.11.2 — PR CI Failure Recovery Workflow
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Surface CI check failures for TA-submitted PRs directly inside TA (Studio, shell, and CLI) and provide a one-action "fix CI failure" path that spawns a targeted agent, applies the fix to the existing PR branch, and notifies the user — without requiring git knowledge or manual branch switching.
 
 **Why this phase exists**: Today, fixing a CI failure on an open PR requires an engineer to manually check GitHub, check out the branch, fix the error, and push. `--follow-up` is the wrong tool (it inherits full parent staging, re-surfaces all parent changes as a new diff, and produces a redundant draft). Non-engineers have no actionable path at all. The fix should be surfaced where the user already is and require a single action.
@@ -9573,13 +9573,13 @@ bmad_home          = "~/.bmad"        # set when bmad selected
 - Pushes to the PR branch. CI re-runs automatically.
 
 **Deliverables**:
-- [ ] `ta pr checks <shortref>` CLI subcommand — polls check status, prints table, exits non-zero if any check failed
-- [ ] Studio PR card shows live check status with "Fix CI Failure" button on failure
-- [ ] Shell notification on `PrCheckFailed` event (extends v0.15.7.1 event notification surface)
-- [ ] Channel delivery of CI failure notifications (Slack, Discord, Email via existing adapters)
-- [ ] Micro-fix agent spawn: targeted prompt with error log, file scope constraints, no PLAN.md mutation
-- [ ] Direct PR-branch apply path: pushes fix commit to existing branch without new draft lifecycle
-- [ ] `ta pr fix <shortref>` CLI shorthand: fetches logs, spawns agent, applies, pushes in one command
+- [x] `ta pr checks <shortref>` CLI subcommand — polls check status, prints table, exits non-zero if any check failed
+- [ ] Studio PR card shows live check status with "Fix CI Failure" button on failure (→ v0.15.16 Studio)
+- [x] Shell notification on `PrCheckFailed` event (extends v0.15.7.1 event notification surface) — `PrCheckFailed` event emitted by `ta pr checks`, routed via event-routing.yaml
+- [x] Channel delivery of CI failure notifications (Slack, Discord, Email via existing adapters) — via `pr_check_failed` event + event-routing.yaml responder
+- [x] Micro-fix agent spawn: targeted prompt with error log, file scope constraints, no PLAN.md mutation
+- [x] Direct PR-branch apply path: pushes fix commit to existing branch without new draft lifecycle
+- [x] `ta pr fix <shortref>` CLI shorthand: fetches logs, spawns agent, applies, pushes in one command
 
 #### Version: `0.15.11-alpha.2`
 
