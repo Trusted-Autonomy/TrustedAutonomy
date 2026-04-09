@@ -7,6 +7,9 @@ exclude = [
     "plugins/messaging/ta-messaging-gmail",
     "plugins/messaging/ta-messaging-outlook",
     "plugins/messaging/ta-messaging-imap",
+    "plugins/social/ta-social-linkedin",
+    "plugins/social/ta-social-x",
+    "plugins/social/ta-social-buffer",
 ]
 members = [
     "crates/ta-audit",

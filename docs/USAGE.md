@@ -3921,6 +3921,111 @@ Fields logged per draft: `draft_id`, `provider`, `to`, `subject`, `created_at`, 
 
 ---
 
+### Social Media Adapter
+
+TA can draft and schedule social media posts through pluggable social adapter plugins. Each platform (LinkedIn, X, Buffer) is a separate binary that speaks the same JSON-over-stdio protocol as messaging plugins. **TA never publishes autonomously** — it creates drafts or scheduled posts; you publish from your platform's own UI.
+
+#### Supported Platforms
+
+| Plugin | Platform | Draft | Schedule | Cross-platform |
+|--------|----------|-------|----------|----------------|
+| `ta-social-linkedin` | LinkedIn | ✓ | ✓ | No |
+| `ta-social-x` | X (Twitter) | ✓ (Basic+ API tier) | ✓ (Basic+ API tier) | No |
+| `ta-social-buffer` | Buffer | ✓ | ✓ | Yes — fans out to all connected profiles |
+
+**Buffer** is the recommended choice for cross-platform content: one `create_draft` call creates drafts on LinkedIn, X, and Instagram simultaneously via your connected Buffer profiles.
+
+#### Plugin Setup
+
+```bash
+# LinkedIn (OAuth2 PKCE)
+ta adapter setup social/linkedin
+
+# X / Twitter (OAuth2 — requires Basic API tier for drafts)
+ta adapter setup social/x
+
+# Buffer (OAuth2 — cross-platform scheduler)
+ta adapter setup social/buffer
+
+# Verify all configured platforms
+ta adapter health social
+```
+
+Each platform stores its OAuth2 token in the OS keychain under `ta-social:<platform>:<handle>`.
+
+**X API tier note**: Draft and scheduled tweets require the X API **Basic tier** or higher. The Free tier supports health checks only. Check your tier at the [X Developer Portal](https://developer.twitter.com/en/portal/dashboard).
+
+#### Drafts vs Scheduled Posts
+
+Two operations are available:
+
+- **`create_draft`** — Creates a draft in the platform's native draft state. The draft appears in your LinkedIn, X, or Buffer draft queue. You review and publish when ready.
+- **`create_scheduled`** — Queues the post to go live at a specified time. The platform (or Buffer) sends it automatically. You can still edit or cancel it before the scheduled time.
+
+```bash
+# Draft mode: creates post as draft, you publish manually
+ta run "Draft a LinkedIn post about the cinepipe project launch — professional tone, \
+        highlight the AI pipeline angle, no specific client names"
+
+# Scheduled mode: post goes live at the configured time
+ta run "Write a week of X posts for the TA public alpha — one per day, consistent voice, \
+        link to the GitHub release" \
+        --persona content-writer
+```
+
+#### Supervisory Review
+
+All social content goes through the same supervisor gate as email. Before any draft is created:
+
+1. **Constitution check** — the post is checked against your voice and style policy (`~/.config/ta/social-constitution.md`)
+2. **Confidence scoring** — if confidence falls below `min_confidence`, the post goes to the TA review queue
+3. **Flag phrases** — any `flag_if_contains` match routes to review instead of creating the draft
+4. **Unverified claims** — optional heuristic check for patterns like "guaranteed to" or "100% proven"
+5. **Client name guard** — posts containing configured `blocked_client_names` are flagged unless `allow_client_names = true`
+
+#### Workflow Template (`social-content.toml`)
+
+The `social-content` workflow template handles recurring content goals:
+
+```bash
+# Initialize the template
+ta workflow init social-content
+# Edit ~/.config/ta/workflows/social-content.toml to configure your platforms and constitution
+
+# Run a content goal
+ta workflow run social-content --goal "Announce our v0.15.12 social media adapter release"
+```
+
+Key config options:
+
+```toml
+[workflow]
+name            = "social-content"
+platforms       = ["linkedin"]        # or ["buffer"] for cross-platform
+mode            = "draft"             # or "scheduled"
+constitution    = "~/.config/ta/social-constitution.md"
+
+[supervisor]
+min_confidence  = 0.80
+flag_if_contains = ["I guarantee", "100% proven"]
+check_unverified_claims = true
+```
+
+#### Social Audit Log
+
+Every draft or scheduled post is recorded in `.ta/social-audit.jsonl`:
+
+```bash
+ta audit social                          # all records
+ta audit social -n 10                    # 10 most recent
+ta audit social --platform linkedin      # filter by platform
+ta audit social --state draft            # only pending drafts
+```
+
+Fields logged per post: `post_id`, `platform`, `handle`, `body_preview` (first 100 chars), `created_at`, `state` (draft/published/deleted), `goal_id`, `supervisor_score`, `manually_approved`.
+
+---
+
 ### VCS Adapters
 
 TA uses pluggable adapters for version control operations. When `submit.adapter` is not explicitly set, TA auto-detects the VCS from the project directory:

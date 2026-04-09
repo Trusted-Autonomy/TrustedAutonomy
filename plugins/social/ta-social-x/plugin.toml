@@ -1,0 +1,7 @@
+name = "x"
+version = "0.1.0"
+type = "social"
+command = "ta-social-x"
+capabilities = ["create_draft", "create_scheduled", "draft_status", "health", "capabilities"]
+description = "X (Twitter) social media adapter — draft and schedule tweets via X API v2 (requires Basic+ API tier for drafts)"
+timeout_secs = 60

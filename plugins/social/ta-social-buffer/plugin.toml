@@ -1,0 +1,7 @@
+name = "buffer"
+version = "0.1.0"
+type = "social"
+command = "ta-social-buffer"
+capabilities = ["create_draft", "create_scheduled", "draft_status", "health", "capabilities"]
+description = "Buffer social media adapter — cross-platform drafts and scheduled posts (supports LinkedIn, X, Instagram simultaneously)"
+timeout_secs = 60

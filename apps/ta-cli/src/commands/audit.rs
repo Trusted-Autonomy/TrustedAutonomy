@@ -6,7 +6,7 @@ use ta_audit::{
     AttestationBackend, AuditDisposition, AuditEvent, AuditLog, BaselineStore, DraftSummary,
     DriftSeverity, GoalAuditLedger, LedgerFilter, SoftwareAttestationBackend,
 };
-use ta_goal::MessagingAuditLog;
+use ta_goal::{MessagingAuditLog, SocialAuditLog};
 use ta_mcp_gateway::GatewayConfig;
 
 #[derive(Subcommand)]
@@ -113,6 +113,30 @@ pub enum AuditCommands {
         #[arg(long)]
         provider: Option<String>,
         /// Filter by draft state (drafted, sent, discarded, unknown).
+        #[arg(long)]
+        state: Option<String>,
+        /// Number of most-recent records to show (0 = all).
+        #[arg(short = 'n', long, default_value = "0")]
+        limit: usize,
+    },
+    /// Show the social media draft audit log (v0.15.12).
+    ///
+    /// Prints all `DraftSocialRecord` entries from `.ta/social-audit.jsonl`.
+    /// Each entry shows the post ID, platform, handle, body preview, creation
+    /// time, current state (draft / published / deleted), and supervisor score.
+    ///
+    /// Example:
+    ///   ta audit social
+    ///   ta audit social --platform linkedin
+    ///   ta audit social --state draft -n 10
+    Social {
+        /// Path to social audit log (defaults to .ta/social-audit.jsonl).
+        #[arg(long)]
+        log: Option<String>,
+        /// Filter by platform (e.g., "linkedin", "x", "buffer").
+        #[arg(long)]
+        platform: Option<String>,
+        /// Filter by state (draft, published, deleted, unknown).
         #[arg(long)]
         state: Option<String>,
         /// Number of most-recent records to show (0 = all).
@@ -329,6 +353,21 @@ pub fn execute(cmd: &AuditCommands, config: &GatewayConfig) -> anyhow::Result<()
                 config,
                 log.as_deref(),
                 provider.as_deref(),
+                state.as_deref(),
+                *limit,
+            )?;
+        }
+
+        AuditCommands::Social {
+            log,
+            platform,
+            state,
+            limit,
+        } => {
+            social_audit(
+                config,
+                log.as_deref(),
+                platform.as_deref(),
                 state.as_deref(),
                 *limit,
             )?;
@@ -1175,6 +1214,91 @@ fn messaging_audit(
 
     println!();
     println!("{} draft record(s)", records.len());
+
+    Ok(())
+}
+
+// ── Social audit (v0.15.12) ────────────────────────────────────────────────
+
+/// Print the social media draft audit log.
+fn social_audit(
+    config: &GatewayConfig,
+    log_path: Option<&str>,
+    platform_filter: Option<&str>,
+    state_filter: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let path = log_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| config.workspace_root.join(".ta").join("social-audit.jsonl"));
+
+    let log = SocialAuditLog::at(&path);
+    let mut records = log.read_all().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read social audit log at {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+
+    if records.is_empty() {
+        println!("No social audit records found.");
+        if !path.exists() {
+            println!("(Log file does not exist yet: {})", path.display());
+            println!("Records are written when a SocialAdapter creates a draft or scheduled post.");
+        }
+        return Ok(());
+    }
+
+    // Apply filters.
+    if let Some(plat) = platform_filter {
+        records.retain(|r| r.platform.eq_ignore_ascii_case(plat));
+    }
+    if let Some(st) = state_filter {
+        records.retain(|r| r.state.to_string().eq_ignore_ascii_case(st));
+    }
+
+    // Apply limit (most recent first).
+    if limit > 0 && records.len() > limit {
+        records = records.into_iter().rev().take(limit).rev().collect();
+    }
+
+    if records.is_empty() {
+        println!("No records match the specified filters.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<32}  {:<10}  {:<16}  {:<35}  {:<11}  created_at",
+        "post_id", "platform", "handle", "body_preview", "state"
+    );
+    println!("{}", "─".repeat(130usize));
+
+    for r in &records {
+        let post_id = if r.post_id.len() > 30 {
+            format!("{}…", &r.post_id[..29])
+        } else {
+            r.post_id.clone()
+        };
+        let handle = if r.handle.len() > 14 {
+            format!("{}…", &r.handle[..13])
+        } else {
+            r.handle.clone()
+        };
+        let preview = if r.body_preview.len() > 33 {
+            format!("{}…", &r.body_preview[..32])
+        } else {
+            r.body_preview.clone()
+        };
+        let approved_marker = if r.manually_approved { " ✓" } else { "" };
+        println!(
+            "{:<32}  {:<10}  {:<16}  {:<35}  {:<11}  {}{}",
+            post_id, r.platform, handle, preview, r.state, r.created_at, approved_marker
+        );
+    }
+
+    println!();
+    println!("{} social post record(s)", records.len());
 
     Ok(())
 }

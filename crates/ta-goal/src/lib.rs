@@ -24,6 +24,7 @@ pub mod history;
 pub mod messaging_audit;
 pub mod operations;
 pub mod persona;
+pub mod social_audit;
 pub mod store;
 pub mod velocity;
 
@@ -35,6 +36,7 @@ pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
 pub use messaging_audit::{DraftEmailRecord, DraftEmailState, MessagingAuditLog};
 pub use operations::{ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog};
 pub use persona::{PersonaCapabilities, PersonaConfig, PersonaInner, PersonaStyle, PersonaSummary};
+pub use social_audit::{DraftSocialRecord, SocialAuditLog, SocialPostRecordState};
 pub use store::GoalRunStore;
 pub use velocity::{
     aggregate_by_contributor, detect_phase_conflicts, merge_velocity_entries,

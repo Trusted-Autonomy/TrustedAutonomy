@@ -1,0 +1,7 @@
+name = "linkedin"
+version = "0.1.0"
+type = "social"
+command = "ta-social-linkedin"
+capabilities = ["create_draft", "create_scheduled", "draft_status", "health", "capabilities"]
+description = "LinkedIn social media adapter — draft and schedule posts via LinkedIn Share API (OAuth2 PKCE)"
+timeout_secs = 60

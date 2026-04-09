@@ -25,6 +25,8 @@ pub mod messaging_plugin_protocol;
 pub mod none;
 pub mod perforce;
 pub mod registry;
+pub mod social_adapter;
+pub mod social_plugin_protocol;
 pub mod svn;
 pub mod vcs_plugin_manifest;
 pub mod vcs_plugin_protocol;
@@ -61,6 +63,16 @@ pub use perforce::PerforceAdapter;
 pub use registry::{
     detect_adapter, enforce_section15, enforce_section15_plugin, known_adapters, select_adapter,
     select_adapter_with_sync,
+};
+pub use social_adapter::{
+    discover_social_plugins, find_social_plugin, social_supervisor_check, DiscoveredSocialPlugin,
+    ExternalSocialAdapter, SocialPluginManifest, SocialPluginSource, SocialSupervisorConfig,
+    SocialSupervisorResult,
+};
+pub use social_plugin_protocol::{
+    CreateScheduledParams, CreateSocialDraftParams, SocialCapabilitiesParams,
+    SocialDraftStatusParams, SocialHealthParams, SocialPluginError, SocialPluginRequest,
+    SocialPluginResponse, SocialPostContent, SocialPostState, SOCIAL_PROTOCOL_VERSION,
 };
 pub use svn::SvnAdapter;
 pub use vcs_plugin_manifest::{

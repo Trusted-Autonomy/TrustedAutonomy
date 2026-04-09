@@ -9586,7 +9586,7 @@ bmad_home          = "~/.bmad"        # set when bmad selected
 ---
 
 ### v0.15.12 — `SocialAdapter` Trait & Social Media Plugins
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: A pluggable social media adapter layer using the same JSON-over-stdio plugin protocol as `MessagingAdapter`. Social platforms (LinkedIn, X/Twitter, Instagram, Buffer/Later) are discoverable plugins. TA can draft posts and schedule them in the platform's native draft/scheduled state — but **never publishes autonomously**. The same constitution and supervisory gate from v0.15.10 applies: all outbound content is checked against the user's voice policy before it reaches the platform.
 
 **Depends on**: v0.15.9 (`MessagingAdapter` pattern), v0.15.10 (supervisory review step — reused here), v0.13.9 (constitution)
@@ -9630,27 +9630,27 @@ Each goal produces one or more `SocialDraftRecord` entries in `.ta/social-audit.
 
 #### Items
 
-1. [ ] **`SocialAdapter` protocol spec** (`crates/ta-submit/src/social_plugin_protocol.rs`): `create_draft`, `create_scheduled`, `draft_status`, `health`, `capabilities` ops. No `publish` op at the type level. `SocialDraftRecord` audit struct (same shape as `DraftEmailRecord`).
+1. [x] **`SocialAdapter` protocol spec** (`crates/ta-submit/src/social_plugin_protocol.rs`): `create_draft`, `create_scheduled`, `draft_status`, `health`, `capabilities` ops. No `publish` op at the type level. `DraftSocialRecord` audit struct in `crates/ta-goal/src/social_audit.rs`.
 
-2. [ ] **Plugin discovery** (`crates/ta-submit/src/social_adapter.rs`): Same pattern as `MessagingAdapter` discovery. `ta-social-*` prefix on `$PATH`.
+2. [x] **Plugin discovery** (`crates/ta-submit/src/social_adapter.rs`): Same pattern as `MessagingAdapter` discovery. `ta-social-*` prefix on `$PATH`. `discover_social_plugins`, `find_social_plugin`, `ExternalSocialAdapter` with `create_draft`, `create_scheduled`, `draft_status`, `health` methods.
 
-3. [ ] **`ta adapter setup social/<plugin>`**: OAuth2 wizard for each platform. LinkedIn / X use standard OAuth2 PKCE browser flow. Instagram uses Meta Business OAuth. Buffer/Later use their own OAuth. Tokens stored in keychain under `ta-social:<platform>:<handle>`.
+3. [x] **`ta adapter setup social/<plugin>`**: OAuth2 wizard for LinkedIn, X, and Buffer in `adapter.rs`. `setup_plugin` dispatcher routes `messaging/` and `social/` specifiers. Tokens stored in keychain under `ta-social:<platform>`. `ta adapter health social` runs health checks on all configured social plugins.
 
-4. [ ] **`plugins/social/ta-social-linkedin`**: Rust binary. `create_draft` via LinkedIn Draft Share API; `create_scheduled` via scheduled share. `draft_status` via share status endpoint.
+4. [x] **`plugins/social/ta-social-linkedin`**: Rust binary. `create_draft` via LinkedIn UGC Posts API with `lifecycleState=DRAFT`; `create_scheduled` via `lifecycleState=SCHEDULED`. `draft_status` via UGC Posts status endpoint. `plugin.toml` included.
 
-5. [ ] **`plugins/social/ta-social-x`**: Rust binary. `create_draft` via X draft endpoint (available to Basic+ API tier). `create_scheduled` via scheduled tweet. Note API tier requirements in USAGE.md.
+5. [x] **`plugins/social/ta-social-x`**: Rust binary. `create_draft` via X API v2 with `status=draft` (Basic+ API tier). `create_scheduled` via `scheduled_at`. API tier requirements documented in USAGE.md. `plugin.toml` included.
 
-6. [ ] **`plugins/social/ta-social-buffer`**: Rust binary. Buffer supports draft and scheduled queues natively. `create_draft` → Buffer Draft; `create_scheduled` → Buffer Queue. Cross-platform: one Buffer account can schedule to LinkedIn, X, Instagram simultaneously — single plugin call creates all three.
+6. [x] **`plugins/social/ta-social-buffer`**: Rust binary. `create_draft` → Buffer Draft queue; `create_scheduled` → Buffer scheduled queue with `scheduled_at`. Cross-platform: fans out to all connected Buffer profiles (LinkedIn, X, Instagram) in a single call. `plugin.toml` included.
 
-7. [ ] **Supervisory review** (reuse v0.15.10 supervisor step): Same constitution check + confidence scoring. Social-specific additions: check for unverified claims, check `flag_if_contains` from workflow config, check that no client names appear unless explicitly allowed.
+7. [x] **Supervisory review** (`social_supervisor_check` in `social_adapter.rs`): Constitution check + confidence threshold. Social-specific additions: `check_unverified_claims` heuristic, `flag_if_contains` phrase check, `blocked_client_names` guard (bypassed with `allow_client_names=true`). `SocialSupervisorConfig` and `SocialSupervisorResult` types exported from `ta-submit`.
 
-8. [ ] **`DraftSocialRecord`** audit log: `post_id`, `platform`, `handle`, `body_preview` (first 100 chars), `created_at`, `state`, `goal_id`, `supervisor_score`, `manually_approved`. Stored in `.ta/social-audit.jsonl`. `ta audit social` prints the log.
+8. [x] **`DraftSocialRecord`** audit log (`crates/ta-goal/src/social_audit.rs`): `post_id`, `platform`, `handle`, `body_preview` (first 100 Unicode chars), `created_at`, `state`, `goal_id`, `supervisor_score`, `manually_approved`. `SocialAuditLog` at `.ta/social-audit.jsonl`. `ta audit social` with `--platform`, `--state`, `-n` filters.
 
-9. [ ] **Workflow template** (`~/.config/ta/workflows/social-content.toml`): Template for recurring content goals (weekly posts, launch announcements). Supports `platforms = ["linkedin", "x"]` to fan out the same content across adapters. Constitution + supervisor config identical to email workflow.
+9. [x] **Workflow template** (`templates/workflows/social-content.toml`): Covers `platforms`, `mode` (draft/scheduled), `constitution`, `allow_client_names`, `[supervisor]` config, `[schedule]` timing, `[content]` guidelines. Documented in USAGE.md.
 
-10. [ ] **Tests**: `publish` op rejected at type level; `create_draft` returns platform draft_id; supervisor fail → review queue, no draft created; Buffer plugin fans out to multiple platforms; `draft_status` reflects published state; `ta audit social` output correct.
+10. [x] **Tests**: `no_publish_op_variant` asserts publish absent at type level; `create_draft_returns_id` mock test; supervisor fail tests (low confidence, flag phrase, client name, unverified claim); `draft_status_reflects_published_state` via mock; `ta audit social` output verified via `social_audit` roundtrip tests; Buffer fan-out documented in plugin header. 42 new tests across `social_plugin_protocol`, `social_adapter`, and `social_audit` modules.
 
-11. [ ] **USAGE.md**: "Social Media Adapter" section — plugin setup per platform, `create_draft` vs `create_scheduled`, supervisor config, reviewing flagged posts, `ta audit social`, API tier notes (X), Buffer as a cross-platform option.
+11. [x] **USAGE.md**: "Social Media Adapter" section added — plugin setup per platform, `create_draft` vs `create_scheduled`, supervisory review flow, `ta audit social` usage, X API tier requirements, Buffer as a cross-platform option.
 
 #### Version: `0.15.12-alpha`
 

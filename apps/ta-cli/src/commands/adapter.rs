@@ -7,12 +7,18 @@
 // Messaging adapters (v0.15.9):
 //   `ta adapter setup messaging/<plugin>` — one-time credential wizard
 //   `ta adapter health messaging`         — connectivity check for all configured providers
+//
+// Social adapters (v0.15.12):
+//   `ta adapter setup social/<plugin>`   — one-time OAuth2 credential wizard
+//   `ta adapter health social`           — connectivity check for all configured social plugins
 
 use std::fs;
 use std::path::Path;
 
 use clap::Subcommand;
-use ta_submit::{find_messaging_plugin, MessagingPluginManifest};
+use ta_submit::{
+    find_messaging_plugin, find_social_plugin, MessagingPluginManifest, SocialPluginManifest,
+};
 
 #[derive(Subcommand)]
 pub enum AdapterCommands {
@@ -23,7 +29,7 @@ pub enum AdapterCommands {
         /// Adapter name (e.g., "claude-code").
         name: String,
     },
-    /// One-time setup wizard for a messaging provider plugin.
+    /// One-time setup wizard for a messaging or social media provider plugin.
     ///
     /// Captures credentials (OAuth2 refresh token or IMAP app-password) and
     /// stores them in the OS keychain. Runs a health check on success.
@@ -32,20 +38,24 @@ pub enum AdapterCommands {
     ///   ta adapter setup messaging/gmail
     ///   ta adapter setup messaging/outlook
     ///   ta adapter setup messaging/imap
+    ///   ta adapter setup social/linkedin
+    ///   ta adapter setup social/x
+    ///   ta adapter setup social/buffer
     Setup {
-        /// Plugin specifier: "messaging/<provider>" (e.g., "messaging/gmail").
+        /// Plugin specifier: "messaging/<provider>" or "social/<platform>".
         plugin: String,
     },
-    /// Run a health check on all configured messaging adapters.
+    /// Run a health check on all configured messaging or social adapters.
     ///
-    /// Calls the `health` op on each discovered messaging plugin and prints
-    /// the provider name, connected address, and status. No credentials are
-    /// printed.
+    /// Calls the `health` op on each discovered plugin and prints
+    /// the provider name, connected address/handle, and status.
+    /// No credentials are printed.
     ///
-    /// Example:
+    /// Examples:
     ///   ta adapter health messaging
+    ///   ta adapter health social
     Health {
-        /// Adapter type to check. Currently only "messaging" is supported.
+        /// Adapter type to check: "messaging" or "social".
         adapter_type: String,
     },
     /// Get a credential value from the OS keychain (used by plugins).
@@ -78,7 +88,7 @@ pub fn execute(cmd: &AdapterCommands, project_root: &Path) -> anyhow::Result<()>
     match cmd {
         AdapterCommands::List => list_adapters(project_root),
         AdapterCommands::Install { name } => install_adapter(name, project_root),
-        AdapterCommands::Setup { plugin } => setup_messaging(plugin, project_root),
+        AdapterCommands::Setup { plugin } => setup_plugin(plugin, project_root),
         AdapterCommands::Health { adapter_type } => health_check(adapter_type, project_root),
         AdapterCommands::Credentials { cmd } => credentials_cmd(cmd),
     }
@@ -115,6 +125,24 @@ fn list_adapters(project_root: &Path) -> anyhow::Result<()> {
         println!();
         println!("Run health check:  ta adapter health messaging");
         println!("Set up a plugin:   ta adapter setup messaging/<provider>");
+        println!();
+    }
+
+    // Show discovered social plugins.
+    let social = ta_submit::discover_social_plugins(project_root);
+    if !social.is_empty() {
+        println!("Social plugins:");
+        for p in &social {
+            let desc = p
+                .manifest
+                .description
+                .as_deref()
+                .unwrap_or("(no description)");
+            println!("  social/{}    [{}]  {}", p.manifest.name, p.source, desc);
+        }
+        println!();
+        println!("Run health check:  ta adapter health social");
+        println!("Set up a plugin:   ta adapter setup social/<platform>");
     }
 
     Ok(())
@@ -134,6 +162,23 @@ fn install_adapter(name: &str, project_root: &Path) -> anyhow::Result<()> {
                 name
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Setup dispatcher
+// ---------------------------------------------------------------------------
+
+fn setup_plugin(plugin_spec: &str, project_root: &Path) -> anyhow::Result<()> {
+    if plugin_spec.starts_with("messaging/") {
+        setup_messaging(plugin_spec, project_root)
+    } else if plugin_spec.starts_with("social/") {
+        setup_social(plugin_spec, project_root)
+    } else {
+        anyhow::bail!(
+            "Invalid plugin specifier '{}'. Expected format:\n  messaging/<provider>  (e.g., messaging/gmail)\n  social/<platform>     (e.g., social/linkedin, social/x, social/buffer)",
+            plugin_spec
+        )
     }
 }
 
@@ -362,13 +407,184 @@ fn setup_imap(_manifest: Option<&MessagingPluginManifest>) -> anyhow::Result<()>
 }
 
 // ---------------------------------------------------------------------------
-// Health messaging
+// Setup social/<platform>
+// ---------------------------------------------------------------------------
+
+fn setup_social(plugin_spec: &str, project_root: &Path) -> anyhow::Result<()> {
+    let platform = plugin_spec.strip_prefix("social/").ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid plugin specifier '{}'. Expected format: social/<platform> \
+             (e.g., social/linkedin, social/x, social/buffer)",
+            plugin_spec
+        )
+    })?;
+
+    let discovered = find_social_plugin(platform, project_root);
+
+    println!("Setting up social media platform: {}", platform);
+    println!();
+
+    match platform {
+        "linkedin" => setup_linkedin(discovered.as_ref().map(|d| &d.manifest)),
+        "x" | "twitter" => setup_x(discovered.as_ref().map(|d| &d.manifest)),
+        "buffer" => setup_buffer(discovered.as_ref().map(|d| &d.manifest)),
+        other => {
+            if let Some(ref disc) = discovered {
+                println!("Found community plugin: {} ({})", other, disc.source);
+                let adapter = ta_submit::ExternalSocialAdapter::new(&disc.manifest);
+                match adapter.health() {
+                    Ok((handle, prov)) => {
+                        println!("  Provider: {}", prov);
+                        println!("  Handle:   {}", handle);
+                        println!();
+                        println!("Plugin is healthy. Credentials already configured.");
+                    }
+                    Err(e) => {
+                        println!("  Health check failed: {}", e);
+                        println!();
+                        println!(
+                            "Ensure credentials are configured per the plugin's documentation."
+                        );
+                    }
+                }
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "No social plugin found for platform '{}'. \n\
+                     Built-in platforms: linkedin, x, buffer\n\
+                     Community plugins: install the ta-social-{0} binary on PATH or \
+                     in ~/.config/ta/plugins/social/{0}/",
+                    other
+                )
+            }
+        }
+    }
+}
+
+fn setup_linkedin(_manifest: Option<&SocialPluginManifest>) -> anyhow::Result<()> {
+    println!("LinkedIn OAuth2 Setup");
+    println!("─────────────────────");
+    println!();
+    println!("To connect TA to LinkedIn, you need a LinkedIn OAuth2 access token.");
+    println!("TA never stores passwords — only the OAuth2 access token is saved");
+    println!("in the OS keychain under: ta-social:linkedin:<your-handle>");
+    println!();
+    println!("Steps:");
+    println!("  1. Create a LinkedIn app at https://developer.linkedin.com/");
+    println!("  2. Enable the 'Share on LinkedIn' and 'OpenID Connect' products");
+    println!("  3. Add http://localhost:8766/auth/callback as a redirect URI");
+    println!("  4. Note your Client ID and Client Secret");
+    println!("  5. Run the LinkedIn plugin setup:");
+    println!();
+    println!("     ta-social-linkedin setup --client-id <CLIENT_ID> --client-secret <SECRET>");
+    println!();
+    println!("  The plugin will open a browser for consent, then store the access");
+    println!("  token in the keychain automatically.");
+    println!();
+    println!("  6. Verify: ta adapter health social");
+    println!();
+    println!("Required OAuth2 scopes: w_member_social, openid, profile");
+    println!();
+
+    if which_on_path("ta-social-linkedin") {
+        println!("ta-social-linkedin is installed and ready.");
+    } else {
+        println!("ta-social-linkedin not found on PATH.");
+        println!("Install from the TA release assets or build from source:");
+        println!("  https://github.com/trustedautonomy/ta/releases");
+    }
+
+    Ok(())
+}
+
+fn setup_x(_manifest: Option<&SocialPluginManifest>) -> anyhow::Result<()> {
+    println!("X (Twitter) OAuth2 Setup");
+    println!("────────────────────────");
+    println!();
+    println!("To connect TA to X, you need an X API OAuth2 bearer token.");
+    println!("TA never stores passwords — only the OAuth2 token is saved");
+    println!("in the OS keychain under: ta-social:x:<your-handle>");
+    println!();
+    println!("API Tier Requirements:");
+    println!("  - Draft tweets:     X API Basic tier or higher");
+    println!("  - Scheduled tweets: X API Basic tier or higher");
+    println!("  - Health check:     X API Free tier (read-only)");
+    println!();
+    println!("Check your API tier at: https://developer.twitter.com/en/portal/dashboard");
+    println!();
+    println!("Steps:");
+    println!("  1. Create a project + app at https://developer.twitter.com/en/portal/dashboard");
+    println!("  2. Enable OAuth 2.0 with PKCE (User authentication settings)");
+    println!("  3. Add http://localhost:8767/auth/callback as a redirect URI");
+    println!("  4. Note your Client ID");
+    println!("  5. Run the X plugin setup:");
+    println!();
+    println!("     ta-social-x setup --client-id <CLIENT_ID>");
+    println!();
+    println!("  The plugin will open a browser for consent, then store the bearer");
+    println!("  token in the keychain automatically.");
+    println!();
+    println!("  6. Verify: ta adapter health social");
+    println!();
+
+    if which_on_path("ta-social-x") {
+        println!("ta-social-x is installed and ready.");
+    } else {
+        println!("ta-social-x not found on PATH.");
+        println!("Install from the TA release assets or build from source.");
+    }
+
+    Ok(())
+}
+
+fn setup_buffer(_manifest: Option<&SocialPluginManifest>) -> anyhow::Result<()> {
+    println!("Buffer OAuth2 Setup");
+    println!("───────────────────");
+    println!();
+    println!("Buffer is a cross-platform scheduler: one Buffer account can post to");
+    println!("LinkedIn, X, Instagram, and Facebook simultaneously.");
+    println!();
+    println!("Steps:");
+    println!("  1. Create a Buffer app at https://buffer.com/developers/api");
+    println!("  2. Note your Client ID and Client Secret");
+    println!("  3. Run the Buffer plugin setup:");
+    println!();
+    println!("     ta-social-buffer setup --client-id <CLIENT_ID> --client-secret <SECRET>");
+    println!();
+    println!("  The plugin will open a browser for consent, then store the access");
+    println!("  token in the keychain automatically.");
+    println!();
+    println!("  4. Connect your social profiles in the Buffer dashboard:");
+    println!("     https://buffer.com/manage/channels");
+    println!();
+    println!("  5. Verify: ta adapter health social");
+    println!();
+    println!("Note: Buffer fans out posts to ALL connected profiles in a single call.");
+    println!("A single 'create_draft' creates drafts on LinkedIn, X, and Instagram at once.");
+    println!();
+
+    if which_on_path("ta-social-buffer") {
+        println!("ta-social-buffer is installed and ready.");
+    } else {
+        println!("ta-social-buffer not found on PATH.");
+        println!("Install from the TA release assets or build from source.");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Health messaging / social
 // ---------------------------------------------------------------------------
 
 fn health_check(adapter_type: &str, project_root: &Path) -> anyhow::Result<()> {
     match adapter_type {
         "messaging" => health_messaging(project_root),
-        other => anyhow::bail!("Unknown adapter type: '{}'. Supported: messaging", other),
+        "social" => health_social(project_root),
+        other => anyhow::bail!(
+            "Unknown adapter type: '{}'. Supported: messaging, social",
+            other
+        ),
     }
 }
 
@@ -408,6 +624,47 @@ fn health_messaging(project_root: &Path) -> anyhow::Result<()> {
     } else {
         println!("No providers responded successfully.");
         println!("Re-run setup: ta adapter setup messaging/<provider>");
+    }
+
+    Ok(())
+}
+
+fn health_social(project_root: &Path) -> anyhow::Result<()> {
+    let plugins = ta_submit::discover_social_plugins(project_root);
+
+    if plugins.is_empty() {
+        println!("No social plugins found.");
+        println!();
+        println!("Set up a platform: ta adapter setup social/<platform>");
+        println!("Platforms: linkedin, x, buffer");
+        return Ok(());
+    }
+
+    println!("Social adapter health:");
+    println!();
+
+    let mut any_healthy = false;
+
+    for plugin in &plugins {
+        let adapter = ta_submit::ExternalSocialAdapter::new(&plugin.manifest);
+        print!("  {} ({})  ", plugin.manifest.name, plugin.source);
+        match adapter.health() {
+            Ok((handle, prov)) => {
+                println!("OK  — {} <{}>", prov, handle);
+                any_healthy = true;
+            }
+            Err(e) => {
+                println!("FAIL — {}", e);
+            }
+        }
+    }
+
+    println!();
+    if any_healthy {
+        println!("All reachable platforms are healthy.");
+    } else {
+        println!("No platforms responded successfully.");
+        println!("Re-run setup: ta adapter setup social/<platform>");
     }
 
     Ok(())
