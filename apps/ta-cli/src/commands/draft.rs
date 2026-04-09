@@ -5607,6 +5607,27 @@ fn apply_package(
                 return Err(e);
             }
             rollback_guard.commit();
+
+            // Re-write velocity-history.jsonl to the working tree after branch restore.
+            // The §8c block above wrote it before adapter.commit() so auto_stage picked
+            // it up for the feature-branch commit. But git checkout back to main REMOVES
+            // the file from disk (it was only in the feature branch's commit, not main).
+            // Re-writing here ensures the file persists locally for `ta stats velocity --team`.
+            // If main already had the file (prior apply), checkout restores that version and
+            // this append adds the new entry — no duplicate.
+            {
+                use ta_goal::{GoalOutcome, VelocityEntry, VelocityHistoryStore};
+                let history_entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied)
+                    .with_machine_id()
+                    .with_committer(&target_dir);
+                let hs = VelocityHistoryStore::for_project(&target_dir);
+                if let Err(e) = hs.append(&history_entry) {
+                    tracing::warn!(
+                        "Failed to re-write velocity history entry to working tree: {}",
+                        e
+                    );
+                }
+            }
         } // end of non-dry-run block
     }
 
