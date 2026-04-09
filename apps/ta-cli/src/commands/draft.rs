@@ -5266,6 +5266,21 @@ fn apply_package(
                     println!("  All pre-submit checks passed.\n");
                 }
 
+                // §8c: write velocity-history.jsonl BEFORE adapter.commit() so
+                // auto_stage_critical_files() sees the file as dirty and includes it
+                // in the same VCS commit. Writing after commit means the file exists
+                // but was never staged, so it's silently dropped from the commit.
+                {
+                    use ta_goal::{GoalOutcome, VelocityEntry, VelocityHistoryStore};
+                    let history_entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied)
+                        .with_machine_id()
+                        .with_committer(&target_dir);
+                    let hs = VelocityHistoryStore::for_project(&target_dir);
+                    if let Err(e) = hs.append(&history_entry) {
+                        tracing::warn!("Failed to record velocity history entry: {}", e);
+                    }
+                }
+
                 // Commit changes — goal title as subject, complete draft summary as body.
                 eprintln!("[apply] Staging changes for VCS commit...");
                 let commit_msg = build_commit_message(goal, &pkg);
@@ -5592,6 +5607,27 @@ fn apply_package(
                 return Err(e);
             }
             rollback_guard.commit();
+
+            // Re-write velocity-history.jsonl to the working tree after branch restore.
+            // The §8c block above wrote it before adapter.commit() so auto_stage picked
+            // it up for the feature-branch commit. But git checkout back to main REMOVES
+            // the file from disk (it was only in the feature branch's commit, not main).
+            // Re-writing here ensures the file persists locally for `ta stats velocity --team`.
+            // If main already had the file (prior apply), checkout restores that version and
+            // this append adds the new entry — no duplicate.
+            {
+                use ta_goal::{GoalOutcome, VelocityEntry, VelocityHistoryStore};
+                let history_entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied)
+                    .with_machine_id()
+                    .with_committer(&target_dir);
+                let hs = VelocityHistoryStore::for_project(&target_dir);
+                if let Err(e) = hs.append(&history_entry) {
+                    tracing::warn!(
+                        "Failed to re-write velocity history entry to working tree: {}",
+                        e
+                    );
+                }
+            }
         } // end of non-dry-run block
     }
 
@@ -5628,24 +5664,11 @@ fn apply_package(
 
     // §8b: record velocity entry for the applied goal.
     {
-        use ta_goal::{GoalOutcome, VelocityEntry, VelocityHistoryStore, VelocityStore};
+        use ta_goal::{GoalOutcome, VelocityEntry, VelocityStore};
         let vs = VelocityStore::for_project(&config.workspace_root);
         let entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied);
         if let Err(e) = vs.append(&entry) {
             tracing::warn!("Failed to record velocity entry: {}", e);
-        }
-
-        // §8c: when committing to VCS, also append to the shared velocity-history.jsonl.
-        // This file is committed alongside plan_history.jsonl so multi-machine stats
-        // are visible to the whole team via `ta stats velocity --team`.
-        if git_commit {
-            let history_entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied)
-                .with_machine_id()
-                .with_committer(&target_dir);
-            let hs = VelocityHistoryStore::for_project(&target_dir);
-            if let Err(e) = hs.append(&history_entry) {
-                tracing::warn!("Failed to record velocity history entry: {}", e);
-            }
         }
     }
 
