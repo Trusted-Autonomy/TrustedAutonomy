@@ -646,6 +646,7 @@ command = "ta-messaging-imap"
     ///
     /// Using OnceLock prevents concurrent write+exec races (ETXTBSY) on overlayfs-backed
     /// /tmp in Nix CI, where writing and immediately exec-ing a file can race kernel copy-up.
+    /// On Linux we use /dev/shm (guaranteed tmpfs, never overlayfs) so the race cannot occur.
     /// The script dispatches on op type so both health and create_draft tests can share it.
     #[cfg(unix)]
     fn shared_mock_plugin_path() -> &'static std::path::Path {
@@ -658,8 +659,18 @@ command = "ta-messaging-imap"
             let pid = std::process::id();
             let name = format!("ta-msg-mock-shared-{}", pid);
 
+            // On Linux, /tmp is overlayfs-backed in Nix CI — exec-ing a file written there
+            // races the kernel copy-up even after sync_all(). /dev/shm is always tmpfs and
+            // has no copy-up layer, so the race cannot occur. Fall back to /tmp if absent.
             #[cfg(target_os = "linux")]
-            let path = std::path::PathBuf::from("/tmp").join(&name);
+            let path = {
+                let shm = std::path::Path::new("/dev/shm");
+                if shm.exists() {
+                    shm.join(&name)
+                } else {
+                    std::path::PathBuf::from("/tmp").join(&name)
+                }
+            };
             #[cfg(not(target_os = "linux"))]
             let path = std::env::temp_dir().join(&name);
 

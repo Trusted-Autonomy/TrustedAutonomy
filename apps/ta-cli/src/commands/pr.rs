@@ -210,6 +210,7 @@ fn to_draft_command(cmd: &PrCommands) -> draft::DraftCommands {
             watch: false,
             chain: false,
             force_apply: false,
+            status: false,
         },
     }
 }

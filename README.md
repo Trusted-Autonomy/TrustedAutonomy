@@ -258,28 +258,6 @@ For workloads requiring real runtimes, isolated containers or microVMs can be ad
 
 ---
 
-## Why Rust?
-
-Trusted Autonomy sits between an AI agent and your codebase, making guarantees about safety, correctness, and auditability. The implementation language has to uphold the same standard as the software’s core promise. Rust meets that bar; the alternatives don’t — for reasons that are structural, not stylistic.
-
-**1. No data races — by construction.** TA runs concurrent operations: a daemon managing multiple goals, file watchers, event streams, and staging copies all active simultaneously. Rust’s ownership and borrow checker makes data races a compile-time error, not a runtime surprise. In a tool whose purpose is mediating shared state, that guarantee is load-bearing.
-
-**2. Deterministic resource cleanup (RAII, no GC).** Long-lived daemon processes expose the worst of garbage-collected languages: non-deterministic pauses, finalizers that run late or not at all, resources held longer than expected. Rust’s `Drop` trait runs cleanup the instant an object goes out of scope — lock files, staging directories, subprocess handles — with no GC involved. This is how `.ta/apply.lock` is safely released even when an apply path exits early or panics.
-
-**3. Compiler-enforced atomic state transitions.** TA’s draft lifecycle is a state machine (`Draft → PendingReview → Approved → Applied`). In Rust, each state is a distinct enum variant that carries exactly the data appropriate to that state — `Approved` carries `approved_by` and `approved_at`; `Applied` carries `applied_at`. You cannot represent an `Approved` draft without a reviewer, and you cannot add a new state without the compiler rejecting every `match` that doesn’t handle it. The invariants of the state machine are enforced at compile time, not by documentation or runtime checks.
-
-**4. Single-binary distribution.** `cargo build --release` produces one self-contained binary per platform. No runtime to install, no virtualenv, no node_modules. The install story is `curl | sh`, not a multi-step environment setup.
-
-**5. Serious cross-platform systems work.** TA does things that expose the worst failure modes of higher-level runtimes: PTY spawning, overlayfs file operations, Windows ProjFS virtual staging, process lifecycle management, low-level git plumbing. Rust gives direct access to platform APIs with no runtime interposing between the code and the OS.
-
-**6. Memory safety without the C++ trade-off.** The alternative for this class of systems work is C++, which provides the same low-level access but none of the safety guarantees. Rust offers both.
-
-### Why not Go?
-
-Go is a pragmatic language for daemons and CLIs — fast compilation, simple concurrency, easy distribution. For a different class of tool it would be defensible. For TA specifically, two structural issues rule it out: the garbage collector introduces non-deterministic pauses and makes resource-cleanup timing unpredictable in a long-lived process doing high-stakes file operations; and Go has no sum types, so there is no compiler-enforced equivalent of Rust’s exhaustive enum matching — state machines must be expressed with strings and runtime checks, and missed transitions become bugs rather than compile errors.
-
----
-
 ## Nix: why and how it’s used
 
 ### Why Nix is included
