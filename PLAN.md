@@ -9831,6 +9831,51 @@ The draft view renders this as a readable summary ("Agent stored 4 memory entrie
 
 ---
 
+### v0.15.13.3 — Committed Project-Scoped Memory (`.ta/project-memory/`)
+<!-- status: pending -->
+**Goal**: Memory entries with `scope = "project"` or `scope = "team"` are currently stored in `.ta/memory/` (gitignored, machine-local) alongside ephemeral execution state. This means project knowledge — architectural decisions, codebase facts, known gotchas — is lost when a machine is wiped and never shared with teammates or their agents. This phase splits the storage layer: local-scoped entries stay in `.ta/memory/`; project/team-scoped entries land in `.ta/project-memory/` which is committed to VCS and shared across the team.
+
+**Depends on**: v0.15.13.2 (memory entry tracking per goal run)
+
+**Why this matters**:
+- An agent that "learns the project" stores findings to memory. Today those findings are invisible to every other agent on every other machine.
+- Architectural decisions ("use `--thinking-mode` in args, not a TOML field") must be re-derived on every new goal run because nothing persists them in a shared, retrievable form.
+- `scope` is already declared on memory entries but not enforced in the storage path — this phase makes it load-bearing.
+
+**Design**:
+
+| Scope | Storage path | Gitignored? | Shared? |
+|-------|-------------|-------------|---------|
+| `local` | `.ta/memory/` | Yes | No |
+| `project` | `.ta/project-memory/` | No | Yes — committed |
+| `team` | `.ta/project-memory/` | No | Yes — committed |
+
+`.ta/project-memory/` uses the same on-disk format as `.ta/memory/` so the read path is identical. At `ta run` injection time, project-memory entries are always surfaced regardless of goal-title similarity — they are unconditional context. Additionally, entries tagged with a file path (e.g. `file = "apps/ta-cli/src/commands/agent.rs"`) are surfaced when the staging workspace contains that file, enabling file-scope-triggered retrieval for architectural decisions.
+
+**Items**:
+
+1. [ ] **Storage path routing** (`crates/ta-goal/src/memory.rs`): `MemoryStore::write()` checks `entry.scope`. `Scope::Local` → `.ta/memory/`; `Scope::Project | Scope::Team` → `.ta/project-memory/`. Read path loads both directories and merges results.
+
+2. [ ] **`.gitignore` update** (`ta init` template + docs): Add `.ta/project-memory/` to the "committed" list in gitignore comments. Remove it from the ignored list if present.
+
+3. [ ] **File-path tagging**: `MemoryEntry` gains an optional `file_paths: Vec<String>` field. When set, the entry surfaces at injection time whenever any listed path exists in staging, independent of similarity score.
+
+4. [ ] **`ta run` injection**: Project-memory entries injected unconditionally (all of them, budget-permitting). File-path-tagged entries surfaced when staging contains matching path. Both added to the "Prior Context" section of CLAUDE.md injection before goal-title similarity entries.
+
+5. [ ] **`ta memory store --scope project "key" "value" [--file path/to/file.rs]`**: CLI command to manually write a project-scoped memory entry, optionally tagged to a file path. Primary UX for recording architectural decisions.
+
+6. [ ] **`ta memory list --scope project`**: List all committed project-memory entries with their keys, file tags, and creation goal ID.
+
+7. [ ] **`ta draft apply` auto-stage**: When applying a draft that modifies `.ta/project-memory/`, `auto_stage_critical_files()` includes the directory so it lands in the VCS commit alongside source changes.
+
+8. [ ] **Tests**: `scope = project` entry → written to `.ta/project-memory/`, not `.ta/memory/`; `scope = local` → `.ta/memory/` only; file-path-tagged entry → surfaced when staging contains the file, not surfaced when it doesn't; injection order: project-memory before similarity entries.
+
+9. [ ] **USAGE.md**: "Team Memory" section — `ta memory store --scope project`, file-path tagging for architectural decisions, how project-memory is committed and shared, distinction from local memory.
+
+#### Version: `0.15.13-alpha.3`
+
+---
+
 ### v0.15.14 — Hierarchical Workflows: Parallel Fan-Out, Phase Loops & Milestone Draft
 <!-- status: pending -->
 **Goal**: Two first-class modes for multi-phase execution — **PR-per-phase** (iterate phases serially, PR and VCS-sync each one before moving on) and **milestone-draft** (iterate phases, accumulate all changes into a branch, present the entire series as one combined draft for human approval). Both modes support phase selection by count, version set (glob), or range. The sync step after each PR uses the `SourceAdapter` trait — not hardcoded git — so the loop works identically on Git, Perforce, and SVN.
