@@ -9738,7 +9738,7 @@ condition = "!plan_next.done"
 
 ### v0.15.13.1 — `ta init` generates CLAUDE.md
 <!-- status: pending -->
-**Goal**: `ta init` (and `ta init run --template <type>`) generates a starter `CLAUDE.md` in the project root alongside the `.ta/` config. If a `CLAUDE.md` already exists it is left unchanged (no overwrite without `--overwrite`). The generated file is derived from the same project-type detection and verify commands that `ta init` already writes to `workflow.toml`, so it is immediately correct for the project — not a generic placeholder.
+**Goal**: `ta init` (and `ta init run --template <type>`) generates a starter `CLAUDE.md` in the project root alongside the `.ta/` config. If a `CLAUDE.md` already exists it is left unchanged (no overwrite without `--overwrite`). The generated file is derived from the same project-type detection and verify commands that `ta init` already writes to `workflow.toml`, so it is immediately correct for the project — not a generic placeholder. ta init should be safe to run again without breaking an existing setup but add new details such as the CLAUDE.md. We should know what version a project was init'ed with and know the upgrade path, or each section checks if it should run.
 
 **Depends on**: none (init command is self-contained)
 
