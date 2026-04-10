@@ -7920,6 +7920,7 @@ Available templates: `rust-workspace`, `typescript-monorepo`, `python-ml`, `go-s
 - Optionally creates a GitHub remote via `gh repo create` (requires `gh` CLI)
 
 Each template generates:
+- `CLAUDE.md` — agent instructions tailored to the project type (build command, verify steps, git rules)
 - `.ta/workflow.toml` — workflow defaults for the project type
 - `.ta/memory.toml` — key schema and backend config
 - `.ta/policy.yaml` — starter policy with appropriate security level
@@ -7929,6 +7930,28 @@ Each template generates:
 - Seeded memory entries from project structure (e.g., Cargo.toml workspace members → `arch:module-map`)
 
 `ta init` reads existing project files and tailors config to the actual structure — not just generic templates.
+
+#### CLAUDE.md generation
+
+`ta init` writes a `CLAUDE.md` to the project root containing the build command, verify steps (the same commands configured in `.ta/workflow.toml`), git branching rules, and project-specific conventions. Agents running under TA pick this file up automatically — it tells them exactly how to build and verify before submitting a draft.
+
+```bash
+# First init — CLAUDE.md created alongside .ta/ config
+ta init run --template rust-workspace
+
+# Re-running on an already-configured project — CLAUDE.md created if missing, everything else unchanged
+ta init run
+
+# Regenerate CLAUDE.md from scratch (e.g., after changing template)
+ta init run --overwrite
+```
+
+If `CLAUDE.md` already exists, `ta init run` leaves it untouched and prints:
+```
+  CLAUDE.md already exists — skipping (use --overwrite to replace)
+```
+
+Edit the generated `CLAUDE.md` to add project-specific rules (protected files, code style, reviewer names) — the generated sections are a starting point, not a locked-down template.
 
 ### Generating a Project Plan
 
