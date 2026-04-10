@@ -33,6 +33,14 @@ impl WorkflowCatalog {
                 "approval-chain",
                 "Sequential human approval steps (v0.13.7.3+)",
             ),
+            (
+                "governed-goal",
+                "Safe autonomous coding loop: run_goal → review → human_gate → apply → pr_sync",
+            ),
+            (
+                "plan-build-loop",
+                "Iterate all pending plan phases through the governed build workflow (v0.15.13)",
+            ),
         ]
     }
 
@@ -424,7 +432,9 @@ verdict:
         assert!(names.contains(&"serial-phases"));
         assert!(names.contains(&"swarm"));
         assert!(names.contains(&"approval-chain"));
-        assert_eq!(catalog.len(), 4);
+        assert!(names.contains(&"governed-goal"));
+        assert!(names.contains(&"plan-build-loop"));
+        assert_eq!(catalog.len(), 6);
     }
 
     #[test]
@@ -433,6 +443,8 @@ verdict:
         assert!(WorkflowCatalog::is_known("serial-phases"));
         assert!(WorkflowCatalog::is_known("swarm"));
         assert!(WorkflowCatalog::is_known("approval-chain"));
+        assert!(WorkflowCatalog::is_known("governed-goal"));
+        assert!(WorkflowCatalog::is_known("plan-build-loop"));
         assert!(!WorkflowCatalog::is_known("unknown-workflow"));
         assert!(!WorkflowCatalog::is_known(""));
     }

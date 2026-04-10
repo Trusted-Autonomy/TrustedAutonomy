@@ -3809,9 +3809,6 @@ const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Skill(*)",
     "TodoRead(*)",
     "TodoWrite(*)",
-    // TA's own MCP tools — always auto-approved so agents never prompt
-    // for the tools they need to interact with the TA daemon.
-    "mcp__ta__*",
 ];
 
 /// Built-in forbidden tool patterns — community-maintained deny list.

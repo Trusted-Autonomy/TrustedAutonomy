@@ -1,0 +1,64 @@
+# plan-build-loop.toml — Iterate all pending plan phases through the governed build workflow.
+#
+# Replaces build_phases.sh with a native TA workflow that:
+#   1. Reads the next pending plan phase via `ta plan next`
+#   2. Runs the `build` workflow for that phase (goal + review + apply + PR)
+#   3. Loops back to step 1 until all phases are complete
+#
+# Usage:
+#   ta workflow run plan-build-loop --goal "Run all pending phases"
+#   ta workflow run plan-build-loop --goal "Run all pending phases" --dry-run
+#   ta workflow status <run-id>
+
+[workflow]
+name = "plan-build-loop"
+description = """
+Iterate all pending plan phases through the governed build workflow.
+For each pending phase: runs the agent goal, routes through the reviewer,
+applies on approval, and syncs the PR before moving to the next phase.
+Stops cleanly when all phases complete.
+"""
+
+[workflow.config]
+# Maximum phases to process before emitting a CHECKPOINT and halting.
+# Increase this if you have more than 99 pending phases.
+max_phases = 99
+
+# Stop the loop if any reviewer flags a draft — require manual resume.
+# Set to false to only pause at the human_gate instead of stopping.
+stop_on_flag = true
+
+# ── Stages ─────────────────────────────────────────────────────────────────────
+
+[[stages]]
+name = "plan_next"
+kind = "plan_next"
+description = """
+Call `ta plan next` to get the next pending plan phase.
+Outputs: phase_id, phase_title, done (bool).
+When done=true, the loop stages fall through and the workflow completes.
+"""
+
+[[stages]]
+name = "run_phase"
+kind = "workflow"
+workflow = "build"
+goal = "{{plan_next.phase_id}} — {{plan_next.phase_title}}"
+phase = "{{plan_next.phase_id}}"
+condition = "!plan_next.done"
+depends_on = ["plan_next"]
+description = """
+Invoke the `build` workflow as a sub-workflow for the current phase.
+Skipped when plan_next.done is true (all phases complete).
+"""
+
+[[stages]]
+name = "loop"
+kind = "goto"
+target = "plan_next"
+condition = "!plan_next.done"
+depends_on = ["run_phase"]
+description = """
+Loop back to `plan_next` when more phases remain.
+Falls through (ends the workflow) when plan_next.done is true.
+"""

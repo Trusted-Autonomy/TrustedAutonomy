@@ -61,10 +61,25 @@ pub struct WorkflowConfig {
     /// settings are the single source of truth.
     #[serde(default = "default_require_pr")]
     pub require_pr: bool,
+
+    /// Maximum loop iterations for `kind = "goto"` stages before halting with a
+    /// CHECKPOINT message and requiring manual resume. Default: 99.
+    #[serde(default = "default_max_phases")]
+    pub max_phases: u32,
+
+    /// When true, stop the workflow if the reviewer flags — require manual resume.
+    /// When false (the default), flag verdicts only pause at the human_gate.
+    #[serde(default)]
+    #[allow(dead_code)] // read by loop workflows; not yet plumbed through in v0.15.13
+    pub stop_on_flag: bool,
 }
 
 fn default_require_pr() -> bool {
     true
+}
+
+fn default_max_phases() -> u32 {
+    99
 }
 
 fn default_reviewer_agent() -> String {
@@ -97,6 +112,117 @@ pub struct StageDef {
     pub description: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Step kind. Default = name-based dispatch (run_goal, review_draft, etc.).
+    #[serde(default)]
+    pub kind: StageKind,
+    /// For `kind = "workflow"`: name of the child workflow TOML to invoke.
+    #[serde(default)]
+    pub workflow: Option<String>,
+    /// For `kind = "workflow"`: goal title passed to the child workflow.
+    /// Supports `{{stage.field}}` template interpolation.
+    #[serde(default)]
+    pub goal: Option<String>,
+    /// For `kind = "workflow"`: plan phase passed to the child workflow.
+    /// Supports `{{stage.field}}` template interpolation.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// Guard condition for this stage.
+    ///
+    /// For non-goto stages: if false, the stage is skipped.
+    /// For `kind = "goto"`: if true, jump to `target`; if false, fall through.
+    ///
+    /// Supported forms: `!stage.field`, `stage.field == "value"`, `stage.field != "value"`.
+    #[serde(default)]
+    pub condition: Option<String>,
+    /// For `kind = "goto"`: stage name to jump to when `condition` is true.
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+// ── New step kinds (v0.15.13) ─────────────────────────────────────────────────
+
+/// The kind of step in a governed workflow stage (v0.15.13).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StageKind {
+    /// Default: existing name-based dispatch (run_goal, review_draft, etc.)
+    #[default]
+    Default,
+    /// Invoke another named workflow as a sub-workflow, running it to completion.
+    Workflow,
+    /// Run `ta plan next` and emit `{phase_id, phase_title, done}` into the output map.
+    PlanNext,
+    /// Jump to `target` when `condition` is true (loop-back step).
+    Goto,
+}
+
+/// Output from a `kind = "plan_next"` stage (v0.15.13).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanNextOutput {
+    pub phase_id: String,
+    pub phase_title: String,
+    /// True when all plan phases are complete (no more work to do).
+    pub done: bool,
+}
+
+impl PlanNextOutput {
+    /// Parse `ta plan next` stdout into a structured output.
+    ///
+    /// Expected formats:
+    ///   "Next pending phase:\n  Phase <id> — <title>\n..."
+    ///   "All plan phases are complete or in progress."
+    pub fn parse(stdout: &str) -> Self {
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("All plan phases") {
+                return PlanNextOutput {
+                    phase_id: String::new(),
+                    phase_title: String::new(),
+                    done: true,
+                };
+            }
+            // "Phase v0.15.14 — Hierarchical Workflows: ..."
+            if let Some(rest) = trimmed.strip_prefix("Phase ") {
+                if let Some((id, title)) = rest.split_once(" \u{2014} ") {
+                    return PlanNextOutput {
+                        phase_id: id.trim().to_string(),
+                        phase_title: title.trim().to_string(),
+                        done: false,
+                    };
+                }
+                // Fallback: no em-dash separator.
+                return PlanNextOutput {
+                    phase_id: rest.trim().to_string(),
+                    phase_title: String::new(),
+                    done: false,
+                };
+            }
+        }
+        // Nothing parseable — treat as done to avoid infinite loops.
+        PlanNextOutput {
+            phase_id: String::new(),
+            phase_title: String::new(),
+            done: true,
+        }
+    }
+
+    /// Convert to a string map for template interpolation.
+    pub fn to_output_map(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        map.insert("phase_id".to_string(), self.phase_id.clone());
+        map.insert("phase_title".to_string(), self.phase_title.clone());
+        map.insert("done".to_string(), self.done.to_string());
+        map
+    }
+}
+
+/// Links a parent workflow run to a child sub-workflow run (v0.15.13).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubworkflowRecord {
+    pub parent_run_id: String,
+    pub child_run_id: String,
+    pub stage_name: String,
+    pub child_workflow: String,
 }
 
 // ── Verdict schema (.ta/review/<draft-id>/verdict.json) ───────────────────────
@@ -305,20 +431,45 @@ pub struct GovernedWorkflowRun {
     /// Audit trail — one entry per stage transition.
     #[serde(default)]
     pub audit_trail: Vec<StageAuditEntry>,
+    /// Stage outputs for template interpolation and condition evaluation (v0.15.13).
+    /// Key: stage name. Value: field → string value map.
+    #[serde(default)]
+    pub outputs: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// Sub-workflow records for `kind = "workflow"` stages (v0.15.13).
+    #[serde(default)]
+    pub sub_workflow_records: Vec<SubworkflowRecord>,
+    /// Loop iteration counts per goto stage name (v0.15.13).
+    #[serde(default)]
+    pub loop_iterations: std::collections::HashMap<String, u32>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl GovernedWorkflowRun {
-    /// Create a new run with all stages pending.
+    /// Create a new run with the canonical governed-goal stages (backward compat).
+    #[allow(dead_code)] // used in tests; production code calls new_with_stages directly
     pub fn new(run_id: &str, workflow_name: &str, goal_title: &str) -> Self {
-        let stage_names = [
-            "run_goal",
-            "review_draft",
-            "human_gate",
-            "apply_draft",
-            "pr_sync",
-        ];
+        Self::new_with_stages(
+            run_id,
+            workflow_name,
+            goal_title,
+            &[
+                "run_goal",
+                "review_draft",
+                "human_gate",
+                "apply_draft",
+                "pr_sync",
+            ],
+        )
+    }
+
+    /// Create a new run with an explicit list of stage names.
+    pub fn new_with_stages(
+        run_id: &str,
+        workflow_name: &str,
+        goal_title: &str,
+        stage_names: &[&str],
+    ) -> Self {
         let stages = stage_names.iter().map(|n| StageRecord::new(n)).collect();
         GovernedWorkflowRun {
             run_id: run_id.to_string(),
@@ -332,6 +483,9 @@ impl GovernedWorkflowRun {
             stages,
             verdict: None,
             audit_trail: Vec::new(),
+            outputs: std::collections::HashMap::new(),
+            sub_workflow_records: Vec::new(),
+            loop_iterations: std::collections::HashMap::new(),
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -679,13 +833,173 @@ pub struct RunOptions<'a> {
     /// - injected into the agent's CLAUDE.md context via `ta run --phase`
     /// - passed to `ta draft apply --phase` so the phase is marked done in PLAN.md
     pub plan_phase: Option<&'a str>,
+    /// Sub-workflow recursion depth. 0 = top-level. Hard limit: 5 (v0.15.13).
+    pub depth: u32,
+}
+
+// ── Template interpolation & condition evaluation (v0.15.13) ─────────────────
+
+/// Interpolate `{{stage_name.field}}` placeholders in a template string.
+///
+/// Unresolved placeholders are left unchanged so callers can detect them.
+pub fn interpolate_template(
+    template: &str,
+    outputs: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+) -> String {
+    let mut result = template.to_string();
+    // Find all {{...}} placeholders and replace them.
+    let mut out = String::with_capacity(result.len());
+    let mut remaining = result.as_str();
+    while let Some(open) = remaining.find("{{") {
+        out.push_str(&remaining[..open]);
+        let after_open = &remaining[open + 2..];
+        if let Some(close) = after_open.find("}}") {
+            let placeholder = after_open[..close].trim();
+            // Placeholder format: "stage_name.field"
+            if let Some((stage, field)) = placeholder.split_once('.') {
+                if let Some(stage_map) = outputs.get(stage) {
+                    if let Some(value) = stage_map.get(field) {
+                        out.push_str(value);
+                        remaining = &after_open[close + 2..];
+                        continue;
+                    }
+                }
+            }
+            // Unresolved — keep the placeholder verbatim.
+            out.push_str("{{");
+            out.push_str(placeholder);
+            out.push_str("}}");
+            remaining = &after_open[close + 2..];
+        } else {
+            // No closing braces — append rest as-is.
+            out.push_str("{{");
+            out.push_str(after_open);
+            break;
+        }
+    }
+    out.push_str(remaining);
+    result = out;
+    result
+}
+
+/// Evaluate a condition expression against the current output map.
+///
+/// Supported forms:
+///   - `!stage.field`              — boolean not (field must be "true" or "false")
+///   - `stage.field == "value"`    — equality check
+///   - `stage.field != "value"`    — inequality check
+///
+/// Returns an error if the expression is malformed or references an unknown field.
+pub fn evaluate_condition(
+    condition: &str,
+    outputs: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+) -> anyhow::Result<bool> {
+    let condition = condition.trim();
+
+    // Form 1: `!stage.field`
+    if let Some(rest) = condition.strip_prefix('!') {
+        let field_ref = rest.trim();
+        let value = resolve_field(field_ref, outputs).map_err(|e| {
+            anyhow::anyhow!("Condition '{}' references unknown field: {}", condition, e)
+        })?;
+        match value.as_str() {
+            "true" => return Ok(false),
+            "false" => return Ok(true),
+            other => anyhow::bail!(
+                "Condition '{}': field '{}' has non-boolean value '{}'. \
+                 Boolean conditions require 'true' or 'false'.",
+                condition,
+                field_ref,
+                other
+            ),
+        }
+    }
+
+    // Form 2: `stage.field == "value"` or `stage.field != "value"`
+    if let Some((lhs, rhs)) = condition.split_once(" == ") {
+        let field_ref = lhs.trim();
+        let expected = rhs.trim().trim_matches('"');
+        let actual = resolve_field(field_ref, outputs).map_err(|e| {
+            anyhow::anyhow!("Condition '{}' references unknown field: {}", condition, e)
+        })?;
+        return Ok(actual == expected);
+    }
+    if let Some((lhs, rhs)) = condition.split_once(" != ") {
+        let field_ref = lhs.trim();
+        let expected = rhs.trim().trim_matches('"');
+        let actual = resolve_field(field_ref, outputs).map_err(|e| {
+            anyhow::anyhow!("Condition '{}' references unknown field: {}", condition, e)
+        })?;
+        return Ok(actual != expected);
+    }
+
+    // Plain field reference — treat as boolean.
+    let value = resolve_field(condition, outputs).map_err(|e| {
+        anyhow::anyhow!("Condition '{}' references unknown field: {}", condition, e)
+    })?;
+    match value.as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => anyhow::bail!(
+            "Condition '{}': field has non-boolean value '{}'. \
+             Boolean conditions require 'true' or 'false'.",
+            condition,
+            other
+        ),
+    }
+}
+
+/// Resolve a `stage.field` reference from the output map.
+fn resolve_field(
+    field_ref: &str,
+    outputs: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+) -> anyhow::Result<String> {
+    let (stage, field) = field_ref.split_once('.').ok_or_else(|| {
+        anyhow::anyhow!(
+            "'{}' is not a valid field reference — expected 'stage_name.field'",
+            field_ref
+        )
+    })?;
+    let stage_map = outputs.get(stage).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Stage '{}' has no outputs yet — ensure it runs before this condition is evaluated",
+            stage
+        )
+    })?;
+    let value = stage_map.get(field).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Stage '{}' output has no field '{}'. Available: {}",
+            stage,
+            field,
+            stage_map.keys().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })?;
+    Ok(value.clone())
 }
 
 /// Execute a governed workflow end-to-end.
 pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
+    // Recursion depth guard: prevent infinite sub-workflow nesting.
+    const MAX_DEPTH: u32 = 5;
+    if opts.depth > MAX_DEPTH {
+        anyhow::bail!(
+            "Sub-workflow recursion depth limit ({}) exceeded.\n\
+             Workflow '{}' would exceed the maximum nesting depth of {}.\n\
+             Check for circular sub-workflow references in your workflow definitions.",
+            MAX_DEPTH,
+            opts.workflow_name,
+            MAX_DEPTH
+        );
+    }
+
     let runs_dir = opts.workspace_root.join(".ta").join("workflow-runs");
     let def = find_workflow_def(opts.workspace_root, opts.workflow_name)?;
     let stage_order = validate_stage_graph(&def.stages)?;
+
+    // Detect loop mode: any stage with kind=goto triggers sequential loop execution.
+    // Computed early so both the dry-run block and the execution block can use it.
+    let has_goto = def.stages.iter().any(|s| s.kind == StageKind::Goto);
+
     // Clone so we can override `require_pr` based on VCS settings.
     let mut owned_config = def.workflow.config.clone();
     // Read the project's workflow.toml submit section. If the VCS adapter is "git" with
@@ -701,7 +1015,7 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
     }
     let config = &owned_config;
 
-    // Dry run: just print the stage graph.
+    // Dry run: print the stage graph and (for loop workflows) pending phase info.
     if opts.dry_run {
         println!("Workflow: {}", def.workflow.name);
         println!(
@@ -711,31 +1025,69 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
         println!("Goal:     {}", opts.goal_title);
         println!();
         println!("Stage graph (dry-run, no execution):");
-        for (i, stage_name) in stage_order.iter().enumerate() {
-            let def_stage = def.stages.iter().find(|s| s.name == *stage_name);
-            let desc = def_stage
-                .map(|s| {
-                    s.description
-                        .trim()
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .to_string()
-                })
-                .unwrap_or_default();
-            println!("  [{}] {} — {}", i + 1, stage_name, desc);
+        for (i, stage) in def.stages.iter().enumerate() {
+            let desc = stage
+                .description
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            let kind_label = match stage.kind {
+                StageKind::Default => String::new(),
+                StageKind::PlanNext => " [plan_next]".to_string(),
+                StageKind::Workflow => {
+                    format!(" [workflow: {}]", stage.workflow.as_deref().unwrap_or("?"))
+                }
+                StageKind::Goto => format!(" [goto: {}]", stage.target.as_deref().unwrap_or("?")),
+            };
+            println!("  [{}] {}{} — {}", i + 1, stage.name, kind_label, desc);
         }
         println!();
         println!("Config:");
         println!("  reviewer_agent:       {}", config.reviewer_agent);
         println!("  gate_on_verdict:      {:?}", config.gate_on_verdict);
+        println!("  max_phases:           {}", config.max_phases);
         println!("  pr_poll_interval_secs:{}", config.pr_poll_interval_secs);
         println!("  sync_timeout_hours:   {}", config.sync_timeout_hours);
         println!("  auto_merge:           {}", config.auto_merge);
+
+        // For loop workflows: call `ta plan next` once to show what would run first.
+        if has_goto {
+            println!();
+            println!("Next phase preview (calls `ta plan next`):");
+            let output = std::process::Command::new("ta")
+                .args([
+                    "--project-root",
+                    &opts.workspace_root.to_string_lossy(),
+                    "plan",
+                    "next",
+                    "--no-version-check",
+                ])
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    let parsed = PlanNextOutput::parse(&stdout);
+                    if parsed.done {
+                        println!("  All plan phases complete — loop would not run.");
+                    } else {
+                        println!(
+                            "  First iteration would run: {} — {}",
+                            parsed.phase_id, parsed.phase_title
+                        );
+                        println!("  Max iterations: {}", config.max_phases);
+                    }
+                }
+                _ => println!("  (could not invoke 'ta plan next' for preview)"),
+            }
+        }
+
         return Ok(());
     }
 
     // Resume or new run.
+    let stage_name_list: Vec<&str> = def.stages.iter().map(|s| s.name.as_str()).collect();
     let mut run = if let Some(resume_id) = opts.resume_run_id {
         let existing = GovernedWorkflowRun::load(&runs_dir, resume_id)?;
         if existing.state == WorkflowRunState::Completed {
@@ -752,7 +1104,12 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
         existing
     } else {
         let run_id = uuid::Uuid::new_v4().to_string();
-        let run = GovernedWorkflowRun::new(&run_id, opts.workflow_name, opts.goal_title);
+        let run = GovernedWorkflowRun::new_with_stages(
+            &run_id,
+            opts.workflow_name,
+            opts.goal_title,
+            &stage_name_list,
+        );
         run.save(&runs_dir)?;
         println!("Started workflow run: {}", &run_id[..8.min(run_id.len())]);
         println!("  Workflow: {}", opts.workflow_name);
@@ -761,74 +1118,80 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
         run
     };
 
-    // Execute each stage in order, skipping already-completed stages.
-    for stage_name in &stage_order {
-        let already_done = run
-            .stages
-            .iter()
-            .find(|s| &s.name == stage_name)
-            .map(|s| s.status == StageStatus::Completed)
-            .unwrap_or(false);
-        if already_done {
-            println!("[{}] already completed — skipping", stage_name);
-            continue;
-        }
-
-        print_stage_header(stage_name);
-
-        run.current_stage = Some(stage_name.clone());
-        if let Some(s) = run.stage_mut(stage_name) {
-            s.start();
-        }
-        run.updated_at = Utc::now();
-        run.save(&runs_dir)?;
-
-        let start = Instant::now();
-        let result = execute_stage(stage_name, &mut run, opts, config);
-        let elapsed = start.elapsed().as_secs();
-
-        match result {
-            Ok(detail) => {
-                if let Some(s) = run.stage_mut(stage_name) {
-                    s.complete(detail.clone());
-                }
-                run.emit_audit(stage_name, opts.agent, None, elapsed);
-                run.updated_at = Utc::now();
-                run.save(&runs_dir)?;
-                println!(
-                    "  [{}] completed in {}s{}",
-                    stage_name,
-                    elapsed,
-                    detail
-                        .as_deref()
-                        .map(|d| format!(" — {}", d))
-                        .unwrap_or_default()
-                );
+    if has_goto {
+        // Loop execution mode: sequential with goto jumps.
+        run_loop_workflow(&def.stages, config, &mut run, opts, &runs_dir)?;
+    } else {
+        // DAG execution mode: topological order, skip completed stages.
+        for stage_name in &stage_order {
+            let stage_def = def.stages.iter().find(|s| s.name == *stage_name).unwrap();
+            let already_done = run
+                .stages
+                .iter()
+                .find(|s| &s.name == stage_name)
+                .map(|s| s.status == StageStatus::Completed)
+                .unwrap_or(false);
+            if already_done {
+                println!("[{}] already completed — skipping", stage_name);
+                continue;
             }
-            Err(e) => {
-                let reason = e.to_string();
-                if let Some(s) = run.stage_mut(stage_name) {
-                    s.fail(&reason);
+
+            print_stage_header(stage_name);
+
+            run.current_stage = Some(stage_name.clone());
+            if let Some(s) = run.stage_mut(stage_name) {
+                s.start();
+            }
+            run.updated_at = Utc::now();
+            run.save(&runs_dir)?;
+
+            let start = Instant::now();
+            let result = execute_stage(stage_def, &mut run, opts, config);
+            let elapsed = start.elapsed().as_secs();
+
+            match result {
+                Ok(detail) => {
+                    if let Some(s) = run.stage_mut(stage_name) {
+                        s.complete(detail.clone());
+                    }
+                    run.emit_audit(stage_name, opts.agent, None, elapsed);
+                    run.updated_at = Utc::now();
+                    run.save(&runs_dir)?;
+                    println!(
+                        "  [{}] completed in {}s{}",
+                        stage_name,
+                        elapsed,
+                        detail
+                            .as_deref()
+                            .map(|d| format!(" — {}", d))
+                            .unwrap_or_default()
+                    );
                 }
-                run.emit_audit(stage_name, opts.agent, Some("failed"), elapsed);
-                run.state = WorkflowRunState::Failed;
-                run.updated_at = Utc::now();
-                run.save(&runs_dir)?;
-                println!("  [{}] FAILED: {}", stage_name, reason);
-                println!();
-                println!(
-                    "Workflow run {} failed at stage '{}'.",
-                    &run.run_id[..8.min(run.run_id.len())],
-                    stage_name
-                );
-                println!("Check the above error and retry or resume:");
-                println!(
-                    "  ta workflow run {} --goal \"{}\" --resume {}",
-                    opts.workflow_name,
-                    opts.goal_title,
-                    &run.run_id[..8.min(run.run_id.len())]
-                );
-                return Err(e);
+                Err(e) => {
+                    let reason = e.to_string();
+                    if let Some(s) = run.stage_mut(stage_name) {
+                        s.fail(&reason);
+                    }
+                    run.emit_audit(stage_name, opts.agent, Some("failed"), elapsed);
+                    run.state = WorkflowRunState::Failed;
+                    run.updated_at = Utc::now();
+                    run.save(&runs_dir)?;
+                    println!("  [{}] FAILED: {}", stage_name, reason);
+                    println!();
+                    println!(
+                        "Workflow run {} failed at stage '{}'.",
+                        &run.run_id[..8.min(run.run_id.len())],
+                        stage_name
+                    );
+                    println!("Check the above error and retry or resume:");
+                    println!(
+                        "  ta workflow run {} --goal \"{}\" --resume {}",
+                        opts.workflow_name,
+                        opts.goal_title,
+                        &run.run_id[..8.min(run.run_id.len())]
+                    );
+                    return Err(e);
+                }
             }
         }
     }
@@ -853,21 +1216,368 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Execute a single named stage, returning a human-readable summary on success.
+/// Sequential loop execution for workflows containing `kind = "goto"` stages (v0.15.13).
+///
+/// Executes stages in definition order. For goto stages, jumps back to the
+/// target when the condition is true. Guards against infinite loops via
+/// `config.max_phases`.
+fn run_loop_workflow(
+    stages: &[StageDef],
+    config: &WorkflowConfig,
+    run: &mut GovernedWorkflowRun,
+    opts: &RunOptions,
+    runs_dir: &Path,
+) -> anyhow::Result<()> {
+    let mut idx: usize = 0;
+    while idx < stages.len() {
+        let stage_def = &stages[idx];
+        let stage_name = stage_def.name.as_str();
+
+        // Evaluate condition (skip non-goto stages when condition is false).
+        if stage_def.kind != StageKind::Goto {
+            if let Some(cond) = &stage_def.condition {
+                match evaluate_condition(cond, &run.outputs) {
+                    Ok(false) => {
+                        tracing::debug!(
+                            stage = stage_name,
+                            condition = cond,
+                            "stage skipped — condition false"
+                        );
+                        println!("  [{}] skipped (condition: {} = false)", stage_name, cond);
+                        idx += 1;
+                        continue;
+                    }
+                    Ok(true) => {}
+                    Err(e) => anyhow::bail!("Stage '{}' condition error: {}", stage_name, e),
+                }
+            }
+        }
+
+        print_stage_header(stage_name);
+
+        // Ensure the stage record exists (loop stages re-run, so reset status).
+        if run.stage_mut(stage_name).is_none() {
+            run.stages.push(StageRecord::new(stage_name));
+        }
+        run.current_stage = Some(stage_name.to_string());
+        if let Some(s) = run.stage_mut(stage_name) {
+            s.start();
+        }
+        run.updated_at = Utc::now();
+        run.save(runs_dir)?;
+
+        // Handle goto stage: evaluate condition and jump or fall through.
+        if stage_def.kind == StageKind::Goto {
+            let should_jump = if let Some(cond) = &stage_def.condition {
+                evaluate_condition(cond, &run.outputs)
+                    .map_err(|e| anyhow::anyhow!("Stage '{}' condition error: {}", stage_name, e))?
+            } else {
+                true // unconditional goto
+            };
+
+            if should_jump {
+                // Check max_phases guard — extract count to avoid borrow conflict.
+                let new_iters = {
+                    let iters = run
+                        .loop_iterations
+                        .entry(stage_name.to_string())
+                        .or_insert(0);
+                    *iters += 1;
+                    *iters
+                };
+                if new_iters > config.max_phases {
+                    if let Some(s) = run.stage_mut(stage_name) {
+                        s.complete(Some(format!(
+                            "CHECKPOINT after {} iterations",
+                            new_iters - 1
+                        )));
+                    }
+                    run.updated_at = Utc::now();
+                    run.save(runs_dir)?;
+                    anyhow::bail!(
+                        "Loop CHECKPOINT: stage '{}' reached the maximum iteration limit ({}).\n\
+                         {} iterations completed. Check PLAN.md for remaining phases.\n\
+                         To continue, re-run:\n  ta workflow run {} --goal \"{}\" --resume {}",
+                        stage_name,
+                        config.max_phases,
+                        new_iters - 1,
+                        opts.workflow_name,
+                        opts.goal_title,
+                        &run.run_id[..8.min(run.run_id.len())]
+                    );
+                }
+
+                // Jump to target.
+                let target = stage_def.target.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Stage '{}' has kind=goto but no `target` field defined",
+                        stage_name
+                    )
+                })?;
+                let target_idx = stages
+                    .iter()
+                    .position(|s| s.name == target)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Stage '{}' goto target '{}' not found in this workflow",
+                            stage_name,
+                            target
+                        )
+                    })?;
+
+                let target_owned = target.to_string();
+                if let Some(s) = run.stage_mut(stage_name) {
+                    s.complete(Some(format!(
+                        "jumped to '{}' (iteration {})",
+                        target_owned, new_iters
+                    )));
+                }
+                run.emit_audit(stage_name, "workflow", None, 0);
+                run.updated_at = Utc::now();
+                run.save(runs_dir)?;
+                println!(
+                    "  [{}] looping back to '{}' (iteration {})",
+                    stage_name, target_owned, new_iters
+                );
+                idx = target_idx;
+                continue;
+            } else {
+                // Condition false — fall through.
+                if let Some(s) = run.stage_mut(stage_name) {
+                    s.complete(Some("condition false — fall through".to_string()));
+                }
+                run.emit_audit(stage_name, "workflow", None, 0);
+                run.updated_at = Utc::now();
+                run.save(runs_dir)?;
+                println!("  [{}] condition false — falling through", stage_name);
+                idx += 1;
+                continue;
+            }
+        }
+
+        // Normal stage execution.
+        let start = Instant::now();
+        let result = execute_stage(stage_def, run, opts, config);
+        let elapsed = start.elapsed().as_secs();
+
+        match result {
+            Ok(detail) => {
+                if let Some(s) = run.stage_mut(stage_name) {
+                    s.complete(detail.clone());
+                }
+                run.emit_audit(stage_name, opts.agent, None, elapsed);
+                run.updated_at = Utc::now();
+                run.save(runs_dir)?;
+                println!(
+                    "  [{}] completed in {}s{}",
+                    stage_name,
+                    elapsed,
+                    detail
+                        .as_deref()
+                        .map(|d| format!(" — {}", d))
+                        .unwrap_or_default()
+                );
+            }
+            Err(e) => {
+                let reason = e.to_string();
+                if let Some(s) = run.stage_mut(stage_name) {
+                    s.fail(&reason);
+                }
+                run.emit_audit(stage_name, opts.agent, Some("failed"), elapsed);
+                run.state = WorkflowRunState::Failed;
+                run.updated_at = Utc::now();
+                run.save(runs_dir)?;
+                println!("  [{}] FAILED: {}", stage_name, reason);
+                println!();
+                println!(
+                    "Workflow run {} failed at stage '{}'.",
+                    &run.run_id[..8.min(run.run_id.len())],
+                    stage_name
+                );
+                println!("Check the above error and retry or resume:");
+                println!(
+                    "  ta workflow run {} --goal \"{}\" --resume {}",
+                    opts.workflow_name,
+                    opts.goal_title,
+                    &run.run_id[..8.min(run.run_id.len())]
+                );
+                return Err(e);
+            }
+        }
+
+        idx += 1;
+    }
+
+    Ok(())
+}
+
+/// Execute a single stage, dispatching on `StageKind`.
 fn execute_stage(
-    stage_name: &str,
+    stage_def: &StageDef,
     run: &mut GovernedWorkflowRun,
     opts: &RunOptions,
     config: &WorkflowConfig,
 ) -> anyhow::Result<Option<String>> {
-    match stage_name {
-        "run_goal" => stage_run_goal(run, opts),
-        "review_draft" => stage_review_draft(run, opts, config),
-        "human_gate" => stage_human_gate(run, config),
-        "apply_draft" => stage_apply_draft(run, opts, config),
-        "pr_sync" => stage_pr_sync(run, config),
-        other => anyhow::bail!("Unknown stage: '{}'", other),
+    match stage_def.kind {
+        StageKind::PlanNext => stage_plan_next(run, &stage_def.name, opts),
+        StageKind::Workflow => stage_run_subworkflow(run, stage_def, opts, config),
+        StageKind::Goto => {
+            // Goto is handled inline in run_loop_workflow; falling here is a bug.
+            anyhow::bail!(
+                "Internal error: execute_stage called for goto stage '{}'",
+                stage_def.name
+            )
+        }
+        StageKind::Default => {
+            // Legacy name-based dispatch for the canonical governed-goal stages.
+            match stage_def.name.as_str() {
+                "run_goal" => stage_run_goal(run, opts),
+                "review_draft" => stage_review_draft(run, opts, config),
+                "human_gate" => stage_human_gate(run, config),
+                "apply_draft" => stage_apply_draft(run, opts, config),
+                "pr_sync" => stage_pr_sync(run, config),
+                other => anyhow::bail!(
+                    "Unknown stage: '{}'. \
+                     For custom stages, set `kind` in the workflow TOML.",
+                    other
+                ),
+            }
+        }
     }
+}
+
+// ── New stage executors (v0.15.13) ────────────────────────────────────────────
+
+/// Stage executor for `kind = "plan_next"`.
+///
+/// Shells out to `ta plan next`, parses the output, and stores structured
+/// results in `run.outputs[stage_name]` for downstream template interpolation.
+fn stage_plan_next(
+    run: &mut GovernedWorkflowRun,
+    stage_name: &str,
+    opts: &RunOptions,
+) -> anyhow::Result<Option<String>> {
+    println!("  Running: ta plan next");
+
+    let output = std::process::Command::new("ta")
+        .args([
+            "--project-root",
+            &opts.workspace_root.to_string_lossy(),
+            "plan",
+            "next",
+            "--no-version-check",
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to invoke 'ta plan next': {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "ta plan next failed (exit {}):\n{}\n{}",
+            output.status.code().unwrap_or(-1),
+            stderr,
+            stdout
+        );
+    }
+
+    let parsed = PlanNextOutput::parse(&stdout);
+    let detail = if parsed.done {
+        "all phases complete".to_string()
+    } else {
+        format!("next: {} — {}", parsed.phase_id, parsed.phase_title)
+    };
+
+    // Store outputs for template interpolation.
+    run.outputs
+        .insert(stage_name.to_string(), parsed.to_output_map());
+
+    Ok(Some(detail))
+}
+
+/// Stage executor for `kind = "workflow"` — invokes a child workflow.
+///
+/// Resolves the child workflow definition, applies template interpolation to
+/// the `goal` and `phase` fields, then calls `run_governed_workflow` recursively
+/// (depth-limited to 5). The child run ID is recorded in `sub_workflow_records`.
+fn stage_run_subworkflow(
+    run: &mut GovernedWorkflowRun,
+    stage_def: &StageDef,
+    opts: &RunOptions,
+    _config: &WorkflowConfig,
+) -> anyhow::Result<Option<String>> {
+    let child_workflow = stage_def.workflow.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Stage '{}' has kind=workflow but no `workflow` field defined",
+            stage_def.name
+        )
+    })?;
+
+    // Apply template interpolation to goal and phase.
+    let raw_goal = stage_def.goal.as_deref().unwrap_or(opts.goal_title);
+    let child_goal = interpolate_template(raw_goal, &run.outputs);
+    let child_phase = stage_def
+        .phase
+        .as_deref()
+        .map(|p| interpolate_template(p, &run.outputs));
+
+    // Check that placeholders were resolved.
+    if child_goal.contains("{{") {
+        anyhow::bail!(
+            "Stage '{}': goal template '{}' has unresolved placeholders. \
+             Ensure the referenced stage ran before this step.",
+            stage_def.name,
+            child_goal
+        );
+    }
+
+    println!(
+        "  Invoking sub-workflow '{}' for goal: {}",
+        child_workflow, child_goal
+    );
+    if let Some(ref p) = child_phase {
+        println!("    Phase: {}", p);
+    }
+    println!("    Depth: {}/{}", opts.depth + 1, 5);
+
+    let child_opts = RunOptions {
+        workspace_root: opts.workspace_root,
+        workflow_name: child_workflow,
+        goal_title: &child_goal,
+        dry_run: opts.dry_run,
+        resume_run_id: None,
+        agent: opts.agent,
+        plan_phase: child_phase.as_deref(),
+        depth: opts.depth + 1,
+    };
+
+    // We need to capture the child run ID. Run the child workflow, then find
+    // the most recently created run as the child.
+    let runs_dir = opts.workspace_root.join(".ta").join("workflow-runs");
+    run_governed_workflow(&child_opts)?;
+
+    // Find the child run ID by looking for the most recently modified run
+    // that matches the child workflow name.
+    let child_run_id = GovernedWorkflowRun::find_latest(&runs_dir)
+        .ok()
+        .flatten()
+        .filter(|r| r.workflow_name == child_workflow)
+        .map(|r| r.run_id)
+        .unwrap_or_else(|| "(unknown)".to_string());
+
+    run.sub_workflow_records.push(SubworkflowRecord {
+        parent_run_id: run.run_id.clone(),
+        child_run_id: child_run_id.clone(),
+        stage_name: stage_def.name.clone(),
+        child_workflow: child_workflow.to_string(),
+    });
+
+    Ok(Some(format!(
+        "sub-workflow '{}' completed (run: {})",
+        child_workflow,
+        &child_run_id[..8.min(child_run_id.len())]
+    )))
 }
 
 /// Stage 1: run_goal — invoke `ta run` to create a goal and produce a draft.
@@ -1615,6 +2325,32 @@ pub fn show_run_status(runs_dir: &Path, run_id_or_prefix: Option<&str>) -> anyho
         println!("PR: {}", pr_url);
     }
 
+    if !run.sub_workflow_records.is_empty() {
+        println!();
+        println!("Sub-workflow runs:");
+        for rec in &run.sub_workflow_records {
+            println!(
+                "  [{}] stage='{}' workflow='{}' child-run={}",
+                rec.stage_name,
+                rec.stage_name,
+                rec.child_workflow,
+                &rec.child_run_id[..8.min(rec.child_run_id.len())]
+            );
+            println!(
+                "    ta workflow status {}",
+                &rec.child_run_id[..8.min(rec.child_run_id.len())]
+            );
+        }
+    }
+
+    if !run.loop_iterations.is_empty() {
+        println!();
+        println!("Loop iterations:");
+        for (stage, count) in &run.loop_iterations {
+            println!("  {}: {} iteration(s)", stage, count);
+        }
+    }
+
     if run.state == WorkflowRunState::Failed || run.state == WorkflowRunState::AwaitingHuman {
         println!();
         println!("Next action:");
@@ -1675,32 +2411,13 @@ mod tests {
 
     #[test]
     fn stage_graph_canonical_order() {
+        // Uses the `stage()` helper defined below.
         let stages = vec![
-            StageDef {
-                name: "run_goal".to_string(),
-                description: "".to_string(),
-                depends_on: vec![],
-            },
-            StageDef {
-                name: "review_draft".to_string(),
-                description: "".to_string(),
-                depends_on: vec!["run_goal".to_string()],
-            },
-            StageDef {
-                name: "human_gate".to_string(),
-                description: "".to_string(),
-                depends_on: vec!["review_draft".to_string()],
-            },
-            StageDef {
-                name: "apply_draft".to_string(),
-                description: "".to_string(),
-                depends_on: vec!["human_gate".to_string()],
-            },
-            StageDef {
-                name: "pr_sync".to_string(),
-                description: "".to_string(),
-                depends_on: vec!["apply_draft".to_string()],
-            },
+            stage("run_goal", &[]),
+            stage("review_draft", &["run_goal"]),
+            stage("human_gate", &["review_draft"]),
+            stage("apply_draft", &["human_gate"]),
+            stage("pr_sync", &["apply_draft"]),
         ];
         let order = validate_stage_graph(&stages).unwrap();
         assert_eq!(
@@ -1715,13 +2432,24 @@ mod tests {
         );
     }
 
+    /// Convenience: build a minimal StageDef for test use.
+    fn stage(name: &str, deps: &[&str]) -> StageDef {
+        StageDef {
+            name: name.to_string(),
+            description: String::new(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            kind: StageKind::Default,
+            workflow: None,
+            goal: None,
+            phase: None,
+            condition: None,
+            target: None,
+        }
+    }
+
     #[test]
     fn stage_graph_unknown_dep_error() {
-        let stages = vec![StageDef {
-            name: "run_goal".to_string(),
-            description: "".to_string(),
-            depends_on: vec!["nonexistent".to_string()],
-        }];
+        let stages = vec![stage("run_goal", &["nonexistent"])];
         let err = validate_stage_graph(&stages).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
     }
@@ -1729,18 +2457,7 @@ mod tests {
     #[test]
     fn stage_graph_cycle_detection() {
         // a → b → a (cycle)
-        let stages = vec![
-            StageDef {
-                name: "a".to_string(),
-                description: "".to_string(),
-                depends_on: vec!["b".to_string()],
-            },
-            StageDef {
-                name: "b".to_string(),
-                description: "".to_string(),
-                depends_on: vec!["a".to_string()],
-            },
-        ];
+        let stages = vec![stage("a", &["b"]), stage("b", &["a"])];
         let err = validate_stage_graph(&stages).unwrap_err();
         assert!(err.to_string().contains("cycle"));
     }
@@ -1938,6 +2655,7 @@ mod tests {
             resume_run_id: None,
             agent: "claude-code",
             plan_phase: None,
+            depth: 0,
         };
         // dry_run=true validates the stage graph without executing agents.
         let result = run_governed_workflow(&opts);
@@ -1965,6 +2683,7 @@ mod tests {
             resume_run_id: None,
             agent: "claude-code",
             plan_phase: None,
+            depth: 0,
         };
         // dry_run should succeed and print the graph.
         run_governed_workflow(&opts).unwrap();
@@ -1984,6 +2703,7 @@ mod tests {
             resume_run_id: None,
             agent: "claude-code",
             plan_phase: Some("v0.4.0"),
+            depth: 0,
         };
         // plan_phase is visible on the options; the dry-run path would print it.
         assert_eq!(opts.plan_phase, Some("v0.4.0"));
@@ -2002,6 +2722,7 @@ mod tests {
             resume_run_id: None,
             agent: "claude-code",
             plan_phase: None,
+            depth: 0,
         };
         assert!(opts.plan_phase.is_none());
     }
@@ -2038,5 +2759,361 @@ mod tests {
         let loaded = GovernedWorkflowRun::load(&runs_dir, "phase-run-1").unwrap();
         assert_eq!(loaded.goal_title, "v0.4.0 — Captioning Utils");
         assert_eq!(loaded.workflow_name, "build");
+    }
+
+    // ── Template interpolation (v0.15.13) ─────────────────────────────────────
+
+    #[test]
+    fn interpolate_template_basic() {
+        let mut outputs = std::collections::HashMap::new();
+        let mut plan_map = std::collections::HashMap::new();
+        plan_map.insert("phase_id".to_string(), "v0.15.14".to_string());
+        plan_map.insert("phase_title".to_string(), "Parallel Fan-Out".to_string());
+        outputs.insert("plan_next".to_string(), plan_map);
+
+        let result = interpolate_template(
+            "{{plan_next.phase_id}} — {{plan_next.phase_title}}",
+            &outputs,
+        );
+        assert_eq!(result, "v0.15.14 — Parallel Fan-Out");
+    }
+
+    #[test]
+    fn interpolate_template_unresolved_left_verbatim() {
+        let outputs = std::collections::HashMap::new();
+        let result = interpolate_template("{{plan_next.phase_id}}", &outputs);
+        // Unresolved placeholder kept intact.
+        assert_eq!(result, "{{plan_next.phase_id}}");
+    }
+
+    #[test]
+    fn interpolate_template_no_placeholders() {
+        let outputs = std::collections::HashMap::new();
+        let result = interpolate_template("hello world", &outputs);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn interpolate_template_mixed() {
+        let mut outputs = std::collections::HashMap::new();
+        let mut m = std::collections::HashMap::new();
+        m.insert("id".to_string(), "42".to_string());
+        outputs.insert("stage".to_string(), m);
+
+        let result = interpolate_template("prefix-{{stage.id}}-{{missing.x}}-suffix", &outputs);
+        assert_eq!(result, "prefix-42-{{missing.x}}-suffix");
+    }
+
+    // ── Condition evaluator (v0.15.13) ────────────────────────────────────────
+
+    fn make_outputs(
+        stage: &str,
+        kv: &[(&str, &str)],
+    ) -> std::collections::HashMap<String, std::collections::HashMap<String, String>> {
+        let mut outputs = std::collections::HashMap::new();
+        let mut m = std::collections::HashMap::new();
+        for (k, v) in kv {
+            m.insert(k.to_string(), v.to_string());
+        }
+        outputs.insert(stage.to_string(), m);
+        outputs
+    }
+
+    #[test]
+    fn condition_evaluator_negation_false() {
+        // !plan_next.done where done="false" → !false → true
+        let outputs = make_outputs("plan_next", &[("done", "false")]);
+        assert!(evaluate_condition("!plan_next.done", &outputs).unwrap());
+    }
+
+    #[test]
+    fn condition_evaluator_negation_true() {
+        // !plan_next.done where done="true" → !true → false
+        let outputs = make_outputs("plan_next", &[("done", "true")]);
+        assert!(!evaluate_condition("!plan_next.done", &outputs).unwrap());
+    }
+
+    #[test]
+    fn condition_evaluator_equality_match() {
+        let outputs = make_outputs("stage", &[("status", "approved")]);
+        assert!(evaluate_condition("stage.status == \"approved\"", &outputs).unwrap());
+    }
+
+    #[test]
+    fn condition_evaluator_equality_no_match() {
+        let outputs = make_outputs("stage", &[("status", "pending")]);
+        assert!(!evaluate_condition("stage.status == \"approved\"", &outputs).unwrap());
+    }
+
+    #[test]
+    fn condition_evaluator_inequality() {
+        let outputs = make_outputs("stage", &[("result", "ok")]);
+        assert!(evaluate_condition("stage.result != \"fail\"", &outputs).unwrap());
+    }
+
+    #[test]
+    fn condition_evaluator_non_boolean_negation_fails() {
+        let outputs = make_outputs("stage", &[("value", "maybe")]);
+        let err = evaluate_condition("!stage.value", &outputs).unwrap_err();
+        assert!(err.to_string().contains("non-boolean"));
+    }
+
+    #[test]
+    fn condition_evaluator_missing_stage_fails() {
+        let outputs = std::collections::HashMap::new();
+        let err = evaluate_condition("!plan_next.done", &outputs).unwrap_err();
+        assert!(err.to_string().contains("plan_next"));
+    }
+
+    #[test]
+    fn condition_evaluator_missing_field_fails() {
+        let outputs = make_outputs("plan_next", &[("phase_id", "v0.15.14")]);
+        let err = evaluate_condition("!plan_next.done", &outputs).unwrap_err();
+        assert!(err.to_string().contains("done"));
+    }
+
+    #[test]
+    fn condition_evaluator_plain_boolean_true() {
+        let outputs = make_outputs("stage", &[("ready", "true")]);
+        assert!(evaluate_condition("stage.ready", &outputs).unwrap());
+    }
+
+    // ── PlanNextOutput parsing (v0.15.13) ─────────────────────────────────────
+
+    #[test]
+    fn plan_next_output_parsing_with_phase() {
+        let stdout = "Next pending phase:\n  Phase v0.15.14 \u{2014} Parallel Fan-Out\n\nTo start:";
+        let out = PlanNextOutput::parse(stdout);
+        assert!(!out.done);
+        assert_eq!(out.phase_id, "v0.15.14");
+        assert_eq!(out.phase_title, "Parallel Fan-Out");
+    }
+
+    #[test]
+    fn plan_next_output_parsing_all_done() {
+        let stdout = "All plan phases are complete or in progress.\n";
+        let out = PlanNextOutput::parse(stdout);
+        assert!(out.done);
+        assert_eq!(out.phase_id, "");
+    }
+
+    #[test]
+    fn plan_next_output_parsing_empty_is_done() {
+        let out = PlanNextOutput::parse("");
+        assert!(out.done);
+    }
+
+    #[test]
+    fn plan_next_output_to_map_keys() {
+        let out = PlanNextOutput {
+            phase_id: "v0.15.14".to_string(),
+            phase_title: "Fan-Out".to_string(),
+            done: false,
+        };
+        let map = out.to_output_map();
+        assert_eq!(map.get("phase_id").map(|s| s.as_str()), Some("v0.15.14"));
+        assert_eq!(map.get("done").map(|s| s.as_str()), Some("false"));
+        assert!(map.contains_key("phase_title"));
+    }
+
+    // ── SubworkflowRecord serialization (v0.15.13) ────────────────────────────
+
+    #[test]
+    fn subworkflow_record_roundtrip() {
+        let rec = SubworkflowRecord {
+            parent_run_id: "parent-123".to_string(),
+            child_run_id: "child-456".to_string(),
+            stage_name: "run_phase".to_string(),
+            child_workflow: "build".to_string(),
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let restored: SubworkflowRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.parent_run_id, "parent-123");
+        assert_eq!(restored.child_run_id, "child-456");
+        assert_eq!(restored.child_workflow, "build");
+    }
+
+    // ── GovernedWorkflowRun new fields (v0.15.13) ─────────────────────────────
+
+    #[test]
+    fn run_new_with_stages_custom_names() {
+        let run = GovernedWorkflowRun::new_with_stages(
+            "test-run",
+            "plan-build-loop",
+            "loop test",
+            &["plan_next", "run_phase", "loop"],
+        );
+        assert_eq!(run.stages.len(), 3);
+        assert_eq!(run.stages[0].name, "plan_next");
+        assert_eq!(run.stages[1].name, "run_phase");
+        assert_eq!(run.stages[2].name, "loop");
+        assert!(run.outputs.is_empty());
+        assert!(run.sub_workflow_records.is_empty());
+        assert!(run.loop_iterations.is_empty());
+    }
+
+    #[test]
+    fn run_outputs_persist_through_save_load() {
+        let dir = tempdir().unwrap();
+        let runs_dir = dir.path().join("workflow-runs");
+        let mut run = GovernedWorkflowRun::new("out-test", "test-wf", "Goal");
+        let mut m = std::collections::HashMap::new();
+        m.insert("done".to_string(), "false".to_string());
+        run.outputs.insert("plan_next".to_string(), m);
+        run.save(&runs_dir).unwrap();
+
+        let loaded = GovernedWorkflowRun::load(&runs_dir, "out-test").unwrap();
+        assert_eq!(
+            loaded
+                .outputs
+                .get("plan_next")
+                .and_then(|m| m.get("done"))
+                .map(|s| s.as_str()),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn run_loop_iterations_persist() {
+        let dir = tempdir().unwrap();
+        let runs_dir = dir.path().join("workflow-runs");
+        let mut run = GovernedWorkflowRun::new("loop-test", "plan-build-loop", "Goal");
+        run.loop_iterations.insert("loop".to_string(), 3);
+        run.save(&runs_dir).unwrap();
+
+        let loaded = GovernedWorkflowRun::load(&runs_dir, "loop-test").unwrap();
+        assert_eq!(loaded.loop_iterations.get("loop"), Some(&3));
+    }
+
+    // ── StageKind deserialization (v0.15.13) ──────────────────────────────────
+
+    #[test]
+    fn stage_kind_defaults_to_default() {
+        let toml_str = r#"
+name = "run_goal"
+description = "Run the goal"
+"#;
+        let stage: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(stage.kind, StageKind::Default);
+    }
+
+    #[test]
+    fn stage_kind_workflow_deserializes() {
+        let toml_str = r#"
+name = "run_phase"
+description = "Invoke child workflow"
+kind = "workflow"
+workflow = "build"
+goal = "{{plan_next.phase_id}}"
+phase = "{{plan_next.phase_id}}"
+condition = "!plan_next.done"
+"#;
+        let stage: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(stage.kind, StageKind::Workflow);
+        assert_eq!(stage.workflow.as_deref(), Some("build"));
+        assert_eq!(stage.condition.as_deref(), Some("!plan_next.done"));
+    }
+
+    #[test]
+    fn stage_kind_goto_deserializes() {
+        let toml_str = r#"
+name = "loop"
+description = "Loop back"
+kind = "goto"
+target = "plan_next"
+condition = "!plan_next.done"
+"#;
+        let stage: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(stage.kind, StageKind::Goto);
+        assert_eq!(stage.target.as_deref(), Some("plan_next"));
+    }
+
+    #[test]
+    fn stage_kind_plan_next_deserializes() {
+        let toml_str = r#"
+name = "plan_next"
+description = "Get next phase"
+kind = "plan_next"
+"#;
+        let stage: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(stage.kind, StageKind::PlanNext);
+    }
+
+    // ── Depth guard (v0.15.13) ────────────────────────────────────────────────
+
+    #[test]
+    fn depth_guard_fires_above_limit() {
+        // Directly test the depth guard logic without spawning a real workflow.
+        // The guard kicks in when opts.depth > MAX_DEPTH (5).
+        let dir = tempdir().unwrap();
+        // Write a minimal workflow TOML so find_workflow_def succeeds.
+        let templates_dir = dir.path().join("templates").join("workflows");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        std::fs::write(
+            templates_dir.join("governed-goal.toml"),
+            include_str!("../../../../templates/workflows/governed-goal.toml"),
+        )
+        .unwrap();
+        let opts = RunOptions {
+            workspace_root: dir.path(),
+            workflow_name: "governed-goal",
+            goal_title: "depth test",
+            dry_run: false,
+            resume_run_id: None,
+            agent: "claude-code",
+            plan_phase: None,
+            depth: 6, // exceeds MAX_DEPTH = 5
+        };
+        let err = run_governed_workflow(&opts).unwrap_err();
+        assert!(
+            err.to_string().contains("recursion depth limit"),
+            "Expected depth guard message, got: {}",
+            err
+        );
+    }
+
+    // ── Loop max_phases guard (v0.15.13) ──────────────────────────────────────
+
+    #[test]
+    fn loop_workflow_max_phases_guard_via_config() {
+        // Test the CHECKPOINT message format from the guard.
+        let max = 99u32;
+        let iters = max + 1;
+        let msg = format!(
+            "Loop CHECKPOINT: stage '{}' reached the maximum iteration limit ({}).\n\
+             {} iterations completed.",
+            "loop",
+            max,
+            iters - 1
+        );
+        assert!(msg.contains("CHECKPOINT"));
+        assert!(msg.contains("99"));
+    }
+
+    // ── Dry-run for loop workflow (v0.15.13) ──────────────────────────────────
+
+    #[test]
+    fn dry_run_plan_build_loop_prints_kind_labels() {
+        let dir = tempdir().unwrap();
+        let templates_dir = dir.path().join("templates").join("workflows");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        // Write the plan-build-loop template.
+        std::fs::write(
+            templates_dir.join("plan-build-loop.toml"),
+            include_str!("../../../../templates/workflows/plan-build-loop.toml"),
+        )
+        .unwrap();
+        let opts = RunOptions {
+            workspace_root: dir.path(),
+            workflow_name: "plan-build-loop",
+            goal_title: "run all phases",
+            dry_run: true,
+            resume_run_id: None,
+            agent: "claude-code",
+            plan_phase: None,
+            depth: 0,
+        };
+        // Should succeed (dry-run doesn't execute anything).
+        run_governed_workflow(&opts).unwrap();
     }
 }

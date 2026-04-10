@@ -235,6 +235,7 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
                 resume_run_id: resume.as_deref(),
                 agent,
                 plan_phase: phase.as_deref(),
+                depth: 0,
             };
             governed_workflow::run_governed_workflow(&opts)
         }

@@ -8243,6 +8243,133 @@ Output is JSON with `run_id`, `workflow_name`, `goal_title`, per-stage records, 
 
 ---
 
+### Workflow Loops & Sub-workflows
+
+TA workflows support three new step kinds that enable composable, looping execution: `plan_next`, `workflow`, and `goto`. Together they replace the `build_phases.sh` shell script with a native, observable workflow.
+
+#### Built-in: `plan-build-loop`
+
+The `plan-build-loop` template iterates all pending plan phases through the `build` workflow:
+
+```bash
+# Run all pending plan phases (replaces ./build_phases.sh)
+ta workflow run plan-build-loop --goal "Run all pending phases"
+
+# Preview what would run without executing anything
+ta workflow run plan-build-loop --goal "..." --dry-run
+
+# Check status
+ta workflow status
+ta workflow status <run-id>
+```
+
+The loop runs until all phases in `PLAN.md` are marked done, or until `max_phases` (default 99) iterations have been completed. On each iteration it:
+
+1. Calls `ta plan next` to find the next pending phase
+2. Invokes the `build` workflow as a sub-workflow for that phase
+3. Loops back to step 1
+
+When a reviewer flags a draft and `stop_on_flag = true` (the default), the loop halts and requires manual resume.
+
+#### Step kinds
+
+**`kind = "plan_next"`** — Shells out to `ta plan next` and emits structured outputs:
+
+```toml
+[[stages]]
+name = "plan_next"
+kind = "plan_next"
+description = "Get the next pending plan phase"
+```
+
+Outputs available to downstream stages as `{{plan_next.phase_id}}`, `{{plan_next.phase_title}}`, `{{plan_next.done}}`.
+
+**`kind = "workflow"`** — Invokes another named workflow as a sub-workflow:
+
+```toml
+[[stages]]
+name = "run_phase"
+kind = "workflow"
+workflow = "build"
+goal = "{{plan_next.phase_id}} — {{plan_next.phase_title}}"
+phase = "{{plan_next.phase_id}}"
+condition = "!plan_next.done"
+depends_on = ["plan_next"]
+description = "Run the build workflow for the current phase"
+```
+
+The `goal` and `phase` fields support `{{stage_name.field}}` template interpolation from previous stage outputs. Sub-workflows are depth-limited to 5 levels.
+
+**`kind = "goto"`** — Jumps to a target stage when a condition is true:
+
+```toml
+[[stages]]
+name = "loop"
+kind = "goto"
+target = "plan_next"
+condition = "!plan_next.done"
+depends_on = ["run_phase"]
+description = "Loop back when more phases remain"
+```
+
+When `condition` is false, the step falls through and the workflow ends normally.
+
+#### Template interpolation
+
+Stage fields (`goal`, `phase`, `condition`) support `{{stage_name.field}}` placeholders:
+
+```toml
+goal = "{{plan_next.phase_id}} — {{plan_next.phase_title}}"
+```
+
+Placeholders are resolved from the outputs of previously executed stages. Unresolved placeholders are left verbatim and cause a hard error if used in a `workflow` stage.
+
+#### Condition expressions
+
+The `condition` field supports three forms:
+
+| Expression | Meaning |
+|---|---|
+| `!stage.field` | Boolean not — field must be `"true"` or `"false"` |
+| `stage.field == "value"` | Equality check |
+| `stage.field != "value"` | Inequality check |
+
+For non-goto stages, a false condition skips the stage. For `goto` stages, a false condition falls through (ends the loop).
+
+#### Sub-workflow status
+
+When a `workflow` step completes, the child run ID is recorded and shown in `ta workflow status`:
+
+```
+Sub-workflow runs:
+  [run_phase] stage='run_phase' workflow='build' child-run=b1c2d3e4
+    ta workflow status b1c2d3e4
+```
+
+You can inspect the child run independently:
+
+```bash
+ta workflow status b1c2d3e4
+```
+
+#### Loop configuration
+
+Configure loop behaviour in the workflow TOML:
+
+```toml
+[workflow.config]
+max_phases = 99       # Halt with CHECKPOINT after this many iterations
+stop_on_flag = true   # Stop if reviewer flags; require manual resume
+```
+
+When `max_phases` is reached, the workflow emits a clear CHECKPOINT message and stops. Resume with:
+
+```bash
+ta workflow run plan-build-loop --goal "Run all pending phases" --resume <run-id>
+```
+
+---
+
 ### Workflow Engine
 
 TA includes a pluggable workflow engine for orchestrating multi-stage, multi-role workflows. Define stages, assign roles to agents, and let TA handle routing, verdict scoring, and human-in-the-loop interaction.

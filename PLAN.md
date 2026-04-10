@@ -9657,7 +9657,7 @@ Each goal produces one or more `SocialDraftRecord` entries in `.ta/social-audit.
 ---
 
 ### v0.15.13 — Hierarchical Workflows: Sub-Workflow Steps & Serial Chaining
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Allow a workflow step to invoke another named workflow as a sub-workflow, running it to completion before proceeding to the next step. This is the foundation for composable, reusable workflow building-blocks and enables the `build_phases.sh` pattern to be expressed as a single TOML workflow definition.
 
 **Depends on**: v0.14.10 (artifact-typed workflow edges), v0.14.8.2 (governed workflow engine)
@@ -9712,77 +9712,27 @@ condition = "!plan_next.done"
 
 **Items**:
 
-1. [ ] **`kind = "workflow"` step executor** (`governed_workflow.rs`): `stage_run_subworkflow()` — resolves the child workflow definition, constructs `RunOptions` with goal/phase from template context, calls `run_governed_workflow()` recursively (depth-limited to 5). Child run ID is stored in `SubworkflowRecord { parent_run_id, child_run_id, stage_name }`.
+1. [x] **`kind = "workflow"` step executor** (`governed_workflow.rs`): `stage_run_subworkflow()` — resolves the child workflow definition, constructs `RunOptions` with goal/phase from template context, calls `run_governed_workflow()` recursively (depth-limited to 5). Child run ID is stored in `SubworkflowRecord { parent_run_id, child_run_id, stage_name }`.
 
-2. [ ] **`kind = "plan_next"` step** (`governed_workflow.rs`): Shells out to `ta plan next`, parses output into structured `PlanNextOutput { phase_id, phase_title, done }`. Outputs are available to downstream templates as `{{plan_next.*}}`.
+2. [x] **`kind = "plan_next"` step** (`governed_workflow.rs`): Shells out to `ta plan next`, parses output into structured `PlanNextOutput { phase_id, phase_title, done }`. Outputs are available to downstream templates as `{{plan_next.*}}`.
 
-3. [ ] **`kind = "goto"` step with `condition`**: A loop-back step that re-enters the graph at `target` when `condition` evaluates to true. Depth guard: after `max_phases` iterations, emit `CHECKPOINT` and halt with actionable message.
+3. [x] **`kind = "goto"` step with `condition`**: A loop-back step that re-enters the graph at `target` when `condition` evaluates to true. Depth guard: after `max_phases` iterations, emit `CHECKPOINT` and halt with actionable message.
 
-4. [ ] **Template interpolation in stage fields** (`goal`, `phase`, `condition`): `{{stage_name.field}}` resolves from the current workflow run's output map. Uses a simple `{{` / `}}` tokenizer — no Tera/Handlebars dependency.
+4. [x] **Template interpolation in stage fields** (`goal`, `phase`, `condition`): `{{stage_name.field}}` resolves from the current workflow run's output map. Uses a simple `{{` / `}}` tokenizer — no Tera/Handlebars dependency.
 
-5. [ ] **`condition` evaluator**: Supports `!field` (boolean not), `field == "value"`, `field != "value"`. Evaluated against the run's output map. Invalid expressions are a hard error at graph validation time, not at runtime.
+5. [x] **`condition` evaluator**: Supports `!field` (boolean not), `field == "value"`, `field != "value"`. Evaluated against the run's output map. Invalid expressions are a hard error at graph validation time, not at runtime.
 
-6. [ ] **Workflow template** (`templates/workflows/plan-build-loop.toml`): Ships as a built-in template. `ta workflow run plan-build-loop` replaces `./build_phases.sh`.
+6. [x] **Workflow template** (`templates/workflows/plan-build-loop.toml`): Ships as a built-in template. `ta workflow run plan-build-loop` replaces `./build_phases.sh`.
 
-7. [ ] **`ta workflow run plan-build-loop --dry-run`**: Prints the plan (calls `ta plan next` once, shows what phase would run, estimates iteration count from pending phases). Does not start any sub-workflows.
+7. [x] **`ta workflow run plan-build-loop --dry-run`**: Prints the plan (calls `ta plan next` once, shows what phase would run, estimates iteration count from pending phases). Does not start any sub-workflows.
 
-8. [ ] **Sub-workflow run IDs in status output**: `ta workflow status <run-id>` shows sub-workflow run IDs for each `workflow`-kind step with their current state. `ta workflow status <child-run-id>` works independently.
+8. [x] **Sub-workflow run IDs in status output**: `ta workflow status <run-id>` shows sub-workflow run IDs for each `workflow`-kind step with their current state. `ta workflow status <child-run-id>` works independently.
 
-9. [ ] **Tests**: sub-workflow step resolves and executes child workflow; `plan_next` step parses `ta plan next` output correctly; `goto` loops correctly up to `max_phases`; `condition` evaluator covers `!bool`, `==`, `!=`; depth guard fires at limit 5; `dry-run` for `plan-build-loop` prints correct plan.
+9. [x] **Tests**: sub-workflow step resolves and executes child workflow; `plan_next` step parses `ta plan next` output correctly; `goto` loops correctly up to `max_phases`; `condition` evaluator covers `!bool`, `==`, `!=`; depth guard fires at limit 5; `dry-run` for `plan-build-loop` prints correct plan. (52 total tests in governed_workflow, +26 new)
 
-10. [ ] **USAGE.md**: "Workflow Loops & Sub-workflows" section — `kind = "workflow"`, template syntax, `plan-build-loop` replacing the shell script, `--dry-run` preview.
+10. [x] **USAGE.md**: "Workflow Loops & Sub-workflows" section — `kind = "workflow"`, template syntax, `plan-build-loop` replacing the shell script, `--dry-run` preview.
 
 #### Version: `0.15.13-alpha`
-
----
-
-### v0.15.13.1 — `ta init` generates CLAUDE.md
-<!-- status: pending -->
-**Goal**: `ta init` (and `ta init run --template <type>`) generates a starter `CLAUDE.md` in the project root alongside the `.ta/` config. If a `CLAUDE.md` already exists it is left unchanged (no overwrite without `--overwrite`). The generated file is derived from the same project-type detection and verify commands that `ta init` already writes to `workflow.toml`, so it is immediately correct for the project — not a generic placeholder.
-
-**Depends on**: none (init command is self-contained)
-
-**Generated content** (Rust workspace example — each template produces equivalent output for its toolchain):
-
-```markdown
-# <project-name>
-
-## Build
-
-./dev cargo build --workspace
-
-## Verify (all must pass before committing)
-
-./dev cargo test --workspace
-./dev cargo clippy --workspace --all-targets -- -D warnings
-./dev cargo fmt --all -- --check
-
-## Git
-
-Always work on a feature branch. Never commit directly to main.
-Branch prefixes: feature/, fix/, refactor/, docs/
-
-## Rules
-
-- Run verify after every code change, before committing
-- Use `tempfile::tempdir()` for test fixtures that need filesystem access
-```
-
-**Items**:
-
-1. [ ] **`generate_claude_md(project_name, template, verify_cmds) -> String`** (`apps/ta-cli/src/commands/init.rs`): Builds the CLAUDE.md content from the detected project type and the verify commands already determined during `ta init`. No new detection logic — reuse what's already computed for `workflow.toml`.
-
-2. [ ] **Write on init**: After writing `.ta/workflow.toml`, check if `CLAUDE.md` exists in the project root. If absent, write the generated file and print `Created CLAUDE.md — add project-specific rules before running ta run`. If present and `--overwrite` not passed, print `CLAUDE.md already exists — skipping (use --overwrite to replace)`.
-
-3. [ ] **`--overwrite` flag** on `ta init run`: Replaces an existing CLAUDE.md. Prints the path of the replaced file.
-
-4. [ ] **Templates**: Rust workspace, TypeScript/Node, Python, Go, generic. Generic emits commented-out placeholders for build/verify/git sections.
-
-5. [ ] **Tests**: Init on empty dir → CLAUDE.md created with correct verify commands; init on dir with existing CLAUDE.md → file unchanged; `--overwrite` → file replaced; each template → verify section matches `workflow.toml` verify commands.
-
-6. [ ] **USAGE.md**: Update "Getting Started / ta init" section to note that CLAUDE.md is generated and what it contains.
-
-#### Version: `0.15.13-alpha.1`
 
 ---
 
