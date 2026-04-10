@@ -5607,27 +5607,6 @@ fn apply_package(
                 return Err(e);
             }
             rollback_guard.commit();
-
-            // Re-write velocity-history.jsonl to the working tree after branch restore.
-            // The §8c block above wrote it before adapter.commit() so auto_stage picked
-            // it up for the feature-branch commit. But git checkout back to main REMOVES
-            // the file from disk (it was only in the feature branch's commit, not main).
-            // Re-writing here ensures the file persists locally for `ta stats velocity --team`.
-            // If main already had the file (prior apply), checkout restores that version and
-            // this append adds the new entry — no duplicate.
-            {
-                use ta_goal::{GoalOutcome, VelocityEntry, VelocityHistoryStore};
-                let history_entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied)
-                    .with_machine_id()
-                    .with_committer(&target_dir);
-                let hs = VelocityHistoryStore::for_project(&target_dir);
-                if let Err(e) = hs.append(&history_entry) {
-                    tracing::warn!(
-                        "Failed to re-write velocity history entry to working tree: {}",
-                        e
-                    );
-                }
-            }
         } // end of non-dry-run block
     }
 
@@ -9268,16 +9247,26 @@ fn run() {
         // No Debug-format change types like "Modify" — should use ~ + - > icons.
         assert!(!full_msg.contains("Modify  "));
 
-        // v0.15.7: velocity-history.jsonl written on --git-commit apply.
-        let history_path = project.path().join(".ta/velocity-history.jsonl");
+        // v0.15.7: velocity-history.jsonl is committed on the feature branch.
+        // The file is written before adapter.commit() so auto_stage picks it up,
+        // then git checkout back to main removes it from the working tree (it was
+        // only in the feature-branch commit, not on main). Verify via git show.
+        let show_ref = format!("{}:.ta/velocity-history.jsonl", branch_name);
+        let history_show = clear_git_env(
+            std::process::Command::new("git")
+                .args(["show", &show_ref])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
         assert!(
-            history_path.exists(),
-            "velocity-history.jsonl should exist after git-commit apply"
+            history_show.status.success(),
+            "velocity-history.jsonl should be in the feature branch commit"
         );
-        let history_content = std::fs::read_to_string(&history_path).unwrap();
+        let history_content = String::from_utf8_lossy(&history_show.stdout);
         assert!(
             !history_content.trim().is_empty(),
-            "velocity-history.jsonl should not be empty"
+            "velocity-history.jsonl in commit should not be empty"
         );
         let history_entry: serde_json::Value =
             serde_json::from_str(history_content.trim()).unwrap();
@@ -9285,6 +9274,20 @@ fn run() {
         // machine_id should be set (8 hex chars).
         let mid = history_entry["machine_id"].as_str().unwrap_or("");
         assert_eq!(mid.len(), 8, "machine_id should be 8 chars");
+        // Working tree should be clean — no uncommitted velocity-history.jsonl on main.
+        let wt_status = clear_git_env(
+            std::process::Command::new("git")
+                .args(["status", "--porcelain", ".ta/velocity-history.jsonl"])
+                .current_dir(project.path()),
+        )
+        .output()
+        .unwrap();
+        let wt_dirty = String::from_utf8_lossy(&wt_status.stdout);
+        assert!(
+            wt_dirty.trim().is_empty(),
+            "velocity-history.jsonl should not be dirty on main after apply: {}",
+            wt_dirty
+        );
     }
 
     /// v0.14.16 — Branch restore: after `ta draft apply --git-commit`, the working
