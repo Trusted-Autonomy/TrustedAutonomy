@@ -9251,9 +9251,10 @@ fn run() {
         // The file is written before adapter.commit() so auto_stage picks it up,
         // then git checkout back to main removes it from the working tree (it was
         // only in the feature-branch commit, not on main). Verify via git show.
+        let show_ref = format!("{}:.ta/velocity-history.jsonl", branch_name);
         let history_show = clear_git_env(
             std::process::Command::new("git")
-                .args(["show", &format!("{}:.ta/velocity-history.jsonl", branch_name)])
+                .args(["show", &show_ref])
                 .current_dir(project.path()),
         )
         .output()
