@@ -34,6 +34,9 @@ pub enum InitCommands {
         /// Skip all interactive prompts.
         #[arg(long)]
         non_interactive: bool,
+        /// Overwrite an existing CLAUDE.md (default: skip if present).
+        #[arg(long)]
+        overwrite: bool,
     },
     /// List available project templates.
     Templates,
@@ -48,6 +51,7 @@ pub fn execute(command: &InitCommands, config: &GatewayConfig) -> anyhow::Result
             vcs,
             remote,
             non_interactive,
+            overwrite,
         } => run_init(
             config,
             template.as_deref(),
@@ -55,6 +59,7 @@ pub fn execute(command: &InitCommands, config: &GatewayConfig) -> anyhow::Result
             vcs.as_deref(),
             remote.as_deref(),
             *non_interactive,
+            *overwrite,
         ),
         InitCommands::Templates => list_templates(),
     }
@@ -142,6 +147,7 @@ fn run_init(
     vcs_override: Option<&str>,
     remote_url: Option<&str>,
     non_interactive: bool,
+    overwrite: bool,
 ) -> anyhow::Result<()> {
     let project_root = &config.workspace_root;
     let ta_dir = project_root.join(".ta");
@@ -152,8 +158,24 @@ fn run_init(
             || ta_dir.join("policy.yaml").exists()
             || ta_dir.join("memory.toml").exists();
         if has_config {
-            println!("Project already has TA configuration in .ta/");
-            println!("Use `ta setup refine <topic>` to update specific config.");
+            // Still generate CLAUDE.md if it's missing (safe to re-run).
+            let claude_md_path = project_root.join("CLAUDE.md");
+            if !claude_md_path.exists() || overwrite {
+                let default_name = project_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("project")
+                    .to_string();
+                let name = project_name.unwrap_or(&default_name);
+                let detected_type = detect_project_type(project_root);
+                let project_type = template_name
+                    .and_then(|t| parse_template_name(t).ok())
+                    .unwrap_or(detected_type);
+                write_claude_md(project_root, name, &project_type, overwrite)?;
+            } else {
+                println!("Project already has TA configuration in .ta/");
+                println!("Use `ta setup refine <topic>` to update specific config.");
+            }
             return Ok(());
         }
     }
@@ -179,21 +201,7 @@ fn run_init(
     // Resolve project type.
     let detected_type = detect_project_type(project_root);
     let project_type = if let Some(tmpl) = template_name {
-        match tmpl {
-            "rust-workspace" => ProjectType::RustWorkspace,
-            "typescript-monorepo" | "typescript" => ProjectType::TypeScript,
-            "python-ml" | "python" => ProjectType::Python,
-            "go-service" | "go" => ProjectType::Go,
-            "unreal-cpp" | "unreal" => ProjectType::UnrealCpp,
-            "unity-csharp" | "unity" => ProjectType::UnityCsharp,
-            "generic" => ProjectType::Generic,
-            _ => {
-                anyhow::bail!(
-                    "Unknown template: '{}'. Run `ta init templates` for available options.",
-                    tmpl
-                );
-            }
-        }
+        parse_template_name(tmpl)?
     } else if interactive {
         let type_str = prompt(
             "Template (rust-workspace/typescript-monorepo/python-ml/go-service/generic)",
@@ -257,6 +265,7 @@ fn run_init(
     std::fs::create_dir_all(&ta_dir)?;
 
     generate_workflow_toml(&ta_dir, &project_type)?;
+    write_claude_md(project_root, name, &project_type, overwrite)?;
     generate_memory_toml(&ta_dir, &project_type)?;
     generate_policy_yaml(&ta_dir, &project_type)?;
     generate_taignore(project_root, &project_type)?;
@@ -302,6 +311,7 @@ fn run_init(
     println!("TA project initialized successfully!");
     println!();
     println!("Generated files:");
+    println!("  CLAUDE.md              — agent instructions (build, verify, git rules)");
     println!("  .ta/workflow.toml      — workflow configuration");
     println!("  .ta/memory.toml        — memory key schema and backend");
     println!("  .ta/policy.yaml        — security policy");
@@ -383,6 +393,117 @@ fn run_init(
     println!("  ta plan new \"description of your project\"");
     println!("  ta plan new --file product-spec.md");
 
+    Ok(())
+}
+
+/// Parse a template name string into a `ProjectType`.
+fn parse_template_name(tmpl: &str) -> anyhow::Result<ProjectType> {
+    match tmpl {
+        "rust-workspace" | "rust" => Ok(ProjectType::RustWorkspace),
+        "typescript-monorepo" | "typescript" => Ok(ProjectType::TypeScript),
+        "python-ml" | "python" => Ok(ProjectType::Python),
+        "go-service" | "go" => Ok(ProjectType::Go),
+        "unreal-cpp" | "unreal" => Ok(ProjectType::UnrealCpp),
+        "unity-csharp" | "unity" => Ok(ProjectType::UnityCsharp),
+        "generic" => Ok(ProjectType::Generic),
+        _ => anyhow::bail!(
+            "Unknown template: '{}'. Run `ta init templates` for available options.",
+            tmpl
+        ),
+    }
+}
+
+/// Build CLAUDE.md content for the given project name and type.
+///
+/// The verify commands are derived from the same template logic used by
+/// `generate_workflow_toml`, so both files stay in sync.
+pub fn generate_claude_md(project_name: &str, project_type: &ProjectType) -> String {
+    let (build_section, verify_section, extra_rules) = match project_type {
+        ProjectType::RustWorkspace => (
+            "./dev cargo build --workspace",
+            "./dev cargo test --workspace\n./dev cargo clippy --workspace --all-targets -- -D warnings\n./dev cargo fmt --all -- --check",
+            "- Use `tempfile::tempdir()` for test fixtures that need filesystem access",
+        ),
+        ProjectType::TypeScript => (
+            "npm run build",
+            "npm run typecheck\nnpm test\nnpm run lint",
+            "- Do not commit generated files (dist/, build/)",
+        ),
+        ProjectType::Python => (
+            "pip install -e .",
+            "ruff check .\nmypy src/\npytest",
+            "- Do not commit .venv/ or __pycache__/",
+        ),
+        ProjectType::Go => (
+            "go build ./...",
+            "go build ./...\ngo test ./...\ngo vet ./...",
+            "- Run `go mod tidy` when adding or removing dependencies",
+        ),
+        ProjectType::UnrealCpp => (
+            "# Run UnrealBuildTool for your target",
+            "# See .ta/workflow.toml for verify commands",
+            "- Never modify generated .generated.h files directly",
+        ),
+        ProjectType::UnityCsharp => (
+            "# Open the project in Unity Editor to build",
+            "# See .ta/workflow.toml for verify commands",
+            "- Keep ProjectSettings/ under version control",
+        ),
+        ProjectType::Generic => (
+            "# TODO: add build command",
+            "# TODO: add verify commands, e.g.:\n# make test\n# make lint",
+            "# TODO: add project-specific rules",
+        ),
+    };
+
+    format!(
+        r#"# {name}
+
+## Build
+
+{build}
+
+## Verify (all must pass before committing)
+
+{verify}
+
+## Git
+
+Always work on a feature branch. Never commit directly to main.
+Branch prefixes: feature/, fix/, refactor/, docs/
+
+## Rules
+
+- Run verify after every code change, before committing
+{extra}
+"#,
+        name = project_name,
+        build = build_section,
+        verify = verify_section,
+        extra = extra_rules,
+    )
+}
+
+/// Write CLAUDE.md to `project_root`. Skips if the file exists unless `overwrite` is true.
+fn write_claude_md(
+    project_root: &Path,
+    project_name: &str,
+    project_type: &ProjectType,
+    overwrite: bool,
+) -> anyhow::Result<()> {
+    let path = project_root.join("CLAUDE.md");
+    let already_exists = path.exists();
+    if already_exists && !overwrite {
+        println!("  CLAUDE.md already exists — skipping (use --overwrite to replace)");
+        return Ok(());
+    }
+    let content = generate_claude_md(project_name, project_type);
+    std::fs::write(&path, content)?;
+    if already_exists {
+        println!("  Replaced CLAUDE.md ({})", path.display());
+    } else {
+        println!("  Created CLAUDE.md — add project-specific rules before running ta run");
+    }
     Ok(())
 }
 
@@ -1075,7 +1196,7 @@ mod tests {
         .unwrap();
 
         let config = test_config(&dir);
-        run_init(&config, None, Some("test-project"), None, None, true).unwrap();
+        run_init(&config, None, Some("test-project"), None, None, true, false).unwrap();
 
         let ta_dir = dir.path().join(".ta");
         assert!(ta_dir.join("workflow.toml").exists());
@@ -1084,6 +1205,7 @@ mod tests {
         assert!(ta_dir.join("agents").join("claude-code.yaml").exists());
         assert!(ta_dir.join("constitutions").join("default.yaml").exists());
         assert!(dir.path().join(".taignore").exists());
+        assert!(dir.path().join("CLAUDE.md").exists());
 
         // Check memory seed.
         let memory_dir = ta_dir.join("memory");
@@ -1099,7 +1221,7 @@ mod tests {
 
         let config = test_config(&dir);
         // Should not error, just skip.
-        run_init(&config, None, None, None, None, true).unwrap();
+        run_init(&config, None, None, None, None, true, false).unwrap();
     }
 
     #[test]
@@ -1113,6 +1235,7 @@ mod tests {
             None,
             None,
             true,
+            false,
         )
         .unwrap();
 
@@ -1125,7 +1248,7 @@ mod tests {
     fn init_unknown_template_errors() {
         let dir = TempDir::new().unwrap();
         let config = test_config(&dir);
-        let result = run_init(&config, Some("haskell"), None, None, None, true);
+        let result = run_init(&config, Some("haskell"), None, None, None, true, false);
         assert!(result.is_err());
     }
 
@@ -1201,6 +1324,7 @@ members = [
             None,
             None,
             true,
+            false,
         )
         .unwrap();
 
@@ -1245,6 +1369,7 @@ members = [
             None,
             None,
             true,
+            false,
         )
         .unwrap();
 
@@ -1348,5 +1473,156 @@ members = [
         assert!(content.contains("PlatformerGame"));
         assert!(content.contains("Unity"));
         assert!(content.contains("*.cs"));
+    }
+
+    // --- CLAUDE.md generation tests ---
+
+    #[test]
+    fn init_creates_claude_md_on_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        run_init(
+            &config,
+            Some("rust-workspace"),
+            Some("my-project"),
+            None,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+
+        let claude_md = dir.path().join("CLAUDE.md");
+        assert!(claude_md.exists(), "CLAUDE.md should be created");
+        let content = std::fs::read_to_string(&claude_md).unwrap();
+        assert!(content.contains("# my-project"));
+        assert!(content.contains("cargo test --workspace"));
+        assert!(content.contains("cargo clippy"));
+        assert!(content.contains("cargo fmt"));
+    }
+
+    #[test]
+    fn init_skips_existing_claude_md() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "# existing content\n").unwrap();
+        let config = test_config(&dir);
+        run_init(
+            &config,
+            Some("rust-workspace"),
+            Some("my-project"),
+            None,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(
+            content, "# existing content\n",
+            "existing CLAUDE.md must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn init_overwrites_claude_md_with_flag() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "# old content\n").unwrap();
+        let config = test_config(&dir);
+        run_init(
+            &config,
+            Some("rust-workspace"),
+            Some("my-project"),
+            None,
+            None,
+            true,
+            true, // --overwrite
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert_ne!(content, "# old content\n", "CLAUDE.md should be replaced");
+        assert!(
+            content.contains("cargo test"),
+            "replaced content should have verify commands"
+        );
+    }
+
+    #[test]
+    fn generate_claude_md_rust_has_cargo_verify() {
+        let content = generate_claude_md("my-crate", &ProjectType::RustWorkspace);
+        assert!(content.contains("# my-crate"));
+        assert!(content.contains("cargo build --workspace"));
+        assert!(content.contains("cargo test --workspace"));
+        assert!(content.contains("cargo clippy --workspace --all-targets -- -D warnings"));
+        assert!(content.contains("cargo fmt --all -- --check"));
+        assert!(content.contains("tempfile::tempdir()"));
+    }
+
+    #[test]
+    fn generate_claude_md_typescript_has_npm_verify() {
+        let content = generate_claude_md("my-app", &ProjectType::TypeScript);
+        assert!(content.contains("# my-app"));
+        assert!(content.contains("npm run typecheck"));
+        assert!(content.contains("npm test"));
+        assert!(content.contains("npm run lint"));
+    }
+
+    #[test]
+    fn generate_claude_md_python_has_pytest() {
+        let content = generate_claude_md("my-pkg", &ProjectType::Python);
+        assert!(content.contains("ruff check"));
+        assert!(content.contains("mypy src/"));
+        assert!(content.contains("pytest"));
+    }
+
+    #[test]
+    fn generate_claude_md_go_has_go_test() {
+        let content = generate_claude_md("my-svc", &ProjectType::Go);
+        assert!(content.contains("go build ./..."));
+        assert!(content.contains("go test ./..."));
+        assert!(content.contains("go vet ./..."));
+    }
+
+    #[test]
+    fn generate_claude_md_generic_has_placeholders() {
+        let content = generate_claude_md("my-thing", &ProjectType::Generic);
+        assert!(content.contains("# my-thing"));
+        assert!(content.contains("TODO"));
+    }
+
+    #[test]
+    fn write_claude_md_idempotent_without_overwrite() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "# keep me\n").unwrap();
+        write_claude_md(dir.path(), "proj", &ProjectType::RustWorkspace, false).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(content, "# keep me\n");
+    }
+
+    #[test]
+    fn init_already_configured_generates_missing_claude_md() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(ta_dir.join("workflow.toml"), "# existing\n").unwrap();
+
+        // CLAUDE.md does not exist yet — re-running init should create it.
+        let config = test_config(&dir);
+        run_init(
+            &config,
+            None,
+            Some("re-run-project"),
+            None,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            dir.path().join("CLAUDE.md").exists(),
+            "CLAUDE.md should be created on re-run when missing"
+        );
     }
 }

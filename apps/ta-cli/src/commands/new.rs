@@ -773,6 +773,7 @@ fn run_new(
             vcs: None,
             remote: None,
             non_interactive: true,
+            overwrite: false,
         },
         &project_config,
     );

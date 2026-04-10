@@ -9737,7 +9737,7 @@ condition = "!plan_next.done"
 ---
 
 ### v0.15.13.1 — `ta init` generates CLAUDE.md
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: `ta init` (and `ta init run --template <type>`) generates a starter `CLAUDE.md` in the project root alongside the `.ta/` config. If a `CLAUDE.md` already exists it is left unchanged (no overwrite without `--overwrite`). The generated file is derived from the same project-type detection and verify commands that `ta init` already writes to `workflow.toml`, so it is immediately correct for the project — not a generic placeholder. ta init should be safe to run again without breaking an existing setup but add new details such as the CLAUDE.md. We should know what version a project was init'ed with and know the upgrade path, or each section checks if it should run.
 
 **Depends on**: none (init command is self-contained)
@@ -9770,17 +9770,17 @@ Branch prefixes: feature/, fix/, refactor/, docs/
 
 **Items**:
 
-1. [ ] **`generate_claude_md(project_name, template, verify_cmds) -> String`** (`apps/ta-cli/src/commands/init.rs`): Builds the CLAUDE.md content from the detected project type and the verify commands already determined during `ta init`. No new detection logic — reuse what's already computed for `workflow.toml`.
+1. [x] **`generate_claude_md(project_name, template, verify_cmds) -> String`** (`apps/ta-cli/src/commands/init.rs`): Builds the CLAUDE.md content from the detected project type and the verify commands already determined during `ta init`. No new detection logic — reuse what's already computed for `workflow.toml`. Added `parse_template_name()` helper to share template→ProjectType mapping between the two call sites.
 
-2. [ ] **Write on init**: After writing `.ta/workflow.toml`, check if `CLAUDE.md` exists in the project root. If absent, write the generated file and print `Created CLAUDE.md — add project-specific rules before running ta run`. If present and `--overwrite` not passed, print `CLAUDE.md already exists — skipping (use --overwrite to replace)`.
+2. [x] **Write on init**: After writing `.ta/workflow.toml`, check if `CLAUDE.md` exists in the project root. If absent, write the generated file and print `Created CLAUDE.md — add project-specific rules before running ta run`. If present and `--overwrite` not passed, print `CLAUDE.md already exists — skipping (use --overwrite to replace)`.
 
-3. [ ] **`--overwrite` flag** on `ta init run`: Replaces an existing CLAUDE.md. Prints the path of the replaced file.
+3. [x] **`--overwrite` flag** on `ta init run`: Replaces an existing CLAUDE.md. Prints the path of the replaced file.
 
-4. [ ] **Templates**: Rust workspace, TypeScript/Node, Python, Go, generic. Generic emits commented-out placeholders for build/verify/git sections.
+4. [x] **Templates**: Rust workspace (cargo build/test/clippy/fmt), TypeScript/Node (npm typecheck/test/lint), Python (ruff/mypy/pytest), Go (go build/test/vet), generic (commented-out placeholders), Unreal/Unity (generic stub with workflow.toml reference).
 
-5. [ ] **Tests**: Init on empty dir → CLAUDE.md created with correct verify commands; init on dir with existing CLAUDE.md → file unchanged; `--overwrite` → file replaced; each template → verify section matches `workflow.toml` verify commands.
+5. [x] **Tests**: 10 new tests — init on empty dir → CLAUDE.md created with correct verify commands (2 per template); init on dir with existing CLAUDE.md → file unchanged; `--overwrite` → file replaced; `write_claude_md` idempotent without flag; re-run on configured project generates missing CLAUDE.md. 42 init tests total, all passing.
 
-6. [ ] **USAGE.md**: Update "Getting Started / ta init" section to note that CLAUDE.md is generated and what it contains.
+6. [x] **USAGE.md**: Added "CLAUDE.md generation" subsection under Project Initialization explaining what is generated, how `--overwrite` works, and how to customise.
 
 #### Version: `0.15.13-alpha.1`
 
