@@ -9955,13 +9955,23 @@ One JSON record per item, appended by `ta draft apply`:
 
 ### v0.15.15 — Multi-Agent Consensus Review Workflow
 <!-- status: pending -->
-**Goal**: A workflow template for multi-agent panel reviews where specialist agents run in parallel, each producing a structured verdict with a score and findings, and a final consensus step aggregates their outputs into a readiness score and recommendation. Ships with a `code-review-consensus` template covering architect, security, principal engineer, and PM roles.
+**Goal**: A workflow template for multi-agent panel reviews where specialist agents run in parallel, each producing a structured verdict with a score and findings, and a final consensus step aggregates their outputs into a readiness score and recommendation. Ships with a `code-review-consensus` template covering architect, security, principal engineer, and PM roles. Include configurable consensus algorithms/models. Start with Raft and Paxos with Raft as the default — it should do no work if there is no swarm/multi-agent in the workflow.
 
 **Depends on**: v0.15.14 (parallel fan-out, join step)
 
-**Design**:
+**Algorithm selection (TA)**:
 
-A `kind = "consensus_review"` step, or equivalently expressed via the generic parallel + join system:
+| Algorithm | Fault model | Use case |
+|-----------|-------------|----------|
+| **Raft** (default) | Crash fault tolerant | Multi-agent panels, agent coordinator state, replicated workflow logs |
+| **Paxos** | Crash fault tolerant | Alternative to Raft where single-decree consensus is sufficient |
+| **Weighted Threshold** | Trust-all | Single-node or no-swarm — simple weighted average, no replication |
+
+Raft is the TA default: leader election ensures one coordinator drives consensus even when agents stall or crash; log replication provides durability of the consensus decision across the workflow session. Falls back to `WeightedThreshold` with no coordination overhead when only one reviewer is active (no-op on single-agent workflows). Byzantine/adversarial consensus (PBFT, HotStuff, SCP) lives in the SA layer above TA.
+
+**Design** (workflow template):
+
+A `kind = "consensus"` step, or equivalently expressed via the generic parallel + join system:
 
 ```toml
 # templates/workflows/code-review-consensus.toml
@@ -9979,8 +9989,10 @@ Blocks apply if score < gate_threshold.
 """
 
 [workflow.config]
-gate_threshold = 0.75     # minimum consensus score to auto-proceed
+gate_threshold = 0.75          # minimum consensus score to auto-proceed
 reviewer_timeout_mins = 30
+consensus_algorithm = "raft"   # raft | paxos | weighted
+require_all_reviewers = false  # if false, timeout slots are omitted from quorum
 
 [[stage]]
 name = "architect_review"
@@ -10030,6 +10042,7 @@ inputs = ["architect_review.score", "security_review.score",
           "principal_review.score", "pm_review.score"]
 weights = { architect = 1.0, security = 1.5, principal = 1.0, pm = 0.5 }
 gate_threshold = "{{workflow.config.gate_threshold}}"
+algorithm = "{{workflow.config.consensus_algorithm}}"
 depends_on = ["architect_review", "security_review", "principal_review", "pm_review"]
 
 [[stage]]
@@ -10041,26 +10054,41 @@ condition = "consensus.proceed"
 
 **Items**:
 
-1. [ ] **`kind = "consensus"` step**: Reads `score` and `findings` from each input stage's output map. Computes `weighted_average(scores, weights)`. If `weighted_avg >= gate_threshold` → output `proceed = true`. Otherwise → output `proceed = false`, surface all findings grouped by reviewer role.
+1. [ ] **`ConsensusAlgorithm` enum** (`crates/ta-workflow/src/consensus.rs`): `Raft`, `Paxos`, `Weighted`. Serializes as `"raft"` / `"paxos"` / `"weighted"`. Default = `Raft`. No-op (falls through to `Weighted`) when only one reviewer is active.
 
-2. [ ] **`review-specialist` base workflow template** (`templates/workflows/review-specialist.toml`): Minimal governed review workflow. Runs a single agent with the `--objective` prompt, produces `verdict.json` with `score: f64` (0.0–1.0), `findings: Vec<String>`, `role: String`. The `score` field is the primary output consumed by the `consensus` step.
+2. [ ] **`kind = "consensus"` step runtime** (`governed_workflow.rs`): Dispatches to the selected algorithm. Reads `score` and `findings` from each input stage's output map. When `algorithm = "raft"`, uses the Raft coordinator to replicate the consensus decision to all active agents before committing — ensures durability if the coordinator crashes mid-decision. When `algorithm = "weighted"`, computes the weighted average directly with no replication overhead. Single-agent / no-swarm → always uses `weighted` regardless of config.
 
-3. [ ] **`WeightedConsensus` struct** (`governed_workflow.rs`): `scores: HashMap<String, f64>`, `weights: HashMap<String, f64>`, `threshold: f64`. `compute() -> ConsensusResult { score, proceed, findings_by_role }`. Exposed as a standalone function so it can be unit-tested without spawning agents.
+3. [ ] **`RaftConsensus`** (`crates/ta-workflow/src/consensus/raft.rs`):
+   - Leader election: the `consensus` step is the initial leader; if it stalls, any reviewer with a higher term becomes leader
+   - Log entry: each reviewer's `{ score, findings, role }` is appended to the Raft log; committed once a majority (⌊n/2⌋+1) acknowledge receipt
+   - Once the log is committed, computes `weighted_average(committed_scores, weights)` → `proceed` / `score`
+   - Session-scoped — log lives in `.ta/workflow-runs/<run-id>/raft.log` and is cleared on run completion
+   - All leader elections and log entries appended to `goal-audit.jsonl` as structured events
 
-4. [ ] **`ta workflow run code-review-consensus --goal "Add rate limiting to auth"` UX**:
+4. [ ] **`PaxosConsensus`** (`crates/ta-workflow/src/consensus/paxos.rs`): Single-decree Paxos for cases where only one round of consensus is needed and Raft's multi-round log is unnecessary overhead. `prepare → promise → accept → accepted` phase. Selected via `algorithm = "paxos"`.
+
+5. [ ] **`WeightedConsensus`** (`crates/ta-workflow/src/consensus/weighted.rs`): Used when `algorithm = "weighted"` or when only one reviewer is active (no-op path). `scores: HashMap<String, f64>`, `weights: HashMap<String, f64>`, `threshold: f64`. `compute() -> ConsensusResult { score, proceed, findings_by_role }`. No coordination overhead — identical to current scalar aggregation.
+
+6. [ ] **`review-specialist` base workflow template** (`templates/workflows/review-specialist.toml`): Minimal governed review workflow. Runs a single agent with the `--objective` prompt, produces `verdict.json` with `score: f64` (0.0–1.0), `findings: Vec<String>`, `role: String`. The `score` field is the primary output consumed by the `consensus` step.
+
+7. [ ] **`ta workflow run code-review-consensus --goal "Add rate limiting to auth"` UX**:
    - Shows live status as each reviewer completes (same live-status machinery as `ta workflow status --live`)
-   - On completion: prints consensus score, per-reviewer scores, and top findings
+   - On completion: prints consensus score, per-reviewer scores, algorithm used, and top findings
+   - Prints `[Raft] Committed log entry 4/4 (majority: 3)` when Raft log commits
    - On `proceed = false`: prints blockage message with all findings, suggests `--override` with audit log
 
-5. [ ] **`--override` flag on governed workflow run**: Bypasses `consensus.proceed = false` and applies the draft with an `OVERRIDE` entry in the audit trail. Requires the user to supply `--override-reason "..."`. Logged to `goal-audit.jsonl` and flagged in `ta workflow status` output.
+8. [ ] **`--override` flag on governed workflow run**: Bypasses `consensus.proceed = false` and applies the draft with an `OVERRIDE` entry in the audit trail. Requires `--override-reason "..."`. Logged to `goal-audit.jsonl` and flagged in `ta workflow status`.
 
-6. [ ] **Reviewer timeout**: Each specialist review has `reviewer_timeout_mins` (default 30). If a reviewer doesn't complete in time, its slot is omitted from the consensus calculation and flagged in the result (not a hard failure unless `require_all_reviewers = true`).
+9. [ ] **Reviewer timeout**: Each specialist review has `reviewer_timeout_mins` (default 30). If a reviewer doesn't complete in time, its slot is omitted from the quorum calculation (Raft: reduces majority threshold; Paxos: reduces quorum size) and flagged in the result. Not a hard failure unless `require_all_reviewers = true`.
 
-7. [ ] **Tests**: `WeightedConsensus::compute` with equal weights; weighted average with security 1.5x; threshold gate proceeds on 0.80 with gate 0.75; threshold gate blocks on 0.70; missing reviewer slot with `require_all = false` omits from average; `--override` adds OVERRIDE to audit trail; timeout produces flagged-but-omitted slot.
+10. [ ] **Tests**: `RaftConsensus` — 4 reviewers all commit → proceed; 4 reviewers, 1 stall → majority of 3 commits, stall flagged; `PaxosConsensus` — single-decree prepare/accept round trips; `WeightedConsensus` — equal weights, 1.5x security weight, threshold gate proceeds/blocks; single-reviewer → falls back to `weighted` regardless of config; `--override` → OVERRIDE in audit trail; timeout → omitted from quorum.
 
-8. [ ] **Workflow template** (`templates/workflows/code-review-consensus.toml`): Ships as a built-in template. `ta workflow run code-review-consensus --goal "..."` is the primary UX.
+11. [ ] **Workflow template** (`templates/workflows/code-review-consensus.toml`): Ships as a built-in template. `ta workflow run code-review-consensus --goal "..."` is the primary UX.
 
-9. [ ] **USAGE.md**: "Multi-Agent Consensus Review" section — running `code-review-consensus`, interpreting the score, reviewer roles, configuring weights and threshold, override with audit log.
+12. [ ] **USAGE.md** — "Multi-Agent Consensus Review" section:
+    - Running `code-review-consensus`, interpreting the score, reviewer roles, configuring weights and threshold
+    - Understanding `consensus_algorithm`: when Raft (multi-agent durability), Paxos (single-round), or Weighted (single-agent / no coordination)
+    - Override with audit log
 
 #### Version: `0.15.15-alpha`
 
@@ -10833,6 +10861,29 @@ SA is a **separate repository** that depends on TA as a library/daemon. It does 
 3. **SA-v0.3** — Kernel-level network policy: agent network egress rules enforced at the container level, not just by constitution. Requires SA-v0.1 (OCI runtime).
 4. **SA-v0.4** — Multi-party governance: RBAC, org-level policy, audit export for compliance (ISO/IEC 42001, EU AI Act). Requires TA v0.14.4 daemon extension surface.
 5. **SA-v0.5** — Cloud deployment: multi-tenant daemon, SSO, secrets management. This is the commercial tier that external teams pay for.
+
+6. **SA-v0.6** — Distributed Byzantine consensus: PBFT as the default protocol for multi-node/multi-agent coordination and multi-human merge arbitration. Extends TA's v0.15.15 `ConsensusAlgorithm` enum with Byzantine-fault-tolerant variants (`Pbft`, `HotStuff`, `Scp`). Requires SA-v0.4 (multi-party governance) and TA v0.15.15 (consensus step runtime + `ConsensusAlgorithm` trait).
+
+   **Why Byzantine here, not in TA**: TA assumes trusted agents running on a single user's machine — Raft (crash-fault-tolerant) is the right default. SA operates in environments where nodes may be compromised, colluding, or adversarially controlled. PBFT's Byzantine fault tolerance is only meaningful when you have independent trust domains, hardware attestation (SA-v0.2), and multi-party governance (SA-v0.4) backing each vote.
+
+   **Algorithm selection (SA)**:
+
+   | Algorithm | Fault model | Message complexity | Use case |
+   |-----------|-------------|-------------------|----------|
+   | **PBFT** (SA default) | Byzantine (f of 3f+1) | O(n²) | Multi-org panels, multi-human merge arbitration, regulated deployments |
+   | **HotStuff / Linear BFT** | Byzantine (f of 3f+1) | O(n) | Larger panels (>7 nodes) where PBFT's O(n²) is impractical |
+   | **Stellar SCP** | Federated Byzantine | O(n) per quorum slice | Cross-org / federated trust where each node has its own quorum slice — no single coordinator |
+   | **Tendermint BFT** | Byzantine (f of 3f+1) | O(n²) with pipelining | Blockchain-style finality with explicit round structure; suited for ordered audit logs |
+
+   **Multi-human merge coordination**: When multiple human reviewers must reach agreement before a draft is applied (multi-party code review, legal/compliance sign-off, release approval), SA-v0.6 runs a PBFT round among the reviewers' approval signals. Each human approval is a signed vote (verified against their hardware attestation from SA-v0.2). A conflicting approval/denial from two humans is treated as a Byzantine fault and escalated rather than silently resolved.
+
+   **Phases**:
+   - `SA-v0.6.1` — `ByzantineConsensusAlgorithm` enum extending TA's `ConsensusAlgorithm`: `Pbft`, `HotStuff`, `Scp`, `Tendermint`. Serializes as `"pbft"` / `"hotstuff"` / `"scp"` / `"tendermint"`. Registered as SA-layer variants — TA's `ConsensusAlgorithm::Sa(ByzantineConsensusAlgorithm)` wrapper so TA remains Byzantine-free without an SA plugin.
+   - `SA-v0.6.2` — `PbftConsensus` implementation (`sa-consensus/src/pbft.rs`): 3-phase commit (pre-prepare → prepare → commit), view-change on leader timeout, attestation-verified vote signatures (requires SA-v0.2 `AttestationBackend`).
+   - `SA-v0.6.3` — `HotStuffConsensus` implementation (`sa-consensus/src/hotstuff.rs`): linear 2-phase BFT with pipelined proposals. Use when panel size > 7 and PBFT message overhead is measurable.
+   - `SA-v0.6.4` — `StellarSCP` implementation (`sa-consensus/src/scp.rs`): federated Byzantine agreement with quorum slices declared in `sa-config.toml`. Each node's quorum slice is a set of orgs/signers it trusts; consensus requires a quorum intersection across slices.
+   - `SA-v0.6.5` — Multi-human merge arbitration: `kind = "human-consensus"` workflow step. Each human reviewer submits a signed approval/denial via the SA web UI or API. PBFT aggregates votes with attestation verification. Conflicting signals escalate to a named arbitrator (configured in `sa-config.toml`).
+   - `SA-v0.6.6` — Observability: all PBFT view-changes, HotStuff timeouts, SCP quorum failures, and multi-human escalations exported to the SA audit trail with structured fields (algorithm, round, node-count, fault-count, duration). `sa audit consensus-log --run <id>` command.
 
 ### How to track the decision
 
