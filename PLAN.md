@@ -9736,6 +9736,56 @@ condition = "!plan_next.done"
 
 ---
 
+### v0.15.13.1 — `ta init` generates CLAUDE.md
+<!-- status: pending -->
+**Goal**: `ta init` (and `ta init run --template <type>`) generates a starter `CLAUDE.md` in the project root alongside the `.ta/` config. If a `CLAUDE.md` already exists it is left unchanged (no overwrite without `--overwrite`). The generated file is derived from the same project-type detection and verify commands that `ta init` already writes to `workflow.toml`, so it is immediately correct for the project — not a generic placeholder.
+
+**Depends on**: none (init command is self-contained)
+
+**Generated content** (Rust workspace example — each template produces equivalent output for its toolchain):
+
+```markdown
+# <project-name>
+
+## Build
+
+./dev cargo build --workspace
+
+## Verify (all must pass before committing)
+
+./dev cargo test --workspace
+./dev cargo clippy --workspace --all-targets -- -D warnings
+./dev cargo fmt --all -- --check
+
+## Git
+
+Always work on a feature branch. Never commit directly to main.
+Branch prefixes: feature/, fix/, refactor/, docs/
+
+## Rules
+
+- Run verify after every code change, before committing
+- Use `tempfile::tempdir()` for test fixtures that need filesystem access
+```
+
+**Items**:
+
+1. [ ] **`generate_claude_md(project_name, template, verify_cmds) -> String`** (`apps/ta-cli/src/commands/init.rs`): Builds the CLAUDE.md content from the detected project type and the verify commands already determined during `ta init`. No new detection logic — reuse what's already computed for `workflow.toml`.
+
+2. [ ] **Write on init**: After writing `.ta/workflow.toml`, check if `CLAUDE.md` exists in the project root. If absent, write the generated file and print `Created CLAUDE.md — add project-specific rules before running ta run`. If present and `--overwrite` not passed, print `CLAUDE.md already exists — skipping (use --overwrite to replace)`.
+
+3. [ ] **`--overwrite` flag** on `ta init run`: Replaces an existing CLAUDE.md. Prints the path of the replaced file.
+
+4. [ ] **Templates**: Rust workspace, TypeScript/Node, Python, Go, generic. Generic emits commented-out placeholders for build/verify/git sections.
+
+5. [ ] **Tests**: Init on empty dir → CLAUDE.md created with correct verify commands; init on dir with existing CLAUDE.md → file unchanged; `--overwrite` → file replaced; each template → verify section matches `workflow.toml` verify commands.
+
+6. [ ] **USAGE.md**: Update "Getting Started / ta init" section to note that CLAUDE.md is generated and what it contains.
+
+#### Version: `0.15.13-alpha.1`
+
+---
+
 ### v0.15.14 — Hierarchical Workflows: Parallel Fan-Out, Phase Loops & Milestone Draft
 <!-- status: pending -->
 **Goal**: Two first-class modes for multi-phase execution — **PR-per-phase** (iterate phases serially, PR and VCS-sync each one before moving on) and **milestone-draft** (iterate phases, accumulate all changes into a branch, present the entire series as one combined draft for human approval). Both modes support phase selection by count, version set (glob), or range. The sync step after each PR uses the `SourceAdapter` trait — not hardcoded git — so the loop works identically on Git, Perforce, and SVN.
