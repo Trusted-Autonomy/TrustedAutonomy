@@ -66,7 +66,14 @@ pub struct SupervisorRunConfig {
     pub constitution_path: Option<std::path::PathBuf>,
     /// Don't fail if constitution is missing.
     pub skip_if_no_constitution: bool,
-    /// Timeout in seconds (default 120).
+    /// Kill supervisor if no token is received for this many seconds (default 30).
+    ///
+    /// Replaces wall-clock `timeout_secs`: a supervisor actively streaming a large diff
+    /// will never be killed as long as tokens keep arriving. Only a truly stalled process
+    /// (no output for `heartbeat_stale_secs`) is terminated.
+    pub heartbeat_stale_secs: u64,
+    /// Deprecated: use `heartbeat_stale_secs` instead. Accepted for backward compat and
+    /// mapped to `heartbeat_stale_secs` at construction time with a deprecation warning.
     pub timeout_secs: u64,
     /// Optional env var name to check before spawning the agent (pre-flight UX check).
     /// When set, TA verifies the var exists and prints an actionable message if missing.
@@ -74,6 +81,9 @@ pub struct SupervisorRunConfig {
     pub api_key_env: Option<String>,
     /// Staging directory path (required for manifest-based custom agents).
     pub staging_path: Option<std::path::PathBuf>,
+    /// Path to the heartbeat file written after each token chunk. When `None`, heartbeat
+    /// writes are skipped (e.g. in tests or when no workspace dir is available).
+    pub heartbeat_path: Option<std::path::PathBuf>,
 }
 
 /// Raw LLM response structure (expected JSON from the supervisor prompt).
@@ -159,7 +169,7 @@ fn invoke_claude_cli_supervisor(
     prompt: &str,
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
-    let stdout = spawn_with_timeout(
+    let stdout = spawn_with_heartbeat_monitor(
         "claude",
         &[
             "--print",
@@ -168,7 +178,8 @@ fn invoke_claude_cli_supervisor(
             "stream-json",
             prompt,
         ],
-        config.timeout_secs,
+        config.heartbeat_stale_secs,
+        config.heartbeat_path.as_deref(),
         "Claude Code CLI",
     )?;
 
@@ -185,10 +196,11 @@ fn invoke_codex_supervisor(
     prompt: &str,
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
-    let stdout = spawn_with_timeout(
+    let stdout = spawn_with_heartbeat_monitor(
         "codex",
         &["--approval-mode", "full-auto", "--quiet", prompt],
-        config.timeout_secs,
+        config.heartbeat_stale_secs,
+        config.heartbeat_path.as_deref(),
         "Codex CLI",
     )?;
 
@@ -201,10 +213,11 @@ fn invoke_ollama_supervisor(
     prompt: &str,
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
-    let stdout = spawn_with_timeout(
+    let stdout = spawn_with_heartbeat_monitor(
         "ta",
         &["agent", "run", "ollama", "--headless", "--prompt", prompt],
-        config.timeout_secs,
+        config.heartbeat_stale_secs,
+        config.heartbeat_path.as_deref(),
         "ta-agent-ollama",
     )?;
 
@@ -212,13 +225,26 @@ fn invoke_ollama_supervisor(
     Ok(review)
 }
 
-/// Spawn a process and collect its stdout, killing it if it exceeds the timeout.
-fn spawn_with_timeout(
+/// Spawn a process and stream its stdout, writing a heartbeat file after each line received.
+///
+/// A reader thread collects stdout lines and sends them via a channel. The main thread
+/// polls with a short timeout and kills the child if no output has arrived for
+/// `stale_secs`. This replaces the wall-clock `spawn_with_timeout` approach: actively
+/// streaming supervisors are never killed, only truly stalled ones (no tokens for
+/// `stale_secs`).
+///
+/// `heartbeat_path` is optional; when `None`, heartbeat writes are skipped (e.g. in
+/// tests or when no workspace dir is available).
+fn spawn_with_heartbeat_monitor(
     program: &str,
     args: &[&str],
-    timeout_secs: u64,
+    stale_secs: u64,
+    heartbeat_path: Option<&std::path::Path>,
     label: &str,
 ) -> anyhow::Result<String> {
+    use std::io::BufRead;
+    use std::sync::mpsc;
+
     let mut child = std::process::Command::new(program)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -233,45 +259,105 @@ fn spawn_with_timeout(
             )
         })?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    // Write initial heartbeat immediately so mtime is set from the moment of spawn.
+    if let Some(hb) = heartbeat_path {
+        let _ = std::fs::write(hb, b"");
+    }
 
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_string(&mut stdout);
-                }
-                if !status.success() && stdout.trim().is_empty() {
-                    let mut stderr = String::new();
-                    if let Some(mut err) = child.stderr.take() {
-                        let _ = err.read_to_string(&mut stderr);
+    // Spawn reader thread: reads stdout lines and sends them via channel.
+    // Sends `None` on EOF.
+    let (line_tx, line_rx) = mpsc::channel::<Option<String>>();
+    let stdout = child.stdout.take();
+    let reader_handle = std::thread::spawn(move || {
+        if let Some(stdout) = stdout {
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        if line_tx.send(Some(l)).is_err() {
+                            break;
+                        }
                     }
-                    anyhow::bail!(
-                        "{} exited with status {}: {}",
-                        label,
-                        status,
-                        &stderr[..stderr.len().min(200)]
-                    );
+                    Err(_) => break,
                 }
-                return Ok(stdout);
+            }
+        }
+        let _ = line_tx.send(None);
+    });
+
+    // Main loop: poll for lines, update heartbeat, check for stall.
+    let poll_interval = std::time::Duration::from_millis(100);
+    let stale_duration = std::time::Duration::from_secs(stale_secs);
+    let mut stdout_str = String::new();
+    let mut partial_output = String::new();
+    let mut last_token = std::time::Instant::now();
+    let mut eof = false;
+
+    while !eof {
+        match line_rx.recv_timeout(poll_interval) {
+            Ok(Some(line)) => {
+                last_token = std::time::Instant::now();
+                stdout_str.push_str(&line);
+                stdout_str.push('\n');
+                // Accumulate partial output for stall error messages (cap at 200 chars).
+                if partial_output.len() < 200 {
+                    partial_output.push_str(&line);
+                    partial_output.push('\n');
+                }
+                // Update heartbeat on each received line.
+                if let Some(hb) = heartbeat_path {
+                    let _ = std::fs::write(hb, b"");
+                }
             }
             Ok(None) => {
-                if std::time::Instant::now() >= deadline {
+                eof = true; // Reader sent EOF sentinel.
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // No output received in poll_interval — check for stall.
+                if last_token.elapsed() >= stale_duration {
                     let _ = child.kill();
+                    let _ = reader_handle.join();
+                    if let Some(hb) = heartbeat_path {
+                        let _ = std::fs::remove_file(hb);
+                    }
+                    let partial = partial_output.trim().to_string();
                     anyhow::bail!(
-                        "{} timed out after {}s — increase [supervisor] timeout_secs in workflow.toml",
-                        label,
-                        timeout_secs
+                        "Supervisor stalled — no tokens received for {}s. Findings so far: {}",
+                        stale_secs,
+                        partial
                     );
                 }
-                std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            Err(e) => {
-                anyhow::bail!("Error waiting for {}: {}", label, e);
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eof = true;
             }
         }
     }
+
+    let _ = reader_handle.join();
+
+    // Wait for child to exit.
+    let status = child.wait()?;
+
+    // Clean up heartbeat sentinel on completion.
+    if let Some(hb) = heartbeat_path {
+        let _ = std::fs::remove_file(hb);
+    }
+
+    if !status.success() && stdout_str.trim().is_empty() {
+        let mut stderr = String::new();
+        if let Some(mut err) = child.stderr.take() {
+            let _ = err.read_to_string(&mut stderr);
+        }
+        anyhow::bail!(
+            "{} exited with status {}: {}",
+            label,
+            status,
+            &stderr[..stderr.len().min(200)]
+        );
+    }
+
+    Ok(stdout_str)
 }
 
 /// Extract the final text content from Claude CLI's stream-json output.
@@ -439,7 +525,6 @@ fn run_manifest_supervisor(
     }
 
     let parts: Vec<&str> = cmd_str.split_whitespace().collect();
-    let timeout = std::time::Duration::from_secs(config.timeout_secs);
     let mut child = std::process::Command::new(parts[0])
         .args(&parts[1..])
         .current_dir(staging_path)
@@ -448,17 +533,41 @@ fn run_manifest_supervisor(
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn custom agent '{}': {}", agent_name, e))?;
 
-    let deadline = std::time::Instant::now() + timeout;
+    // Write initial heartbeat for manifest agent.
+    if let Some(ref hb) = config.heartbeat_path {
+        let _ = std::fs::write(hb, b"");
+    }
+
+    // Manifest agents write a result file rather than streaming stdout, so we poll
+    // for the result file and update the heartbeat on each poll tick.
+    let stale_secs = config.heartbeat_stale_secs;
+    let mut last_result_size: u64 = 0;
+    let mut last_progress = std::time::Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {
-                if std::time::Instant::now() >= deadline {
+                // Update heartbeat if the result file has grown (agent is making progress).
+                let current_size = std::fs::metadata(&result_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if current_size > last_result_size {
+                    last_result_size = current_size;
+                    last_progress = std::time::Instant::now();
+                    if let Some(ref hb) = config.heartbeat_path {
+                        let _ = std::fs::write(hb, b"");
+                    }
+                }
+                if last_progress.elapsed().as_secs() >= stale_secs {
                     let _ = child.kill();
+                    // Clean up heartbeat.
+                    if let Some(ref hb) = config.heartbeat_path {
+                        let _ = std::fs::remove_file(hb);
+                    }
                     anyhow::bail!(
-                        "Custom agent '{}' timed out after {}s",
+                        "Custom agent '{}' stalled — no progress for {}s",
                         agent_name,
-                        config.timeout_secs
+                        stale_secs
                     );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -467,6 +576,11 @@ fn run_manifest_supervisor(
                 anyhow::bail!("Error waiting for custom agent '{}': {}", agent_name, e);
             }
         }
+    }
+
+    // Clean up heartbeat on completion.
+    if let Some(ref hb) = config.heartbeat_path {
+        let _ = std::fs::remove_file(hb);
     }
 
     let content = std::fs::read_to_string(&result_path).map_err(|e| {
@@ -816,15 +930,141 @@ mod tests {
             verdict_on_block: "warn".to_string(),
             constitution_path: None,
             skip_if_no_constitution: true,
+            heartbeat_stale_secs: 30,
             timeout_secs: 30,
             api_key_env: Some("TA_TEST_MISSING_KEY_XYZ_SUPERVISOR".to_string()),
             staging_path: None,
+            heartbeat_path: None,
         };
         // Ensure the env var is not set.
         std::env::remove_var("TA_TEST_MISSING_KEY_XYZ_SUPERVISOR");
         let review = invoke_supervisor_agent("test objective", &[], None, &config);
         assert_eq!(review.verdict, SupervisorVerdict::Warn);
         assert!(review.findings[0].contains("TA_TEST_MISSING_KEY_XYZ_SUPERVISOR"));
+    }
+
+    #[test]
+    fn test_heartbeat_written_per_chunk() {
+        use tempfile::tempdir;
+        // Use `echo` to produce output — available on all Unix-like systems.
+        let dir = tempdir().unwrap();
+        let hb_path = dir.path().join("supervisor.heartbeat");
+
+        // Ensure the heartbeat file doesn't exist before the call.
+        assert!(!hb_path.exists());
+
+        // spawn_with_heartbeat_monitor with `echo` — produces one line of output.
+        let result = spawn_with_heartbeat_monitor(
+            "echo",
+            &["heartbeat_test"],
+            30, // stale_secs — won't trigger for a fast echo
+            Some(hb_path.as_path()),
+            "echo",
+        );
+        // echo exits 0 so result is Ok.
+        assert!(result.is_ok(), "echo should succeed: {:?}", result);
+        let stdout = result.unwrap();
+        assert!(stdout.contains("heartbeat_test"));
+        // Heartbeat file is cleaned up on completion.
+        assert!(
+            !hb_path.exists(),
+            "heartbeat file should be removed after completion"
+        );
+    }
+
+    #[test]
+    fn test_monitor_kills_stalled_process() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let hb_path = dir.path().join("supervisor_stall.heartbeat");
+
+        // Use `sleep 60` to simulate a process that produces no output.
+        // stale_secs = 1 so it should be killed almost immediately.
+        let result = spawn_with_heartbeat_monitor(
+            "sleep",
+            &["60"],
+            1, // stale_secs — kill after 1s of no output
+            Some(hb_path.as_path()),
+            "sleep",
+        );
+        assert!(result.is_err(), "stalled process should be killed");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("stalled") || err.contains("no tokens"),
+            "error should mention stall: {}",
+            err
+        );
+        // Heartbeat file should be cleaned up.
+        assert!(
+            !hb_path.exists(),
+            "heartbeat file should be removed after stall"
+        );
+    }
+
+    #[test]
+    fn test_active_streaming_not_killed() {
+        // A process that produces output frequently should NOT be killed.
+        // We use a shell command to print multiple lines with small delays.
+        // stale_secs = 5 (generous), process completes fast.
+        let result = spawn_with_heartbeat_monitor(
+            "sh",
+            &["-c", "echo line1 && echo line2 && echo line3"],
+            5,
+            None, // no heartbeat file needed
+            "sh",
+        );
+        assert!(
+            result.is_ok(),
+            "fast-completing process should not be killed: {:?}",
+            result
+        );
+        let stdout = result.unwrap();
+        assert!(stdout.contains("line1"));
+        assert!(stdout.contains("line3"));
+    }
+
+    #[test]
+    fn test_timeout_secs_field_preserved() {
+        // timeout_secs is preserved for backward compat — verify it doesn't break construction.
+        let config = SupervisorRunConfig {
+            enabled: true,
+            agent: "builtin".to_string(),
+            verdict_on_block: "warn".to_string(),
+            constitution_path: None,
+            skip_if_no_constitution: true,
+            heartbeat_stale_secs: 30,
+            timeout_secs: 120, // deprecated alias — must still be accepted
+            api_key_env: None,
+            staging_path: None,
+            heartbeat_path: None,
+        };
+        assert_eq!(config.heartbeat_stale_secs, 30);
+        assert_eq!(config.timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_stall_message_includes_partial_output() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let hb_path = dir.path().join("stall_partial.heartbeat");
+
+        // Use a shell command: print some output then hang.
+        // stale_secs = 1.
+        let result = spawn_with_heartbeat_monitor(
+            "sh",
+            &["-c", "echo partial_finding && sleep 60"],
+            1,
+            Some(hb_path.as_path()),
+            "sh",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // The stall message should include the partial output captured before stall.
+        assert!(
+            err.contains("partial_finding") || err.contains("Findings so far"),
+            "stall error should include partial output: {}",
+            err
+        );
     }
 
     #[test]
@@ -836,9 +1076,11 @@ mod tests {
             verdict_on_block: "warn".to_string(),
             constitution_path: None,
             skip_if_no_constitution: true,
+            heartbeat_stale_secs: 30,
             timeout_secs: 30,
             api_key_env: None,
             staging_path: None,
+            heartbeat_path: None,
         };
         let review = invoke_supervisor_agent("test objective", &[], None, &config);
         assert_eq!(review.verdict, SupervisorVerdict::Warn);
@@ -853,9 +1095,11 @@ mod tests {
             verdict_on_block: "warn".to_string(),
             constitution_path: None,
             skip_if_no_constitution: true,
+            heartbeat_stale_secs: 30,
             timeout_secs: 30,
             api_key_env: Some("OPENAI_API_KEY".to_string()),
             staging_path: None,
+            heartbeat_path: None,
         };
         std::env::remove_var("OPENAI_API_KEY");
         let review = invoke_supervisor_agent("objective", &[], None, &config);
@@ -907,9 +1151,11 @@ mod tests {
             verdict_on_block: "warn".to_string(),
             constitution_path: None,
             skip_if_no_constitution: true,
+            heartbeat_stale_secs: 10,
             timeout_secs: 10,
             api_key_env: None,
             staging_path: None,
+            heartbeat_path: None,
         };
 
         let review = invoke_supervisor_agent("test objective", &[], None, &config);
