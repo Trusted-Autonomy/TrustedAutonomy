@@ -9868,9 +9868,16 @@ The draft view renders this as a readable summary ("Agent stored 4 memory entrie
 
 7. [ ] **`ta draft apply` auto-stage**: When applying a draft that modifies `.ta/project-memory/`, `auto_stage_critical_files()` includes the directory so it lands in the VCS commit alongside source changes.
 
-8. [ ] **Tests**: `scope = project` entry → written to `.ta/project-memory/`, not `.ta/memory/`; `scope = local` → `.ta/memory/` only; file-path-tagged entry → surfaced when staging contains the file, not surfaced when it doesn't; injection order: project-memory before similarity entries.
+8. [ ] **Merge strategy for concurrent team writes**: `.ta/project-memory/` uses one file per entry key (matching the existing `.ta/memory/` per-file layout). This means independent entries from different team members merge cleanly. For **same-key conflicts** (two teammates update the same entry concurrently):
+   - Register a custom git merge driver in `.gitattributes`: `**.ta/project-memory/* merge=ta-memory`
+   - Driver (`scripts/ta-memory-merge`): if timestamps differ → take the newer entry (last-write-wins); if timestamps are equal → keep both under suffixed keys (`key` + `key__conflict_<sha>`) and emit a warning
+   - `ta memory conflicts` command: lists entries in `.ta/project-memory/` with `__conflict_` suffix, shows both versions side-by-side, prompts to keep/merge/discard
+   - `ta init` registers the merge driver in the project's `.git/config` (local, not committed) and writes the `.gitattributes` pattern (committed)
+   - If the custom driver is absent (fresh clone), git falls back to standard 3-way merge — which may produce conflict markers in the entry file. `ta memory doctor` detects conflict markers in `.ta/project-memory/` and surfaces them as actionable errors
 
-9. [ ] **USAGE.md**: "Team Memory" section — `ta memory store --scope project`, file-path tagging for architectural decisions, how project-memory is committed and shared, distinction from local memory.
+9. [ ] **Tests**: `scope = project` entry → written to `.ta/project-memory/`, not `.ta/memory/`; `scope = local` → `.ta/memory/` only; file-path-tagged entry → surfaced when staging contains the file, not surfaced when it doesn't; injection order: project-memory before similarity entries; same-key concurrent write → newer timestamp wins; equal-timestamp conflict → both kept with `__conflict_` suffix; `ta memory conflicts` lists and resolves.
+
+10. [ ] **USAGE.md**: "Team Memory" section — `ta memory store --scope project`, file-path tagging for architectural decisions, how project-memory is committed and shared, merge strategy for concurrent updates, `ta memory conflicts` for collision resolution, distinction from local memory.
 
 #### Version: `0.15.13-alpha.3`
 
