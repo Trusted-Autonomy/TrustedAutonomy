@@ -9831,6 +9831,26 @@ The draft view renders this as a readable summary ("Agent stored 4 memory entrie
 
 ---
 
+### v0.15.13.2.1 — Version Bump Reliability & Post-Apply Validation
+<!-- status: pending -->
+**Goal**: `ta draft apply` silently skips the workspace version bump if the goal has no `plan_phase` set (e.g., goal was started without `--phase`). Additionally, `bump_workspace_version` returning an empty vec is ambiguous — it could mean "already at target" or "regex matched nothing" — and is currently logged as neither. This phase makes version bumping reliable and observable.
+
+**Root cause**: At apply time, `phase_ids` is built from `goal.plan_phase` (set at `ta run --phase` time). If the goal was created without `--phase`, `phase_ids` is empty and the bump block at line 5180 is entirely skipped with no warning. The silent `Ok(vec![])` arm in `bump_workspace_version` makes it impossible to distinguish "already correct" from "failed to match."
+
+**Changes**:
+- [ ] `bump_workspace_version`: distinguish "already at version" (return `Ok(BumpResult::AlreadyCurrent)`) from "no files matched" (return `Err` or `Ok(BumpResult::NoMatch)`) — never treat no-match as success
+- [ ] After phase-apply completes (both VCS and non-VCS paths), derive expected semver from `last_phase_id` and compare against the post-apply Cargo.toml version; if mismatch, emit a loud actionable warning with the exact `./scripts/bump-version.sh <version>` command
+- [ ] If `phase_ids` is empty at apply time but the goal title contains a version string matching a known phase ID (fuzzy fallback), log a hint: "goal has no phase linked — run with `--phase v0.x.y.z` to enable auto-bump"
+- [ ] Add `ta draft apply --validate-version` flag (also runs as default post-apply check) that reads Cargo.toml and confirms it matches the applied phase semver, exiting non-zero if mismatched (useful in CI)
+- [ ] Test: apply a goal without `--phase` → confirm warning is printed; apply a goal with `--phase` → confirm Cargo.toml updated; apply to an already-correct version → confirm `AlreadyCurrent` log, no error
+- [ ] Update USAGE.md: document that `ta run` must be called with `--phase <id>` for auto-bump to fire; document `--validate-version` flag
+
+**Depends on**: v0.15.13.2
+
+#### Version: `0.15.13-alpha.2.1`
+
+---
+
 ### v0.15.13.3 — Committed Project-Scoped Memory (`.ta/project-memory/`)
 <!-- status: pending -->
 **Goal**: Memory entries with `scope = "project"` or `scope = "team"` are currently stored in `.ta/memory/` (gitignored, machine-local) alongside ephemeral execution state. This means project knowledge — architectural decisions, codebase facts, known gotchas — is lost when a machine is wiped and never shared with teammates or their agents. This phase splits the storage layer: local-scoped entries stay in `.ta/memory/`; project/team-scoped entries land in `.ta/project-memory/` which is committed to VCS and shared across the team.
