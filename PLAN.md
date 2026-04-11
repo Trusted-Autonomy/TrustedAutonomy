@@ -9896,7 +9896,7 @@ The draft view renders this as a readable summary ("Agent stored 4 memory entrie
 ---
 
 ### v0.15.13.4 — Supervisor Review: Heartbeat-Based Liveness (Replace Wall-Clock Timeout)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: The built-in supervisor review (`run_builtin_supervisor()`) uses a wall-clock `timeout_secs` (default 120s) that fires even when the supervisor is actively streaming a response. A large diff or a slow API response legitimately takes longer than 120s. Fix: same heartbeat model used for the agent watchdog in v0.15.7.1 — supervisor writes a heartbeat on each token received, monitor kills only when heartbeats stop.
 
 **Depends on**: v0.15.7.1 (heartbeat infrastructure in `.ta/heartbeats/`)
@@ -9914,19 +9914,19 @@ heartbeat_stale_secs = 30    # kill if no token received for this long (replaces
 
 **Items**:
 
-1. [ ] **Heartbeat writes in streaming loop** (`crates/ta-changeset/src/supervisor_review.rs`): Write `.ta/heartbeats/<goal-id>.supervisor` after each API chunk. Uses existing heartbeats dir from v0.15.7.1.
+1. [x] **Heartbeat writes in streaming loop** (`crates/ta-changeset/src/supervisor_review.rs`): `spawn_with_heartbeat_monitor()` writes `.ta/heartbeats/<goal-id>.supervisor` after each line received from the supervisor process. Initial write happens at spawn time.
 
-2. [ ] **Monitor thread replaces deadline**: Spawn monitor thread alongside streaming loop. Kill on mtime stale. Remove `Instant::now() + Duration::from_secs(timeout_secs)` deadline.
+2. [x] **Monitor thread replaces deadline**: `spawn_with_heartbeat_monitor()` uses a reader thread + `recv_timeout` loop. Main thread checks `last_token.elapsed() >= stale_duration` every 100ms and calls `child.kill()` if stalled. No `Instant::now() + Duration` deadline remains.
 
-3. [ ] **`SupervisorRunConfig`**: Replace `timeout_secs` with `heartbeat_stale_secs: u64` (default 30). `timeout_secs` accepted as deprecated alias with stderr warning.
+3. [x] **`SupervisorRunConfig`**: Added `heartbeat_stale_secs: u64` (default 30) and `heartbeat_path: Option<PathBuf>`. `timeout_secs` kept as deprecated field (u64) with deprecation warning emitted in `run.rs` and `release.rs` when set. `SupervisorConfig` in `ta-submit` updated to `heartbeat_stale_secs` + `timeout_secs: Option<u64>`.
 
-4. [ ] **Stall message**: `"Supervisor stalled — no tokens received for {stale_secs}s. Findings so far: {partial}"`. Include partial response in fallback.
+4. [x] **Stall message**: `"Supervisor stalled — no tokens received for {stale_secs}s. Findings so far: {partial}"`. Partial output accumulated in a capped buffer and included in the bail message.
 
-5. [ ] **Heartbeat cleanup**: Delete sentinel on completion. Drop guard cleans up on panic/signal.
+5. [x] **Heartbeat cleanup**: `spawn_with_heartbeat_monitor()` calls `fs::remove_file(hb)` on both normal completion and stall. Manifest supervisor also cleans up.
 
-6. [ ] **Tests**: heartbeat written per chunk; monitor kills on stale mtime; active streaming never killed; `timeout_secs` emits warning; stall message includes partial.
+6. [x] **Tests**: 5 new tests — `test_heartbeat_written_per_chunk` (initial write + cleanup); `test_monitor_kills_stalled_process` (sleep 60 killed after 1s stale); `test_active_streaming_not_killed` (fast echo not killed); `test_timeout_secs_field_preserved` (backward compat construction); `test_stall_message_includes_partial_output` (partial output in error).
 
-7. [ ] **USAGE.md**: Update "Supervisor Agent" — replace `timeout_secs` with `heartbeat_stale_secs`.
+7. [x] **USAGE.md**: "Supervisor Agent" section updated — `timeout_secs` replaced with `heartbeat_stale_secs`, deprecation note added.
 
 #### Version: `0.15.13-alpha.4`
 

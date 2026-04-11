@@ -1404,15 +1404,23 @@ fn run_constitution_check_step(
         return Ok(ta_changeset::SupervisorVerdict::Pass);
     }
 
+    if sup_cfg.timeout_secs.is_some() {
+        eprintln!(
+            "Warning: [supervisor] timeout_secs is deprecated. \
+             Use heartbeat_stale_secs instead (see workflow.toml)."
+        );
+    }
     let run_config = ta_changeset::SupervisorRunConfig {
         enabled: true,
         agent: sup_cfg.agent.clone(),
         verdict_on_block: sup_cfg.verdict_on_block.clone(),
         constitution_path: sup_cfg.constitution_path.clone(),
         skip_if_no_constitution: sup_cfg.skip_if_no_constitution,
-        timeout_secs: sup_cfg.timeout_secs,
+        heartbeat_stale_secs: sup_cfg.heartbeat_stale_secs,
+        timeout_secs: sup_cfg.timeout_secs.unwrap_or(120),
         api_key_env: sup_cfg.api_key_env.clone(),
         staging_path: None,
+        heartbeat_path: None,
     };
 
     let constitution_text = ta_changeset::load_constitution(&config.workspace_root, &run_config);

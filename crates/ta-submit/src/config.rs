@@ -667,7 +667,8 @@ pub fn resolve_plan_path(
 /// verdict_on_block = "warn"      # "warn" | "block"
 /// constitution_path = ".ta/constitution.toml"
 /// skip_if_no_constitution = true
-/// timeout_secs = 120
+/// heartbeat_stale_secs = 30     # kill if no token received for this long (replaces timeout_secs)
+/// # timeout_secs = 120           # deprecated — use heartbeat_stale_secs instead
 /// # api_key_env = "OPENAI_API_KEY"  # optional: pre-flight check for codex / custom agents
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -698,9 +699,19 @@ pub struct SupervisorConfig {
     #[serde(default = "default_supervisor_skip_no_constitution")]
     pub skip_if_no_constitution: bool,
 
-    /// Supervisor timeout in seconds (default 120 — short review, not implementation).
-    #[serde(default = "default_supervisor_timeout")]
-    pub timeout_secs: u64,
+    /// Kill supervisor if no token is received for this many seconds (default 30).
+    ///
+    /// Replaces the wall-clock `timeout_secs`: a supervisor actively streaming a large diff
+    /// will never be killed — only one that stops producing output for `heartbeat_stale_secs`
+    /// is terminated. Set higher (e.g. 60) if your supervisor uses a slow model.
+    #[serde(default = "default_supervisor_heartbeat_stale_secs")]
+    pub heartbeat_stale_secs: u64,
+
+    /// Deprecated: wall-clock timeout in seconds. Accepted for backward compatibility.
+    /// When present, emits a deprecation warning and the value is ignored in favour of
+    /// `heartbeat_stale_secs`. Will be removed in a future version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 
     /// Optional env var name to pre-flight check before spawning the supervisor agent.
     /// When set, TA verifies the var is present and prints an actionable message if missing.
@@ -719,8 +730,8 @@ fn default_supervisor_agent() -> String {
 fn default_verdict_on_block() -> String {
     "warn".to_string()
 }
-fn default_supervisor_timeout() -> u64 {
-    120
+fn default_supervisor_heartbeat_stale_secs() -> u64 {
+    30
 }
 fn default_supervisor_skip_no_constitution() -> bool {
     true
@@ -734,7 +745,8 @@ impl Default for SupervisorConfig {
             verdict_on_block: default_verdict_on_block(),
             constitution_path: None,
             skip_if_no_constitution: default_supervisor_skip_no_constitution(),
-            timeout_secs: default_supervisor_timeout(),
+            heartbeat_stale_secs: default_supervisor_heartbeat_stale_secs(),
+            timeout_secs: None,
             api_key_env: None,
         }
     }

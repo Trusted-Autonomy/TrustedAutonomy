@@ -914,9 +914,12 @@ agent = "builtin"                      # see agent options below
 verdict_on_block = "warn"              # "warn" = show only | "block" = refuse approve
 constitution_path = ".ta/constitution.toml"  # optional; also checks docs/TA-CONSTITUTION.md
 skip_if_no_constitution = true         # don't fail if no constitution file
-timeout_secs = 120
+heartbeat_stale_secs = 30             # kill if no token received for this long (default: 30)
+# timeout_secs = 120                   # deprecated — use heartbeat_stale_secs instead
 # api_key_env = "OPENAI_API_KEY"       # optional: pre-flight env var check for codex/custom agents
 ```
+
+`heartbeat_stale_secs` replaces the old wall-clock `timeout_secs`. A supervisor actively streaming a large diff will never be killed — only one that produces no output for `heartbeat_stale_secs` is terminated. This prevents false timeouts on large diffs or slow models. The old `timeout_secs` field is still accepted for backward compatibility but emits a deprecation warning.
 
 **Supervisor agent options**
 
@@ -938,7 +941,7 @@ agent = "codex"
 api_key_env = "OPENAI_API_KEY"   # TA checks this exists before spawning; codex reads it
 ```
 
-If the binary is not found, times out, or the response cannot be parsed, the supervisor falls back to a `warn` verdict automatically — it never blocks a draft due to its own failure.
+If the binary is not found, stalls (no tokens for `heartbeat_stale_secs`), or the response cannot be parsed, the supervisor falls back to a `warn` verdict automatically — it never blocks a draft due to its own failure.
 
 **Draft view output**:
 
