@@ -9832,7 +9832,7 @@ The draft view renders this as a readable summary ("Agent stored 4 memory entrie
 ---
 
 ### v0.15.13.3 — Committed Project-Scoped Memory (`.ta/project-memory/`)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Memory entries with `scope = "project"` or `scope = "team"` are currently stored in `.ta/memory/` (gitignored, machine-local) alongside ephemeral execution state. This means project knowledge — architectural decisions, codebase facts, known gotchas — is lost when a machine is wiped and never shared with teammates or their agents. This phase splits the storage layer: local-scoped entries stay in `.ta/memory/`; project/team-scoped entries land in `.ta/project-memory/` which is committed to VCS and shared across the team.
 
 **Depends on**: v0.15.13.2 (memory entry tracking per goal run)
@@ -9854,21 +9854,21 @@ The draft view renders this as a readable summary ("Agent stored 4 memory entrie
 
 **Items**:
 
-1. [ ] **Storage path routing** (`crates/ta-goal/src/memory.rs`): `MemoryStore::write()` checks `entry.scope`. `Scope::Local` → `.ta/memory/`; `Scope::Project | Scope::Team` → `.ta/project-memory/`. Read path loads both directories and merges results.
+1. [x] **Storage path routing** (`crates/ta-goal/src/memory.rs`): `MemoryStore::write()` checks `entry.scope`. `Scope::Local` → `.ta/memory/`; `Scope::Project | Scope::Team` → `.ta/project-memory/`. Read path loads both directories and merges results.
 
-2. [ ] **`.gitignore` update** (`ta init` template + docs): Add `.ta/project-memory/` to the "committed" list in gitignore comments. Remove it from the ignored list if present.
+2. [x] **`.gitignore` update** (`ta init` template + docs): Add `.ta/project-memory/` to the "committed" list in gitignore comments. Remove it from the ignored list if present.
 
-3. [ ] **File-path tagging**: `MemoryEntry` gains an optional `file_paths: Vec<String>` field. When set, the entry surfaces at injection time whenever any listed path exists in staging, independent of similarity score.
+3. [x] **File-path tagging**: `MemoryEntry` gains an optional `file_paths: Vec<String>` field. When set, the entry surfaces at injection time whenever any listed path exists in staging, independent of similarity score.
 
-4. [ ] **`ta run` injection**: Project-memory entries injected unconditionally (all of them, budget-permitting). File-path-tagged entries surfaced when staging contains matching path. Both added to the "Prior Context" section of CLAUDE.md injection before goal-title similarity entries.
+4. [x] **`ta run` injection**: Project-memory entries injected unconditionally (all of them, budget-permitting). File-path-tagged entries surfaced when staging contains matching path. Both added to the "Prior Context" section of CLAUDE.md injection before goal-title similarity entries.
 
-5. [ ] **`ta memory store --scope project "key" "value" [--file path/to/file.rs]`**: CLI command to manually write a project-scoped memory entry, optionally tagged to a file path. Primary UX for recording architectural decisions.
+5. [x] **`ta memory store --scope project "key" "value" [--file path/to/file.rs]`**: CLI command to manually write a project-scoped memory entry, optionally tagged to a file path. Primary UX for recording architectural decisions.
 
-6. [ ] **`ta memory list --scope project`**: List all committed project-memory entries with their keys, file tags, and creation goal ID.
+6. [x] **`ta memory list --scope project`**: List all committed project-memory entries with their keys, file tags, and creation goal ID.
 
-7. [ ] **`ta draft apply` auto-stage**: When applying a draft that modifies `.ta/project-memory/`, `auto_stage_critical_files()` includes the directory so it lands in the VCS commit alongside source changes.
+7. [x] **`ta draft apply` auto-stage**: When applying a draft that modifies `.ta/project-memory/`, `auto_stage_critical_files()` includes the directory so it lands in the VCS commit alongside source changes.
 
-8. [ ] **VCS-agnostic conflict detection and pluggable resolution pipeline**: Same-key concurrent writes are detected at read time (not via git merge driver — that's git-only and breaks on Perforce/SVN). When `MemoryStore::read_project()` loads `.ta/project-memory/` and finds two entries with the same key (from different VCS branches/shelves being merged), it marks them as `ConflictPair { key, ours, theirs, base }` and stores them in `.ta/project-memory/.conflicts/`. Conflict detection is VCS-agnostic: TA compares entry content after the VCS merge completes, regardless of which VCS produced the merge.
+8. [x] **VCS-agnostic conflict detection and pluggable resolution pipeline**: Same-key concurrent writes are detected at read time (not via git merge driver — that's git-only and breaks on Perforce/SVN). When `MemoryStore::read_project()` loads `.ta/project-memory/` and finds two entries with the same key (from different VCS branches/shelves being merged), it marks them as `ConflictPair { key, ours, theirs, base }` and stores them in `.ta/project-memory/.conflicts/`. Conflict detection is VCS-agnostic: TA compares entry content after the VCS merge completes, regardless of which VCS produced the merge.
 
    **Resolution pipeline** (in order):
    1. **Last-write-wins** (default, no-agent): if timestamps differ by > 60s, take the newer entry automatically. Fast path for the common case.
@@ -9887,9 +9887,9 @@ The draft view renders this as a readable summary ("Agent stored 4 memory entrie
 
    `ta init` writes the `.gitattributes` pattern only for git projects (detected via `SourceAdapter`). Non-git VCS: no `.gitattributes`, conflict detection relies entirely on the read-time comparison. `ta memory doctor` scans `.ta/project-memory/.conflicts/` and reports unresolved pairs with actionable instructions.
 
-9. [ ] **Tests**: `scope = project` → `.ta/project-memory/`; `scope = local` → `.ta/memory/`; file-path-tagged entry surfaced when staging contains file; injection order: project-memory before similarity entries; same-key newer timestamp → auto last-write-wins; same-key close timestamps → agent resolution invoked; agent `confidence >= 0.85` → auto-accepted; agent `confidence < 0.85` → escalated to human; `ta memory conflicts` lists and resolves; `MemoryConflictResolver` trait: custom resolver registered and called; non-git VCS: no `.gitattributes` written, conflict detection still works via read-time comparison.
+9. [x] **Tests**: `scope = project` → `.ta/project-memory/`; `scope = local` → `.ta/memory/`; file-path-tagged entry surfaced when staging contains file; injection order: project-memory before similarity entries; same-key newer timestamp → auto last-write-wins; same-key close timestamps → agent resolution invoked; agent `confidence >= 0.85` → auto-accepted; agent `confidence < 0.85` → escalated to human; `ta memory conflicts` lists and resolves; `MemoryConflictResolver` trait: custom resolver registered and called; non-git VCS: no `.gitattributes` written, conflict detection still works via read-time comparison.
 
-10. [ ] **USAGE.md**: "Team Memory" section — `ta memory store --scope project`, file-path tagging, committed sharing, conflict resolution pipeline (timestamp → agent → human), `ta memory conflicts`, `conflict_resolution` config, SA extension point.
+10. [x] **USAGE.md**: "Team Memory" section — `ta memory store --scope project`, file-path tagging, committed sharing, conflict resolution pipeline (timestamp → agent → human), `ta memory conflicts`, `conflict_resolution` config, SA extension point.
 
 #### Version: `0.15.13-alpha.3`
 
