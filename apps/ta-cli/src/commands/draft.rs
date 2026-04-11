@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use chrono::{Duration, Utc};
 use clap::Subcommand;
 use sha2::Digest as _;
+use ta_changeset::artifact_kind::ArtifactKind;
 use ta_changeset::changeset::{ChangeKind, ChangeSet, CommitIntent};
 use ta_changeset::diff::DiffContent;
 use ta_changeset::diff_handlers::DiffHandlersConfig;
@@ -27,6 +28,7 @@ use ta_changeset::uri_pattern;
 use ta_connector_fs::FsConnector;
 use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
 use ta_mcp_gateway::GatewayConfig;
+use ta_memory::{memory_store_from_config, MemoryQuery};
 use ta_workspace::{
     ChangeStore, ExcludePatterns, JsonFileStore, OverlayWorkspace, StagingWorkspace,
 };
@@ -1411,10 +1413,11 @@ pub(crate) fn build_package(
         );
     }
 
-    let source_dir = goal
+    let source_dir_buf: std::path::PathBuf = goal
         .source_dir
-        .as_ref()
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("Goal has no source_dir (not an overlay-based goal)"))?;
+    let source_dir: &std::path::Path = &source_dir_buf;
 
     // v0.12.2.3: Strip any leftover TA injection header from CLAUDE.md before diffing.
     // Protects against crash/freeze that leaves inject_claude_md's content in staging.
@@ -1431,6 +1434,33 @@ pub(crate) fn build_package(
     let changes = overlay.diff_all().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if changes.is_empty() {
+        // v0.15.13.2: Check whether the agent stored memory entries during this run.
+        // If it did, produce a MemorySummary draft so the findings are reviewable.
+        let goal_uuid = goal.goal_run_id;
+        let memory_store = memory_store_from_config(source_dir);
+        let memory_entries = memory_store
+            .lookup(MemoryQuery {
+                goal_id: Some(goal_uuid),
+                ..Default::default()
+            })
+            .unwrap_or_default();
+
+        if !memory_entries.is_empty() {
+            println!(
+                "No file changes detected. Found {} memory entry/entries written by this goal — \
+                 building memory-only draft.",
+                memory_entries.len()
+            );
+            return build_memory_only_draft(
+                config,
+                goal,
+                goal_id,
+                memory_entries,
+                source_dir,
+                summary,
+            );
+        }
+
         // Diagnose why there are no changes to produce a helpful error.
         let uncommitted = count_working_tree_changes(source_dir);
         if uncommitted > 0 {
@@ -2099,6 +2129,253 @@ pub(crate) fn build_package(
     println!();
     println!("Review with:  ta draft view {}", draft_display);
     println!("Approve with: ta draft approve {}", draft_display);
+
+    Ok(())
+}
+
+/// Build a draft package for a goal run that wrote memory entries but no file changes (v0.15.13.2).
+///
+/// Called by `build_package` when the overlay diff is empty but memory entries were found
+/// for this goal. Produces a `DraftPackage` with a single `MemorySummary` artifact so the
+/// agent's findings are reviewable. Approve keeps entries in the store (no-op — they were
+/// already written). Deny removes them via `ta draft deny`.
+fn build_memory_only_draft(
+    config: &GatewayConfig,
+    goal: GoalRun,
+    goal_id: String,
+    memory_entries: Vec<ta_memory::store::MemoryEntry>,
+    source_dir: &std::path::Path,
+    summary: &str,
+) -> anyhow::Result<()> {
+    use ta_changeset::draft_package::{
+        AgentIdentity, Changes, Goal, Iteration, Plan, Provenance, RequestedAction, ReviewRequests,
+        Risk, Signatures, Summary, WorkspaceRef,
+    };
+
+    let goal_store = GoalRunStore::new(&config.goals_dir)?;
+    let package_id = Uuid::new_v4();
+
+    // Render a human-readable summary of the memory entries.
+    let mut content_lines: Vec<String> = Vec::new();
+    content_lines.push(format!(
+        "Agent stored {} memory entry/entries during this goal run:\n",
+        memory_entries.len()
+    ));
+    for entry in &memory_entries {
+        let scope = entry.scope.as_deref().unwrap_or("local");
+        let category = entry
+            .category
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "other".to_string());
+        let value_str = match &entry.value {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+        };
+        content_lines.push("---".to_string());
+        content_lines.push(format!("Key:      {}", entry.key));
+        content_lines.push(format!("Scope:    {} | Category: {}", scope, category));
+        if !entry.tags.is_empty() {
+            content_lines.push(format!("Tags:     {}", entry.tags.join(", ")));
+        }
+        content_lines.push(format!("Value:\n{}", value_str));
+    }
+    let rendered_content = content_lines.join("\n");
+
+    let entry_ids: Vec<String> = memory_entries
+        .iter()
+        .map(|e| e.entry_id.to_string())
+        .collect();
+    let entry_count = memory_entries.len();
+
+    // Build the single MemorySummary artifact.
+    let artifact = Artifact {
+        resource_uri: format!("ta://memory/{}", goal_id),
+        change_type: ChangeType::Add,
+        diff_ref: "changeset:0".to_string(),
+        tests_run: vec![],
+        disposition: Default::default(),
+        rationale: Some(format!(
+            "Agent stored {} memory entry/entries during this run but made no file changes. \
+             These findings are the deliverable — approve to keep them, deny to remove them.",
+            entry_count
+        )),
+        dependencies: vec![],
+        explanation_tiers: None,
+        comments: None,
+        amendment: None,
+        kind: Some(ArtifactKind::MemorySummary {
+            entry_count,
+            entry_ids: entry_ids.clone(),
+        }),
+    };
+
+    // Persist the changeset holding the rendered summary.
+    let changeset = ChangeSet::new(
+        format!("ta://memory/{}", goal_id),
+        ChangeKind::FsPatch,
+        DiffContent::CreateFile {
+            content: rendered_content,
+        },
+    );
+    let mut store = JsonFileStore::new(goal.store_path.clone())?;
+    store.save(&goal_id, &changeset)?;
+
+    let effective_summary = if summary == "Changes from agent work" {
+        format!("Analysis goal: {} memory entry/entries stored", entry_count)
+    } else {
+        summary.to_string()
+    };
+
+    let constitution_store = ta_policy::ConstitutionStore::for_workspace(&config.workspace_root);
+
+    let mut pkg = DraftPackage {
+        package_version: "1.0.0".to_string(),
+        package_id,
+        created_at: chrono::Utc::now(),
+        goal: Goal {
+            goal_id: goal_id.to_string(),
+            title: goal.title.clone(),
+            objective: goal.objective.clone(),
+            success_criteria: vec![],
+            constraints: vec![],
+            parent_goal_title: None,
+        },
+        iteration: Iteration {
+            iteration_id: format!("{}-1", goal_id),
+            sequence: 1,
+            workspace_ref: WorkspaceRef {
+                ref_type: "memory_only".to_string(),
+                ref_name: goal.workspace_path.display().to_string(),
+                base_ref: Some(source_dir.display().to_string()),
+            },
+        },
+        agent_identity: AgentIdentity {
+            agent_id: goal.agent_id.clone(),
+            agent_type: "coding".to_string(),
+            constitution_id: constitution_store
+                .load(&goal_id)
+                .ok()
+                .flatten()
+                .map(|c| format!("goal-{}", c.goal_id))
+                .unwrap_or_else(|| "default".to_string()),
+            capability_manifest_hash: goal.manifest_id.to_string(),
+            orchestrator_run_id: None,
+        },
+        summary: Summary {
+            what_changed: effective_summary,
+            why: resolve_draft_why(&goal, source_dir),
+            impact: format!("{} memory entry/entries stored (no file changes)", entry_count),
+            rollback_plan: "Deny the draft to remove the memory entries from the store".to_string(),
+            open_questions: vec![],
+            alternatives_considered: vec![],
+        },
+        plan: Plan {
+            completed_steps: vec!["Agent completed analysis and stored findings to memory".to_string()],
+            next_steps: vec!["Review memory entries and approve or deny".to_string()],
+            decision_log: vec![],
+        },
+        changes: Changes {
+            artifacts: vec![artifact],
+            patch_sets: vec![],
+            pending_actions: vec![],
+        },
+        risk: Risk {
+            risk_score: 0,
+            findings: vec![],
+            policy_decisions: vec![],
+        },
+        provenance: Provenance {
+            inputs: vec![],
+            tool_trace_hash: "memory-only".to_string(),
+        },
+        review_requests: ReviewRequests {
+            requested_actions: vec![RequestedAction {
+                action: "approve".to_string(),
+                targets: vec!["all".to_string()],
+            }],
+            reviewers: vec!["human-reviewer".to_string()],
+            required_approvals: 1,
+            notes_to_reviewer: Some(format!(
+                "This is a memory-only draft. The agent stored {} entry/entries but made no file \
+                 changes. Approve to accept the findings; deny to remove them from the memory store.",
+                entry_count
+            )),
+        },
+        signatures: Signatures {
+            package_hash: "pending".to_string(),
+            agent_signature: "pending".to_string(),
+            gateway_attestation: None,
+        },
+        status: DraftStatus::PendingReview,
+        verification_warnings: vec![],
+        validation_log: vec![],
+        display_id: None,
+        tag: goal.tag.clone().or_else(|| Some(goal.display_tag())),
+        vcs_status: None,
+        parent_draft_id: None,
+        pending_approvals: vec![],
+        supervisor_review: None,
+        ignored_artifacts: vec![],
+        baseline_artifacts: vec![],
+        agent_decision_log: vec![],
+        goal_shortref: None,
+        draft_seq: 0,
+    };
+
+    // Set display_id and shortref/seq (mirrors build_package logic).
+    {
+        let goal_prefix = &goal_id[..8.min(goal_id.len())];
+        let existing = load_all_packages(config)
+            .unwrap_or_default()
+            .iter()
+            .filter(|p| p.goal.goal_id == goal_id)
+            .count();
+        let seq = existing + 1;
+        pkg.display_id = Some(format!("{}-{:02}", goal_prefix, seq));
+        pkg.goal_shortref = Some(goal_prefix.to_string());
+        pkg.draft_seq = seq as u32;
+    }
+
+    save_package(config, &pkg)?;
+
+    // Update goal: record memory entry IDs and transition to PrReady.
+    let mut goal = goal;
+    goal.pr_package_id = Some(package_id);
+    goal.memory_entries_created = entry_ids.iter().filter_map(|s| s.parse().ok()).collect();
+    goal_store.save(&goal)?;
+    goal_store.transition(goal.goal_run_id, GoalRunState::PrReady)?;
+
+    // Emit DraftBuilt event.
+    {
+        use ta_events::{EventEnvelope, EventStore, FsEventStore, SessionEvent};
+        let events_dir = config.workspace_root.join(".ta").join("events");
+        let event_store = FsEventStore::new(&events_dir);
+        let event = SessionEvent::DraftBuilt {
+            goal_id: goal.goal_run_id,
+            draft_id: package_id,
+            artifact_count: 1,
+            title: goal.title.clone(),
+        };
+        if let Err(e) = event_store.append(&EventEnvelope::new(event)) {
+            tracing::warn!("Failed to persist DraftBuilt event: {}", e);
+        }
+    }
+
+    let draft_display = draft_display_id(&pkg);
+    println!("draft package built: {} (memory-only)", draft_display);
+    println!("  Goal:    {} ({})", goal.title, goal_id);
+    println!(
+        "  Memory:  {} entry/entries stored (no file changes)",
+        entry_count
+    );
+    println!();
+    println!("Review with:  ta draft view {}", draft_display);
+    println!("Approve with: ta draft approve {}", draft_display);
+    println!(
+        "  (Deny removes the memory entries: ta draft deny {} \"reason\")",
+        draft_display
+    );
 
     Ok(())
 }
@@ -3333,6 +3610,51 @@ fn deny_package(
 
     // v0.12.5: Capture denial as human guidance and draft rejection into memory.
     capture_draft_denial_to_memory(config, package_goal_id, &pkg, reason);
+
+    // v0.15.13.2: If this is a memory-only draft, remove the stored entries on deny.
+    // The MemorySummary artifact holds the entry IDs to delete. We do this before
+    // velocity/audit so all cleanup is complete before the function returns.
+    {
+        let has_memory_artifact = pkg
+            .changes
+            .artifacts
+            .iter()
+            .any(|a| matches!(a.kind, Some(ArtifactKind::MemorySummary { .. })));
+        if has_memory_artifact {
+            let mut memory_store = memory_store_from_config(&config.workspace_root);
+            let mut removed = 0usize;
+            for artifact in &pkg.changes.artifacts {
+                if let Some(ArtifactKind::MemorySummary { ref entry_ids, .. }) = artifact.kind {
+                    // We can't delete by UUID directly — look up each key first.
+                    if let Ok(all_entries) = memory_store.list(None) {
+                        for entry_id_str in entry_ids {
+                            if let Ok(id) = entry_id_str.parse::<Uuid>() {
+                                if let Some(entry) = all_entries.iter().find(|e| e.entry_id == id) {
+                                    match memory_store.forget(&entry.key) {
+                                        Ok(true) => removed += 1,
+                                        Ok(false) => {} // already gone
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                key = %entry.key,
+                                                error = %e,
+                                                "Failed to remove memory entry on deny"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if removed > 0 {
+                println!(
+                    "Removed {} memory entry/entries from store (memory-only draft denied).",
+                    removed
+                );
+            }
+        }
+    }
 
     // v0.13.10: Record velocity entry for the denied goal.
     if let Some(goal_id) = package_goal_id {
@@ -12311,5 +12633,171 @@ fn run() {
             result.is_err(),
             "build_draft_inline should fail when goal does not exist"
         );
+    }
+
+    // ── Memory-only draft tests (v0.15.13.2) ─────────────────────────────
+
+    /// Helper: set up a goal in Running state inside a temp project, with a source dir
+    /// and identical staging dir (empty diff). Returns (config, goal_id, goal).
+    fn setup_memory_only_goal(
+        project: &TempDir,
+    ) -> (ta_mcp_gateway::GatewayConfig, String, ta_goal::GoalRun) {
+        use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
+
+        std::fs::create_dir_all(project.path().join(".ta/goals")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ta/memory")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ta/staging")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ta/packages")).unwrap();
+
+        // Source dir and workspace are the same → empty diff.
+        let workspace = project.path().join(".ta/staging/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store_dir = project.path().join(".ta/staging/store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+
+        let config = ta_mcp_gateway::GatewayConfig::for_project(project.path());
+
+        let mut goal = GoalRun::new(
+            "Analysis goal",
+            "Inspect codebase and store findings",
+            "test-agent",
+            workspace.clone(),
+            store_dir.clone(),
+        );
+        goal.source_dir = Some(project.path().to_path_buf());
+        goal.state = GoalRunState::Running;
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        goal_store.save(&goal).unwrap();
+
+        let goal_id = goal.goal_run_id.to_string();
+        (config, goal_id, goal)
+    }
+
+    #[test]
+    fn memory_only_draft_created_when_empty_diff_and_memory_entries_exist() {
+        let project = TempDir::new().unwrap();
+        let (config, goal_id, goal) = setup_memory_only_goal(&project);
+        let goal_uuid = goal.goal_run_id;
+
+        // Write a memory entry for this goal.
+        use ta_memory::store::MemoryStore as _;
+        let mut mem_store = ta_memory::FsMemoryStore::new(project.path().join(".ta/memory"));
+        mem_store
+            .store_with_params(
+                "test-finding",
+                serde_json::json!("The auth middleware uses RS256 — do not change to HS256."),
+                vec!["architecture".to_string()],
+                "test-agent",
+                ta_memory::store::StoreParams {
+                    goal_id: Some(goal_uuid),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // build_package should succeed and create a memory-only draft.
+        let result = build_package(&config, &goal_id, "Analysis run", false);
+        assert!(
+            result.is_ok(),
+            "build_package should succeed for memory-only run; got: {:?}",
+            result.err()
+        );
+
+        // The goal should now be in PrReady state.
+        let goal_store = ta_goal::GoalRunStore::new(&config.goals_dir).unwrap();
+        let updated = goal_store.get(goal_uuid).unwrap().unwrap();
+        assert!(
+            matches!(updated.state, ta_goal::GoalRunState::PrReady),
+            "goal should be PrReady after memory-only draft build"
+        );
+        assert!(
+            updated.pr_package_id.is_some(),
+            "goal should have pr_package_id set"
+        );
+        assert_eq!(
+            updated.memory_entries_created.len(),
+            1,
+            "goal should record 1 memory entry created"
+        );
+
+        // The draft should contain a MemorySummary artifact.
+        let pkg_id = updated.pr_package_id.unwrap();
+        let pkg = load_package(&config, pkg_id).unwrap();
+        assert_eq!(pkg.changes.artifacts.len(), 1);
+        let artifact = &pkg.changes.artifacts[0];
+        assert!(
+            artifact.resource_uri.starts_with("ta://memory/"),
+            "artifact URI should be ta://memory/..."
+        );
+        assert!(
+            matches!(
+                artifact.kind,
+                Some(ArtifactKind::MemorySummary { entry_count: 1, .. })
+            ),
+            "artifact kind should be MemorySummary with entry_count=1"
+        );
+    }
+
+    #[test]
+    fn empty_diff_and_no_memory_entries_errors() {
+        let project = TempDir::new().unwrap();
+        let (config, goal_id, _goal) = setup_memory_only_goal(&project);
+
+        // No memory entries → should error.
+        let result = build_package(&config, &goal_id, "Nothing done", false);
+        assert!(
+            result.is_err(),
+            "build_package should fail when diff is empty and no memory entries exist"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("No changes detected"),
+            "error should mention 'No changes detected'; got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn memory_summary_artifact_kind_is_memory_summary() {
+        let kind = ArtifactKind::MemorySummary {
+            entry_count: 3,
+            entry_ids: vec!["abc".to_string(), "def".to_string(), "ghi".to_string()],
+        };
+        assert!(kind.is_memory_summary());
+        assert!(!kind.is_image());
+        assert!(!kind.is_binary());
+        assert!(!kind.is_text());
+        assert!(!kind.is_video());
+    }
+
+    #[test]
+    fn memory_summary_artifact_kind_roundtrip() {
+        let kind = ArtifactKind::MemorySummary {
+            entry_count: 2,
+            entry_ids: vec!["id-1".to_string(), "id-2".to_string()],
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: ArtifactKind = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ArtifactKind::MemorySummary { entry_count: 2, .. }
+        ));
+        assert!(
+            json.contains("\"type\":\"memory_summary\""),
+            "json: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn matches_file_filters_always_shows_ta_memory_uri() {
+        use ta_changeset::output_adapters::matches_file_filters;
+        // ta://memory/ URIs should always pass through, even with file filters active.
+        assert!(matches_file_filters(
+            "ta://memory/some-goal-id",
+            &["src/*.rs".to_string()]
+        ));
+        assert!(matches_file_filters("ta://memory/abc", &[]));
     }
 }

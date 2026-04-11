@@ -86,6 +86,24 @@ pub enum ArtifactKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         line_count: Option<u64>,
     },
+
+    /// A memory summary artifact produced by an analysis/learning goal run (v0.15.13.2).
+    ///
+    /// Produced when `ta draft build` detects an empty overlay diff but finds memory
+    /// entries written by this goal run. The changeset holds a rendered summary of all
+    /// entries (key, scope, value) for human review.
+    ///
+    /// On approve: entries remain in the store — they were written during the run.
+    /// On deny: entries are removed from the store using `entry_ids`.
+    MemorySummary {
+        /// Number of memory entries created during this goal run.
+        entry_count: usize,
+        /// Entry IDs (as strings) used by `ta draft deny` to remove them from the store.
+        ///
+        /// These are the `entry_id` (UUID) values from each `MemoryEntry`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        entry_ids: Vec<String>,
+    },
 }
 
 impl ArtifactKind {
@@ -109,6 +127,11 @@ impl ArtifactKind {
         matches!(self, Self::Text { .. })
     }
 
+    /// Returns true if this is a memory summary kind (no file diff; rendered as entry list).
+    pub fn is_memory_summary(&self) -> bool {
+        matches!(self, Self::MemorySummary { .. })
+    }
+
     /// Returns a short human-readable label for display (e.g. `"MP4 video"`, `"PNG image"`).
     pub fn display_label(&self) -> String {
         match self {
@@ -128,6 +151,9 @@ impl ArtifactKind {
                 Some(enc) => format!("text ({})", enc),
                 None => "text".to_string(),
             },
+            Self::MemorySummary { entry_count, .. } => {
+                format!("memory summary ({} entries)", entry_count)
+            }
         }
     }
 

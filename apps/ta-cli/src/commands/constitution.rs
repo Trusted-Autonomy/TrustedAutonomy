@@ -1598,6 +1598,7 @@ fn create_review_draft(
         progress_note: None,
         vcs_isolation: None,
         initiated_by: None,
+        memory_entries_created: vec![],
         created_at: now,
         updated_at: now,
     };

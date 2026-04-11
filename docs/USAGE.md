@@ -5554,6 +5554,38 @@ Entries are JSON files in `.ta/memory/`, one per key. The filesystem backend is 
 backend = "filesystem"    # "filesystem" (default) or "ruvector" (v0.5.5+)
 ```
 
+#### Analysis and learning goals
+
+Some goals don't change any source files — they read the codebase and store findings to memory. Examples: "Audit all authentication paths and record what you find", "Learn the project conventions and store them for future agents", "Inspect the CI configuration and document its structure."
+
+Without special handling, these goals produce an empty overlay diff and `ta draft build` would error with "No changes detected." That's wrong: the agent's findings *are* the deliverable.
+
+**How it works:** When `ta draft build` detects an empty diff, it checks whether the agent wrote any memory entries during this run (by querying the memory store for entries whose `goal_id` matches). If entries exist, a *memory-only draft* is created automatically — a reviewable artifact showing every entry the agent stored.
+
+```
+$ ta run "Audit auth paths and store findings" --phase analysis
+  ... agent runs, stores 4 memory entries, makes no file changes ...
+
+$ ta draft build --latest
+No file changes detected. Found 4 memory entry/entries written by this goal —
+building memory-only draft.
+draft package built: abc123ef-01 (memory-only)
+  Goal:    Audit auth paths and store findings (abc123ef-...)
+  Memory:  4 entry/entries stored (no file changes)
+
+Review with:  ta draft view abc123ef-01
+Approve with: ta draft approve abc123ef-01
+  (Deny removes the memory entries: ta draft deny abc123ef-01 "reason")
+```
+
+**Reviewing a memory-only draft:** `ta draft view` shows each memory entry under a `[memory]` header — key, scope, category, and value — so you can verify the agent found what you expected.
+
+**Approve vs deny:**
+- **Approve**: entries remain in the memory store (they were written during the run — approve is a no-op on storage).
+- **Deny**: entries are removed from the store, as if the agent's findings were rejected.
+
+**Scope guard:** this behavior only fires when the overlay diff is truly empty *and* memory entries exist for the goal. Normal goals that write source files are unaffected — memory entries written alongside file changes are not captured as a separate artifact.
+
 ### Event System
 
 TA publishes structured lifecycle events that external tools and scripts can consume.

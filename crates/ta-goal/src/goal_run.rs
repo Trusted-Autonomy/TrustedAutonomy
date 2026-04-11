@@ -325,6 +325,15 @@ pub struct GoalRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiated_by: Option<String>,
 
+    /// Memory entry IDs written during this goal run (v0.15.13.2).
+    ///
+    /// Populated by `ta draft build` when it detects an empty overlay diff but
+    /// finds memory entries whose `goal_id` matches this goal. Used by
+    /// `ta draft deny` to remove those entries from the store when the reviewer
+    /// rejects the analysis results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_entries_created: Vec<Uuid>,
+
     /// When this goal run was created.
     pub created_at: DateTime<Utc>,
 
@@ -409,6 +418,7 @@ impl GoalRun {
             progress_note: None,
             vcs_isolation: None,
             initiated_by: None,
+            memory_entries_created: Vec::new(),
             created_at: now,
             updated_at: now,
         }
