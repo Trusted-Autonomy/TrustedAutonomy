@@ -275,6 +275,36 @@ impl TerminalAdapter {
             return output;
         }
 
+        // Memory summary artifacts: render entry list with [memory] tag prefix.
+        if let Some(ArtifactKind::MemorySummary { entry_count, .. }) = &artifact.kind {
+            output.push_str(&format!(
+                "\n    {bold}[memory] Memory entries stored:{reset} {}\n",
+                entry_count
+            ));
+            // The changeset holds the rendered entry list as text.
+            if let Some(provider) = ctx.diff_provider {
+                match provider.get_diff(&artifact.diff_ref) {
+                    Ok(content) => {
+                        for line in content.lines() {
+                            output.push_str(&format!("    {dim}{}{reset}\n", line));
+                        }
+                    }
+                    Err(e) => {
+                        output.push_str(&format!(
+                            "    {red}[Error loading memory summary: {}]{reset}\n",
+                            e,
+                            red = self.color_code("\x1b[31m"),
+                            reset = reset
+                        ));
+                    }
+                }
+            }
+            output.push_str(&format!(
+                "    {dim}[Approve to keep entries · Deny to remove them from the store]{reset}\n"
+            ));
+            return output;
+        }
+
         // Video artifacts: suppress binary diff; show metadata summary instead.
         if let Some(kind @ ArtifactKind::Video { .. }) = &artifact.kind {
             output.push_str(&format!("\n    {bold}Video artifact:{reset}\n"));

@@ -206,6 +206,11 @@ pub fn matches_file_filters(uri: &str, filters: &[String]) -> bool {
     if filters.is_empty() {
         return true;
     }
+    // Non-filesystem artifacts (e.g. ta://memory/...) are always shown regardless of
+    // file filters — filters target source-file paths, not synthetic TA artifacts.
+    if !uri.starts_with("fs://workspace/") {
+        return true;
+    }
     // Extract path from URI: "fs://workspace/src/auth.rs" -> "src/auth.rs"
     let path = uri.strip_prefix("fs://workspace/").unwrap_or(uri);
     filters.iter().any(|pattern| {

@@ -9787,7 +9787,7 @@ Branch prefixes: feature/, fix/, refactor/, docs/
 ---
 
 ### v0.15.13.2 — Draft for Memory-Only Goal Runs
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Goal runs that write only to `.ta/` (memory entries, notes, analysis output) currently produce no draft and silently complete with "nothing to review." This is wrong for analysis/learning/inspection goals where the agent's findings *are* the deliverable. This phase detects memory-only runs and produces a reviewable artifact.
 
 **Root cause**: The overlay diff excludes `.ta/` — it's machine-specific ephemeral state. Memory entries written to `.ta/memory/` never appear in `ta draft build`'s diff. So an agent that reads the whole codebase and stores rich findings to memory produces a diff of zero bytes and no `DraftPackage`.
@@ -9815,17 +9815,17 @@ The draft view renders this as a readable summary ("Agent stored 4 memory entrie
 
 **Items**:
 
-1. [ ] **Track memory entries created per goal run**: `GoalRun` gets a `memory_entries_created: Vec<MemoryEntryId>` field, populated by the memory store's write path when `goal_id` is set on the entry. (`crates/ta-goal/src/goal_run.rs`, `crates/ta-goal/src/memory.rs`)
+1. [x] **Track memory entries created per goal run**: `GoalRun` gets a `memory_entries_created: Vec<Uuid>` field populated by `build_memory_only_draft` at draft-build time (queried from the memory store by `goal_id`). (`crates/ta-goal/src/goal_run.rs`, `apps/ta-cli/src/commands/draft.rs`)
 
-2. [ ] **`ta draft build` empty-diff detection**: After computing the overlay diff, if `artifacts.is_empty()` and `goal_run.memory_entries_created` is non-empty, synthesize a `MemorySummary` artifact. (`apps/ta-cli/src/commands/draft.rs`)
+2. [x] **`ta draft build` empty-diff detection**: After computing the overlay diff, if `changes.is_empty()`, query the memory store for entries with this goal's UUID. If entries exist, delegate to `build_memory_only_draft`; otherwise fall through to the existing error path. (`apps/ta-cli/src/commands/draft.rs`)
 
-3. [ ] **`MemorySummary` artifact kind** (`crates/ta-changeset/src/lib.rs`): New `ArtifactKind::MemorySummary`. Rendered in `ta draft view` as a collapsible "Memory entries stored" section. Not applied to the filesystem on `ta draft apply` — the approve action is a no-op for this kind (entries are already in the store). Deny removes the entries from the store.
+3. [x] **`MemorySummary` artifact kind** (`crates/ta-changeset/src/artifact_kind.rs`): New `ArtifactKind::MemorySummary { entry_count, entry_ids }`. Rendered in `ta draft view` with `[memory]` prefix. Approve is a no-op (entries already in store). Deny removes entries by ID from the memory store. `matches_file_filters` updated to always pass `ta://memory/` URIs through.
 
-4. [ ] **`ta draft view` rendering**: Show memory summary entries with their key, scope, and content. Distinguish from file artifacts with a `[memory]` tag prefix.
+4. [x] **`ta draft view` rendering**: Terminal adapter renders `MemorySummary` artifacts with `[memory] Memory entries stored: N` header, then the full rendered entry list (key, scope, category, value) from the changeset content, with approve/deny guidance. (`crates/ta-changeset/src/output_adapters/terminal.rs`)
 
-5. [ ] **Tests**: empty-diff + memory entries → draft created with `MemorySummary` artifact; empty-diff + no memory entries → no draft (existing behavior); non-empty diff + memory entries → draft contains file artifacts only (memory summary not added when file changes exist).
+5. [x] **Tests**: 5 tests added — `memory_only_draft_created_when_empty_diff_and_memory_entries_exist`, `empty_diff_and_no_memory_entries_errors`, `memory_summary_artifact_kind_is_memory_summary`, `memory_summary_artifact_kind_roundtrip`, `matches_file_filters_always_shows_ta_memory_uri`. (`apps/ta-cli/src/commands/draft.rs`)
 
-6. [ ] **USAGE.md**: "Analysis and learning goals" section — explain that goals which only store memory (no file changes) still produce a draft so the agent's findings can be reviewed and optionally denied.
+6. [x] **USAGE.md**: "Analysis and learning goals" section added under Context Memory — explains the trigger, review flow, approve/deny semantics, and scope guard. (`docs/USAGE.md`)
 
 #### Version: `0.15.13-alpha.2`
 

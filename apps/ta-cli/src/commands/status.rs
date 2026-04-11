@@ -599,6 +599,7 @@ mod tests {
             progress_note: None,
             vcs_isolation: None,
             initiated_by: None,
+            memory_entries_created: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
