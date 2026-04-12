@@ -9955,18 +9955,18 @@ On `ta draft apply`, the existing logic already advances the phase to `done`. No
 ---
 
 ### v0.15.13.6 — Version Bump Reliability & Post-Apply Validation
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: `ta draft apply` silently skips the workspace version bump if the goal has no `plan_phase` set. `bump_workspace_version` returning an empty vec is ambiguous — "already at target" and "regex matched nothing" are both silent `Ok([])`. This phase makes the bump observable, validates the result, and adds CI enforcement.
 
 **Root cause**: `phase_ids` is built from `goal.plan_phase` (set at `ta run --phase` time). If a goal was started without `--phase`, `phase_ids` is empty and the entire bump block at `draft.rs:5180` is skipped with no warning. The silent `Ok(vec![])` arm in `bump_workspace_version` makes it impossible to distinguish "already correct" from "regex failed to match."
 
 **Items**:
-- [ ] `bump_workspace_version`: return `BumpResult` enum — `Bumped(Vec<PathBuf>)`, `AlreadyCurrent`, `NoMatch(String)`. `NoMatch` is an error; never silently succeed when no file was modified
-- [ ] Post-apply check (both VCS and non-VCS paths): derive expected semver from `last_phase_id`, read Cargo.toml, compare. If mismatch: emit loud actionable warning with exact `./scripts/bump-version.sh <version>` command
-- [ ] If `phase_ids` is empty at apply time: log hint "goal has no phase linked — version not auto-bumped; re-run with `ta run --phase <id>` or bump manually"
-- [ ] `ta draft apply --validate-version` flag: reads Cargo.toml post-apply, exits non-zero if version doesn't match phase semver — usable in CI
-- [ ] Tests: apply without `--phase` → warning printed, Cargo.toml unchanged; apply with `--phase` → Cargo.toml updated; already-correct → `AlreadyCurrent`, no error; regex no-match → `NoMatch` error surfaced
-- [ ] USAGE.md: document `--phase` requirement for auto-bump; document `--validate-version`
+- [x] `bump_workspace_version`: return `BumpResult` enum — `Bumped(Vec<PathBuf>)`, `AlreadyCurrent`, `NoMatch(String)`. `NoMatch` is an error; never silently succeed when no file was modified
+- [x] Post-apply check (both VCS and non-VCS paths): derive expected semver from `last_phase_id`, read Cargo.toml, compare. If mismatch: emit loud actionable warning with exact `./scripts/bump-version.sh <version>` command (`validate_cargo_version`)
+- [x] If `phase_ids` is empty at apply time: log hint "goal has no phase linked — version not auto-bumped; re-run with `ta run --phase <id>` or bump manually"
+- [x] `ta draft apply --validate-version` flag: reads Cargo.toml post-apply, exits non-zero if version doesn't match phase semver — usable in CI
+- [x] Tests: 12 new tests covering `BumpResult` variants (`AlreadyCurrent`, `NoMatch`, `Bumped`), `read_cargo_version`, and `validate_cargo_version` (match, mismatch, file absent)
+- [x] USAGE.md: document `--phase` requirement for auto-bump; document `--validate-version`
 
 **Depends on**: v0.15.13.5
 

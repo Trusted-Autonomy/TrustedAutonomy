@@ -4869,6 +4869,51 @@ Check whether the .gitignore entry is intentional.
 
 TA also excludes `.mcp.json` and `settings.local.json` from overlay diffs entirely (they are injected/restored by TA infrastructure and are never agent work product).
 
+### Automatic Version Bumping
+
+When a goal is started with `ta run --phase <id>`, `ta draft apply` automatically bumps the workspace version to match the completed phase:
+
+- `Cargo.toml` — first `version = "..."` line (workspace package version)
+- `CLAUDE.md` — `**Current version**: \`...\`` line
+- `.release.toml` — `prerelease = true`
+
+**Requirement:** the `--phase` flag (or `ta run --phase`) must be used. Without it, the version is not auto-bumped and a hint is printed:
+
+```
+[version] hint: goal has no phase linked — version not auto-bumped.
+Re-run with `ta run --phase <id>` or bump manually with
+`./scripts/bump-version.sh <version>`
+```
+
+#### Post-apply version validation
+
+After apply, TA reads `Cargo.toml` and compares the actual version against the expected semver for the phase. On mismatch, a loud actionable warning is printed:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  VERSION MISMATCH — post-apply validation failed             ║
+╠══════════════════════════════════════════════════════════════╣
+║  Expected: 0.15.13-alpha.6                                   ║
+║  Actual:   0.15.13-alpha.5                                   ║
+╠══════════════════════════════════════════════════════════════╣
+║  Fix: ./scripts/bump-version.sh 0.15.13-alpha.6              ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+#### `--validate-version` (CI enforcement)
+
+Use `--validate-version` to make version mismatches fail fast with a non-zero exit code — useful in CI pipelines:
+
+```bash
+ta draft apply <draft-id> --validate-version
+```
+
+This exits non-zero if `Cargo.toml` doesn't match the phase semver after apply. Combine with `--phase` when the goal was not started with a linked phase:
+
+```bash
+ta draft apply <draft-id> --phase v0.15.13.6 --validate-version
+```
+
 ### Release Pipeline
 
 TA includes a YAML-driven release pipeline:

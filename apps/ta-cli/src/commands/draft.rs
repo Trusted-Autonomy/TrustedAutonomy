@@ -228,6 +228,11 @@ pub enum DraftCommands {
         /// replacement). Use when the shrinkage is intentional (e.g., intentional rewrite).
         #[arg(long)]
         force_apply: bool,
+        /// After apply, read Cargo.toml and exit non-zero if its version doesn't match
+        /// the semver derived from the linked plan phase. Usable in CI to enforce version
+        /// bump correctness. Requires --phase or a goal with a linked plan_phase.
+        #[arg(long)]
+        validate_version: bool,
         /// Show whether an apply is currently in progress (reads .ta/apply.lock).
         #[arg(long)]
         status: bool,
@@ -687,6 +692,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             watch,
             chain,
             force_apply,
+            validate_version,
             status,
         } => {
             if *status {
@@ -783,6 +789,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 },
                 phase.as_deref(),
                 *force_apply,
+                *validate_version,
             )?;
 
             // --watch: poll until merged, then auto-sync.
@@ -2511,6 +2518,7 @@ fn apply_chain(
             },
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )?;
     }
 
@@ -3947,6 +3955,19 @@ fn capture_phase_complete_to_memory(
 /// Bump the canonical version fields in Cargo.toml, CLAUDE.md, and .release.toml
 /// to `new_version`.
 ///
+/// Result of a workspace version bump attempt.
+#[derive(Debug)]
+pub enum BumpResult {
+    /// One or more files were updated to `new_version`.
+    Bumped(Vec<std::path::PathBuf>),
+    /// All files that exist were already at `new_version`; nothing was written.
+    AlreadyCurrent,
+    /// Cargo.toml exists but contains no top-level `version = "..."` line.
+    /// This is an error — the regex failed to match, so we cannot know whether
+    /// the version is correct. The string payload contains an actionable message.
+    NoMatch(String),
+}
+
 /// Called automatically by `draft apply --phase` after the plan update so that
 /// version tracking stays in sync without requiring agent or human intervention.
 /// Agents should NOT bump the version manually — this function is the authority.
@@ -3956,11 +3977,14 @@ fn capture_phase_complete_to_memory(
 ///   CLAUDE.md        — `**Current version**: \`...\`` line
 ///   .release.toml    — `prerelease = ...` set to `true`; other fields left intact
 ///
-/// Returns the list of files that were actually modified (for inclusion in git commit).
+/// Returns [`BumpResult`]:
+/// - `Bumped(paths)` — files were updated (stage these in git)
+/// - `AlreadyCurrent` — all files already had the target version; nothing changed
+/// - `NoMatch(msg)` — Cargo.toml exists but the `version = "..."` pattern was not found
 pub fn bump_workspace_version(
     workspace_dir: &Path,
     new_version: &str,
-) -> anyhow::Result<Vec<std::path::PathBuf>> {
+) -> anyhow::Result<BumpResult> {
     let mut modified = Vec::new();
 
     // --- Cargo.toml ---
@@ -3983,6 +4007,14 @@ pub fn bump_workspace_version(
             .collect::<Vec<_>>()
             .join("\n")
             + if original.ends_with('\n') { "\n" } else { "" };
+
+        if !replaced {
+            return Ok(BumpResult::NoMatch(format!(
+                "Cargo.toml has no top-level `version = \"...\"` line — \
+                 could not set version to {new_version}. \
+                 Run: ./scripts/bump-version.sh {new_version}"
+            )));
+        }
 
         if updated != original {
             std::fs::write(&cargo_path, &updated)?;
@@ -4018,7 +4050,70 @@ pub fn bump_workspace_version(
         }
     }
 
-    Ok(modified)
+    if modified.is_empty() {
+        Ok(BumpResult::AlreadyCurrent)
+    } else {
+        Ok(BumpResult::Bumped(modified))
+    }
+}
+
+/// Read the workspace version from `<workspace_dir>/Cargo.toml`.
+///
+/// Looks for the first `version = "..."` line at column 0 (workspace package version).
+/// Returns `None` if Cargo.toml is absent or has no such line.
+pub fn read_cargo_version(workspace_dir: &Path) -> Option<String> {
+    let cargo_path = workspace_dir.join("Cargo.toml");
+    let content = std::fs::read_to_string(&cargo_path).ok()?;
+    for line in content.lines() {
+        if line.starts_with("version = \"") {
+            // Strip prefix/suffix quotes.
+            let inner = line
+                .trim_start_matches("version = \"")
+                .trim_end_matches('"');
+            return Some(inner.to_string());
+        }
+    }
+    None
+}
+
+/// Validate that `<workspace_dir>/Cargo.toml` version matches `expected_version`.
+///
+/// Prints a loud actionable warning (and optionally returns an error) when there
+/// is a mismatch. Used post-apply to catch version bump failures early.
+///
+/// Returns `Ok(true)` when the versions match, `Ok(false)` on mismatch with a warning
+/// already printed. The caller decides whether to propagate an error.
+pub fn validate_cargo_version(
+    workspace_dir: &Path,
+    expected_version: &str,
+) -> anyhow::Result<bool> {
+    match read_cargo_version(workspace_dir) {
+        Some(actual) if actual == expected_version => Ok(true),
+        Some(actual) => {
+            eprintln!();
+            eprintln!("╔══════════════════════════════════════════════════════════════╗");
+            eprintln!("║  VERSION MISMATCH — post-apply validation failed             ║");
+            eprintln!("╠══════════════════════════════════════════════════════════════╣");
+            eprintln!("║  Expected: {:<51}║", expected_version);
+            eprintln!("║  Actual:   {:<51}║", actual);
+            eprintln!("╠══════════════════════════════════════════════════════════════╣");
+            eprintln!(
+                "║  Fix: ./scripts/bump-version.sh {:<30}║",
+                expected_version
+            );
+            eprintln!("╚══════════════════════════════════════════════════════════════╝");
+            eprintln!();
+            Ok(false)
+        }
+        None => {
+            eprintln!(
+                "[version] Warning: could not read Cargo.toml to validate version \
+                 (expected {}). Check that Cargo.toml has a top-level `version = \"...\"` line.",
+                expected_version
+            );
+            Ok(false)
+        }
+    }
 }
 
 /// Simple line-by-line regex replacement helper (first match only, no external crate needed).
@@ -4455,6 +4550,7 @@ fn apply_package(
     patterns: SelectiveReviewPatterns,
     phase_override: Option<&str>,
     force_apply: bool,
+    validate_version: bool,
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
 
@@ -5201,6 +5297,15 @@ fn apply_package(
         vec![]
     };
 
+    // If no phase is linked, emit a hint so operators know version won't auto-bump.
+    if phase_ids.is_empty() {
+        eprintln!(
+            "[version] hint: goal has no phase linked — version not auto-bumped. \
+             Re-run with `ta run --phase <id>` or bump manually with \
+             `./scripts/bump-version.sh <version>`"
+        );
+    }
+
     // Non-VCS path: run plan update now, before rollback.commit().
     // VCS path: plan update runs inside the submit closure after adapter.prepare().
     if !git_commit && !phase_ids.is_empty() {
@@ -5259,7 +5364,7 @@ fn apply_package(
             // Agents should NOT set the version — this is the single authority.
             if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
                 match bump_workspace_version(&target_dir, &new_ver) {
-                    Ok(bumped) if !bumped.is_empty() => {
+                    Ok(BumpResult::Bumped(bumped)) => {
                         println!("[version] Phase {} → bumped to {}", last_phase_id, new_ver);
                         // Stage bumped files immediately. bump_workspace_version writes
                         // CLAUDE.md and Cargo.toml to disk but does NOT stage them.
@@ -5278,8 +5383,17 @@ fn apply_package(
                             }
                         }
                     }
-                    Ok(_) => {
+                    Ok(BumpResult::AlreadyCurrent) => {
                         // Already at target version — no change needed.
+                    }
+                    Ok(BumpResult::NoMatch(msg)) => {
+                        tracing::warn!(
+                            phase = %last_phase_id,
+                            version = %new_ver,
+                            "version bump regex no-match: {}",
+                            msg
+                        );
+                        eprintln!("[version] Warning: {}", msg);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -5490,7 +5604,7 @@ fn apply_package(
                         // Auto-bump workspace version to match the completed phase.
                         if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
                             match bump_workspace_version(&target_dir, &new_ver) {
-                                Ok(bumped) if !bumped.is_empty() => {
+                                Ok(BumpResult::Bumped(bumped)) => {
                                     println!(
                                         "[version] Phase {} → bumped to {}",
                                         last_phase_id, new_ver
@@ -5507,7 +5621,16 @@ fn apply_package(
                                         }
                                     }
                                 }
-                                Ok(_) => {}
+                                Ok(BumpResult::AlreadyCurrent) => {}
+                                Ok(BumpResult::NoMatch(msg)) => {
+                                    tracing::warn!(
+                                        phase = %last_phase_id,
+                                        version = %new_ver,
+                                        "version bump regex no-match: {}",
+                                        msg
+                                    );
+                                    eprintln!("[version] Warning: {}", msg);
+                                }
                                 Err(e) => {
                                     tracing::warn!(
                                         phase = %last_phase_id,
@@ -6189,6 +6312,30 @@ fn apply_package(
                         short_id
                     );
                 }
+            }
+        }
+    }
+
+    // Post-apply version validation.
+    // Always check when a phase is linked; fail fast (non-zero exit) when --validate-version.
+    if !dry_run && !phase_ids.is_empty() {
+        let last_phase = phase_ids.last().map(String::as_str).unwrap_or("");
+        if let Some(expected_ver) = super::plan::phase_id_to_semver(last_phase) {
+            let version_ok = validate_cargo_version(&target_dir, &expected_ver)?;
+            if !version_ok {
+                if validate_version {
+                    anyhow::bail!(
+                        "Post-apply version validation failed: Cargo.toml does not match \
+                         expected version {} for phase {}. \
+                         Run: ./scripts/bump-version.sh {}",
+                        expected_ver,
+                        last_phase,
+                        expected_ver
+                    );
+                }
+                // Not --validate-version: warning already printed by validate_cargo_version.
+            } else {
+                println!("  Version: {} ✓", expected_ver);
             }
         }
     }
@@ -9460,6 +9607,7 @@ fn run() {
             SelectiveReviewPatterns::default(),
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -9549,6 +9697,7 @@ fn run() {
             SelectiveReviewPatterns::default(),
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -9729,6 +9878,7 @@ fn run() {
             SelectiveReviewPatterns::default(),
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -9882,6 +10032,7 @@ fn run() {
             SelectiveReviewPatterns::default(),
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         );
 
         // Apply must have returned an error.
@@ -10152,6 +10303,7 @@ fn run() {
             },
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -10218,6 +10370,7 @@ fn run() {
             },
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -10281,6 +10434,7 @@ fn run() {
             },
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -10343,6 +10497,7 @@ fn run() {
             },
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -10444,6 +10599,7 @@ fn run() {
             },
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         );
 
         assert!(result.is_err());
@@ -11441,6 +11597,7 @@ fn run() {
             SelectiveReviewPatterns::default(),
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -11547,6 +11704,7 @@ fn run() {
             SelectiveReviewPatterns::default(),
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -11960,6 +12118,7 @@ fn run() {
             SelectiveReviewPatterns::default(),
             None,  // phase_override
             false, // force_apply
+            false, // validate_version
         )
         .unwrap();
 
@@ -12470,14 +12629,19 @@ fn run() {
         )
         .unwrap();
 
-        let modified = bump_workspace_version(dir.path(), "0.14.23-alpha").unwrap();
+        let result = bump_workspace_version(dir.path(), "0.14.23-alpha").unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
         assert!(
             content.contains("version = \"0.14.23-alpha\""),
             "Cargo.toml should have new version"
         );
-        assert!(modified.iter().any(|p| p.ends_with("Cargo.toml")));
+        match result {
+            BumpResult::Bumped(paths) => {
+                assert!(paths.iter().any(|p| p.ends_with("Cargo.toml")));
+            }
+            other => panic!("expected Bumped, got {:?}", other),
+        }
     }
 
     #[test]
@@ -12529,12 +12693,13 @@ fn run() {
         )
         .unwrap();
 
-        let modified = bump_workspace_version(dir.path(), "0.15.0-alpha").unwrap();
+        let result = bump_workspace_version(dir.path(), "0.15.0-alpha").unwrap();
 
-        // No modification — file was already at target.
+        // Already at target → AlreadyCurrent, not Bumped.
         assert!(
-            modified.is_empty(),
-            "no files should be modified if already at target"
+            matches!(result, BumpResult::AlreadyCurrent),
+            "expected AlreadyCurrent, got {:?}",
+            result
         );
     }
 
@@ -12550,6 +12715,95 @@ fn run() {
 
         let result = bump_workspace_version(dir.path(), "0.15.0-alpha");
         assert!(result.is_ok(), "missing optional files should not error");
+    }
+
+    #[test]
+    fn bump_version_no_match_when_cargo_toml_has_no_version_line() {
+        // Cargo.toml exists but has no top-level `version = "..."` line.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "# No version here\n[workspace]\nmembers = [\"app\"]\n",
+        )
+        .unwrap();
+
+        let result = bump_workspace_version(dir.path(), "0.15.0-alpha").unwrap();
+        assert!(
+            matches!(result, BumpResult::NoMatch(_)),
+            "expected NoMatch when Cargo.toml has no version line, got {:?}",
+            result
+        );
+        if let BumpResult::NoMatch(msg) = result {
+            assert!(
+                msg.contains("bump-version.sh"),
+                "NoMatch message should contain actionable command: {}",
+                msg
+            );
+        }
+    }
+
+    // ── read_cargo_version / validate_cargo_version ───────────────────
+
+    #[test]
+    fn read_cargo_version_returns_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.13-alpha.6\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_cargo_version(dir.path()),
+            Some("0.15.13-alpha.6".to_string())
+        );
+    }
+
+    #[test]
+    fn read_cargo_version_returns_none_when_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_cargo_version(dir.path()), None);
+    }
+
+    #[test]
+    fn read_cargo_version_returns_none_when_no_version_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        )
+        .unwrap();
+        assert_eq!(read_cargo_version(dir.path()), None);
+    }
+
+    #[test]
+    fn validate_cargo_version_ok_when_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.13-alpha.6\"\n",
+        )
+        .unwrap();
+        let ok = validate_cargo_version(dir.path(), "0.15.13-alpha.6").unwrap();
+        assert!(ok, "should return true when versions match");
+    }
+
+    #[test]
+    fn validate_cargo_version_fails_on_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.13-alpha.5\"\n",
+        )
+        .unwrap();
+        let ok = validate_cargo_version(dir.path(), "0.15.13-alpha.6").unwrap();
+        assert!(!ok, "should return false when versions differ");
+    }
+
+    #[test]
+    fn validate_cargo_version_fails_when_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = validate_cargo_version(dir.path(), "0.15.13-alpha.6").unwrap();
+        assert!(!ok, "should return false when Cargo.toml is absent");
     }
 
     // ── v0.15.8.1: build_draft_inline tests ──────────────────────────
