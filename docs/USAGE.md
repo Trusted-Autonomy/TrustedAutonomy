@@ -1157,6 +1157,22 @@ ta run "refactor the auth module" \
 
 See `docs/agent-framework-options.md` for a full comparison of Ollama, llama.cpp server, vLLM, and LM Studio.
 
+## Why Rust
+
+TA is written in Rust. This is a deliberate choice worth understanding if you are evaluating, integrating, or contributing to TA.
+
+**Safety on the mediation path.** TA sits between an AI agent and your codebase — mediating every file write, git operation, patch application, and external call. That path must not crash, leak memory, or corrupt state mid-apply. Rust eliminates use-after-free, data races, and null dereferences at compile time. These are not hypothetical bugs; they are the exact failure modes that would make a governance layer untrustworthy.
+
+**Fearless concurrency.** Parallel goal fan-out, background watchdogs, concurrent staging, and event routing all require shared mutable state across threads. Rust's borrow checker makes data races a compile error. TA runs complex multi-agent workflows without locks-and-hope.
+
+**Single static binary.** TA installs with one command on any machine — no Python version mismatch, no Node.js, no JVM, no runtime to manage. This is a requirement for a tool that must work reliably in every developer environment, including CI runners and air-gapped servers.
+
+**Performance on the hot path.** Diff computation, staging copy, patch application, and JSONL store reads all run inline. For large codebases (Unreal Engine source, large monorepos) this matters — a slow mediation layer becomes a tax on every agent run.
+
+**The honest tradeoff.** Longer compile times, steeper onboarding, smaller talent pool than Go or Python. The correctness guarantees justify the cost: a governance layer developers don't trust is worthless regardless of how fast it is to build.
+
+---
+
 ## Local Models (Ollama)
 
 TA supports running goals against local models via [Ollama](https://ollama.ai), with no cloud API key required. The `ta-agent-ollama` binary implements a full tool-use loop against any OpenAI-compatible endpoint.

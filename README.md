@@ -1004,10 +1004,24 @@ Apache 2.0
 
 ---
 
+## Why Rust
+
+**Safety where it matters most.** TA mediates every agent action — file writes, git operations, external calls, patch application. That mediation path must not crash, leak, or corrupt state mid-apply. Rust’s ownership model eliminates use-after-free, data races, and null dereferences at compile time — exactly the bug classes that would be catastrophic in a system sitting between an AI agent and your codebase.
+
+**Fearless concurrency for multi-agent workloads.** Parallel goal fan-out, background watchdogs, concurrent staging, and event routing all require shared mutable state across threads. The borrow checker makes data races a compile error rather than a production incident.
+
+**Single static binary, zero runtime dependencies.** TA installs with one command on any machine — no Python version mismatch, no Node.js, no JVM. For a tool that needs to work reliably in every engineer’s environment, including CI and air-gapped servers, that is a requirement not a nicety.
+
+**Performance on the hot path.** Diff computation, staging copy, patch application, and JSONL parsing all happen inline. For large codebases (Unreal Engine source, monorepos) this is the difference between a tool developers use and one they don’t.
+
+**The honest tradeoff.** Longer compile times, steeper learning curve, smaller talent pool than Go or Python. Worth it because TA’s correctness guarantees *are* the product — a governance layer people don’t trust is worthless.
+
+---
+
 ## Philosophy (tl;dr)
 
 > Autonomy is not about removing humans.
->  
+>
 > It’s about **moving human involvement to the right abstraction layer**.
 
 Trusted Autonomy exists to make that layer explicit, enforceable, and trustworthy.
