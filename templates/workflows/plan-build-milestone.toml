@@ -1,0 +1,85 @@
+# plan-build-milestone.toml — Mode B: milestone accumulation (v0.15.14)
+#
+# Accumulates all phase drafts locally, then presents one combined approval step
+# and opens a single PR for the entire milestone. Lower overhead per phase since
+# there is no per-phase PR creation or merge wait.
+#
+# Flow:
+#   1. Get next pending plan phase
+#   2. Run agent goal → produce draft
+#   3. Apply draft locally (no PR per phase)
+#   4. Loop until all phases complete
+#   5. Aggregate all phase drafts into a MilestoneDraft
+#   6. Human approval gate
+#   7. PR sync for the milestone branch
+#
+# Usage:
+#   ta workflow run plan-build-milestone --goal "Sprint milestone"
+#
+# Mode B trades per-phase visibility for batch efficiency. Use Mode A
+# (plan-build-phases.toml) when you need a PR review trail per phase.
+
+[workflow]
+name = "plan-build-milestone"
+description = """
+Milestone-draft build workflow (Mode B). For each pending plan phase:
+  1. Run the agent goal (producing a draft)
+  2. Apply the draft locally (no PR per phase)
+  3. Collect all drafts into a single MilestoneDraft
+After all phases: present one combined approval step and open a single PR.
+"""
+
+[workflow.config]
+max_phases = 99
+require_pr = false
+
+[[stages]]
+name = "plan_next"
+kind = "plan_next"
+description = "Get next pending plan phase."
+
+[[stages]]
+name = "run_phase"
+kind = "run_goal"
+goal = "{{plan_next.phase_id}} — {{plan_next.phase_title}}"
+phase = "{{plan_next.phase_id}}"
+condition = "!plan_next.done"
+depends_on = ["plan_next"]
+description = "Run agent goal for this phase, producing a draft."
+
+[[stages]]
+name = "apply_local"
+kind = "apply_draft_branch"
+milestone_branch = "feature/milestone-build"
+condition = "!plan_next.done"
+depends_on = ["run_phase"]
+description = "Apply draft locally to milestone branch (no per-phase PR)."
+
+[[stages]]
+name = "loop"
+kind = "goto"
+target = "plan_next"
+condition = "!plan_next.done"
+depends_on = ["apply_local"]
+description = "Loop until all phases complete."
+
+[[stages]]
+name = "aggregate"
+kind = "aggregate_draft"
+source_stages = "all"
+milestone_title = "Milestone build"
+milestone_branch = "feature/milestone-build"
+depends_on = ["loop"]
+description = "Collect all phase drafts into a single MilestoneDraft for unified review."
+
+[[stages]]
+name = "human_gate"
+kind = "human_gate"
+depends_on = ["aggregate"]
+description = "Human approval gate for the combined milestone draft."
+
+[[stages]]
+name = "pr_sync"
+kind = "pr_sync"
+depends_on = ["human_gate"]
+description = "Open single PR for milestone branch, poll for merge, VCS sync."

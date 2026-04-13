@@ -1,0 +1,54 @@
+# plan-build-phases.toml — Mode A: PR-per-phase serial build loop (v0.15.14)
+#
+# Canonical replacement for build_phases.sh. For each pending plan phase:
+#   1. Get next pending plan phase (plan_next)
+#   2. Run the governed build workflow for that phase (run_phase)
+#   3. Loop back to step 1 until all phases complete
+#
+# The governed "build" sub-workflow handles the full review → approve → apply →
+# PR-create → PR-merge → VCS-sync cycle for each individual phase.
+#
+# Usage:
+#   ta workflow run plan-build-phases --goal "Build all pending phases"
+#
+# To target a specific range of phases, copy this template to
+# .ta/workflows/plan-build-phases.toml and set max_phases accordingly.
+
+[workflow]
+name = "plan-build-phases"
+description = """
+PR-per-phase build loop (Mode A). For each pending plan phase:
+  1. Run the agent goal to produce a draft
+  2. Review the draft with a reviewer agent
+  3. Apply on human approval (creating a PR per phase)
+  4. Poll for PR merge + VCS sync
+  5. Move to the next phase
+Replaces build_phases.sh with a VCS-agnostic native workflow.
+"""
+
+[workflow.config]
+max_phases = 99
+stop_on_flag = true
+
+[[stages]]
+name = "plan_next"
+kind = "plan_next"
+description = "Get next pending plan phase."
+
+[[stages]]
+name = "run_phase"
+kind = "workflow"
+workflow = "build"
+goal = "{{plan_next.phase_id}} — {{plan_next.phase_title}}"
+phase = "{{plan_next.phase_id}}"
+condition = "!plan_next.done"
+depends_on = ["plan_next"]
+description = "Run governed build workflow for this phase."
+
+[[stages]]
+name = "loop"
+kind = "goto"
+target = "plan_next"
+condition = "!plan_next.done"
+depends_on = ["run_phase"]
+description = "Loop until all phases complete."

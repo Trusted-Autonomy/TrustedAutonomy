@@ -21,6 +21,7 @@ pub mod error;
 pub mod explanation;
 pub mod interaction;
 pub mod interactive_session_store;
+pub mod milestone_draft;
 pub mod multi_channel;
 pub mod output_adapters;
 pub mod plugin;
@@ -89,6 +90,8 @@ pub use supervisor_review::{
 pub use terminal_channel::{AutoApproveChannel, TerminalChannel, TerminalSessionChannel};
 pub use uri_pattern::{filter_uris, matches_uri};
 pub use webhook_channel::WebhookChannel;
+
+pub use milestone_draft::{MilestoneDraft, PhaseSummary};
 
 // Backwards compatibility: export old names as aliases
 pub use draft_package::DraftPackage as PRPackage;

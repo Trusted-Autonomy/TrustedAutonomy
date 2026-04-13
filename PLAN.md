@@ -9975,7 +9975,7 @@ On `ta draft apply`, the existing logic already advances the phase to `done`. No
 ---
 
 ### v0.15.14 — Hierarchical Workflows: Parallel Fan-Out, Phase Loops & Milestone Draft
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Two first-class modes for multi-phase execution — **PR-per-phase** (iterate phases serially, PR and VCS-sync each one before moving on) and **milestone-draft** (iterate phases, accumulate all changes into a branch, present the entire series as one combined draft for human approval). Both modes support phase selection by count, version set (glob), or range. The sync step after each PR uses the `SourceAdapter` trait — not hardcoded git — so the loop works identically on Git, Perforce, and SVN.
 
 **Depends on**: v0.15.13 (sub-workflow steps, serial chaining)

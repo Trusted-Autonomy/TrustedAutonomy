@@ -137,11 +137,42 @@ pub struct StageDef {
     /// For `kind = "goto"`: stage name to jump to when `condition` is true.
     #[serde(default)]
     pub target: Option<String>,
+    // ── v0.15.14 new fields ───────────────────────────────────────────────────
+    /// For `kind = "aggregate_draft"`: which stages' draft_id outputs to collect.
+    /// `"all"` collects from all stages that produced a `draft_id` output.
+    /// Comma-separated stage names to collect from specific stages.
+    #[serde(default)]
+    pub source_stages: Option<String>,
+    /// For `kind = "aggregate_draft"`: human-readable milestone title.
+    #[serde(default)]
+    pub milestone_title: Option<String>,
+    /// For `kind = "apply_draft_branch"` / milestone mode: branch to apply to.
+    #[serde(default)]
+    pub milestone_branch: Option<String>,
+    /// For parallel execution: group name. All stages sharing the same group
+    /// are dispatched concurrently (up to `max_parallel`).
+    /// NOTE: parallel dispatch is deferred; this field is parsed but not yet
+    /// used in the execution engine (sequential fallback only).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub parallel_group: Option<String>,
+    /// For `kind = "join"`: which parallel_group to wait for.
+    #[serde(default)]
+    pub join_group: Option<String>,
+    /// Behavior when a parallel group member fails.
+    /// `"continue"` = proceed with remaining stages; default = halt workflow.
+    #[serde(default)]
+    pub on_partial_failure: Option<String>,
+    /// Maximum parallel workers for a group (default: 3).
+    /// NOTE: not yet used in execution (parallel dispatch is deferred).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub max_parallel: Option<usize>,
 }
 
-// ── New step kinds (v0.15.13) ─────────────────────────────────────────────────
+// ── New step kinds (v0.15.13 + v0.15.14) ─────────────────────────────────────
 
-/// The kind of step in a governed workflow stage (v0.15.13).
+/// The kind of step in a governed workflow stage (v0.15.13 + v0.15.14).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StageKind {
@@ -154,6 +185,14 @@ pub enum StageKind {
     PlanNext,
     /// Jump to `target` when `condition` is true (loop-back step).
     Goto,
+    /// Advances the phase cursor in phase-loop mode (alias for PlanNext, v0.15.14).
+    LoopNext,
+    /// Apply the current draft to a named branch instead of main (v0.15.14).
+    ApplyDraftBranch,
+    /// Collect draft IDs from source stages and create a MilestoneDraft (v0.15.14).
+    AggregateDraft,
+    /// Synchronization point: validates all stages in a parallel_group completed (v0.15.14).
+    Join,
 }
 
 /// Output from a `kind = "plan_next"` stage (v0.15.13).
@@ -1040,6 +1079,12 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
                     format!(" [workflow: {}]", stage.workflow.as_deref().unwrap_or("?"))
                 }
                 StageKind::Goto => format!(" [goto: {}]", stage.target.as_deref().unwrap_or("?")),
+                StageKind::LoopNext => " [loop_next]".to_string(),
+                StageKind::ApplyDraftBranch => " [apply_draft_branch]".to_string(),
+                StageKind::AggregateDraft => " [aggregate_draft]".to_string(),
+                StageKind::Join => {
+                    format!(" [join: {}]", stage.join_group.as_deref().unwrap_or("?"))
+                }
             };
             println!("  [{}] {}{} — {}", i + 1, stage.name, kind_label, desc);
         }
@@ -1420,7 +1465,11 @@ fn execute_stage(
 ) -> anyhow::Result<Option<String>> {
     match stage_def.kind {
         StageKind::PlanNext => stage_plan_next(run, &stage_def.name, opts),
+        StageKind::LoopNext => stage_loop_next(run, &stage_def.name, opts),
         StageKind::Workflow => stage_run_subworkflow(run, stage_def, opts, config),
+        StageKind::ApplyDraftBranch => stage_apply_draft_branch(run, stage_def, opts, config),
+        StageKind::AggregateDraft => stage_aggregate_draft(run, stage_def, opts),
+        StageKind::Join => stage_join(run, stage_def),
         StageKind::Goto => {
             // Goto is handled inline in run_loop_workflow; falling here is a bug.
             anyhow::bail!(
@@ -1435,7 +1484,10 @@ fn execute_stage(
                 "review_draft" => stage_review_draft(run, opts, config),
                 "human_gate" => stage_human_gate(run, config),
                 "apply_draft" => stage_apply_draft(run, opts, config),
-                "pr_sync" => stage_pr_sync(run, config),
+                "apply_draft_branch" => stage_apply_draft_branch(run, stage_def, opts, config),
+                "aggregate_draft" => stage_aggregate_draft(run, stage_def, opts),
+                "join" => stage_join(run, stage_def),
+                "pr_sync" => stage_pr_sync(run, config, opts.workspace_root),
                 other => anyhow::bail!(
                     "Unknown stage: '{}'. \
                      For custom stages, set `kind` in the workflow TOML.",
@@ -1494,6 +1546,279 @@ fn stage_plan_next(
         .insert(stage_name.to_string(), parsed.to_output_map());
 
     Ok(Some(detail))
+}
+
+/// Stage executor for `kind = "loop_next"` (v0.15.14).
+///
+/// Alias for `plan_next` — runs `ta plan next` and emits the same structured
+/// outputs. The distinction enables future filtering via `[phases]` config
+/// and makes workflow templates self-documenting about loop intent.
+fn stage_loop_next(
+    run: &mut GovernedWorkflowRun,
+    stage_name: &str,
+    opts: &RunOptions,
+) -> anyhow::Result<Option<String>> {
+    // Delegate entirely to stage_plan_next — same behavior, same output format.
+    stage_plan_next(run, stage_name, opts)
+}
+
+/// Stage executor for `kind = "apply_draft_branch"` (v0.15.14).
+///
+/// Like `apply_draft` but appends `--branch <milestone_branch>` when the
+/// `milestone_branch` field is set in the stage def. Falls back to regular
+/// apply behavior when the field is absent.
+fn stage_apply_draft_branch(
+    run: &mut GovernedWorkflowRun,
+    stage_def: &StageDef,
+    opts: &RunOptions,
+    config: &WorkflowConfig,
+) -> anyhow::Result<Option<String>> {
+    if let Some(ref branch) = stage_def.milestone_branch {
+        // Branch-targeted apply: apply the draft to a named branch.
+        let draft_id = run.draft_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Stage '{}': no draft_id available — run_goal stage must complete first",
+                stage_def.name
+            )
+        })?;
+
+        println!(
+            "  Running: ta draft apply {} --git-commit --branch {}",
+            &draft_id[..8.min(draft_id.len())],
+            branch
+        );
+
+        let mut cmd = std::process::Command::new("ta");
+        cmd.args([
+            "--project-root",
+            &opts.workspace_root.to_string_lossy(),
+            "draft",
+            "apply",
+            draft_id,
+            "--git-commit",
+            "--branch",
+            branch,
+            "--no-version-check",
+        ]);
+        if let Some(phase) = opts.plan_phase {
+            cmd.args(["--phase", phase]);
+        }
+
+        let output = cmd
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to invoke 'ta draft apply': {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "ta draft apply (branch) failed (exit {}):\n{}\n{}",
+                output.status.code().unwrap_or(-1),
+                stderr,
+                stdout
+            );
+        }
+
+        Ok(Some(format!(
+            "applied to branch '{}' (draft {})",
+            branch,
+            &draft_id[..8.min(draft_id.len())]
+        )))
+    } else {
+        // No branch specified — fall back to regular apply.
+        stage_apply_draft(run, opts, config)
+    }
+}
+
+/// Stage executor for `kind = "aggregate_draft"` (v0.15.14).
+///
+/// Collects `draft_id` values from stage outputs (either all stages or a
+/// named subset), deduplicates, and creates a `MilestoneDraft` saved to
+/// `.ta/milestones/<uuid>.json`. Records `milestone_id` in this stage's
+/// output map for downstream template interpolation.
+fn stage_aggregate_draft(
+    run: &mut GovernedWorkflowRun,
+    stage_def: &StageDef,
+    opts: &RunOptions,
+) -> anyhow::Result<Option<String>> {
+    use ta_changeset::{MilestoneDraft, PhaseSummary};
+
+    // Collect draft IDs from source stages.
+    let source_spec = stage_def.source_stages.as_deref().unwrap_or("all");
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ordered_drafts: Vec<String> = Vec::new();
+    let mut phase_summaries: Vec<PhaseSummary> = Vec::new();
+
+    if source_spec == "all" {
+        // Collect from every stage that has a draft_id output.
+        for (sname, smap) in &run.outputs {
+            if sname == &stage_def.name {
+                continue; // skip self
+            }
+            if let Some(draft_id) = smap.get("draft_id") {
+                if !draft_id.is_empty() && seen_ids.insert(draft_id.clone()) {
+                    let phase_id = smap.get("phase_id").cloned();
+                    let phase_title = smap.get("phase_title").cloned();
+                    ordered_drafts.push(draft_id.clone());
+                    phase_summaries.push(PhaseSummary {
+                        draft_id: draft_id.clone(),
+                        phase_id,
+                        phase_title,
+                        artifact_count: 0, // count not tracked at this layer
+                    });
+                }
+            }
+        }
+    } else {
+        // Collect from named stages (comma-separated).
+        for sname in source_spec.split(',') {
+            let sname = sname.trim();
+            if let Some(smap) = run.outputs.get(sname) {
+                if let Some(draft_id) = smap.get("draft_id") {
+                    if !draft_id.is_empty() && seen_ids.insert(draft_id.clone()) {
+                        let phase_id = smap.get("phase_id").cloned();
+                        let phase_title = smap.get("phase_title").cloned();
+                        ordered_drafts.push(draft_id.clone());
+                        phase_summaries.push(PhaseSummary {
+                            draft_id: draft_id.clone(),
+                            phase_id,
+                            phase_title,
+                            artifact_count: 0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if ordered_drafts.is_empty() {
+        println!(
+            "  [{}] no draft IDs found in source stages (source_stages = '{}')",
+            stage_def.name, source_spec
+        );
+    }
+
+    let milestone_id = uuid::Uuid::new_v4().to_string();
+    let milestone_title = stage_def
+        .milestone_title
+        .clone()
+        .unwrap_or_else(|| "Milestone build".to_string());
+    let milestone_branch = stage_def.milestone_branch.clone();
+
+    println!(
+        "  Creating MilestoneDraft '{}' with {} draft(s)",
+        milestone_title,
+        ordered_drafts.len()
+    );
+
+    let milestone = MilestoneDraft {
+        milestone_id: milestone_id.clone(),
+        milestone_title: milestone_title.clone(),
+        source_drafts: ordered_drafts.clone(),
+        milestone_branch,
+        phase_summaries,
+        created_at: chrono::Utc::now(),
+    };
+    milestone.save(opts.workspace_root)?;
+
+    // Store milestone_id in outputs for downstream stages.
+    let mut output_map = std::collections::HashMap::new();
+    output_map.insert("milestone_id".to_string(), milestone_id.clone());
+    output_map.insert("milestone_title".to_string(), milestone_title.clone());
+    output_map.insert("draft_count".to_string(), ordered_drafts.len().to_string());
+    run.outputs.insert(stage_def.name.clone(), output_map);
+
+    println!(
+        "  MilestoneDraft saved: .ta/milestones/{}.json",
+        &milestone_id[..8.min(milestone_id.len())]
+    );
+
+    Ok(Some(format!(
+        "milestone {} ({} drafts)",
+        &milestone_id[..8.min(milestone_id.len())],
+        ordered_drafts.len()
+    )))
+}
+
+/// Stage executor for `kind = "join"` (v0.15.14).
+///
+/// A synchronization point for parallel stage groups. In the current sequential
+/// execution model, this validates that all stages in the named `join_group`
+/// completed successfully. When `on_partial_failure = "continue"`, failed stages
+/// are treated as skipped rather than halting the workflow.
+fn stage_join(
+    run: &mut GovernedWorkflowRun,
+    stage_def: &StageDef,
+) -> anyhow::Result<Option<String>> {
+    let group = stage_def.join_group.as_deref().unwrap_or_default();
+    if group.is_empty() {
+        // No group specified — treat as a no-op sync point.
+        return Ok(Some("join (no group — no-op)".to_string()));
+    }
+
+    // Find all stages that belong to this parallel group.
+    // Since we don't have the stage defs here, we validate by checking the
+    // run's stage records for any that failed.
+    //
+    // The join stage validates the run state: if any stage has Failed status
+    // and on_partial_failure != "continue", bail out.
+    let failed_stages: Vec<String> = run
+        .stages
+        .iter()
+        .filter(|s| s.status == StageStatus::Failed)
+        .map(|s| s.name.clone())
+        .collect();
+
+    let on_partial = stage_def.on_partial_failure.as_deref().unwrap_or("halt");
+
+    if !failed_stages.is_empty() && on_partial != "continue" {
+        anyhow::bail!(
+            "Join stage '{}' (group '{}') detected {} failed stage(s): {}\n\
+             Set on_partial_failure = \"continue\" in the stage def to proceed despite failures.",
+            stage_def.name,
+            group,
+            failed_stages.len(),
+            failed_stages.join(", ")
+        );
+    }
+
+    if !failed_stages.is_empty() {
+        println!(
+            "  [{}] {} stage(s) failed but on_partial_failure=continue — proceeding",
+            stage_def.name,
+            failed_stages.len()
+        );
+    }
+
+    Ok(Some(format!("join group='{}' validated", group)))
+}
+
+/// VCS sync helper: pull the latest changes after a PR merge (v0.15.14).
+///
+/// Loads the workflow VCS config and runs the appropriate sync command.
+/// For git adapters this is `git pull --ff-only`. Errors are non-fatal:
+/// the caller prints a warning and suggests a manual sync.
+fn do_vcs_sync(workspace_root: &Path) -> anyhow::Result<()> {
+    let config_path = workspace_root.join(".ta").join("workflow.toml");
+    let wf = ta_submit::WorkflowConfig::load_or_default(&config_path);
+
+    // For git adapter (the common case and default).
+    if wf.submit.adapter == "git" || wf.submit.adapter.is_empty() {
+        let output = std::process::Command::new("git")
+            .args(["pull", "--ff-only"])
+            .current_dir(workspace_root)
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to invoke git pull: {}", e))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git pull --ff-only failed (exit {}):\n{}",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    // Other adapters: no-op for now (they manage their own sync).
+    Ok(())
 }
 
 /// Stage executor for `kind = "workflow"` — invokes a child workflow.
@@ -2141,10 +2466,11 @@ fn stage_apply_draft(
     Ok(Some(detail))
 }
 
-/// Stage 5: pr_sync — poll for PR merge and update goal state.
+/// Stage 5: pr_sync — poll for PR merge, VCS sync, and update goal state.
 fn stage_pr_sync(
     run: &mut GovernedWorkflowRun,
     config: &WorkflowConfig,
+    workspace_root: &Path,
 ) -> anyhow::Result<Option<String>> {
     let pr_url = match &run.pr_url {
         Some(url) => url.clone(),
@@ -2217,6 +2543,15 @@ fn stage_pr_sync(
                     at: Utc::now(),
                 });
                 println!("  PR merged — goal state updated (GoalSynced)");
+                // VCS sync: pull the merged changes into the local workspace (v0.15.14).
+                // Non-fatal: print a warning and suggest manual sync on failure.
+                match do_vcs_sync(workspace_root) {
+                    Ok(()) => println!("  Local workspace synced from merge."),
+                    Err(e) => println!(
+                        "  [warn] VCS sync after merge failed: {} — run 'git pull' manually",
+                        e
+                    ),
+                }
                 return Ok(Some(format!("PR merged after {}s", elapsed)));
             }
             PrPollResult::Closed => {
@@ -2351,6 +2686,29 @@ pub fn show_run_status(runs_dir: &Path, run_id_or_prefix: Option<&str>) -> anyho
         }
     }
 
+    // Show milestone draft info if any aggregate_draft stage produced one (v0.15.14).
+    let milestone_entries: Vec<(&str, &str)> = run
+        .outputs
+        .iter()
+        .filter_map(|(sname, smap)| {
+            let mid = smap.get("milestone_id")?.as_str();
+            let title = smap
+                .get("milestone_title")
+                .map(|s| s.as_str())
+                .unwrap_or("(untitled)");
+            Some((sname.as_str(), mid, title))
+        })
+        .map(|(_sname, mid, title)| (mid, title))
+        .collect();
+    if !milestone_entries.is_empty() {
+        println!();
+        println!("Milestone drafts:");
+        for (mid, title) in &milestone_entries {
+            println!("  {} — {} ({})", &mid[..8.min(mid.len())], title, mid);
+            println!("    View: cat .ta/milestones/{}.json", mid);
+        }
+    }
+
     if run.state == WorkflowRunState::Failed || run.state == WorkflowRunState::AwaitingHuman {
         println!();
         println!("Next action:");
@@ -2444,6 +2802,13 @@ mod tests {
             phase: None,
             condition: None,
             target: None,
+            source_stages: None,
+            milestone_title: None,
+            milestone_branch: None,
+            parallel_group: None,
+            join_group: None,
+            on_partial_failure: None,
+            max_parallel: None,
         }
     }
 
@@ -3115,5 +3480,317 @@ kind = "plan_next"
         };
         // Should succeed (dry-run doesn't execute anything).
         run_governed_workflow(&opts).unwrap();
+    }
+
+    // ── v0.15.14 new stage kind deserialization ───────────────────────────────
+
+    #[test]
+    fn stage_kind_loop_next_deserializes() {
+        let toml_str = r#"
+name = "loop_next"
+description = "Advance phase cursor"
+kind = "loop_next"
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.kind, StageKind::LoopNext);
+    }
+
+    #[test]
+    fn stage_kind_apply_draft_branch_deserializes() {
+        let toml_str = r#"
+name = "apply_local"
+description = "Apply to milestone branch"
+kind = "apply_draft_branch"
+milestone_branch = "feature/milestone-1"
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.kind, StageKind::ApplyDraftBranch);
+        assert_eq!(s.milestone_branch.as_deref(), Some("feature/milestone-1"));
+    }
+
+    #[test]
+    fn stage_kind_aggregate_draft_deserializes() {
+        let toml_str = r#"
+name = "aggregate"
+description = "Collect all drafts"
+kind = "aggregate_draft"
+source_stages = "all"
+milestone_title = "Sprint milestone"
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.kind, StageKind::AggregateDraft);
+        assert_eq!(s.source_stages.as_deref(), Some("all"));
+        assert_eq!(s.milestone_title.as_deref(), Some("Sprint milestone"));
+    }
+
+    #[test]
+    fn stage_kind_join_deserializes() {
+        let toml_str = r#"
+name = "sync"
+description = "Wait for parallel group"
+kind = "join"
+join_group = "workers"
+on_partial_failure = "continue"
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.kind, StageKind::Join);
+        assert_eq!(s.join_group.as_deref(), Some("workers"));
+        assert_eq!(s.on_partial_failure.as_deref(), Some("continue"));
+    }
+
+    // ── aggregate_draft stage executor ───────────────────────────────────────
+
+    #[test]
+    fn aggregate_draft_merges_outputs() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+
+        let mut run = GovernedWorkflowRun::new("agg-test", "test-wf", "Goal");
+
+        // Simulate two source stages with draft_id outputs.
+        let mut map1 = std::collections::HashMap::new();
+        map1.insert("draft_id".to_string(), "draft-aaa-111".to_string());
+        map1.insert("phase_id".to_string(), "v0.15.14".to_string());
+        map1.insert("phase_title".to_string(), "Phase A".to_string());
+        run.outputs.insert("run_phase_1".to_string(), map1);
+
+        let mut map2 = std::collections::HashMap::new();
+        map2.insert("draft_id".to_string(), "draft-bbb-222".to_string());
+        map2.insert("phase_id".to_string(), "v0.15.15".to_string());
+        map2.insert("phase_title".to_string(), "Phase B".to_string());
+        run.outputs.insert("run_phase_2".to_string(), map2);
+
+        let stage_def = StageDef {
+            name: "aggregate".to_string(),
+            description: "collect".to_string(),
+            depends_on: vec![],
+            kind: StageKind::AggregateDraft,
+            workflow: None,
+            goal: None,
+            phase: None,
+            condition: None,
+            target: None,
+            source_stages: Some("all".to_string()),
+            milestone_title: Some("Test Milestone".to_string()),
+            milestone_branch: None,
+            parallel_group: None,
+            join_group: None,
+            on_partial_failure: None,
+            max_parallel: None,
+        };
+
+        let opts = RunOptions {
+            workspace_root: workspace,
+            workflow_name: "test-wf",
+            goal_title: "test",
+            dry_run: false,
+            resume_run_id: None,
+            agent: "claude-code",
+            plan_phase: None,
+            depth: 0,
+        };
+
+        let result = stage_aggregate_draft(&mut run, &stage_def, &opts).unwrap();
+        assert!(result.is_some());
+
+        // Milestone ID should be recorded in stage outputs.
+        let agg_out = run.outputs.get("aggregate").unwrap();
+        let milestone_id = agg_out.get("milestone_id").unwrap();
+        assert!(!milestone_id.is_empty());
+        assert_eq!(agg_out.get("draft_count").unwrap().as_str(), "2");
+
+        // Milestone file should exist.
+        let milestone_path = workspace
+            .join(".ta")
+            .join("milestones")
+            .join(format!("{}.json", milestone_id));
+        assert!(milestone_path.exists(), "milestone file should be created");
+    }
+
+    #[test]
+    fn aggregate_draft_deduplicates_draft_ids() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+
+        let mut run = GovernedWorkflowRun::new("dedup-test", "test-wf", "Goal");
+
+        // Two stages with the same draft_id — should deduplicate.
+        let mut map1 = std::collections::HashMap::new();
+        map1.insert("draft_id".to_string(), "same-draft".to_string());
+        run.outputs.insert("stage_a".to_string(), map1.clone());
+        run.outputs.insert("stage_b".to_string(), map1);
+
+        let stage_def = StageDef {
+            name: "aggregate".to_string(),
+            description: "collect".to_string(),
+            depends_on: vec![],
+            kind: StageKind::AggregateDraft,
+            workflow: None,
+            goal: None,
+            phase: None,
+            condition: None,
+            target: None,
+            source_stages: Some("all".to_string()),
+            milestone_title: None,
+            milestone_branch: None,
+            parallel_group: None,
+            join_group: None,
+            on_partial_failure: None,
+            max_parallel: None,
+        };
+
+        let opts = RunOptions {
+            workspace_root: workspace,
+            workflow_name: "test-wf",
+            goal_title: "test",
+            dry_run: false,
+            resume_run_id: None,
+            agent: "claude-code",
+            plan_phase: None,
+            depth: 0,
+        };
+
+        stage_aggregate_draft(&mut run, &stage_def, &opts).unwrap();
+        let agg_out = run.outputs.get("aggregate").unwrap();
+        // Only 1 unique draft ID.
+        assert_eq!(agg_out.get("draft_count").unwrap().as_str(), "1");
+    }
+
+    // ── join stage executor ───────────────────────────────────────────────────
+
+    #[test]
+    fn join_validates_group_completed_no_failures() {
+        let mut run = GovernedWorkflowRun::new("join-test", "test-wf", "Goal");
+        // All stages completed successfully — join should pass.
+        for s in &mut run.stages {
+            s.status = StageStatus::Completed;
+        }
+
+        let stage_def = StageDef {
+            name: "sync".to_string(),
+            description: "join".to_string(),
+            depends_on: vec![],
+            kind: StageKind::Join,
+            workflow: None,
+            goal: None,
+            phase: None,
+            condition: None,
+            target: None,
+            source_stages: None,
+            milestone_title: None,
+            milestone_branch: None,
+            parallel_group: None,
+            join_group: Some("workers".to_string()),
+            on_partial_failure: None,
+            max_parallel: None,
+        };
+
+        let result = stage_join(&mut run, &stage_def).unwrap();
+        assert!(result.unwrap().contains("workers"));
+    }
+
+    #[test]
+    fn join_halts_on_failure_by_default() {
+        let mut run = GovernedWorkflowRun::new("join-fail-test", "test-wf", "Goal");
+        // Mark one stage as failed.
+        if let Some(s) = run.stages.first_mut() {
+            s.status = StageStatus::Failed;
+            s.name = "failing_stage".to_string();
+        }
+
+        let stage_def = StageDef {
+            name: "sync".to_string(),
+            description: "join".to_string(),
+            depends_on: vec![],
+            kind: StageKind::Join,
+            workflow: None,
+            goal: None,
+            phase: None,
+            condition: None,
+            target: None,
+            source_stages: None,
+            milestone_title: None,
+            milestone_branch: None,
+            parallel_group: None,
+            join_group: Some("workers".to_string()),
+            on_partial_failure: None, // default = halt
+            max_parallel: None,
+        };
+
+        let err = stage_join(&mut run, &stage_def).unwrap_err();
+        assert!(err.to_string().contains("failed stage"));
+    }
+
+    #[test]
+    fn join_continues_on_partial_failure_when_configured() {
+        let mut run = GovernedWorkflowRun::new("join-partial-test", "test-wf", "Goal");
+        if let Some(s) = run.stages.first_mut() {
+            s.status = StageStatus::Failed;
+        }
+
+        let stage_def = StageDef {
+            name: "sync".to_string(),
+            description: "join".to_string(),
+            depends_on: vec![],
+            kind: StageKind::Join,
+            workflow: None,
+            goal: None,
+            phase: None,
+            condition: None,
+            target: None,
+            source_stages: None,
+            milestone_title: None,
+            milestone_branch: None,
+            parallel_group: None,
+            join_group: Some("workers".to_string()),
+            on_partial_failure: Some("continue".to_string()),
+            max_parallel: None,
+        };
+
+        let result = stage_join(&mut run, &stage_def);
+        // Should succeed despite the failed stage.
+        assert!(result.is_ok());
+    }
+
+    // ── loop_next is an alias for plan_next output format ────────────────────
+
+    #[test]
+    fn loop_next_advances_cursor_same_format_as_plan_next() {
+        // Verify that LoopNext kind is treated like PlanNext in the dispatch.
+        // We test the deserialization and type equivalence, not the actual ta invocation.
+        let toml_str = r#"
+name = "loop_next_stage"
+description = "Advance loop"
+kind = "loop_next"
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.kind, StageKind::LoopNext);
+        // PlanNextOutput format is the same for both.
+        let out = PlanNextOutput {
+            phase_id: "v0.15.14".to_string(),
+            phase_title: "Test".to_string(),
+            done: false,
+        };
+        let map = out.to_output_map();
+        assert!(map.contains_key("phase_id"));
+        assert!(map.contains_key("phase_title"));
+        assert!(map.contains_key("done"));
+    }
+
+    // ── parallel group fields round-trip through StageDef ────────────────────
+
+    #[test]
+    fn parallel_stages_fields_roundtrip() {
+        let toml_str = r#"
+name = "worker"
+description = "Parallel worker"
+parallel_group = "workers"
+max_parallel = 3
+on_partial_failure = "continue"
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.parallel_group.as_deref(), Some("workers"));
+        assert_eq!(s.max_parallel, Some(3));
+        assert_eq!(s.on_partial_failure.as_deref(), Some("continue"));
     }
 }

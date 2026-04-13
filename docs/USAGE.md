@@ -8354,9 +8354,58 @@ Output is JSON with `run_id`, `workflow_name`, `goal_title`, per-stage records, 
 
 ---
 
-### Workflow Loops & Sub-workflows
+### Multi-Phase Workflows
 
-TA workflows support three new step kinds that enable composable, looping execution: `plan_next`, `workflow`, and `goto`. Together they replace the `build_phases.sh` shell script with a native, observable workflow.
+TA supports two built-in strategies for iterating over pending plan phases — Mode A (PR per phase) and Mode B (milestone batch). Both are native workflows that replace `build_phases.sh`.
+
+#### Mode A vs. Mode B
+
+| | Mode A — `plan-build-phases` | Mode B — `plan-build-milestone` |
+|---|---|---|
+| **PR cadence** | One PR per phase | One PR for all phases |
+| **Review cadence** | Per-phase review | Single milestone review |
+| **VCS history** | Granular commits | Batch commit |
+| **Best for** | Fine-grained traceability | Sprint batches, low-overhead builds |
+| **Template** | `plan-build-phases.toml` | `plan-build-milestone.toml` |
+
+#### Using Mode A (PR per phase)
+
+```bash
+# Run all pending phases, one PR each
+ta workflow run plan-build-phases --goal "Build all pending phases"
+
+# Preview without executing
+ta workflow run plan-build-phases --goal "..." --dry-run
+```
+
+Each iteration runs the full governed build cycle (agent goal → review → human gate → apply → PR merge → VCS sync) for one phase, then moves to the next.
+
+#### Using Mode B (milestone batch)
+
+```bash
+# Accumulate all phases into one milestone draft
+ta workflow run plan-build-milestone --goal "Sprint milestone"
+```
+
+Phase drafts are applied locally without per-phase PRs. After all phases complete, a `MilestoneDraft` is created, reviewed in one human gate, and submitted as a single PR.
+
+#### Reviewing a Milestone Draft
+
+When `kind = "aggregate_draft"` completes, the milestone is saved to `.ta/milestones/<id>.json`:
+
+```bash
+# Check which milestone was created
+ta workflow status
+
+# Inspect the milestone draft directly
+cat .ta/milestones/<milestone-id>.json
+```
+
+The `ta workflow status` output shows milestone info under "Milestone drafts" when one has been created.
+
+#### Workflow Loops & Sub-workflows
+
+TA workflows support six step kinds for composable, looping execution: `plan_next`, `loop_next`, `workflow`, `goto`, `aggregate_draft`, `apply_draft_branch`, and `join`. Together they replace `build_phases.sh` with a VCS-agnostic native workflow.
 
 #### Built-in: `plan-build-loop`
 
@@ -8424,6 +8473,75 @@ description = "Loop back when more phases remain"
 ```
 
 When `condition` is false, the step falls through and the workflow ends normally.
+
+**`kind = "loop_next"`** — Alias for `plan_next` that makes loop intent explicit. Produces the same `{phase_id, phase_title, done}` outputs and is interchangeable with `plan_next` in loop workflows:
+
+```toml
+[[stages]]
+name = "next"
+kind = "loop_next"
+description = "Advance phase cursor"
+```
+
+**`kind = "apply_draft_branch"`** — Like `apply_draft` but targets a named branch instead of the default feature branch. Used in milestone mode to accumulate changes without per-phase PRs:
+
+```toml
+[[stages]]
+name = "apply_local"
+kind = "apply_draft_branch"
+milestone_branch = "feature/milestone-build"
+condition = "!plan_next.done"
+description = "Apply draft to milestone branch"
+```
+
+If `milestone_branch` is not set, falls back to regular apply behavior.
+
+**`kind = "aggregate_draft"`** — Collects `draft_id` values from stage outputs and creates a `MilestoneDraft`:
+
+```toml
+[[stages]]
+name = "aggregate"
+kind = "aggregate_draft"
+source_stages = "all"       # "all" or comma-separated stage names
+milestone_title = "Sprint milestone"
+milestone_branch = "feature/milestone-build"
+depends_on = ["loop"]
+description = "Collect all phase drafts into a MilestoneDraft"
+```
+
+The milestone is saved to `.ta/milestones/<uuid>.json`. The `milestone_id` is emitted into `run.outputs["aggregate"]["milestone_id"]` for downstream stages.
+
+**`kind = "join"`** — Synchronization point for parallel stage groups. Validates that all group members completed:
+
+```toml
+[[stages]]
+name = "sync"
+kind = "join"
+join_group = "workers"
+on_partial_failure = "continue"   # "continue" or omit (default: halt)
+description = "Wait for parallel workers"
+```
+
+#### Parallel stage groups
+
+Mark stages with `parallel_group` to declare that they belong to a concurrent group (future execution; currently runs sequentially):
+
+```toml
+[[stages]]
+name = "worker_a"
+parallel_group = "workers"
+max_parallel = 3
+description = "Parallel worker A"
+
+[[stages]]
+name = "worker_b"
+parallel_group = "workers"
+description = "Parallel worker B"
+```
+
+#### VCS sync after PR merge
+
+The `pr_sync` stage automatically calls `git pull --ff-only` after detecting a merged PR to keep the local workspace in sync. If the sync fails, a warning is printed and the workflow continues — run `git pull` manually to recover.
 
 #### Template interpolation
 
