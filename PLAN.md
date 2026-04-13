@@ -10108,6 +10108,33 @@ kind = "pr_sync"          # opens one PR from milestone_branch → main, polls, 
 
 ---
 
+### v0.15.14.0 — Draft Apply Provenance & Already-Applied UX
+<!-- status: pending -->
+**Goal**: Fix two UX failures that cause users to think a draft is in a "bad state" when it was legitimately applied by a background task.
+
+**Root cause**: `ta draft apply` on an already-Applied draft returns an opaque error with no context about when or how it was applied. And the `Applied` state records no provenance (who/what applied it), so the user has no way to distinguish a legitimate background apply from a corrupted state.
+
+**Incident**: User ran `ta draft applied <id>` (typo — unknown subcommand, no-op), then `ta draft apply <id>` returned "Cannot apply package in Applied state" with no further context. User concluded the state was corrupted and tried to recover manually.
+
+#### Changes
+
+1. **Apply provenance field** — add `applied_via: ApplyProvenance` to `DraftStatus::Applied`:
+   - `ApplyProvenance::Manual { user: String }` — triggered by `ta draft apply`
+   - `ApplyProvenance::BackgroundTask { task_id: String }` — triggered by background task
+   - `ApplyProvenance::AutoMerge` — triggered by auto-merge hook
+   - Persisted in draft store; shown in `ta draft list` and `ta draft view`
+
+2. **Better error on already-Applied** — instead of: `Cannot apply package in Applied { applied_at: ... } state`
+   Show: `Draft "v0.15.14 ..." was already applied on 2026-04-13 at 03:39 via background task bwdlflabx. PR #363 was created. No action needed. (Run \`ta draft view <id>\` to confirm.)`
+
+3. **`ta draft list` Applied column** — show provenance inline: `Applied (background)` vs `Applied (manual)`
+
+4. **Unknown subcommand safety** — no code change needed (clap already handles this), but add an integration test asserting that `ta draft <unknown>` exits non-zero and does NOT modify any draft state.
+
+#### Version: `0.15.14-alpha.0` (patch, no semver bump needed; ships on next tagged release)
+
+---
+
 ### v0.15.14.1 — Human Review Items: Plan Schema & Tracking
 <!-- status: pending -->
 **Goal**: Distinguish agent-completable implementation items from steps that require a human to verify, test, or sign off. Today both types live in the same flat checklist, so phases get marked `done` while human verification steps remain unchecked indefinitely — no reminder, no tracking, no deferral. This phase adds a `#### Human Review` subsection to the plan schema, a lightweight store for tracking open review items, a `ta plan review` command, and surfacing in `ta status` and `build_phases.sh`.
