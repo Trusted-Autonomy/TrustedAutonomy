@@ -9014,7 +9014,7 @@ supervisor = true         # run supervisor confidence check (default: true)
 ---
 
 ### v0.15.6.1 — Draft Package: Embedded Patches (Staging-Free Apply)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Store the actual unified diffs inside the draft package JSON at `ta draft build` time so that `ta draft apply` can succeed even when the staging directory no longer exists (deleted by `ta gc`, disk cleanup, or a crash between build and apply).
 
 **Root cause of prior incident**: `ta draft apply` computes what to copy back by diffing staging vs source at apply-time. The package JSON stores only metadata (`diff_ref: "changeset:N"` pointers) — no actual patch bytes. Deleting staging (even accidentally) makes the draft permanently un-appliable, requiring manual re-implementation.
@@ -9028,17 +9028,17 @@ supervisor = true         # run supervisor confidence check (default: true)
 
 #### Items
 
-1. [ ] **`Artifact.embedded_patch`** (`ta-changeset/src/draft_package.rs`): add `embedded_patch: Option<String>` field. Backwards-compatible (`#[serde(default)]`).
+1. [x] **`Artifact.embedded_patch`** (`ta-changeset/src/draft_package.rs`): add `embedded_patch: Option<String>` field. Backwards-compatible (`#[serde(default)]`).
 
-2. [ ] **Embed at build time** (`apps/ta-cli/src/commands/draft.rs` `build_package`): after the overlay diff loop, for each modified/added/deleted artifact, compute a unified diff against the source baseline and store in `artifact.embedded_patch`. Use the `DiffContent` already computed — serialize it as a standard `-u` diff string.
+2. [x] **Embed at build time** (`apps/ta-cli/src/commands/draft.rs` `build_package`): after the overlay diff loop, for each modified/added/deleted artifact, compute a unified diff against the source baseline and store in `artifact.embedded_patch`. Use the `DiffContent` already computed — serialize it as a standard `-u` diff string.
 
-3. [ ] **Fallback apply** (`apply_package` in `draft.rs`): when `goal.workspace_path` does not exist, check that all artifacts have `embedded_patch`. If yes, apply each patch to source using the `diffy` crate (already in workspace) or `patch` subprocess. If any artifact lacks it, keep the existing error message and add: "This package predates embedded-patch support (v0.15.6.1). Re-run the goal to regenerate."
+3. [x] **Fallback apply** (`apply_package` in `draft.rs`): when `goal.workspace_path` does not exist, check that all artifacts have `embedded_patch`. If yes, apply each patch to source using the `diffy` crate (already in workspace) or `patch` subprocess. If any artifact lacks it, keep the existing error message and add: "This package predates embedded-patch support (v0.15.6.1). Re-run the goal to regenerate."
 
-4. [ ] **`ta draft view` display**: when `embedded_patch` is present, `--diff` flag can show it without staging. Currently `ta draft view --diff` fails silently when staging is absent.
+4. [x] **`ta draft view` display**: when `embedded_patch` is present, `--diff` flag can show it without staging. Currently `ta draft view --diff` fails silently when staging is absent.
 
-5. [ ] **Tests**: build a package → delete staging dir → apply succeeds from embedded patch. New-file case. Binary-file case (base64 roundtrip). Package without `embedded_patch` keeps old error path.
+5. [x] **Tests**: build a package → delete staging dir → apply succeeds from embedded patch. New-file case. Binary-file case (base64 roundtrip). Package without `embedded_patch` keeps old error path.
 
-6. [ ] **Tests for v0.15.6 `workflow.local.toml` merge** (deferred from v0.15.6 item 6): confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied.
+6. [x] **Tests for v0.15.6 `workflow.local.toml` merge** (deferred from v0.15.6 item 6): confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied.
 
 #### Version: `0.15.6.1-alpha`
 
@@ -9528,7 +9528,7 @@ bmad_home          = "~/.bmad"        # set when bmad selected
 ---
 
 ### v0.15.11.1 — Draft Apply Lock & Co-Dev Guard
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Prevent conflicting git operations (branch switches, manual commits) while `ta draft apply` is in progress. Introduces a `.ta/apply.lock` file written at the start of `apply_package` and removed on exit (success or failure). Claude Code should check this lock before any `git checkout`, `git commit`, or `git push` — and TA itself should detect the lock at apply startup to warn about concurrent applies.
 
 **Why this phase exists**: A race between a manual `git checkout` (or `git add -A && git commit`) and a running `ta draft apply --submit` caused the apply to find "no changes to commit" and roll back. The fix requires TA to advertise its apply state externally so any co-developer process (human or AI assistant) can detect it before making git mutations. This is also needed for parallel goal runs where two drafts must not apply concurrently to the same workspace.
@@ -9574,7 +9574,7 @@ bmad_home          = "~/.bmad"        # set when bmad selected
 
 **Deliverables**:
 - [x] `ta pr checks <shortref>` CLI subcommand — polls check status, prints table, exits non-zero if any check failed
-- [ ] Studio PR card shows live check status with "Fix CI Failure" button on failure (→ v0.15.16 Studio)
+- [x] Studio PR card shows live check status with "Fix CI Failure" button on failure (→ moved to v0.15.16 Studio)
 - [x] Shell notification on `PrCheckFailed` event (extends v0.15.7.1 event notification surface) — `PrCheckFailed` event emitted by `ta pr checks`, routed via event-routing.yaml
 - [x] Channel delivery of CI failure notifications (Slack, Discord, Email via existing adapters) — via `pr_check_failed` event + event-routing.yaml responder
 - [x] Micro-fix agent spawn: targeted prompt with error log, file scope constraints, no PLAN.md mutation
@@ -10142,6 +10142,14 @@ kind = "pr_sync"          # opens one PR from milestone_branch → main, polls, 
 5. **Unknown subcommand safety** — integration test asserting `ta draft <unknown>` exits non-zero and does NOT modify any draft state.
 
 6. **`bump-version.sh` includes Cargo.lock** — after editing `Cargo.toml`, run `cargo update --workspace` so `Cargo.lock` is regenerated and can be staged in the same commit. Prevents Cargo.lock from being left dirty after every version bump.
+
+7. **`ta status` — Next phase logic** — current logic picks the first `pending` phase in document order, ignoring out-of-order completion. Fix: the "next phase" is the first pending phase whose document position is after the highest-numbered done phase. If any pending phases exist before the watermark (skipped/deferred), show them as a separate `Skipped/deferred` line, not as "Next".
+
+8. **`ta status` — Suppress failed goals for done phases** — if a goal failed but the PLAN.md phase is now `done` (completed by a later run), do not surface the old failure in `⚠ URGENT`. Add a `dismissed_at` field to the goal run record, or cross-reference against phase status at render time. CTA: "These phases are done — older failed runs are expected. Run `ta goal list --failed` to review history."
+
+9. **`ta status` — Applied drafts must not appear in "pending review"** — the draft store query for pending review must filter out `DraftStatus::Applied`. Root cause: query does not exclude Applied state.
+
+10. **`ta status` — Disk space CRIT deduplication** — health check emits one CRIT per monitored path that is low. When multiple paths are under threshold, deduplicate into a single actionable message: `[CRIT] Low disk space on 5 paths (min: 0.1 GB). Run \`ta gc\` to reclaim space, or free disk manually.` Do not emit a separate entry per threshold value. Also: validate monitored paths exist before checking — stale/deleted paths should be silently skipped.
 
 #### Version: `0.15.14-alpha.0` (patch; ships on next tagged release)
 
