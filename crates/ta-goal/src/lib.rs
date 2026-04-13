@@ -21,6 +21,7 @@ pub mod error;
 pub mod events;
 pub mod goal_run;
 pub mod history;
+pub mod human_review;
 pub mod messaging_audit;
 pub mod operations;
 pub mod persona;
@@ -34,6 +35,9 @@ pub use error::GoalError;
 pub use events::{EventDispatcher, LogSink, NotificationSink, TaEvent};
 pub use goal_run::{slugify_title, GoalRun, GoalRunState};
 pub use history::{GoalHistoryEntry, GoalHistoryLedger, HistoryFilter};
+pub use human_review::{
+    extract_human_review_items, HumanReviewRecord, HumanReviewStatus, HumanReviewStore,
+};
 pub use messaging_audit::{DraftEmailRecord, DraftEmailState, MessagingAuditLog};
 pub use operations::{ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog};
 pub use persona::{PersonaCapabilities, PersonaConfig, PersonaInner, PersonaStyle, PersonaSummary};

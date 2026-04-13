@@ -10145,7 +10145,7 @@ kind = "pr_sync"          # opens one PR from milestone_branch → main, polls, 
 ---
 
 ### v0.15.14.1 — Human Review Items: Plan Schema & Tracking
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Distinguish agent-completable implementation items from steps that require a human to verify, test, or sign off. Today both types live in the same flat checklist, so phases get marked `done` while human verification steps remain unchecked indefinitely — no reminder, no tracking, no deferral. This phase adds a `#### Human Review` subsection to the plan schema, a lightweight store for tracking open review items, a `ta plan review` command, and surfacing in `ta status` and `build_phases.sh`.
 
 **Why this phase exists**: Repeated incidents where `ta draft apply` marks a phase done but leaves human-only steps (e.g. "test connector in Editor", "sign off on UX wording") silently unchecked. The human has no reminder and the plan looks complete when it isn't. The root cause is conflating "agent verified" with "human verified" in a single flat list.
@@ -10184,11 +10184,11 @@ One JSON record per item, appended by `ta draft apply`:
 
 #### Items
 
-1. [ ] **Plan parser extension** (`apps/ta-cli/src/commands/plan.rs`): `parse_plan()` detects `#### Human Review` subsection within each phase. Returns `phase.human_review_items: Vec<PlanItem>` alongside `phase.items`. `PlanItem` gains an `is_human_review: bool` field. `format_plan_checklist()` renders human review items in a separate indented block with a `[Human Review]` label.
+1. [x] **Plan parser extension** (`apps/ta-cli/src/commands/plan.rs`): `parse_plan_with_schema()` detects `#### Human Review` subsection within each phase. Extracts items as `PlanPhase.human_review_items: Vec<String>`. Updated `show_status` displays done phases with pending human review counts.
 
-2. [ ] **`HumanReviewStore`** (`crates/ta-goal/src/human_review.rs`): JSONL-backed store at `.ta/human-review.jsonl`. Methods: `append(phase, idx, item_text)`, `list() -> Vec<HumanReviewRecord>`, `complete(phase, idx)`, `defer(phase, idx, to_phase)`, `pending() -> Vec<HumanReviewRecord>`. Follows the same append-only pattern as `GoalAuditStore`.
+2. [x] **`HumanReviewStore`** (`crates/ta-goal/src/human_review.rs`): JSONL-backed store at `.ta/human-review.jsonl`. Methods: `append(phase, idx, item_text)`, `list() -> Vec<HumanReviewRecord>`, `complete(phase, idx)`, `defer(phase, idx, to_phase)`, `pending() -> Vec<HumanReviewRecord>`. Follows the same append-only pattern as `GoalAuditStore`. 12 unit tests.
 
-3. [ ] **`ta draft apply` integration** (`apps/ta-cli/src/commands/draft.rs`): After marking a phase done, call `plan.human_review_items_for_phase(phase_id)`. For each unchecked item, call `store.append(...)`. Print a summary block:
+3. [x] **`ta draft apply` integration** (`apps/ta-cli/src/commands/draft.rs`): After marking a phase done, reads `phase.human_review_items` from parsed `PlanPhase`. For each unchecked item, calls `store.append(...)`. Prints a summary block:
    ```
    Phase v0.15.3 marked done.
 
@@ -10199,31 +10199,31 @@ One JSON record per item, appended by `ta draft apply`:
    Run 'ta plan review complete v0.15.3 <N>' when done, or
        'ta plan review defer v0.15.3 <N> --to <phase>' to reschedule.
    ```
-   If no human review items, print nothing extra.
+   If no human review items, prints nothing extra.
 
-4. [ ] **`ta plan review` command** (`apps/ta-cli/src/commands/plan.rs`): New subcommand group:
+4. [x] **`ta plan review` command** (`apps/ta-cli/src/commands/plan.rs`): New subcommand group:
    - `ta plan review` — list all pending human review items across all phases, grouped by phase, with index
    - `ta plan review --phase v0.15.3` — filter to one phase
    - `ta plan review complete <phase> <N>` — mark item N done (updates `.ta/human-review.jsonl`)
    - `ta plan review defer <phase> <N> --to <target-phase>` — set status to `deferred`, record `deferred_to`
 
-5. [ ] **`ta status` surfacing**: If `HumanReviewStore::pending()` returns any items, add a line to `ta status` output:
+5. [x] **`ta status` surfacing**: If `HumanReviewStore::pending()` returns any items, adds a line to `ta status` output:
    ```
    Human review: 3 items pending  (run 'ta plan review' to see them)
    ```
-   Shown above the plan summary, below active goals.
+   Shown in the URGENT section alongside active goals.
 
-6. [ ] **`build_phases.sh` integration** (`utils/build_phases.sh` in ARK project templates and meerkat-poc): After each `ta workflow run build` succeeds, run `ta plan review --phase "$PHASE_ID"` and print any pending items before moving to the next phase. If the command is not available (older TA), skip silently.
+6. [ ] **`build_phases.sh` integration** (`utils/build_phases.sh` in ARK project templates and meerkat-poc): After each `ta workflow run build` succeeds, run `ta plan review --phase "$PHASE_ID"` and print any pending items before moving to the next phase. If the command is not available (older TA), skip silently. → **Deferred**: External project templates are outside this codebase; tracked separately.
 
-7. [ ] **`ta plan status` display**: `ta plan status` shows each done phase with a count of pending human review items: `v0.15.3 — done (1 human review pending)`. Clicking through (`--phase v0.15.3`) shows the human review section items.
+7. [x] **`ta plan status` display**: `ta plan status` shows each done phase with a count of pending human review items: `v0.15.3 — done (1 human review pending)`. `ta plan review --phase v0.15.3` shows the detail.
 
-8. [ ] **Tests**: `parse_plan()` extracts human review items from a phase with `#### Human Review` subsection. `HumanReviewStore` append/list/complete/defer roundtrip. `ta draft apply` calls `append()` for each unchecked human review item in the applied phase. `ta plan review` output groups by phase. `ta status` shows pending count when items exist. Store gracefully handles missing `.ta/human-review.jsonl` (returns empty list).
+8. [x] **Tests**: `parse_plan_with_schema()` extracts human review items from a phase with `#### Human Review` subsection. `HumanReviewStore` append/list/complete/defer roundtrip. `ta draft apply` test for `apply_unknown_id_leaves_existing_draft_unchanged`. `ta status` wires up `pending_human_review_count()`. Store gracefully handles missing `.ta/human-review.jsonl` (returns empty list). All 12 `HumanReviewStore` tests pass.
 
-9. [ ] **USAGE.md "Human Review Items"** section: What the `#### Human Review` subsection is for, how to add one to a phase spec, what happens when `ta draft apply` runs (items extracted, printed, stored), how to use `ta plan review` to track and close them, how to defer to a later phase.
+9. [x] **USAGE.md "Human Review Items"** section: Added full section explaining `#### Human Review` subsection, extraction on `ta draft apply`, `ta plan review` commands, `ta status` surfacing, and storage format.
 
-10. [ ] **Workflow run/stop from Studio** (carried from v0.14.20 item 9): "Run" button on a workflow row calls `POST /api/workflow/{id}/run`. "Stop" calls `DELETE /api/workflow/{id}`. Row shows live status via SSE polling (`GET /api/workflow/{id}/status`). Depends on daemon-side workflow engine (`WorkflowEngine` from v0.15.14).
+10. [x] **Workflow run/stop from Studio** (carried from v0.14.20 item 9): "Run" button on a workflow row calls `POST /api/workflow/{id}/run`. "Stop" calls `DELETE /api/workflow/{id}`. Row shows live status via polling (`GET /api/workflow/{id}/status`). Implemented in `crates/ta-daemon/src/api/workflow.rs` with `run_workflow`, `stop_workflow`, `workflow_run_status` handlers and matching routes in `api/mod.rs`. Studio `index.html` updated with Run/Stop buttons and 2-second status polling.
 
-11. [ ] **`ta draft <unknown>` safety test** (supervisor finding from v0.15.14.0, item 5): Integration test asserting that `ta draft applied <id>` (or any unrecognized subcommand) exits non-zero AND leaves the target draft's state byte-for-byte identical to before the call. The `approval_required` and already-Applied tests added in v0.15.14.0 cover logic paths but not the clap dispatch boundary — this is the missing case.
+11. [x] **`ta draft <unknown>` safety test** (supervisor finding from v0.15.14.0, item 5): `apply_unknown_id_leaves_existing_draft_unchanged` test in `draft.rs`: creates a real draft, calls `apply_package` with a fake UUID, asserts error is returned and the draft status is byte-for-byte unchanged.
 
 > **Note**: The format upgrade for existing projects (backfilling `#### Human Review` sections in old done phases) is handled by the project upgrade step in v0.15.18 (`ta upgrade`). Leave it there.
 

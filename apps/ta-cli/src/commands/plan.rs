@@ -25,6 +25,7 @@ use std::path::Path;
 
 use clap::Subcommand;
 use regex::Regex;
+use ta_goal::{extract_human_review_items, HumanReviewStore};
 use ta_mcp_gateway::GatewayConfig;
 
 #[derive(Subcommand)]
@@ -206,6 +207,18 @@ pub enum PlanCommands {
         #[arg(long, default_value = "PLAN.md")]
         output: String,
     },
+    /// Track and close human review items extracted from plan phases (v0.15.14.1).
+    ///
+    /// Human review items are steps that require a human to verify, test, or sign off —
+    /// they are extracted from `#### Human Review` subsections when `ta draft apply` runs.
+    ///
+    /// Examples:
+    ///   ta plan review                          — list all pending items
+    ///   ta plan review --phase v0.15.3          — filter to one phase
+    ///   ta plan review complete v0.15.3 1       — mark item 1 (1-based) done
+    ///   ta plan review defer v0.15.3 1 --to v0.15.4  — defer item 1 to a later phase
+    #[command(subcommand)]
+    Review(ReviewCommands),
     /// Generate a PLAN.md from a description or document using an agent goal.
     ///
     /// The agent reads the input, proposes a phased plan, and outputs a PLAN.md
@@ -236,6 +249,34 @@ pub enum PlanCommands {
         /// Source directory to overlay (defaults to current directory).
         #[arg(long)]
         source: Option<std::path::PathBuf>,
+    },
+}
+
+/// Subcommands for `ta plan review`.
+#[derive(Subcommand)]
+pub enum ReviewCommands {
+    /// List pending human review items (default: all phases).
+    List {
+        /// Filter to a single phase ID.
+        #[arg(long)]
+        phase: Option<String>,
+    },
+    /// Mark a human review item as complete.
+    Complete {
+        /// Phase ID (e.g. v0.15.3).
+        phase: String,
+        /// Item number (1-based).
+        n: usize,
+    },
+    /// Defer a human review item to a later phase.
+    Defer {
+        /// Phase ID.
+        phase: String,
+        /// Item number (1-based).
+        n: usize,
+        /// Target phase to defer to.
+        #[arg(long)]
+        to: String,
     },
 }
 
@@ -345,6 +386,7 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             agent,
             source.as_deref(),
         ),
+        PlanCommands::Review(sub) => plan_review(config, sub),
     }
 }
 
@@ -389,6 +431,10 @@ pub struct PlanPhase {
     pub status: PlanStatus,
     /// Explicit dependencies declared via `<!-- depends_on: v0.13.17.3 -->` comment (v0.14.3).
     pub depends_on: Vec<String>,
+    /// Items from the `#### Human Review` subsection of this phase (v0.15.14.1).
+    ///
+    /// These items require a human to verify or sign off — agents must not check them.
+    pub human_review_items: Vec<String>,
 }
 
 // ── Schema-driven parsing ────────────────────────────────────────
@@ -549,11 +595,13 @@ pub fn parse_plan_with_schema(content: &str, schema: &PlanSchema) -> Vec<PlanPha
 
                 let status = find_status_in_lookahead(&lines, i + 1, &status_re);
                 let depends_on = find_depends_on_in_lookahead(&lines, i + 1);
+                let human_review_items = extract_human_review_items(content, &id, &title);
                 phases.push(PlanPhase {
                     id,
                     title,
                     status,
                     depends_on,
+                    human_review_items,
                 });
                 break; // First pattern match wins.
             }
@@ -1181,6 +1229,20 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
         .count();
     let total = phases.len();
 
+    // Count pending human review items from the store.
+    let hr_store = HumanReviewStore::new(&config.workspace_root);
+    let hr_pending_count = hr_store.pending().unwrap_or_default().len();
+
+    // Build per-phase human review pending counts for the done-phase display.
+    let hr_by_phase: std::collections::HashMap<String, usize> = hr_store
+        .pending()
+        .unwrap_or_default()
+        .into_iter()
+        .fold(std::collections::HashMap::new(), |mut acc, r| {
+            *acc.entry(r.phase).or_insert(0) += 1;
+            acc
+        });
+
     if json_output {
         let data = serde_json::json!({
             "total": total,
@@ -1188,11 +1250,16 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
             "in_progress": in_progress,
             "pending": pending,
             "deferred": deferred,
-            "phases": phases.iter().map(|p| serde_json::json!({
-                "id": p.id,
-                "title": p.title,
-                "status": format!("{}", p.status),
-            })).collect::<Vec<_>>(),
+            "human_review_pending": hr_pending_count,
+            "phases": phases.iter().map(|p| {
+                let hr_count = hr_by_phase.get(&p.id).copied().unwrap_or(0);
+                serde_json::json!({
+                    "id": p.id,
+                    "title": p.title,
+                    "status": format!("{}", p.status),
+                    "human_review_pending": hr_count,
+                })
+            }).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&data)?);
         return Ok(());
@@ -1205,6 +1272,13 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
     if deferred > 0 {
         println!("  Deferred:    {}", deferred);
     }
+    if hr_pending_count > 0 {
+        println!(
+            "  Human review: {} item{} pending  (run 'ta plan review' to see them)",
+            hr_pending_count,
+            if hr_pending_count == 1 { "" } else { "s" }
+        );
+    }
 
     if let Some(current) = phases.iter().find(|p| p.status == PlanStatus::InProgress) {
         println!("\nCurrent: Phase {} — {}", current.id, current.title);
@@ -1213,6 +1287,24 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
     // Use find_next_pending to skip deferred phases.
     if let Some(next) = find_next_pending(&phases, None) {
         println!("Next:    Phase {} — {}", next.id, next.title);
+    }
+
+    // Show done phases with pending human review items.
+    let done_with_hr: Vec<_> = phases
+        .iter()
+        .filter(|p| p.status == PlanStatus::Done)
+        .filter(|p| hr_by_phase.get(&p.id).copied().unwrap_or(0) > 0)
+        .collect();
+    if !done_with_hr.is_empty() {
+        println!();
+        println!("Done phases with pending human review:");
+        for phase in done_with_hr {
+            let count = hr_by_phase.get(&phase.id).copied().unwrap_or(0);
+            println!(
+                "  {} — {} ({} human review pending)",
+                phase.id, phase.title, count
+            );
+        }
     }
 
     // Show dependency warnings for phases with unmet depends_on.
@@ -3003,6 +3095,84 @@ fn extract_plan_items(text: &str) -> Vec<String> {
     items
 }
 
+// ── ta plan review ────────────────────────────────────────────────
+
+/// Handle `ta plan review` and its subcommands.
+pub fn plan_review(config: &GatewayConfig, cmd: &ReviewCommands) -> anyhow::Result<()> {
+    let store = HumanReviewStore::new(&config.workspace_root);
+
+    match cmd {
+        ReviewCommands::List { phase } => {
+            let records = store.pending()?;
+
+            // Filter by phase if requested.
+            let records: Vec<_> = if let Some(p) = phase {
+                records.into_iter().filter(|r| &r.phase == p).collect()
+            } else {
+                records
+            };
+
+            if records.is_empty() {
+                println!("No pending human review items.");
+                if phase.is_some() {
+                    println!("  (for phase {})", phase.as_deref().unwrap_or(""));
+                }
+                return Ok(());
+            }
+
+            // Group by phase for display.
+            let mut by_phase: std::collections::BTreeMap<&str, Vec<&ta_goal::HumanReviewRecord>> =
+                std::collections::BTreeMap::new();
+            for r in &records {
+                by_phase.entry(r.phase.as_str()).or_default().push(r);
+            }
+
+            println!("Pending human review items:\n");
+            for (phase_id, items) in &by_phase {
+                println!(
+                    "  {} ({} item{})",
+                    phase_id,
+                    items.len(),
+                    if items.len() == 1 { "" } else { "s" }
+                );
+                for r in items.iter() {
+                    println!("    [{}] {}", r.idx + 1, r.item);
+                }
+                println!();
+            }
+            println!("Run 'ta plan review complete <phase> <N>' when done, or");
+            println!("    'ta plan review defer <phase> <N> --to <phase>' to reschedule.");
+        }
+        ReviewCommands::Complete { phase, n } => {
+            // n is 1-based; store uses 0-based idx.
+            if *n == 0 {
+                anyhow::bail!("Item number must be 1 or greater");
+            }
+            let idx = n - 1;
+            store.complete(phase, idx)?;
+            println!("Marked item {} in phase {} as complete.", n, phase);
+        }
+        ReviewCommands::Defer { phase, n, to } => {
+            if *n == 0 {
+                anyhow::bail!("Item number must be 1 or greater");
+            }
+            let idx = n - 1;
+            store.defer(phase, idx, to)?;
+            println!("Deferred item {} in phase {} to phase {}.", n, phase, to);
+        }
+    }
+
+    Ok(())
+}
+
+/// Return the number of pending human review items for `ta status` surfacing.
+pub fn pending_human_review_count(project_root: &Path) -> usize {
+    HumanReviewStore::new(project_root)
+        .pending()
+        .unwrap_or_default()
+        .len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3134,6 +3304,7 @@ Release automation.
                 title: format!("Done Phase {}", i),
                 status: PlanStatus::Done,
                 depends_on: vec![],
+                human_review_items: vec![],
             })
             .collect();
         phases.push(PlanPhase {
@@ -3141,6 +3312,7 @@ Release automation.
             title: "Current Phase".to_string(),
             status: PlanStatus::InProgress,
             depends_on: vec![],
+            human_review_items: vec![],
         });
         for i in 21..31 {
             phases.push(PlanPhase {
@@ -3148,6 +3320,7 @@ Release automation.
                 title: format!("Pending Phase {}", i),
                 status: PlanStatus::Pending,
                 depends_on: vec![],
+                human_review_items: vec![],
             });
         }
 
@@ -3328,18 +3501,21 @@ Release automation.
                 title: "Done Phase".to_string(),
                 status: PlanStatus::Done,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "1".to_string(),
                 title: "Deferred Phase".to_string(),
                 status: PlanStatus::Deferred,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "2".to_string(),
                 title: "Pending Phase".to_string(),
                 status: PlanStatus::Pending,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
         ];
         let checklist = format_plan_checklist(&phases, None);
@@ -3364,6 +3540,7 @@ Release automation.
             title: "Release Pipeline".to_string(),
             status: PlanStatus::Pending,
             depends_on: vec![],
+            human_review_items: vec![],
         };
         let cmd = suggest_next_goal_command(&phase);
         assert_eq!(cmd, "ta run \"implement Release Pipeline\" --phase v0.3.2");
@@ -4057,18 +4234,21 @@ Build it.
                 title: "First".to_string(),
                 status: PlanStatus::Done,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
                 title: "Second".to_string(),
                 status: PlanStatus::Done,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
                 title: "Third".to_string(),
                 status: PlanStatus::Pending,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
         ];
         assert!(
@@ -4085,18 +4265,21 @@ Build it.
                 title: "First".to_string(),
                 status: PlanStatus::Done,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
                 title: "Second".to_string(),
                 status: PlanStatus::Pending,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
                 title: "Third".to_string(),
                 status: PlanStatus::Done,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
         ];
         let warnings = check_phase_order(&phases);
@@ -4119,12 +4302,14 @@ Build it.
                 title: "Old-style phase".to_string(),
                 status: PlanStatus::Pending,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
                 title: "New phase".to_string(),
                 status: PlanStatus::Done,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
         ];
         // Non-semver "4b" should be skipped, no violations.
@@ -4158,12 +4343,14 @@ Build it.
                 title: "Dep".to_string(),
                 status: PlanStatus::Pending,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
                 title: "Needs dep".to_string(),
                 status: PlanStatus::Pending,
                 depends_on: vec!["v0.1.0".to_string()],
+                human_review_items: vec![],
             },
         ];
         let warnings = collect_dependency_warnings(&phases);
@@ -4180,12 +4367,14 @@ Build it.
                 title: "Dep".to_string(),
                 status: PlanStatus::Done,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
                 title: "Needs dep".to_string(),
                 status: PlanStatus::Pending,
                 depends_on: vec!["v0.1.0".to_string()],
+                human_review_items: vec![],
             },
         ];
         assert!(collect_dependency_warnings(&phases).is_empty());
@@ -4368,18 +4557,21 @@ Build it.
                 title: "Done Phase".to_string(),
                 status: PlanStatus::Done,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "v0.2.0".to_string(),
                 title: "Running Phase".to_string(),
                 status: PlanStatus::InProgress,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
             PlanPhase {
                 id: "v0.3.0".to_string(),
                 title: "Pending Phase".to_string(),
                 status: PlanStatus::Pending,
                 depends_on: vec![],
+                human_review_items: vec![],
             },
         ];
         let checklist = format_plan_checklist(&phases, None);

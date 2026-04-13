@@ -1543,6 +1543,9 @@ async function loadWorkflows() {
   }
 }
 
+// Track workflow status pollers by workflow ID.
+const _wfStatusPollers = {};
+
 function renderWorkflows(workflows) {
   let html = '';
 
@@ -1551,15 +1554,22 @@ function renderWorkflows(workflows) {
     html += '<div class="card"><div class="card-meta">No workflows found in .ta/workflows/. Create one below.</div></div>';
   } else {
     workflows.forEach(w => {
-      html += `<div class="card">
+      html += `<div class="card" id="wf-card-${esc(w.id)}">
         <div class="card-header">
           <span class="card-title">${esc(w.name || w.id)}</span>
           <span class="badge ${w.trigger === 'scheduled' ? 'badge-info' : 'badge-default'}">${esc(w.trigger)}</span>
-          <span class="badge badge-default">${esc(w.status)}</span>
+          <span class="badge badge-default" id="wf-status-${esc(w.id)}">${esc(w.status)}</span>
         </div>
         <div class="card-meta" style="font-family:monospace;font-size:0.78rem">${esc(w.toml_path)}</div>
+        <div class="actions" style="margin-top:0.5rem">
+          <button class="btn btn-primary btn-sm" onclick="runWorkflow('${esc(w.id)}')">&#9654; Run</button>
+          <button class="btn btn-danger btn-sm" onclick="stopWorkflow('${esc(w.id)}')">&#9632; Stop</button>
+        </div>
+        <div id="wf-msg-${esc(w.id)}" style="font-size:0.82rem;margin-top:0.4rem;color:var(--muted)"></div>
       </div>`;
     });
+    // Start polling status for each workflow.
+    workflows.forEach(w => { pollWorkflowStatus(w.id); });
   }
   html += '</div>';
 
@@ -1631,6 +1641,83 @@ async function saveWorkflow() {
   } catch (e) {
     if (status) { status.textContent = 'Network error: ' + e.message; status.style.color = 'var(--red)'; }
   }
+}
+
+// ── Workflow Run / Stop / Status (v0.15.14.1) ─────────────────
+async function runWorkflow(id) {
+  const msgEl = document.getElementById('wf-msg-' + id);
+  const statusEl = document.getElementById('wf-status-' + id);
+  if (msgEl) msgEl.textContent = 'Starting…';
+  if (statusEl) { statusEl.textContent = 'starting'; statusEl.className = 'badge badge-info'; }
+  try {
+    const resp = await fetch('/api/workflow/' + encodeURIComponent(id) + '/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const result = await resp.json();
+    if (resp.ok) {
+      if (msgEl) { msgEl.textContent = result.message || 'Workflow started.'; msgEl.style.color = 'var(--green)'; }
+    } else {
+      if (msgEl) { msgEl.textContent = result.error || 'Failed to start.'; msgEl.style.color = 'var(--red)'; }
+      if (statusEl) { statusEl.textContent = 'idle'; statusEl.className = 'badge badge-default'; }
+    }
+  } catch (e) {
+    if (msgEl) { msgEl.textContent = 'Network error: ' + e.message; msgEl.style.color = 'var(--red)'; }
+  }
+}
+
+async function stopWorkflow(id) {
+  const msgEl = document.getElementById('wf-msg-' + id);
+  if (msgEl) msgEl.textContent = 'Sending stop signal…';
+  try {
+    const resp = await fetch('/api/workflow/' + encodeURIComponent(id), { method: 'DELETE' });
+    const result = await resp.json();
+    if (resp.ok) {
+      if (msgEl) { msgEl.textContent = result.message || 'Stop requested.'; msgEl.style.color = 'var(--amber, orange)'; }
+    } else {
+      if (msgEl) { msgEl.textContent = result.error || 'Could not stop.'; msgEl.style.color = 'var(--red)'; }
+    }
+  } catch (e) {
+    if (msgEl) { msgEl.textContent = 'Network error: ' + e.message; msgEl.style.color = 'var(--red)'; }
+  }
+}
+
+async function pollWorkflowStatus(id) {
+  // Stop any existing poller for this id.
+  if (_wfStatusPollers[id]) {
+    clearInterval(_wfStatusPollers[id]);
+    delete _wfStatusPollers[id];
+  }
+  const doFetch = async () => {
+    const statusEl = document.getElementById('wf-status-' + id);
+    if (!statusEl) {
+      // Card was removed from DOM — stop polling.
+      clearInterval(_wfStatusPollers[id]);
+      delete _wfStatusPollers[id];
+      return;
+    }
+    try {
+      const resp = await fetch('/api/workflow/' + encodeURIComponent(id) + '/status');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const state = data.state || 'idle';
+      const badgeClass = state === 'running' ? 'badge-success'
+        : state === 'awaiting_human' ? 'badge-warning'
+        : state === 'completed' ? 'badge-info'
+        : state === 'failed' ? 'badge-danger'
+        : 'badge-default';
+      statusEl.textContent = state;
+      statusEl.className = 'badge ' + badgeClass;
+      const msgEl = document.getElementById('wf-msg-' + id);
+      if (msgEl && data.current_stage) {
+        msgEl.textContent = 'Stage: ' + data.current_stage;
+        msgEl.style.color = 'var(--muted)';
+      }
+    } catch (_) { /* ignore network errors during polling */ }
+  };
+  doFetch();
+  _wfStatusPollers[id] = setInterval(doFetch, 2000);
 }
 
 // ── Personas (v0.14.20) ───────────────────────────────────────

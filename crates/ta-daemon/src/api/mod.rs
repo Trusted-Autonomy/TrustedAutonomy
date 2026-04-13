@@ -366,6 +366,13 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         // Workflow generate/save (v0.14.20).
         .route("/api/workflow/generate", post(workflow::generate_workflow))
         .route("/api/workflow/save", post(workflow::save_workflow))
+        // Workflow run/stop/status from Studio (v0.15.14.1).
+        .route("/api/workflow/{id}/run", post(workflow::run_workflow))
+        .route("/api/workflow/{id}", delete(workflow::stop_workflow))
+        .route(
+            "/api/workflow/{id}/status",
+            get(workflow::workflow_run_status),
+        )
         // Proactive notifications (v0.13.1.6).
         .route("/api/notifications", get(notifications::get_notifications))
         // Settings API (v0.14.13).

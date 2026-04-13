@@ -9637,6 +9637,84 @@ The CSV export includes `machine_id` and `committer` columns in addition to the 
 
 ---
 
+## Human Review Items
+
+When an agent completes a plan phase, most items in the checklist are things the agent verified itself — tests passed, linting clean, files written. But some items can only be verified by a human: checking visual output in an editor, confirming UX wording with a stakeholder, testing a connector against a real project.
+
+The `#### Human Review` subsection marks these explicitly so they are tracked separately and never accidentally checked off by an agent.
+
+### Adding human review items to a phase
+
+In your `PLAN.md`, add a `#### Human Review` subsection inside any phase:
+
+```markdown
+### v1.2.0 — My Phase <!-- status: pending -->
+
+#### Items
+- [ ] Agent writes the new API handler
+- [ ] Tests pass in CI
+
+#### Human Review
+- [ ] Smoke-test the new endpoint against the staging server
+- [ ] Confirm response format matches the API contract
+```
+
+Items under `#### Human Review` are **never checked off by agents**. TA extracts them automatically when a phase is marked done.
+
+### What happens when `ta draft apply` runs
+
+When you apply a draft that marks a phase complete, TA automatically:
+
+1. Extracts any unchecked items under `#### Human Review` in that phase
+2. Stores them in `.ta/human-review.jsonl`
+3. Prints a summary:
+
+```
+Phase v1.2.0 marked done.
+
+Human review items require your attention (2):
+  [1] Smoke-test the new endpoint against the staging server
+  [2] Confirm response format matches the API contract
+
+Run 'ta plan review complete v1.2.0 <N>' when done, or
+    'ta plan review defer v1.2.0 <N> --to <phase>' to reschedule.
+```
+
+### Viewing pending review items
+
+```bash
+ta plan review                    # all pending items across all phases
+ta plan review --phase v1.2.0     # filter to one phase
+```
+
+### Closing review items
+
+When you have completed a human review step:
+
+```bash
+ta plan review complete v1.2.0 1   # mark item 1 as complete
+```
+
+If the item can't be done now and belongs to a later phase:
+
+```bash
+ta plan review defer v1.2.0 2 --to v1.3.0   # defer item 2 to v1.3.0
+```
+
+### Surfacing in `ta status`
+
+If any human review items are pending, `ta status` shows a reminder:
+
+```
+Human review: 2 items pending  (run 'ta plan review' to see them)
+```
+
+### Storage
+
+Human review records are stored at `.ta/human-review.jsonl` — one JSON record per item. The file is local-only and gitignored. Each record captures the phase, item index, text, status (`pending`/`complete`/`deferred`), creation time, and optional `deferred_to` phase.
+
+---
+
 ## Creative Templates
 
 Templates are project scaffolding packages that include a `workflow.toml`, `.taignore`, optional `memory.toml`, and an onboarding goal prompt. They provide a starting point for common project types.

@@ -47,6 +47,9 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
         Err(_) => vec![],
     };
 
+    // Human review pending count (v0.15.14.1).
+    let hr_pending = super::plan::pending_human_review_count(&config.workspace_root);
+
     let now = chrono::Utc::now();
 
     // Classify goals.
@@ -120,7 +123,8 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
     let has_urgent = !urgent_goals.is_empty()
         || !failed_goals.is_empty()
         || pending_drafts > 0
-        || !pending_ops.is_empty();
+        || !pending_ops.is_empty()
+        || hr_pending > 0;
 
     // ── URGENT ───────────────────────────────────────────────────────────
     if has_urgent {
@@ -154,6 +158,14 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
             for id in &pending_draft_ids {
                 println!("│    → `ta draft view {}` to review", id);
             }
+        }
+
+        if hr_pending > 0 {
+            println!(
+                "│    Human review: {} item{} pending  (run 'ta plan review' to see them)",
+                hr_pending,
+                if hr_pending == 1 { "" } else { "s" }
+            );
         }
 
         // Deduplicate disk-space CRIT entries: multiple paths at low space

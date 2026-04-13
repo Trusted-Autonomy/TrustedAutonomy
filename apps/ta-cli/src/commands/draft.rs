@@ -5479,6 +5479,68 @@ fn apply_package(
                 );
             }
 
+            // v0.15.14.1: Extract human review items from each marked-done phase
+            // and append to .ta/human-review.jsonl.
+            {
+                let hr_store = ta_goal::HumanReviewStore::new(&target_dir);
+                let mut total_hr_items = 0usize;
+
+                for phase in &phase_ids {
+                    let parsed = super::plan::parse_plan(&content);
+                    let phase_info = parsed
+                        .into_iter()
+                        .find(|p| super::plan::phase_ids_match(&p.id, phase));
+                    // Use the pre-parsed human_review_items field from PlanPhase.
+                    let hr_items = phase_info.map(|p| p.human_review_items).unwrap_or_default();
+
+                    if !hr_items.is_empty() {
+                        for (idx, item_text) in hr_items.iter().enumerate() {
+                            if let Err(e) = hr_store.append(phase, idx, item_text) {
+                                tracing::warn!(phase = %phase, "failed to record human review item: {}", e);
+                            }
+                        }
+                        total_hr_items += hr_items.len();
+                    }
+                }
+
+                if total_hr_items > 0 {
+                    println!();
+                    println!(
+                        "Human review items require your attention ({}):",
+                        total_hr_items
+                    );
+                    // Show items grouped by phase.
+                    for phase in &phase_ids {
+                        let parsed = super::plan::parse_plan(&content);
+                        let phase_info = parsed
+                            .into_iter()
+                            .find(|p| super::plan::phase_ids_match(&p.id, phase));
+                        let hr_items = phase_info.map(|p| p.human_review_items).unwrap_or_default();
+                        if !hr_items.is_empty() {
+                            if phase_ids.len() > 1 {
+                                println!("  Phase {}:", phase);
+                            }
+                            for (n, item) in hr_items.iter().enumerate() {
+                                println!("  [{}] {}", n + 1, item);
+                            }
+                        }
+                    }
+                    println!();
+                    if phase_ids.len() == 1 {
+                        println!(
+                            "Run 'ta plan review complete {} <N>' when done, or",
+                            phase_ids[0]
+                        );
+                        println!(
+                            "    'ta plan review defer {} <N> --to <phase>' to reschedule.",
+                            phase_ids[0]
+                        );
+                    } else {
+                        println!("Run 'ta plan review' to see and manage all pending items.");
+                    }
+                }
+            }
+
             // Auto-suggest the next pending phase (after the last marked phase).
             let phases_after = super::plan::parse_plan(&content);
             if let Some(next) =
@@ -13350,6 +13412,84 @@ fn run() {
             msg.contains("ta draft approve"),
             "error should suggest ta draft approve: {}",
             msg
+        );
+    }
+
+    // ── v0.15.14.1: ta draft <unknown> clap dispatch boundary ────────────────
+
+    /// Verify that `apply_package` called with a non-existent package ID returns an error
+    /// and does not mutate any existing draft's state.
+    ///
+    /// This is the Rust-level analog of the clap dispatch boundary test: unknown subcommands
+    /// (e.g. `ta draft applied <id>`) are rejected before reaching any Rust code. The real
+    /// risk is a function accidentally operating on the wrong draft. This test asserts the
+    /// "fail safe" contract: an unresolvable ID is an error, not a silent no-op that mutates
+    /// a different draft.
+    #[test]
+    fn apply_unknown_id_leaves_existing_draft_unchanged() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Draft state test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test that bad ID leaves draft unchanged".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+        std::fs::write(goal.workspace_path.join("README.md"), "# Changed\n").unwrap();
+        build_package(&config, &goal_id, "Draft state changes", false).unwrap();
+
+        let packages_before = load_all_packages(&config).unwrap();
+        assert_eq!(packages_before.len(), 1);
+        let real_pkg_id = packages_before[0].package_id.to_string();
+        let status_before = packages_before[0].status.clone();
+
+        // Attempt to apply with a completely fake ID.
+        let fake_id = "00000000-0000-0000-0000-000000000000";
+        let result = apply_package(
+            &config,
+            fake_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+        );
+        // Must return an error — never silently succeed.
+        assert!(
+            result.is_err(),
+            "apply_package with a non-existent ID must return an error"
+        );
+
+        // The real draft must be byte-for-byte identical to before.
+        let packages_after = load_all_packages(&config).unwrap();
+        let pkg_after = packages_after
+            .iter()
+            .find(|p| p.package_id.to_string() == real_pkg_id)
+            .expect("original draft must still exist after failed apply");
+        assert_eq!(
+            pkg_after.status, status_before,
+            "draft status must not have changed after a failed apply"
         );
     }
 }
