@@ -809,7 +809,17 @@ ta draft apply 2159d87e/2       # apply draft #2 for that goal
 
 The DRAFT ID column in `ta draft list` emits the `<shortref>/<seq>` format (e.g. `2159d87e/1`). Copy-paste it directly into any draft command — it will resolve. The goal shortref is also shown in `ta goal list` (ID column). Use `grep 2159d87e .ta/audit.jsonl` to find all audit entries for a goal.
 
-For simple workflows, `ta draft apply` works directly on unapproved drafts (auto-approves on apply).
+For single-author projects, `ta draft apply` works directly on unapproved drafts (auto-approves on apply). No separate `ta draft approve` step is needed. This is the default.
+
+For multi-author workflows that require an explicit approval gate before applying, set `approval_required = true` in `.ta/workflow.toml`:
+
+```toml
+[draft]
+approval_required = false   # default: single-author flow — apply auto-approves
+# approval_required = true  # multi-author: require ta draft approve before ta draft apply
+```
+
+When `approval_required = true`, `ta draft apply` on a `PendingReview` draft prints an actionable error directing the reviewer to run `ta draft approve <id>` first.
 
 #### Draft View Output
 

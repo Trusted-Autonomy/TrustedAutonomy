@@ -54,8 +54,8 @@ pub use channel_registry::{
 pub use diff::DiffContent;
 pub use diff_handlers::{DiffHandlerError, DiffHandlersConfig, HandlerRule};
 pub use draft_package::{
-    ActionKind, ApprovalRecord, DesignAlternative, DraftPackage, DraftStatus, ExplanationTiers,
-    IgnoredArtifact, PendingAction, ValidationEntry, VcsTrackingInfo,
+    ActionKind, ApplyProvenance, ApprovalRecord, DesignAlternative, DraftPackage, DraftStatus,
+    ExplanationTiers, IgnoredArtifact, PendingAction, ValidationEntry, VcsTrackingInfo,
 };
 pub use draft_resolver::{draft_canonical_id, resolve_draft, DraftResolveError};
 pub use error::ChangeSetError;

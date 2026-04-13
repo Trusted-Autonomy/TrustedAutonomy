@@ -828,6 +828,20 @@ pub struct DraftReviewConfig {
     /// Asset diff configuration (v0.15.4).
     #[serde(default)]
     pub asset_diff: AssetDiffConfig,
+
+    /// Whether an explicit `ta draft approve` step is required before applying (v0.15.14.0).
+    ///
+    /// - `false` (default): single-author flow — `ta draft apply` accepts `PendingReview`
+    ///   directly, auto-approving on apply. No separate approve step needed.
+    /// - `true`: multi-author flow — `ta draft apply` requires `Approved` state; applying
+    ///   from `PendingReview` errors with a clear message directing the user to approve first.
+    ///
+    /// ```toml
+    /// [draft]
+    /// approval_required = false   # set true for multi-author approval workflows
+    /// ```
+    #[serde(default)]
+    pub approval_required: bool,
 }
 
 /// Context injection mode for CLAUDE.md (v0.14.3.2).

@@ -133,11 +133,23 @@ with open('${CLAUDE_MD}', 'w') as f:
 print('  CLAUDE.md: Current version =', new_ver)
 " "$NEW_VERSION"
 
+# --- Cargo.lock ---
+# Regenerate Cargo.lock so the lockfile stays in sync with the bumped version.
+# This prevents Cargo.lock from being left dirty after every version bump.
+if command -v cargo &>/dev/null; then
+  echo "  Regenerating Cargo.lock (cargo update --workspace)..."
+  cargo update --workspace --quiet 2>/dev/null \
+    && echo "  Cargo.lock: updated" \
+    || echo "  Cargo.lock: could not regenerate (cargo not in PATH — run manually)"
+else
+  echo "  Cargo.lock: cargo not found — run 'cargo update --workspace' manually before committing"
+fi
+
 echo ""
 echo "Done. Verify with:  grep -E 'version|Current version' Cargo.toml CLAUDE.md .release.toml"
 echo ""
 echo "Next:"
-echo "  git add Cargo.toml .release.toml CLAUDE.md"
+echo "  git add Cargo.toml .release.toml CLAUDE.md Cargo.lock"
 echo "  git commit -m \"chore: bump version to $NEW_VERSION\""
 echo "  git tag public-alpha-v<X.Y.Z.N>"
 echo "  git push && git push origin <tag>"

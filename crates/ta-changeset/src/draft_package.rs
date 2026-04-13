@@ -678,6 +678,29 @@ pub struct AlternativeConsidered {
     pub rejected_reason: String,
 }
 
+/// How a draft was applied — provenance for [`DraftStatus::Applied`] (v0.15.14.0).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "via", rename_all = "snake_case")]
+pub enum ApplyProvenance {
+    /// Triggered by an explicit `ta draft apply` CLI invocation.
+    #[default]
+    Manual,
+    /// Triggered by a background or agent task.
+    BackgroundTask { task_id: String },
+    /// Triggered by an auto-merge hook.
+    AutoMerge,
+}
+
+impl std::fmt::Display for ApplyProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyProvenance::Manual => write!(f, "manual"),
+            ApplyProvenance::BackgroundTask { .. } => write!(f, "background"),
+            ApplyProvenance::AutoMerge => write!(f, "auto-merge"),
+        }
+    }
+}
+
 /// Review status of a draft package (internal tracking, not in JSON schema).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -695,6 +718,10 @@ pub enum DraftStatus {
     },
     Applied {
         applied_at: DateTime<Utc>,
+        /// How the draft was applied (v0.15.14.0). Defaults to `Manual` for
+        /// backward-compatible deserialization of older draft files.
+        #[serde(default)]
+        applied_via: ApplyProvenance,
     },
     /// This draft has been superseded by a follow-up goal's draft.
     Superseded {
@@ -954,6 +981,7 @@ mod tests {
         // Approved → Applied
         let status = DraftStatus::Applied {
             applied_at: Utc::now(),
+            applied_via: ApplyProvenance::Manual,
         };
         assert_eq!(status.to_string(), "applied");
     }

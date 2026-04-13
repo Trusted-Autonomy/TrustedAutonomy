@@ -12,10 +12,11 @@ use ta_changeset::changeset::{ChangeKind, ChangeSet, CommitIntent};
 use ta_changeset::diff::DiffContent;
 use ta_changeset::diff_handlers::DiffHandlersConfig;
 use ta_changeset::draft_package::{
-    AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType, ApprovalRecord, Artifact,
-    ArtifactDisposition, ChangeDependency, ChangeType, Changes, DecisionLogEntry, DependencyKind,
-    DraftPackage, DraftStatus, ExplanationTiers, Goal, Iteration, Plan, Provenance,
-    RequestedAction, ReviewRequests, Risk, Signatures, Summary, VerificationWarning, WorkspaceRef,
+    AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType, ApplyProvenance,
+    ApprovalRecord, Artifact, ArtifactDisposition, ChangeDependency, ChangeType, Changes,
+    DecisionLogEntry, DependencyKind, DraftPackage, DraftStatus, ExplanationTiers, Goal, Iteration,
+    Plan, Provenance, RequestedAction, ReviewRequests, Risk, Signatures, Summary,
+    VerificationWarning, WorkspaceRef,
 };
 use ta_changeset::explanation::ExplanationSidecar;
 use ta_changeset::output_adapters::{
@@ -2606,7 +2607,7 @@ fn list_packages(
                     return true;
                 }
                 // Show Applied drafts younger than 7 days or with open PRs.
-                if let DraftStatus::Applied { applied_at } = &p.status {
+                if let DraftStatus::Applied { applied_at, .. } = &p.status {
                     let age = Utc::now() - *applied_at;
                     if age.num_days() < 7 {
                         return true;
@@ -2697,6 +2698,9 @@ fn list_packages(
                 format!("superseded ({})", &superseded_by.to_string()[..8])
             }
             DraftStatus::Closed { .. } => "closed".to_string(),
+            DraftStatus::Applied { applied_via, .. } => {
+                format!("Applied ({})", applied_via)
+            }
             _ => format!("{:?}", pkg.status),
         };
 
@@ -4691,8 +4695,57 @@ fn apply_package(
 
         println!("Applying {} approved artifact(s)...", approved_count);
     } else {
-        // All-or-nothing mode: accept Approved or PendingReview (auto-approve on apply).
+        // All-or-nothing mode: check for already-Applied, then enforce approval_required.
+        if let DraftStatus::Applied {
+            applied_at,
+            applied_via,
+        } = &pkg.status
+        {
+            let applied_date = applied_at.format("%Y-%m-%d at %H:%M UTC").to_string();
+            let via_str = applied_via.to_string();
+            let pr_info = pkg
+                .vcs_status
+                .as_ref()
+                .and_then(|v| v.review_id.as_ref())
+                .map(|id| format!(" PR #{} was created.", id))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "Draft \"{}\" was already applied on {} via {}.{} Nothing to do.\n\
+                 (Run `ta draft view {}` to review.)",
+                pkg.goal.title,
+                applied_date,
+                via_str,
+                pr_info,
+                id
+            );
+        }
+
+        // Load workflow config to check approval_required.
+        let approval_required = {
+            // Determine source_dir: look up the goal first, or fall back to target param.
+            let wf_dir = match target {
+                Some(t) => std::path::PathBuf::from(t),
+                None => config.workspace_root.clone(),
+            };
+            let wf_path = wf_dir.join(".ta/workflow.toml");
+            ta_submit::WorkflowConfig::load_or_default(&wf_path)
+                .draft
+                .approval_required
+        };
+
         if matches!(pkg.status, DraftStatus::PendingReview) {
+            if approval_required {
+                anyhow::bail!(
+                    "Draft \"{}\" is in PendingReview state but approval is required \
+                     before applying.\n\
+                     \n\
+                     This project is configured with `[draft] approval_required = true`.\n\
+                     Run `ta draft approve {}` first, then re-run `ta draft apply {}`.",
+                    pkg.goal.title,
+                    id,
+                    id
+                );
+            }
             pkg.status = DraftStatus::Approved {
                 approved_by: "auto (apply)".to_string(),
                 approved_at: Utc::now(),
@@ -6094,6 +6147,7 @@ fn apply_package(
     let files_applied = pkg.changes.artifacts.len();
     pkg.status = DraftStatus::Applied {
         applied_at: Utc::now(),
+        applied_via: ApplyProvenance::Manual,
     };
     save_package(config, &pkg)?;
 
@@ -13135,6 +13189,167 @@ fn run() {
             !plan_after.contains("<!-- status: in_progress -->"),
             "in_progress marker should be gone: {}",
             plan_after
+        );
+    }
+
+    // ── v0.15.14.0: already-Applied error message ────────────────────────
+
+    #[test]
+    fn apply_already_applied_gives_friendly_error() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Already-applied test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test already-applied error".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "Already-applied test", false).unwrap();
+
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+
+        // First apply should succeed.
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+        apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        // Second apply should give a friendly error mentioning "already applied".
+        let err = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already applied"),
+            "error should mention 'already applied': {}",
+            msg
+        );
+        assert!(
+            msg.contains("Nothing to do"),
+            "error should say 'Nothing to do': {}",
+            msg
+        );
+        assert!(
+            msg.contains("ta draft view"),
+            "error should suggest 'ta draft view': {}",
+            msg
+        );
+    }
+
+    // ── v0.15.14.0: approval_required enforcement ────────────────────────
+
+    #[test]
+    fn apply_pending_review_blocked_when_approval_required() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+
+        // Write workflow config requiring approval.
+        std::fs::create_dir_all(project.path().join(".ta")).unwrap();
+        std::fs::write(
+            project.path().join(".ta/workflow.toml"),
+            "[draft]\napproval_required = true\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Approval-required test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test approval_required".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "Approval-required test", false).unwrap();
+
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+
+        // Apply from PendingReview with approval_required=true should fail.
+        let err = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("approval is required"),
+            "error should mention approval_required: {}",
+            msg
+        );
+        assert!(
+            msg.contains("ta draft approve"),
+            "error should suggest ta draft approve: {}",
+            msg
         );
     }
 }
