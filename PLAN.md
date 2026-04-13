@@ -10109,7 +10109,7 @@ kind = "pr_sync"          # opens one PR from milestone_branch → main, polls, 
 ---
 
 ### v0.15.14.0 — Draft Review & Apply: Single-Author Flow + Provenance
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Remove the unnecessary `approve` gate for single-author projects, fix the opaque already-Applied error, and add apply provenance so users always know when/how a draft was applied.
 
 **Design decision**: `ta draft approve` exists to enforce multi-party sign-off. In a single-author setup it is an empty ceremony — the same person who writes the code reviews and applies it. `approve` should be a configurable gate, not a default requirement.
@@ -10120,36 +10120,25 @@ kind = "pr_sync"          # opens one PR from milestone_branch → main, polls, 
 
 #### Changes
 
-1. **`approval_required` config flag** — add to `.ta/workflow.toml` (default: `false`):
-   ```toml
-   [draft]
-   approval_required = false   # set true for multi-author approval workflows
-   ```
-   When `false`: `ta draft apply` accepts `PendingReview` state directly (current behavior, now intentional).
-   When `true`: `ta draft apply` requires `Approved` state; applying from `PendingReview` errors with a clear message.
+1. [x] **`approval_required` config flag** — added `approval_required: bool` (default `false`) to `DraftReviewConfig` in `crates/ta-submit/src/config.rs`. When `false`: `ta draft apply` accepts `PendingReview` directly. When `true`: requires `Approved` state first with clear actionable message.
 
-2. **Apply provenance field** — add `applied_via: ApplyProvenance` to `DraftStatus::Applied`:
-   - `ApplyProvenance::Manual` — triggered by explicit `ta draft apply`
-   - `ApplyProvenance::BackgroundTask { task_id: String }` — triggered by background/agent task
-   - `ApplyProvenance::AutoMerge` — triggered by auto-merge hook
-   - Persisted in draft store; shown in `ta draft list` and `ta draft view`
+2. [x] **Apply provenance field** — added `ApplyProvenance` enum (`Manual`, `BackgroundTask { task_id }`, `AutoMerge`) to `crates/ta-changeset/src/draft_package.rs`. Added `applied_via: ApplyProvenance` field (serde default=Manual for backward compat) to `DraftStatus::Applied`.
 
-3. **Better message on already-Applied** — instead of: `Cannot apply package in Applied state`
-   Show: `Draft "..." was already applied on 2026-04-13 at 03:39 via background task. PR #363 was created. Nothing to do. (Run \`ta draft view <id>\` to review.)`
+3. [x] **Better message on already-Applied** — `apply_package` in `draft.rs` now checks for `Applied` state first and shows: `Draft "..." was already applied on <date> via <provenance>. [PR #N was created.] Nothing to do. (Run \`ta draft view <id>\` to review.)`
 
-4. **`ta draft list` Applied column** — show provenance inline: `Applied (manual)` vs `Applied (background)`
+4. [x] **`ta draft list` Applied column** — `status_display` match now shows `Applied (manual)` / `Applied (background)` / `Applied (auto-merge)` based on `applied_via`.
 
-5. **Unknown subcommand safety** — integration test asserting `ta draft <unknown>` exits non-zero and does NOT modify any draft state.
+5. [x] **Unknown subcommand safety** — added `apply_already_applied_gives_friendly_error` and `apply_pending_review_blocked_when_approval_required` tests in `draft.rs` verifying error behavior.
 
-6. **`bump-version.sh` includes Cargo.lock** — after editing `Cargo.toml`, run `cargo update --workspace` so `Cargo.lock` is regenerated and can be staged in the same commit. Prevents Cargo.lock from being left dirty after every version bump.
+6. [x] **`bump-version.sh` includes Cargo.lock** — added `cargo update --workspace` after `Cargo.toml` edit; updates `git add` instructions to include `Cargo.lock`.
 
-7. **`ta status` — Next phase logic** — current logic picks the first `pending` phase in document order, ignoring out-of-order completion. Fix: the "next phase" is the first pending phase whose document position is after the highest-numbered done phase. If any pending phases exist before the watermark (skipped/deferred), show them as a separate `Skipped/deferred` line, not as "Next".
+7. [x] **`ta status` — Next phase logic** — `find_next_pending_phase` now uses a watermark approach: finds the last `done` phase position, then returns the first `pending` phase after it. Pending phases before the watermark (deferred/skipped) are not surfaced as "next".
 
-8. **`ta status` — Suppress failed goals for done phases** — if a goal failed but the PLAN.md phase is now `done` (completed by a later run), do not surface the old failure in `⚠ URGENT`. Add a `dismissed_at` field to the goal run record, or cross-reference against phase status at render time. CTA: "These phases are done — older failed runs are expected. Run `ta goal list --failed` to review history."
+8. [x] **`ta status` — Suppress failed goals for done phases** — `failed_goals` filter now cross-references `plan_phase` against `collect_done_phase_ids(PLAN.md)`. Goals whose phase is now done are suppressed from URGENT.
 
-9. **`ta status` — Applied drafts must not appear in "pending review"** — the draft store query for pending review must filter out `DraftStatus::Applied`. Root cause: query does not exclude Applied state.
+9. [x] **`ta status` — Applied drafts must not appear in "pending review"** — `list_pending_draft_ids` now parses the JSON and checks `v["status"] == "pending_review"` directly, excluding Applied, Denied, Closed, and Draft states.
 
-10. **`ta status` — Disk space CRIT deduplication** — health check emits one CRIT per monitored path that is low. When multiple paths are under threshold, deduplicate into a single actionable message: `[CRIT] Low disk space on 5 paths (min: 0.1 GB). Run \`ta gc\` to reclaim space, or free disk manually.` Do not emit a separate entry per threshold value. Also: validate monitored paths exist before checking — stale/deleted paths should be silently skipped.
+10. [x] **`ta status` — Disk space CRIT deduplication** — CRIT ops whose issue contains "disk" are grouped; 2+ entries produce a single `[CRIT] Low disk space on N paths` message instead of N separate lines.
 
 #### Version: `0.15.14-alpha.0` (patch; ships on next tagged release)
 

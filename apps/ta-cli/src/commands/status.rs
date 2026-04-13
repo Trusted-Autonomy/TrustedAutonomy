@@ -6,6 +6,8 @@
 // Output order: Urgent (stuck/failed goals, pending approvals, health issues)
 //               → Active work → Recent completions → Suggested next actions.
 
+use std::collections::HashSet;
+
 use ta_goal::{GoalRunState, GoalRunStore};
 use ta_mcp_gateway::GatewayConfig;
 
@@ -58,13 +60,30 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
         .collect();
 
     // v0.15.7.1: Exclude reviewer goals whose parent draft is terminal from URGENT.
-    // A reviewer goal title like "Review draft <id> for governed workflow" is a
-    // system artifact — if the draft it reviewed is already Applied or Denied, the
-    // failure is not user-actionable and should not appear as URGENT.
+    // v0.15.14.0: Exclude goals whose plan_phase is now done in PLAN.md — if a later
+    // run completed the phase, the old failure is expected and not user-actionable.
+    let done_phases = {
+        let plan_path = config.workspace_root.join("PLAN.md");
+        if plan_path.exists() {
+            std::fs::read_to_string(&plan_path)
+                .map(|c| collect_done_phase_ids(&c))
+                .unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        }
+    };
     let failed_goals: Vec<_> = all_goals
         .iter()
         .filter(|g| matches!(g.state, GoalRunState::Failed { .. }))
         .filter(|g| !is_terminal_reviewer_goal(g))
+        .filter(|g| {
+            // Suppress if the goal's plan phase is now done — a later run completed it.
+            if let Some(ref phase) = g.plan_phase {
+                !done_phases.contains(phase.as_str())
+            } else {
+                true
+            }
+        })
         .take(5)
         .collect();
 
@@ -137,7 +156,25 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
             }
         }
 
-        for op in &pending_ops {
+        // Deduplicate disk-space CRIT entries: multiple paths at low space
+        // produce one consolidated message rather than one line per threshold.
+        let (disk_crits, other_ops): (Vec<_>, Vec<_>) = pending_ops.iter().partition(|op| {
+            op.severity == ta_goal::ActionSeverity::Critical
+                && op.issue.to_lowercase().contains("disk")
+        });
+        if !disk_crits.is_empty() {
+            if disk_crits.len() == 1 {
+                println!("│    [CRIT] {}", disk_crits[0].issue);
+                println!("│    → {}", disk_crits[0].proposed_action);
+            } else {
+                println!(
+                    "│    [CRIT] Low disk space on {} paths. Run `ta gc` to reclaim space, \
+                     or free disk manually.",
+                    disk_crits.len()
+                );
+            }
+        }
+        for op in &other_ops {
             let sev = match op.severity {
                 ta_goal::ActionSeverity::Critical => "CRIT",
                 ta_goal::ActionSeverity::Warning => "WARN",
@@ -473,15 +510,61 @@ fn format_staging_size(bytes: u64) -> String {
     }
 }
 
+/// Find the next phase the user should work on.
+///
+/// Uses a watermark approach: find the last `done` phase in document order,
+/// then return the first `pending` phase after that position. This prevents
+/// out-of-order completions from surfacing an already-completed phase as "next".
+///
+/// Pending phases before the watermark (skipped or deferred) are not returned
+/// by this function — they are surfaced separately if needed.
 fn find_next_pending_phase(plan_content: &str) -> Option<String> {
     let lines: Vec<&str> = plan_content.lines().collect();
-    for i in 0..lines.len().saturating_sub(1) {
-        if lines[i].starts_with("### ") && lines[i + 1].contains("<!-- status: pending -->") {
-            let title = lines[i].trim_start_matches('#').trim();
-            return Some(title.to_string());
+
+    // Collect all phase positions with their status.
+    let mut done_watermark: Option<usize> = None;
+    let mut pending_phases: Vec<(usize, String)> = Vec::new();
+
+    let mut i = 0;
+    while i < lines.len().saturating_sub(1) {
+        if lines[i].starts_with("### ") {
+            let title = lines[i].trim_start_matches('#').trim().to_string();
+            if lines[i + 1].contains("<!-- status: done -->") {
+                done_watermark = Some(i);
+            } else if lines[i + 1].contains("<!-- status: pending -->") {
+                pending_phases.push((i, title));
+            }
         }
+        i += 1;
     }
-    None
+
+    // Return the first pending phase after the highest-numbered done phase.
+    let watermark = done_watermark.unwrap_or(0);
+    pending_phases
+        .into_iter()
+        .find(|(pos, _)| *pos > watermark)
+        .map(|(_, title)| title)
+}
+
+/// Collect the phase IDs (e.g. "v0.15.14") of all phases currently marked `done`
+/// in PLAN.md. Used to suppress failed-goal URGENT alerts when a later run completed
+/// the phase successfully (v0.15.14.0).
+fn collect_done_phase_ids(plan_content: &str) -> HashSet<String> {
+    let lines: Vec<&str> = plan_content.lines().collect();
+    let mut done = HashSet::new();
+    let mut i = 0;
+    while i < lines.len().saturating_sub(1) {
+        if lines[i].starts_with("### ") && lines[i + 1].contains("<!-- status: done -->") {
+            // Extract the phase ID — the first whitespace-delimited token after "### ".
+            // e.g. "### v0.15.14 — Hierarchical Workflows" → "v0.15.14"
+            let title = lines[i].trim_start_matches('#').trim();
+            if let Some(id) = title.split_whitespace().next() {
+                done.insert(id.to_string());
+            }
+        }
+        i += 1;
+    }
+    done
 }
 
 /// Returns true if this is a system reviewer goal spawned by a governed workflow
@@ -511,7 +594,14 @@ fn list_pending_draft_ids(pr_packages_dir: &std::path::Path) -> Vec<String> {
                 .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
                 .filter_map(|e| {
                     let content = std::fs::read_to_string(e.path()).ok()?;
-                    if !content.contains("PendingReview") {
+                    // Parse the JSON to check the status field directly.
+                    // This avoids false positives from string matching on other fields and
+                    // correctly excludes Applied drafts (root cause of item #9: Applied drafts
+                    // appearing in the pending review count because the old string check
+                    // didn't exclude Applied state).
+                    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+                    let status = v["status"].as_str()?;
+                    if status != "pending_review" {
                         return None;
                     }
                     // Extract ID from filename (strip .json extension).
@@ -652,5 +742,86 @@ mod tests {
             false,
         );
         assert!(suggestions.iter().any(|s| s.contains("ta run")));
+    }
+
+    // v0.15.14.0 — watermark-based next phase logic.
+    #[test]
+    fn find_next_pending_phase_watermark_skips_deferred_pending_before_done() {
+        // v0.9.4 is pending (deferred/skipped), v0.9.5 is done, v0.9.6 is pending.
+        // The watermark is at v0.9.5. v0.9.4 is before the watermark — it should NOT
+        // be returned as "next". v0.9.6 is after the watermark — it should be returned.
+        let plan = r#"
+### v0.9.4 — Deferred Phase
+<!-- status: pending -->
+
+### v0.9.5 — Completed Phase
+<!-- status: done -->
+
+### v0.9.6 — Next Phase
+<!-- status: pending -->
+"#;
+        let result = find_next_pending_phase(plan);
+        assert_eq!(result, Some("v0.9.6 — Next Phase".to_string()));
+    }
+
+    #[test]
+    fn find_next_pending_phase_no_done_phase_returns_first_pending() {
+        // No done phases at all: return the first pending phase.
+        let plan = r#"
+### v0.9.5 — First Phase
+<!-- status: pending -->
+
+### v0.9.6 — Second Phase
+<!-- status: pending -->
+"#;
+        let result = find_next_pending_phase(plan);
+        assert_eq!(result, Some("v0.9.5 — First Phase".to_string()));
+    }
+
+    // v0.15.14.0 — collect_done_phase_ids.
+    #[test]
+    fn collect_done_phase_ids_extracts_ids() {
+        let plan = r#"
+### v0.9.5 — Done Phase
+<!-- status: done -->
+
+### v0.9.6 — Pending Phase
+<!-- status: pending -->
+
+### v0.9.7 — Another Done
+<!-- status: done -->
+"#;
+        let ids = collect_done_phase_ids(plan);
+        assert!(ids.contains("v0.9.5"));
+        assert!(ids.contains("v0.9.7"));
+        assert!(!ids.contains("v0.9.6"));
+    }
+
+    // v0.15.14.0 — list_pending_draft_ids excludes Applied drafts.
+    #[test]
+    fn list_pending_draft_ids_excludes_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write a pending_review draft.
+        std::fs::write(
+            dir.path().join("pkg-pending.json"),
+            r#"{"status":"pending_review","package_id":"00000000-0000-0000-0000-000000000001"}"#,
+        )
+        .unwrap();
+        // Write an applied draft — must NOT appear in results.
+        std::fs::write(
+            dir.path().join("pkg-applied.json"),
+            r#"{"status":"applied","applied_at":"2026-04-13T00:00:00Z","package_id":"00000000-0000-0000-0000-000000000002"}"#,
+        )
+        .unwrap();
+        // Write a denied draft — must NOT appear.
+        std::fs::write(
+            dir.path().join("pkg-denied.json"),
+            r#"{"status":"denied","reason":"bad","denied_by":"tester","package_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )
+        .unwrap();
+
+        let ids = list_pending_draft_ids(dir.path());
+        assert_eq!(ids.len(), 1);
+        assert!(ids[0].contains("pkg-pending"));
     }
 }
