@@ -10420,6 +10420,30 @@ level = "mid"               # "low" | "mid" | "high" — sets all defaults below
 
 ---
 
+### v0.15.14.6 — Supervisor Hook JSON Filtering
+<!-- status: pending -->
+**Goal**: Fix supervisor stdout pollution from Claude Code session hooks. When the supervisor calls `claude --print`, the `SessionStart:startup` hook fires and writes `{"type":"system","subtype":"hook_started",...}` JSON to stdout before any supervisor content arrives. The supervisor stream reader captures this as output (satisfying the heartbeat check), then waits — and the 30s stall watchdog fires because no further real tokens arrive. Result: false supervisor failure reported as "Supervisor stalled — no tokens received for 30s."
+
+**Root cause**: `spawn_with_heartbeat_monitor` reads stdout line-by-line and treats any line as a heartbeat token. Hook JSON lines are real stdout bytes but not supervisor content. The stall timer is measuring token arrival, not meaningful content arrival.
+
+**Design**: Filter `{"type":"system",...}` lines from the supervisor stdout stream before the heartbeat monitor counts them as tokens. Apply both to the stream-json output parser and to the plain-text fallback path. Additionally, pass `--no-hooks` (or the equivalent env var) to suppress hooks entirely in headless supervisor invocations — the supervisor doesn't need hooks and they add startup latency.
+
+#### Items
+
+1. [ ] **Hook JSON line filter in `spawn_with_heartbeat_monitor`** (`supervisor_review.rs`): Before updating the heartbeat timestamp and appending to the output buffer, check if the line parses as `{"type":"system",...}`. If so, discard silently — do not count as a heartbeat token, do not include in parsed output. Applies to all supervisor dispatch paths (claude, codex, ollama, manifest).
+
+2. [ ] **Suppress hooks in supervisor invocation**: Pass `CLAUDE_CODE_DISABLE_HOOKS=1` env var (or equivalent) when spawning the supervisor subprocess. Hooks are for interactive sessions; headless supervisor runs don't need them and they add startup latency + stdout noise. Add this to all four dispatch paths.
+
+3. [ ] **Stall message improvement**: When the 30s stall fires, the finding text currently includes the raw hook JSON. After fix, if hook lines were filtered, the finding should not include them. Ensure `SupervisorReview::fallback_warn` message is clean.
+
+4. [ ] **Tests**: Hook JSON line is filtered and not counted as a heartbeat token. Supervisor output containing only hook JSON lines triggers stall (no real content). `CLAUDE_CODE_DISABLE_HOOKS` env var is set in supervisor subprocess env. Existing stall tests still pass.
+
+5. [ ] **USAGE.md note**: Add to "Supervisor Agent" section — hooks are suppressed in supervisor invocations; if a custom hook must run, set `[supervisor] enable_hooks = true` to opt back in.
+
+#### Version: `0.15.14.6-alpha`
+
+---
+
 ### v0.15.15 — Multi-Agent Consensus Review Workflow
 <!-- status: pending -->
 **Goal**: A workflow template for multi-agent panel reviews where specialist agents run in parallel, each producing a structured verdict with a score and findings, and a final consensus step aggregates their outputs into a readiness score and recommendation. Ships with a `code-review-consensus` template covering architect, security, principal engineer, and PM roles. Include configurable consensus algorithms/models. Start with Raft and Paxos with Raft as the default — it should do no work if there is no swarm/multi-agent in the workflow.
