@@ -16,6 +16,7 @@
 //! - [`EventDispatcher`] — dispatches events to notification sinks
 //! - [`NotificationSink`] — trait for receiving events (log, webhook, etc.)
 
+pub mod analysis;
 pub mod conversation;
 pub mod error;
 pub mod events;
@@ -31,6 +32,10 @@ pub mod store;
 pub mod token_cost;
 pub mod velocity;
 
+pub use analysis::{
+    detect_language, parse_output, run_analyzer, AnalysisConfig, AnalysisFinding, FindingSeverity,
+    Language, OnFailure, OnMaxIterations,
+};
 pub use conversation::{ConversationStore, ConversationTurn, TurnRole};
 pub use error::GoalError;
 pub use events::{EventDispatcher, LogSink, NotificationSink, TaEvent};

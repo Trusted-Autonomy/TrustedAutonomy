@@ -168,6 +168,11 @@ pub struct StageDef {
     #[serde(default)]
     #[allow(dead_code)]
     pub max_parallel: Option<usize>,
+    // ── v0.15.14.3 fields (static_analysis) ──────────────────────────────────
+    /// For `kind = "static_analysis"`: override the language to analyse.
+    /// When absent, the language is auto-detected from workspace marker files.
+    #[serde(default)]
+    pub lang: Option<String>,
 }
 
 // ── New step kinds (v0.15.13 + v0.15.14) ─────────────────────────────────────
@@ -193,6 +198,9 @@ pub enum StageKind {
     AggregateDraft,
     /// Synchronization point: validates all stages in a parallel_group completed (v0.15.14).
     Join,
+    /// Run the configured static analyzer for the detected or specified language,
+    /// optionally entering an agent correction loop on failure (v0.15.14.3).
+    StaticAnalysis,
 }
 
 /// Output from a `kind = "plan_next"` stage (v0.15.13).
@@ -1085,6 +1093,10 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
                 StageKind::Join => {
                     format!(" [join: {}]", stage.join_group.as_deref().unwrap_or("?"))
                 }
+                StageKind::StaticAnalysis => {
+                    let lang = stage.lang.as_deref().unwrap_or("auto");
+                    format!(" [static_analysis: {}]", lang)
+                }
             };
             println!("  [{}] {}{} — {}", i + 1, stage.name, kind_label, desc);
         }
@@ -1470,6 +1482,7 @@ fn execute_stage(
         StageKind::ApplyDraftBranch => stage_apply_draft_branch(run, stage_def, opts, config),
         StageKind::AggregateDraft => stage_aggregate_draft(run, stage_def, opts),
         StageKind::Join => stage_join(run, stage_def),
+        StageKind::StaticAnalysis => stage_static_analysis(run, stage_def, opts),
         StageKind::Goto => {
             // Goto is handled inline in run_loop_workflow; falling here is a bug.
             anyhow::bail!(
@@ -1791,6 +1804,294 @@ fn stage_join(
     }
 
     Ok(Some(format!("join group='{}' validated", group)))
+}
+
+// ── Static analysis stage (v0.15.14.3) ───────────────────────────────────────
+
+/// Stage executor for `kind = "static_analysis"` (v0.15.14.3).
+///
+/// 1. Loads `[analysis.<lang>]` from the project's `.ta/workflow.toml`.
+/// 2. Runs the configured tool and parses structured findings.
+/// 3. Dispatches on `on_failure`:
+///    - `fail` → returns an error with the findings table.
+///    - `warn` → logs findings and continues.
+///    - `agent` → enters the correction loop (spawns fix goals, re-runs, iterates).
+fn stage_static_analysis(
+    run: &mut GovernedWorkflowRun,
+    stage_def: &StageDef,
+    opts: &RunOptions,
+) -> anyhow::Result<Option<String>> {
+    use std::str::FromStr as _;
+    use ta_goal::analysis::{
+        detect_language, run_analyzer, AnalysisFinding, FindingSeverity, Language, OnFailure,
+        OnMaxIterations,
+    };
+
+    let workspace_root = opts.workspace_root;
+
+    // Load [analysis.*] from .ta/workflow.toml.
+    let config_path = workspace_root.join(".ta").join("workflow.toml");
+    let workflow_cfg = ta_submit::WorkflowConfig::load_or_default(&config_path);
+
+    // Resolve language: stage-def override > auto-detect > first configured language.
+    let language: Language = if let Some(ref lang_str) = stage_def.lang {
+        Language::from_str(lang_str).unwrap()
+    } else if let Some(detected) = detect_language(workspace_root) {
+        if workflow_cfg.analysis.contains_key(&detected.as_key()) {
+            detected
+        } else if workflow_cfg.analysis.len() == 1 {
+            let key = workflow_cfg.analysis.keys().next().unwrap();
+            Language::from_str(key).unwrap()
+        } else {
+            detected
+        }
+    } else if workflow_cfg.analysis.len() == 1 {
+        let key = workflow_cfg.analysis.keys().next().unwrap();
+        Language::from_str(key).unwrap()
+    } else {
+        anyhow::bail!(
+            "stage '{}': could not auto-detect language. \
+             Set `lang = \"<lang>\"` in the stage definition or add `[analysis.*]` config.",
+            stage_def.name
+        );
+    };
+
+    let lang_key = language.as_key();
+    let analysis_cfg = workflow_cfg
+        .analysis
+        .get(&lang_key)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "stage '{}': no [analysis.{}] section found in .ta/workflow.toml.",
+                stage_def.name,
+                lang_key
+            )
+        })?;
+
+    println!(
+        "  Running {} analysis (lang: {}, on_failure: {})...",
+        analysis_cfg.tool, language, analysis_cfg.on_failure
+    );
+
+    // First run.
+    let (success, _raw, findings) = run_analyzer(&analysis_cfg, workspace_root)?;
+    if success && findings.is_empty() {
+        println!("  {} passed — no findings.", analysis_cfg.tool);
+        return Ok(Some(format!("{} passed", analysis_cfg.tool)));
+    }
+
+    let errors: Vec<_> = findings
+        .iter()
+        .filter(|f| f.severity == FindingSeverity::Error)
+        .collect();
+    println!(
+        "  {} findings: {} error(s), {} total",
+        analysis_cfg.tool,
+        errors.len(),
+        findings.len()
+    );
+
+    match analysis_cfg.on_failure {
+        OnFailure::Warn => {
+            println!("  [warn] on_failure=warn — logging findings and continuing.");
+            println!("{}", AnalysisFinding::format_table(&findings));
+            return Ok(Some(format!(
+                "{} warn: {} finding(s)",
+                analysis_cfg.tool,
+                findings.len()
+            )));
+        }
+        OnFailure::Fail => {
+            println!("{}", AnalysisFinding::format_table(&findings));
+            anyhow::bail!(
+                "Static analysis failed: {} reported {} finding(s).\n\
+                 Set on_failure = \"warn\" in [analysis.{}] to continue despite findings, \
+                 or on_failure = \"agent\" to trigger the correction loop.",
+                analysis_cfg.tool,
+                findings.len(),
+                lang_key
+            );
+        }
+        OnFailure::Agent => {}
+    }
+
+    // Agent correction loop.
+    println!(
+        "  on_failure=agent — starting correction loop (max {} iterations)...",
+        analysis_cfg.max_iterations
+    );
+    println!("{}", AnalysisFinding::format_table(&findings));
+
+    let mut current_findings = findings;
+    let mut iteration = 0u32;
+
+    loop {
+        iteration += 1;
+        if iteration > analysis_cfg.max_iterations {
+            break;
+        }
+
+        println!(
+            "\n  [correction loop] iteration {}/{} — spawning fix goal...",
+            iteration, analysis_cfg.max_iterations
+        );
+
+        // Build targeted fix objective.
+        let objective =
+            AnalysisFinding::build_fix_prompt(&analysis_cfg.tool, &language, &current_findings);
+        let fix_title = format!(
+            "Fix {} analysis findings ({}) — iteration {}",
+            analysis_cfg.tool, language, iteration
+        );
+
+        // Spawn fix goal via `ta run`.
+        let mut cmd = std::process::Command::new("ta");
+        cmd.args([
+            "--project-root",
+            &workspace_root.to_string_lossy(),
+            "run",
+            &fix_title,
+            "--agent",
+            opts.agent,
+            "--headless",
+            "--no-version-check",
+            "--objective",
+            &objective,
+        ]);
+        println!(
+            "  Running: ta run {:?} --agent {} --headless",
+            fix_title, opts.agent
+        );
+
+        let output = cmd
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to invoke 'ta run' for fix goal: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "Fix goal failed (exit {}):\n{}\n{}",
+                output.status.code().unwrap_or(-1),
+                stderr,
+                stdout
+            );
+        }
+
+        // Extract draft ID from headless sentinel.
+        let mut fix_draft_id: Option<String> = None;
+        for line in stdout.lines().chain(stderr.lines()) {
+            if let Some(json_str) = line.strip_prefix("__TA_HEADLESS_RESULT__:") {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    if let Some(id) = v["draft_id"].as_str() {
+                        if id != "null" && !id.is_empty() {
+                            fix_draft_id = Some(id.to_string());
+                        }
+                    }
+                    if let Some(id) = v["goal_id"].as_str() {
+                        run.goal_id = Some(id.to_string());
+                    }
+                }
+                break;
+            }
+        }
+
+        let draft_id = match fix_draft_id {
+            Some(id) => id,
+            None => {
+                println!("  [correction loop] Fix goal did not produce a draft — stopping loop.");
+                break;
+            }
+        };
+
+        println!(
+            "  [correction loop] Fix draft {} — applying to re-run analyzer...",
+            &draft_id[..8.min(draft_id.len())]
+        );
+        run.draft_id = Some(draft_id.clone());
+
+        // Apply the fix draft (without git commit — corrections accumulate, outer workflow commits).
+        let apply_output = std::process::Command::new("ta")
+            .args([
+                "--project-root",
+                &workspace_root.to_string_lossy(),
+                "draft",
+                "apply",
+                &draft_id,
+                "--no-version-check",
+            ])
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to invoke 'ta draft apply': {}", e))?;
+
+        if !apply_output.status.success() {
+            let err = String::from_utf8_lossy(&apply_output.stderr);
+            println!(
+                "  [correction loop] draft apply failed — stopping loop. Error: {}",
+                err.trim()
+            );
+            break;
+        }
+
+        // Re-run the analyzer.
+        println!("  [correction loop] Re-running {}...", analysis_cfg.tool);
+        let (ok, _raw2, new_findings) = run_analyzer(&analysis_cfg, workspace_root)?;
+        if ok && new_findings.is_empty() {
+            println!(
+                "  [correction loop] Clean after {} iteration(s).",
+                iteration
+            );
+            current_findings = new_findings;
+            break;
+        }
+
+        current_findings = new_findings;
+        let new_errors: Vec<_> = current_findings
+            .iter()
+            .filter(|f| f.severity == FindingSeverity::Error)
+            .collect();
+        println!(
+            "  [correction loop] Still {} error(s) after iteration {}.",
+            new_errors.len(),
+            iteration
+        );
+    }
+
+    // Loop finished — check final state.
+    if current_findings.is_empty() {
+        return Ok(Some(format!(
+            "{} clean after {} correction pass(es)",
+            analysis_cfg.tool, iteration
+        )));
+    }
+
+    // Max iterations exhausted with remaining findings.
+    let msg = format!(
+        "{} still has {} finding(s) after {} correction pass(es)",
+        analysis_cfg.tool,
+        current_findings.len(),
+        analysis_cfg.max_iterations
+    );
+
+    match analysis_cfg.on_max_iterations {
+        OnMaxIterations::Warn => {
+            println!(
+                "  [warn] Max iterations ({}) reached with remaining findings. Continuing.",
+                analysis_cfg.max_iterations
+            );
+            println!("{}", AnalysisFinding::format_table(&current_findings));
+            Ok(Some(msg))
+        }
+        OnMaxIterations::Fail => {
+            println!("{}", AnalysisFinding::format_table(&current_findings));
+            anyhow::bail!(
+                "{}\nSet on_max_iterations = \"warn\" in [analysis.{}] to continue despite \
+                 remaining findings.",
+                msg,
+                lang_key
+            )
+        }
+    }
 }
 
 /// VCS sync helper: pull the latest changes after a PR merge (v0.15.14).
@@ -2809,6 +3110,7 @@ mod tests {
             join_group: None,
             on_partial_failure: None,
             max_parallel: None,
+            lang: None,
         }
     }
 
@@ -3538,6 +3840,32 @@ on_partial_failure = "continue"
         assert_eq!(s.on_partial_failure.as_deref(), Some("continue"));
     }
 
+    #[test]
+    fn stage_kind_static_analysis_deserializes() {
+        let toml_str = r#"
+name = "lint"
+description = "Run static analysis"
+kind = "static_analysis"
+lang = "python"
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.kind, StageKind::StaticAnalysis);
+        assert_eq!(s.lang.as_deref(), Some("python"));
+    }
+
+    #[test]
+    fn stage_kind_static_analysis_no_lang() {
+        // lang defaults to None when not specified; auto-detect will be used at runtime.
+        let toml_str = r#"
+name = "lint"
+description = "Run static analysis"
+kind = "static_analysis"
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.kind, StageKind::StaticAnalysis);
+        assert!(s.lang.is_none());
+    }
+
     // ── aggregate_draft stage executor ───────────────────────────────────────
 
     #[test]
@@ -3577,6 +3905,7 @@ on_partial_failure = "continue"
             join_group: None,
             on_partial_failure: None,
             max_parallel: None,
+            lang: None,
         };
 
         let opts = RunOptions {
@@ -3637,6 +3966,7 @@ on_partial_failure = "continue"
             join_group: None,
             on_partial_failure: None,
             max_parallel: None,
+            lang: None,
         };
 
         let opts = RunOptions {
@@ -3683,6 +4013,7 @@ on_partial_failure = "continue"
             join_group: Some("workers".to_string()),
             on_partial_failure: None,
             max_parallel: None,
+            lang: None,
         };
 
         let result = stage_join(&mut run, &stage_def).unwrap();
@@ -3715,6 +4046,7 @@ on_partial_failure = "continue"
             join_group: Some("workers".to_string()),
             on_partial_failure: None, // default = halt
             max_parallel: None,
+            lang: None,
         };
 
         let err = stage_join(&mut run, &stage_def).unwrap_err();
@@ -3745,6 +4077,7 @@ on_partial_failure = "continue"
             join_group: Some("workers".to_string()),
             on_partial_failure: Some("continue".to_string()),
             max_parallel: None,
+            lang: None,
         };
 
         let result = stage_join(&mut run, &stage_def);

@@ -533,6 +533,13 @@ on_failure = "block"
 # Timeout per command in seconds
 timeout = 300
 
+# Static analysis configuration (v0.15.14.3)
+# clippy already runs in [verify]; on_failure = "warn" keeps this non-blocking.
+[analysis.rust]
+tool = "cargo-clippy"
+args = ["-D", "warnings"]
+on_failure = "warn"
+
 # VCS submit adapter
 [submit.git]
 branch_prefix = "feature/"
@@ -551,6 +558,13 @@ commands = [
 on_failure = "block"
 timeout = 300
 
+# Static analysis configuration (v0.15.14.3)
+[analysis.typescript]
+tool = "pyright"
+args = []
+on_failure = "agent"
+max_iterations = 3
+
 [submit.git]
 branch_prefix = "feature/"
 auto_review = true
@@ -567,6 +581,13 @@ commands = [
 ]
 on_failure = "block"
 timeout = 300
+
+# Static analysis configuration (v0.15.14.3)
+[analysis.python]
+tool = "mypy"
+args = ["--strict"]
+on_failure = "agent"
+max_iterations = 3
 
 [submit.git]
 branch_prefix = "feature/"
@@ -585,6 +606,13 @@ commands = [
 on_failure = "block"
 timeout = 300
 
+# Static analysis configuration (v0.15.14.3)
+[analysis.go]
+tool = "golangci-lint"
+args = ["run"]
+on_failure = "agent"
+max_iterations = 3
+
 [submit.git]
 branch_prefix = "feature/"
 auto_review = true
@@ -599,6 +627,13 @@ auto_review = true
 # commands = ["make test", "make lint"]
 # on_failure = "block"
 # timeout = 300
+
+# Static analysis (v0.15.14.3) — uncomment and configure for your language:
+# [analysis.python]
+# tool = "mypy"
+# args = ["--strict"]
+# on_failure = "agent"
+# max_iterations = 3
 
 [submit.git]
 branch_prefix = "feature/"
@@ -1671,5 +1706,65 @@ members = [
             dir.path().join("CLAUDE.md").exists(),
             "CLAUDE.md should be created on re-run when missing"
         );
+    }
+
+    // ── template analysis section (v0.15.14.3) ────────────────────────────────
+
+    #[test]
+    fn rust_template_workflow_has_analysis_section() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        generate_workflow_toml(&ta_dir, &ProjectType::RustWorkspace).unwrap();
+        let content = std::fs::read_to_string(ta_dir.join("workflow.toml")).unwrap();
+        assert!(
+            content.contains("[analysis.rust]"),
+            "rust template should include [analysis.rust]"
+        );
+        assert!(content.contains("cargo-clippy"));
+        assert!(content.contains("on_failure = \"warn\""));
+    }
+
+    #[test]
+    fn python_template_workflow_has_analysis_section() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        generate_workflow_toml(&ta_dir, &ProjectType::Python).unwrap();
+        let content = std::fs::read_to_string(ta_dir.join("workflow.toml")).unwrap();
+        assert!(
+            content.contains("[analysis.python]"),
+            "python template should include [analysis.python]"
+        );
+        assert!(content.contains("tool = \"mypy\""));
+        assert!(content.contains("on_failure = \"agent\""));
+    }
+
+    #[test]
+    fn typescript_template_workflow_has_analysis_section() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        generate_workflow_toml(&ta_dir, &ProjectType::TypeScript).unwrap();
+        let content = std::fs::read_to_string(ta_dir.join("workflow.toml")).unwrap();
+        assert!(
+            content.contains("[analysis.typescript]"),
+            "typescript template should include [analysis.typescript]"
+        );
+        assert!(content.contains("tool = \"pyright\""));
+    }
+
+    #[test]
+    fn go_template_workflow_has_analysis_section() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        generate_workflow_toml(&ta_dir, &ProjectType::Go).unwrap();
+        let content = std::fs::read_to_string(ta_dir.join("workflow.toml")).unwrap();
+        assert!(
+            content.contains("[analysis.go]"),
+            "go template should include [analysis.go]"
+        );
+        assert!(content.contains("golangci-lint"));
     }
 }

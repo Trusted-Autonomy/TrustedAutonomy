@@ -1,6 +1,7 @@
 //! Workflow configuration structures
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Top-level workflow configuration from .ta/workflow.toml
@@ -160,6 +161,25 @@ pub struct WorkflowConfig {
     /// ```
     #[serde(default)]
     pub project: ProjectSection,
+
+    /// Per-language static analysis configuration (v0.15.14.3).
+    ///
+    /// Keys are language names (`python`, `typescript`, `rust`, `go`).
+    ///
+    /// ```toml
+    /// [analysis.python]
+    /// tool = "mypy"
+    /// args = ["--strict"]
+    /// on_failure = "agent"
+    /// max_iterations = 3
+    ///
+    /// [analysis.rust]
+    /// tool = "cargo-clippy"
+    /// args = ["-D", "warnings"]
+    /// on_failure = "warn"
+    /// ```
+    #[serde(default)]
+    pub analysis: HashMap<String, ta_goal::analysis::AnalysisConfig>,
 }
 
 /// Commit auto-staging configuration (v0.14.3.7).
@@ -2450,5 +2470,70 @@ name = "My Pipeline Project"
     fn project_section_defaults_to_none_name() {
         let config = WorkflowConfig::default();
         assert!(config.project.name.is_none());
+    }
+
+    // ── analysis config (v0.15.14.3) ─────────────────────────────────────────
+
+    #[test]
+    fn analysis_config_parses_python() {
+        let toml = r#"
+[analysis.python]
+tool = "mypy"
+args = ["--strict"]
+on_failure = "agent"
+max_iterations = 3
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        let py = config
+            .analysis
+            .get("python")
+            .expect("python analysis config");
+        assert_eq!(py.tool, "mypy");
+        assert_eq!(py.args, vec!["--strict"]);
+        assert_eq!(py.on_failure, ta_goal::analysis::OnFailure::Agent);
+        assert_eq!(py.max_iterations, 3);
+    }
+
+    #[test]
+    fn analysis_config_parses_multiple_languages() {
+        let toml = r#"
+[analysis.rust]
+tool = "cargo-clippy"
+args = ["-D", "warnings"]
+on_failure = "warn"
+
+[analysis.go]
+tool = "golangci-lint"
+args = ["run"]
+on_failure = "agent"
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.analysis.len(), 2);
+        let rust = config.analysis.get("rust").unwrap();
+        assert_eq!(rust.tool, "cargo-clippy");
+        assert_eq!(rust.on_failure, ta_goal::analysis::OnFailure::Warn);
+        let go = config.analysis.get("go").unwrap();
+        assert_eq!(go.on_failure, ta_goal::analysis::OnFailure::Agent);
+    }
+
+    #[test]
+    fn analysis_config_defaults_to_empty_map() {
+        let config = WorkflowConfig::default();
+        assert!(config.analysis.is_empty());
+    }
+
+    #[test]
+    fn analysis_config_parses_on_max_iterations() {
+        let toml = r#"
+[analysis.typescript]
+tool = "pyright"
+on_max_iterations = "fail"
+"#;
+        let config: WorkflowConfig = toml::from_str(toml).unwrap();
+        let ts = config.analysis.get("typescript").unwrap();
+        assert_eq!(
+            ts.on_max_iterations,
+            ta_goal::analysis::OnMaxIterations::Fail
+        );
     }
 }
