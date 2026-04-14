@@ -378,6 +378,11 @@ impl OverlayWorkspace {
         // Print staging size report.
         println!("{}", stat.size_report());
 
+        // v0.15.14.7: Delete ephemeral staging-root files so each goal starts
+        // with a clean slate. These files (e.g., .ta-decisions.json) must not
+        // carry over from a previous goal's applied source state.
+        delete_ephemeral_staging_files(&staging_dir);
+
         // v0.2.1: Capture source snapshot for conflict detection.
         let snapshot =
             SourceSnapshot::capture(&source_dir, |path| excludes.should_skip_path(path)).ok();
@@ -1475,6 +1480,40 @@ pub const TA_MANAGED_FILES: &[&str] = &[
     "settings.local.json", // Claude Code settings — injected with TA overrides
 ];
 
+/// Ephemeral staging-root artifacts written by the agent during a goal run.
+///
+/// These files are scoped to the goal run and must never be applied back to
+/// source. The overlay diff and apply path both exclude them (v0.15.14.7).
+/// They are also deleted from staging at creation time so each new goal starts
+/// with a clean slate regardless of what the source directory contains.
+pub const EPHEMERAL_STAGING_FILES: &[&str] = &[
+    ".ta-decisions.json", // Agent Decision Log — written per-run, never applied back
+];
+
+/// Delete ephemeral staging-root files from `staging_dir` after initial copy.
+///
+/// Called once during workspace creation. These files must not bleed from one
+/// goal's source state into the next goal's staging workspace (v0.15.14.7).
+fn delete_ephemeral_staging_files(staging_dir: &Path) {
+    for name in EPHEMERAL_STAGING_FILES {
+        let path = staging_dir.join(name);
+        if path.exists() {
+            if let Err(e) = fs::remove_file(&path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to delete ephemeral staging file — agent will start with stale data"
+                );
+            } else {
+                tracing::debug!(
+                    path = %path.display(),
+                    "deleted ephemeral staging file (clean slate for new goal)"
+                );
+            }
+        }
+    }
+}
+
 /// Check if a path should be skipped when diffing.
 /// We skip infrastructure directories — these are internal state, not agent work product.
 /// V1 TEMPORARY: Also checks exclude patterns for build artifacts that
@@ -1504,6 +1543,13 @@ fn should_skip_for_diff(path: &str, excludes: &ExcludePatterns) -> bool {
     // them from diffs so they never appear as agent-authored changes (v0.13.17.5).
     for managed in TA_MANAGED_FILES {
         if path == *managed {
+            return true;
+        }
+    }
+
+    // Ephemeral staging-only files must never appear in changesets (v0.15.14.7).
+    for ephemeral in EPHEMERAL_STAGING_FILES {
+        if path == *ephemeral {
             return true;
         }
     }
@@ -2553,5 +2599,136 @@ mod tests {
             Some("docs/USAGE.md".to_string())
         );
         assert_eq!(extract_path_from_conflict("no match here"), None);
+    }
+
+    // ── v0.15.14.7: Ephemeral staging file tests ──────────────────────────────
+
+    /// `.ta-decisions.json` written in staging must NOT appear in `diff_all()`.
+    #[test]
+    fn decisions_json_excluded_from_diff() {
+        let source = create_source_project();
+        let staging_root = TempDir::new().unwrap();
+
+        let overlay = OverlayWorkspace::create(
+            "goal-1",
+            source.path(),
+            staging_root.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        // Agent writes a decisions log during the goal.
+        fs::write(
+            overlay.staging_dir().join(".ta-decisions.json"),
+            r#"[{"decision":"chose Ed25519","rationale":"faster","alternatives":[],"confidence":0.9}]"#,
+        )
+        .unwrap();
+
+        let changes = overlay.diff_all().unwrap();
+        let paths: Vec<&str> = changes
+            .iter()
+            .map(|c| match c {
+                OverlayChange::Modified { path, .. }
+                | OverlayChange::Created { path, .. }
+                | OverlayChange::Deleted { path } => path.as_str(),
+            })
+            .collect();
+
+        assert!(
+            !paths.contains(&".ta-decisions.json"),
+            ".ta-decisions.json must be excluded from diff changeset, got: {:?}",
+            paths
+        );
+    }
+
+    /// `.ta-decisions.json` already present in source must be deleted from staging at creation.
+    #[test]
+    fn decisions_json_deleted_from_staging_at_creation() {
+        let source = TempDir::new().unwrap();
+        fs::write(source.path().join("README.md"), "# Project\n").unwrap();
+        // Simulate a stale decisions file in source (left over from prior goal apply).
+        fs::write(
+            source.path().join(".ta-decisions.json"),
+            r#"[{"decision":"stale decision from goal A"}]"#,
+        )
+        .unwrap();
+
+        let staging_root = TempDir::new().unwrap();
+        let overlay = OverlayWorkspace::create(
+            "goal-2",
+            source.path(),
+            staging_root.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        // After staging creation, the stale file must be gone.
+        assert!(
+            !overlay.staging_dir().join(".ta-decisions.json").exists(),
+            ".ta-decisions.json from source must not carry over into new goal's staging"
+        );
+    }
+
+    /// Decisions from goal A must not appear in goal B's diff even after apply.
+    ///
+    /// Simulates the full bleed scenario: goal A writes decisions → goal B is
+    /// created from the same source → goal B's diff must be clean.
+    #[test]
+    fn decisions_from_goal_a_do_not_bleed_into_goal_b_diff() {
+        let source = TempDir::new().unwrap();
+        fs::write(source.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+        // Goal A: agent writes a decisions file in staging.
+        let staging_root = TempDir::new().unwrap();
+        let overlay_a = OverlayWorkspace::create(
+            "goal-a",
+            source.path(),
+            staging_root.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+        fs::write(
+            overlay_a.staging_dir().join(".ta-decisions.json"),
+            r#"[{"decision":"goal A decision"}]"#,
+        )
+        .unwrap();
+        // Simulate: goal A's decisions file got applied back to source somehow.
+        fs::write(
+            source.path().join(".ta-decisions.json"),
+            r#"[{"decision":"goal A decision"}]"#,
+        )
+        .unwrap();
+
+        // Goal B: new goal starting from same source (which now has the stale file).
+        let staging_root_b = TempDir::new().unwrap();
+        let overlay_b = OverlayWorkspace::create(
+            "goal-b",
+            source.path(),
+            staging_root_b.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        // Staging for goal B must not have the stale file.
+        assert!(
+            !overlay_b.staging_dir().join(".ta-decisions.json").exists(),
+            "stale .ta-decisions.json must be deleted from goal B's staging"
+        );
+
+        // Diff for goal B must also be clean (no decisions file).
+        let changes = overlay_b.diff_all().unwrap();
+        let paths: Vec<&str> = changes
+            .iter()
+            .map(|c| match c {
+                OverlayChange::Modified { path, .. }
+                | OverlayChange::Created { path, .. }
+                | OverlayChange::Deleted { path } => path.as_str(),
+            })
+            .collect();
+        assert!(
+            !paths.contains(&".ta-decisions.json"),
+            "goal B diff must not include .ta-decisions.json from goal A, got: {:?}",
+            paths
+        );
     }
 }

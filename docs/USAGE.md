@@ -866,6 +866,8 @@ ta draft view <id> --json
 
 These are surfaced in `ta draft view` under "Agent Decision Log" and in the HTML output as collapsible sections. In the HTML view, section open/closed state is persisted in `localStorage` between page loads.
 
+> **`.ta-decisions.json` is ephemeral.** It is scoped to a single goal run and is automatically deleted from the staging workspace at the start of each new goal. It is excluded from the overlay diff and is never applied back to the source tree. If `ta doctor` reports a stale copy in your project root, remove it with `rm .ta-decisions.json`.
+
 Agents can also populate the Design Decisions section by passing an `alternatives` array to the `ta_pr_build` MCP tool. Each entry has `option`, `rationale`, and `chosen` fields.
 
 ### Validation Log

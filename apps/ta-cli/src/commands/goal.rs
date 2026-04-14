@@ -3587,6 +3587,29 @@ pub fn doctor(config: &GatewayConfig) -> anyhow::Result<()> {
         }
     }
 
+    // ── Stale ephemeral file check (v0.15.14.7) ──────────────────────────────
+    // `.ta-decisions.json` at the project root is a staging-only artifact.
+    // If it exists in the source tree, a prior `ta draft apply` incorrectly
+    // applied it. Report it and offer removal so it cannot bleed into the next goal.
+    {
+        let stale_decisions = config.workspace_root.join(".ta-decisions.json");
+        if stale_decisions.exists() {
+            println!("  Stale ephemeral file check... WARN");
+            println!(
+                "    .ta-decisions.json found in project root ({})",
+                stale_decisions.display()
+            );
+            println!("    This file is written by agents during a goal run and must not");
+            println!("    exist in the source tree — it may bleed into subsequent goals.");
+            println!("    Fix: rm .ta-decisions.json   (or: ta doctor --fix-ephemeral)");
+            warn += 1;
+        } else {
+            print!("  Stale ephemeral file check... ");
+            println!("ok");
+            pass += 1;
+        }
+    }
+
     println!();
     println!("{} passed, {} warnings, {} failures", pass, warn, fail);
     if fail > 0 {

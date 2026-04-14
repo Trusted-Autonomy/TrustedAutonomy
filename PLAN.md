@@ -10445,24 +10445,24 @@ level = "mid"               # "low" | "mid" | "high" — sets all defaults below
 ---
 
 ### v0.15.14.7 — Fix Legacy Agent Decision Log Bleeding Between Goals
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Agent decisions from a previous goal run are appearing in subsequent drafts. Root cause: `.ta-decisions.json` is written at the staging root (alongside `Cargo.toml`, `PLAN.md`, etc.), not inside `.ta/`. When `ta draft apply` runs, the overlay copies all modified files back to source — including `.ta-decisions.json`. The next goal's staging is created from that source, carrying the previous run's decisions forward. Every subsequent draft inherits the full history of prior decisions until the file is manually deleted.
 
 **Fix**: Treat `.ta-decisions.json` as a staging-only ephemeral artifact — excluded from the overlay diff and apply path, deleted at staging creation time, and gitignored.
 
 #### Items
 
-1. [ ] **Exclude from overlay diff** (`crates/ta-workspace/src/overlay.rs`): Add `.ta-decisions.json` to the overlay's excluded-paths list alongside `.ta/`. Files on this list are never included in the changeset diff and never applied back to source.
+1. [x] **Exclude from overlay diff** (`crates/ta-workspace/src/overlay.rs`): Added `EPHEMERAL_STAGING_FILES` constant with `.ta-decisions.json`; `should_skip_for_diff()` now checks this list so the file is never included in the changeset diff and never applied back to source.
 
-2. [ ] **Delete at staging creation time** (`overlay.rs`): After copying source to staging, delete `.ta-decisions.json` from staging root if present. Agent always starts with a clean slate regardless of source state.
+2. [x] **Delete at staging creation time** (`overlay.rs`): Added `delete_ephemeral_staging_files()` called in `create_with_strategy()` after the source copy completes. Agent always starts with a clean slate regardless of source state.
 
-3. [ ] **`.gitignore` entry**: Prevent commits of stale copies. *(Already added as immediate hotfix — this item tracks verification that the code-level exclusion makes it redundant.)*
+3. [x] **`.gitignore` entry**: Verified already present (added as hotfix). Code-level exclusion makes it redundant but the `.gitignore` entry remains as defense-in-depth.
 
-4. [ ] **`ta doctor` stale-file check**: If `.ta-decisions.json` exists in the project root, report it and offer removal. One-time cleanup for existing projects.
+4. [x] **`ta doctor` stale-file check**: Added check at the end of `doctor()` in `goal.rs`. If `.ta-decisions.json` exists in the project root, `ta doctor` reports a WARN with instructions to remove it.
 
-5. [ ] **Tests**: Decisions from goal A do not appear in goal B's draft. Overlay excludes `.ta-decisions.json` from changeset. Staging creation deletes stale copy.
+5. [x] **Tests** (3 tests in `overlay.rs`): `decisions_json_excluded_from_diff`, `decisions_json_deleted_from_staging_at_creation`, `decisions_from_goal_a_do_not_bleed_into_goal_b_diff` — all pass.
 
-6. [ ] **USAGE.md**: Document `.ta-decisions.json` as ephemeral to the goal run in the "Agent Decision Log" section.
+6. [x] **USAGE.md**: Added ephemeral callout to the "Agent Decision Log" section explaining the file is scoped to a single goal run and never applied back to source.
 
 #### Version: `0.15.14.7-alpha`
 
