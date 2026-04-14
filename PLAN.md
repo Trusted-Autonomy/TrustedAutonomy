@@ -10444,6 +10444,30 @@ level = "mid"               # "low" | "mid" | "high" — sets all defaults below
 
 ---
 
+### v0.15.14.7 — Fix Legacy Agent Decision Log Bleeding Between Goals
+<!-- status: pending -->
+**Goal**: Agent decisions from a previous goal run are appearing in subsequent drafts. Root cause: `.ta-decisions.json` is written at the staging root (alongside `Cargo.toml`, `PLAN.md`, etc.), not inside `.ta/`. When `ta draft apply` runs, the overlay copies all modified files back to source — including `.ta-decisions.json`. The next goal's staging is created from that source, carrying the previous run's decisions forward. Every subsequent draft inherits the full history of prior decisions until the file is manually deleted.
+
+**Fix**: Treat `.ta-decisions.json` as a staging-only ephemeral artifact — excluded from the overlay diff and apply path, deleted at staging creation time, and gitignored.
+
+#### Items
+
+1. [ ] **Exclude from overlay diff** (`crates/ta-workspace/src/overlay.rs`): Add `.ta-decisions.json` to the overlay's excluded-paths list alongside `.ta/`. Files on this list are never included in the changeset diff and never applied back to source.
+
+2. [ ] **Delete at staging creation time** (`overlay.rs`): After copying source to staging, delete `.ta-decisions.json` from staging root if present. Agent always starts with a clean slate regardless of source state.
+
+3. [ ] **`.gitignore` entry**: Prevent commits of stale copies. *(Already added as immediate hotfix — this item tracks verification that the code-level exclusion makes it redundant.)*
+
+4. [ ] **`ta doctor` stale-file check**: If `.ta-decisions.json` exists in the project root, report it and offer removal. One-time cleanup for existing projects.
+
+5. [ ] **Tests**: Decisions from goal A do not appear in goal B's draft. Overlay excludes `.ta-decisions.json` from changeset. Staging creation deletes stale copy.
+
+6. [ ] **USAGE.md**: Document `.ta-decisions.json` as ephemeral to the goal run in the "Agent Decision Log" section.
+
+#### Version: `0.15.14.7-alpha`
+
+---
+
 ### v0.15.15 — Multi-Agent Consensus Review Workflow
 <!-- status: pending -->
 **Goal**: A workflow template for multi-agent panel reviews where specialist agents run in parallel, each producing a structured verdict with a score and findings, and a final consensus step aggregates their outputs into a readiness score and recommendation. Ships with a `code-review-consensus` template covering architect, security, principal engineer, and PM roles. Include configurable consensus algorithms/models. Start with Raft and Paxos with Raft as the default — it should do no work if there is no swarm/multi-agent in the workflow.

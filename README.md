@@ -1004,6 +1004,24 @@ Apache 2.0
 
 ---
 
+## Why This Matters
+
+**The short version:** AI agents that can only act while you're watching aren't autonomous — they're autocomplete with extra steps.
+
+AI agents that can only act while you're watching aren't autonomous — they're autocomplete with extra steps. The bottleneck isn't the agent's capability; it's the human's attention. Every time the agent needs to write a file, send an email, modify a database record, or run a command, someone has to be present to approve it or clean up after it. That's not delegation — that's supervision, and it doesn't scale.
+
+Trusted Autonomy is built on a different premise: that safe autonomy requires a boundary, not a babysitter. The agent works in a complete isolated copy of your project — code, documents, database scripts, whatever the goal touches — and runs to completion without requiring your attention. When it's done, you see the entire result as a single reviewable unit: what changed, why, what the automated review found, what risks were flagged. You approve or deny — partially or entirely, with follow-up questions fed back to the agent on any item. Nothing lands in your real environment until you say so.
+
+This changes the human role fundamentally. Instead of monitoring every step to prevent mistakes, you define goals, set the rules once in a constitution, and review outcomes. You become the architect and product guide — the person who decides what should be built and whether the result meets the bar — not the implementor who has to stay present to keep things from going sideways.
+
+The model works across workloads beyond code. An agent writing database migrations, drafting customer emails, posting to social channels, or modifying infrastructure faces the same problem: the blast radius of an unchecked mistake is real, and humans can't be present for every action at scale. A staging boundary with constitutional rules and pre-apply review applies equally whether the artifact is a Terraform file, an outbound email, a social post, or a database schema. The governance layer doesn't care what kind of work the agent is doing — it cares that nothing irreversible happens without a human having seen it first.
+
+Compliance capability is directly in play. Regulated industries need demonstrable answers to "who approved this, when, under what rules, and what did the automated review find?" TA produces a signed audit trail for every goal: the objective, the agent identity, the constitution version, the supervisor findings, and the human approval — all chained together. That's not a feature bolted on for enterprise sales; it's what the staging-and-review model produces naturally.
+
+Multi-step and autonomous workflows are where the compounding value is clearest. A single goal run is useful. A chained sequence — research → draft → review → apply → verify — where each step's output feeds the next, governed by the same constitutional rules throughout, running while the team is focused elsewhere, is a different order of productivity. The human sets the destination and the constraints. The system executes, flags exceptions, and presents a coherent result. That's the shift from task tool to execution substrate.
+
+---
+
 ## Why Rust
 
 **Safety where it matters most.** TA mediates every agent action — file writes, git operations, external calls, patch application. That mediation path must not crash, leak, or corrupt state mid-apply. Rust’s ownership model eliminates use-after-free, data races, and null dereferences at compile time — exactly the bug classes that would be catastrophic in a system sitting between an AI agent and your codebase.
