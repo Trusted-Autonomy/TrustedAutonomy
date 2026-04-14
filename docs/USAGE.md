@@ -956,6 +956,17 @@ api_key_env = "OPENAI_API_KEY"   # TA checks this exists before spawning; codex 
 
 If the binary is not found, stalls (no tokens for `heartbeat_stale_secs`), or the response cannot be parsed, the supervisor falls back to a `warn` verdict automatically — it never blocks a draft due to its own failure.
 
+**Hooks suppression in supervisor invocations**
+
+Session hooks are suppressed by default in supervisor subprocesses (`CLAUDE_CODE_DISABLE_HOOKS=1`). This prevents `SessionStart` and other Claude Code hooks from writing `{"type":"system",...}` JSON to stdout before any supervisor content, which would otherwise satisfy the heartbeat check and cause a false 30s stall timeout.
+
+If you have a custom hook that must run during supervisor invocations, opt back in with:
+
+```toml
+[supervisor]
+enable_hooks = true
+```
+
 **Assigning a supervisor profile**
 
 Instead of the bare `agent` string, you can define a named profile in `[agent_profiles]` and reference it by name. This lets you configure framework and model independently and reuse the same profile across supervisors and workflow steps:

@@ -1423,6 +1423,7 @@ fn run_constitution_check_step(
         heartbeat_path: None,
         agent_profile: None,
         resolved_model: None,
+        enable_hooks: sup_cfg.enable_hooks,
     };
 
     let constitution_text = ta_changeset::load_constitution(&config.workspace_root, &run_config);

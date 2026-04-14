@@ -90,6 +90,12 @@ pub struct SupervisorRunConfig {
     pub agent_profile: Option<String>,
     /// Resolved model from agent_profile (if any). Passed to agent CLI via --model flag.
     pub resolved_model: Option<String>,
+    /// Allow session hooks to fire in the supervisor subprocess. Default: false.
+    ///
+    /// When false, `CLAUDE_CODE_DISABLE_HOOKS=1` is set so that `SessionStart` and other
+    /// hooks do not write JSON to stdout before supervisor content arrives. Set to `true`
+    /// only if a custom hook must run during supervisor invocations.
+    pub enable_hooks: bool,
 }
 
 /// Raw LLM response structure (expected JSON from the supervisor prompt).
@@ -195,6 +201,12 @@ fn invoke_claude_cli_supervisor(
 
     let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
+    let disable_hooks_env: &[(&str, &str)] = if config.enable_hooks {
+        &[]
+    } else {
+        &[("CLAUDE_CODE_DISABLE_HOOKS", "1")]
+    };
+
     let stdout = spawn_with_heartbeat_monitor(
         "claude",
         &args_refs,
@@ -202,6 +214,7 @@ fn invoke_claude_cli_supervisor(
         config.heartbeat_path.as_deref(),
         "Claude Code CLI",
         staging,
+        disable_hooks_env,
     )?;
 
     let text = extract_claude_stream_json_text(&stdout);
@@ -219,6 +232,11 @@ fn invoke_codex_supervisor(
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
     let staging = config.staging_path.as_deref();
+    let disable_hooks_env: &[(&str, &str)] = if config.enable_hooks {
+        &[]
+    } else {
+        &[("CLAUDE_CODE_DISABLE_HOOKS", "1")]
+    };
     let stdout = spawn_with_heartbeat_monitor(
         "codex",
         &["--approval-mode", "full-auto", "--quiet", prompt],
@@ -226,6 +244,7 @@ fn invoke_codex_supervisor(
         config.heartbeat_path.as_deref(),
         "Codex CLI",
         staging,
+        disable_hooks_env,
     )?;
 
     let mut review = parse_supervisor_response_or_text(&stdout, "codex");
@@ -239,6 +258,11 @@ fn invoke_ollama_supervisor(
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
     let staging = config.staging_path.as_deref();
+    let disable_hooks_env: &[(&str, &str)] = if config.enable_hooks {
+        &[]
+    } else {
+        &[("CLAUDE_CODE_DISABLE_HOOKS", "1")]
+    };
     let stdout = spawn_with_heartbeat_monitor(
         "ta",
         &[
@@ -255,11 +279,31 @@ fn invoke_ollama_supervisor(
         config.heartbeat_path.as_deref(),
         "ta-agent-ollama",
         staging,
+        disable_hooks_env,
     )?;
 
     let mut review = parse_supervisor_response_or_text(&stdout, "ollama");
     apply_hedging_quality_gate(&mut review);
     Ok(review)
+}
+
+/// Check whether a stdout line is a Claude Code hook JSON event.
+///
+/// Hook events look like `{"type":"system","subtype":"hook_started",...}`. They arrive
+/// on stdout before any supervisor content when hooks fire (e.g., `SessionStart`). We
+/// discard these silently — they are not supervisor tokens and must not reset the stall
+/// watchdog timer.
+fn is_hook_json_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    // Quick pre-check before JSON parse for performance.
+    if !trimmed.starts_with('{') || !trimmed.contains("\"type\"") {
+        return false;
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        val.get("type").and_then(|t| t.as_str()) == Some("system")
+    } else {
+        false
+    }
 }
 
 /// Spawn a process and stream its stdout, writing a heartbeat file after each line received.
@@ -272,6 +316,13 @@ fn invoke_ollama_supervisor(
 ///
 /// `heartbeat_path` is optional; when `None`, heartbeat writes are skipped (e.g. in
 /// tests or when no workspace dir is available).
+///
+/// `extra_env` is a slice of `(key, value)` pairs injected into the subprocess environment.
+/// Pass `&[("CLAUDE_CODE_DISABLE_HOOKS", "1")]` to suppress hook stdout pollution from
+/// Claude Code session hooks.
+///
+/// Lines that match `is_hook_json_line` (i.e., `{"type":"system",...}`) are discarded
+/// silently — they do not count as heartbeat tokens and are not included in the output.
 fn spawn_with_heartbeat_monitor(
     program: &str,
     args: &[&str],
@@ -279,6 +330,7 @@ fn spawn_with_heartbeat_monitor(
     heartbeat_path: Option<&std::path::Path>,
     label: &str,
     current_dir: Option<&std::path::Path>,
+    extra_env: &[(&str, &str)],
 ) -> anyhow::Result<String> {
     use std::io::BufRead;
     use std::sync::mpsc;
@@ -287,6 +339,9 @@ fn spawn_with_heartbeat_monitor(
     cmd.args(args);
     if let Some(dir) = current_dir {
         cmd.current_dir(dir);
+    }
+    for (k, v) in extra_env {
+        cmd.env(k, v);
     }
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
@@ -338,6 +393,14 @@ fn spawn_with_heartbeat_monitor(
     while !eof {
         match line_rx.recv_timeout(poll_interval) {
             Ok(Some(line)) => {
+                // Discard hook JSON system events — they are not supervisor tokens.
+                // Hook lines like {"type":"system","subtype":"hook_started",...} appear
+                // on stdout before any real content when SessionStart hooks fire.
+                // Counting them as heartbeat tokens causes a false stall: the watchdog
+                // resets once on the hook line, then waits 30s for real content.
+                if is_hook_json_line(&line) {
+                    continue;
+                }
                 last_token = std::time::Instant::now();
                 stdout_str.push_str(&line);
                 stdout_str.push('\n');
@@ -570,11 +633,16 @@ fn run_manifest_supervisor(
     }
 
     let parts: Vec<&str> = cmd_str.split_whitespace().collect();
-    let mut child = std::process::Command::new(parts[0])
+    let mut spawn_cmd = std::process::Command::new(parts[0]);
+    spawn_cmd
         .args(&parts[1..])
         .current_dir(staging_path)
         .env("TA_SUPERVISOR_INPUT", input_path.to_str().unwrap_or(""))
-        .env("TA_SUPERVISOR_OUTPUT", result_path.to_str().unwrap_or(""))
+        .env("TA_SUPERVISOR_OUTPUT", result_path.to_str().unwrap_or(""));
+    if !config.enable_hooks {
+        spawn_cmd.env("CLAUDE_CODE_DISABLE_HOOKS", "1");
+    }
+    let mut child = spawn_cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn custom agent '{}': {}", agent_name, e))?;
 
@@ -847,6 +915,11 @@ pub fn load_constitution(staging_path: &Path, config: &SupervisorRunConfig) -> O
 mod tests {
     use super::*;
 
+    /// Mutex to serialize tests that mutate the global PATH environment variable.
+    /// Tests that create mock `claude` binaries and prepend a temp dir to PATH must
+    /// acquire this lock to prevent parallel races where the wrong mock binary is found.
+    static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_build_supervisor_prompt_includes_objective() {
         let prompt = build_supervisor_prompt(
@@ -1021,6 +1094,7 @@ mod tests {
             heartbeat_path: None,
             agent_profile: None,
             resolved_model: None,
+            enable_hooks: false,
         };
         // Ensure the env var is not set.
         std::env::remove_var("TA_TEST_MISSING_KEY_XYZ_SUPERVISOR");
@@ -1047,6 +1121,7 @@ mod tests {
             Some(hb_path.as_path()),
             "echo",
             None,
+            &[],
         );
         // echo exits 0 so result is Ok.
         assert!(result.is_ok(), "echo should succeed: {:?}", result);
@@ -1074,6 +1149,7 @@ mod tests {
             Some(hb_path.as_path()),
             "sleep",
             None,
+            &[],
         );
         assert!(result.is_err(), "stalled process should be killed");
         let err = result.unwrap_err().to_string();
@@ -1101,6 +1177,7 @@ mod tests {
             None, // no heartbeat file needed
             "sh",
             None,
+            &[],
         );
         assert!(
             result.is_ok(),
@@ -1128,6 +1205,7 @@ mod tests {
             heartbeat_path: None,
             agent_profile: None,
             resolved_model: None,
+            enable_hooks: false,
         };
         assert_eq!(config.heartbeat_stale_secs, 30);
         assert_eq!(config.timeout_secs, 120);
@@ -1148,6 +1226,7 @@ mod tests {
             Some(hb_path.as_path()),
             "sh",
             None,
+            &[],
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1175,6 +1254,7 @@ mod tests {
             heartbeat_path: None,
             agent_profile: None,
             resolved_model: None,
+            enable_hooks: false,
         };
         let review = invoke_supervisor_agent("test objective", &[], None, &config);
         assert_eq!(review.verdict, SupervisorVerdict::Warn);
@@ -1196,6 +1276,7 @@ mod tests {
             heartbeat_path: None,
             agent_profile: None,
             resolved_model: None,
+            enable_hooks: false,
         };
         std::env::remove_var("OPENAI_API_KEY");
         let review = invoke_supervisor_agent("objective", &[], None, &config);
@@ -1242,6 +1323,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&claude_path, perms).unwrap();
 
+        let _lock = PATH_MUTEX.lock().unwrap();
         let old_path = std::env::var("PATH").unwrap_or_default();
         // Prepend temp dir so our mock `claude` takes precedence.
         std::env::set_var("PATH", format!("{}:{}", tmp.path().display(), old_path));
@@ -1259,6 +1341,7 @@ mod tests {
             heartbeat_path: None,
             agent_profile: None,
             resolved_model: None,
+            enable_hooks: false,
         };
 
         let review = invoke_supervisor_agent("test objective", &[], None, &config);
@@ -1379,6 +1462,7 @@ mod tests {
             heartbeat_path: None,
             agent_profile: Some("supervisor".to_string()),
             resolved_model: Some("claude-sonnet-4-6".to_string()),
+            enable_hooks: false,
         };
         assert_eq!(config.agent_profile.as_deref(), Some("supervisor"));
         assert_eq!(config.resolved_model.as_deref(), Some("claude-sonnet-4-6"));
@@ -1412,6 +1496,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&claude_path, perms).unwrap();
 
+        let _lock = PATH_MUTEX.lock().unwrap();
         let old_path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{}", bin_dir.path().display(), old_path));
 
@@ -1428,6 +1513,7 @@ mod tests {
             heartbeat_path: None,
             agent_profile: None,
             resolved_model: None,
+            enable_hooks: false,
         };
 
         let review = invoke_supervisor_agent("test objective", &[], None, &config);
@@ -1437,6 +1523,225 @@ mod tests {
             review.verdict,
             SupervisorVerdict::Pass,
             "Supervisor must run in staging dir; got findings: {:?}",
+            review.findings
+        );
+    }
+
+    // ── v0.15.14.6 — Supervisor Hook JSON Filtering ───────────────────────
+
+    #[test]
+    fn test_is_hook_json_line_detects_system_type() {
+        // SessionStart hook JSON that fires before supervisor content.
+        let hook_line = r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart"}"#;
+        assert!(
+            is_hook_json_line(hook_line),
+            "SessionStart hook JSON must be detected"
+        );
+    }
+
+    #[test]
+    fn test_is_hook_json_line_ignores_non_system_type() {
+        // Real supervisor content should NOT be filtered.
+        let result_line =
+            r#"{"type":"result","subtype":"success","result":"{\"verdict\":\"pass\"}"}"#;
+        assert!(
+            !is_hook_json_line(result_line),
+            "result event must not be filtered"
+        );
+
+        let assistant_line =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
+        assert!(
+            !is_hook_json_line(assistant_line),
+            "assistant event must not be filtered"
+        );
+    }
+
+    #[test]
+    fn test_is_hook_json_line_ignores_plain_text() {
+        assert!(!is_hook_json_line("some plain output"));
+        assert!(!is_hook_json_line(""));
+        assert!(!is_hook_json_line("not json at all"));
+    }
+
+    #[test]
+    fn test_is_hook_json_line_ignores_non_json_braces() {
+        // A line that starts with { but is not valid JSON should not crash.
+        assert!(!is_hook_json_line("{not valid json}"));
+    }
+
+    /// Hook JSON lines must NOT be counted as heartbeat tokens and must NOT appear in
+    /// the returned stdout string.
+    #[cfg(unix)]
+    #[test]
+    fn test_hook_json_line_filtered_from_output() {
+        // Emit a hook JSON line followed by a real content line.
+        // The monitor should filter the hook line and return only the content line.
+        let hook_json = r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart"}"#;
+        let real_content = r#"{"type":"result","result":"done"}"#;
+        let script = format!("echo '{}' && echo '{}'", hook_json, real_content);
+
+        let result = spawn_with_heartbeat_monitor("sh", &["-c", &script], 5, None, "sh", None, &[]);
+        assert!(result.is_ok(), "process should succeed: {:?}", result);
+        let stdout = result.unwrap();
+        // Hook line must be excluded from output.
+        assert!(
+            !stdout.contains("hook_started"),
+            "hook JSON must not appear in output: {}",
+            stdout
+        );
+        // Real content must be present.
+        assert!(
+            stdout.contains("result"),
+            "real content must be in output: {}",
+            stdout
+        );
+    }
+
+    /// A stream consisting only of hook JSON lines should still trigger a stall — the
+    /// stall timer must NOT be reset by hook lines.
+    #[cfg(unix)]
+    #[test]
+    fn test_only_hook_json_lines_triggers_stall() {
+        // Print a hook JSON line then hang for 60s.
+        // stale_secs=1 — should stall because the hook line is filtered.
+        let hook_json = r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart"}"#;
+        let script = format!("echo '{}' && sleep 60", hook_json);
+
+        let result = spawn_with_heartbeat_monitor(
+            "sh",
+            &["-c", &script],
+            1, // stale_secs — very short so the test is fast
+            None,
+            "sh",
+            None,
+            &[],
+        );
+        assert!(
+            result.is_err(),
+            "stream of only hook JSON should trigger stall"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("stalled") || err.contains("no tokens"),
+            "stall error expected: {}",
+            err
+        );
+    }
+
+    /// CLAUDE_CODE_DISABLE_HOOKS env var must be set in the supervisor subprocess env
+    /// when enable_hooks is false.
+    #[cfg(unix)]
+    #[test]
+    fn test_disable_hooks_env_var_set_when_enable_hooks_false() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_path = tmp.path().join("claude");
+        {
+            let mut f = std::fs::File::create(&claude_path).unwrap();
+            // Script checks that CLAUDE_CODE_DISABLE_HOOKS=1 is set.
+            f.write_all(
+                b"#!/bin/sh\n\
+                  if [ \"$CLAUDE_CODE_DISABLE_HOOKS\" = \"1\" ]; then\n\
+                    echo '{\"verdict\":\"pass\",\"scope_ok\":true,\"findings\":[],\"summary\":\"hooks disabled\"}'\n\
+                  else\n\
+                    echo '{\"verdict\":\"block\",\"scope_ok\":false,\"findings\":[\"CLAUDE_CODE_DISABLE_HOOKS not set\"],\"summary\":\"hooks not disabled\"}'\n\
+                  fi\n",
+            )
+            .unwrap();
+        }
+        let mut perms = std::fs::metadata(&claude_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&claude_path, perms).unwrap();
+
+        let _lock = PATH_MUTEX.lock().unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", tmp.path().display(), old_path));
+
+        let config = SupervisorRunConfig {
+            enabled: true,
+            agent: "builtin".to_string(),
+            verdict_on_block: "warn".to_string(),
+            constitution_path: None,
+            skip_if_no_constitution: true,
+            heartbeat_stale_secs: 10,
+            timeout_secs: 10,
+            api_key_env: None,
+            staging_path: None,
+            heartbeat_path: None,
+            agent_profile: None,
+            resolved_model: None,
+            enable_hooks: false, // hooks should be suppressed
+        };
+
+        let review = invoke_supervisor_agent("test objective", &[], None, &config);
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(
+            review.verdict,
+            SupervisorVerdict::Pass,
+            "CLAUDE_CODE_DISABLE_HOOKS=1 must be set when enable_hooks=false; got: {:?}",
+            review.findings
+        );
+    }
+
+    /// When enable_hooks=true, CLAUDE_CODE_DISABLE_HOOKS must NOT be set.
+    #[cfg(unix)]
+    #[test]
+    fn test_enable_hooks_true_does_not_set_disable_env() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_path = tmp.path().join("claude");
+        {
+            let mut f = std::fs::File::create(&claude_path).unwrap();
+            // Script checks that CLAUDE_CODE_DISABLE_HOOKS is NOT set to "1".
+            f.write_all(
+                b"#!/bin/sh\n\
+                  if [ \"$CLAUDE_CODE_DISABLE_HOOKS\" = \"1\" ]; then\n\
+                    echo '{\"verdict\":\"block\",\"scope_ok\":false,\"findings\":[\"CLAUDE_CODE_DISABLE_HOOKS was set unexpectedly\"],\"summary\":\"fail\"}'\n\
+                  else\n\
+                    echo '{\"verdict\":\"pass\",\"scope_ok\":true,\"findings\":[],\"summary\":\"hooks allowed\"}'\n\
+                  fi\n",
+            )
+            .unwrap();
+        }
+        let mut perms = std::fs::metadata(&claude_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&claude_path, perms).unwrap();
+
+        let _lock = PATH_MUTEX.lock().unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        // Make sure the env var is cleared in the parent too.
+        std::env::remove_var("CLAUDE_CODE_DISABLE_HOOKS");
+        std::env::set_var("PATH", format!("{}:{}", tmp.path().display(), old_path));
+
+        let config = SupervisorRunConfig {
+            enabled: true,
+            agent: "builtin".to_string(),
+            verdict_on_block: "warn".to_string(),
+            constitution_path: None,
+            skip_if_no_constitution: true,
+            heartbeat_stale_secs: 10,
+            timeout_secs: 10,
+            api_key_env: None,
+            staging_path: None,
+            heartbeat_path: None,
+            agent_profile: None,
+            resolved_model: None,
+            enable_hooks: true, // hooks explicitly enabled — must NOT set DISABLE var
+        };
+
+        let review = invoke_supervisor_agent("test objective", &[], None, &config);
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(
+            review.verdict,
+            SupervisorVerdict::Pass,
+            "CLAUDE_CODE_DISABLE_HOOKS must not be set when enable_hooks=true; got: {:?}",
             review.findings
         );
     }

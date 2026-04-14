@@ -2688,6 +2688,7 @@ pub fn execute(
                 heartbeat_path,
                 agent_profile: sup_cfg.agent_profile.clone(),
                 resolved_model,
+                enable_hooks: sup_cfg.enable_hooks,
             };
 
             // Load constitution text.

@@ -767,6 +767,15 @@ pub struct SupervisorConfig {
     /// the bare `agent` string. Any registered framework works — not just claude.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_profile: Option<String>,
+
+    /// Allow session hooks to fire in the supervisor subprocess. Default: false.
+    ///
+    /// By default, TA sets `CLAUDE_CODE_DISABLE_HOOKS=1` when spawning the supervisor
+    /// so that `SessionStart` and other hooks do not write JSON to stdout (which could
+    /// be mistaken for supervisor content and trigger false stall timeouts). Set to
+    /// `true` only if a custom hook must run during supervisor invocations.
+    #[serde(default)]
+    pub enable_hooks: bool,
 }
 
 fn default_supervisor_enabled() -> bool {
@@ -797,6 +806,7 @@ impl Default for SupervisorConfig {
             timeout_secs: None,
             api_key_env: None,
             agent_profile: None,
+            enable_hooks: false,
         }
     }
 }
