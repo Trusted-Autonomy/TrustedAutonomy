@@ -21,6 +21,7 @@
 // Module declarations — each `mod foo;` tells Rust to look for `foo.rs`
 // in the same directory and include it as a submodule.
 pub mod attestation;
+pub mod chain;
 pub mod drift;
 pub mod error;
 pub mod event;
@@ -33,6 +34,7 @@ pub mod log;
 pub use attestation::{
     AttestationBackend, AttestationError, AttestationRecord, SoftwareAttestationBackend,
 };
+pub use chain::{sign_entry, verify_entry_sig, verify_hmac_chain, AuditHmacKey, ChainVerifyEntry};
 pub use drift::{
     constitution_violation_finding, BaselineStore, BehavioralBaseline, DraftSummary, DriftFinding,
     DriftReport, DriftSeverity, DriftSignal,

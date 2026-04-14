@@ -20,7 +20,20 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
 
     let version = env!("CARGO_PKG_VERSION");
 
-    println!("╭─ {} (ta v{})", project_name, version);
+    // Security badge (v0.15.14.4) — load before header so it can be shown inline.
+    let security_badge = {
+        let wf_path = config.workspace_root.join(".ta/workflow.toml");
+        let wf = ta_submit::WorkflowConfig::load_or_default(&wf_path);
+        let level = wf.security.level;
+        let badge = match level {
+            ta_goal::SecurityLevel::Low => String::new(),
+            ta_goal::SecurityLevel::Mid => " [mid]".to_string(),
+            ta_goal::SecurityLevel::High => " [high]".to_string(),
+        };
+        (level, badge)
+    };
+
+    println!("╭─ {} (ta v{}{})", project_name, version, security_badge.1);
 
     // Current plan phase.
     let next_phase = {
@@ -36,6 +49,29 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
 
     if let Some(ref phase) = next_phase {
         println!("│  Next phase: {}", phase);
+    }
+
+    // Show security level for non-low levels.
+    if security_badge.0 != ta_goal::SecurityLevel::Low {
+        let overrides_note = {
+            let wf_path = config.workspace_root.join(".ta/workflow.toml");
+            let wf = ta_submit::WorkflowConfig::load_or_default(&wf_path);
+            let overrides = wf.security.to_overrides();
+            let profile = ta_goal::SecurityProfile::from_level(wf.security.level, &overrides);
+            let mut notes = vec![];
+            if wf.security.level == ta_goal::SecurityLevel::High && !profile.sandbox_enabled {
+                notes.push("sandbox=off (override)");
+            }
+            if !overrides.extra_forbidden_tools.is_empty() {
+                notes.push("extra forbidden tools");
+            }
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", notes.join(", "))
+            }
+        };
+        println!("│  Security: {}{}", security_badge.0, overrides_note);
     }
 
     println!("│");

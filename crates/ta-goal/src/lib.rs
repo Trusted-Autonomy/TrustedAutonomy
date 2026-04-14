@@ -27,6 +27,7 @@ pub mod messaging_audit;
 pub mod operations;
 pub mod persona;
 pub mod phase_selector;
+pub mod security;
 pub mod social_audit;
 pub mod store;
 pub mod token_cost;
@@ -48,6 +49,10 @@ pub use messaging_audit::{DraftEmailRecord, DraftEmailState, MessagingAuditLog};
 pub use operations::{ActionSeverity, ActionStatus, CorrectiveAction, OperationsLog};
 pub use persona::{PersonaCapabilities, PersonaConfig, PersonaInner, PersonaStyle, PersonaSummary};
 pub use phase_selector::{PhaseSelector, PhaseSelectorConfig, SelectedPhase};
+pub use security::{
+    AuditMode, ConstitutionBlockMode, SecretScanMode, SecurityLevel, SecurityOverrides,
+    SecurityProfile, DEFAULT_MID_FORBIDDEN_TOOLS,
+};
 pub use social_audit::{DraftSocialRecord, SocialAuditLog, SocialPostRecordState};
 pub use store::GoalRunStore;
 pub use token_cost::{compute_cost, rate_for_model, ModelRate};

@@ -4800,6 +4800,74 @@ fn apply_package(
             .unwrap_or_else(|| config.workspace_root.clone()),
     };
 
+    // ── Secret scan (v0.15.14.4) ─────────────────────────────────────────────
+    // Run before any file writes. Scans text content of draft artifacts for
+    // high-confidence secret patterns (AWS keys, GitHub PATs, PEM headers, etc.).
+    // Mode is determined by the security profile — always on unless explicitly
+    // set to `[security.secrets] scan = "off"`.
+    {
+        use ta_changeset::secret_scan;
+        use ta_goal::SecretScanMode;
+
+        let wf_path = config.workspace_root.join(".ta/workflow.toml");
+        let wf = ta_submit::WorkflowConfig::load_or_default(&wf_path);
+        let overrides = wf.security.to_overrides();
+        let profile = ta_goal::SecurityProfile::from_level(wf.security.level, &overrides);
+
+        if profile.secret_scan_mode != SecretScanMode::Off {
+            let staging_path = &goal.workspace_path;
+            let mut all_findings = Vec::new();
+
+            for artifact in &pkg.changes.artifacts {
+                // Only scan text artifacts that have diff content.
+                let rel_path = artifact
+                    .resource_uri
+                    .strip_prefix("fs://workspace/")
+                    .unwrap_or(artifact.resource_uri.as_str());
+
+                // Try to read the staged file content for scanning.
+                let staged_file = staging_path.join(rel_path);
+                if staged_file.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&staged_file) {
+                        let findings = secret_scan::scan_for_secrets(
+                            &content,
+                            rel_path,
+                            &config.workspace_root,
+                        );
+                        all_findings.extend(findings);
+                    }
+                }
+            }
+
+            if !all_findings.is_empty() {
+                match profile.secret_scan_mode {
+                    SecretScanMode::Warn => {
+                        secret_scan::print_findings(&all_findings);
+                        eprintln!(
+                            "[warn] {} secret finding(s) in draft — apply continuing \
+                             (set [security] level = \"high\" or [security.secrets] scan = \"block\" to abort).",
+                            all_findings.len()
+                        );
+                    }
+                    SecretScanMode::Block => {
+                        secret_scan::print_block_cta(&all_findings);
+                        anyhow::bail!(
+                            "Apply blocked: {} secret finding(s) in draft artifacts. \
+                             Remove secrets or add to .ta-secret-ignore before applying.",
+                            all_findings.len()
+                        );
+                    }
+                    SecretScanMode::Off => {}
+                }
+            } else {
+                tracing::debug!(
+                    "Secret scan: no findings in {} artifact(s)",
+                    pkg.changes.artifacts.len()
+                );
+            }
+        }
+    }
+
     // Pre-apply: clean any TA-managed working-tree artifacts that could
     // block git operations (injection-polluted CLAUDE.md, etc.).
     check_and_clean_working_tree(&target_dir);

@@ -541,6 +541,8 @@ fn csv_escape(s: &str) -> String {
 }
 
 fn ledger_verify(config: &GatewayConfig, override_path: Option<&str>) -> anyhow::Result<()> {
+    use ta_audit::{verify_hmac_chain, AuditHmacKey};
+
     let path = ledger_path(config, override_path);
 
     if !path.exists() {
@@ -548,28 +550,76 @@ fn ledger_verify(config: &GatewayConfig, override_path: Option<&str>) -> anyhow:
         return Ok(());
     }
 
-    match GoalAuditLedger::verify_chain(&path) {
-        Ok(_) => {
-            let entries = GoalAuditLedger::read_all(&path)?;
+    // Load HMAC key if present (high-security projects).
+    let hmac_key_path = AuditHmacKey::path_for(&config.workspace_root);
+    let hmac_key = if hmac_key_path.exists() {
+        match AuditHmacKey::load(&hmac_key_path) {
+            Ok(k) => {
+                println!("HMAC key found — verifying signed hash chain.");
+                Some(k)
+            }
+            Err(e) => {
+                eprintln!(
+                    "[warn] Failed to load audit.key: {} — skipping HMAC verification.",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Use the extended chain verifier which also checks HMAC sigs.
+    let results = verify_hmac_chain(&path, hmac_key.as_ref())?;
+
+    let mut hmac_failures = 0usize;
+    let mut hash_failures = 0usize;
+
+    for r in &results {
+        if !r.hash_ok {
+            hash_failures += 1;
             println!(
-                "Goal audit ledger verified: {} entries, hash chain intact.",
-                entries.len()
+                "  HASH CHAIN BROKEN at line {} (goal {}): previous_hash mismatch",
+                r.line, r.goal_id
             );
         }
-        Err(ta_audit::AuditError::IntegrityViolation {
-            line,
-            expected,
-            actual,
-        }) => {
-            println!("INTEGRITY VIOLATION at line {}:", line);
-            println!("  Expected previous_hash: {}", expected);
-            println!("  Actual previous_hash:   {}", actual);
-            println!();
-            println!("The goal audit ledger may have been tampered with.");
-            anyhow::bail!("Goal audit ledger integrity check failed");
+        if let Some(false) = r.hmac_ok {
+            hmac_failures += 1;
+            println!(
+                "  HMAC INVALID at line {} (goal {}): signature verification failed",
+                r.line, r.goal_id
+            );
         }
-        Err(e) => return Err(e.into()),
+        if let Some(ref err) = r.error {
+            println!("  PARSE ERROR at line {}: {}", r.line, err);
+        }
     }
+
+    if hash_failures > 0 || hmac_failures > 0 {
+        println!();
+        println!(
+            "INTEGRITY VIOLATION: {} hash failure(s), {} HMAC failure(s).",
+            hash_failures, hmac_failures
+        );
+        println!("The goal audit ledger may have been tampered with.");
+        anyhow::bail!("Goal audit ledger integrity check failed");
+    }
+
+    let hmac_str = if hmac_key.is_some() {
+        format!(
+            " + {} HMAC signature(s) verified",
+            results.iter().filter(|r| r.hmac_ok == Some(true)).count()
+        )
+    } else {
+        String::new()
+    };
+
+    println!(
+        "Goal audit ledger verified: {} entries, hash chain intact{}.",
+        results.len(),
+        hmac_str,
+    );
 
     Ok(())
 }

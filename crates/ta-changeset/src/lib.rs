@@ -32,6 +32,7 @@ pub mod registry_client;
 pub mod review_channel;
 pub mod review_session;
 pub mod review_session_store;
+pub mod secret_scan;
 pub mod session_channel;
 pub mod sources;
 pub mod supervisor;

@@ -43,9 +43,9 @@ pub use adapter::SubmitAdapter;
 pub use config::{
     check_disk_space_mb, resolve_plan_path, ApplyConfig, AssetDiffConfig, BuildConfig, BuildOnFail,
     CommitConfig, ContextMode, DiffConfig, DraftReviewConfig, GitConfig, PerforceConfig,
-    PlanConfig, ShellConfig, StagingConfig, SubmitConfig, SvnConfig, SyncConfig, TaLocalPaths,
-    TaPathConfig, TaProjectPaths, VcsAgentConfig, VcsConfig, VerifyCommand, VerifyConfig,
-    VerifyOnFailure, WorkflowConfig,
+    PlanConfig, SecurityConfig, ShellConfig, StagingConfig, SubmitConfig, SvnConfig, SyncConfig,
+    TaLocalPaths, TaPathConfig, TaProjectPaths, VcsAgentConfig, VcsConfig, VerifyCommand,
+    VerifyConfig, VerifyOnFailure, WorkflowConfig,
 };
 pub use external_vcs_adapter::ExternalVcsAdapter;
 pub use git::GitAdapter;

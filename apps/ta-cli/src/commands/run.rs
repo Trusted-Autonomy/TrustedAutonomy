@@ -1534,7 +1534,34 @@ pub fn execute(
         )?;
     }
     if agent_config.injects_settings {
-        inject_claude_settings(&staging_path, source)?;
+        // Load security profile from workflow.toml to apply level-appropriate
+        // forbidden tool patterns and capability restrictions (v0.15.14.4).
+        let security_profile = {
+            let wf_path = config.workspace_root.join(".ta/workflow.toml");
+            let wf = ta_submit::WorkflowConfig::load_or_default(&wf_path);
+            let overrides = wf.security.to_overrides();
+            let profile = ta_goal::SecurityProfile::from_level(wf.security.level, &overrides);
+
+            // Warn when high mode but sandbox is overridden to disabled.
+            if wf.security.level == ta_goal::SecurityLevel::High && !profile.sandbox_enabled {
+                eprintln!(
+                    "[warn] security.level=high but sandbox.enabled=false — sandbox override active. \
+                     High security requires process isolation."
+                );
+            }
+
+            if wf.security.level != ta_goal::SecurityLevel::Low && !quiet {
+                println!("Security: {} level active", wf.security.level);
+            }
+            profile
+        };
+
+        inject_claude_settings_with_security(
+            &staging_path,
+            source,
+            &security_profile.forbidden_tool_patterns,
+            security_profile.web_search_enabled,
+        )?;
     }
 
     // v0.13.8 item 8: Env/Arg-mode context injection for non-prepend frameworks.
@@ -3950,7 +3977,22 @@ fn load_forbidden_tools(source_dir: Option<&Path>) -> Vec<String> {
 
 /// Inject .claude/settings.local.json with TA permissions.
 /// Allows all standard tools, denies forbidden patterns.
+/// Used directly in tests; production code calls inject_claude_settings_with_security.
+#[cfg_attr(not(test), allow(dead_code))]
 fn inject_claude_settings(staging_path: &Path, source_dir: Option<&Path>) -> anyhow::Result<()> {
+    inject_claude_settings_with_security(staging_path, source_dir, &[], true)
+}
+
+/// Full version of inject_claude_settings with security profile support.
+///
+/// `extra_deny` — additional forbidden tool patterns from the security profile (e.g., mid/high level).
+/// `web_search_enabled` — if false, removes `WebSearch(*)` from the allow list.
+fn inject_claude_settings_with_security(
+    staging_path: &Path,
+    source_dir: Option<&Path>,
+    extra_deny: &[String],
+    web_search_enabled: bool,
+) -> anyhow::Result<()> {
     let settings_path = staging_path.join(SETTINGS_REL_PATH);
     let backup_path = staging_path.join(SETTINGS_BACKUP);
 
@@ -3986,9 +4028,16 @@ fn inject_claude_settings(staging_path: &Path, source_dir: Option<&Path>) -> any
     // Build allow and deny lists.
     let allow: Vec<String> = DEFAULT_ALLOWED_TOOLS
         .iter()
+        .filter(|t| web_search_enabled || !t.starts_with("WebSearch"))
         .map(|s| format!("\"{}\"", s))
         .collect();
-    let forbidden = load_forbidden_tools(source_dir);
+    let mut forbidden = load_forbidden_tools(source_dir);
+    // Merge security-profile patterns (dedup).
+    for pattern in extra_deny {
+        if !forbidden.contains(pattern) {
+            forbidden.push(pattern.clone());
+        }
+    }
     let deny: Vec<String> = forbidden.iter().map(|s| format!("\"{}\"", s)).collect();
 
     let settings_json = format!(

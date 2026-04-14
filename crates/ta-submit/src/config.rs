@@ -180,6 +180,18 @@ pub struct WorkflowConfig {
     /// ```
     #[serde(default)]
     pub analysis: HashMap<String, ta_goal::analysis::AnalysisConfig>,
+
+    /// Security level profile configuration (v0.15.14.4).
+    ///
+    /// Sets a named preset of security defaults. Individual settings always
+    /// override the level preset.
+    ///
+    /// ```toml
+    /// [security]
+    /// level = "mid"   # "low" | "mid" | "high"
+    /// ```
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 /// Commit auto-staging configuration (v0.14.3.7).
@@ -1710,6 +1722,53 @@ pub fn check_disk_space_mb(path: &std::path::Path) -> Result<u64, String> {
     {
         let _ = path;
         Ok(u64::MAX)
+    }
+}
+
+/// Security level profile configuration (v0.15.14.4).
+///
+/// Sets a named preset of security defaults. Individual settings always override
+/// the level preset. See `ta_goal::SecurityProfile::from_level` for the full
+/// default table per level.
+///
+/// ```toml
+/// [security]
+/// level = "mid"   # "low" (default) | "mid" | "high"
+///
+/// # Override individual controls beyond the level preset:
+/// # [security.secrets]
+/// # scan = "off"   # "off" | "warn" | "block"
+///
+/// # [security.forbidden_tools]
+/// # extra = ["Bash(*aws*)", "Bash(*gcloud*)"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Security level preset.
+    ///
+    /// - `"low"` (default): Frictionless solo-developer mode.
+    /// - `"mid"`: Sensible team defaults (sandbox on, forbidden patterns, hash chain).
+    /// - `"high"`: High-assurance regulated mode (approval gate, HMAC chain, no WebSearch).
+    #[serde(default)]
+    pub level: ta_goal::SecurityLevel,
+
+    /// Secret scanning mode override (individual override for `[security.secrets] scan`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_scan: Option<ta_goal::SecretScanMode>,
+
+    /// Extra forbidden tool patterns added on top of the level preset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_forbidden_tools: Vec<String>,
+}
+
+impl SecurityConfig {
+    /// Convert to `SecurityOverrides` for use with `SecurityProfile::from_level`.
+    pub fn to_overrides(&self) -> ta_goal::SecurityOverrides {
+        ta_goal::SecurityOverrides {
+            secret_scan_mode: self.secret_scan,
+            extra_forbidden_tools: self.extra_forbidden_tools.clone(),
+            ..Default::default()
+        }
     }
 }
 

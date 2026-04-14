@@ -17,6 +17,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 glob = { workspace = true }
+regex = { workspace = true }
 toml = "0.8"
 reqwest = { workspace = true }
 anyhow = { workspace = true }

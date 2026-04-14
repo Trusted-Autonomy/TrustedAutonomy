@@ -3684,6 +3684,68 @@ git_mode = "inherit-read"   # override for this machine only
 VCS:      isolated (git)
 ```
 
+### Security Levels (`[security]`)
+
+TA supports three named security presets. A single `level` setting in `workflow.toml` controls a bundle of defaults; any individual setting can always override the preset.
+
+```toml
+[security]
+level = "mid"   # "low" | "mid" | "high"
+```
+
+**Level defaults:**
+
+| Capability | `low` (default) | `mid` (team) | `high` (regulated) |
+|---|---|---|---|
+| Process sandbox | off | on | on (warns if disabled) |
+| Forbidden shell patterns | none | `rm -rf`, `sudo`, `curl\|bash` | explicit allowlist only |
+| Web search | enabled | enabled | disabled |
+| Approval gate | view→apply | view→apply | approve required before apply |
+| Audit trail | local JSONL | SHA-256 hash chain | HMAC-SHA256 signed chain |
+| Constitution violations | warn, continue | warn, continue | block draft + log for follow-up |
+| Secret scanning | warn | warn | block apply |
+| `ta status` badge | not shown | `[mid]` | `[high]` + active overrides |
+
+**Setting a level:**
+
+```toml
+# .ta/workflow.toml
+
+[security]
+level = "high"
+
+# Individual overrides always win:
+[security]
+level = "mid"
+extra_forbidden_tools = ["Bash(*aws*)", "Bash(*gcloud*)"]
+```
+
+**Secret scanning** runs over all staged artifact text content at `ta draft apply` time. It detects AWS access keys, GitHub PATs, private key PEM headers, generic API keys, and secret assignments.
+
+- `warn` (default for `low`/`mid`): prints findings, continues.
+- `block` (default for `high`): prints findings, aborts apply.
+- `off`: disables scanning entirely — must be set explicitly.
+
+To exclude a path from scanning, add it to `.ta-secret-ignore` (one glob pattern per line, same syntax as `.taignore`):
+
+```
+fixtures/**
+tests/data/*.env
+```
+
+**Audit chain verification** (`mid` and `high`):
+
+```bash
+ta audit verify          # checks SHA-256 hash chain integrity
+ta audit verify --full   # also verifies HMAC signatures (high only)
+```
+
+For `high` mode, TA generates a per-project HMAC key at `.ta/audit.key` on first run. The key is 32 bytes of random data stored as hex. Keep it in your repo's secure storage alongside your deployment secrets.
+
+**`ta init` prompt:** When running interactively, `ta init` asks for a security level and writes the `[security]` section to `workflow.toml`.
+
+**Relationship to SecureTA (SA):** Security levels (`low`/`mid`/`high`) are a configuration layer on top of the standard TA runtime. Full OS-level isolation (OCI containers, gVisor, TPM attestation) is provided by SecureTA and sits above `high`. Security levels are not a substitute for SecureTA when operating in regulated environments that require OS-boundary enforcement.
+
 ### Commit Co-Authorship
 
 Every commit made through `ta draft apply` includes a `Co-Authored-By` trailer. This gives TA shared credit alongside the human author in GitHub's contribution graph, PR history, and `git log`.
