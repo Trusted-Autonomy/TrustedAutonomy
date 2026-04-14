@@ -10318,7 +10318,14 @@ on_failure = "agent"
 <!-- status: pending -->
 **Goal**: Replace today's implicit "everything is open" stance with a declared, tiered security model. A single `[security] level = "low" | "mid" | "high"` setting in `workflow.toml` sets a named preset of defaults; individual settings always override. This gives solo developers a frictionless default, teams a sensible hardened baseline, and regulated projects a documented high-assurance posture — without jumping to the full SA (OCI/gVisor/TPM) ceiling.
 
-**Design principle**: Level sets defaults only. Every individual control can be overridden. Escalation is silent; demotion logs a warning. SA (SecureTA) sits above `"high"` and is out of scope for this phase.
+**Design principles**:
+- Level sets defaults only — every individual control can be overridden. Escalation is silent; demotion logs a warning.
+- **Supervisor constitution review and secret scanning are always on** at all levels. What changes per level is the *consequence* — warn vs block vs block+auto-follow-up.
+- SA (SecureTA) sits above `"high"` and is out of scope for this phase.
+
+**`Bash(*)` risk in `low` mode**: The staging directory is a behavioral boundary, not an OS boundary. `Bash(*)` lets the agent run any shell command — `cd ..` out of staging is unrestricted. Real risks: `rm -rf` on paths outside staging, `git push` bypassing the draft/review cycle, `curl url | bash`, cloud CLI calls (`aws s3 rb`, `gcloud compute instances delete`) with real infrastructure effects, credential exfiltration via `env | curl`. The constitution tells the agent not to; `Bash(*)` means nothing stops it.
+
+**"Approval gate enforced" in `high`**: Post v0.15.14.0, single-author flow skips `ta draft approve` — apply works from `PendingReview`. In `high` mode, `approval_required = true` is locked even for solo developers. `ta draft apply` requires prior `ta draft approve`. Purpose: an explicit audit record that a human consciously signed off, not just applied.
 
 **Depends on**: v0.15.14.0 (approval_required config), experimental sandbox infrastructure (v0.14.0)
 
@@ -10327,14 +10334,13 @@ on_failure = "agent"
 | Capability | `low` (default today) | `mid` (team/startup) | `high` (regulated) |
 |---|---|---|---|
 | Process sandbox | off | on (sandbox-exec/bwrap) | on, required — warn if overridden off |
-| `Bash` scope | `Bash(*)` unrestricted | `Bash(*)` allowed but staging-path-scoped warning | explicit `Bash` allowlist only |
-| Network | unrestricted | domain allowlist configurable; warn on unknown domains | explicit allowlist required; `WebSearch` disabled |
-| Forbidden tools | empty | sensible defaults (e.g. `Bash(rm -rf /)`, `Bash(*sudo*)`) | strict; agent cannot add tools at runtime |
-| Approval gate | off | off | `approval_required = true` enforced |
+| `Bash` scope | `Bash(*)` unrestricted | `Bash(*)` + sensible forbidden list (rm -rf, sudo, curl\|bash) | explicit allowlist only — no `Bash(*)` |
+| Network | unrestricted | domain allowlist configurable; warn on unknown | explicit allowlist required; `WebSearch` disabled |
+| Approval gate | off (view→apply) | off (view→apply) | `approval_required = true` locked — approve required before apply |
 | Audit trail | JSONL local | JSONL + per-entry SHA-256 | signed hash chain (HMAC-SHA256 with project key) |
-| Constitution enforcement | behavioral | behavioral + supervisor required | supervisor required; constitution violations block apply |
-| Secret scanning | off | warn on `ta draft apply` | block on `ta draft apply` |
-| `ta status` display | not shown | shows `[mid]` badge | shows `[high]` badge + any overrides |
+| **Constitution / supervisor** | **always on — warn only** | **always on — warn; block configurable** | **always on — violations block draft + auto-trigger `--follow-up`** |
+| **Secret scanning** | **always on — warn** | **always on — warn** | **always on — block by default** (explicit `scan = "warn"` to downgrade) |
+| `ta status` display | not shown | shows `[mid]` badge | shows `[high]` badge + any active overrides |
 
 #### Config (`workflow.toml`)
 
@@ -10348,7 +10354,7 @@ level = "mid"               # "low" | "mid" | "high" — sets all defaults below
 # allow_network = ["api.anthropic.com", "github.com"]
 
 # [security.secrets]
-# scan = "block"            # "off" | "warn" | "block"
+# scan = "off"              # "off" | "warn" | "block" — "off" explicitly disables scanning
 
 # [security.forbidden_tools]
 # extra = ["Bash(*sudo*)", "Bash(*aws*)"]
@@ -10356,23 +10362,25 @@ level = "mid"               # "low" | "mid" | "high" — sets all defaults below
 
 #### Items
 
-1. [ ] **`SecurityLevel` enum** (`crates/ta-goal/src/security.rs`): `Low | Mid | High`. `SecurityProfile::from_level(level, overrides) -> SecurityProfile` — merges level defaults with any explicit overrides from `workflow.toml`. `SecurityProfile` fields: `sandbox_enabled`, `network_policy`, `forbidden_tool_patterns`, `approval_required`, `audit_mode`, `constitution_enforcement`, `secret_scan_mode`.
+1. [ ] **`SecurityLevel` enum** (`crates/ta-goal/src/security.rs`): `Low | Mid | High`. `SecurityProfile::from_level(level, overrides) -> SecurityProfile` — merges level defaults with explicit overrides from `workflow.toml`. `SecurityProfile` fields: `sandbox_enabled`, `network_policy`, `forbidden_tool_patterns`, `approval_required`, `audit_mode`, `constitution_block_mode: ConstitutionBlockMode`, `secret_scan_mode: SecretScanMode`. `ConstitutionBlockMode`: `Warn | Block | BlockAndFollowUp`. `SecretScanMode`: `Off | Warn | Block`. Both are always present — level determines the default value, not whether they exist.
 
-2. [ ] **Level preset tables** (`security.rs`): Const defaults per level for each field. `mid` populates `DEFAULT_FORBIDDEN_TOOLS` in `run.rs` with sensible patterns (`Bash(*rm -rf*)`, `Bash(*sudo *)`, `Bash(*curl * | bash*)`, `Bash(*wget * -O- * | sh*)`).
+2. [ ] **Level preset tables** (`security.rs`): Const defaults per level. Constitution supervisor: `low → Warn`, `mid → Warn` (configurable to `Block`), `high → BlockAndFollowUp`. Secret scan: `low → Warn`, `mid → Warn`, `high → Block`. `mid` populates `DEFAULT_FORBIDDEN_TOOLS` in `run.rs` with sensible patterns (`Bash(*rm -rf*)`, `Bash(*sudo *)`, `Bash(*curl * | bash*)`, `Bash(*wget * -O- * | sh*)`).
 
 3. [ ] **Apply profile in `run.rs`**: Load `SecurityProfile` at goal start. Pass to `inject_claude_settings()` (tool allow/deny), sandbox spawn, and audit writer. When `level = "high"` and sandbox is manually disabled, print: `[warn] security.level=high but sandbox.enabled=false — sandbox override active. High security requires process isolation.`
 
-4. [ ] **Secret scanning** (`crates/ta-changeset/src/secret_scan.rs`): Regex-based scan over draft artifact text content at `ta draft apply` time. Patterns: AWS key (`AKIA[0-9A-Z]{16}`), generic API key (`[Aa][Pp][Ii][_-]?[Kk][Ee][Yy].*=.*[A-Za-z0-9]{20,}`), private key PEM header, GitHub PAT (`ghp_[A-Za-z0-9]{36}`). On `scan = "warn"`: print findings, continue. On `scan = "block"`: print findings, abort apply with CTA: `Remove secrets from the draft or add to .ta-secret-ignore before applying.`
+4. [ ] **Secret scanning always runs** (`crates/ta-changeset/src/secret_scan.rs`): Regex scan over draft artifact text content at `ta draft apply` time — runs at all levels. Patterns: AWS key (`AKIA[0-9A-Z]{16}`), generic API key (`[Aa][Pp][Ii][_-]?[Kk][Ee][Yy].*=.*[A-Za-z0-9]{20,}`), private key PEM header, GitHub PAT (`ghp_[A-Za-z0-9]{36}`). Mode from `SecurityProfile.secret_scan_mode`: `Warn` → print findings, continue. `Block` → print findings, abort apply with CTA: `Remove secrets from the draft or add to .ta-secret-ignore before applying.` `Off` → skip entirely (explicit disable). Default is `Warn` for low/mid, `Block` for high.
 
-5. [ ] **Audit hash chain** (`crates/ta-audit/src/chain.rs`): For `mid`/`high`, each `GoalAuditEntry` written to `goal-audit.jsonl` includes a `prev_hash: Option<String>` (SHA-256 of previous entry bytes). For `high`, entries are HMAC-SHA256 signed with a project key stored in `.ta/audit.key` (generated on `ta init` for `high` projects). `ta audit verify` checks chain integrity and reports any gaps or tampering.
+5. [ ] **HIGH constitution violation → block + auto-follow-up**: When `constitution_block_mode = BlockAndFollowUp` and the supervisor returns any `Fail` finding: (a) set draft status to `Blocked { reason: "constitution violation", supervisor_findings }`, preventing apply; (b) automatically spawn a `--follow-up` goal with the supervisor findings as context so the agent can correct the violation. Log the follow-up goal ID in the blocked draft. User can override block with `ta draft apply --override-constitution-block` (audited).
 
-6. [ ] **`ta init` level prompt**: When `ta init` runs interactively, ask: `Security level? [low] / mid / high`. Default `low` for solo, suggest `mid` for team templates. Write `[security] level = "<choice>"` into generated `workflow.toml`.
+6. [ ] **Audit hash chain** (`crates/ta-audit/src/chain.rs`): For `mid`/`high`, each `GoalAuditEntry` written to `goal-audit.jsonl` includes a `prev_hash: Option<String>` (SHA-256 of previous entry bytes). For `high`, entries are HMAC-SHA256 signed with a project key stored in `.ta/audit.key` (generated on `ta init` for `high` projects). `ta audit verify` checks chain integrity and reports any gaps or tampering.
 
-7. [ ] **`ta status` security badge**: Show `Security: mid` (or `high`) line in status output. For `high`, also list any active overrides that deviate from the preset.
+7. [ ] **`ta init` level prompt**: When `ta init` runs interactively, ask: `Security level? [low] / mid / high`. Default `low` for solo, suggest `mid` for team templates. Write `[security] level = "<choice>"` into generated `workflow.toml`.
 
-8. [ ] **Tests**: `SecurityProfile::from_level` applies correct defaults per level; override wins over preset; `mid` forbidden tool patterns block `rm -rf` and `sudo`; secret scanner finds AWS key and GitHub PAT in diff text; `block` mode aborts apply; `warn` mode continues; audit hash chain roundtrip; `ta audit verify` detects a tampered entry; `ta init` writes level to workflow.toml.
+8. [ ] **`ta status` security badge**: Show `Security: mid` (or `high`) line in status output. For `high`, also list any active overrides that deviate from the preset.
 
-9. [ ] **USAGE.md "Security Levels" section**: Table of levels and defaults, how to set level, individual override examples, secret scan patterns, audit chain verification, relationship to SecureTA (SA) above `high`.
+9. [ ] **Tests**: `SecurityProfile::from_level` applies correct defaults per level; override wins over preset; secret scan runs at all levels by default; `Off` disables it; `mid` forbidden tool patterns block `rm -rf` and `sudo`; secret scanner finds AWS key and GitHub PAT in diff text; `Block` mode aborts apply; `Warn` mode continues; `BlockAndFollowUp` spawns follow-up goal on constitution fail; audit hash chain roundtrip; `ta audit verify` detects a tampered entry; `ta init` writes level to workflow.toml.
+
+10. [ ] **USAGE.md "Security Levels" section**: Table of levels and defaults, how to set level, individual override examples, disabling secret scan (`scan = "off"`), audit chain verification, relationship to SecureTA (SA) above `high`.
 
 #### Version: `0.15.14.4-alpha`
 
