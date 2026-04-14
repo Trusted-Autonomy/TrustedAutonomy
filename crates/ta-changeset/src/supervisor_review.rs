@@ -183,6 +183,8 @@ fn invoke_claude_cli_supervisor(
 ) -> anyhow::Result<SupervisorReview> {
     let staging = config.staging_path.as_deref();
 
+    // When --allowedTools is passed, the claude CLI does not accept the prompt as a
+    // positional argument — it must come via stdin. Always use stdin for consistency.
     let mut args_owned: Vec<String> = vec![
         "--print".into(),
         "--verbose".into(),
@@ -197,8 +199,7 @@ fn invoke_claude_cli_supervisor(
         args_owned.push(model.clone());
     }
 
-    args_owned.push(prompt.to_string());
-
+    // Prompt goes via stdin (not positional) — required when --allowedTools is present.
     let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
     let disable_hooks_env: &[(&str, &str)] = if config.enable_hooks {
@@ -215,6 +216,7 @@ fn invoke_claude_cli_supervisor(
         "Claude Code CLI",
         staging,
         disable_hooks_env,
+        Some(prompt),
     )?;
 
     let text = extract_claude_stream_json_text(&stdout);
@@ -245,6 +247,7 @@ fn invoke_codex_supervisor(
         "Codex CLI",
         staging,
         disable_hooks_env,
+        None,
     )?;
 
     let mut review = parse_supervisor_response_or_text(&stdout, "codex");
@@ -280,6 +283,7 @@ fn invoke_ollama_supervisor(
         "ta-agent-ollama",
         staging,
         disable_hooks_env,
+        None,
     )?;
 
     let mut review = parse_supervisor_response_or_text(&stdout, "ollama");
@@ -323,6 +327,7 @@ fn is_hook_json_line(line: &str) -> bool {
 ///
 /// Lines that match `is_hook_json_line` (i.e., `{"type":"system",...}`) are discarded
 /// silently — they do not count as heartbeat tokens and are not included in the output.
+#[allow(clippy::too_many_arguments)]
 fn spawn_with_heartbeat_monitor(
     program: &str,
     args: &[&str],
@@ -331,6 +336,7 @@ fn spawn_with_heartbeat_monitor(
     label: &str,
     current_dir: Option<&std::path::Path>,
     extra_env: &[(&str, &str)],
+    stdin_input: Option<&str>,
 ) -> anyhow::Result<String> {
     use std::io::BufRead;
     use std::sync::mpsc;
@@ -343,7 +349,13 @@ fn spawn_with_heartbeat_monitor(
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+    let stdin_stdio = if stdin_input.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
     let mut child = cmd
+        .stdin(stdin_stdio)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -359,6 +371,19 @@ fn spawn_with_heartbeat_monitor(
     // Write initial heartbeat immediately so mtime is set from the moment of spawn.
     if let Some(hb) = heartbeat_path {
         let _ = std::fs::write(hb, b"");
+    }
+
+    // Write stdin input in a background thread to avoid deadlock: if the child fills its
+    // stdout buffer waiting for us to read while we're blocking on stdin write, we deadlock.
+    if let Some(input) = stdin_input {
+        if let Some(mut stdin_pipe) = child.stdin.take() {
+            let input_owned = input.to_string();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = stdin_pipe.write_all(input_owned.as_bytes());
+                // stdin_pipe drops here, sending EOF to the child.
+            });
+        }
     }
 
     // Spawn reader thread: reads stdout lines and sends them via channel.
@@ -1123,6 +1148,7 @@ mod tests {
             "echo",
             None,
             &[],
+            None,
         );
         // echo exits 0 so result is Ok.
         assert!(result.is_ok(), "echo should succeed: {:?}", result);
@@ -1151,6 +1177,7 @@ mod tests {
             "sleep",
             None,
             &[],
+            None,
         );
         assert!(result.is_err(), "stalled process should be killed");
         let err = result.unwrap_err().to_string();
@@ -1179,6 +1206,7 @@ mod tests {
             "sh",
             None,
             &[],
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1228,6 +1256,7 @@ mod tests {
             "sh",
             None,
             &[],
+            None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1582,7 +1611,8 @@ mod tests {
         let real_content = r#"{"type":"result","result":"done"}"#;
         let script = format!("echo '{}' && echo '{}'", hook_json, real_content);
 
-        let result = spawn_with_heartbeat_monitor("sh", &["-c", &script], 5, None, "sh", None, &[]);
+        let result =
+            spawn_with_heartbeat_monitor("sh", &["-c", &script], 5, None, "sh", None, &[], None);
         assert!(result.is_ok(), "process should succeed: {:?}", result);
         let stdout = result.unwrap();
         // Hook line must be excluded from output.
@@ -1617,6 +1647,7 @@ mod tests {
             "sh",
             None,
             &[],
+            None,
         );
         assert!(
             result.is_err(),
