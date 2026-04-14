@@ -9271,7 +9271,7 @@ Building draft...  ████████████████░░░░ 
 ---
 
 ### v0.15.9 — `MessagingAdapter` Trait & Email Provider Plugins
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: A pluggable messaging adapter layer — the same external plugin protocol used by VCS adapters — extended to cover mailbox access. Email providers (Gmail, Outlook, IMAP/SMTP) are discoverable plugins that speak a common `MessagingAdapter` JSON-over-stdio protocol. No bespoke `ta email` command surface; credentials live in the OS keychain. This phase delivers the adapter trait, the plugin protocol, and three built-in provider plugins. The workflow in v0.15.10 drives them.
 
 **Depends on**: v0.12.0.2 (VCS plugin protocol as the pattern to follow)
@@ -10469,7 +10469,7 @@ level = "mid"               # "low" | "mid" | "high" — sets all defaults below
 ---
 
 ### v0.15.15 — Multi-Agent Consensus Review Workflow
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: A workflow template for multi-agent panel reviews where specialist agents run in parallel, each producing a structured verdict with a score and findings, and a final consensus step aggregates their outputs into a readiness score and recommendation. Ships with a `code-review-consensus` template covering architect, security, principal engineer, and PM roles. Include configurable consensus algorithms/models. Start with Raft and Paxos with Raft as the default — it should do no work if there is no swarm/multi-agent in the workflow.
 
 **Depends on**: v0.15.14 (parallel fan-out, join step)
