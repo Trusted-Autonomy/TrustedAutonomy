@@ -911,9 +911,12 @@ After `required_checks` run, an AI supervisor reviews the staged changes for goa
 **How it works**
 
 1. Agent exits and `required_checks` run.
-2. Supervisor reads: the goal's stated objective, the list of changed files (from `.ta/change_summary.json`), and the project constitution (if present).
-3. Supervisor calls the LLM and returns a structured verdict: `pass`, `warn`, or `block`.
-4. The verdict is embedded in the draft package and shown in `ta draft view`.
+2. Supervisor launches as a headless agent in the staging workspace with Read, Grep, and Glob tool access.
+3. Supervisor reads the changed files directly before forming findings — it is not given pre-loaded diffs.
+4. Supervisor returns a structured verdict: `pass`, `warn`, or `block`, with `file:line` citations.
+5. The verdict is embedded in the draft package and shown in `ta draft view`.
+
+The file-inspection approach scales better than diff injection: a 50-file change doesn't saturate the supervisor's context, and it can follow code rather than scanning a wall of text.
 
 **Configuration** (`.ta/workflow.toml`):
 
@@ -933,13 +936,13 @@ heartbeat_stale_secs = 30             # kill if no token received for this long 
 
 **Supervisor agent options**
 
-| `agent` value | Invocation | Credential |
-|---|---|---|
-| `"builtin"` (default) | `claude --print --output-format stream-json` | Delegated to the `claude` binary — subscription OAuth or API key |
-| `"claude-code"` | Same as `"builtin"` | Same |
-| `"codex"` | `codex --approval-mode full-auto --quiet` | `OPENAI_API_KEY` or Codex subscription (handled by Codex binary) |
-| `"ollama"` | `ta agent run ollama --headless` | Local — no key required |
-| `"<manifest-name>"` | Reads `.ta/agents/<name>.toml`, spawns command | Whatever the manifest specifies |
+| `agent` value | Invocation | Tool access | Credential |
+|---|---|---|---|
+| `"builtin"` (default) | `claude --print --output-format stream-json --allowedTools Read(*),Grep(*),Glob(*)` | Read, Grep, Glob | Delegated to the `claude` binary — subscription OAuth or API key |
+| `"claude-code"` | Same as `"builtin"` | Same | Same |
+| `"codex"` | `codex --approval-mode full-auto --quiet` (runs in staging dir) | Codex native | `OPENAI_API_KEY` or Codex subscription (handled by Codex binary) |
+| `"ollama"` | `ta agent run ollama --headless --tools read,grep,glob` | Read, Grep, Glob | Local — no key required |
+| `"<manifest-name>"` | Reads `.ta/agents/<name>.toml`, spawns command in staging dir | Whatever the manifest specifies | Whatever the manifest specifies |
 
 TA **never reads or forwards API keys** — it delegates authentication entirely to the agent binary. Subscription users of Claude Code (OAuth) can use `agent = "builtin"` without setting `ANTHROPIC_API_KEY`.
 
@@ -952,6 +955,31 @@ api_key_env = "OPENAI_API_KEY"   # TA checks this exists before spawning; codex 
 ```
 
 If the binary is not found, stalls (no tokens for `heartbeat_stale_secs`), or the response cannot be parsed, the supervisor falls back to a `warn` verdict automatically — it never blocks a draft due to its own failure.
+
+**Assigning a supervisor profile**
+
+Instead of the bare `agent` string, you can define a named profile in `[agent_profiles]` and reference it by name. This lets you configure framework and model independently and reuse the same profile across supervisors and workflow steps:
+
+```toml
+[agent_profiles.supervisor]
+framework = "claude"
+model = "claude-sonnet-4-6"
+
+[supervisor]
+agent_profile = "supervisor"   # overrides agent = "builtin"
+```
+
+Any registered framework works — not just claude. If `agent_profile` is unset, the `agent` field is used as before.
+
+**Unverified-finding quality gate**
+
+If the supervisor returns a finding containing a hedging phrase ("cannot be verified", "unable to confirm", "without viewing", "depends on implementation"), the verdict is automatically upgraded to `warn` and a meta-finding is appended:
+
+```
+Supervisor produced unverified finding — staging access may be missing or supervisor did not read the file.
+```
+
+This catches regressions where the supervisor loses file access and falls back to surface-level analysis.
 
 **Draft view output**:
 

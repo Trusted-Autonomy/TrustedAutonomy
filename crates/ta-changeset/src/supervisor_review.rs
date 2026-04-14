@@ -84,6 +84,12 @@ pub struct SupervisorRunConfig {
     /// Path to the heartbeat file written after each token chunk. When `None`, heartbeat
     /// writes are skipped (e.g. in tests or when no workspace dir is available).
     pub heartbeat_path: Option<std::path::PathBuf>,
+    /// Optional agent profile name resolved from workflow.toml `[agent_profiles]`.
+    /// When set, the `agent` field is treated as a fallback; the profile's `framework`
+    /// drives dispatch and `model` is forwarded to the agent binary when applicable.
+    pub agent_profile: Option<String>,
+    /// Resolved model from agent_profile (if any). Passed to agent CLI via --model flag.
+    pub resolved_model: Option<String>,
 }
 
 /// Raw LLM response structure (expected JSON from the supervisor prompt).
@@ -169,22 +175,38 @@ fn invoke_claude_cli_supervisor(
     prompt: &str,
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
+    let staging = config.staging_path.as_deref();
+
+    let mut args_owned: Vec<String> = vec![
+        "--print".into(),
+        "--verbose".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--allowedTools".into(),
+        "Read(*),Grep(*),Glob(*)".into(),
+    ];
+
+    if let Some(ref model) = config.resolved_model {
+        args_owned.push("--model".into());
+        args_owned.push(model.clone());
+    }
+
+    args_owned.push(prompt.to_string());
+
+    let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+
     let stdout = spawn_with_heartbeat_monitor(
         "claude",
-        &[
-            "--print",
-            "--verbose",
-            "--output-format",
-            "stream-json",
-            prompt,
-        ],
+        &args_refs,
         config.heartbeat_stale_secs,
         config.heartbeat_path.as_deref(),
         "Claude Code CLI",
+        staging,
     )?;
 
     let text = extract_claude_stream_json_text(&stdout);
-    let review = parse_supervisor_response_or_text(&text, "claude-code");
+    let mut review = parse_supervisor_response_or_text(&text, "claude-code");
+    apply_hedging_quality_gate(&mut review);
     Ok(review)
 }
 
@@ -196,15 +218,18 @@ fn invoke_codex_supervisor(
     prompt: &str,
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
+    let staging = config.staging_path.as_deref();
     let stdout = spawn_with_heartbeat_monitor(
         "codex",
         &["--approval-mode", "full-auto", "--quiet", prompt],
         config.heartbeat_stale_secs,
         config.heartbeat_path.as_deref(),
         "Codex CLI",
+        staging,
     )?;
 
-    let review = parse_supervisor_response_or_text(&stdout, "codex");
+    let mut review = parse_supervisor_response_or_text(&stdout, "codex");
+    apply_hedging_quality_gate(&mut review);
     Ok(review)
 }
 
@@ -213,15 +238,27 @@ fn invoke_ollama_supervisor(
     prompt: &str,
     config: &SupervisorRunConfig,
 ) -> anyhow::Result<SupervisorReview> {
+    let staging = config.staging_path.as_deref();
     let stdout = spawn_with_heartbeat_monitor(
         "ta",
-        &["agent", "run", "ollama", "--headless", "--prompt", prompt],
+        &[
+            "agent",
+            "run",
+            "ollama",
+            "--headless",
+            "--tools",
+            "read,grep,glob",
+            "--prompt",
+            prompt,
+        ],
         config.heartbeat_stale_secs,
         config.heartbeat_path.as_deref(),
         "ta-agent-ollama",
+        staging,
     )?;
 
-    let review = parse_supervisor_response_or_text(&stdout, "ollama");
+    let mut review = parse_supervisor_response_or_text(&stdout, "ollama");
+    apply_hedging_quality_gate(&mut review);
     Ok(review)
 }
 
@@ -241,12 +278,17 @@ fn spawn_with_heartbeat_monitor(
     stale_secs: u64,
     heartbeat_path: Option<&std::path::Path>,
     label: &str,
+    current_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<String> {
     use std::io::BufRead;
     use std::sync::mpsc;
 
-    let mut child = std::process::Command::new(program)
-        .args(args)
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    if let Some(dir) = current_dir {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -482,6 +524,9 @@ fn run_manifest_supervisor(
     let input = serde_json::json!({
         "objective": objective,
         "changed_files": changed_files,
+        "instruction": "Read the changed files using your available tools before forming each finding. \
+                        Cite file:line in every finding that references code. \
+                        Never write 'cannot be verified without viewing files' — view the files first.",
     });
     let input_path = staging_path.join(".ta/supervisor_input.json");
     if let Err(e) = std::fs::write(
@@ -652,6 +697,10 @@ Goal Objective:
 Changed Files:
 {files_list}{constitution_section}
 
+Read the files listed above using your Read/Grep/Glob tools before forming each finding.
+Cite `file:line` in every finding that references code.
+Never write 'cannot be verified without viewing files' — view the files first.
+
 Review the changes and answer:
 1. Did the agent stay within the goal scope? (Only files directly needed for the objective should be modified)
 2. Are any changes surprising, potentially harmful, or out of scope?
@@ -673,6 +722,41 @@ Use:
 
 Keep findings concise (1-2 sentences each, max 5 findings)."#
     )
+}
+
+/// Hedging phrases that indicate the supervisor did not read the staged files.
+const HEDGING_PHRASES: &[&str] = &[
+    "cannot be verified",
+    "unable to confirm",
+    "without viewing",
+    "depends on implementation",
+    "cannot verify",
+    "unable to verify",
+    "not possible to confirm",
+];
+
+/// Scan findings for hedging phrases that indicate the supervisor failed to read files.
+///
+/// Returns `true` if any finding contains a hedging phrase, and mutates the findings
+/// to append a meta-finding explaining what happened.
+pub(crate) fn apply_hedging_quality_gate(review: &mut SupervisorReview) -> bool {
+    let mut hedged = false;
+    for finding in &review.findings {
+        let lower = finding.to_lowercase();
+        if HEDGING_PHRASES.iter().any(|p| lower.contains(p)) {
+            hedged = true;
+            break;
+        }
+    }
+    if hedged {
+        if review.verdict == SupervisorVerdict::Pass {
+            review.verdict = SupervisorVerdict::Warn;
+        }
+        review.findings.push(
+            "Supervisor produced unverified finding — staging access may be missing or supervisor did not read the file.".to_string()
+        );
+    }
+    hedged
 }
 
 fn parse_supervisor_response(text: &str) -> anyhow::Result<SupervisorReview> {
@@ -935,6 +1019,8 @@ mod tests {
             api_key_env: Some("TA_TEST_MISSING_KEY_XYZ_SUPERVISOR".to_string()),
             staging_path: None,
             heartbeat_path: None,
+            agent_profile: None,
+            resolved_model: None,
         };
         // Ensure the env var is not set.
         std::env::remove_var("TA_TEST_MISSING_KEY_XYZ_SUPERVISOR");
@@ -960,6 +1046,7 @@ mod tests {
             30, // stale_secs — won't trigger for a fast echo
             Some(hb_path.as_path()),
             "echo",
+            None,
         );
         // echo exits 0 so result is Ok.
         assert!(result.is_ok(), "echo should succeed: {:?}", result);
@@ -986,6 +1073,7 @@ mod tests {
             1, // stale_secs — kill after 1s of no output
             Some(hb_path.as_path()),
             "sleep",
+            None,
         );
         assert!(result.is_err(), "stalled process should be killed");
         let err = result.unwrap_err().to_string();
@@ -1012,6 +1100,7 @@ mod tests {
             5,
             None, // no heartbeat file needed
             "sh",
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1037,6 +1126,8 @@ mod tests {
             api_key_env: None,
             staging_path: None,
             heartbeat_path: None,
+            agent_profile: None,
+            resolved_model: None,
         };
         assert_eq!(config.heartbeat_stale_secs, 30);
         assert_eq!(config.timeout_secs, 120);
@@ -1056,6 +1147,7 @@ mod tests {
             1,
             Some(hb_path.as_path()),
             "sh",
+            None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1081,6 +1173,8 @@ mod tests {
             api_key_env: None,
             staging_path: None,
             heartbeat_path: None,
+            agent_profile: None,
+            resolved_model: None,
         };
         let review = invoke_supervisor_agent("test objective", &[], None, &config);
         assert_eq!(review.verdict, SupervisorVerdict::Warn);
@@ -1100,6 +1194,8 @@ mod tests {
             api_key_env: Some("OPENAI_API_KEY".to_string()),
             staging_path: None,
             heartbeat_path: None,
+            agent_profile: None,
+            resolved_model: None,
         };
         std::env::remove_var("OPENAI_API_KEY");
         let review = invoke_supervisor_agent("objective", &[], None, &config);
@@ -1126,13 +1222,18 @@ mod tests {
         let claude_path = tmp.path().join("claude");
         {
             let mut f = std::fs::File::create(&claude_path).unwrap();
-            // The script checks that --verbose is in $@ and emits a plain JSON verdict.
+            // The script checks that --verbose and --allowedTools are in $@ and emits a plain JSON verdict.
             // Using echo so there are no printf escaping issues with nested JSON.
             f.write_all(
                 b"#!/bin/sh\n\
-                  found=''\n\
-                  for arg in \"$@\"; do [ \"$arg\" = \"--verbose\" ] && found=1; done\n\
-                  if [ -z \"$found\" ]; then echo 'Error: --verbose missing' >&2; exit 1; fi\n\
+                  found_verbose=''\n\
+                  found_tools=''\n\
+                  for arg in \"$@\"; do\n\
+                    [ \"$arg\" = \"--verbose\" ] && found_verbose=1\n\
+                    [ \"$arg\" = \"--allowedTools\" ] && found_tools=1\n\
+                  done\n\
+                  if [ -z \"$found_verbose\" ]; then echo 'Error: --verbose missing' >&2; exit 1; fi\n\
+                  if [ -z \"$found_tools\" ]; then echo 'Error: --allowedTools missing' >&2; exit 1; fi\n\
                   echo '{\"verdict\":\"pass\",\"scope_ok\":true,\"findings\":[],\"summary\":\"ok\"}'\n",
             )
             .unwrap();
@@ -1156,6 +1257,8 @@ mod tests {
             api_key_env: None,
             staging_path: None,
             heartbeat_path: None,
+            agent_profile: None,
+            resolved_model: None,
         };
 
         let review = invoke_supervisor_agent("test objective", &[], None, &config);
@@ -1167,6 +1270,173 @@ mod tests {
             review.verdict,
             SupervisorVerdict::Pass,
             "Supervisor must pass --verbose to claude CLI; got findings: {:?}",
+            review.findings
+        );
+    }
+
+    #[test]
+    fn test_build_supervisor_prompt_includes_file_inspection_instruction() {
+        let prompt =
+            build_supervisor_prompt("Add JWT authentication", &["src/auth.rs".to_string()], None);
+        assert!(
+            prompt.contains("Read"),
+            "prompt must instruct supervisor to read files"
+        );
+        assert!(
+            prompt.contains("file:line") || prompt.contains("file:"),
+            "prompt must require file:line citations"
+        );
+        assert!(
+            prompt.contains("cannot be verified") || prompt.contains("Never write"),
+            "prompt must ban hedging phrases"
+        );
+    }
+
+    #[test]
+    fn test_hedging_quality_gate_fires_on_hedging_phrase() {
+        let mut review = SupervisorReview {
+            verdict: SupervisorVerdict::Pass,
+            scope_ok: true,
+            findings: vec![
+                "This change cannot be verified without viewing the actual file contents."
+                    .to_string(),
+            ],
+            summary: "Looks fine.".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 0.0,
+        };
+        let fired = apply_hedging_quality_gate(&mut review);
+        assert!(fired, "quality gate should fire on 'cannot be verified'");
+        assert_eq!(
+            review.verdict,
+            SupervisorVerdict::Warn,
+            "verdict should be upgraded to Warn"
+        );
+        assert!(
+            review
+                .findings
+                .last()
+                .unwrap()
+                .contains("Supervisor produced unverified finding"),
+            "meta-finding should be appended"
+        );
+    }
+
+    #[test]
+    fn test_hedging_quality_gate_no_fire_on_clean_findings() {
+        let mut review = SupervisorReview {
+            verdict: SupervisorVerdict::Pass,
+            scope_ok: true,
+            findings: vec![
+                "src/auth.rs:42: JWT secret is not rotated — consider adding rotation logic."
+                    .to_string(),
+            ],
+            summary: "One finding.".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 0.0,
+        };
+        let fired = apply_hedging_quality_gate(&mut review);
+        assert!(
+            !fired,
+            "quality gate should not fire on clean file:line findings"
+        );
+        assert_eq!(review.verdict, SupervisorVerdict::Pass);
+    }
+
+    #[test]
+    fn test_hedging_quality_gate_preserves_block_verdict() {
+        let mut review = SupervisorReview {
+            verdict: SupervisorVerdict::Block,
+            scope_ok: false,
+            findings: vec![
+                "Unable to confirm whether the migration is reversible without viewing migration files.".to_string(),
+            ],
+            summary: "Block.".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 0.0,
+        };
+        apply_hedging_quality_gate(&mut review);
+        // Block should not be downgraded — only Pass is upgraded to Warn
+        assert_eq!(
+            review.verdict,
+            SupervisorVerdict::Block,
+            "Block verdict must not be changed"
+        );
+    }
+
+    #[test]
+    fn test_supervisor_run_config_agent_profile_field() {
+        let config = SupervisorRunConfig {
+            enabled: true,
+            agent: "builtin".to_string(),
+            verdict_on_block: "warn".to_string(),
+            constitution_path: None,
+            skip_if_no_constitution: true,
+            heartbeat_stale_secs: 30,
+            timeout_secs: 30,
+            api_key_env: None,
+            staging_path: None,
+            heartbeat_path: None,
+            agent_profile: Some("supervisor".to_string()),
+            resolved_model: Some("claude-sonnet-4-6".to_string()),
+        };
+        assert_eq!(config.agent_profile.as_deref(), Some("supervisor"));
+        assert_eq!(config.resolved_model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_claude_supervisor_sets_current_dir_in_staging() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        // Create a staging dir with a sentinel file so we can verify cwd.
+        let staging = tempfile::tempdir().unwrap();
+        let sentinel = staging.path().join("STAGING_SENTINEL.txt");
+        std::fs::write(&sentinel, b"yes").unwrap();
+
+        // Create a mock `claude` that checks if STAGING_SENTINEL.txt exists in its cwd.
+        let bin_dir = tempfile::tempdir().unwrap();
+        let claude_path = bin_dir.path().join("claude");
+        {
+            let mut f = std::fs::File::create(&claude_path).unwrap();
+            f.write_all(
+                b"#!/bin/sh\n\
+                  if [ ! -f STAGING_SENTINEL.txt ]; then\n\
+                    echo 'Error: not running in staging dir' >&2; exit 1\n\
+                  fi\n\
+                  echo '{\"verdict\":\"pass\",\"scope_ok\":true,\"findings\":[],\"summary\":\"staging ok\"}'\n",
+            )
+            .unwrap();
+        }
+        let mut perms = std::fs::metadata(&claude_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&claude_path, perms).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin_dir.path().display(), old_path));
+
+        let config = SupervisorRunConfig {
+            enabled: true,
+            agent: "builtin".to_string(),
+            verdict_on_block: "warn".to_string(),
+            constitution_path: None,
+            skip_if_no_constitution: true,
+            heartbeat_stale_secs: 10,
+            timeout_secs: 10,
+            api_key_env: None,
+            staging_path: Some(staging.path().to_path_buf()),
+            heartbeat_path: None,
+            agent_profile: None,
+            resolved_model: None,
+        };
+
+        let review = invoke_supervisor_agent("test objective", &[], None, &config);
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(
+            review.verdict,
+            SupervisorVerdict::Pass,
+            "Supervisor must run in staging dir; got findings: {:?}",
             review.findings
         );
     }

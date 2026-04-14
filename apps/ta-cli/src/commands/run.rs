@@ -2658,9 +2658,26 @@ pub fn execute(
                 let _ = std::fs::create_dir_all(&hb_dir);
                 Some(hb_dir.join(format!("{}.supervisor", goal_id)))
             };
+            // Resolve agent profile if configured.
+            let (effective_agent, resolved_model) = if let Some(ref profile_name) =
+                sup_cfg.agent_profile
+            {
+                if let Some(profile) = wf.agent_profiles.get(profile_name) {
+                    (profile.framework.clone(), profile.model.clone())
+                } else {
+                    tracing::warn!(
+                        profile = %profile_name,
+                        "Supervisor agent_profile not found in [agent_profiles] — using agent field"
+                    );
+                    (sup_cfg.agent.clone(), None)
+                }
+            } else {
+                (sup_cfg.agent.clone(), None)
+            };
+
             let run_config = ta_changeset::SupervisorRunConfig {
                 enabled: true,
-                agent: sup_cfg.agent.clone(),
+                agent: effective_agent,
                 verdict_on_block: sup_cfg.verdict_on_block.clone(),
                 constitution_path: sup_cfg.constitution_path.clone(),
                 skip_if_no_constitution: sup_cfg.skip_if_no_constitution,
@@ -2669,6 +2686,8 @@ pub fn execute(
                 api_key_env: sup_cfg.api_key_env.clone(),
                 staging_path: Some(staging_path.to_path_buf()),
                 heartbeat_path,
+                agent_profile: sup_cfg.agent_profile.clone(),
+                resolved_model,
             };
 
             // Load constitution text.

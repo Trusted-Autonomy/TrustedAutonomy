@@ -1421,6 +1421,8 @@ fn run_constitution_check_step(
         api_key_env: sup_cfg.api_key_env.clone(),
         staging_path: None,
         heartbeat_path: None,
+        agent_profile: None,
+        resolved_model: None,
     };
 
     let constitution_text = ta_changeset::load_constitution(&config.workspace_root, &run_config);

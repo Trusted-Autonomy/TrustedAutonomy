@@ -192,6 +192,16 @@ pub struct WorkflowConfig {
     /// ```
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// Named agent profiles that supervisor and workflow steps can reference.
+    ///
+    /// ```toml
+    /// [agent_profiles.supervisor]
+    /// framework = "claude"
+    /// model = "claude-sonnet-4-6"
+    /// ```
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub agent_profiles: HashMap<String, AgentProfile>,
 }
 
 /// Commit auto-staging configuration (v0.14.3.7).
@@ -751,6 +761,12 @@ pub struct SupervisorConfig {
     /// Example: `api_key_env = "OPENAI_API_KEY"` for the codex agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+
+    /// Optional agent profile name from `[agent_profiles]`. When set, resolves the
+    /// `framework` and `model` for the supervisor from the profile table, overriding
+    /// the bare `agent` string. Any registered framework works — not just claude.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_profile: Option<String>,
 }
 
 fn default_supervisor_enabled() -> bool {
@@ -780,8 +796,27 @@ impl Default for SupervisorConfig {
             heartbeat_stale_secs: default_supervisor_heartbeat_stale_secs(),
             timeout_secs: None,
             api_key_env: None,
+            agent_profile: None,
         }
     }
+}
+
+/// Named agent profile — associates a framework name with an optional model override.
+///
+/// Used by `[agent_profiles]` in `workflow.toml`:
+/// ```toml
+/// [agent_profiles.supervisor]
+/// framework = "claude"
+/// model = "claude-sonnet-4-6"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentProfile {
+    /// Agent framework: "claude" / "claude-code", "codex", "ollama", or a manifest name.
+    #[serde(default)]
+    pub framework: String,
+    /// Optional model override forwarded to the agent binary (e.g. `--model <value>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Asset diff configuration for `[draft.asset_diff]` in `workflow.toml` (v0.15.4).

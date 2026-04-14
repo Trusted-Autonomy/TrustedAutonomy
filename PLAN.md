@@ -10387,7 +10387,7 @@ level = "mid"               # "low" | "mid" | "high" — sets all defaults below
 ---
 
 ### v0.15.14.5 — Supervisor Agent: File-Inspection Mode (Headless Agent in Staging)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Replace the single-shot supervisor prompt with a headless agent that has Read/Grep/Glob tool access to the staging workspace. The supervisor reads what it needs, produces specific file:line findings, and never receives pre-loaded diffs. Eliminates vague "cannot be verified without viewing staging files" findings entirely.
 
 **Root cause**: `invoke_claude_cli_supervisor` calls `claude --print` with a pre-built text prompt containing only the goal objective, a list of changed file paths (no content), and the constitution. No tools are available. The supervisor reasons from filenames alone, producing surface-level findings with qualified hedging. `run_manifest_supervisor` already runs in `staging_path` as `current_dir` — the same model applies to all built-in supervisors.
