@@ -542,6 +542,19 @@ enum Commands {
         /// Defaults to the most recent active goal.
         goal_id: Option<String>,
     },
+    /// Language-aware static analysis with optional agent correction loop (v0.15.14.3).
+    ///
+    /// Reads `[analysis.<lang>]` configuration from `.ta/workflow.toml` and runs
+    /// the configured tool (mypy, pyright, cargo-clippy, golangci-lint, eslint).
+    ///
+    /// Examples:
+    ///   ta analysis run
+    ///   ta analysis run --lang python
+    ///   ta analysis run --fix
+    Analysis {
+        #[command(subcommand)]
+        command: commands::analysis::AnalysisCommands,
+    },
     /// View the interactive conversation history for a goal.
     Conversation {
         /// Goal run ID (or prefix).
@@ -991,6 +1004,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Build { test } => commands::build::execute(&config, *test),
         Commands::Sync => commands::sync::execute(&config),
         Commands::Verify { goal_id } => commands::verify::execute(&config, goal_id.as_deref()),
+        Commands::Analysis { command } => commands::analysis::execute(command, &config),
         Commands::Doctor => commands::goal::doctor(&config),
         Commands::Conversation { goal_id, json } => {
             commands::conversation::execute(&config, goal_id, *json)

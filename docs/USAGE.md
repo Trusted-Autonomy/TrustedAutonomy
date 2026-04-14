@@ -8625,6 +8625,153 @@ ta workflow run plan-build-loop --goal "Run all pending phases" --resume <run-id
 
 ---
 
+### Static Analysis
+
+TA integrates first-class static analysis for Python, TypeScript, Rust, and Go. Tools are configured per-language in `.ta/workflow.toml`. The optional agent correction loop iterates on findings until the analyzer is clean or a limit is hit — all without manual intervention.
+
+#### Configuration
+
+Add `[analysis.<lang>]` blocks to `.ta/workflow.toml`:
+
+```toml
+[analysis.python]
+tool = "mypy"            # or "pyright", "ruff check"
+args = ["--strict"]
+on_failure = "agent"     # "fail" | "warn" | "agent"
+max_iterations = 3       # correction loop limit (default: 3)
+
+[analysis.typescript]
+tool = "pyright"
+args = []
+on_failure = "agent"
+
+[analysis.rust]
+tool = "cargo-clippy"
+args = ["-D", "warnings"]
+on_failure = "warn"      # clippy already runs in verify; warn is non-blocking
+
+[analysis.go]
+tool = "golangci-lint"
+args = ["run"]
+on_failure = "agent"
+```
+
+Language is auto-detected from workspace marker files (`Cargo.toml` → rust, `go.mod` → go, `pyproject.toml`/`requirements.txt` → python, `package.json` + `.ts` → typescript). Manual config always wins.
+
+#### `on_failure` modes
+
+| Value | Behaviour |
+|-------|-----------|
+| `fail` | Fail immediately and print the findings table (default) |
+| `warn` | Log findings and continue — non-blocking |
+| `agent` | Spawn a targeted fix agent and re-run until clean or `max_iterations` reached |
+
+#### Running analysis manually
+
+```bash
+# Run the configured analyzer for the detected language
+ta analysis run
+
+# Override language
+ta analysis run --lang python
+
+# Trigger the agent correction loop — produces a draft for human review
+ta analysis run --fix
+
+# Use a specific agent for the fix loop
+ta analysis run --fix --agent claude-code
+```
+
+`ta analysis run` prints a structured findings table. With `--fix`, it spawns a fix goal and produces a draft for review via the normal `ta draft view / approve / apply` workflow.
+
+#### Correction loop behaviour
+
+When `on_failure = "agent"`:
+
+1. The analyzer runs and findings are parsed into a structured table.
+2. A targeted fix goal is spawned with the findings, affected files, and a scope instruction ("fix only what the analyzer flagged").
+3. After the agent applies fixes, the analyzer re-runs.
+4. Steps 2–3 repeat until the analyzer is clean or `max_iterations` is exhausted.
+
+When `max_iterations` is exhausted:
+
+- `on_max_iterations = "warn"` (default): remaining findings are logged and the step continues.
+- `on_max_iterations = "fail"`: the step fails with remaining findings listed.
+
+```toml
+[analysis.python]
+tool = "mypy"
+on_failure = "agent"
+max_iterations = 5
+on_max_iterations = "fail"   # block apply when iterations run out
+```
+
+#### As a governed workflow step
+
+Add a `kind = "static_analysis"` stage to any governed workflow TOML:
+
+```toml
+[[stages]]
+name = "lint"
+kind = "static_analysis"
+description = "Run mypy before the main goal"
+# lang = "python"   # optional — auto-detected when absent
+```
+
+The stage reads `[analysis.<lang>]` from the project's `.ta/workflow.toml` and dispatches on `on_failure`. With `on_failure = "agent"`, it runs the full correction loop inline — all correction passes are applied before the workflow proceeds.
+
+Example: static analysis as a pre-flight check before `run_goal`:
+
+```toml
+[[stages]]
+name = "lint"
+kind = "static_analysis"
+description = "Ensure type checker passes before agent run"
+
+[[stages]]
+name = "run_goal"
+description = "Run the agent goal"
+depends_on = ["lint"]
+
+[[stages]]
+name = "review_draft"
+description = "Review the draft"
+depends_on = ["run_goal"]
+```
+
+#### Chaining in `plan-build-phases.toml`
+
+```toml
+[[stages]]
+name = "static_check"
+kind = "static_analysis"
+description = "Language-aware static analysis"
+
+[[stages]]
+name = "run_phase"
+kind = "workflow"
+workflow = "build"
+goal = "{{plan_next.phase_id}} — {{plan_next.phase_title}}"
+phase = "{{plan_next.phase_id}}"
+depends_on = ["static_check"]
+```
+
+#### Supported tools
+
+| Language | Default tool | Output format |
+|----------|-------------|---------------|
+| Python | `mypy` | text (`file:line: severity: msg [code]`) |
+| Python | `pyright` | JSON (`--outputjson`) |
+| TypeScript | `pyright` | JSON (`--outputjson`) |
+| TypeScript | `eslint` | JSON array |
+| Rust | `cargo-clippy` | NDJSON (`--message-format json`) |
+| Go | `golangci-lint` | JSON (`--out-format json`) |
+| Any | custom tool | raw line capture |
+
+TA injects the machine-readable output flags automatically (e.g. `--outputjson` for pyright, `--message-format json` for clippy) unless you already include them in `args`.
+
+---
+
 ### Workflow Engine
 
 TA includes a pluggable workflow engine for orchestrating multi-stage, multi-role workflows. Define stages, assign roles to agents, and let TA handle routing, verdict scoring, and human-in-the-loop interaction.

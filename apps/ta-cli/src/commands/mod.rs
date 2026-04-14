@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod agent;
+pub mod analysis;
 pub mod audit;
 pub mod build;
 pub mod community;
