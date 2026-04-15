@@ -1870,6 +1870,7 @@ pub(crate) fn build_package(
         agent_decision_log,
         goal_shortref: None, // Set below with display_id (v0.14.7.3).
         draft_seq: 0,        // Set below with display_id (v0.14.7.3).
+        plan_phase: goal.plan_phase.clone(), // Inherit from GoalRun (v0.15.15.2).
     };
 
     // v0.12.2.1: Track parent_draft_id and compute composited diff for follow-up chains.
@@ -2329,6 +2330,7 @@ fn build_memory_only_draft(
         agent_decision_log: vec![],
         goal_shortref: None,
         draft_seq: 0,
+        plan_phase: None,
     };
 
     // Set display_id and shortref/seq (mirrors build_package logic).
@@ -2753,13 +2755,20 @@ fn list_packages(
             None => "\u{2014}".to_string(),
         };
 
+        // v0.15.15.2: phase suffix shown when present.
+        let phase_suffix = pkg
+            .plan_phase
+            .as_deref()
+            .map(|p| format!("  [{}]", p))
+            .unwrap_or_default();
+
         if show_chain_col {
             let parent_display = pkg
                 .parent_draft_id
                 .map(|id| format!("→ {}", &id.to_string()[..8]))
                 .unwrap_or_else(|| "\u{2014}".to_string());
             println!(
-                "{:<20} {:<16} {:<26} {:<16} {:<8} {:<10} {:<14} {}",
+                "{:<20} {:<16} {:<26} {:<16} {:<8} {:<10} {:<14} {}{}",
                 truncate(&tag_display, 18),
                 draft_display_id(pkg),
                 goal_display,
@@ -2768,10 +2777,11 @@ fn list_packages(
                 parent_display,
                 vcs_display,
                 age_str,
+                phase_suffix,
             );
         } else {
             println!(
-                "{:<20} {:<16} {:<26} {:<16} {:<8} {:<14} {}",
+                "{:<20} {:<16} {:<26} {:<16} {:<8} {:<14} {}{}",
                 truncate(&tag_display, 18),
                 draft_display_id(pkg),
                 goal_display,
@@ -2779,6 +2789,7 @@ fn list_packages(
                 pkg.changes.artifacts.len(),
                 vcs_display,
                 age_str,
+                phase_suffix,
             );
         }
     }
@@ -2999,6 +3010,19 @@ fn view_package(
             println!("  Combined: {} file(s) across chain", total_files);
             println!();
         }
+    }
+
+    // v0.15.15.2: Show plan phase prominently below the chain context.
+    if let Some(ref phase_id) = pkg.plan_phase {
+        // Try to get the phase title from the source PLAN.md.
+        let phase_title = super::plan::load_plan(&config.workspace_root)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| p.id == *phase_id)
+            .map(|p| format!("{} — {}", phase_id, p.title))
+            .unwrap_or_else(|| phase_id.clone());
+        println!("Phase: {}", phase_title);
+        println!();
     }
 
     // Parse detail level and format.

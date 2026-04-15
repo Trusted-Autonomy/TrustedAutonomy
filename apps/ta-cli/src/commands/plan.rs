@@ -3173,6 +3173,220 @@ pub fn pending_human_review_count(project_root: &Path) -> usize {
         .len()
 }
 
+// ── Phase auto-detection (v0.15.15.2) ───────────────────────────────────────
+
+/// Extract a semver phase ID from a goal title string.
+///
+/// Looks for a version prefix matching `v<W>.<X>.<Y>[.<Z>]` at the start or after
+/// a space. Returns the first match, or None if the title has no embedded phase ID.
+///
+/// Examples:
+///   "v0.15.15.2 — Fix auth"  → Some("v0.15.15.2")
+///   "fix auth bug"           → None
+pub fn extract_semver_from_title(title: &str) -> Option<String> {
+    let re = Regex::new(r"(?:^|\s)(v\d+\.\d+\.\d+(?:\.\d+)?)").ok()?;
+    re.captures(title)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// Find the single in-progress phase in a loaded plan, if exactly one exists.
+///
+/// Returns `Some(phase_id)` only when there is exactly one `in_progress` phase.
+/// Returns `None` when there are zero or more than one (ambiguous).
+pub fn find_single_in_progress(phases: &[PlanPhase]) -> Option<String> {
+    let in_progress: Vec<&PlanPhase> = phases
+        .iter()
+        .filter(|p| p.status == PlanStatus::InProgress)
+        .collect();
+    if in_progress.len() == 1 {
+        Some(in_progress[0].id.clone())
+    } else {
+        None
+    }
+}
+
+/// Generate a gap semver for an ad-hoc goal inserted between planned phases.
+///
+/// Uses a **5-part format `W.X.Y.Z.A`** where the 5th component (`A`) is
+/// exclusively reserved for inserted (ad-hoc) goals — never used in planned phases.
+///
+/// `last_done`: the ID of the last completed phase (e.g., `"v0.15.15.1"`).
+/// `existing_phases`: all phases in the plan (used to detect collisions).
+///
+/// Resolution:
+///   - `last_done = "v0.15.15.1"`, no collision → `"v0.15.15.1.1"`
+///   - `last_done = "v0.15.15.1"`, `.1` taken → `"v0.15.15.1.2"`
+///   - If `last_done` is non-semver → `"ad-hoc.1"` (fallback)
+pub fn create_gap_semver(last_done: &str, existing_phases: &[PlanPhase]) -> String {
+    // Collect existing 5-part sub-phase IDs derived from last_done.
+    let used: std::collections::HashSet<u32> = existing_phases
+        .iter()
+        .filter_map(|p| {
+            let id = &p.id;
+            // Must start with last_done as prefix, then a dot and a number.
+            let prefix = format!("{}.", last_done);
+            if let Some(suffix) = id.strip_prefix(&prefix) {
+                // 5th component must be a plain number with no further dots.
+                if !suffix.contains('.') {
+                    suffix.parse::<u32>().ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Find the smallest available A starting from 1.
+    let a = (1u32..).find(|n| !used.contains(n)).unwrap_or(1);
+
+    // Build the 5-part ID from last_done.
+    if last_done.starts_with('v') || last_done.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("{}.{}", last_done, a)
+    } else {
+        // Non-semver project (e.g. "sprint-3") — append dot suffix.
+        format!("{}.{}", last_done, a)
+    }
+}
+
+/// Find the last completed phase ID for gap semver generation.
+///
+/// Returns the ID of the highest-indexed Done phase, or "v0.0.0" as a default.
+pub fn last_completed_phase_id(phases: &[PlanPhase]) -> String {
+    phases
+        .iter()
+        .rev()
+        .find(|p| p.status == PlanStatus::Done)
+        .map(|p| p.id.clone())
+        .unwrap_or_else(|| "v0.0.0".to_string())
+}
+
+/// Insert an ad-hoc phase stub into PLAN.md immediately after the last Done phase.
+///
+/// The stub has `<!-- status: in_progress -->` since it starts immediately.
+/// If the phase ID already exists, this is a no-op.
+pub fn insert_adhoc_phase(project_root: &Path, phase_id: &str, title: &str) -> anyhow::Result<()> {
+    let plan_path = project_root.join("PLAN.md");
+    if !plan_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&plan_path)?;
+
+    // No-op if phase already exists.
+    if content.contains(phase_id) {
+        return Ok(());
+    }
+
+    // Find the last Done phase and insert after its block.
+    // Simple heuristic: find the last `<!-- status: done -->` line, then insert
+    // after the paragraph following it (next blank line after the line).
+    let stub = format!(
+        "\n### {} — {}\n<!-- status: in_progress -->\n*Inserted goal — not in original plan.*\n",
+        phase_id, title
+    );
+
+    // Find insertion point: after the last `<!-- status: done -->` section.
+    // We walk backward looking for the last occurrence of "status: done", then
+    // find the next blank line after it (end of that phase's intro paragraph).
+    let insert_pos = find_insert_pos_after_last_done(&content);
+    let updated = format!(
+        "{}{}{}",
+        &content[..insert_pos],
+        stub,
+        &content[insert_pos..]
+    );
+    std::fs::write(&plan_path, &updated)?;
+    Ok(())
+}
+
+/// Find the character position immediately after the last Done phase block.
+fn find_insert_pos_after_last_done(content: &str) -> usize {
+    // Find the last "<!-- status: done -->" occurrence.
+    let done_marker = "<!-- status: done -->";
+    let last_done_pos = content.rfind(done_marker);
+    let Some(done_start) = last_done_pos else {
+        // No done phases — insert at the end.
+        return content.len();
+    };
+
+    // From done_start, scan forward to find the end of this phase's content block.
+    // End of block = the next `### ` or `## ` header, or end of file.
+    let after_done = done_start + done_marker.len();
+    let rest = &content[after_done..];
+
+    // Look for the next section header.
+    for (i, line) in rest.lines().enumerate() {
+        let trimmed = line.trim();
+        if i > 0 && (trimmed.starts_with("### ") || trimmed.starts_with("## ")) {
+            // Insert before this header.
+            let byte_offset: usize = rest.lines().take(i).map(|l| l.len() + 1).sum();
+            return after_done + byte_offset;
+        }
+    }
+
+    // No next header found — insert at end.
+    content.len()
+}
+
+/// Auto-detect the plan phase for a goal run.
+///
+/// Priority (first match wins):
+/// 1. `--phase` explicit flag (never called here — handled by caller)
+/// 2. Semver found in goal title (e.g., `"v0.15.15.2 — Fix auth"` → `v0.15.15.2`)
+/// 3. Exactly one phase currently `in_progress` in PLAN.md → use it
+/// 4. None of the above → generate a gap semver and insert stub into PLAN.md
+///
+/// Returns `(phase_id, was_auto_detected, message_to_print)`.
+pub fn auto_detect_phase(project_root: &Path, title: &str, quiet: bool) -> Option<String> {
+    let plan_path = project_root.join("PLAN.md");
+    if !plan_path.exists() {
+        return None;
+    }
+    let phases = load_plan(project_root).unwrap_or_default();
+
+    // 2. Semver in title.
+    if let Some(phase_id) = extract_semver_from_title(title) {
+        // Verify it's actually a known phase.
+        if phases.iter().any(|p| phase_ids_match(&p.id, &phase_id)) {
+            if !quiet {
+                println!("Auto-linked phase from title: {}", phase_id);
+            }
+            return Some(phase_id);
+        }
+        // Unknown phase from title — still use it (could be a new phase being named).
+        if !quiet {
+            println!(
+                "Phase ID extracted from title: {} (not yet in PLAN.md)",
+                phase_id
+            );
+        }
+        return Some(phase_id);
+    }
+
+    // 3. Exactly one in_progress phase.
+    if let Some(phase_id) = find_single_in_progress(&phases) {
+        if !quiet {
+            println!("Auto-linked phase: {} (currently in_progress)", phase_id);
+        }
+        return Some(phase_id);
+    }
+
+    // 4. No match → generate gap semver and insert stub.
+    let last_done = last_completed_phase_id(&phases);
+    let gap_id = create_gap_semver(&last_done, &phases);
+    if !quiet {
+        println!(
+            "No phase specified — inserted ad-hoc phase {} in PLAN.md. \
+             Use --phase to target a planned phase instead.",
+            gap_id
+        );
+    }
+    let _ = insert_adhoc_phase(project_root, &gap_id, title);
+    Some(gap_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4581,5 +4795,210 @@ Build it.
             "in_progress uses [~]"
         );
         assert!(checklist.contains("[ ] Phase v0.3.0"), "pending uses [ ]");
+    }
+
+    // ── Phase auto-detection tests (v0.15.15.2) ──────────────────
+
+    #[test]
+    fn extract_semver_from_title_with_version_prefix() {
+        assert_eq!(
+            extract_semver_from_title("v0.15.15.2 — Fix auth"),
+            Some("v0.15.15.2".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_semver_from_title_three_part() {
+        assert_eq!(
+            extract_semver_from_title("v0.15.0 — Initial release"),
+            Some("v0.15.0".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_semver_from_title_no_version() {
+        assert_eq!(extract_semver_from_title("fix auth bug"), None);
+        assert_eq!(extract_semver_from_title("implement login flow"), None);
+    }
+
+    #[test]
+    fn find_single_in_progress_returns_unique() {
+        let phases = vec![
+            PlanPhase {
+                id: "v0.1.0".to_string(),
+                title: "Done".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+            PlanPhase {
+                id: "v0.2.0".to_string(),
+                title: "Running".to_string(),
+                status: PlanStatus::InProgress,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+            PlanPhase {
+                id: "v0.3.0".to_string(),
+                title: "Pending".to_string(),
+                status: PlanStatus::Pending,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+        ];
+        assert_eq!(find_single_in_progress(&phases), Some("v0.2.0".to_string()));
+    }
+
+    #[test]
+    fn find_single_in_progress_returns_none_when_multiple() {
+        let phases = vec![
+            PlanPhase {
+                id: "v0.1.0".to_string(),
+                title: "Running 1".to_string(),
+                status: PlanStatus::InProgress,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+            PlanPhase {
+                id: "v0.2.0".to_string(),
+                title: "Running 2".to_string(),
+                status: PlanStatus::InProgress,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+        ];
+        assert_eq!(find_single_in_progress(&phases), None);
+    }
+
+    #[test]
+    fn find_single_in_progress_returns_none_when_zero() {
+        let phases = vec![PlanPhase {
+            id: "v0.1.0".to_string(),
+            title: "Done".to_string(),
+            status: PlanStatus::Done,
+            depends_on: vec![],
+            human_review_items: vec![],
+        }];
+        assert_eq!(find_single_in_progress(&phases), None);
+    }
+
+    #[test]
+    fn create_gap_semver_first_slot() {
+        let phases = vec![PlanPhase {
+            id: "v0.15.15.1".to_string(),
+            title: "Done".to_string(),
+            status: PlanStatus::Done,
+            depends_on: vec![],
+            human_review_items: vec![],
+        }];
+        assert_eq!(create_gap_semver("v0.15.15.1", &phases), "v0.15.15.1.1");
+    }
+
+    #[test]
+    fn create_gap_semver_increments_when_slot_taken() {
+        let phases = vec![
+            PlanPhase {
+                id: "v0.15.15.1".to_string(),
+                title: "Done".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+            PlanPhase {
+                id: "v0.15.15.1.1".to_string(),
+                title: "Ad-hoc 1".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+        ];
+        assert_eq!(create_gap_semver("v0.15.15.1", &phases), "v0.15.15.1.2");
+    }
+
+    #[test]
+    fn create_gap_semver_skips_taken_slots() {
+        let phases = vec![
+            PlanPhase {
+                id: "v0.15.15.1".to_string(),
+                title: "Done".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+            PlanPhase {
+                id: "v0.15.15.1.1".to_string(),
+                title: "Ad-hoc 1".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+            PlanPhase {
+                id: "v0.15.15.1.2".to_string(),
+                title: "Ad-hoc 2".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+        ];
+        assert_eq!(create_gap_semver("v0.15.15.1", &phases), "v0.15.15.1.3");
+    }
+
+    #[test]
+    fn insert_adhoc_phase_adds_stub_to_plan() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let plan_path = dir.path().join("PLAN.md");
+        std::fs::write(
+            &plan_path,
+            "# Plan\n\n### v0.1.0 — Done phase\n<!-- status: done -->\nSome content.\n\n### v0.2.0 — Pending\n<!-- status: pending -->\n",
+        ).unwrap();
+        insert_adhoc_phase(dir.path(), "v0.1.0.1", "Fix auth regression").unwrap();
+        let updated = std::fs::read_to_string(&plan_path).unwrap();
+        assert!(
+            updated.contains("v0.1.0.1"),
+            "phase ID inserted: {}",
+            updated
+        );
+        assert!(
+            updated.contains("Fix auth regression"),
+            "title inserted: {}",
+            updated
+        );
+        assert!(
+            updated.contains("<!-- status: in_progress -->"),
+            "in_progress marker: {}",
+            updated
+        );
+    }
+
+    #[test]
+    fn insert_adhoc_phase_is_noop_if_phase_exists() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let plan_path = dir.path().join("PLAN.md");
+        std::fs::write(
+            &plan_path,
+            "# Plan\n\n### v0.1.0.1 — Already there\n<!-- status: in_progress -->\n",
+        )
+        .unwrap();
+        insert_adhoc_phase(dir.path(), "v0.1.0.1", "Should not duplicate").unwrap();
+        let updated = std::fs::read_to_string(&plan_path).unwrap();
+        // Should appear only once.
+        assert_eq!(
+            updated.matches("v0.1.0.1").count(),
+            1,
+            "should not duplicate: {}",
+            updated
+        );
+    }
+
+    #[test]
+    fn extract_semver_phase_overrides_in_progress() {
+        // When the title has a semver, it wins over the in_progress check.
+        let title = "v0.15.15.2 — One-Command Release";
+        assert_eq!(
+            extract_semver_from_title(title),
+            Some("v0.15.15.2".to_string())
+        );
     }
 }

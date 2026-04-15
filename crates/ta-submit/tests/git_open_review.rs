@@ -164,6 +164,7 @@ fn make_draft_package() -> DraftPackage {
         agent_decision_log: vec![],
         goal_shortref: None,
         draft_seq: 0,
+        plan_phase: None,
     }
 }
 

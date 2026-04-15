@@ -1072,7 +1072,30 @@ fn framework_doctor(name: &str, project_root: &std::path::Path) -> anyhow::Resul
         }
     }
 
-    // 2. For Ollama-based frameworks, check the endpoint.
+    // 2. For ta-agent-ollama profiles, verify the binary is present (v0.15.15.2).
+    if fw.command == "ta-agent-ollama" {
+        let agent_found = which::which("ta-agent-ollama").is_ok() || {
+            let sibling = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("ta-agent-ollama")));
+            #[cfg(windows)]
+            let sibling = sibling.map(|p| p.with_extension("exe"));
+            sibling.map(|p| p.exists()).unwrap_or(false)
+        };
+        if agent_found {
+            println!("  [OK] ta-agent-ollama binary is installed");
+        } else {
+            all_ok = false;
+            println!("  [FAIL] ta-agent-ollama binary not found on PATH or sibling to ta.");
+            println!(
+                "         Fix: update your TA installation to v0.15.15.2 or later — \
+                 ta-agent-ollama is now bundled in the release packages."
+            );
+            println!("         Manual: cargo install ta-agent-ollama  (or build from source)");
+        }
+    }
+
+    // 3. For Ollama-based frameworks, check the endpoint.
     if fw.command == "ta-agent-ollama" || fw.args.iter().any(|a| a.contains("localhost:11434")) {
         let base_url = fw
             .args
@@ -1102,7 +1125,7 @@ fn framework_doctor(name: &str, project_root: &std::path::Path) -> anyhow::Resul
         }
     }
 
-    // 3. Check for required API keys based on framework.
+    // 4. Check for required API keys based on framework.
     if fw.command == "claude" || fw.name.contains("claude") {
         if std::env::var("ANTHROPIC_API_KEY").is_ok() {
             println!("  [OK] ANTHROPIC_API_KEY is set");
@@ -1122,7 +1145,7 @@ fn framework_doctor(name: &str, project_root: &std::path::Path) -> anyhow::Resul
         }
     }
 
-    // 4. Summary.
+    // 5. Summary.
     println!();
     if all_ok {
         println!("All checks passed. Framework '{}' is ready to use.", name);
@@ -1498,6 +1521,29 @@ fn install_qwen(size: &str) -> anyhow::Result<()> {
         );
         println!("  Run: ta run \"your goal\" --agent {}", profile_name);
     }
+
+    // Verify ta-agent-ollama is findable (v0.15.15.2).
+    // Check PATH first, then sibling to the current `ta` binary.
+    let ollama_agent_found = which::which("ta-agent-ollama").is_ok() || {
+        let sibling = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("ta-agent-ollama")));
+        #[cfg(windows)]
+        let sibling = sibling.map(|p| p.with_extension("exe"));
+        sibling.map(|p| p.exists()).unwrap_or(false)
+    };
+    if !ollama_agent_found {
+        println!();
+        println!(
+            "WARNING: ta-agent-ollama binary not found — update your TA installation \
+             to v0.15.15.2 or later."
+        );
+        println!("  Without it, `ta run --agent qwen3.5-<size>` will fail at launch time.");
+        println!(
+            "  Fix: reinstall TA from https://github.com/Trusted-Autonomy/TrustedAutonomy/releases"
+        );
+    }
+
     println!();
     println!("To check prerequisites: ta agent doctor <profile-name>");
     Ok(())

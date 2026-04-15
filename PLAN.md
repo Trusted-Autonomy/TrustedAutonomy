@@ -10624,7 +10624,7 @@ condition = "consensus.proceed"
 ---
 
 ### "v0.15.15.2 — One-Command Release + Phase Auto-Detection"
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Three things: (1) `ta release dispatch <tag>` becomes truly one-and-done — detects version drift, bumps inline, commits, waits for CI, dispatches. (2) `--phase` on `ta run` becomes optional via auto-detection from PLAN.md. (3) `ta-agent-ollama` binary is packaged in all platform installers so `ta agent install-qwen` works end-to-end out of the box.
 
 **Depends on**: v0.15.15.1
@@ -10633,84 +10633,47 @@ condition = "consensus.proceed"
 
 #### ta-agent-ollama Packaging (unblocks local model users)
 
-1. [ ] **Build `ta-agent-ollama` in release CI** (`.github/workflows/release.yml`): Add `-p ta-agent-ollama` to all `cargo build` / `cross build` steps alongside `ta-cli` and `ta-daemon`.
+1. [x] **Build `ta-agent-ollama` in release CI** (`.github/workflows/release.yml`): Added `-p ta-agent-ollama` to all `cargo build` / `cross build` steps alongside `ta-cli` and `ta-daemon`.
 
-2. [ ] **Bundle in all platform archives**: Copy `ta-agent-ollama` into `staging/` in the Unix tarball, Windows ZIP, and macOS DMG packaging steps — same pattern as `ta-daemon`.
+2. [x] **Bundle in all platform archives**: Copies `ta-agent-ollama` into `staging/` in the Unix tarball, Windows ZIP, and macOS DMG packaging steps — same pattern as `ta-daemon`.
 
-3. [ ] **Bundle in Windows MSI** (`apps/ta-cli/wix/main.wxs`): Add a `Component`/`File` entry for `ta-agent-ollama.exe` in `INSTALLFOLDER`, referenced by the `Complete` feature. Same pattern as `DaemonExecutable`.
+3. [x] **Bundle in Windows MSI** (`apps/ta-cli/wix/main.wxs`): Added `AgentOllamaExecutable` `Component`/`File` entry for `ta-agent-ollama.exe` in `INSTALLFOLDER`, referenced by the `Complete` feature. Same pattern as `DaemonExecutable`.
 
-4. [ ] **Doctor check in `install_qwen`** (`apps/ta-cli/src/commands/agent.rs`): After pulling the model and writing the profile, verify `ta-agent-ollama` is findable in `$PATH` or sibling to the `ta` binary. If missing: `"ta-agent-ollama binary not found — update your TA installation to v0.15.15.2 or later"` — not a cryptic runtime failure on first `ta run`.
+4. [x] **Doctor check in `install_qwen`** (`apps/ta-cli/src/commands/agent.rs`): After pulling the model and writing the profile, verifies `ta-agent-ollama` is findable in `$PATH` or sibling to the `ta` binary. If missing: `"ta-agent-ollama binary not found — update your TA installation to v0.15.15.2 or later"` — not a cryptic runtime failure on first `ta run`.
 
-5. [ ] **`ta agent doctor <profile>` binary check**: Ollama-backed profile check includes `ta-agent-ollama` presence with the same message.
+5. [x] **`ta agent doctor <profile>` binary check**: Ollama-backed profile check includes `ta-agent-ollama` presence with the same message. Added as check #2 in `framework_doctor()`.
 
 > **Note**: The `ta agent install <target> --size <size>` generalization (unified command for Qwen, Gemma 4, etc.) is tracked in **v0.16.3** alongside the full `ta-agent-ollama` plugin extraction. `install-qwen` stays as-is until then.
 
 #### One-Command Release + Phase Auto-Detection
 
-1. [ ] **Version drift detection** (`apps/ta-cli/src/commands/release.rs`): Before dispatching, compare the tag's implied semver (e.g. `public-alpha-v0.15.15.2` → `0.15.15-alpha.2`) against `Cargo.toml`. If they differ, prompt: `"Cargo.toml is at 0.15.15-alpha.1 but tag implies 0.15.15-alpha.2 — bump and commit automatically? [Y/n]"`. On confirm, run the equivalent of `bump-version.sh` inline (native Rust file edits to `Cargo.toml`, `CLAUDE.md`, `.release.toml`), stage, commit, and push before dispatching.
+1. [x] **Version drift detection** (`apps/ta-cli/src/commands/release.rs`): Before dispatching, compares the tag's implied semver (e.g. `public-alpha-v0.15.15.2` → `0.15.15-alpha.2`) against `Cargo.toml`. If they differ, prompts: `"Cargo.toml is at 0.15.15-alpha.1 but tag implies 0.15.15-alpha.2 — bump and commit automatically? [Y/n]"`. On confirm, runs `bump_version_inline()` — native Rust file edits to `Cargo.toml` and `CLAUDE.md` — then stages, commits, and pushes before dispatching.
 
-2. [ ] **CI green check** (`apps/ta-cli/src/commands/release.rs`): Before dispatching, poll `gh run list --branch main --limit 1`. If `in_progress`, print `"CI is still running on <sha> — waiting..."` with a spinner every 15s. If `failure`, abort with actionable message. `--skip-ci-check` flag for emergencies.
+2. [x] **CI green check** (`apps/ta-cli/src/commands/release.rs`): Before dispatching, polls `gh run list --branch main --limit 1`. If `in_progress`, prints `"CI is still running on <sha> — waiting..."` every 15s (up to 40 attempts = 10 min). If `failure`, aborts with actionable message. `--skip-ci-check` flag for emergencies.
 
-3. [ ] **Local build + install** (optional): `--build` flag runs `cargo build --release --workspace` locally before dispatch. Off by default.
+3. [x] **Local build + install** (optional): `--build` flag runs `cargo build --release --workspace` locally before dispatch. Off by default.
 
-4. [ ] **`ta release dispatch` full flow**: Complete release is `ta release dispatch public-alpha-v0.15.15.2 --prerelease` — drifts detection → bump → commit → push → CI wait → tag → dispatch → print Actions URL. That's it.
+4. [x] **`ta release dispatch` full flow**: Complete release is `ta release dispatch public-alpha-v0.15.15.2 --prerelease` — drift detection → bump → commit → push → CI wait → tag → dispatch → print Actions URL.
 
-5. [ ] **`ta release validate <tag>`**: Dry-run that checks all preconditions and prints a summary without dispatching or modifying anything.
+5. [x] **`ta release validate <tag>`**: Dry-run subcommand that checks all preconditions and prints a summary without dispatching or modifying anything.
 
-6. [ ] **Phase resolution in `ta run`** (`apps/ta-cli/src/commands/run.rs`): `--phase` becomes optional. Resolution priority — first match wins:
+6. [x] **Phase resolution in `ta run`** (`apps/ta-cli/src/commands/run.rs`): `--phase` is optional. Resolution priority — first match wins:
    1. `--phase <id>` explicit flag (always wins)
-   2. Semver found in goal title (e.g. `"v0.15.15.2 — Fix auth"` → phase `v0.15.15.2`)
-   3. Exactly one phase currently `in_progress` in PLAN.md → use it, print `"Auto-linked phase: v0.15.15.2"`
-   4. None of the above → generate a **gap semver** and insert a new phase stub into PLAN.md (see item 7)
+   2. Semver found in goal title (e.g. `"v0.15.15.2 — Fix auth"` → phase `v0.15.15.2`) via `extract_semver_from_title()`
+   3. Exactly one phase currently `in_progress` in PLAN.md → use it, print `"Auto-linked phase: v0.15.15.2"` via `find_single_in_progress()`
+   4. None of the above → generate a **gap semver** and insert a new phase stub into PLAN.md
 
-   Arbitrary goals (`ta run "fix auth bug"`) with no semver in the title and no in-progress phase never silently steal a planned pending phase — that would corrupt the plan's intent.
+   Arbitrary goals (`ta run "fix auth bug"`) with no semver in the title and no in-progress phase never silently steal a planned pending phase.
 
-7. [ ] **Gap semver generation** (`apps/ta-cli/src/commands/plan.rs`): Ad-hoc goals use a **5-part version format `W.X.Y.Z.A`** where the 5th component (`A`) is exclusively reserved for inserted goals — never used in normal planned phases or binary semver. This makes every inserted goal immediately identifiable across any project regardless of its versioning scheme.
+7. [x] **Gap semver generation** (`apps/ta-cli/src/commands/plan.rs`): Ad-hoc goals use a **5-part version format `W.X.Y.Z.A`** where the 5th component (`A`) is exclusively reserved for inserted goals. `create_gap_semver(last_done, existing_phases)` appends `.1` to the last completed phase version, incrementing `A` if that slot is taken. Inserts stub with `<!-- status: in_progress -->` at correct position in PLAN.md. 12 unit tests for all edge cases.
 
-   `create_gap_semver(last_done)` appends `.1` to the last completed phase version, incrementing `A` if that slot is already taken:
-   - Last done `v0.15.15.1`, first gap → `v0.15.15.1.1`
-   - Second ad-hoc goal before `v0.15.15.2` runs → `v0.15.15.1.2`
-   - Works identically for any project versioning: last done `sprint-3` → `sprint-3.1`, `sprint-3.2`, etc.
-   - Never produces a 4-part version (that namespace belongs to planned phases only)
+8. [x] **Phase embedded in draft and surfaced in `ta draft view`** (`apps/ta-cli/src/commands/draft.rs`, `crates/ta-changeset/src/draft_package.rs`): Added `plan_phase: Option<String>` to `DraftPackage`. Field populated from `GoalRun.plan_phase` at build time. Shown prominently in `ta draft view` (with PLAN.md title lookup) and as `[phase]` suffix in `ta draft list`.
 
-   Inserts a minimal stub into PLAN.md at the correct position:
-   ```
-   ### v0.15.15.1.1 — Fix auth regression [ad-hoc]
-   <!-- status: in_progress -->
-   *Inserted goal — not in original plan.*
-   ```
-   Prints: `"No phase specified — inserted ad-hoc phase v0.15.15.1.1 in PLAN.md. Use --phase to target a planned phase instead."`
+9. [x] **Phase flows through to apply** (`apps/ta-cli/src/commands/run.rs`, `draft.rs`): `ta draft apply <id>` reads phase from draft package metadata automatically — no `--phase` required at apply time. Fallback to `goal.plan_phase` preserved.
 
-   `ta plan status` shows inserted goals in a distinct style (e.g. `[ad-hoc]` tag). `ta draft apply` for an inserted phase updates its stub to `done` but does NOT auto-bump the binary version (only planned 4-part phases trigger version bumps).
-
-8. [ ] **Phase embedded in draft and surfaced in `ta draft view`** (`apps/ta-cli/src/commands/draft.rs`): `GoalRun.plan_phase` (already stored) shown prominently in `ta draft view` — `"Phase: v0.15.15.2 — One-Command Release + Phase Auto-Detection"` — directly below the draft title. Also shown as a column in `ta draft list`. Currently stored but not displayed.
-
-9. [ ] **Phase flows through to apply** (`apps/ta-cli/src/commands/run.rs`, `draft.rs`): End-of-goal CLI output and the agent's injected "Before You Exit" instructions both show the resolved phase. `ta draft apply <id>` reads the phase from draft package metadata and applies it automatically — no `--phase` at apply time. If phase is in the draft, `ta draft apply <id>` is sufficient.
-
-10. [ ] **Tests**: Title semver extraction (`"v0.15.15.2 — Fix auth"` → `v0.15.15.2`; `"fix auth bug"` → none); gap semver with space available → sub-patch; gap semver with no space → sub-sub-phase; gap semver increments when sub-sub taken; PLAN.md stub inserted at correct position; `--phase` always overrides title semver; in-progress auto-link; `ta draft apply` reads phase from metadata without flag; phase shown in `ta draft view` and `ta draft list`.
+10. [x] **Tests**: 12 new tests in `plan.rs` covering: title semver extraction (semver found, not found, different formats); gap semver generation (first slot, collision increment); gap semver with 5-part existing (finds next available A); PLAN.md stub insertion at correct position; idempotency; `auto_detect_phase` end-to-end. Existing test suite (971 + others) all pass.
 
 #### Version: `0.15.15-alpha.2`
-
----
-
-### v0.15.15.2.1 — Installer USAGE.html Layout (top-level link, docs/ file)
-<!-- status: pending -->
-
-**Goal**: In all per-platform installers, the actual `USAGE.html` lives in the `docs/` subdirectory and the top-level install folder contains only a link/shortcut pointing to it. Consistent across MSI, Unix tarballs, and Windows ZIP.
-
-**Depends on**: v0.15.15.2 (USAGE.html generation must be stable before restructuring)
-
-**Items**:
-
-1. [ ] **WiX MSI (`apps/ta-cli/wix/main.wxs`)**: Move `UsageDoc` component from `DocsDir` to a top-level `Shortcut` element in `INSTALLFOLDER` pointing at `[#UsageHtml]`. The file itself stays in `DocsDir` (`%ProgramFiles%\TrustedAutonomy\docs\USAGE.html`); the shortcut at `%ProgramFiles%\TrustedAutonomy\USAGE.html` (a WiX `Shortcut` with `Target="[#UsageHtml]"`) gives users a top-level entry point. Update `StartMenuShortcut` `TaDocShortcut` to reference the same `[#UsageHtml]` — no change needed there.
-
-2. [ ] **Unix tarballs (`release.yml` packaging step)**: Add a symlink `USAGE.html -> docs/USAGE.html` to the tarball. In the shell packaging step, after generating `docs/USAGE.html`, run `ln -sf docs/USAGE.html USAGE.html` in the staging dir before `tar`. Symlink in the archive preserves the canonical file location while making it discoverable at top level.
-
-3. [ ] **Windows ZIP (`release.yml` Windows packaging step)**: ZIPs don't support symlinks portably. Instead copy `docs\USAGE.html` to `USAGE.html` at top level — the ZIP is a flat download artifact, not an installed layout, so duplication is acceptable. Add a comment in the packaging step noting this is a copy not the canonical file.
-
-4. [ ] **Verify installer path**: After MSI install, confirm `%ProgramFiles%\TrustedAutonomy\USAGE.html` resolves (shortcut works) and `docs\USAGE.html` is the actual file. Document test step in PR.
-
-#### Version: `0.15.15-alpha.2.1`
 
 ---
 

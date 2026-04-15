@@ -1037,8 +1037,28 @@ pub fn execute(
         follow_up_goal,
     )?;
     let title = title.as_deref();
-    let phase = phase.as_deref();
     let follow_up = follow_up.as_ref();
+
+    // ── Phase auto-detection (v0.15.15.2) ──────────────────────────
+    //
+    // When --phase is not explicitly provided, try to resolve a phase automatically:
+    // 1. --phase explicit (already resolved above via smart follow-up)
+    // 2. Semver in goal title ("v0.15.15.2 — Fix auth" → v0.15.15.2)
+    // 3. Exactly one in_progress phase in PLAN.md → use it
+    // 4. None → generate gap semver and insert ad-hoc stub into PLAN.md
+    //
+    // Only runs when PLAN.md exists and phase is still None.
+    let auto_detected_phase: Option<String> = if phase.is_none() {
+        let source_root = source
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| config.workspace_root.clone());
+        title.and_then(|t| plan::auto_detect_phase(&source_root, t, quiet))
+    } else {
+        None
+    };
+    // Merge: explicit phase (from flag or smart follow-up) takes priority.
+    let phase_owned: Option<String> = phase.or(auto_detected_phase);
+    let phase: Option<&str> = phase_owned.as_deref();
 
     // ── Phase-order guard (v0.14.3) ──────────────────────────────
     //
@@ -6356,6 +6376,7 @@ pre_launch:
             agent_decision_log: vec![],
             goal_shortref: None,
             draft_seq: 0,
+            plan_phase: None,
         };
 
         // Save the draft package.
@@ -6521,6 +6542,7 @@ pre_launch:
             agent_decision_log: vec![],
             goal_shortref: None,
             draft_seq: 0,
+            plan_phase: None,
         };
 
         super::super::draft::save_package(&config, &parent_draft).unwrap();

@@ -77,12 +77,14 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }} -p ta-cli
           cargo build --release --target ${{ matrix.target }} -p ta-daemon
+          cargo build --release --target ${{ matrix.target }} -p ta-agent-ollama
 
       - name: Build binary (cross)
         if: matrix.cross == true
         run: |
           cross build --release --target ${{ matrix.target }} -p ta-cli
           cross build --release --target ${{ matrix.target }} -p ta-daemon
+          cross build --release --target ${{ matrix.target }} -p ta-agent-ollama
 
       - name: Package binary with docs (Unix)
         if: runner.os != 'Windows'
@@ -90,6 +92,7 @@ jobs:
           mkdir -p staging
           cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} staging/
           cp target/${{ matrix.target }}/release/ta-daemon staging/
+          cp target/${{ matrix.target }}/release/ta-agent-ollama staging/ 2>/dev/null || true
           # Stamp the release version into USAGE.md before packaging
           if [ -f docs/USAGE.md ]; then
             sed "s/^\*\*Version\*\*:.*/**Version**: ${{ steps.get_version.outputs.version }}/" \
@@ -144,6 +147,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path staging, artifacts | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe" staging/
           Copy-Item "target/${{ matrix.target }}/release/ta-daemon.exe" staging/
+          if (Test-Path "target/${{ matrix.target }}/release/ta-agent-ollama.exe") {
+            Copy-Item "target/${{ matrix.target }}/release/ta-agent-ollama.exe" staging/
+          }
           # Stamp the release version into USAGE.md before packaging
           if (Test-Path "docs/USAGE.md") {
             (Get-Content "docs/USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: ${{ steps.get_version.outputs.version }}" |
@@ -200,6 +206,13 @@ jobs:
             Copy-Item "scripts\ta-studio.bat" "$releaseDir\ta-studio.bat"
           }
 
+          # Copy ta-agent-ollama.exe for MSI bundling.
+          if (Test-Path "$releaseDir\ta-agent-ollama.exe") {
+            Write-Host "ta-agent-ollama.exe already in release dir"
+          } else {
+            Write-Host "ta-agent-ollama.exe not found — local model support will not be bundled in MSI"
+          }
+
           # Copy vcs-perforce plugin files for MSI bundling.
           New-Item -ItemType Directory -Force -Path "$releaseDir\plugins\vcs" | Out-Null
           if (Test-Path "plugins\vcs-perforce") {
@@ -237,9 +250,13 @@ jobs:
           PKG_ROOT="pkgbuild-root"
           mkdir -p "${PKG_ROOT}/usr/local/bin"
 
-          # Install both binaries into the pkg root.
+          # Install binaries into the pkg root.
           cp "target/${{ matrix.target }}/release/ta" "${PKG_ROOT}/usr/local/bin/"
           cp "target/${{ matrix.target }}/release/ta-daemon" "${PKG_ROOT}/usr/local/bin/"
+          if [ -f "target/${{ matrix.target }}/release/ta-agent-ollama" ]; then
+            cp "target/${{ matrix.target }}/release/ta-agent-ollama" "${PKG_ROOT}/usr/local/bin/"
+            chmod +x "${PKG_ROOT}/usr/local/bin/ta-agent-ollama"
+          fi
           chmod +x "${PKG_ROOT}/usr/local/bin/ta" "${PKG_ROOT}/usr/local/bin/ta-daemon"
 
           # Component package.

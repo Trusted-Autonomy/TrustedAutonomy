@@ -71,6 +71,14 @@
             KeyPath="yes" />
         </Component>
 
+        <Component Id="AgentOllamaExecutable" Guid="D3E4F5A6-B7C8-4D9E-0F1A-2B3C4D5E6F7B">
+          <File
+            Id="TaAgentOllamaBinary"
+            Name="ta-agent-ollama.exe"
+            Source="$(var.SourceDir)\ta-agent-ollama.exe"
+            KeyPath="yes" />
+        </Component>
+
         <Component Id="TaStudioBat" Guid="B7C8D9E0-F1A2-4B3C-4D5E-6F7A8B9C0D1E">
           <File
             Id="TaStudioBatFile"
@@ -163,6 +171,7 @@
     <Feature Id="Complete" Title="Trusted Autonomy" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="DaemonExecutable" />
+      <ComponentRef Id="AgentOllamaExecutable" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="UsageDoc" />
       <ComponentRef Id="VcsPerforce" />

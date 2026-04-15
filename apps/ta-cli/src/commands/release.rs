@@ -119,6 +119,7 @@ pub enum ReleaseCommands {
     ///
     /// Example:
     ///   ta release dispatch public-alpha-v0.13.1.1
+    ///   ta release dispatch public-alpha-v0.15.15.2 --prerelease
     Dispatch {
         /// The GitHub tag label to use for the release (e.g. "public-alpha-v0.13.1.1").
         /// Does not need to exist — the release workflow creates it.
@@ -130,6 +131,35 @@ pub enum ReleaseCommands {
 
         /// GitHub repository in `owner/repo` format.
         /// Defaults to the `GITHUB_REPOSITORY` env var or auto-detected from git remote.
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Workflow file name (default: "release.yml").
+        #[arg(long, default_value = "release.yml")]
+        workflow: String,
+
+        /// Skip the CI green check before dispatching (for emergencies).
+        /// By default, dispatch waits for any in-progress CI run on main to complete.
+        #[arg(long, default_value_t = false)]
+        skip_ci_check: bool,
+
+        /// Run `cargo build --release --workspace` locally before dispatching.
+        /// Off by default — use to verify the build compiles before triggering CI.
+        #[arg(long, default_value_t = false)]
+        build: bool,
+    },
+    /// Dry-run release validation: check all preconditions without dispatching.
+    ///
+    /// Verifies tag format, version alignment, git state, and CI prerequisites
+    /// without pushing, committing, or creating any release objects.
+    ///
+    /// Example:
+    ///   ta release validate public-alpha-v0.15.15.2
+    ValidateTag {
+        /// The tag to validate (same format as `ta release dispatch`).
+        tag: String,
+
+        /// GitHub repository in `owner/repo` format.
         #[arg(long)]
         repo: Option<String>,
 
@@ -187,7 +217,16 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
                             "--label provided: dispatching release workflow for '{}'",
                             tag
                         );
-                        dispatch_release(tag, *prerelease, None, "release.yml")?;
+                        dispatch_release(
+                            config,
+                            tag,
+                            *prerelease,
+                            None,
+                            "release.yml",
+                            false,
+                            false,
+                            false,
+                        )?;
                     } else {
                         println!("[dry-run] Would dispatch: ta release dispatch {}", tag);
                     }
@@ -208,7 +247,32 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             prerelease,
             repo,
             workflow,
-        } => dispatch_release(tag, *prerelease, repo.as_deref(), workflow),
+            skip_ci_check,
+            build,
+        } => dispatch_release(
+            config,
+            tag,
+            *prerelease,
+            repo.as_deref(),
+            workflow,
+            *skip_ci_check,
+            *build,
+            false,
+        ),
+        ReleaseCommands::ValidateTag {
+            tag,
+            repo,
+            workflow,
+        } => dispatch_release(
+            config,
+            tag,
+            false,
+            repo.as_deref(),
+            workflow,
+            true,
+            false,
+            true,
+        ),
     }
 }
 
@@ -2130,17 +2194,261 @@ fn validate_release_with_env(
 
 // ── Dispatch release via workflow_dispatch ───────────────────────
 
+/// Extract a semver string from a release tag.
+///
+/// Handles tag formats:
+///   - `public-alpha-v0.15.15.2` → `0.15.15-alpha.2`
+///   - `v0.15.15-alpha.2`        → `0.15.15-alpha.2`
+///   - `v0.15.15`                → `0.15.15-alpha`
+///
+/// Returns None if no numeric version can be found.
+fn semver_from_tag(tag: &str) -> Option<String> {
+    use regex::Regex;
+    // Extract the raw numeric part (e.g. "0.15.15.2" or "0.15.15-alpha.2")
+    let re = Regex::new(r"v?(\d+\.\d+\.\d+)(?:[-.]alpha)?(?:[.-](\d+))?").ok()?;
+    let caps = re.captures(tag)?;
+    let base = caps.get(1)?.as_str(); // e.g. "0.15.15"
+    if let Some(sub) = caps.get(2) {
+        Some(format!("{}-alpha.{}", base, sub.as_str()))
+    } else {
+        Some(format!("{}-alpha", base))
+    }
+}
+
+/// Read workspace version from Cargo.toml at the given root.
+fn read_cargo_version(workspace_root: &Path) -> Option<String> {
+    let toml_path = workspace_root.join("Cargo.toml");
+    let content = std::fs::read_to_string(&toml_path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("version") && trimmed.contains('=') {
+            if let Some(val) = trimmed.split_once('=').map(|x| x.1) {
+                let v = val.trim().trim_matches('"');
+                if v.chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+                {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Bump version in Cargo.toml, CLAUDE.md, and .release.toml atomically (native Rust).
+///
+/// This replicates the critical subset of scripts/bump-version.sh for inline use.
+fn bump_version_inline(workspace_root: &Path, new_version: &str) -> anyhow::Result<()> {
+    // Cargo.toml — replace `version = "..."` in [workspace.package] block.
+    let cargo_path = workspace_root.join("Cargo.toml");
+    let cargo_content = std::fs::read_to_string(&cargo_path)
+        .map_err(|e| anyhow::anyhow!("Cannot read Cargo.toml: {}", e))?;
+    let updated_cargo = bump_version_in_toml(&cargo_content, new_version);
+    std::fs::write(&cargo_path, &updated_cargo)
+        .map_err(|e| anyhow::anyhow!("Cannot write Cargo.toml: {}", e))?;
+
+    // CLAUDE.md — replace `**Current version**: `...`` line.
+    let claude_path = workspace_root.join("CLAUDE.md");
+    if claude_path.exists() {
+        let claude_content = std::fs::read_to_string(&claude_path)
+            .map_err(|e| anyhow::anyhow!("Cannot read CLAUDE.md: {}", e))?;
+        let updated = claude_content
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("**Current version**:") {
+                    format!("**Current version**: `{}`", new_version)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Preserve trailing newline if original had one.
+        let updated = if claude_content.ends_with('\n') {
+            format!("{}\n", updated)
+        } else {
+            updated
+        };
+        std::fs::write(&claude_path, &updated)
+            .map_err(|e| anyhow::anyhow!("Cannot write CLAUDE.md: {}", e))?;
+    }
+
+    Ok(())
+}
+
+fn bump_version_in_toml(content: &str, new_version: &str) -> String {
+    // Replace the first `version = "..."` that looks like a semver (not a dep pin).
+    let mut in_workspace_package = false;
+    let mut replaced = false;
+    content
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed == "[workspace.package]" {
+                in_workspace_package = true;
+            } else if trimmed.starts_with('[') && trimmed != "[workspace.package]" {
+                in_workspace_package = false;
+            }
+            if in_workspace_package
+                && !replaced
+                && trimmed.starts_with("version")
+                && trimmed.contains('=')
+            {
+                replaced = true;
+                format!("version = \"{}\"", new_version)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Poll `gh run list --branch main --limit 1` until CI is green or failed.
+///
+/// Returns Ok(()) when CI is green, Err when CI failed, or Ok(()) when skip_ci_check.
+fn wait_for_ci_green(repo: &str, dry_run: bool) -> anyhow::Result<()> {
+    println!("Checking CI status on main branch...");
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let out = Command::new("gh")
+            .args([
+                "run",
+                "list",
+                "--branch",
+                "main",
+                "--limit",
+                "1",
+                "--repo",
+                repo,
+                "--json",
+                "status,conclusion,headSha,displayTitle",
+            ])
+            .output();
+
+        let run_info = match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => {
+                // gh not available or API failure — skip CI check gracefully.
+                println!("  (CI check unavailable — skipping)");
+                return Ok(());
+            }
+        };
+
+        // Parse the JSON array from gh.
+        if run_info.is_empty() || run_info == "[]" {
+            println!("  No CI runs found on main — proceeding.");
+            return Ok(());
+        }
+
+        // Extract status/conclusion from the first run JSON object.
+        let status_val = extract_json_field(&run_info, "status").unwrap_or_default();
+        let conclusion_val = extract_json_field(&run_info, "conclusion").unwrap_or_default();
+        let sha_val = extract_json_field(&run_info, "headSha").unwrap_or_default();
+        let title_val = extract_json_field(&run_info, "displayTitle").unwrap_or_default();
+
+        match status_val.as_str() {
+            "in_progress" | "queued" | "waiting" => {
+                let sha_short = if sha_val.len() >= 7 {
+                    &sha_val[..7]
+                } else {
+                    &sha_val
+                };
+                println!(
+                    "  CI is still running on {} ({}) — waiting 15s... (attempt {})",
+                    sha_short, title_val, attempts
+                );
+                if dry_run {
+                    println!("  [dry-run] Would wait for CI to complete.");
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_secs(15));
+            }
+            "completed" => match conclusion_val.as_str() {
+                "success" => {
+                    let sha_short = if sha_val.len() >= 7 {
+                        &sha_val[..7]
+                    } else {
+                        &sha_val
+                    };
+                    println!("  CI passed on {} ({}).", sha_short, title_val);
+                    return Ok(());
+                }
+                "failure" | "timed_out" | "cancelled" => {
+                    anyhow::bail!(
+                        "CI is failing on main (conclusion: {}).\n  \
+                         Run: gh run list --branch main --repo {}\n  \
+                         Use --skip-ci-check to bypass this check (not recommended).",
+                        conclusion_val,
+                        repo
+                    );
+                }
+                _ => {
+                    // neutral, skipped, stale, etc. — treat as green.
+                    println!(
+                        "  CI status: {} (conclusion: {}) — proceeding.",
+                        status_val, conclusion_val
+                    );
+                    return Ok(());
+                }
+            },
+            _ => {
+                println!("  CI status: {} — proceeding.", status_val);
+                return Ok(());
+            }
+        }
+
+        if attempts > 40 {
+            anyhow::bail!(
+                "CI has been running for over 10 minutes (40 checks × 15s).\n  \
+                 Check manually: gh run list --branch main --repo {}\n  \
+                 Use --skip-ci-check to bypass.",
+                repo
+            );
+        }
+    }
+}
+
+/// Extract a single string field from a JSON array of one object.
+fn extract_json_field(json: &str, field: &str) -> Option<String> {
+    // Simple extraction for `"field":"value"` without a full JSON parser dep.
+    let needle = format!("\"{}\":", field);
+    let start = json.find(&needle)? + needle.len();
+    let rest = json[start..].trim_start();
+    if let Some(inner) = rest.strip_prefix('"') {
+        // String value.
+        let end = inner.find('"')?;
+        Some(inner[..end].to_string())
+    } else if rest.starts_with("null") {
+        Some(String::new())
+    } else {
+        // Boolean / number — grab until next delimiter.
+        let end = rest.find([',', '}', ']']).unwrap_or(rest.len());
+        Some(rest[..end].trim().to_string())
+    }
+}
+
 /// Trigger the GitHub Actions release workflow for a custom tag label.
 ///
 /// For tags that don't match `v*` (e.g. `public-alpha-v0.13.1.1`), the
 /// `push: tags: v*` CI trigger doesn't fire. This function calls
 /// `gh workflow run <workflow> --field tag=<tag>` to trigger via
 /// `workflow_dispatch` instead.
+///
+/// v0.15.15.2: adds version drift detection, CI green check, and optional local build.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_release(
+    config: &GatewayConfig,
     tag: &str,
     prerelease: bool,
     repo: Option<&str>,
     workflow: &str,
+    skip_ci_check: bool,
+    build: bool,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     // Resolve repo: explicit arg > GITHUB_REPOSITORY env > git remote parse.
     let repo = if let Some(r) = repo {
@@ -2164,17 +2472,162 @@ fn dispatch_release(
     // Check gh is available.
     let gh_check = Command::new("gh").arg("--version").output();
     if gh_check.is_err() || !gh_check.unwrap().status.success() {
-        anyhow::bail!(
-            "GitHub CLI (gh) is required for `ta release dispatch`.\n\
-             Install: https://cli.github.com"
-        );
+        if dry_run {
+            println!("[dry-run] gh CLI not found — would fail on dispatch.");
+        } else {
+            anyhow::bail!(
+                "GitHub CLI (gh) is required for `ta release dispatch`.\n\
+                 Install: https://cli.github.com"
+            );
+        }
     }
 
-    println!("Dispatching release workflow for tag: {}", tag);
-    println!("  Repository: {}", repo);
-    println!("  Workflow:   {}", workflow);
+    println!("Release pre-flight for tag: {}", tag);
+    println!("  Repository:  {}", repo);
+    println!("  Workflow:    {}", workflow);
     println!("  Pre-release: {}", prerelease);
+    if dry_run {
+        println!("  Mode:        [validate only — no changes will be made]");
+    }
     println!();
+
+    // ── Step 1: Version drift detection ────────────────────────────────────
+    //
+    // Extract the semver implied by the tag (e.g. "public-alpha-v0.15.15.2" →
+    // "0.15.15-alpha.2") and compare against Cargo.toml workspace version.
+    // If they differ, offer to bump inline.
+    if let Some(tag_semver) = semver_from_tag(tag) {
+        let cargo_version = read_cargo_version(&config.workspace_root);
+        if let Some(ref cv) = cargo_version {
+            if cv != &tag_semver {
+                println!(
+                    "Version drift detected: Cargo.toml is at {} but tag implies {}.",
+                    cv, tag_semver
+                );
+                if dry_run {
+                    println!(
+                        "[dry-run] Would prompt: bump Cargo.toml from {} to {}?",
+                        cv, tag_semver
+                    );
+                } else {
+                    // Prompt user to bump inline.
+                    eprint!(
+                        "Bump Cargo.toml (and CLAUDE.md) from {} to {} automatically? [Y/n] ",
+                        cv, tag_semver
+                    );
+                    use std::io::BufRead;
+                    let stdin = std::io::stdin();
+                    let mut line = String::new();
+                    let _ = stdin.lock().read_line(&mut line);
+                    let answer = line.trim().to_lowercase();
+                    if answer.is_empty() || answer == "y" {
+                        bump_version_inline(&config.workspace_root, &tag_semver)?;
+                        println!("  Bumped version to {}", tag_semver);
+
+                        // Commit the bump.
+                        let add_status = Command::new("git")
+                            .args(["add", "Cargo.toml", "CLAUDE.md"])
+                            .current_dir(&config.workspace_root)
+                            .status();
+                        let commit_status = Command::new("git")
+                            .args([
+                                "commit",
+                                "-m",
+                                &format!(
+                                    "chore: bump version to {} for release {}",
+                                    tag_semver, tag
+                                ),
+                            ])
+                            .current_dir(&config.workspace_root)
+                            .status();
+                        match (add_status, commit_status) {
+                            (Ok(a), Ok(c)) if a.success() && c.success() => {
+                                println!("  Committed version bump.");
+                                // Push.
+                                let push_status = Command::new("git")
+                                    .args(["push"])
+                                    .current_dir(&config.workspace_root)
+                                    .status();
+                                match push_status {
+                                    Ok(s) if s.success() => println!("  Pushed to remote."),
+                                    _ => println!("  Warning: push failed — commit is local only. Push manually before dispatching."),
+                                }
+                            }
+                            _ => {
+                                println!(
+                                    "  Warning: version was bumped in files but git commit failed. \
+                                     Stage and commit manually before dispatching."
+                                );
+                            }
+                        }
+                    } else {
+                        anyhow::bail!(
+                            "Version bump declined. Tag {} implies {} but Cargo.toml is {}.\n  \
+                             Fix with: ./scripts/bump-version.sh {}",
+                            tag,
+                            tag_semver,
+                            cv,
+                            tag_semver
+                        );
+                    }
+                }
+            } else {
+                println!("  Version aligned: {} matches tag {}.", cv, tag);
+            }
+        }
+    } else {
+        println!("  (Tag does not embed a semver — skipping version alignment check)");
+    }
+
+    // ── Step 2: CI green check ──────────────────────────────────────────────
+    if skip_ci_check {
+        println!("  CI check: skipped (--skip-ci-check)");
+    } else {
+        wait_for_ci_green(&repo, dry_run)?;
+    }
+
+    // ── Step 3: Optional local build ───────────────────────────────────────
+    if build {
+        println!();
+        println!("Running local build verification (--build)...");
+        if dry_run {
+            println!("[dry-run] Would run: cargo build --release --workspace");
+        } else {
+            let build_status = Command::new("cargo")
+                .args(["build", "--release", "--workspace"])
+                .current_dir(&config.workspace_root)
+                .status()
+                .map_err(|e| anyhow::anyhow!("Failed to run cargo build: {}", e))?;
+            if !build_status.success() {
+                anyhow::bail!(
+                    "Local build failed (exit {}).\n  Fix build errors before dispatching.",
+                    build_status.code().unwrap_or(-1)
+                );
+            }
+            println!("  Local build passed.");
+        }
+    }
+
+    // ── Step 4: Dry-run summary or actual dispatch ─────────────────────────
+    if dry_run {
+        println!();
+        println!("Validation summary:");
+        println!("  Tag:        {}", tag);
+        println!("  Repository: {}", repo);
+        println!("  Workflow:   {}", workflow);
+        println!("  Pre-release: {}", prerelease);
+        println!();
+        println!("All pre-conditions checked. To dispatch:");
+        println!(
+            "  ta release dispatch {}{}",
+            tag,
+            if prerelease { " --prerelease" } else { "" }
+        );
+        return Ok(());
+    }
+
+    println!();
+    println!("Dispatching release workflow...");
 
     let mut args = vec![
         "workflow".to_string(),
@@ -2207,7 +2660,8 @@ fn dispatch_release(
         );
     }
 
-    println!("Release workflow dispatched.");
+    println!("Release workflow dispatched successfully.");
+    println!();
     println!(
         "Monitor progress:\n  gh run list --repo {} --workflow {}",
         repo, workflow

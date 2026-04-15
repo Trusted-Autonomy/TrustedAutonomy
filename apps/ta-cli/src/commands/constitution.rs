@@ -1748,6 +1748,7 @@ fn create_review_draft(
         agent_decision_log: vec![],
         goal_shortref: Some(review_id_str[..8].to_string()),
         draft_seq: 1,
+        plan_phase: None,
     };
 
     super::draft::save_package(config, &pkg)

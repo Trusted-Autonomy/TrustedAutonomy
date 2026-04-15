@@ -586,6 +586,14 @@ pub struct DraftPackage {
     /// Defaults to 0 for legacy drafts without this field.
     #[serde(default)]
     pub draft_seq: u32,
+
+    /// Plan phase ID linked to this draft (v0.15.15.2).
+    ///
+    /// Populated from `GoalRun.plan_phase` at `ta draft build` time.
+    /// Shown prominently in `ta draft view` (below the draft title) and as
+    /// a column in `ta draft list`. Empty for goals not linked to a plan phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_phase: Option<String>,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -836,6 +844,7 @@ pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
         agent_decision_log: vec![],
         goal_shortref: Some(goal_shortref.to_string()),
         draft_seq,
+        plan_phase: None,
     }
 }
 
@@ -986,6 +995,7 @@ mod tests {
             agent_decision_log: vec![],
             goal_shortref: None,
             draft_seq: 0,
+            plan_phase: None,
         }
     }
 
