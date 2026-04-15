@@ -201,6 +201,10 @@ pub enum StageKind {
     /// Run the configured static analyzer for the detected or specified language,
     /// optionally entering an agent correction loop on failure (v0.15.14.3).
     StaticAnalysis,
+    /// Aggregate reviewer votes using the consensus engine (v0.15.15.1).
+    Consensus,
+    /// Apply the current draft to source (explicit `kind = "apply_draft"` variant) (v0.15.15.1).
+    ApplyDraft,
 }
 
 /// Output from a `kind = "plan_next"` stage (v0.15.13).
@@ -1097,6 +1101,8 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
                     let lang = stage.lang.as_deref().unwrap_or("auto");
                     format!(" [static_analysis: {}]", lang)
                 }
+                StageKind::Consensus => " [consensus]".to_string(),
+                StageKind::ApplyDraft => " [apply_draft]".to_string(),
             };
             println!("  [{}] {}{} — {}", i + 1, stage.name, kind_label, desc);
         }
@@ -1483,6 +1489,8 @@ fn execute_stage(
         StageKind::AggregateDraft => stage_aggregate_draft(run, stage_def, opts),
         StageKind::Join => stage_join(run, stage_def),
         StageKind::StaticAnalysis => stage_static_analysis(run, stage_def, opts),
+        StageKind::Consensus => stage_consensus(run, stage_def, opts, config),
+        StageKind::ApplyDraft => stage_apply_draft(run, opts, config),
         StageKind::Goto => {
             // Goto is handled inline in run_loop_workflow; falling here is a bug.
             anyhow::bail!(
@@ -2120,6 +2128,152 @@ fn do_vcs_sync(workspace_root: &Path) -> anyhow::Result<()> {
     }
     // Other adapters: no-op for now (they manage their own sync).
     Ok(())
+}
+
+/// Stage executor for `kind = "consensus"` — aggregate reviewer votes (v0.15.15.1).
+///
+/// Reads reviewer verdict files from `.ta/review/<run-id>/<role>/verdict.json`,
+/// builds `ConsensusInput` from the stage's `depends_on` list (reviewer roles),
+/// calls `run_consensus()`, writes score/proceed/algorithm to the run output map,
+/// and fails the stage if `result.proceed == false` (unless `override_reason` is set
+/// via the consensus engine's `override_reason` mechanism).
+fn stage_consensus(
+    run: &mut GovernedWorkflowRun,
+    stage_def: &StageDef,
+    opts: &RunOptions,
+    _config: &WorkflowConfig,
+) -> anyhow::Result<Option<String>> {
+    use std::collections::HashMap;
+    use ta_workflow::consensus::{run_consensus, ConsensusAlgorithm, ConsensusInput, ReviewerVote};
+
+    let run_id = &run.run_id;
+    let review_dir = opts.workspace_root.join(".ta").join("review").join(run_id);
+
+    println!(
+        "  [consensus] reading reviewer verdicts from {}",
+        review_dir.display()
+    );
+
+    // Reviewer roles are listed in the stage's depends_on field.
+    let reviewer_roles: Vec<String> = stage_def.depends_on.clone();
+
+    let mut votes: Vec<ReviewerVote> = Vec::new();
+
+    for role in &reviewer_roles {
+        let verdict_path = review_dir.join(role).join("verdict.json");
+        if !verdict_path.exists() {
+            // Reviewer timed out or didn't write a verdict.
+            println!(
+                "  [consensus] role '{}': no verdict file — treated as timeout",
+                role
+            );
+            votes.push(ReviewerVote {
+                role: role.clone(),
+                score: 0.0,
+                findings: vec![format!(
+                    "Verdict file not found: {}",
+                    verdict_path.display()
+                )],
+                timed_out: true,
+            });
+            continue;
+        }
+
+        let raw = std::fs::read_to_string(&verdict_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read verdict for role '{}': {}", role, e))?;
+        let verdict: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("Invalid verdict JSON for role '{}': {}", role, e))?;
+
+        let score = verdict
+            .get("score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let findings: Vec<String> = verdict
+            .get("findings")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        println!(
+            "  [consensus] role '{}': score={:.2}, findings={}",
+            role,
+            score,
+            findings.len()
+        );
+        votes.push(ReviewerVote {
+            role: role.clone(),
+            score,
+            findings,
+            timed_out: false,
+        });
+    }
+
+    let weights: HashMap<String, f64> = HashMap::new();
+    let threshold = 0.75_f64;
+    let algorithm = ConsensusAlgorithm::Raft;
+    let require_all = false;
+    let override_reason: Option<String> = None;
+
+    let run_dir = opts
+        .workspace_root
+        .join(".ta")
+        .join("workflow-runs")
+        .join(run_id);
+    std::fs::create_dir_all(&run_dir)?;
+
+    let input = ConsensusInput {
+        votes,
+        weights,
+        threshold,
+        algorithm,
+        run_id: run_id.clone(),
+        run_dir,
+        require_all,
+        override_reason,
+    };
+
+    let result =
+        run_consensus(&input).map_err(|e| anyhow::anyhow!("Consensus engine error: {}", e))?;
+
+    println!("  [consensus] {}", result.summary);
+
+    // Store result fields in output map for downstream stages/conditions.
+    let mut output_map = std::collections::HashMap::new();
+    output_map.insert("score".to_string(), format!("{:.4}", result.score));
+    output_map.insert("proceed".to_string(), result.proceed.to_string());
+    output_map.insert("algorithm".to_string(), result.algorithm_used.to_string());
+    run.outputs.insert(stage_def.name.clone(), output_map);
+
+    if !result.proceed && !result.override_active {
+        anyhow::bail!(
+            "Consensus gate BLOCKED: score={:.2} is below threshold={:.2}.\n\
+             Algorithm: {}\n\
+             Per-role scores: {}\n\
+             Timed-out roles: {}\n\
+             Use --override-reason to bypass this gate with an audit entry.",
+            result.score,
+            threshold,
+            result.algorithm_used,
+            result
+                .scores_by_role
+                .iter()
+                .map(|(k, v)| format!("{}={:.2}", k, v))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if result.timed_out_roles.is_empty() {
+                "none".to_string()
+            } else {
+                result.timed_out_roles.join(", ")
+            }
+        );
+    }
+
+    Ok(Some(result.summary))
 }
 
 /// Stage executor for `kind = "workflow"` — invokes a child workflow.
@@ -4125,5 +4279,164 @@ on_partial_failure = "continue"
         assert_eq!(s.parallel_group.as_deref(), Some("workers"));
         assert_eq!(s.max_parallel, Some(3));
         assert_eq!(s.on_partial_failure.as_deref(), Some("continue"));
+    }
+
+    // ── StageKind::Consensus and StageKind::ApplyDraft deserialization (v0.15.15.1) ──
+
+    #[test]
+    fn stage_kind_consensus_deserializes() {
+        let toml_str = r#"
+name = "consensus"
+description = "Aggregate reviewer scores"
+kind = "consensus"
+depends_on = ["architect_review", "security_review"]
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.kind, StageKind::Consensus);
+        assert_eq!(s.depends_on.len(), 2);
+    }
+
+    #[test]
+    fn stage_kind_apply_draft_deserializes() {
+        let toml_str = r#"
+name = "apply"
+description = "Apply the approved draft"
+kind = "apply_draft"
+"#;
+        let s: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(s.kind, StageKind::ApplyDraft);
+    }
+
+    // ── stage_consensus executor (v0.15.15.1) ────────────────────────────────
+
+    fn make_consensus_stage_def(roles: Vec<String>) -> StageDef {
+        StageDef {
+            name: "consensus".to_string(),
+            description: "Consensus".to_string(),
+            depends_on: roles,
+            kind: StageKind::Consensus,
+            workflow: None,
+            goal: None,
+            phase: None,
+            condition: None,
+            target: None,
+            source_stages: None,
+            milestone_title: None,
+            milestone_branch: None,
+            parallel_group: None,
+            join_group: None,
+            on_partial_failure: None,
+            max_parallel: None,
+            lang: None,
+        }
+    }
+
+    #[test]
+    fn stage_consensus_4_reviewers_proceed() {
+        let dir = tempdir().unwrap();
+        let run_id = "test-consensus-run";
+        let review_base = dir.path().join(".ta").join("review").join(run_id);
+        for (role, score) in &[
+            ("architect_review", 0.85),
+            ("security_review", 0.80),
+            ("principal_review", 0.90),
+            ("pm_review", 0.75),
+        ] {
+            let role_dir = review_base.join(role);
+            std::fs::create_dir_all(&role_dir).unwrap();
+            let verdict = serde_json::json!({
+                "score": score,
+                "findings": [],
+                "decision": "approve"
+            });
+            std::fs::write(
+                role_dir.join("verdict.json"),
+                serde_json::to_string(&verdict).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let config = WorkflowConfig::default();
+        let mut run = GovernedWorkflowRun::new(run_id, "test-consensus", "Goal");
+        let stage_def = make_consensus_stage_def(vec![
+            "architect_review".to_string(),
+            "security_review".to_string(),
+            "principal_review".to_string(),
+            "pm_review".to_string(),
+        ]);
+        let opts = RunOptions {
+            workspace_root: dir.path(),
+            workflow_name: "test",
+            goal_title: "test",
+            dry_run: false,
+            resume_run_id: None,
+            agent: "claude-code",
+            plan_phase: None,
+            depth: 0,
+        };
+        let result = stage_consensus(&mut run, &stage_def, &opts, &config).unwrap();
+        assert!(result.is_some());
+        // Check output map has the consensus fields.
+        let out = run.outputs.get("consensus").unwrap();
+        assert_eq!(out.get("proceed").unwrap(), "true");
+    }
+
+    #[test]
+    fn stage_consensus_below_threshold_fails() {
+        let dir = tempdir().unwrap();
+        let run_id = "test-consensus-fail";
+        let review_base = dir.path().join(".ta").join("review").join(run_id);
+        for (role, score) in &[("architect_review", 0.3_f64), ("security_review", 0.2_f64)] {
+            let role_dir = review_base.join(role);
+            std::fs::create_dir_all(&role_dir).unwrap();
+            let verdict = serde_json::json!({"score": score, "findings": ["Critical bug"], "decision": "flag"});
+            std::fs::write(
+                role_dir.join("verdict.json"),
+                serde_json::to_string(&verdict).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let config = WorkflowConfig::default();
+        let mut run = GovernedWorkflowRun::new(run_id, "test-wf", "Goal");
+        let stage_def = make_consensus_stage_def(vec![
+            "architect_review".to_string(),
+            "security_review".to_string(),
+        ]);
+        let opts = RunOptions {
+            workspace_root: dir.path(),
+            workflow_name: "test",
+            goal_title: "test",
+            dry_run: false,
+            resume_run_id: None,
+            agent: "claude-code",
+            plan_phase: None,
+            depth: 0,
+        };
+        let err = stage_consensus(&mut run, &stage_def, &opts, &config).unwrap_err();
+        assert!(err.to_string().contains("BLOCKED"));
+    }
+
+    #[test]
+    fn stage_consensus_missing_verdict_file_is_timeout() {
+        let dir = tempdir().unwrap();
+        let run_id = "test-consensus-timeout";
+        // Don't create any verdict files.
+        let config = WorkflowConfig::default();
+        let mut run = GovernedWorkflowRun::new(run_id, "test-wf", "Goal");
+        let stage_def = make_consensus_stage_def(vec!["reviewer_a".to_string()]);
+        let opts = RunOptions {
+            workspace_root: dir.path(),
+            workflow_name: "test",
+            goal_title: "test",
+            dry_run: false,
+            resume_run_id: None,
+            agent: "claude-code",
+            plan_phase: None,
+            depth: 0,
+        };
+        // With 1 timed-out reviewer (score=0.0), proceed=false → BLOCKED
+        let err = stage_consensus(&mut run, &stage_def, &opts, &config).unwrap_err();
+        assert!(err.to_string().contains("BLOCKED"));
     }
 }

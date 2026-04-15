@@ -242,6 +242,73 @@ pub fn run(input: &ConsensusInput) -> Result<ConsensusResult, WorkflowError> {
         timed_out: timed_out_roles.clone(),
     })?;
 
+    // ── Write audit entry to .ta/audit.jsonl BEFORE cleanup ──────────────────
+    // Constitution §1.5: per-reviewer votes must be durable in the append-only
+    // audit log regardless of whether the caller retains ConsensusResult.
+    {
+        // Climb up from run_dir to find the .ta directory.
+        // run_dir is typically <workspace_root>/.ta/workflow-runs/<run-id>/
+        // so run_dir.parent().parent() = <workspace_root>/.ta
+        let audit_path = input
+            .run_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|ta_dir| ta_dir.join("audit.jsonl"))
+            .unwrap_or_else(|| input.run_dir.join("audit.jsonl"));
+
+        let scores_json: serde_json::Value = active_votes
+            .iter()
+            .map(|v| (v.role.clone(), serde_json::Value::from(v.score)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+
+        let mut entry = serde_json::json!({
+            "event": "consensus_complete",
+            "run_id": input.run_id,
+            "algorithm": "paxos",
+            "score": final_score,
+            "proceed": final_proceed,
+            "override_active": final_override,
+            "timed_out_roles": timed_out_roles,
+            "scores_by_role": scores_json,
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+
+        if let Some(reason) = &input.override_reason {
+            entry["override_reason"] = serde_json::Value::String(reason.clone());
+        }
+
+        if let Some(parent) = audit_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&audit_path)
+        {
+            let _ = writeln!(f, "{}", entry);
+        }
+
+        // Item 4: separate override entry for queryability.
+        if final_override {
+            let override_entry = serde_json::json!({
+                "event": "consensus_override",
+                "run_id": input.run_id,
+                "reason": input.override_reason.as_deref().unwrap_or(""),
+                "score_before_override": final_score,
+                "timestamp": Utc::now().to_rfc3339(),
+            });
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&audit_path)
+            {
+                let _ = writeln!(f, "{}", override_entry);
+            }
+        }
+    }
+
     log.cleanup();
 
     // Collect per-role data.
@@ -421,5 +488,91 @@ mod tests {
         assert_eq!(result.scores_by_role.get("security"), Some(&0.7));
         let findings = result.findings_by_role.get("security").unwrap();
         assert_eq!(findings[0], "XSS risk at auth endpoint");
+    }
+
+    #[test]
+    fn audit_entry_written_before_log_cleanup() {
+        let dir = tempdir().unwrap();
+        // Create .ta subdir to simulate a real workspace structure.
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        // run_dir is inside .ta/workflow-runs/<run-id>
+        let run_dir = ta_dir.join("workflow-runs").join("paxos-audit-test");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let input = ConsensusInput {
+            votes: vec![vote("architect", 0.9), vote("security", 0.8)],
+            weights: HashMap::new(),
+            threshold: 0.75,
+            algorithm: ConsensusAlgorithm::Paxos,
+            run_id: "paxos-audit-test".to_string(),
+            run_dir: run_dir.clone(),
+            require_all: false,
+            override_reason: None,
+        };
+        run(&input).unwrap();
+
+        // Paxos log should be cleaned up.
+        let log_path = run_dir.join("paxos-audit-test.paxos.log");
+        assert!(
+            !log_path.exists(),
+            "Paxos log should be deleted after success"
+        );
+
+        // Audit entry should exist.
+        let audit_path = ta_dir.join("audit.jsonl");
+        assert!(audit_path.exists(), "audit.jsonl should exist");
+        let content = std::fs::read_to_string(&audit_path).unwrap();
+        let entry: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(entry["event"], "consensus_complete");
+        assert_eq!(entry["algorithm"], "paxos");
+        assert_eq!(entry["run_id"], "paxos-audit-test");
+        assert!(entry["proceed"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn override_audit_entry_written_when_override_active() {
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        let run_dir = ta_dir.join("workflow-runs").join("paxos-override-audit");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let input = ConsensusInput {
+            votes: vec![vote("architect", 0.3)], // low score → would block
+            weights: HashMap::new(),
+            threshold: 0.75,
+            algorithm: ConsensusAlgorithm::Paxos,
+            run_id: "paxos-override-audit".to_string(),
+            run_dir: run_dir.clone(),
+            require_all: false,
+            override_reason: Some("emergency paxos fix approved by CTO".to_string()),
+        };
+        let result = run(&input).unwrap();
+        assert!(result.proceed);
+        assert!(result.override_active);
+
+        let audit_path = ta_dir.join("audit.jsonl");
+        assert!(audit_path.exists());
+        let content = std::fs::read_to_string(&audit_path).unwrap();
+        let entries: Vec<serde_json::Value> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        // Should have consensus_complete entry and consensus_override entry.
+        assert!(entries
+            .iter()
+            .any(|e| e["event"] == "consensus_complete" && e["override_active"] == true));
+        assert!(entries.iter().any(|e| e["event"] == "consensus_override"));
+        let override_entry = entries
+            .iter()
+            .find(|e| e["event"] == "consensus_override")
+            .unwrap();
+        assert_eq!(
+            override_entry["reason"],
+            "emergency paxos fix approved by CTO"
+        );
     }
 }

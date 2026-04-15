@@ -508,6 +508,20 @@ ta config set api_key sk-ant-...
 
 TA always checks `ANTHROPIC_API_KEY` first, then falls back to the stored key.
 
+#### Claude subscription (Max/Pro)
+
+If you use Claude Max or Claude Pro, you can authenticate via the `claude` CLI without an API key:
+
+1. Install the `claude` CLI from [claude.ai/code](https://claude.ai/code)
+2. Run `claude login` — this opens a browser for OAuth authentication
+3. No `ANTHROPIC_API_KEY` is needed — TA delegates authentication entirely to the `claude` binary
+
+TA detects the active session automatically when `claude` is the configured agent framework.
+
+#### OpenAI / Codex subscription
+
+When using the `codex` agent framework, Codex handles its own authentication. If `OPENAI_API_KEY` is absent, Codex falls back to whatever credentials are configured in its own auth store.
+
 #### BMAD and Claude-Flow
 
 [BMAD](https://github.com/bmadcode/bmad-method) provides structured multi-role AI planning (Analyst → Architect → PM). Select it in Step 3 of the wizard, and TA will clone it to `~/.bmad` automatically.

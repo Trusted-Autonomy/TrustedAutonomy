@@ -4804,7 +4804,7 @@ Write checkpoints to `.ta/ta-progress.json` as you complete significant steps. T
 
 Use labels like: `compiled`, `tests_pass`, `linted`, `work_complete`. The file is TA-internal and excluded from the diff shown to reviewers.
 
-## Agent Decision Log (optional but encouraged)
+## Agent Decision Log (required for feature work)
 
 If you make significant design decisions during this session, record them in `.ta-decisions.json` so the reviewer can see your reasoning. This is separate from the change summary — it captures *why you chose one approach over another*.
 
@@ -4819,7 +4819,7 @@ If you make significant design decisions during this session, record them in `.t
 ]
 ```
 
-This file is optional. If present, TA will surface these decisions in `ta draft view` under "Agent Decision Log".
+This file is **required when implementing features or any significant code refactor**. If present, TA will surface these decisions in `ta draft view` under "Agent Decision Log". For trivial changes (typos, comment updates, config-only edits), this file may be omitted.
 
 ## Before You Exit — Change Summary (REQUIRED)
 

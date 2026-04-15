@@ -839,6 +839,52 @@ pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
     }
 }
 
+/// Check whether a draft is missing an agent decision log for substantive changes.
+///
+/// "Substantive" = any artifact that is a `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`,
+/// `.py`, `.go`, `.java`, `.cpp`, `.c`, or `.h` file. Config-only changes
+/// (`.toml`, `.yaml`, `.json`, `.md`, docs) are excluded from this check.
+///
+/// Returns a warning annotation string when the check fires, or `None` if
+/// a decision log is present or there are no substantive code changes.
+///
+/// This satisfies Constitution §1.5: reviewers must have design rationale for
+/// any goal that creates or modifies non-trivial source code.
+pub fn check_missing_decisions(pkg: &DraftPackage) -> Option<String> {
+    // No warning if decision log is present.
+    if !pkg.agent_decision_log.is_empty() {
+        return None;
+    }
+
+    let substantive_extensions = [
+        "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "cpp", "c", "h",
+    ];
+
+    let has_substantive_code = pkg.changes.artifacts.iter().any(|a| {
+        let uri = &a.resource_uri;
+        // Extract file extension from URI like "fs://workspace/src/main.rs"
+        if let Some(path_part) = uri.strip_prefix("fs://workspace/") {
+            let ext = std::path::Path::new(path_part)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            substantive_extensions.contains(&ext)
+        } else {
+            false
+        }
+    });
+
+    if has_substantive_code {
+        Some(
+            "No agent decision log entries found for a goal with significant code changes. \
+             Consider `ta run --follow-up` to capture design rationale before approving."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1556,5 +1602,93 @@ mod tests {
         let json = r#"{"decision":"Used JWT","rationale":"Scalability"}"#;
         let entry: DecisionLogEntry = serde_json::from_str(json).unwrap();
         assert!(entry.context.is_none());
+    }
+
+    // ── check_missing_decisions (v0.15.15.1) ─────────────────────────────────
+
+    fn make_artifact(uri: &str) -> Artifact {
+        Artifact {
+            resource_uri: uri.to_string(),
+            change_type: ChangeType::Add,
+            diff_ref: "changeset:0".to_string(),
+            tests_run: vec![],
+            disposition: ArtifactDisposition::Pending,
+            rationale: None,
+            dependencies: vec![],
+            explanation_tiers: None,
+            comments: None,
+            amendment: None,
+            kind: None,
+        }
+    }
+
+    #[test]
+    fn missing_decisions_fires_on_code_changes() {
+        let mut pkg = test_package();
+        // Add a Rust file artifact — substantive code change.
+        pkg.changes
+            .artifacts
+            .push(make_artifact("fs://workspace/src/main.rs"));
+        // No decision log entries.
+        let warn = check_missing_decisions(&pkg);
+        assert!(warn.is_some());
+        assert!(warn.unwrap().contains("decision log"));
+    }
+
+    #[test]
+    fn missing_decisions_suppressed_when_decisions_present() {
+        let mut pkg = test_package();
+        pkg.changes
+            .artifacts
+            .push(make_artifact("fs://workspace/src/main.rs"));
+        pkg.agent_decision_log.push(DecisionLogEntry {
+            decision: "Used trait objects for extensibility".to_string(),
+            rationale: "Allows plugin authors to add new adapters".to_string(),
+            alternatives: vec!["enum dispatch".to_string()],
+            alternatives_considered: vec![],
+            confidence: Some(0.9),
+            context: None,
+        });
+        let warn = check_missing_decisions(&pkg);
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn missing_decisions_suppressed_for_trivial_changes() {
+        let mut pkg = test_package();
+        // Only toml + md files — no substantive code.
+        pkg.changes
+            .artifacts
+            .push(make_artifact("fs://workspace/Cargo.toml"));
+        pkg.changes
+            .artifacts
+            .push(make_artifact("fs://workspace/README.md"));
+        let warn = check_missing_decisions(&pkg);
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn missing_decisions_fires_for_typescript_and_python() {
+        let mut pkg = test_package();
+        pkg.changes
+            .artifacts
+            .push(make_artifact("fs://workspace/src/app.ts"));
+        let warn = check_missing_decisions(&pkg);
+        assert!(warn.is_some());
+
+        let mut pkg2 = test_package();
+        pkg2.changes
+            .artifacts
+            .push(make_artifact("fs://workspace/scripts/process.py"));
+        let warn2 = check_missing_decisions(&pkg2);
+        assert!(warn2.is_some());
+    }
+
+    #[test]
+    fn missing_decisions_suppressed_when_no_artifacts() {
+        let pkg = test_package();
+        // No artifacts at all.
+        let warn = check_missing_decisions(&pkg);
+        assert!(warn.is_none());
     }
 }
