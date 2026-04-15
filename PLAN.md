@@ -10649,12 +10649,23 @@ condition = "consensus.proceed"
 
    Arbitrary goals (`ta run "fix auth bug"`) with no semver in the title and no in-progress phase never silently steal a planned pending phase — that would corrupt the plan's intent.
 
-7. [ ] **Gap semver generation** (`apps/ta-cli/src/commands/plan.rs`): `create_gap_semver(last_done, next_planned)` computes a version that slots between the last completed phase and the next planned one without colliding:
-   - If numeric space exists between them (e.g. last=`v0.15.15.1`, next=`v0.15.16`) → use next available sub-patch: `v0.15.15.2`
-   - If no space (e.g. last=`v0.15.15.1`, next=`v0.15.15.2`) → use sub-sub-phase: `v0.15.15.1.1`; if that's taken, increment: `v0.15.15.1.2`, etc.
-   - Inserts a minimal phase stub into PLAN.md at the correct position: `### <gap-semver> — <goal-title>\n<!-- status: in_progress -->\n*Ad-hoc goal — not in original plan.*`
-   - Prints: `"No phase specified — created gap phase v0.15.15.1.1 in PLAN.md for this goal. Use --phase to override."`
-   - The stub keeps PLAN.md in sync and gives `ta plan status` a coherent view of all work, planned and ad-hoc.
+7. [ ] **Gap semver generation** (`apps/ta-cli/src/commands/plan.rs`): Ad-hoc goals use a **5-part version format `W.X.Y.Z.A`** where the 5th component (`A`) is exclusively reserved for inserted goals — never used in normal planned phases or binary semver. This makes every inserted goal immediately identifiable across any project regardless of its versioning scheme.
+
+   `create_gap_semver(last_done)` appends `.1` to the last completed phase version, incrementing `A` if that slot is already taken:
+   - Last done `v0.15.15.1`, first gap → `v0.15.15.1.1`
+   - Second ad-hoc goal before `v0.15.15.2` runs → `v0.15.15.1.2`
+   - Works identically for any project versioning: last done `sprint-3` → `sprint-3.1`, `sprint-3.2`, etc.
+   - Never produces a 4-part version (that namespace belongs to planned phases only)
+
+   Inserts a minimal stub into PLAN.md at the correct position:
+   ```
+   ### v0.15.15.1.1 — Fix auth regression [ad-hoc]
+   <!-- status: in_progress -->
+   *Inserted goal — not in original plan.*
+   ```
+   Prints: `"No phase specified — inserted ad-hoc phase v0.15.15.1.1 in PLAN.md. Use --phase to target a planned phase instead."`
+
+   `ta plan status` shows inserted goals in a distinct style (e.g. `[ad-hoc]` tag). `ta draft apply` for an inserted phase updates its stub to `done` but does NOT auto-bump the binary version (only planned 4-part phases trigger version bumps).
 
 8. [ ] **Phase embedded in draft and surfaced in `ta draft view`** (`apps/ta-cli/src/commands/draft.rs`): `GoalRun.plan_phase` (already stored) shown prominently in `ta draft view` — `"Phase: v0.15.15.2 — One-Command Release + Phase Auto-Detection"` — directly below the draft title. Also shown as a column in `ta draft list`. Currently stored but not displayed.
 
