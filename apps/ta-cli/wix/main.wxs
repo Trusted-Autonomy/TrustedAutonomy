@@ -176,7 +176,6 @@
       Level="2"
       AllowAdvertise="no">
       <Component Id="EnableProjFS" Guid="D5E6F7A8-B9C0-4D1E-2F3A-4B5C6D7E8F9A" Directory="INSTALLFOLDER">
-        <Condition>NOT Installed</Condition>
         <!-- Enable Client-ProjFS via DISM on first install. /NoRestart avoids
              forced reboots; the feature is usable immediately on Windows 10 2004+. -->
         <RegistryValue
@@ -200,9 +199,7 @@
       Directory="INSTALLFOLDER" />
 
     <InstallExecuteSequence>
-      <Custom Action="EnableClientProjFS" After="InstallFiles">
-        <![CDATA[(&ProjFS = 3) AND NOT Installed]]>
-      </Custom>
+      <Custom Action="EnableClientProjFS" After="InstallFiles" Condition="(&amp;ProjFS = 3) AND NOT Installed" />
     </InstallExecuteSequence>
 
   </Package>
