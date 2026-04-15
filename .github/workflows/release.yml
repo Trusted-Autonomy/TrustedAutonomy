@@ -95,10 +95,10 @@ jobs:
             sed "s/^\*\*Version\*\*:.*/**Version**: ${{ steps.get_version.outputs.version }}/" \
               docs/USAGE.md > staging/USAGE.md
           fi
-          # Generate USAGE.html — pandoc is available on macOS runners; use <pre> fallback on Linux musl
+          # Generate USAGE.html — --embed-resources: CSS inline, works offline, matches MSI bundle
           if command -v pandoc >/dev/null 2>&1; then
-            pandoc staging/USAGE.md -s --metadata title="Trusted Autonomy Usage Guide" \
-              -c https://cdn.simplecss.org/simple.min.css \
+            pandoc staging/USAGE.md --standalone --embed-resources \
+              --metadata title="Trusted Autonomy Usage Guide" \
               -o staging/USAGE.html
           else
             printf '<!DOCTYPE html><html><meta charset="utf-8"><title>Trusted Autonomy Usage Guide</title><body><pre>%s</pre></body></html>' \
@@ -128,10 +128,19 @@ jobs:
             tar tzf "$tarball" | grep -q "plugins/vcs/vcs-perforce" && echo "✓ vcs-perforce found in tarball" || echo "⚠ vcs-perforce not found in tarball (non-fatal)"
           fi
 
+      - name: Install pandoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install pandoc -y --no-progress | Out-Null
+          $env:PATH = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+          pandoc --version | Select-Object -First 1
+
       - name: Package binary with docs (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $env:PATH = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
           New-Item -ItemType Directory -Force -Path staging, artifacts | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe" staging/
           Copy-Item "target/${{ matrix.target }}/release/ta-daemon.exe" staging/
@@ -140,12 +149,10 @@ jobs:
             (Get-Content "docs/USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: ${{ steps.get_version.outputs.version }}" |
               Set-Content "staging/USAGE.md"
           }
-          # Generate USAGE.html using HtmlEncode fallback (pandoc not pre-installed on windows-latest)
-          $md = [System.IO.File]::ReadAllText("staging\USAGE.md")
-          $escaped = [System.Net.WebUtility]::HtmlEncode($md)
-          ("<!DOCTYPE html><html><meta charset='utf-8'>" +
-           "<title>Trusted Autonomy Usage Guide</title><body><pre>$escaped</pre></body></html>") |
-            Out-File -Encoding utf8 "staging\USAGE.html"
+          # Generate USAGE.html -- same command as MSI bundle and loose artifact
+          pandoc "staging\USAGE.md" --standalone --embed-resources `
+            --metadata title="Trusted Autonomy Usage Guide" `
+            -o "staging\USAGE.html"
           foreach ($f in @("DISCLAIMER.md", "LICENSE", ".release-draft.md")) {
             if (Test-Path $f) { Copy-Item $f staging/ }
           }
@@ -177,29 +184,16 @@ jobs:
           # main.wxs references $(var.SourceDir)\USAGE.html as a required file.
           $releaseDir = "target\x86_64-pc-windows-msvc\release"
 
-          # Install pandoc for proper markdown-to-HTML conversion.
-          # windows-latest includes Chocolatey; this takes ~15s.
-          choco install pandoc -y --no-progress | Out-Null
+          # Pandoc installed in the prior "Install pandoc (Windows)" step.
           $env:PATH = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
 
-          # Stamp the release version into a temp copy of USAGE.md.
+          # Stamp the release version and generate self-contained HTML.
           $stampedMd = "staging-usage.md"
           (Get-Content "docs\USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: $env:TAG" |
             Set-Content $stampedMd -Encoding utf8
-
-          # Generate self-contained HTML (all CSS embedded inline -- works offline).
-          # Falls back to plain pre-wrapped HTML if pandoc unavailable after install.
-          if (Get-Command pandoc -ErrorAction SilentlyContinue) {
-            pandoc $stampedMd --standalone --embed-resources `
-              --metadata title="Trusted Autonomy Usage Guide" `
-              -o "$releaseDir\USAGE.html"
-          } else {
-            $md = [System.IO.File]::ReadAllText($stampedMd)
-            $escaped = [System.Net.WebUtility]::HtmlEncode($md)
-            ("<!DOCTYPE html><html><meta charset='utf-8'>" +
-             "<title>Trusted Autonomy Usage Guide</title><body><pre>$escaped</pre></body></html>") |
-              Out-File -Encoding utf8 "$releaseDir\USAGE.html"
-          }
+          pandoc $stampedMd --standalone --embed-resources `
+            --metadata title="Trusted Autonomy Usage Guide" `
+            -o "$releaseDir\USAGE.html"
 
           # Copy ta-studio.bat launcher for MSI bundling.
           if (Test-Path "scripts\ta-studio.bat") {
@@ -351,11 +345,12 @@ jobs:
         run: |
           brew install pandoc
           # Use the version-stamped copy from staging/
-          pandoc staging/USAGE.md -s --metadata title="Trusted Autonomy Usage Guide" \
-            -c https://cdn.simplecss.org/simple.min.css \
+          # --embed-resources: all CSS embedded inline — same output as MSI-bundled USAGE.html
+          pandoc staging/USAGE.md --standalone --embed-resources \
+            --metadata title="Trusted Autonomy Usage Guide" \
             -o artifacts/USAGE.html
-          pandoc DISCLAIMER.md -s --metadata title="Trusted Autonomy Terms of Use" \
-            -c https://cdn.simplecss.org/simple.min.css \
+          pandoc DISCLAIMER.md --standalone --embed-resources \
+            --metadata title="Trusted Autonomy Terms of Use" \
             -o artifacts/DISCLAIMER.html
           cp staging/USAGE.md artifacts/USAGE.md
 
