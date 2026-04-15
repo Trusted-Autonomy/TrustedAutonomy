@@ -10623,25 +10623,31 @@ condition = "consensus.proceed"
 
 ---
 
-### v0.15.15.2 — `ta release dispatch` One-Command Release
+### v0.15.15.2 — One-Command Release + Phase Auto-Detection
 <!-- status: pending -->
-**Goal**: `ta release dispatch <tag>` becomes a true one-and-done release command. Currently it requires a manual `bump-version.sh` run, commit, and push before dispatching. The command should detect version drift, bump atomically, commit, push, then dispatch — all in one invocation. No pre-flight manual steps for the normal case.
+**Goal**: Two friction points eliminated. (1) `ta release dispatch <tag>` becomes truly one-and-done — detects version drift, bumps inline, commits, waits for CI, dispatches. No pre-flight manual steps. (2) `--phase` on `ta run` becomes an optional override rather than a required argument — the next pending plan phase is auto-detected from `PLAN.md`. When phase is known, it is embedded in the draft and surfaced in `ta draft view` and end-of-goal apply instructions so the user never has to look it up.
 
 **Depends on**: v0.15.15.1
 
 **Items**:
 
-1. [ ] **Version drift detection** (`apps/ta-cli/src/commands/release.rs`): Before dispatching, compare the tag's implied semver (e.g. `public-alpha-v0.15.15.2` → `0.15.15-alpha.2`) against `Cargo.toml`. If they differ, prompt: `"Cargo.toml is at 0.15.15-alpha.1 but tag implies 0.15.15-alpha.2 — bump and commit automatically? [Y/n]"`. On confirm, run the equivalent of `bump-version.sh` inline (no shell exec — native Rust file edits to `Cargo.toml`, `CLAUDE.md`, `.release.toml`), stage, commit `"chore: bump version to 0.15.15-alpha.2"`, and push before dispatching.
+1. [ ] **Version drift detection** (`apps/ta-cli/src/commands/release.rs`): Before dispatching, compare the tag's implied semver (e.g. `public-alpha-v0.15.15.2` → `0.15.15-alpha.2`) against `Cargo.toml`. If they differ, prompt: `"Cargo.toml is at 0.15.15-alpha.1 but tag implies 0.15.15-alpha.2 — bump and commit automatically? [Y/n]"`. On confirm, run the equivalent of `bump-version.sh` inline (native Rust file edits to `Cargo.toml`, `CLAUDE.md`, `.release.toml`), stage, commit, and push before dispatching.
 
-2. [ ] **CI green check** (`apps/ta-cli/src/commands/release.rs`): Before dispatching the tag, call `gh run list --branch main --limit 1` and check latest CI conclusion. If `in_progress`, print `"CI is still running on <sha> — waiting..."` with a spinner and poll every 15s until complete. If `failure`, abort with `"CI failed on <sha> — fix before releasing. Re-run with --skip-ci-check to override."`. `--skip-ci-check` flag available for emergencies.
+2. [ ] **CI green check** (`apps/ta-cli/src/commands/release.rs`): Before dispatching, poll `gh run list --branch main --limit 1`. If `in_progress`, print `"CI is still running on <sha> — waiting..."` with a spinner every 15s. If `failure`, abort with actionable message. `--skip-ci-check` flag for emergencies.
 
-3. [ ] **Local build + install** (optional step): `--build` flag runs `cargo build --release --workspace` locally before dispatch and aborts on failure. Off by default (CI is authoritative), but useful pre-flight for the releasing engineer. Print which binary is being built and elapsed time.
+3. [ ] **Local build + install** (optional): `--build` flag runs `cargo build --release --workspace` locally before dispatch. Off by default.
 
-4. [ ] **`ta release dispatch` full flow with no pre-steps**: After items 1–2, the complete release flow is: `ta release dispatch public-alpha-v0.15.15.2 --prerelease` — detects drift, bumps, commits, pushes, waits for CI if needed, creates and pushes the tag, triggers `workflow_dispatch` on `release.yml`, prints the GitHub Actions run URL. That's it.
+4. [ ] **`ta release dispatch` full flow**: Complete release is `ta release dispatch public-alpha-v0.15.15.2 --prerelease` — drifts detection → bump → commit → push → CI wait → tag → dispatch → print Actions URL. That's it.
 
-5. [ ] **`ta release validate <tag>`**: Dry-run that checks all preconditions and prints a summary without dispatching or modifying anything. Useful to verify before the real run.
+5. [ ] **`ta release validate <tag>`**: Dry-run that checks all preconditions and prints a summary without dispatching or modifying anything.
 
-6. [ ] **Tests**: Version drift detection parses `public-alpha-v0.15.15.2` → `0.15.15-alpha.2` correctly; `--skip-ci-check` bypasses the CI poll; `ta release validate` exits 0 when clean; bump-inline writes correct semver to all three files; tag format variants (`v0.15.15.2`, `public-alpha-v0.15.15.2`, `0.15.15.2`) all resolve to the same semver.
+6. [ ] **Phase auto-detection in `ta run`** (`apps/ta-cli/src/commands/run.rs`): `--phase` becomes optional. When omitted, `ta run` calls `parse_plan()` and finds the first phase with `<!-- status: pending -->` or `<!-- status: in_progress -->`. If exactly one candidate is found, it is used automatically and printed: `"Auto-detected phase: v0.15.15.2"`. If zero candidates, run proceeds without a phase link (existing behaviour). If multiple in-progress phases exist, prompt the user to specify `--phase`. `--phase` always overrides auto-detection.
+
+7. [ ] **Phase embedded in draft and surfaced in `ta draft view`** (`apps/ta-cli/src/commands/draft.rs`): The `GoalRun.plan_phase` field (already exists) is displayed prominently in `ta draft view` output — `"Phase: v0.15.15.2 — One-Command Release + Phase Auto-Detection"` — directly below the draft title. Currently the field is stored but not shown to the user. Also shown in `ta draft list` as a short column.
+
+8. [ ] **Phase in end-of-goal apply instructions** (`apps/ta-cli/src/commands/run.rs`): The agent's injected end-of-goal "Before You Exit" prompt and the post-goal CLI output both include the resolved phase. When `ta draft apply` is invoked without `--phase`, it reads the phase from the draft package metadata (already stored) and applies it automatically — no `--phase` argument needed at apply time either. If phase is in the draft, `ta draft apply <id>` is sufficient.
+
+9. [ ] **Tests**: Phase auto-detection picks first pending phase; skips done phases; prompts on ambiguous in-progress; `--phase` overrides auto-detect; phase shows in `ta draft view` output; `ta draft apply` without `--phase` reads phase from draft metadata and applies correctly; tag format variants all resolve to correct semver.
 
 #### Version: `0.15.15-alpha.2`
 
