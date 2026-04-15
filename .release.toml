@@ -13,7 +13,7 @@ prerelease = true
 
 # Human-readable description appended after "TA v<version> — " in the release title.
 # Update when the release cycle's theme changes (not on every rc bump).
-title_suffix = "Generic Asset Types + Governed Workflow Fix"
+title_suffix = "Consensus Review Workflow — Engine Wiring, Audit & Decision Log"
 
 # Tag of the immediately preceding release (used in "Changes since" footer and delta
 # comparisons). Update to the tag you just published when bumping for the next cycle.
