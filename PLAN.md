@@ -10712,6 +10712,52 @@ condition = "consensus.proceed"
 
 ---
 
+### v0.15.15.3.1 — Config File Format Cleanup
+<!-- status: pending -->
+
+**Goal**: Normalize the inconsistent mix of TOML and YAML across `agents/` and `templates/workflows/`. Document the format rules in the constitution to keep them aligned going forward.
+
+**Depends on**: v0.15.15.3
+
+**Items**:
+
+1. [ ] **Normalize `agents/` to YAML**: Rename `agents/codex.toml` → `agents/codex.yaml` and migrate content. All agent framework manifests in `agents/` should be YAML for consistency.
+
+2. [ ] **Normalize `templates/workflows/`**: Audit the TOML/YAML split. User-authored workflow configs (used as `.ta/workflow.toml` starters) stay TOML. Orchestration templates (multi-step, role-based) stay YAML. Any files that are mismatched get moved and their loaders updated.
+
+3. [ ] **Constitution rule**: Add a constitution entry enforcing the format convention — any new file in `agents/`, `templates/workflows/roles/`, or `plugins/` that uses the wrong format triggers a `warn` rule during `ta draft build`. Pattern: `.toml` file in `agents/` (unless `qwen*.toml` or `codex*.toml` in Ollama profile paths), YAML file in `.ta/` config dirs.
+
+4. [ ] **Update loaders**: Audit `AgentFrameworkManifest::discover()` and workflow template loading to confirm they handle both formats gracefully during the transition, then lock to the canonical format once cleanup is done.
+
+5. [ ] **Tests**: Format validation round-trip for each canonical path. Constitution rule fires correctly on mismatched formats.
+
+#### Version: `0.15.15-alpha.3.1`
+
+---
+
+### v0.15.15.3.2 — Orchestration Stack Guide (USAGE.md)
+<!-- status: pending -->
+
+**Goal**: Document the three-layer orchestration model (TA + Claude Code native agents + ruflow) in `docs/USAGE.md` with concrete decision criteria and code examples. The README now has the design-level explanation; USAGE.md needs the "how to actually configure this" how-to guide.
+
+**Depends on**: v0.15.15.3.1
+
+**Items**:
+
+1. [ ] **USAGE.md "Choosing Your Orchestration Stack" section**: Decision table (same as README), expanded with config examples — `.mcp.json` setup for ruflow MCP, `daemon.toml` agent routing, `workflow.toml` for TA swarm.
+
+2. [ ] **Within-session parallelism note**: Explain that Claude Code's native `Agent` tool handles parallel subtasks automatically when running inside `ta run` — no config needed, no extra install.
+
+3. [ ] **ruflow MCP configuration guide**: Step-by-step — install, register MCP, verify `mcp__claude-flow__memory_retrieve` tools appear in Claude Code session inside staging.
+
+4. [ ] **Combined stack examples**: Three annotated examples — (1) simple goal, (2) TA swarm workflow, (3) cross-session memory with ruflow.
+
+5. [ ] **When NOT to add ruflow**: Clarify that adding ruflow to every goal adds latency and complexity without benefit. Document the threshold: use ruflow when goals span multiple sessions and need to share findings.
+
+#### Version: `0.15.15-alpha.3.2`
+
+---
+
 ### v0.15.15.4 — Email Governance: Draft-Only Policy Enforcement
 <!-- status: pending -->
 
@@ -11551,6 +11597,29 @@ Code releases use semver. Content releases don't. Decide:
 11. [ ] **USAGE.md "Release Management" section**: Quick-start (5 steps: configure `release.toml`, run `ta release run`, test RC, promote to stable), adapter reference table, `release.toml` field reference.
 
 #### Version: `0.17.3-alpha`
+
+---
+
+### v0.17.3.1 — sage-lore Design Review
+<!-- status: pending -->
+
+**Goal**: Evaluate [sage-lore](https://github.com/kwg/sage-lore) (Rust, Scroll DSL, deterministic execution, scan-once security model) as a potential complement or integration target for TA's governance and orchestration layer. Produce a structured design review and recommendation.
+
+**Depends on**: v0.17.3
+
+**Why deferred here**: sage-lore's deterministic execution and scan-once security model are architecturally aligned with TA's staged-action thesis, but integrating at the orchestration layer requires the `ta release` core (v0.17.3) to be stable first. A premature evaluation would miss the context of how TA's adapter and release surfaces interact with external orchestrators.
+
+**Items**:
+
+1. [ ] **Capability audit**: Map sage-lore's 20 Scroll primitives to TA concepts (goal, draft, plan phase, policy gate). Identify gaps and overlaps.
+
+2. [ ] **Security model comparison**: sage-lore scan-once vs TA staging overlay. Are they additive (sage-lore enforces input constraints, TA enforces output constraints) or redundant?
+
+3. [ ] **Integration options**: (a) sage-lore as an orchestrator that drives `ta run` goals via CLI; (b) Scroll DSL as a workflow definition language inside `.ta/workflows/`; (c) no integration — document why.
+
+4. [ ] **Decision document**: `docs/design/sage-lore-review.md` — recommendation (integrate / complement / skip) with rationale and any follow-on plan phases.
+
+#### Version: `0.17.3.1-alpha`
 
 ---
 

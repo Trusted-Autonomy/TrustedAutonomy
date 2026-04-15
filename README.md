@@ -685,6 +685,46 @@ export CLAUDE_FLOW_NON_INTERACTIVE=true    # for CI/headless runs
 export CLAUDE_FLOW_MEMORY_BACKEND=hybrid   # memory persistence backend
 ```
 
+### Choosing your orchestration stack
+
+TA, Claude Code's native multi-agent capabilities, and ruflow/claude-flow serve different layers. They are additive, not competing.
+
+| Layer | Tool | What it does | When to add it |
+|---|---|---|---|
+| **Governance** | TA | Staged execution, policy gates, audit, draft review | Always — this is the substrate |
+| **Agent runtime** | Claude Code / Codex / Ollama | Executes the work in the staging workspace | Always — pick one per goal |
+| **Within-session parallelism** | Claude Code native `Agent` tool | Spawns subagents in parallel inside a single `ta run` — no extra install | When one goal needs concurrent subtasks (research + code + tests in parallel) |
+| **Cross-session memory** | ruflow MCP server | Persists semantic embeddings (HNSW) and agent state across separate `ta run` invocations | When later goals need to recall findings from earlier runs |
+| **Distributed coordination** | ruflow hive-mind | Byzantine consensus, mesh/hierarchical topology, agent pool routing | Multi-machine or multi-team deployments |
+
+**For most goals**: TA + Claude Code, no ruflow needed. Claude Code's built-in `Agent` tool handles parallel subtasks natively.
+
+**Add ruflow when**: you need memory that survives across separate `ta run` invocations (e.g., a multi-week research sprint where agent findings accumulate), or when coordinating agents across multiple machines.
+
+**Valid combined stacks**:
+
+```
+# Stack 1: Most goals (simple or parallel within one session)
+ta run "Refactor auth" --agent claude-code
+# Claude Code uses native Agent tool internally for parallel subtasks
+
+# Stack 2: TA workflow swarm (multiple governed staging envs in parallel)
+ta run "Large refactor" --workflow swarm --sub-goals "auth" "payments" "UI"
+# Each sub-goal = separate staging dir + separate Claude Code; no ruflow needed
+
+# Stack 3: Cross-session memory (ruflow as MCP server)
+ta run "Research phase 1" --agent claude-code
+# → ruflow agentdb stores findings as HNSW embeddings
+ta run "Research phase 2" --agent claude-code
+# → Claude Code queries ruflow for phase 1 findings via mcp__claude-flow__memory_retrieve
+
+# Stack 4: Full ruflow hive-mind (advanced, multi-machine)
+ta run "Deploy pipeline" --agent claude-flow
+# ruflow manages agent lifecycle + TA governs outputs
+```
+
+**Do not migrate away from ruflow** if you rely on persistent cross-session memory or distributed consensus. The native `Agent` tool is not a replacement — it operates within a single session only.
+
 ### Using with OpenAI Codex
 
 ```bash
