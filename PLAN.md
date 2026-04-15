@@ -10742,6 +10742,50 @@ condition = "consensus.proceed"
 
 ---
 
+### v0.15.15.3.3 — Pre-Copy Draft Version Validation
+<!-- status: pending -->
+
+**Goal**: Move version validation to before the file copy, reading from the staging directory rather than the post-copy source workspace. Catches a missing `Cargo.toml` bump in the draft before any files are written — zero recovery cost vs. the current post-copy false alarm.
+
+**Depends on**: v0.15.15.3
+
+#### Root cause
+
+`validate_cargo_version()` is called at `draft.rs:6599` — after `overlay.apply_with_conflict_check()` at line 5272. If the agent's draft does not include a `Cargo.toml` bump, the overlay skips that file and the check reads the unchanged pre-apply version from main. The validation fires as a false mismatch when in fact the problem is that the agent never bumped. Files have already been written to the feature branch at this point.
+
+#### Fix
+
+**Pre-copy path (staging present)**: Before `overlay.apply_with_conflict_check()`, check whether `goal.workspace_path/Cargo.toml` exists (the staging copy). If it does, call `validate_cargo_version(&goal.workspace_path, &expected_ver)`. On mismatch: block the apply with:
+```
+[error] Draft does not include a Cargo.toml version bump.
+  Draft has:    0.15.15-alpha.1
+  Phase needs:  0.15.15-alpha.3
+  Fix: run bump-version.sh inside the staging directory, or deny
+       the draft and re-run the goal with an explicit version bump.
+  Staging: .ta/staging/<goal-id>/
+```
+No files are written. Staging is intact — user can `ta draft deny`, fix in staging, or bump manually and re-apply.
+
+**Embedded-patch path (staging GC'd)**: If `goal.workspace_path` does not exist, skip the pre-copy check and keep the existing post-copy `validate_cargo_version(&target_dir, ...)` as a safety net. Also add a note in the post-copy warning distinguishing "staging was gone" from "agent forgot to bump".
+
+**CLAUDE.md consistency check (same pre-copy gate)**: If `goal.workspace_path/CLAUDE.md` exists, also extract the `**Current version**:` line and check it matches. A version bump that updated `Cargo.toml` but not `CLAUDE.md` is equally broken — flag it with the same pre-copy block.
+
+#### Items
+
+1. [ ] **`validate_staging_version()` helper** (`draft.rs`): New function that reads from a staging path and returns `Ok(())` or `Err(DraftVersionError { draft_ver, expected_ver, staging_path })`. Separate from `validate_cargo_version` to keep post-copy path unchanged.
+
+2. [ ] **Pre-copy gate in `apply_package()`**: After `phase_ids` → `expected_ver` is computed and before `overlay.apply_with_conflict_check()`, call `validate_staging_version()`. Block on mismatch with actionable error (see above). Skip if staging path doesn't exist.
+
+3. [ ] **CLAUDE.md consistency check**: Same pre-copy gate, check `staging/CLAUDE.md` `**Current version**:` line. Block if it differs from `expected_ver` or from the staging `Cargo.toml` version — they must be the same.
+
+4. [ ] **Post-copy check demoted to warning-only**: Keep `validate_cargo_version(&target_dir, ...)` as a fallback for the embedded-patch path, but change the box header to `"VERSION MISMATCH — staging was unavailable at apply time"` so it's clear this is a secondary check, not the primary gate.
+
+5. [ ] **Tests**: Pre-copy blocks when staging `Cargo.toml` has wrong version; pre-copy passes when staging has correct version; falls through to post-copy when staging path missing; CLAUDE.md mismatch blocked; post-copy still fires for embedded-patch path.
+
+#### Version: `0.15.15-alpha.3.3`
+
+---
+
 ### v0.15.15.4 — Email Governance: Draft-Only Policy Enforcement
 <!-- status: pending -->
 
