@@ -27,6 +27,79 @@ Bare patterns in policy rules (e.g., `src/**`) auto-prefix to `fs://workspace/` 
 
 ---
 
+## Credential Architecture
+
+**The agent never holds raw credentials.** This is not a recommendation — it is an enforced invariant. TA acts as an identity broker between the agent and any external resource. The agent calls a TA MCP tool (`ta_external_action`, `ta_context`, etc.) with a logical resource name. TA resolves the real credential internally, applies policy, and executes (or stages for review). The credential is never exposed to the agent process or to the staging workspace.
+
+This changes the security gap analysis significantly. The threat model is not "agent with credentials writes to Postgres." It is "TA has no Postgres staging layer, so TA cannot diff or review the mutation before it lands."
+
+### TA Mode — Local File Vault
+
+**Implemented** (`crates/ta-credentials/`)
+
+Credentials are stored at `.ta/credentials.json` with `0600` file permissions (owner-read-only). The file is listed in `.gitignore` by `ta init` and is never committed to VCS. This is the only correct location for secrets in a TA project.
+
+The vault issues **scoped, time-limited session tokens** to the agent for the duration of a goal:
+
+```
+human adds credential:
+  ta credentials add --name "gmail" --service "google" --secret "<token>" --scopes gmail.send
+
+agent goal starts:
+  TA issues SessionToken { allowed_scopes: ["gmail.send"], expires_at: now + 3600s }
+  SessionToken is passed to the agent (not the raw secret)
+  Agent calls ta_external_action { action_type: "email", ... }
+  TA validates token scope → executes send (or stages for review)
+  Raw credential never leaves the vault
+```
+
+`SessionToken` carries:
+- `credential_id` — which underlying credential to use
+- `allowed_scopes` — what the agent may do with it
+- `expires_at` — automatic revocation after the goal TTL
+- `agent_id` — which agent session holds the token
+
+The `FileVault` backend stores tokens alongside credentials and prunes expired tokens on validation. A future `age`-encrypted-at-rest layer is noted in the code but not yet implemented.
+
+**What is committed to VCS:** nothing credential-related. `.ta/credentials.json` is gitignored. Agents work from session tokens, not raw secrets.
+
+**Security gaps (TA local vault):**
+- `credentials.json` is plaintext JSON with `0600` permissions. If the host is compromised (another process running as the same user), secrets are readable. At-rest encryption (`age`) is planned.
+- Session tokens are stored in the same file as credentials. Separate token storage would reduce the blast radius of a token leak.
+- No credential rotation enforcement. The vault does not expire stored credentials, only issued tokens. Credential lifetime is human-managed.
+
+### SA Mode — Enterprise Credential Store (Planned)
+
+**Planned** — `CredentialVault` trait is designed for pluggable backends.
+
+In Supervised Autonomy (SA) mode, the `FileVault` is replaced by an enterprise credential store plugin. The plugin interface is the `CredentialVault` trait already in place:
+
+```rust
+pub trait CredentialVault: Send + Sync {
+    fn issue_token(&mut self, credential_id, agent_id, scopes, ttl_secs) -> Result<SessionToken>;
+    fn validate_token(&self, token_id) -> Result<SessionToken>;
+    // ... add, list, revoke
+}
+```
+
+A production plugin would delegate to:
+- **HashiCorp Vault** — via Vault Agent or direct API, with AppRole or Kubernetes auth.
+- **AWS Secrets Manager / Parameter Store** — IAM-scoped access; secret rotation automatic.
+- **Azure Key Vault** — Managed Identity authentication.
+- **Infisical, Doppler, etc.** — via plugin.
+
+**User validation requirement:** In SA mode, credential issuance requires authentication of the requesting user/agent, not just a scope match. The plugin is responsible for asserting that the agent identity (session ID, signed token, or SPIFFE SVID) is authorized to hold the requested scopes before issuing a `SessionToken`. This prevents one agent from escalating to another agent's credential scope.
+
+The plugin is configured in `workflow.toml`:
+```toml
+[credentials]
+backend = "hashicorp-vault"     # "file" (default) | "hashicorp-vault" | "aws-secrets" | <plugin>
+vault_addr = "https://vault.internal"
+auth_method = "approle"
+```
+
+---
+
 ## Filesystem Resources (`fs://`)
 
 See [file-system-strategy.md](file-system-strategy.md) for the full design.
@@ -86,10 +159,13 @@ The framework exists and is designed for extension. No Postgres or MySQL impleme
 - WAL diff is replayed on `ta draft apply` or discarded on deny.
 
 **Security gaps (Postgres/MySQL):**
-- No staging, no diff, no review, no audit for Postgres or MySQL writes today. Agent writes to production directly and immediately. This is the highest-severity resource governance gap in the current implementation.
-- If the agent has Postgres credentials, it can modify or delete data and TA has no visibility.
+- No staging, no diff, no review, and no audit for Postgres or MySQL writes. **This is the highest-severity resource governance gap in the current implementation.** The agent does not hold credentials directly (TA's credential vault mediates all access), but because TA has no Postgres staging layer, every mutation the agent requests via `ta_external_action` executes immediately against the real database with no diff, no review gate, and no rollback capability.
+- With `policy = "review"`, the action payload (SQL statement) is held for human review before execution — this is the correct interim posture for Postgres. However, the reviewed artifact is the SQL text, not a row-level diff. A complex migration is hard to audit from SQL text alone.
+- `policy = "auto"` for Postgres is equivalent to giving the agent unrestricted write access to the database. Do not use.
 
-**Interim mitigation:** Set `[actions.db_query] policy = "block"` in workflow.toml to prevent the agent from executing any DB queries via the MCP action system. This does not prevent the agent from running `psql` or `sqlite3` directly from the shell.
+**Interim mitigation:** Set `[actions.db_query] policy = "review"` for Postgres targets. This surfaces every SQL statement for human review before execution. It does not provide row-level diffs or rollback — it is a human-in-the-loop gate, not a staging layer.
+
+Note: `psql` and other DB CLIs are not in the command allowlist by default. If the agent tries to call them directly via shell, the command sandbox (`ta-sandbox`) will block the invocation. The agent must go through the `ta_external_action` MCP tool to reach any database.
 
 ---
 
@@ -115,10 +191,10 @@ All email actions are logged to `.ta/action-log.jsonl` regardless of policy.
 - Gmail API (OAuth, labels, threads) — the `gmail://` URI scheme has pattern matching but no real connector.
 
 **Security gaps:**
-- With `policy = "auto"`, the agent can send arbitrary emails to arbitrary recipients without human review. This is appropriate only in controlled environments where the agent's email behavior is fully trusted.
-- Email content is logged but not hashed or signed. An attacker with access to the action log could modify the record after the fact. Future: HMAC-signed action log entries.
-- No outbound rate limit across sessions (only per-session rate limiting via `rate_limit` in `[actions.email]`). A runaway goal could send many emails if rate limits are set high.
-- No recipient allowlist enforcement today. If the agent constructs a recipient address from injected input, it could exfiltrate data via email. Mitigation: `policy = "review"` for all email; production environments should not use `policy = "auto"`.
+- The agent never holds SMTP credentials or API keys directly — all email sends go through TA's credential vault and MCP tool. The risk is not credential theft; it is **prompt injection causing TA to send an attacker-controlled email.** With `policy = "auto"`, a malicious instruction embedded in a file the agent reads could trigger an email to an attacker's address with sensitive content. Use `policy = "review"` for any production environment where the agent reads untrusted input.
+- No recipient allowlist enforcement. The agent can construct a recipient address from content it reads, making `policy = "auto"` a potential data exfiltration vector via prompt injection.
+- Email content is logged to `.ta/action-log.jsonl` but entries are plaintext and not HMAC-signed. A compromised host could tamper with the log. Future: append-only signed log.
+- Rate limits are per-session only (`rate_limit` in `[actions.email]`). A goal that iterates over a large list could send many emails across multiple sessions. Cross-session rate limiting is not implemented.
 
 ### Gmail API — Planned
 
@@ -150,9 +226,10 @@ With `policy = "review"`, the API call payload (URL, method, headers, body) is c
 **Audit:** Every API action is logged to `.ta/action-log.jsonl` with timestamp, URL, method, status code (for auto executions), and goal ID.
 
 **Security gaps:**
-- `policy = "auto"` allows the agent to make arbitrary HTTP requests immediately. If the agent's prompt has been injected with a malicious instruction, it can POST sensitive data to an attacker's server. Use `policy = "review"` for any action that can exfiltrate data.
-- The command allowlist (`ta-sandbox`) blocks `curl` and `wget` by default, which prevents direct shell-level exfiltration. However, agents using an HTTP library via cargo or an inline Python script may bypass this. The OS sandbox (Tier 3) is the reliable control for network exfiltration.
-- API responses are not staged. If the agent reads sensitive data from an API and stores it in a file, that file may appear in the draft diff — but only if it lands in the project directory. Reads to memory-only storage are invisible.
+- The agent does not hold API keys directly — credentials are resolved by TA's vault at execution time. The risk is **prompt injection directing TA to POST to an attacker-controlled URL** with `policy = "auto"`. An agent that reads a malicious document could be instructed to exfiltrate its context to an external endpoint.
+- `policy = "review"` mitigates this: the full URL, method, headers, and body are shown to the human before the request is sent. This is the correct posture for any action that sends data outbound.
+- `curl` and `wget` are not in the command allowlist by default — shell-level HTTP is blocked. Agents that try to use an HTTP library via an inline script (Python `requests`, etc.) are blocked by the OS sandbox (Tier 3) network filter. Tier 1/2 have only the command allowlist as a control.
+- API responses are not staged. Sensitive data an agent reads from an API and holds only in memory is not captured by TA. Only file writes and MCP-mediated actions are observable.
 
 ---
 
