@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Trusted Autonomy MSI installer definition.
-  Built with WiX v4 (dotnet tool install -g wix --version "4.*").
+  Built with WiX v4 (dotnet tool install -g wix -version "4.*").
 
   Usage (from workspace root):
     wix build apps/ta-cli/wix/main.wxs -d SourceDir=target\x86_64-pc-windows-msvc\release \
