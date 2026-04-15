@@ -159,7 +159,8 @@ jobs:
           TAG: ${{ steps.get_version.outputs.version }}
         run: |
           # Install WiX v4 .NET global tool (~10s; windows-latest ships .NET SDK).
-          dotnet tool install --global wix
+          # Pin to v4.x — v5+ requires OSMF EULA acceptance and uses a different schema.
+          dotnet tool install --global wix --version "4.*"
 
           # Extract version digits from any tag format:
           # "v0.13.12-alpha" → "0.13.12.0"
