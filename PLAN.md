@@ -10613,11 +10613,11 @@ condition = "consensus.proceed"
 
 4. [ ] **Override audit record** (`crates/ta-workflow/src/consensus/weighted.rs`, `raft.rs`, `paxos.rs`): When `override_active = true`, include `"override_reason"` in the audit entry (item 3). Add a separate `{ "event": "consensus_override", "run_id", "reason", "score_before_override", "timestamp" }` entry so overrides are queryable independently. This makes the bypass auditable without requiring the caller to log it.
 
-5. [ ] **Decision log: required for feature work** (`apps/ta-cli/src/commands/run.rs`): Change injected prompt language from "optional but encouraged" to "required when implementing or significantly changing code." Add a draft-build warning in `draft.rs` when: artifact count > 3 AND total lines changed > 100 AND `agent_decision_log` is empty. Warning text: `"Agent made no decision log entries despite substantial changes — consider running ta run --follow-up to capture design rationale."` Do not block the draft; warn only.
+5. [ ] **Decision log: required for feature work** (`apps/ta-cli/src/commands/run.rs`, `crates/ta-changeset/src/constitution.rs`): Change injected prompt language from "optional but encouraged" to "required when implementing features or any significant code refactor." Add a constitution-level `[[rules.warn]]` check (not a draft-build heuristic) that fires when the diff contains substantive code changes but no decision log entries. "Substantive" is evaluated by the constitution engine, not a fixed file/line count — a single new file with >50 lines of non-trivial code, or any modification that the supervisor would score above a low-complexity threshold, qualifies. The rule triggers a warning annotation in the draft view: `"No agent decision log entries found for a goal with significant code changes. Consider ta run --follow-up to capture design rationale before approving."` Configurable: `[rules.warn] name = "missing-decisions" enabled = true` in `constitution.toml` (on by default). Does not block apply.
 
 6. [ ] **Claude Max / subscription auth path** (`docs/USAGE.md`): Add a "Claude subscription (Max/Pro)" subsection under "Provider options" explaining: (1) install the `claude` CLI from [claude.ai/code](https://claude.ai/code); (2) run `claude login` to authenticate via browser OAuth; (3) no `ANTHROPIC_API_KEY` needed — TA delegates auth entirely to the `claude` binary. Parallel "OpenAI Pro / Codex subscription" note explaining Codex handles its own auth when `OPENAI_API_KEY` is absent. This removes the main onboarding blocker for subscription users.
 
-7. [ ] **Tests**: `stage_consensus()` — 4 reviewers → proceed; below threshold → stage fails; override → stage passes with override_active; missing verdict file → clear error. `stage_apply_draft` via `StageKind::ApplyDraft` → same behavior as name-based dispatch. Audit entry exists after raft `run()` + cleanup. Override audit entry present when `override_reason` set. Draft-build warning fires when >3 files changed, >100 lines, no decisions. Warning suppressed when decisions present.
+7. [ ] **Tests**: `stage_consensus()` — 4 reviewers → proceed; below threshold → stage fails; override → stage passes with override_active; missing verdict file → clear error. `stage_apply_draft` via `StageKind::ApplyDraft` → same behavior as name-based dispatch. Audit entry exists after raft `run()` + cleanup. Override audit entry present when `override_reason` set. Constitution `missing-decisions` rule fires on new non-trivial file with no decision log; suppressed when decisions present; suppressed when code changes are trivial (config edits, comment-only changes).
 
 #### Version: `0.15.15-alpha.1`
 
@@ -10990,6 +10990,66 @@ draft built
 11. [ ] **USAGE.md "Interactive Governed Session"** section: Full walkthrough — `ta session run --gate agent`, what the gate agent presents, how to ask questions, how to request modifications, how Studio shows the conversation, how to configure gate persona and timeout.
 
 #### Version: `0.15.19-alpha`
+
+---
+
+### v0.15.20 — Orchestrated Workflow: Work Planner + Implementor Split
+<!-- status: pending -->
+**Goal**: Refactor the implementation node in orchestrated workflows (governed-goal, plan-build-phases, plan-implement-review) so that the single "implement" stage is split into two sequential nodes: a **Work Planner** that reasons about what needs to change and records explicit decisions, followed by an **Implementor** that takes the planner's output as authoritative context and writes the code. This makes the decision record structural rather than voluntary — the planner's output IS the decision log. The implementor is constrained to execute the plan, not re-derive it.
+
+**Why this phase exists**: Decision logging is currently voluntary (agents skip it on substantial work). The root cause is that planning and implementation happen in the same agent context — there is no forcing function to separate reasoning from execution. Splitting into two nodes makes the decision record a first-class artifact: the planner writes what to change and why; the implementor reads that and writes code. Reviewers see the plan before seeing the diff, which is a qualitatively different review experience.
+
+**Design**:
+
+```
+[run_goal] current single-node
+    ↓ becomes:
+[plan_work]    → writes .ta/work-plan.json (decisions, file targets, rationale)
+[implement]    → reads .ta/work-plan.json, writes code in staging
+```
+
+`work-plan.json` schema:
+```json
+{
+  "goal": "...",
+  "decisions": [
+    {
+      "decision": "One-line description of the design choice",
+      "rationale": "Why this approach",
+      "alternatives": ["option A", "option B"],
+      "files_affected": ["src/foo.rs", "src/bar.rs"],
+      "confidence": 0.9
+    }
+  ],
+  "implementation_plan": [
+    { "step": 1, "file": "src/foo.rs", "action": "add GameLiftManager struct", "detail": "..." },
+    { "step": 2, "file": "Build.cs", "action": "link GameLiftServerSDK", "detail": "..." }
+  ],
+  "out_of_scope": ["list of things explicitly not being changed and why"]
+}
+```
+
+The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot write code. The implementor agent runs with full tool access but receives the work plan as the first message in its context window and is instructed to execute it faithfully.
+
+**Items**:
+
+1. [ ] **`StageKind::PlanWork` variant** (`apps/ta-cli/src/commands/governed_workflow.rs`): New stage kind that spawns a read-only agent (Read/Grep/Glob only, same as the supervisor) with a planning prompt. Agent output is captured to `.ta/work-plan.json` in the staging workspace. Fails if the agent exits without writing a parseable work plan. `work-plan.json` format validated against `WorkPlan` struct.
+
+2. [ ] **`WorkPlan` struct** (`crates/ta-workflow/src/work_plan.rs`): `WorkPlan`, `WorkPlanDecision`, `ImplementationStep` types with serde. `WorkPlan::load(staging_path)` and `WorkPlan::validate()` (checks decisions non-empty, each decision has rationale). Re-exported from `ta-workflow` crate root.
+
+3. [ ] **Implementor stage context injection** (`apps/ta-cli/src/commands/governed_workflow.rs`, `apps/ta-cli/src/commands/run.rs`): When a `PlanWork` stage precedes an `implement` / `run_goal` stage in the workflow, the implementor's CLAUDE.md injection includes the full `work-plan.json` content as an "Implementation Plan" section. The implementor prompt says: "Execute the attached plan. Do not redesign; if you encounter a blocker, write it to `.ta/work-plan-blockers.json` and exit."
+
+4. [ ] **`work-plan.json` → `agent_decision_log` bridge** (`apps/ta-cli/src/commands/draft.rs`): At draft build time, if `.ta/work-plan.json` exists in staging, load its `decisions` array and merge into `agent_decision_log` (same `DecisionLogEntry` format). This means planner decisions always surface in `ta draft view` without requiring the implementor to write a separate `.ta-decisions.json`.
+
+5. [ ] **Updated workflow templates**: `governed-goal.toml` gains optional `plan_work` stage before `run_goal` (off by default, enabled with `[workflow.config] use_planner = true`). New `plan-implement-split.toml` template where the split is the default. `plan-build-phases.toml` gains `plan_work` as the first stage in each phase loop iteration.
+
+6. [ ] **Planner prompt** (`apps/ta-cli/src/commands/run.rs`): Injected planning prompt explains the role clearly: read the codebase, understand the goal, write a concrete implementation plan with design decisions documented. Explicitly instructs: "Do not write any code. Your output is the plan only." Includes example `work-plan.json`.
+
+7. [ ] **`ta draft view` planner section**: When `work-plan.json` was used, `ta draft view` shows an "Implementation Plan" section before the file diff — decisions, step list, out-of-scope items. This gives reviewers the full reasoning context before they see code changes, matching the mental model of a proper code review (understand intent → evaluate execution).
+
+8. [ ] **Tests**: `PlanWork` stage spawns read-only agent and writes `work-plan.json`; fails cleanly when no plan written; `WorkPlan::validate()` rejects empty decisions; bridge loads plan decisions into agent_decision_log; draft view shows plan section when present; implementor context injection includes plan when preceding `PlanWork` stage exists.
+
+#### Version: `0.15.20-alpha`
 
 ---
 
