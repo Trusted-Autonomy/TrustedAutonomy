@@ -5,6 +5,7 @@
 #   Cargo.toml          [workspace.package] version
 #   .release.toml       last_release_tag (set to previous tag before bump)
 #   CLAUDE.md           "Current version" line
+#   docs/USAGE.md       **Version**: line (fallback; release CI also stamps at build time)
 #
 # Usage:
 #   ./scripts/bump-version.sh 0.14.22-rc.5
@@ -13,7 +14,7 @@
 #   ./scripts/bump-version.sh 0.15.0        --stable        # marks prerelease=false
 #
 # After running, commit:
-#   git add Cargo.toml .release.toml CLAUDE.md
+#   git add Cargo.toml .release.toml CLAUDE.md docs/USAGE.md
 #   git commit -m "chore: bump version to <new>"
 
 set -euo pipefail
@@ -150,6 +151,18 @@ with open('${CLAUDE_MD}', 'w') as f:
 print('  CLAUDE.md: Current version =', new_ver)
 " "$NEW_VERSION"
 
+# --- docs/USAGE.md ---
+python3 -c "
+import re, sys
+new_ver = sys.argv[1]
+with open('docs/USAGE.md') as f:
+    content = f.read()
+content = re.sub(r'^\*\*Version\*\*:.*', '**Version**: ' + new_ver, content, count=1, flags=re.MULTILINE)
+with open('docs/USAGE.md', 'w') as f:
+    f.write(content)
+print('  docs/USAGE.md: **Version** =', new_ver)
+" "$NEW_VERSION"
+
 # --- Cargo.lock ---
 # Regenerate Cargo.lock so the lockfile stays in sync with the bumped version.
 # This prevents Cargo.lock from being left dirty after every version bump.
@@ -163,7 +176,7 @@ else
 fi
 
 echo ""
-echo "Done. Verify with:  grep -E 'version|Current version' Cargo.toml CLAUDE.md .release.toml"
+echo "Done. Verify with:  grep -E 'version|Current version|Version' Cargo.toml CLAUDE.md .release.toml docs/USAGE.md"
 echo ""
 echo "Next:"
 echo "  git add Cargo.toml .release.toml CLAUDE.md Cargo.lock"

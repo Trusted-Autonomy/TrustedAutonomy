@@ -140,7 +140,7 @@
             Id="TaDocShortcut"
             Name="TA Documentation"
             Description="View Trusted Autonomy documentation"
-            Target="[DocsDir]USAGE.html"
+            Target="[#UsageHtml]"
             WorkingDirectory="INSTALLFOLDER" />
           <Shortcut
             Id="TaStudioShortcut"

@@ -176,16 +176,29 @@ jobs:
           # Generate USAGE.html into the release dir for bundling in the MSI.
           # main.wxs references $(var.SourceDir)\USAGE.html as a required file.
           $releaseDir = "target\x86_64-pc-windows-msvc\release"
-          $md = [System.IO.File]::ReadAllText("docs\USAGE.md")
-          $escaped = [System.Net.WebUtility]::HtmlEncode($md)
-          ("<!DOCTYPE html><html><meta charset='utf-8'>" +
-           "<title>Trusted Autonomy Usage Guide</title><body><pre>$escaped</pre></body></html>") |
-            Out-File -Encoding utf8 "$releaseDir\USAGE.html"
-          # Pandoc upgrade path: overwrite with richer output if available.
+
+          # Install pandoc for proper markdown-to-HTML conversion.
+          # windows-latest includes Chocolatey; this takes ~15s.
+          choco install pandoc -y --no-progress | Out-Null
+          $env:PATH = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+
+          # Stamp the release version into a temp copy of USAGE.md.
+          $stampedMd = "staging-usage.md"
+          (Get-Content "docs\USAGE.md") -replace '^\*\*Version\*\*:.*', "**Version**: $env:TAG" |
+            Set-Content $stampedMd -Encoding utf8
+
+          # Generate self-contained HTML (all CSS embedded inline -- works offline).
+          # Falls back to plain pre-wrapped HTML if pandoc unavailable after install.
           if (Get-Command pandoc -ErrorAction SilentlyContinue) {
-            pandoc docs/USAGE.md -s --metadata title="Trusted Autonomy Usage Guide" `
-              -c https://cdn.simplecss.org/simple.min.css `
+            pandoc $stampedMd --standalone --embed-resources `
+              --metadata title="Trusted Autonomy Usage Guide" `
               -o "$releaseDir\USAGE.html"
+          } else {
+            $md = [System.IO.File]::ReadAllText($stampedMd)
+            $escaped = [System.Net.WebUtility]::HtmlEncode($md)
+            ("<!DOCTYPE html><html><meta charset='utf-8'>" +
+             "<title>Trusted Autonomy Usage Guide</title><body><pre>$escaped</pre></body></html>") |
+              Out-File -Encoding utf8 "$releaseDir\USAGE.html"
           }
 
           # Copy ta-studio.bat launcher for MSI bundling.
