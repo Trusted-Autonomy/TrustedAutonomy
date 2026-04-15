@@ -10597,6 +10597,32 @@ condition = "consensus.proceed"
 
 ---
 
+### v0.15.15.1 — Consensus Engine Wiring, Audit Persistence & Decision Log Fix
+<!-- status: pending -->
+**Goal**: Three correctness gaps identified during v0.15.15 review before public release: (1) `kind = "consensus"` and `kind = "apply_draft"` are not recognized by `StageKind` — the `code-review-consensus` template fails at parse time; (2) per-reviewer votes live only in the Raft/Paxos crash-recovery log, which is deleted on success — Constitution §1.5 (append-only audit) is violated when the log is the sole record; (3) decision logging is "optional" in the injected agent prompt — agents implementing substantial features routinely skip it, leaving reviewers with no insight into design choices.
+
+**Depends on**: v0.15.15 (consensus library crate)
+
+**Items**:
+
+1. [ ] **`StageKind::Consensus` variant** (`apps/ta-cli/src/commands/governed_workflow.rs`): Add `Consensus` to `StageKind` enum (`#[serde(rename_all = "snake_case")]` → deserializes `kind = "consensus"`). Add `stage_consensus()` function that reads reviewer verdict files from `.ta/review/<run-id>/<role>/verdict.json`, builds `ConsensusInput` from workflow config (weights, threshold, algorithm, require_all), calls `run_consensus()`, writes `ConsensusResult` to the workflow run output map, and fails the stage if `result.proceed == false` (unless `--override-reason` is set). Wire into `execute_stage()` match arm.
+
+2. [ ] **`StageKind::ApplyDraft` variant** (`apps/ta-cli/src/commands/governed_workflow.rs`): Add `ApplyDraft` to `StageKind` (deserializes `kind = "apply_draft"`). Map to the existing `stage_apply_draft()` function. The name-based `"apply_draft"` dispatch in `StageKind::Default` remains for backward compatibility; the new variant makes it explicit in templates.
+
+3. [ ] **Audit persistence before log cleanup** (`crates/ta-workflow/src/consensus/raft.rs`, `paxos.rs`): Write a structured audit entry to `.ta/audit.jsonl` (append) BEFORE calling `log.cleanup()`. Entry schema: `{ "event": "consensus_complete", "run_id", "algorithm": "raft"|"paxos", "score", "proceed", "override_active", "override_reason", "timed_out_roles": [...], "scores_by_role": {...}, "timestamp" }`. This satisfies Constitution §1.5 — the per-reviewer vote data is now durable in the append-only audit log regardless of whether the caller persists `ConsensusResult`. Add a test that verifies the audit entry exists after `run()` completes and the log file has been cleaned up.
+
+4. [ ] **Override audit record** (`crates/ta-workflow/src/consensus/weighted.rs`, `raft.rs`, `paxos.rs`): When `override_active = true`, include `"override_reason"` in the audit entry (item 3). Add a separate `{ "event": "consensus_override", "run_id", "reason", "score_before_override", "timestamp" }` entry so overrides are queryable independently. This makes the bypass auditable without requiring the caller to log it.
+
+5. [ ] **Decision log: required for feature work** (`apps/ta-cli/src/commands/run.rs`): Change injected prompt language from "optional but encouraged" to "required when implementing or significantly changing code." Add a draft-build warning in `draft.rs` when: artifact count > 3 AND total lines changed > 100 AND `agent_decision_log` is empty. Warning text: `"Agent made no decision log entries despite substantial changes — consider running ta run --follow-up to capture design rationale."` Do not block the draft; warn only.
+
+6. [ ] **Claude Max / subscription auth path** (`docs/USAGE.md`): Add a "Claude subscription (Max/Pro)" subsection under "Provider options" explaining: (1) install the `claude` CLI from [claude.ai/code](https://claude.ai/code); (2) run `claude login` to authenticate via browser OAuth; (3) no `ANTHROPIC_API_KEY` needed — TA delegates auth entirely to the `claude` binary. Parallel "OpenAI Pro / Codex subscription" note explaining Codex handles its own auth when `OPENAI_API_KEY` is absent. This removes the main onboarding blocker for subscription users.
+
+7. [ ] **Tests**: `stage_consensus()` — 4 reviewers → proceed; below threshold → stage fails; override → stage passes with override_active; missing verdict file → clear error. `stage_apply_draft` via `StageKind::ApplyDraft` → same behavior as name-based dispatch. Audit entry exists after raft `run()` + cleanup. Override audit entry present when `override_reason` set. Draft-build warning fires when >3 files changed, >100 lines, no decisions. Warning suppressed when decisions present.
+
+#### Version: `0.15.15-alpha.1`
+
+---
+
 ### v0.15.16 — Windows Code Signing (EV Certificate + CI Integration)
 <!-- status: pending -->
 **Goal**: Eliminate the Microsoft SmartScreen "Windows protected your PC" warning on the TA Windows MSI installer by signing all Windows binaries and the MSI with an Extended Validation (EV) code signing certificate. EV certs bypass SmartScreen's reputation-building period — signed EV binaries show no warning on first install regardless of download count. Ships with a fully automated signing step in the release CI workflow.
