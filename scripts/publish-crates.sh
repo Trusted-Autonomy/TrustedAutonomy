@@ -89,12 +89,19 @@ publish_crate() {
     fi
   else
     echo "  Publishing $crate_name@$WORKSPACE_VERSION to crates.io..."
-    if cargo publish -p "$crate_name" --token "$CARGO_REGISTRY_TOKEN"; then
+    PUBLISH_OUTPUT=$(cargo publish -p "$crate_name" --token "$CARGO_REGISTRY_TOKEN" 2>&1)
+    PUBLISH_EXIT=$?
+    echo "$PUBLISH_OUTPUT"
+    if [ $PUBLISH_EXIT -eq 0 ]; then
       echo "  ✓ Published $crate_name@$WORKSPACE_VERSION"
       # crates.io needs a moment between publishes to index the crate.
       # Without this delay, dependent crates fail to resolve the just-published version.
       echo "  Waiting 20s for crates.io index propagation..."
       sleep 20
+    elif echo "$PUBLISH_OUTPUT" | grep -q "already exists"; then
+      # crates.io API check can lag behind the index — if cargo itself reports
+      # "already exists", treat it as a successful skip rather than a failure.
+      echo "  ✓ Already published at $WORKSPACE_VERSION (confirmed by cargo) — skipping"
     else
       echo "  ✗ FAILED to publish $crate_name"
       return 1
