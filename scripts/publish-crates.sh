@@ -89,25 +89,53 @@ publish_crate() {
     fi
   else
     echo "  Publishing $crate_name@$WORKSPACE_VERSION to crates.io..."
-    # Use || to prevent set -e from aborting on non-zero exit before we can
-    # inspect the output (e.g. "already exists" should be treated as a skip).
-    PUBLISH_EXIT=0
-    PUBLISH_OUTPUT=$(cargo publish -p "$crate_name" --token "$CARGO_REGISTRY_TOKEN" 2>&1) || PUBLISH_EXIT=$?
-    echo "$PUBLISH_OUTPUT"
-    if [ $PUBLISH_EXIT -eq 0 ]; then
-      echo "  ✓ Published $crate_name@$WORKSPACE_VERSION"
-      # crates.io needs a moment between publishes to index the crate.
-      # Without this delay, dependent crates fail to resolve the just-published version.
-      echo "  Waiting 20s for crates.io index propagation..."
-      sleep 20
-    elif echo "$PUBLISH_OUTPUT" | grep -q "already exists"; then
-      # crates.io API check can lag behind the index — if cargo itself reports
-      # "already exists", treat it as a successful skip rather than a failure.
-      echo "  ✓ Already published at $WORKSPACE_VERSION (confirmed by cargo) — skipping"
-    else
-      echo "  ✗ FAILED to publish $crate_name"
-      return 1
-    fi
+    # Retry loop: handles 429 rate-limit by sleeping until the Retry-After time.
+    # crates.io allows ~1 new crate per 10 minutes when publishing many new crates.
+    while true; do
+      # Use || to prevent set -e from aborting on non-zero exit before we can
+      # inspect the output (e.g. "already exists" / 429 should not be hard failures).
+      PUBLISH_EXIT=0
+      PUBLISH_OUTPUT=$(cargo publish -p "$crate_name" --token "$CARGO_REGISTRY_TOKEN" 2>&1) || PUBLISH_EXIT=$?
+      echo "$PUBLISH_OUTPUT"
+      if [ $PUBLISH_EXIT -eq 0 ]; then
+        echo "  ✓ Published $crate_name@$WORKSPACE_VERSION"
+        # crates.io needs a moment between publishes to index the crate.
+        # Without this delay, dependent crates fail to resolve the just-published version.
+        echo "  Waiting 20s for crates.io index propagation..."
+        sleep 20
+        break
+      elif echo "$PUBLISH_OUTPUT" | grep -q "already exists"; then
+        # crates.io API check can lag behind the index — if cargo itself reports
+        # "already exists", treat it as a successful skip rather than a failure.
+        echo "  ✓ Already published at $WORKSPACE_VERSION (confirmed by cargo) — skipping"
+        break
+      elif echo "$PUBLISH_OUTPUT" | grep -q "429 Too Many Requests"; then
+        # Rate limited. Parse the Retry-After timestamp and sleep exactly that long.
+        RETRY_AFTER=$(echo "$PUBLISH_OUTPUT" | grep -oP 'after \K[^"]+(?= GMT)' | head -1 || true)
+        if [[ -n "$RETRY_AFTER" ]]; then
+          RETRY_EPOCH=$(date -d "$RETRY_AFTER GMT" +%s 2>/dev/null \
+            || date -j -f "%a, %d %b %Y %T" "$RETRY_AFTER" +%s 2>/dev/null \
+            || echo "")
+          NOW_EPOCH=$(date +%s)
+          if [[ -n "$RETRY_EPOCH" && "$RETRY_EPOCH" -gt "$NOW_EPOCH" ]]; then
+            WAIT=$(( RETRY_EPOCH - NOW_EPOCH + 10 ))
+            echo "  Rate limited. Retry after: $RETRY_AFTER GMT — sleeping ${WAIT}s ..."
+            sleep "$WAIT"
+          else
+            echo "  Rate limited (could not parse retry time) — sleeping 615s ..."
+            sleep 615
+          fi
+        else
+          echo "  Rate limited (no retry-after found) — sleeping 615s ..."
+          sleep 615
+        fi
+        echo "  Retrying $crate_name ..."
+        # loop continues
+      else
+        echo "  ✗ FAILED to publish $crate_name"
+        return 1
+      fi
+    done
   fi
 }
 
