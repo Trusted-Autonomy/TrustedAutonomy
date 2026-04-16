@@ -89,8 +89,10 @@ publish_crate() {
     fi
   else
     echo "  Publishing $crate_name@$WORKSPACE_VERSION to crates.io..."
-    PUBLISH_OUTPUT=$(cargo publish -p "$crate_name" --token "$CARGO_REGISTRY_TOKEN" 2>&1)
-    PUBLISH_EXIT=$?
+    # Use || to prevent set -e from aborting on non-zero exit before we can
+    # inspect the output (e.g. "already exists" should be treated as a skip).
+    PUBLISH_EXIT=0
+    PUBLISH_OUTPUT=$(cargo publish -p "$crate_name" --token "$CARGO_REGISTRY_TOKEN" 2>&1) || PUBLISH_EXIT=$?
     echo "$PUBLISH_OUTPUT"
     if [ $PUBLISH_EXIT -eq 0 ]; then
       echo "  ✓ Published $crate_name@$WORKSPACE_VERSION"
