@@ -558,21 +558,33 @@ jobs:
             RELEASE_TITLE="TA ${TAG}"
           fi
 
-          gh release create "$TAG" \
-            --title "$RELEASE_TITLE" \
-            --notes-file release-body.md \
-            --draft \
-            $PRERELEASE_FLAG
+          # Check if the release already exists and is published (immutable).
+          # If so, skip create/upload — assets are already present.
+          # This handles reruns after a partial failure (e.g. crates.io step failed
+          # after a successful publish, requiring a fresh workflow_dispatch).
+          RELEASE_EXISTS=false
+          if gh release view "$TAG" --json isDraft 2>/dev/null | grep -q '"isDraft":false'; then
+            echo "Release $TAG already published — skipping create/upload."
+            RELEASE_EXISTS=true
+          fi
 
-          # Upload all artifacts to the draft release.
-          gh release upload "$TAG" artifacts/* --clobber
+          if [ "$RELEASE_EXISTS" = "false" ]; then
+            gh release create "$TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes-file release-body.md \
+              --draft \
+              $PRERELEASE_FLAG
 
-          # Publish the draft (makes it visible and immutable).
-          # Do not pass --latest for prerelease builds — GitHub rejects it.
-          if [ "$IS_PRERELEASE" = "true" ]; then
-            gh release edit "$TAG" --draft=false
-          else
-            gh release edit "$TAG" --draft=false --latest
+            # Upload all artifacts to the draft release.
+            gh release upload "$TAG" artifacts/* --clobber
+
+            # Publish the draft (makes it visible and immutable).
+            # Do not pass --latest for prerelease builds — GitHub rejects it.
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              gh release edit "$TAG" --draft=false
+            else
+              gh release edit "$TAG" --draft=false --latest
+            fi
           fi
 
       - name: Validate release assets on GitHub
