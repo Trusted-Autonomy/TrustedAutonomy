@@ -8,6 +8,7 @@ repository = "https://github.com/trustedautonomy/ta"
 homepage = "https://github.com/trustedautonomy/ta"
 keywords = ["ai", "agent", "autonomy", "schema", "output"]
 categories = ["development-tools", "parsing"]
+include = ["src/**/*", "schemas/**/*", "Cargo.toml", "README.md"]
 
 [dependencies]
 serde = { workspace = true }

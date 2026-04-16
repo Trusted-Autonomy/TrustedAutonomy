@@ -11,11 +11,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Embedded schema YAML files for built-in agents.
-const EMBEDDED_CLAUDE_CODE_V2: &str =
-    include_str!("../../../agents/output-schemas/claude-code.yaml");
-const EMBEDDED_CLAUDE_CODE_V1: &str =
-    include_str!("../../../agents/output-schemas/claude-code-v1.yaml");
-const EMBEDDED_CODEX: &str = include_str!("../../../agents/output-schemas/codex.yaml");
+/// Stored in `crates/ta-output-schema/schemas/` so they are included in the
+/// published crate package (workspace-relative paths are not packaged by cargo publish).
+const EMBEDDED_CLAUDE_CODE_V2: &str = include_str!("../schemas/claude-code.yaml");
+const EMBEDDED_CLAUDE_CODE_V1: &str = include_str!("../schemas/claude-code-v1.yaml");
+const EMBEDDED_CODEX: &str = include_str!("../schemas/codex.yaml");
 
 /// Schema loader with configurable search paths and embedded defaults.
 #[derive(Debug)]
