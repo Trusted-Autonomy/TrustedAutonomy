@@ -88,6 +88,7 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Add TA to an Existing Project](#add-ta-to-an-existing-project)
    - [Framework Registry](#framework-registry)
    - [Workflow Engine](#workflow-engine)
+   - [Choosing Your Orchestration Stack](#choosing-your-orchestration-stack)
    - [Community Knowledge Hub](#community-knowledge-hub)
 7. [Roadmap](#roadmap)
 8. [Troubleshooting](#troubleshooting)
@@ -9839,6 +9840,176 @@ roles:
 ```
 
 Agent configs are resolved in priority order: `.ta/agents/` (project) → `~/.config/ta/agents/` (user) → built-in defaults.
+
+---
+
+## Choosing Your Orchestration Stack
+
+TA, Claude Code's native multi-agent capabilities, and ruflow/claude-flow serve different layers. They are additive, not competing. This section is the "how to configure it" companion to the design overview in the README.
+
+### Decision Table
+
+| Layer | Tool | What it does | When to add it |
+|---|---|---|---|
+| **Governance** | TA | Staged execution, policy gates, audit, draft review | Always — this is the substrate |
+| **Agent runtime** | Claude Code / Codex / Ollama | Executes the work in the staging workspace | Always — pick one per goal |
+| **Within-session parallelism** | Claude Code native `Agent` tool | Spawns subagents in parallel inside a single `ta run` — no extra install | When one goal needs concurrent subtasks (research + code + tests in parallel) |
+| **Cross-session memory** | ruflow MCP server | Persists semantic embeddings (HNSW) and agent state across separate `ta run` invocations | When later goals need to recall findings from earlier runs |
+| **Distributed coordination** | ruflow hive-mind | Byzantine consensus, mesh/hierarchical topology, agent pool routing | Multi-machine or multi-team deployments |
+
+**For most goals**: TA + Claude Code, no ruflow needed. Claude Code's built-in `Agent` tool handles parallel subtasks natively inside a `ta run` session — zero extra config.
+
+**Add ruflow when**: you need memory that survives across separate `ta run` invocations (e.g., a multi-week research sprint where agent findings accumulate), or when coordinating agents across multiple machines.
+
+### Within-Session Parallelism (No Config Needed)
+
+When Claude Code is running inside `ta run`, it can spawn parallel subagents automatically using its native `Agent` tool. This requires no extra installation, no `.mcp.json` entry for ruflow, and no `--workflow swarm` flag.
+
+Example: Claude Code internally fans out research, coding, and test-writing in parallel, then merges the results — all within a single `ta run` invocation and a single staged workspace:
+
+```bash
+ta run "Add OAuth2 login — research providers, implement, add tests"
+# Claude Code handles the parallelism internally.
+# TA sees one staging workspace and one draft to review.
+```
+
+This is the right choice for the vast majority of goals. It adds zero latency overhead compared to ruflow and requires nothing beyond your existing setup.
+
+### ruflow MCP Configuration Guide
+
+Install ruflow when you need cross-session memory or distributed coordination.
+
+#### Step 1 — Install
+
+```bash
+npm install -g claude-flow      # installs the `claude-flow` CLI
+```
+
+Verify:
+
+```bash
+claude-flow --version
+```
+
+#### Step 2 — Register the MCP Server
+
+Add a `claude-flow` entry to your project's `.mcp.json` (create it at the project root if it doesn't exist):
+
+```json
+{
+  "mcpServers": {
+    "ta": {
+      "command": "ta",
+      "args": ["mcp"],
+      "env": {}
+    },
+    "claude-flow": {
+      "command": "claude-flow",
+      "args": ["mcp", "--port", "3001"],
+      "env": {
+        "CLAUDE_FLOW_MEMORY_BACKEND": "hybrid"
+      }
+    }
+  }
+}
+```
+
+`CLAUDE_FLOW_MEMORY_BACKEND=hybrid` enables both in-memory (fast) and on-disk (persistent) storage. For pure in-memory use `memory`; for disk-only use `sqlite`.
+
+#### Step 3 — Configure Agent Routing (optional)
+
+To make a specific agent always use ruflow memory, add a routing rule to `.ta/daemon.toml`:
+
+```toml
+[agent_routing]
+# Route goals tagged "research" through claude-flow agent
+research = "claude-flow"
+# All other goals use the default claude-code agent
+default = "claude-code"
+```
+
+#### Step 4 — Verify Tool Availability
+
+Start a `ta run` session and confirm ruflow tools are visible to the agent:
+
+```bash
+ta run "Smoke-test ruflow connection" --agent claude-code
+```
+
+Inside the session the agent should have access to tools like `mcp__claude-flow__memory_retrieve`, `mcp__claude-flow__memory_store`, and `mcp__claude-flow__agentdb_session-start`. If those tools are absent, check that the `claude-flow` MCP server is listed in `.mcp.json` and that `claude-flow mcp` starts cleanly:
+
+```bash
+claude-flow mcp --port 3001     # should start without errors
+```
+
+### Combined Stack Examples
+
+#### Example 1 — Simple Goal (TA + Claude Code only)
+
+The default. No extra config required.
+
+```bash
+ta run "Refactor the auth module"
+# Claude Code works in the staging workspace.
+# TA captures the draft; you review and approve.
+```
+
+**workflow.toml** — no changes needed from the default.
+
+#### Example 2 — TA Swarm Workflow (parallel governed sub-goals)
+
+Use when a large task can be split into independent sub-goals that each need their own staging workspace and review cycle.
+
+```bash
+ta run "Large refactor" --workflow swarm \
+  --sub-goals "Refactor auth" "Refactor payments" "Refactor UI"
+```
+
+Or define the swarm in `.ta/workflow.toml`:
+
+```toml
+[workflow]
+type = "swarm"
+
+[[workflow.sub_goals]]
+title = "Refactor auth"
+
+[[workflow.sub_goals]]
+title = "Refactor payments"
+
+[[workflow.sub_goals]]
+title = "Refactor UI"
+```
+
+Each sub-goal runs in its own staging directory with its own Claude Code agent. TA produces one draft per sub-goal. No ruflow needed — this is TA's built-in swarm capability.
+
+#### Example 3 — Cross-Session Memory with ruflow
+
+Use when findings from an earlier `ta run` need to be available to a later one.
+
+```bash
+# Phase 1 — research and store findings
+ta run "Research authentication options" --agent claude-code
+# Agent uses mcp__claude-flow__memory_store to persist findings to ruflow agentdb.
+
+# Phase 2 — implementation; agent recalls earlier research
+ta run "Implement chosen auth approach" --agent claude-code
+# Agent calls mcp__claude-flow__memory_retrieve / mcp__claude-flow__agentdb_hierarchical-recall
+# to pull the prior session's findings into context.
+```
+
+The `.mcp.json` entry (see [Step 2](#step-2--register-the-mcp-server) above) is the only setup required. TA governs both phases independently — ruflow just provides the memory bridge.
+
+### When NOT to Add ruflow
+
+Adding ruflow to every goal increases startup latency (MCP server boot) and introduces an external process dependency. It is not the right choice when:
+
+- **The goal is self-contained** — a single `ta run` that doesn't need to recall anything from prior runs.
+- **Parallelism is within one session** — Claude Code's native `Agent` tool handles this with zero overhead.
+- **The project is short-lived** — no cross-session continuity is needed.
+- **You don't have Node.js available** — ruflow requires Node.js; the rest of TA does not.
+
+**Rule of thumb**: if you can complete the work in one or two `ta run` invocations and don't need to share findings with future sessions, skip ruflow entirely. Add it when goals span multiple sessions and need to share findings — a multi-week research sprint, a phased migration where each phase builds on the last, or a multi-machine pipeline.
 
 ---
 

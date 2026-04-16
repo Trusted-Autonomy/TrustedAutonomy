@@ -10728,15 +10728,15 @@ condition = "consensus.proceed"
 
 **Items**:
 
-1. [ ] **USAGE.md "Choosing Your Orchestration Stack" section**: Decision table (same as README), expanded with config examples — `.mcp.json` setup for ruflow MCP, `daemon.toml` agent routing, `workflow.toml` for TA swarm.
+1. [x] **USAGE.md "Choosing Your Orchestration Stack" section**: Decision table (same as README), expanded with config examples — `.mcp.json` setup for ruflow MCP, `daemon.toml` agent routing, `workflow.toml` for TA swarm.
 
-2. [ ] **Within-session parallelism note**: Explain that Claude Code's native `Agent` tool handles parallel subtasks automatically when running inside `ta run` — no config needed, no extra install.
+2. [x] **Within-session parallelism note**: Explain that Claude Code's native `Agent` tool handles parallel subtasks automatically when running inside `ta run` — no config needed, no extra install.
 
-3. [ ] **ruflow MCP configuration guide**: Step-by-step — install, register MCP, verify `mcp__claude-flow__memory_retrieve` tools appear in Claude Code session inside staging.
+3. [x] **ruflow MCP configuration guide**: Step-by-step — install, register MCP, verify `mcp__claude-flow__memory_retrieve` tools appear in Claude Code session inside staging.
 
-4. [ ] **Combined stack examples**: Three annotated examples — (1) simple goal, (2) TA swarm workflow, (3) cross-session memory with ruflow.
+4. [x] **Combined stack examples**: Three annotated examples — (1) simple goal, (2) TA swarm workflow, (3) cross-session memory with ruflow.
 
-5. [ ] **When NOT to add ruflow**: Clarify that adding ruflow to every goal adds latency and complexity without benefit. Document the threshold: use ruflow when goals span multiple sessions and need to share findings.
+5. [x] **When NOT to add ruflow**: Clarify that adding ruflow to every goal adds latency and complexity without benefit. Document the threshold: use ruflow when goals span multiple sessions and need to share findings.
 
 #### Version: `0.15.15-alpha.3.2`
 
