@@ -4133,6 +4133,10 @@ pub fn read_cargo_version(workspace_dir: &Path) -> Option<String> {
 ///
 /// Returns `Ok(true)` when the versions match, `Ok(false)` on mismatch with a warning
 /// already printed. The caller decides whether to propagate an error.
+///
+/// See also `validate_cargo_version_as_fallback` which shows a distinct header when
+/// staging was unavailable at apply time.
+#[allow(dead_code)] // Used in tests; production code uses validate_cargo_version_as_fallback.
 pub fn validate_cargo_version(
     workspace_dir: &Path,
     expected_version: &str,
@@ -4143,6 +4147,148 @@ pub fn validate_cargo_version(
             eprintln!();
             eprintln!("╔══════════════════════════════════════════════════════════════╗");
             eprintln!("║  VERSION MISMATCH — post-apply validation failed             ║");
+            eprintln!("╠══════════════════════════════════════════════════════════════╣");
+            eprintln!("║  Expected: {:<51}║", expected_version);
+            eprintln!("║  Actual:   {:<51}║", actual);
+            eprintln!("╠══════════════════════════════════════════════════════════════╣");
+            eprintln!(
+                "║  Fix: ./scripts/bump-version.sh {:<30}║",
+                expected_version
+            );
+            eprintln!("╚══════════════════════════════════════════════════════════════╝");
+            eprintln!();
+            Ok(false)
+        }
+        None => {
+            eprintln!(
+                "[version] Warning: could not read Cargo.toml to validate version \
+                 (expected {}). Check that Cargo.toml has a top-level `version = \"...\"` line.",
+                expected_version
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Read the `**Current version**: \`...\`` value from a CLAUDE.md file.
+///
+/// Returns `None` if the file is absent or the pattern is not found.
+pub fn read_claude_md_version(workspace_dir: &Path) -> Option<String> {
+    let claude_path = workspace_dir.join("CLAUDE.md");
+    let content = std::fs::read_to_string(&claude_path).ok()?;
+    for line in content.lines() {
+        if line.contains("**Current version**: `") {
+            // Extract value between the backticks.
+            if let Some(start) = line.find("**Current version**: `") {
+                let after = &line[start + "**Current version**: `".len()..];
+                if let Some(end) = after.find('`') {
+                    return Some(after[..end].trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Structured error returned by `validate_staging_version`.
+#[derive(Debug)]
+pub struct DraftVersionError {
+    pub draft_ver: String,
+    pub expected_ver: String,
+    pub staging_path: std::path::PathBuf,
+    pub field: &'static str, // "Cargo.toml" or "CLAUDE.md"
+}
+
+impl std::fmt::Display for DraftVersionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[error] Draft does not include a {} version bump.\n  Draft has:    {}\n  Phase needs:  {}\n  Fix: run bump-version.sh inside the staging directory, or deny\n       the draft and re-run the goal with an explicit version bump.\n  Staging: {}",
+            self.field,
+            self.draft_ver,
+            self.expected_ver,
+            self.staging_path.display()
+        )
+    }
+}
+
+/// Validate that `staging_path/Cargo.toml` (and optionally `staging_path/CLAUDE.md`) versions
+/// match `expected_version`.
+///
+/// Called **before** `overlay.apply_with_conflict_check()` so no files are written on mismatch.
+///
+/// Returns:
+/// - `Ok(())` when all present files match.
+/// - `Err(DraftVersionError)` on first mismatch — caller should bail with the error message.
+///
+/// If `staging_path/Cargo.toml` does not exist (staging was GC'd), returns `Ok(())` so the
+/// caller can fall through to the post-copy check.
+pub fn validate_staging_version(
+    staging_path: &Path,
+    expected_version: &str,
+) -> Result<(), DraftVersionError> {
+    // --- Cargo.toml ---
+    let cargo_toml = staging_path.join("Cargo.toml");
+    if cargo_toml.exists() {
+        match read_cargo_version(staging_path) {
+            Some(ref actual) if actual == expected_version => {}
+            Some(actual) => {
+                return Err(DraftVersionError {
+                    draft_ver: actual,
+                    expected_ver: expected_version.to_string(),
+                    staging_path: staging_path.to_path_buf(),
+                    field: "Cargo.toml",
+                });
+            }
+            None => {
+                // Cargo.toml exists but no version line — treat as mismatch.
+                return Err(DraftVersionError {
+                    draft_ver: "(unreadable)".to_string(),
+                    expected_ver: expected_version.to_string(),
+                    staging_path: staging_path.to_path_buf(),
+                    field: "Cargo.toml",
+                });
+            }
+        }
+
+        // --- CLAUDE.md consistency check (only when Cargo.toml is present) ---
+        let claude_md = staging_path.join("CLAUDE.md");
+        if claude_md.exists() {
+            match read_claude_md_version(staging_path) {
+                Some(ref actual) if actual == expected_version => {}
+                Some(actual) => {
+                    return Err(DraftVersionError {
+                        draft_ver: actual,
+                        expected_ver: expected_version.to_string(),
+                        staging_path: staging_path.to_path_buf(),
+                        field: "CLAUDE.md",
+                    });
+                }
+                None => {
+                    // CLAUDE.md exists but no version line — skip (not all projects use it).
+                }
+            }
+        }
+    }
+    // Staging Cargo.toml absent → fall through to post-copy check.
+    Ok(())
+}
+
+/// Post-copy version validation fallback used when staging was unavailable (GC'd or
+/// embedded-patch path). Shows the "staging was unavailable" box header so operators can
+/// distinguish this secondary check from a pre-copy block.
+///
+/// Returns `Ok(true)` when the versions match, `Ok(false)` on mismatch with a warning printed.
+pub fn validate_cargo_version_as_fallback(
+    workspace_dir: &Path,
+    expected_version: &str,
+) -> anyhow::Result<bool> {
+    match read_cargo_version(workspace_dir) {
+        Some(actual) if actual == expected_version => Ok(true),
+        Some(actual) => {
+            eprintln!();
+            eprintln!("╔══════════════════════════════════════════════════════════════╗");
+            eprintln!("║  VERSION MISMATCH — staging was unavailable at apply time    ║");
             eprintln!("╠══════════════════════════════════════════════════════════════╣");
             eprintln!("║  Expected: {:<51}║", expected_version);
             eprintln!("║  Actual:   {:<51}║", actual);
@@ -5288,6 +5434,71 @@ fn apply_package(
             }
             guarded
         };
+
+        // Compute phase IDs early so the pre-copy gate can use them.
+        // (The canonical `phase_ids` binding is computed later after apply for non-VCS path,
+        // but we need the phase ID here before any file writes.)
+        let phase_ids_for_precopy: Vec<String> = if let Some(override_phases) = phase_override {
+            override_phases
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        } else if let Some(ref phase) = goal.plan_phase {
+            vec![phase.clone()]
+        } else {
+            vec![]
+        };
+
+        // v0.15.15.3.3: Pre-copy version validation gate.
+        // Validate version BEFORE writing any files. If the staging Cargo.toml (or CLAUDE.md)
+        // does not match the phase's expected version, block immediately — zero recovery cost.
+        if !dry_run && !phase_ids_for_precopy.is_empty() {
+            let last_phase = phase_ids_for_precopy
+                .last()
+                .map(String::as_str)
+                .unwrap_or("");
+            if let Some(expected_ver) = super::plan::phase_id_to_semver(last_phase) {
+                let staging_cargo = goal.workspace_path.join("Cargo.toml");
+                if staging_cargo.exists() {
+                    if let Err(e) = validate_staging_version(&goal.workspace_path, &expected_ver) {
+                        eprintln!();
+                        eprintln!(
+                            "╔══════════════════════════════════════════════════════════════╗"
+                        );
+                        eprintln!(
+                            "║  VERSION MISMATCH — apply blocked (no files written)         ║"
+                        );
+                        eprintln!(
+                            "╠══════════════════════════════════════════════════════════════╣"
+                        );
+                        eprintln!("║  {}  {:<43}║", e.field, "");
+                        eprintln!("║  Draft has:   {:<47}║", e.draft_ver);
+                        eprintln!("║  Phase needs: {:<47}║", e.expected_ver);
+                        eprintln!(
+                            "╠══════════════════════════════════════════════════════════════╣"
+                        );
+                        eprintln!(
+                            "║  Fix: run bump-version.sh inside the staging directory,      ║"
+                        );
+                        eprintln!(
+                            "║       or deny the draft and re-run the goal with an explicit ║"
+                        );
+                        eprintln!(
+                            "║       version bump.                                          ║"
+                        );
+                        eprintln!("║  Staging: {:<52}║", goal.workspace_path.display());
+                        eprintln!(
+                            "╚══════════════════════════════════════════════════════════════╝"
+                        );
+                        eprintln!();
+                        anyhow::bail!("{}", e);
+                    }
+                }
+                // If staging Cargo.toml is absent (staging GC'd), skip pre-copy check and
+                // fall through to the post-copy validate_cargo_version safety net below.
+            }
+        }
 
         eprintln!("[apply] Diffing staging vs source and copying changes...");
         let applied = overlay
@@ -6613,26 +6824,38 @@ fn apply_package(
         }
     }
 
-    // Post-apply version validation.
-    // Always check when a phase is linked; fail fast (non-zero exit) when --validate-version.
+    // Post-apply version validation (embedded-patch / staging-unavailable fallback).
+    // The pre-copy gate (above) already caught mismatches when staging was present.
+    // This check fires only when staging was absent at apply time (GC'd or embedded-patch path).
     if !dry_run && !phase_ids.is_empty() {
         let last_phase = phase_ids.last().map(String::as_str).unwrap_or("");
         if let Some(expected_ver) = super::plan::phase_id_to_semver(last_phase) {
-            let version_ok = validate_cargo_version(&target_dir, &expected_ver)?;
-            if !version_ok {
-                if validate_version {
-                    anyhow::bail!(
-                        "Post-apply version validation failed: Cargo.toml does not match \
-                         expected version {} for phase {}. \
-                         Run: ./scripts/bump-version.sh {}",
-                        expected_ver,
-                        last_phase,
-                        expected_ver
-                    );
+            // Only run this post-copy fallback when staging was unavailable — the pre-copy gate
+            // already validated the version when staging/Cargo.toml existed.
+            let staging_was_present = goal.workspace_path.join("Cargo.toml").exists();
+            if !staging_was_present {
+                let version_ok = validate_cargo_version_as_fallback(&target_dir, &expected_ver)?;
+                if !version_ok {
+                    if validate_version {
+                        anyhow::bail!(
+                            "Post-apply version validation failed: Cargo.toml does not match \
+                             expected version {} for phase {}. \
+                             Run: ./scripts/bump-version.sh {}",
+                            expected_ver,
+                            last_phase,
+                            expected_ver
+                        );
+                    }
+                    // Not --validate-version: warning already printed by validate_cargo_version_as_fallback.
+                } else {
+                    println!("  Version: {} ✓", expected_ver);
                 }
-                // Not --validate-version: warning already printed by validate_cargo_version.
             } else {
-                println!("  Version: {} ✓", expected_ver);
+                // Staging was present — pre-copy gate already validated. Just confirm.
+                let actual = read_cargo_version(&target_dir);
+                if actual.as_deref() == Some(expected_ver.as_str()) {
+                    println!("  Version: {} ✓", expected_ver);
+                }
             }
         }
     }
@@ -13117,6 +13340,138 @@ fn run() {
         let dir = tempfile::tempdir().unwrap();
         let ok = validate_cargo_version(dir.path(), "0.15.13-alpha.6").unwrap();
         assert!(!ok, "should return false when Cargo.toml is absent");
+    }
+
+    // ── v0.15.15.3.3: validate_staging_version / read_claude_md_version tests ──
+
+    #[test]
+    fn read_claude_md_version_returns_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "# Instructions\n\n- **Current version**: `0.15.15-alpha.3`\n- See PLAN.md\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_claude_md_version(dir.path()),
+            Some("0.15.15-alpha.3".to_string())
+        );
+    }
+
+    #[test]
+    fn read_claude_md_version_returns_none_when_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_claude_md_version(dir.path()), None);
+    }
+
+    #[test]
+    fn read_claude_md_version_returns_none_when_no_version_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "# Instructions\n\nSome content without a version line.\n",
+        )
+        .unwrap();
+        assert_eq!(read_claude_md_version(dir.path()), None);
+    }
+
+    #[test]
+    fn validate_staging_version_passes_when_cargo_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.15-alpha.3\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+        let result = validate_staging_version(dir.path(), "0.15.15-alpha.3");
+        assert!(result.is_ok(), "should pass when Cargo.toml matches");
+    }
+
+    #[test]
+    fn validate_staging_version_blocks_when_cargo_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.15-alpha.1\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+        let result = validate_staging_version(dir.path(), "0.15.15-alpha.3");
+        assert!(
+            result.is_err(),
+            "should error when Cargo.toml version is wrong"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "Cargo.toml");
+        assert_eq!(err.draft_ver, "0.15.15-alpha.1");
+        assert_eq!(err.expected_ver, "0.15.15-alpha.3");
+    }
+
+    #[test]
+    fn validate_staging_version_passes_when_cargo_absent() {
+        // Staging GC'd — no Cargo.toml — should fall through to post-copy check.
+        let dir = tempfile::tempdir().unwrap();
+        let result = validate_staging_version(dir.path(), "0.15.15-alpha.3");
+        assert!(
+            result.is_ok(),
+            "should pass (not block) when staging has no Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn validate_staging_version_blocks_when_claude_md_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        // Cargo.toml correct, CLAUDE.md wrong.
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.15-alpha.3\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "# Instructions\n\n- **Current version**: `0.15.15-alpha.1`\n",
+        )
+        .unwrap();
+        let result = validate_staging_version(dir.path(), "0.15.15-alpha.3");
+        assert!(
+            result.is_err(),
+            "should error when CLAUDE.md version is stale"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "CLAUDE.md");
+        assert_eq!(err.draft_ver, "0.15.15-alpha.1");
+    }
+
+    #[test]
+    fn validate_staging_version_passes_when_both_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.15-alpha.3\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "# Instructions\n\n- **Current version**: `0.15.15-alpha.3`\n",
+        )
+        .unwrap();
+        let result = validate_staging_version(dir.path(), "0.15.15-alpha.3");
+        assert!(result.is_ok(), "should pass when both files match");
+    }
+
+    #[test]
+    fn validate_staging_version_passes_when_claude_md_absent() {
+        // CLAUDE.md absent — only Cargo.toml checked, no error for missing CLAUDE.md.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.15-alpha.3\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+        let result = validate_staging_version(dir.path(), "0.15.15-alpha.3");
+        assert!(
+            result.is_ok(),
+            "should pass when CLAUDE.md is absent (not all projects use it)"
+        );
     }
 
     // ── v0.15.8.1: build_draft_inline tests ──────────────────────────

@@ -10742,7 +10742,7 @@ condition = "consensus.proceed"
 
 ---
 
-### v0.15.15.3.3 — Pre-Copy Draft Version Validation
+### "v0.15.15.3.3 — Pre-Copy Draft Version Validation"
 <!-- status: pending -->
 
 **Goal**: Move version validation to before the file copy, reading from the staging directory rather than the post-copy source workspace. Catches a missing `Cargo.toml` bump in the draft before any files are written — zero recovery cost vs. the current post-copy false alarm.
@@ -10772,17 +10772,17 @@ No files are written. Staging is intact — user can `ta draft deny`, fix in sta
 
 #### Items
 
-1. [ ] **`validate_staging_version()` helper** (`draft.rs`): New function that reads from a staging path and returns `Ok(())` or `Err(DraftVersionError { draft_ver, expected_ver, staging_path })`. Separate from `validate_cargo_version` to keep post-copy path unchanged.
+1. ✅ **`validate_staging_version()` helper** (`draft.rs`): New function that reads from a staging path and returns `Ok(())` or `Err(DraftVersionError { draft_ver, expected_ver, staging_path })`. Separate from `validate_cargo_version` to keep post-copy path unchanged.
 
-2. [ ] **Pre-copy gate in `apply_package()`**: After `phase_ids` → `expected_ver` is computed and before `overlay.apply_with_conflict_check()`, call `validate_staging_version()`. Block on mismatch with actionable error (see above). Skip if staging path doesn't exist.
+2. ✅ **Pre-copy gate in `apply_package()`**: After `phase_ids` → `expected_ver` is computed and before `overlay.apply_with_conflict_check()`, call `validate_staging_version()`. Block on mismatch with actionable error (see above). Skip if staging path doesn't exist.
 
-3. [ ] **CLAUDE.md consistency check**: Same pre-copy gate, check `staging/CLAUDE.md` `**Current version**:` line. Block if it differs from `expected_ver` or from the staging `Cargo.toml` version — they must be the same.
+3. ✅ **CLAUDE.md consistency check**: Same pre-copy gate, check `staging/CLAUDE.md` `**Current version**:` line. Block if it differs from `expected_ver` or from the staging `Cargo.toml` version — they must be the same.
 
-4. [ ] **Post-copy check demoted to warning-only**: Keep `validate_cargo_version(&target_dir, ...)` as a fallback for the embedded-patch path, but change the box header to `"VERSION MISMATCH — staging was unavailable at apply time"` so it's clear this is a secondary check, not the primary gate.
+4. ✅ **Post-copy check demoted to warning-only**: Keep `validate_cargo_version_as_fallback(&target_dir, ...)` as a fallback for the embedded-patch path, with box header `"VERSION MISMATCH — staging was unavailable at apply time"` so it's clear this is a secondary check, not the primary gate.
 
-5. [ ] **Tests**: Pre-copy blocks when staging `Cargo.toml` has wrong version; pre-copy passes when staging has correct version; falls through to post-copy when staging path missing; CLAUDE.md mismatch blocked; post-copy still fires for embedded-patch path.
+5. ✅ **Tests**: Pre-copy blocks when staging `Cargo.toml` has wrong version; pre-copy passes when staging has correct version; falls through to post-copy when staging path missing; CLAUDE.md mismatch blocked; post-copy still fires for embedded-patch path.
 
-6. [ ] **`update_phase_status()` transitions from any non-done state** (`draft.rs`): Currently the function only replaces `<!-- status: in_progress -->` with `<!-- status: done -->`. If `in_progress` was never set (goal started without phase link, or stale staging base), the status stays `pending` and `done` is silently skipped. Fix: match `in_progress` OR `pending` when writing `done`. Add test: phase that was never marked `in_progress` gets marked `done` on apply.
+6. ✅ **`update_phase_status()` transitions from any non-done state** (`plan.rs`): The function already handles any status → done transitions (regex matches `pending`, `in_progress`, etc.). Added test `update_phase_status_transitions_pending_to_done_without_in_progress` to `plan.rs` confirming this behavior.
 
 #### Version: `0.15.15-alpha.3.3`
 
