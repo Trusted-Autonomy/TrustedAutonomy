@@ -4080,6 +4080,27 @@ Build it.
         );
     }
 
+    // ── v0.15.15.3.3: update_phase_status pending→done (item 6) ──
+
+    #[test]
+    fn update_phase_status_transitions_pending_to_done_without_in_progress() {
+        // Phase that was never marked in_progress — starts at pending.
+        // This simulates a goal started without a phase link, then applied with --phase.
+        // The function must write done regardless of the prior status.
+        let plan = "### v0.15.99 — Test Phase\n<!-- status: pending -->\n**Goal**: Test\n\n---\n";
+        let updated = update_phase_status(plan, "v0.15.99", PlanStatus::Done);
+        assert!(
+            updated.contains("<!-- status: done -->"),
+            "pending phase must transition to done even without an in_progress step: {}",
+            updated
+        );
+        assert!(
+            !updated.contains("<!-- status: pending -->"),
+            "pending marker must be replaced: {}",
+            updated
+        );
+    }
+
     // ── v0.9.9.3: `ta plan from` tests ──
 
     #[test]
