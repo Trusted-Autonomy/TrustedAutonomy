@@ -10809,7 +10809,7 @@ No files are written. Staging is intact — user can `ta draft deny`, fix in sta
 ---
 
 ### v0.15.15.5 — Batch Build Loop: `build` Sub-Workflow, Auto-Approve & Post-Sync Build Step
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Make `plan-build-loop.yaml` and `plan-build-phases.yaml` runnable end-to-end by supplying the missing `build` sub-workflow, add a simple auto-approve config so trusted local runs skip the interactive `human_gate`, and add a generic post-sync build step with a TA-specific `install_local.sh` implementation committed to the repo. Together these let you invoke `ta workflow run plan-build-loop` and have TA iterate through all pending plan phases unattended (with policy guardrails), rebuilding and installing after each phase merges.
 
