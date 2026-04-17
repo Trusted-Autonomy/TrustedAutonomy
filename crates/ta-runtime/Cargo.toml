@@ -20,7 +20,7 @@ which = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 
-ta-credentials = { path = "../ta-credentials", version = "0.15.15-alpha.5" }
+ta-credentials = { path = "../ta-credentials", version = "0.15.15-alpha.6" }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
