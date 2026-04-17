@@ -8,6 +8,7 @@
 //   5. Pushes to the remote (if git is configured)
 //   6. Creates a GitHub PR (if `gh` CLI is available)
 
+use std::cmp::Reverse;
 use std::path::Path;
 use std::process::Command;
 
@@ -51,7 +52,7 @@ fn find_latest_approved(project_root: &Path) -> anyhow::Result<Option<DraftPacka
     }
 
     // Sort by created_at descending.
-    candidates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    candidates.sort_by_key(|c| Reverse(c.created_at));
     Ok(candidates.into_iter().next())
 }
 

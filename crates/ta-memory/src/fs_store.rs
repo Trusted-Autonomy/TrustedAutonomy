@@ -5,6 +5,7 @@
 // Sufficient for small-to-medium projects. For large-scale semantic
 // search, the ruvector backend can be enabled via cargo feature.
 
+use std::cmp::Reverse;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -79,7 +80,7 @@ impl FsMemoryStore {
         }
 
         // Sort by creation time (newest first).
-        entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        entries.sort_by_key(|e| Reverse(e.created_at));
         Ok(entries)
     }
 }
@@ -463,7 +464,7 @@ impl ProjectMemoryStore {
                 deduplicated_project.push(versions.remove(0));
             } else {
                 // Conflict detected: write to .conflicts/ and take the newest entry.
-                versions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                versions.sort_by_key(|v| Reverse(v.updated_at));
                 let winner = versions.remove(0);
                 let loser = versions.remove(0);
                 let conflict = crate::store::ConflictPair {
@@ -496,7 +497,7 @@ impl ProjectMemoryStore {
         }
 
         let mut result: Vec<_> = merged.into_values().collect();
-        result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        result.sort_by_key(|e| Reverse(e.created_at));
         Ok(result)
     }
 }

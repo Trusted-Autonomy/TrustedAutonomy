@@ -1,5 +1,6 @@
 // goal.rs — Goal subcommands: start, list, status, constitution.
 
+use std::cmp::Reverse;
 use std::path::PathBuf;
 
 use clap::Subcommand;
@@ -399,7 +400,7 @@ fn find_parent_goal(
 
             // Sort by updated_at descending.
             let mut sorted = all_goals.clone();
-            sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            sorted.sort_by_key(|g| Reverse(g.updated_at));
 
             // Prefer goals that haven't been applied yet.
             let unapplied = sorted

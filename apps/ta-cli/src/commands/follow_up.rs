@@ -4,6 +4,7 @@
 // Scans goals, drafts, plan phases, and verification failures to build a
 // ranked list of follow-up candidates the user can pick from interactively.
 
+use std::cmp::Reverse;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
@@ -117,7 +118,7 @@ pub fn gather_follow_up_candidates(
     }
 
     // Sort by recency (most recent first).
-    candidates.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    candidates.sort_by_key(|c| Reverse(c.updated_at));
 
     Ok(candidates)
 }
@@ -145,7 +146,7 @@ pub fn resolve_by_phase(
                 .is_some_and(|p| p == phase_id || p == normalized || p == with_v)
         })
         .collect();
-    phase_goals.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    phase_goals.sort_by_key(|g| Reverse(g.updated_at));
 
     if let Some(goal) = phase_goals.first() {
         if let Some(candidate) = goal_to_candidate(goal, &all_drafts, now) {

@@ -288,7 +288,7 @@ impl SourceSnapshot {
             }
         }
 
-        conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+        conflicts.sort_by_key(|c| c.path.clone());
         Ok(conflicts)
     }
 

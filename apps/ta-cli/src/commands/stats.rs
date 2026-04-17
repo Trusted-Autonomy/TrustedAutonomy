@@ -6,6 +6,8 @@
 // v0.15.14.2: Added --phase-prefix filtering, COST column, FOLLOWUPS column,
 // auto-migrate deprecation note.
 
+use std::cmp::Reverse;
+
 use clap::Subcommand;
 use ta_goal::{GoalOutcome, VelocityHistoryStore, VelocityStore};
 use ta_mcp_gateway::GatewayConfig;
@@ -292,7 +294,7 @@ pub fn execute(cmd: &StatsCommands, config: &GatewayConfig) -> anyhow::Result<()
             }
 
             // Newest first.
-            entries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+            entries.sort_by_key(|e| Reverse(e.started_at));
             entries.truncate(*limit);
 
             if entries.is_empty() {

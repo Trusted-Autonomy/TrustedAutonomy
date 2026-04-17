@@ -7,6 +7,7 @@
 //   ta workflow run governed-goal --goal "Fix the auth bug"
 //   ta workflow status <run-id>
 
+use std::cmp::Reverse;
 use std::io::{BufRead, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -601,7 +602,7 @@ impl GovernedWorkflowRun {
                 Some((modified, e.path()))
             })
             .collect();
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_by_key(|c| Reverse(c.0));
         match candidates.first() {
             None => Ok(None),
             Some((_, path)) => {

@@ -1,5 +1,7 @@
 // events.rs -- Event system CLI: listen, hooks, tokens, routing.
 
+use std::cmp::Reverse;
+
 use clap::Subcommand;
 use ta_events::router::{EventRouter, ResponseStrategy, RoutingConfig};
 use ta_events::store::{EventQueryFilter, FsEventStore};
@@ -135,7 +137,7 @@ fn show_stats(config: &GatewayConfig) -> anyhow::Result<()> {
         println!();
         println!("  By type:");
         let mut types: Vec<_> = by_type.iter().collect();
-        types.sort_by(|a, b| b.1.cmp(a.1));
+        types.sort_by_key(|e| Reverse(*e.1));
         for (t, count) in types {
             println!("    {:<24} {}", t, count);
         }

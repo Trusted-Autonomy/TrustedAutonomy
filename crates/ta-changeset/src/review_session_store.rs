@@ -3,6 +3,7 @@
 // Stores review sessions as JSON files in ~/.ta/review_sessions/<session-id>.json
 // Enables multi-invocation review workflows where reviewers can pause and resume.
 
+use std::cmp::Reverse;
 use std::fs;
 use std::path::PathBuf;
 
@@ -65,7 +66,7 @@ impl ReviewSessionStore {
         }
 
         // Sort by updated_at descending (most recent first).
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| Reverse(s.updated_at));
         Ok(sessions)
     }
 

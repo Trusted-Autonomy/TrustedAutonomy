@@ -102,7 +102,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
         }
     }
 
-    entries.sort_by(|a, b| a.id.cmp(&b.id));
+    entries.sort_by_key(|e| e.id.clone());
     let count = entries.len();
 
     Json(serde_json::json!({

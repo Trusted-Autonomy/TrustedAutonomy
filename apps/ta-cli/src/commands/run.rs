@@ -8,6 +8,7 @@
 //
 // The user then reviews/approves/applies via `ta draft` commands.
 
+use std::cmp::Reverse;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -3872,7 +3873,7 @@ pub(crate) fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Opt
         .filter(|pkg| pkg.goal.goal_id == goal_id)
         .collect();
 
-    drafts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    drafts.sort_by_key(|d| Reverse(d.created_at));
     // Return the canonical display ID so the emitted string resolves via `ta draft view`.
     drafts.first().map(draft_canonical_id)
 }

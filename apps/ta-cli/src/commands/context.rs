@@ -3,6 +3,8 @@
 // Agent-agnostic persistent memory that works across agent frameworks.
 // TA owns the memory — agents consume it through MCP tools or CLI.
 
+use std::cmp::Reverse;
+
 use clap::Subcommand;
 use ta_goal::GoalRunStore;
 use ta_mcp_gateway::GatewayConfig;
@@ -431,7 +433,7 @@ fn show_stats(config: &GatewayConfig) -> anyhow::Result<()> {
         println!();
         println!("  By category:");
         let mut cats: Vec<_> = stats.by_category.iter().collect();
-        cats.sort_by(|a, b| b.1.cmp(a.1));
+        cats.sort_by_key(|e| Reverse(*e.1));
         for (cat, count) in cats {
             println!("    {:<16} {}", cat, count);
         }
@@ -441,7 +443,7 @@ fn show_stats(config: &GatewayConfig) -> anyhow::Result<()> {
         println!();
         println!("  By source:");
         let mut srcs: Vec<_> = stats.by_source.iter().collect();
-        srcs.sort_by(|a, b| b.1.cmp(a.1));
+        srcs.sort_by_key(|e| Reverse(*e.1));
         for (src, count) in srcs {
             println!("    {:<16} {}", src, count);
         }

@@ -581,7 +581,7 @@ fn read_installed_templates(dir: &Path) -> Vec<(String, Option<TemplateManifest>
             result.push((name, manifest));
         }
     }
-    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result.sort_by_key(|r| r.0.clone());
     result
 }
 

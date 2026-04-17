@@ -20,6 +20,7 @@
 // `ta plan create` generates a new plan from a template.
 // `ta pr apply` auto-updates PLAN.md when a goal with --phase completes.
 
+use std::cmp::Reverse;
 use std::fmt;
 use std::path::Path;
 
@@ -2651,7 +2652,7 @@ fn plan_discuss(config: &GatewayConfig, topic: &str, _json: bool) -> anyhow::Res
             matches.push((p, score));
         }
     }
-    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    matches.sort_by_key(|m| Reverse(m.1));
     if matches.is_empty() {
         println!("  No existing phases match this topic.");
     } else {

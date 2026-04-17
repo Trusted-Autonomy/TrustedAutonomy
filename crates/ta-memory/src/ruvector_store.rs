@@ -7,6 +7,7 @@
 // Storage: single `.rvf` directory at `.ta/memory.rvf`.
 // Migration: auto-imports existing `.ta/memory/*.json` on first open.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -243,7 +244,7 @@ impl MemoryStore for RuVectorStore {
         }
 
         // Sort by creation time (newest first), matching FsMemoryStore behavior.
-        entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        entries.sort_by_key(|e| Reverse(e.created_at));
 
         match limit {
             Some(n) => Ok(entries.into_iter().take(n).collect()),

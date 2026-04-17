@@ -659,7 +659,7 @@ pub fn detect_phase_conflicts(committed: &[VelocityEntry]) -> Vec<PhaseConflict>
             }
         })
         .collect();
-    conflicts.sort_by(|a, b| a.phase_id.cmp(&b.phase_id));
+    conflicts.sort_by_key(|c| c.phase_id.clone());
     conflicts
 }
 

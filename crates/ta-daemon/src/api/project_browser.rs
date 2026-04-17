@@ -5,6 +5,7 @@
 //   GET  /api/project/list   — List recent projects
 //   POST /api/project/browse — Trigger native OS directory picker
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -156,7 +157,7 @@ pub async fn open_project(
 pub async fn list_projects(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut projects = RecentProjectsStore::load();
     // Sort by last_opened descending (most recent first).
-    projects.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+    projects.sort_by_key(|p| Reverse(p.last_opened.clone()));
     Json(projects).into_response()
 }
 
