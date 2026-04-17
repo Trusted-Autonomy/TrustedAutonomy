@@ -3410,22 +3410,72 @@ fn view_package(
         println!();
         println!("Pending Actions ({}):", pkg.changes.pending_actions.len());
         println!("{}", "-".repeat(60));
+        let has_email_actions = pkg
+            .changes
+            .pending_actions
+            .iter()
+            .any(|a| a.tool_name.starts_with("ta_external_action:email"));
         for (i, action) in pkg.changes.pending_actions.iter().enumerate() {
-            println!(
-                "  {}. [{}] {} ({})",
-                i + 1,
-                action.disposition,
-                action.description,
-                action.kind,
-            );
-            if let Some(uri) = &action.target_uri {
-                println!("     URI: {}", uri);
+            if action.tool_name.starts_with("ta_external_action:email") {
+                // Render email drafts as structured cards.
+                let to = action
+                    .parameters
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                let subject = action
+                    .parameters
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no subject)");
+                let body_preview = action
+                    .parameters
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .map(|b| {
+                        let trimmed = b.trim();
+                        if trimmed.len() > 80 {
+                            format!("{}…", &trimmed[..80])
+                        } else {
+                            trimmed.to_owned()
+                        }
+                    })
+                    .unwrap_or_else(|| "(no body)".into());
+                println!("  {}.", i + 1);
+                println!(
+                    "  ┌─ Email Draft ──────────────────────────────────────────────────────┐"
+                );
+                println!("  │ To:      {}", to);
+                println!("  │ Subject: {}", subject);
+                println!("  │ Preview: {}", body_preview);
+                println!("  │ Status:  [{}]", action.disposition);
+                println!(
+                    "  └────────────────────────────────────────────────────────────────────┘"
+                );
+                if let Some(uri) = &action.target_uri {
+                    println!("     URI: {}", uri);
+                }
+            } else {
+                println!(
+                    "  {}. [{}] {} ({})",
+                    i + 1,
+                    action.disposition,
+                    action.description,
+                    action.kind,
+                );
+                if let Some(uri) = &action.target_uri {
+                    println!("     URI: {}", uri);
+                }
+                if effective_detail != DetailLevel::Top {
+                    let params_str = serde_json::to_string_pretty(&action.parameters)
+                        .unwrap_or_else(|_| action.parameters.to_string());
+                    println!("     Parameters: {}", params_str);
+                }
             }
-            if effective_detail != DetailLevel::Top {
-                let params_str = serde_json::to_string_pretty(&action.parameters)
-                    .unwrap_or_else(|_| action.parameters.to_string());
-                println!("     Parameters: {}", params_str);
-            }
+        }
+        if has_email_actions {
+            println!();
+            println!("  [Email drafts] Run `ta audit messaging` to see full history.");
         }
     }
 

@@ -35,11 +35,17 @@
 
 pub mod action;
 pub mod capture;
+pub mod constitution_rules;
+pub mod dispatch;
 pub mod policy;
 pub mod rate_limit;
+pub mod ratelimit;
 
 // Re-export the most commonly used types.
 pub use action::{ActionError, ActionRegistry, ActionTypeInfo, ExternalAction};
 pub use capture::{ActionCapture, ActionOutcome, CaptureError, CapturedAction};
+pub use constitution_rules::{ConstitutionViolation, PolicyConstitution};
+pub use dispatch::{DispatchResult, EmailDispatchGuard};
 pub use policy::{ActionPolicies, ActionPolicy, ActionPolicyConfig};
 pub use rate_limit::{RateLimitResult, RateLimiter};
+pub use ratelimit::{SessionRateLimitResult, SessionRateLimiter};

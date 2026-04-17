@@ -77,6 +77,21 @@ pub struct ActionPolicyConfig {
     /// INSERT/UPDATE/DELETE still go through the configured policy.
     #[serde(default)]
     pub auto_approve_reads: bool,
+
+    /// For `email`: optional list of allowed recipient addresses.
+    /// If set, any email draft to an address not in this list is flagged with
+    /// "Recipient not in allowed_recipients" before creating the draft.
+    /// Empty list means no restriction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_recipients: Vec<String>,
+
+    /// For `email`: cross-session hourly rate limit. `None` means no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_hour: Option<u32>,
+
+    /// For `email`: cross-session daily rate limit. `None` means no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_day: Option<u32>,
 }
 
 impl Default for ActionPolicyConfig {
@@ -86,6 +101,9 @@ impl Default for ActionPolicyConfig {
             rate_limit: None,
             allowed_domains: vec![],
             auto_approve_reads: false,
+            allowed_recipients: vec![],
+            max_per_hour: None,
+            max_per_day: None,
         }
     }
 }
@@ -253,5 +271,42 @@ policy = "block"
         let email = policies.policy_for("email");
         assert_eq!(email.policy, ActionPolicy::Block);
         assert_eq!(email.rate_limit, Some(5));
+    }
+
+    #[test]
+    fn allowed_recipients_parsed_from_toml() {
+        let toml = r#"
+[actions.email]
+policy = "review"
+allowed_recipients = ["alice@example.com", "bob@example.com"]
+"#;
+        let policies = make_toml(toml);
+        let email = policies.policy_for("email");
+        assert_eq!(
+            email.allowed_recipients,
+            vec!["alice@example.com", "bob@example.com"]
+        );
+    }
+
+    #[test]
+    fn max_per_hour_and_max_per_day_parsed_from_toml() {
+        let toml = r#"
+[actions.email]
+policy = "review"
+max_per_hour = 5
+max_per_day = 20
+"#;
+        let policies = make_toml(toml);
+        let email = policies.policy_for("email");
+        assert_eq!(email.max_per_hour, Some(5));
+        assert_eq!(email.max_per_day, Some(20));
+    }
+
+    #[test]
+    fn default_config_has_empty_recipients_and_no_rate_limits() {
+        let config = ActionPolicyConfig::default();
+        assert!(config.allowed_recipients.is_empty());
+        assert!(config.max_per_hour.is_none());
+        assert!(config.max_per_day.is_none());
     }
 }
