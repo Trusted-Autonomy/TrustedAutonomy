@@ -195,7 +195,7 @@ impl DraftOverlay {
     pub fn list_mutations(&mut self) -> Result<Vec<&OverlayEntry>> {
         self.ensure_loaded()?;
         let mut entries: Vec<&OverlayEntry> = self.cache.values().collect();
-        entries.sort_by(|a, b| a.ts.cmp(&b.ts));
+        entries.sort_by_key(|e| e.ts);
         Ok(entries)
     }
 

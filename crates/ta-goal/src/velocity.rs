@@ -10,6 +10,7 @@
 //
 // v0.15.14.2: Added token cost fields, phase-prefix filtering, rework tracking.
 
+use std::cmp::Reverse;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -601,7 +602,7 @@ pub fn aggregate_by_contributor(entries: &[VelocityEntry]) -> Vec<ContributorAgg
             }
         })
         .collect();
-    result.sort_by_key(|r| Reverse(r.total_goals));
+    result.sort_by_key(|e| Reverse(e.total_goals));
     result
 }
 

@@ -3,6 +3,7 @@
 //! Remote resources (github:) are synced to `.ta/community-cache/<name>/`.
 //! Local resources (local:) are read directly — no caching needed.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -156,7 +157,7 @@ impl ResourceCache {
         }
 
         // Sort by relevance score descending.
-        results.sort_by(|a, b| b.score.cmp(&a.score));
+        results.sort_by_key(|r| Reverse(r.score));
 
         // Enforce token budget (rough: 4 chars ≈ 1 token).
         let mut total_chars = 0usize;

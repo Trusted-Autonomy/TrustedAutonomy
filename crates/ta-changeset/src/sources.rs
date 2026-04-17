@@ -349,7 +349,7 @@ impl SourceCache {
                 }
             }
         }
-        items.sort_by(|a, b| a.name.cmp(&b.name));
+        items.sort_by_key(|i| i.name.clone());
         items
     }
 }

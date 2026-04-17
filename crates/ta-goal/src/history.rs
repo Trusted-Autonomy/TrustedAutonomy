@@ -4,11 +4,10 @@
 // `.ta/goal-history.jsonl`. This preserves queryable history even after
 // goal JSON files are archived or deleted.
 
+use std::cmp::Reverse;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-
-use std::cmp::Reverse;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

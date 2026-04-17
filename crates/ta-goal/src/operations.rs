@@ -3,9 +3,10 @@
 // The daemon watchdog emits CorrectiveAction proposals when it detects issues.
 // They are persisted to `.ta/operations.jsonl` and surfaced via `ta operations log`.
 
+use std::cmp::Reverse;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::cmp::Reverse;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
