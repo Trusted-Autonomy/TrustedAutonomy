@@ -10897,7 +10897,7 @@ Stable and nightly use different tag prefixes (`v*` vs `nightly`), so GitHub's d
 ### v0.15.15.7 — Apply UX: Dirty VCS Check + Staging Version Bump Fix
 <!-- status: pending -->
 
-**Goal**: Eliminate the two recurring apply blockers that have caused multiple failed apply attempts: (1) `ta run` should warn and prompt when the VCS working tree has uncommitted changes before copying source to staging — catching drift early instead of producing confusing warnings at apply time. (2) The staging version bump path is broken — running `bump-version.sh` from the project root updates only source, not staging, and running it from staging fails silently or gets undone by rollback. The fix must be deterministic and operator-free.
+**Goal**: Eliminate the two recurring apply blockers that have caused multiple failed apply attempts: (1) `ta run` should warn and prompt when the VCS working tree has uncommitted changes before copying source to staging — catching drift early instead of producing confusing warnings at apply time. (2) The staging version bump path is broken — running `bump-version.sh` from the project root updates only source, not staging, and running it from staging fails silently or gets undone by rollback. The fix must be deterministic and operator-free. (3) `ta plan next` needs a `--filter` flag so the batch build loop can be scoped to a version prefix without a project-local `max_phases` hack.
 
 **Depends on**: v0.15.15.5 (apply engine baseline)
 
@@ -10909,7 +10909,9 @@ Stable and nightly use different tag prefixes (`v*` vs `nightly`), so GitHub's d
 
 3. [ ] **Clarify error message**: Remove the contradiction in the current error box — it says "run bump-version.sh inside the staging directory" in the box but "Never run bump-version.sh from inside the staging directory" in the Note. With item 2 done, replace both with: `"[apply] Staging version mismatch auto-corrected. If correction failed, use ta draft deny and re-run."`.
 
-4. [ ] **Tests**: pre-run check warns on dirty tree and aborts on N; `--yes` bypasses prompt; clean tree skips check; version mismatch auto-patches and apply proceeds; auto-patch failure bails with clear message.
+4. [ ] **`ta plan next --filter <prefix>`** (`apps/ta-cli/src/commands/plan.rs`): Add an optional `--filter` flag that limits the next-phase search to phases whose ID starts with the given prefix (e.g. `--filter v0.15`). Phases not matching the prefix are skipped as if they don't exist. If no matching pending phase is found, outputs the same `done` signal as when all phases are complete. Wire through to `stage_plan_next` in `governed_workflow.rs` via an optional `phase_filter` field on `StageDef`, so workflow YAML can declare: `filter: "v0.15"`. Update `plan-build-loop.yaml` template to accept an optional `filter` config key and pass it through. Remove `.ta/workflows/plan-build-loop.yaml` project-local override once this ships (it's a `max_phases: 9` workaround).
+
+5. [ ] **Tests**: pre-run check warns on dirty tree and aborts on N; `--yes` bypasses prompt; clean tree skips check; version mismatch auto-patches and apply proceeds; auto-patch failure bails with clear message; `ta plan next --filter v0.15` skips non-matching phases and signals done when no matching phases remain; `stage_plan_next` passes filter when `phase_filter` is set in stage def.
 
 #### Version: `0.15.15-alpha.7`
 
