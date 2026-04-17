@@ -3,6 +3,8 @@
 // The daemon watchdog emits CorrectiveAction proposals when it detects issues.
 // They are persisted to `.ta/operations.jsonl` and surfaced via `ta operations log`.
 
+use std::cmp::Reverse;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -160,7 +162,7 @@ impl OperationsLog {
             }
         }
         // Most recent first.
-        entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        entries.sort_by_key(|e| Reverse(e.created_at));
         if let Some(limit) = limit {
             entries.truncate(limit);
         }
