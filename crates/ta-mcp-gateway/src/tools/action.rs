@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use ta_actions::{
     ActionCapture, ActionOutcome, ActionPolicies, ActionPolicy, ActionRegistry, CapturedAction,
-    RateLimitResult,
+    DispatchResult, EmailDispatchGuard, RateLimitResult, SessionRateLimiter,
 };
 use ta_changeset::draft_package::{ActionKind, ArtifactDisposition, PendingAction};
 
@@ -89,8 +89,138 @@ pub fn handle_external_action(
     // Resolve effective policy: dry_run overrides everything.
     let dry_run = params.dry_run;
 
-    // Rate limit check (only for review/auto — blocked actions don't consume budget).
-    let rate_check = if policy_config.policy == ActionPolicy::Block {
+    // Apply email dispatch guard — forces email to Review regardless of policy config.
+    let dispatch_guard = EmailDispatchGuard::new();
+    let dispatch_result = dispatch_guard.enforce(&params.action_type, &policy_config.policy);
+    let effective_policy = match &dispatch_result {
+        DispatchResult::ForcedReview { reason } => {
+            tracing::info!(
+                action_type = %params.action_type,
+                reason = %reason,
+                "email dispatch guard: forced to review"
+            );
+            ActionPolicy::Review
+        }
+        DispatchResult::Blocked { message } => {
+            // Return a blocked outcome immediately.
+            let ta_dir = state.config.workspace_root.join(".ta");
+            let capture = ActionCapture::new(&ta_dir);
+            let goal_title = goal_run_id
+                .and_then(|id| state.goal_store.get(id).ok().flatten())
+                .map(|g| g.title.clone());
+            let blocked_outcome = ActionOutcome::Blocked {
+                reason: message.clone(),
+            };
+            let captured = CapturedAction::new(
+                &params.action_type,
+                params.payload.clone(),
+                goal_run_id,
+                goal_title,
+                policy_config.policy.clone(),
+                blocked_outcome.clone(),
+                dry_run,
+            );
+            if let Err(e) = capture.append(&captured) {
+                tracing::warn!(
+                    action_type = %params.action_type,
+                    error = %e,
+                    "failed to write blocked dispatch to action log"
+                );
+            }
+            let response = build_response(
+                &params.action_type,
+                &blocked_outcome,
+                dry_run,
+                &policy_config,
+                goal_run_id,
+            );
+            return Ok(CallToolResult::success(vec![Content::json(response)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?]));
+        }
+        DispatchResult::Allowed => policy_config.policy.clone(),
+    };
+
+    // Cross-session rate limit check for email (max_per_hour / max_per_day).
+    if !dry_run
+        && params.action_type == "email"
+        && (policy_config.max_per_hour.is_some() || policy_config.max_per_day.is_some())
+    {
+        let ta_dir = state.config.workspace_root.join(".ta");
+        let mut session_limiter = SessionRateLimiter::new(&ta_dir);
+        let session_check = session_limiter.check_and_record(
+            &params.action_type,
+            policy_config.max_per_hour,
+            policy_config.max_per_day,
+        );
+        match session_check {
+            ta_actions::SessionRateLimitResult::HourlyExceeded { limit, count } => {
+                let outcome = ActionOutcome::RateLimited {
+                    limit,
+                    current: count,
+                };
+                let goal_title = goal_run_id
+                    .and_then(|id| state.goal_store.get(id).ok().flatten())
+                    .map(|g| g.title.clone());
+                let capture = ActionCapture::new(&ta_dir);
+                let captured = CapturedAction::new(
+                    &params.action_type,
+                    params.payload.clone(),
+                    goal_run_id,
+                    goal_title,
+                    effective_policy.clone(),
+                    outcome.clone(),
+                    dry_run,
+                );
+                if let Err(e) = capture.append(&captured) {
+                    tracing::warn!(error = %e, "failed to write rate-limited action to log");
+                }
+                let response = build_response(
+                    &params.action_type,
+                    &outcome,
+                    dry_run,
+                    &policy_config,
+                    goal_run_id,
+                );
+                return Ok(CallToolResult::success(vec![Content::json(response)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?]));
+            }
+            ta_actions::SessionRateLimitResult::DailyExceeded { limit, count } => {
+                let outcome = ActionOutcome::RateLimited {
+                    limit,
+                    current: count,
+                };
+                let goal_title = goal_run_id
+                    .and_then(|id| state.goal_store.get(id).ok().flatten())
+                    .map(|g| g.title.clone());
+                let capture = ActionCapture::new(&ta_dir);
+                let captured = CapturedAction::new(
+                    &params.action_type,
+                    params.payload.clone(),
+                    goal_run_id,
+                    goal_title,
+                    effective_policy.clone(),
+                    outcome.clone(),
+                    dry_run,
+                );
+                if let Err(e) = capture.append(&captured) {
+                    tracing::warn!(error = %e, "failed to write rate-limited action to log");
+                }
+                let response = build_response(
+                    &params.action_type,
+                    &outcome,
+                    dry_run,
+                    &policy_config,
+                    goal_run_id,
+                );
+                return Ok(CallToolResult::success(vec![Content::json(response)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?]));
+            }
+            ta_actions::SessionRateLimitResult::Allowed => {}
+        }
+    }
+
+    // Per-goal rate limit check (only for review/auto — blocked actions don't consume budget).
+    let rate_check = if effective_policy == ActionPolicy::Block {
         // Blocked actions skip the rate limiter entirely.
         RateLimitResult::Unlimited
     } else if let Some(goal_id) = goal_run_id {
@@ -108,7 +238,7 @@ pub fn handle_external_action(
     } else if let RateLimitResult::Exceeded { limit, current } = rate_check {
         (ActionOutcome::RateLimited { limit, current }, None)
     } else {
-        match &policy_config.policy {
+        match &effective_policy {
             ActionPolicy::Block => (
                 ActionOutcome::Blocked {
                     reason: format!(
@@ -120,9 +250,43 @@ pub fn handle_external_action(
             ),
 
             ActionPolicy::Review => {
+                // Check allowed_recipients for email actions.
+                let recipient_flag = if params.action_type == "email"
+                    && !policy_config.allowed_recipients.is_empty()
+                {
+                    let to = params
+                        .payload
+                        .get("to")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !policy_config.allowed_recipients.iter().any(|r| r == to) {
+                        Some(format!(
+                            "Recipient '{}' not in allowed_recipients (configure in \
+                             .ta/workflow.toml under [actions.email].allowed_recipients)",
+                            to
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 // Add to pending_actions so it surfaces in `ta draft view`.
                 let action_id = Uuid::new_v4();
-                let description = build_description(&params);
+                let base_description = build_description(&params);
+                let description = if let Some(ref flag) = recipient_flag {
+                    format!("{} [FLAG: {}]", base_description, flag)
+                } else {
+                    base_description
+                };
+                if let Some(ref flag) = recipient_flag {
+                    tracing::warn!(
+                        action_type = %params.action_type,
+                        flag = %flag,
+                        "email action flagged: recipient not in allowed_recipients"
+                    );
+                }
                 let pending = PendingAction {
                     action_id,
                     tool_name: format!("ta_external_action:{}", params.action_type),
@@ -176,7 +340,7 @@ pub fn handle_external_action(
         params.payload.clone(),
         goal_run_id,
         goal_title,
-        policy_config.policy.clone(),
+        effective_policy.clone(),
         outcome.clone(),
         dry_run,
     );
@@ -303,10 +467,15 @@ fn build_response(
     policy_config: &ta_actions::ActionPolicyConfig,
     goal_run_id: Option<Uuid>,
 ) -> serde_json::Value {
+    // Show the effective policy (may differ from policy_config.policy for email).
+    let effective_policy_str = match outcome {
+        ActionOutcome::CapturedForReview => "review".to_string(),
+        _ => policy_config.policy.to_string(),
+    };
     let base = serde_json::json!({
         "action_type": action_type,
         "dry_run": dry_run,
-        "policy": policy_config.policy.to_string(),
+        "policy": effective_policy_str,
         "goal_run_id": goal_run_id.map(|id| id.to_string()),
     });
 

@@ -1,0 +1,28 @@
+# .ta/constitution.toml — TA Email and Action Policy Constitution
+#
+# Copy this to .ta/constitution.toml to customize policy rules for your project.
+# Default rules (below) are always active even without this file.
+#
+# Rule types:
+#   [[rules.block]] — fail the action with a clear error message
+#   [[rules.warn]]  — allow but log a warning
+#
+# Conditions (string, evaluated by TA at action dispatch time):
+#   "policy_is_not_review" — fires when the action's policy is not "review"
+#   "always"               — always fires
+
+# ── Default: block email auto-send ──────────────────────────────────
+# This rule is always active (even without this file).
+# Override by changing to [[rules.warn]] with allow_override = true.
+[[rules.block]]
+action_type = "email"
+condition   = "policy_is_not_review"
+message     = "Email actions must use policy = review — TA never sends email autonomously. Drafts are created in your Drafts folder for you to review and send."
+allow_override = false
+
+# ── Example: warn on social posts ──────────────────────────────────
+# [[rules.warn]]
+# action_type = "social_post"
+# condition   = "always"
+# message     = "Social media posts require supervisor review before publishing."
+# allow_override = true

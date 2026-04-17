@@ -10789,7 +10789,7 @@ No files are written. Staging is intact — user can `ta draft deny`, fix in sta
 ---
 
 ### v0.15.15.4 — Email Governance: Draft-Only Policy Enforcement
-<!-- status: pending -->
+<!-- status: done -->
 
 **Goal**: Enforce at the policy and constitution level that email is always a human-reviewed draft — never auto-sent. The `MessagingAdapter.create_draft()` path is the only permitted outcome; `policy = "auto"` for email is blocked by the constitution. Prompt-injection-driven sends are blocked before any draft reaches the user's email Drafts folder without supervision.
 
