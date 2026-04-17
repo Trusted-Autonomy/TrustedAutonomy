@@ -181,7 +181,7 @@ mod tests {
         q.enqueue(make_entry("d2")).await.unwrap();
 
         let mut pending = q.pending().await.unwrap();
-        pending.sort_by(|a, b| a.draft_id.cmp(&b.draft_id));
+        pending.sort_by_key(|e| e.draft_id.clone());
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].draft_id, "d1");
     }

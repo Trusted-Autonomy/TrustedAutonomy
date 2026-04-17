@@ -545,7 +545,7 @@ fn load_project_runbooks(project_root: &Path) -> Vec<RunbookDefinition> {
         }
     }
 
-    runbooks.sort_by(|a, b| a.name.cmp(&b.name));
+    runbooks.sort_by_key(|r| r.name.clone());
     runbooks
 }
 

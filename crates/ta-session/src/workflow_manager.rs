@@ -4,6 +4,7 @@
 // convention `workflow-<session-id>.json` to distinguish them from
 // `TaSession` records (which use `<session-id>.json`).
 
+use std::cmp::Reverse;
 use std::fs;
 use std::path::PathBuf;
 
@@ -83,7 +84,7 @@ impl WorkflowSessionManager {
             }
         }
 
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| Reverse(s.updated_at));
         Ok(sessions)
     }
 

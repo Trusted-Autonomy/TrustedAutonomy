@@ -7,6 +7,7 @@
 // v0.10.18.3: Streaming stdout/stderr, heartbeat progress, per-command
 // configurable timeouts, and enhanced timeout error messages.
 
+use std::cmp::Reverse;
 use std::io::BufRead;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -325,7 +326,7 @@ pub fn execute(config: &GatewayConfig, goal_id: Option<&str>) -> anyhow::Result<
     } else {
         // Find the most recent running or pr-ready goal.
         let mut goals = goal_store.list()?;
-        goals.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        goals.sort_by_key(|g| Reverse(g.created_at));
         goals
             .into_iter()
             .find(|g| {

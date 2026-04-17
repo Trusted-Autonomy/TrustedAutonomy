@@ -7,6 +7,8 @@
 // - `AgentResolver`: stub — escalates to human (full LLM synthesis is a future phase)
 // - `ConflictResolverConfig`: parsed from [memory.conflict_resolution] in workflow.toml
 
+use std::cmp::Reverse;
+
 use serde::{Deserialize, Serialize};
 
 use crate::store::{ConflictPair, ConflictResolution, MemoryConflictResolver};
@@ -222,7 +224,7 @@ pub fn load_conflicts(project_memory_dir: &std::path::Path) -> Vec<ConflictPair>
             }
         }
     }
-    conflicts.sort_by(|a, b| b.detected_at.cmp(&a.detected_at));
+    conflicts.sort_by_key(|c| Reverse(c.detected_at));
     conflicts
 }
 

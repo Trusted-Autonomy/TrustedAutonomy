@@ -741,11 +741,15 @@ pub struct SupervisorConfig {
     #[serde(default = "default_supervisor_skip_no_constitution")]
     pub skip_if_no_constitution: bool,
 
-    /// Kill supervisor if no token is received for this many seconds (default 30).
+    /// Kill supervisor if no token is received for this many seconds (default 90).
     ///
     /// Replaces the wall-clock `timeout_secs`: a supervisor actively streaming a large diff
     /// will never be killed — only one that stops producing output for `heartbeat_stale_secs`
-    /// is terminated. Set higher (e.g. 60) if your supervisor uses a slow model.
+    /// is terminated.
+    ///
+    /// 90s is the default to accommodate extended-thinking models and prompt-cache creation
+    /// (building a 30k+ token cache can take 30-60s at the API with no tokens emitted).
+    /// Lower this (e.g. 30) for fast models where genuine stalls are caught quickly.
     #[serde(default = "default_supervisor_heartbeat_stale_secs")]
     pub heartbeat_stale_secs: u64,
 
@@ -788,7 +792,7 @@ fn default_verdict_on_block() -> String {
     "warn".to_string()
 }
 fn default_supervisor_heartbeat_stale_secs() -> u64 {
-    30
+    90
 }
 fn default_supervisor_skip_no_constitution() -> bool {
     true

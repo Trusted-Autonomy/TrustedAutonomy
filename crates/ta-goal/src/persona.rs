@@ -101,7 +101,7 @@ impl PersonaConfig {
             };
             summaries.push(cfg.to_summary());
         }
-        summaries.sort_by(|a, b| a.name.cmp(&b.name));
+        summaries.sort_by_key(|s| s.name.clone());
         summaries
     }
 

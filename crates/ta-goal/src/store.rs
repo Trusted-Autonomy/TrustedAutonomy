@@ -5,6 +5,7 @@
 //
 // The store supports CRUD operations plus filtering by state.
 
+use std::cmp::Reverse;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -86,7 +87,7 @@ impl GoalRunStore {
         }
 
         // Sort by creation time, newest first.
-        goals.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        goals.sort_by_key(|g| Reverse(g.created_at));
         Ok(goals)
     }
 

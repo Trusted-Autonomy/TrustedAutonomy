@@ -4,6 +4,7 @@
 // `.ta/goal-history.jsonl`. This preserves queryable history even after
 // goal JSON files are archived or deleted.
 
+use std::cmp::Reverse;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -140,7 +141,7 @@ impl GoalHistoryLedger {
         }
 
         // Most recent first.
-        entries.sort_by(|a, b| b.created.cmp(&a.created));
+        entries.sort_by_key(|e| Reverse(e.created));
 
         // Apply limit.
         if let Some(limit) = filter.limit {

@@ -15,6 +15,7 @@
 //   POST /api/memory               → create memory entry (v0.5.7)
 //   DELETE /api/memory/:key        → delete memory entry (v0.5.7)
 
+use std::cmp::Reverse;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -373,7 +374,7 @@ fn load_all_drafts(dir: &std::path::Path) -> Result<Vec<DraftPackage>, std::io::
         }
     }
     // Most recent first.
-    drafts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    drafts.sort_by_key(|d| Reverse(d.created_at));
     Ok(drafts)
 }
 

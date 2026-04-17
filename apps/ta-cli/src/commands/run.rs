@@ -8,6 +8,7 @@
 //
 // The user then reviews/approves/applies via `ta draft` commands.
 
+use std::cmp::Reverse;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -3451,20 +3452,16 @@ fn accumulate_tokens(line: &str, tokens: &mut AgentTokens) {
                     .unwrap_or(0);
             }
         }
-        Some("system") => {
-            if tokens.model.is_empty() {
-                if let Some(model) = val.get("model").and_then(|v| v.as_str()) {
-                    tokens.model = model.to_string();
-                }
+        Some("system") if tokens.model.is_empty() => {
+            if let Some(model) = val.get("model").and_then(|v| v.as_str()) {
+                tokens.model = model.to_string();
             }
         }
-        Some("assistant") => {
+        Some("assistant") if tokens.model.is_empty() => {
             // Also extract model from assistant message metadata if present.
-            if tokens.model.is_empty() {
-                if let Some(msg) = val.get("message") {
-                    if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
-                        tokens.model = model.to_string();
-                    }
+            if let Some(msg) = val.get("message") {
+                if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
+                    tokens.model = model.to_string();
                 }
             }
         }
@@ -3872,7 +3869,7 @@ pub(crate) fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Opt
         .filter(|pkg| pkg.goal.goal_id == goal_id)
         .collect();
 
-    drafts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    drafts.sort_by_key(|d| Reverse(d.created_at));
     // Return the canonical display ID so the emitted string resolves via `ta draft view`.
     drafts.first().map(draft_canonical_id)
 }

@@ -7,6 +7,7 @@
 //   ?since=YYYY-MM-DD    — filter entries from this date
 //   ?phase_prefix=0.15   — filter to v0.15.x phases
 
+use std::cmp::Reverse;
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -136,7 +137,7 @@ pub async fn velocity_detail(
         }
 
         // Newest first.
-        entries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        entries.sort_by_key(|e| Reverse(e.started_at));
         let limit = params.limit.unwrap_or(50);
         entries.truncate(limit);
 

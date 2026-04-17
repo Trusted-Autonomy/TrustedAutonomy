@@ -1416,25 +1416,23 @@ fn run_wizard_loop(
                         state.api_key_message = String::new();
                         state.message = None;
                     }
-                    KeyCode::Enter => {
-                        if !state.api_key_input.is_empty() {
-                            state.message = Some("  Validating API key...".to_string());
-                            terminal.draw(|f| render_wizard(f, state))?;
-                            match validate_anthropic_key(&state.api_key_input) {
-                                Ok(()) => {
-                                    state.api_key_validated = Some(true);
-                                    state.api_key_message = "✓ API key valid".to_string();
-                                    state.message = Some("✓ API key valid".to_string());
-                                    terminal.draw(|f| render_wizard(f, state))?;
-                                    std::thread::sleep(std::time::Duration::from_millis(800));
-                                    state.advance();
-                                    state.message = None;
-                                }
-                                Err(e) => {
-                                    state.api_key_validated = Some(false);
-                                    state.api_key_message = format!("✗ {e}");
-                                    state.message = Some(format!("✗ {e}"));
-                                }
+                    KeyCode::Enter if !state.api_key_input.is_empty() => {
+                        state.message = Some("  Validating API key...".to_string());
+                        terminal.draw(|f| render_wizard(f, state))?;
+                        match validate_anthropic_key(&state.api_key_input) {
+                            Ok(()) => {
+                                state.api_key_validated = Some(true);
+                                state.api_key_message = "✓ API key valid".to_string();
+                                state.message = Some("✓ API key valid".to_string());
+                                terminal.draw(|f| render_wizard(f, state))?;
+                                std::thread::sleep(std::time::Duration::from_millis(800));
+                                state.advance();
+                                state.message = None;
+                            }
+                            Err(e) => {
+                                state.api_key_validated = Some(false);
+                                state.api_key_message = format!("✗ {e}");
+                                state.message = Some(format!("✗ {e}"));
                             }
                         }
                     }
@@ -1446,15 +1444,11 @@ fn run_wizard_loop(
                 },
 
                 WizardStep::OllamaModel => match key.code {
-                    KeyCode::Up => {
-                        if state.ollama_model_idx > 0 {
-                            state.ollama_model_idx -= 1;
-                        }
+                    KeyCode::Up if state.ollama_model_idx > 0 => {
+                        state.ollama_model_idx -= 1;
                     }
-                    KeyCode::Down => {
-                        if state.ollama_model_idx + 1 < state.ollama_models.len() {
-                            state.ollama_model_idx += 1;
-                        }
+                    KeyCode::Down if state.ollama_model_idx + 1 < state.ollama_models.len() => {
+                        state.ollama_model_idx += 1;
                     }
                     KeyCode::Enter | KeyCode::Right => {
                         state.advance();

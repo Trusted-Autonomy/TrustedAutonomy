@@ -1,5 +1,6 @@
 // draft.rs — draft package subcommands: build, list, view, approve, deny, apply.
 
+use std::cmp::Reverse;
 use std::fs;
 use std::path::Path;
 use std::sync::mpsc;
@@ -2585,7 +2586,7 @@ fn list_packages(
     let mut packages = load_all_packages(config)?;
 
     // Default ordering: newest last (chronological) for readability.
-    packages.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    packages.sort_by_key(|p| p.created_at);
 
     // Load GC config for stale threshold.
     let workflow_config = ta_submit::WorkflowConfig::load_or_default(
@@ -7861,7 +7862,7 @@ pub fn load_all_packages(config: &GatewayConfig) -> anyhow::Result<Vec<DraftPack
         }
     }
 
-    packages.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    packages.sort_by_key(|p| Reverse(p.created_at));
     Ok(packages)
 }
 
@@ -8086,7 +8087,7 @@ pub fn build_draft_inline(
     // which can be `shortref/seq` format that isn't a raw UUID).
     let latest_pkg = load_all_packages(config).ok().and_then(|mut pkgs| {
         pkgs.retain(|p| p.goal.goal_id == goal_id);
-        pkgs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        pkgs.sort_by_key(|p| Reverse(p.created_at));
         pkgs.into_iter().next()
     });
 

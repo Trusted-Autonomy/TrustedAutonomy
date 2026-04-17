@@ -1504,11 +1504,9 @@ async fn handle_terminal_event(
                         app.running = false;
                     }
                 }
-                (KeyCode::Esc, _) => {
+                (KeyCode::Esc, _) if app.pending_paste.is_some() => {
                     // Escape cancels a pending large paste (v0.11.4.5).
-                    if app.pending_paste.is_some() {
-                        app.cancel_pending_paste();
-                    }
+                    app.cancel_pending_paste();
                 }
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                     // Ctrl-D in attach mode exits attach (v0.12.0.1).
@@ -2266,22 +2264,22 @@ async fn handle_terminal_event(
                     }
                 }
                 // Scrollbar drag: update position while dragging (v0.14.7.1 item 6).
-                MouseEventKind::Drag(MouseButton::Left) if app.scrollbar_dragging => {
-                    if app.output_area_height > 0 {
-                        let h = app.output_area_height as usize;
-                        let rel_row = (mouse.row.saturating_sub(app.output_area_top)) as usize;
-                        let rel_row = rel_row.min(h.saturating_sub(1));
-                        let vl = app.cached_visual_lines.max(app.output.len());
-                        let max_scroll = vl.saturating_sub(h);
-                        if max_scroll > 0 {
-                            let pos = rel_row * max_scroll / h;
-                            app.scroll_offset = max_scroll.saturating_sub(pos);
-                            if app.scroll_offset == 0 {
-                                app.auto_scroll = true;
-                                app.unread_events = 0;
-                            } else {
-                                app.auto_scroll = false;
-                            }
+                MouseEventKind::Drag(MouseButton::Left)
+                    if app.scrollbar_dragging && app.output_area_height > 0 =>
+                {
+                    let h = app.output_area_height as usize;
+                    let rel_row = (mouse.row.saturating_sub(app.output_area_top)) as usize;
+                    let rel_row = rel_row.min(h.saturating_sub(1));
+                    let vl = app.cached_visual_lines.max(app.output.len());
+                    let max_scroll = vl.saturating_sub(h);
+                    if max_scroll > 0 {
+                        let pos = rel_row * max_scroll / h;
+                        app.scroll_offset = max_scroll.saturating_sub(pos);
+                        if app.scroll_offset == 0 {
+                            app.auto_scroll = true;
+                            app.unread_events = 0;
+                        } else {
+                            app.auto_scroll = false;
                         }
                     }
                 }

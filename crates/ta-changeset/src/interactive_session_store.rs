@@ -3,6 +3,7 @@
 // Stores interactive sessions as JSON files in .ta/interactive_sessions/<session-id>.json
 // Enables multi-invocation interactive workflows where humans can pause and resume sessions.
 
+use std::cmp::Reverse;
 use std::fs;
 use std::path::PathBuf;
 
@@ -64,7 +65,7 @@ impl InteractiveSessionStore {
             }
         }
 
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| Reverse(s.updated_at));
         Ok(sessions)
     }
 

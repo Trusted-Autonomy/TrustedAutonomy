@@ -6,6 +6,7 @@
 //   - `ta community search <q>`  — search across resources
 //   - `ta community get <id>`    — fetch and display a document
 
+use std::cmp::Reverse;
 use std::io::Write as _;
 use std::path::Path;
 
@@ -397,7 +398,7 @@ fn cmd_search(
         );
     }
 
-    results.sort_by(|a, b| b.3.cmp(&a.3));
+    results.sort_by_key(|r| Reverse(r.3));
     results.truncate(20);
 
     if json {

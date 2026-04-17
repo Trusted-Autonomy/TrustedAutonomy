@@ -66,11 +66,14 @@ pub struct SupervisorRunConfig {
     pub constitution_path: Option<std::path::PathBuf>,
     /// Don't fail if constitution is missing.
     pub skip_if_no_constitution: bool,
-    /// Kill supervisor if no token is received for this many seconds (default 30).
+    /// Kill supervisor if no token is received for this many seconds (default 90).
     ///
     /// Replaces wall-clock `timeout_secs`: a supervisor actively streaming a large diff
     /// will never be killed as long as tokens keep arriving. Only a truly stalled process
     /// (no output for `heartbeat_stale_secs`) is terminated.
+    ///
+    /// 90s accommodates extended-thinking models and prompt-cache creation: building a
+    /// 30k+ token cache can take 30-60s at the API with no tokens emitted.
     pub heartbeat_stale_secs: u64,
     /// Deprecated: use `heartbeat_stale_secs` instead. Accepted for backward compat and
     /// mapped to `heartbeat_stale_secs` at construction time with a deprecation warning.

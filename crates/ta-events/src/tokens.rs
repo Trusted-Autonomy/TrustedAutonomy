@@ -7,6 +7,7 @@
 //
 // Tokens are simple HMAC-SHA256 signatures over the scope + expiry + random nonce.
 
+use std::cmp::Reverse;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -161,7 +162,7 @@ impl TokenStore {
                 }
             }
         }
-        tokens.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        tokens.sort_by_key(|t| Reverse(t.created_at));
         Ok(tokens)
     }
 

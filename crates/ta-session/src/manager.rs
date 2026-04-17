@@ -2,6 +2,7 @@
 //
 // Stores sessions as JSON files in .ta/sessions/<session-id>.json.
 
+use std::cmp::Reverse;
 use std::fs;
 use std::path::PathBuf;
 
@@ -92,7 +93,7 @@ impl SessionManager {
             }
         }
 
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| Reverse(s.updated_at));
         Ok(sessions)
     }
 
