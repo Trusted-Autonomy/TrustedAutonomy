@@ -26,6 +26,8 @@ pub fn is_zero_u64_pub(v: &u64) -> bool {
     *v == 0
 }
 
+use std::cmp::Reverse;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -540,7 +542,7 @@ pub fn merge_velocity_entries(
     }
 
     let mut merged: Vec<VelocityEntry> = by_id.into_values().collect();
-    merged.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+    merged.sort_by_key(|e| e.started_at);
 
     (merged, committed_ids)
 }
@@ -599,7 +601,7 @@ pub fn aggregate_by_contributor(entries: &[VelocityEntry]) -> Vec<ContributorAgg
             }
         })
         .collect();
-    result.sort_by(|a, b| b.total_goals.cmp(&a.total_goals));
+    result.sort_by_key(|r| Reverse(r.total_goals));
     result
 }
 

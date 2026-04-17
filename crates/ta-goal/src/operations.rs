@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -160,7 +161,7 @@ impl OperationsLog {
             }
         }
         // Most recent first.
-        entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        entries.sort_by_key(|e| Reverse(e.created_at));
         if let Some(limit) = limit {
             entries.truncate(limit);
         }
