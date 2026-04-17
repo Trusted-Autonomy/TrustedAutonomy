@@ -1,6 +1,6 @@
 # Trusted Autonomy -- User Guide
 
-**Version**: 0.15.15-alpha.5
+**Version**: 0.15.15-alpha.6
 
 Trusted Autonomy (TA) is a governance wrapper for AI agents. It lets any agent work freely in an isolated workspace, then holds the proposed changes at a human review checkpoint before anything takes effect. You see what the agent wants to do, approve or reject each change, and maintain a complete audit trail.
 
@@ -391,6 +391,24 @@ ta draft list
 ta draft view <id>
 ta draft apply <id>
 ```
+
+**Nightly builds**
+
+Nightly pre-releases are built automatically from the latest commit on `main`. They contain the newest features but are not stability-guaranteed.
+
+```bash
+# macOS (Apple Silicon) — nightly
+curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/nightly/ta-nightly-aarch64-apple-darwin.tar.gz
+tar xzf ta-nightly-aarch64-apple-darwin.tar.gz
+sudo cp ta ta-daemon /usr/local/bin/
+
+# Linux (x86_64) — nightly
+curl -LO https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/download/nightly/ta-nightly-x86_64-unknown-linux-musl.tar.gz
+tar xzf ta-nightly-x86_64-unknown-linux-musl.tar.gz
+sudo cp ta ta-daemon /usr/local/bin/
+```
+
+Each nightly archive contains both `ta` and `ta-daemon`. See the [nightly release page](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly) for all platforms and the build history.
 
 **Option D -- Docker** *(Coming Soon)*
 
