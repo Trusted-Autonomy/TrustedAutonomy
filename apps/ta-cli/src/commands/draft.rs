@@ -4203,9 +4203,24 @@ impl std::fmt::Display for DraftVersionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[error] Draft does not include a {} version bump.\n  Draft has:    {}\n  Phase needs:  {}\n  Fix: run bump-version.sh inside the staging directory, or deny\n       the draft and re-run the goal with an explicit version bump.\n  Staging: {}",
+            "[error] Draft {} version does not match the expected phase version.\n\
+             \n\
+             \x20 Staging has:    {}\n\
+             \x20 Phase expects:  {}\n\
+             \n\
+             Option A — bump the staging copy to match (run from the PROJECT ROOT, not staging):\n\
+             \x20   ./scripts/bump-version.sh {}\n\
+             \x20   ta draft apply <id>   # retry apply\n\
+             \n\
+             Option B — deny this draft and rebuild:\n\
+             \x20   ta draft deny <id> --reason \"version mismatch\"\n\
+             \x20   ta run \"<goal title>\" --follow-up --phase <phase>\n\
+             \n\
+             Note: never run bump-version.sh from inside the staging directory ({}).\n\
+             \x20     Always run it from the workspace root.",
             self.field,
             self.draft_ver,
+            self.expected_ver,
             self.expected_ver,
             self.staging_path.display()
         )
@@ -4287,17 +4302,27 @@ pub fn validate_cargo_version_as_fallback(
         Some(actual) if actual == expected_version => Ok(true),
         Some(actual) => {
             eprintln!();
-            eprintln!("╔══════════════════════════════════════════════════════════════╗");
-            eprintln!("║  VERSION MISMATCH — staging was unavailable at apply time    ║");
-            eprintln!("╠══════════════════════════════════════════════════════════════╣");
-            eprintln!("║  Expected: {:<51}║", expected_version);
-            eprintln!("║  Actual:   {:<51}║", actual);
-            eprintln!("╠══════════════════════════════════════════════════════════════╣");
-            eprintln!(
-                "║  Fix: ./scripts/bump-version.sh {:<30}║",
-                expected_version
-            );
-            eprintln!("╚══════════════════════════════════════════════════════════════╝");
+            eprintln!("╔══════════════════════════════════════════════════════════════════╗");
+            eprintln!("║  VERSION MISMATCH — source does not match the applied draft      ║");
+            eprintln!("╠══════════════════════════════════════════════════════════════════╣");
+            eprintln!("║  Source (Cargo.toml): {:<44}║", actual);
+            eprintln!("║  Draft expected:      {:<44}║", expected_version);
+            eprintln!("╠══════════════════════════════════════════════════════════════════╣");
+            eprintln!("║  Why: the draft was built at a different version than the source,║");
+            eprintln!("║  or bump-version.sh was run inside the staging directory instead ║");
+            eprintln!("║  of the project root.                                            ║");
+            eprintln!("╠══════════════════════════════════════════════════════════════════╣");
+            eprintln!("║  Option A — bump source to match draft (staging version correct):║");
+            eprintln!("║    cd <project-root>                                             ║");
+            eprintln!("║    ./scripts/bump-version.sh {:<37}║", expected_version);
+            eprintln!("║    ta draft apply <id>   # retry                                 ║");
+            eprintln!("║                                                                  ║");
+            eprintln!("║  Option B — deny draft and redo (staging version wrong):         ║");
+            eprintln!("║    ta draft deny <id> --reason \"version mismatch, redo\"          ║");
+            eprintln!("║    ta run \"<goal>\" --follow-up --phase <phase>                   ║");
+            eprintln!("╠══════════════════════════════════════════════════════════════════╣");
+            eprintln!("║  Run `ta doctor` to diagnose version consistency issues.         ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════════╝");
             eprintln!();
             Ok(false)
         }

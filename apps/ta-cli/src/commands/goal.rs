@@ -3610,6 +3610,107 @@ pub fn doctor(config: &GatewayConfig) -> anyhow::Result<()> {
         }
     }
 
+    // ── Version consistency check ─────────────────────────────────────────────
+    // Compares Cargo.toml workspace version vs CLAUDE.md "Current version" line.
+    // A mismatch means bump-version.sh was only partially applied or run in the
+    // wrong directory.
+    {
+        use super::draft::{read_cargo_version, read_claude_md_version};
+        print!("  Version consistency (Cargo.toml vs CLAUDE.md)... ");
+        let cargo_ver = read_cargo_version(&config.workspace_root);
+        let claude_ver = read_claude_md_version(&config.workspace_root);
+        match (cargo_ver, claude_ver) {
+            (Some(ref cv), Some(ref mv)) if cv == mv => {
+                println!("ok ({cv})");
+                pass += 1;
+            }
+            (Some(ref cv), Some(ref mv)) => {
+                println!("MISMATCH");
+                println!("    Cargo.toml: {cv}");
+                println!("    CLAUDE.md:  {mv}");
+                println!("    Fix (run from project root): ./scripts/bump-version.sh {cv}");
+                println!("    Note: never run bump-version.sh from inside a staging directory.");
+                fail += 1;
+            }
+            (Some(ref cv), None) => {
+                println!("ok ({cv}, no version line in CLAUDE.md)");
+                pass += 1;
+            }
+            (None, _) => {
+                println!("unknown (no top-level version in Cargo.toml)");
+                warn += 1;
+            }
+        }
+    }
+
+    // ── Staging version mismatch check ───────────────────────────────────────
+    // For each goal in a reviewable state that still has a staging directory,
+    // compare the staging version vs the source version. A mismatch means the
+    // draft apply will fail unless the source is bumped first.
+    {
+        use super::draft::read_cargo_version;
+        let source_ver = read_cargo_version(&config.workspace_root);
+        if let (Ok(goal_store), Some(source_ver)) =
+            (GoalRunStore::new(&config.goals_dir), source_ver)
+        {
+            let goals = goal_store.list().unwrap_or_default();
+            let reviewable: Vec<_> = goals
+                .iter()
+                .filter(|g| {
+                    matches!(
+                        g.state,
+                        GoalRunState::PrReady
+                            | GoalRunState::UnderReview
+                            | GoalRunState::Approved { .. }
+                    )
+                })
+                .collect();
+
+            let mut mismatches: Vec<(String, String, String)> = Vec::new(); // (goal_id, staging_ver, goal_title)
+            for goal in &reviewable {
+                if goal.workspace_path.join("Cargo.toml").exists() {
+                    if let Some(staging_ver) = read_cargo_version(&goal.workspace_path) {
+                        if staging_ver != source_ver {
+                            mismatches.push((
+                                goal.goal_run_id.to_string(),
+                                staging_ver,
+                                goal.title.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            if mismatches.is_empty() {
+                print!("  Staging version mismatch... ");
+                println!("ok");
+                pass += 1;
+            } else {
+                println!(
+                    "  Staging version mismatch... {} issue(s) found",
+                    mismatches.len()
+                );
+                for (goal_id, staging_ver, title) in &mismatches {
+                    let short_id = &goal_id[..8.min(goal_id.len())];
+                    println!("    Goal {short_id} ({title}):");
+                    println!("      Staging version: {staging_ver}");
+                    println!("      Source version:  {source_ver}");
+                    println!("      Option A — source is behind (draft bumped correctly):");
+                    println!("        cd <project-root>");
+                    println!("        ./scripts/bump-version.sh {staging_ver}");
+                    println!("        ta draft apply {short_id}");
+                    println!("      Option B — staging has wrong version (rebuild draft):");
+                    println!(
+                        "        ta draft deny {short_id} --reason \"version mismatch, redo\""
+                    );
+                    println!("        ta run \"<goal>\" --follow-up --phase <phase>");
+                    println!("      Note: never run bump-version.sh from inside the staging dir.");
+                }
+                warn += 1;
+            }
+        }
+    }
+
     println!();
     println!("{} passed, {} warnings, {} failures", pass, warn, fail);
     if fail > 0 {
