@@ -1015,6 +1015,75 @@ pub struct WorkflowSection {
     /// ```
     #[serde(default)]
     pub context_mode: ContextMode,
+
+    /// Auto-approve gate bypass configuration (v0.15.15.5).
+    ///
+    /// When enabled and all conditions are satisfied, `human_gate` proceeds
+    /// without interactive input. Conditions: `"reviewer_approved"`, `"no_flags"`,
+    /// `"severity_below"`.
+    ///
+    /// ```toml
+    /// [workflow.auto_approve]
+    /// enabled = true
+    /// conditions = ["reviewer_approved", "no_flags"]
+    /// ```
+    #[serde(default)]
+    pub auto_approve: WorkflowAutoApproveConfig,
+
+    /// Post-sync build step configuration (v0.15.15.5).
+    ///
+    /// Runs a command after `pr_sync` completes (PR merged + VCS synced).
+    ///
+    /// ```toml
+    /// [workflow.post_sync_build]
+    /// enabled = true
+    /// command = "bash install_local.sh"
+    /// timeout_secs = 600
+    /// on_failure = "halt"
+    /// ```
+    #[serde(default)]
+    pub post_sync_build: WorkflowPostSyncBuildConfig,
+}
+
+/// Auto-approve config from `[workflow.auto_approve]` in `.ta/workflow.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkflowAutoApproveConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub conditions: Vec<String>,
+}
+
+/// Post-sync build config from `[workflow.post_sync_build]` in `.ta/workflow.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowPostSyncBuildConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default = "default_post_sync_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_on_failure_halt")]
+    pub on_failure: String,
+}
+
+fn default_post_sync_timeout_secs() -> u64 {
+    600
+}
+
+fn default_on_failure_halt() -> String {
+    "halt".to_string()
+}
+
+impl Default for WorkflowPostSyncBuildConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            command: None,
+            timeout_secs: default_post_sync_timeout_secs(),
+            on_failure: default_on_failure_halt(),
+        }
+    }
 }
 
 fn default_enforce_phase_order() -> String {
@@ -1041,6 +1110,8 @@ impl Default for WorkflowSection {
             plan_done_window: default_plan_done_window(),
             plan_pending_window: default_plan_pending_window(),
             context_mode: ContextMode::default(),
+            auto_approve: WorkflowAutoApproveConfig::default(),
+            post_sync_build: WorkflowPostSyncBuildConfig::default(),
         }
     }
 }

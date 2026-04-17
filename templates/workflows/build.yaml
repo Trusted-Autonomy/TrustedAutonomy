@@ -1,0 +1,67 @@
+# build.yaml — Per-phase governed build sub-workflow.
+#
+# Invoked by plan-build-loop and plan-build-phases as a sub-workflow for each
+# pending plan phase. Runs the full governed cycle:
+#   run_goal → review_draft → human_gate → apply_draft → pr_sync
+#
+# Project-local override: copy to .ta/workflows/build.yaml and modify the
+# config block to change reviewer agent, gate mode, or auto-approve policy.
+#
+# Usage (direct):
+#   ta workflow run build --goal "v0.15.15.5 — Batch Build Loop" --phase v0.15.15.5
+# Usage (as sub-workflow from plan-build-loop):
+#   ta workflow run plan-build-loop --goal "Run all pending phases"
+
+workflow:
+  name: build
+  description: |
+    Governed per-phase build sub-workflow. For a single plan phase:
+      1. Run the agent goal to produce a draft
+      2. Review the draft with the configured reviewer agent
+      3. Apply on approval (human gate or auto-approve when conditions met)
+      4. Create a PR and poll until merged
+      5. Sync the local workspace from the merged PR
+    Post-sync build runs after step 5 when configured in .ta/workflow.toml.
+  config:
+    reviewer_agent: claude-code
+    gate_on_verdict: auto
+    pr_poll_interval_secs: 120
+    sync_timeout_hours: 72
+    auto_merge: false
+    require_pr: true
+
+stages:
+  - name: run_goal
+    description: |
+      Run the agent goal for this plan phase. Produces a draft with all code
+      and documentation changes. The draft ID is captured for downstream stages.
+
+  - name: review_draft
+    description: |
+      Run the reviewer agent against the draft. Produces a verdict.json
+      (approve / flag / reject) with findings and confidence score.
+    depends_on:
+      - run_goal
+
+  - name: human_gate
+    description: |
+      Evaluate the reviewer verdict. If auto_approve conditions are met
+      (configured in .ta/workflow.toml [workflow.auto_approve]), proceed
+      automatically. Otherwise, prompt the human to approve or reject.
+    depends_on:
+      - review_draft
+
+  - name: apply_draft
+    description: |
+      Apply the approved draft to a feature branch with a git commit, then
+      create a pull request targeting main.
+    depends_on:
+      - human_gate
+
+  - name: pr_sync
+    description: |
+      Poll until the PR merges (or times out). After merge, pull the changes
+      into the local workspace. If post_sync_build is configured in
+      .ta/workflow.toml, run the build command before returning to the loop.
+    depends_on:
+      - apply_draft

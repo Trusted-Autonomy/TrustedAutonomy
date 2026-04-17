@@ -73,6 +73,114 @@ pub struct WorkflowConfig {
     #[serde(default)]
     #[allow(dead_code)] // read by loop workflows; not yet plumbed through in v0.15.13
     pub stop_on_flag: bool,
+
+    /// Auto-approve configuration: skip the interactive human_gate when all conditions pass.
+    #[serde(default)]
+    pub auto_approve: AutoApproveConfig,
+
+    /// Post-sync build step: run a command after `pr_sync` completes successfully.
+    #[serde(default)]
+    pub post_sync_build: PostSyncBuildConfig,
+}
+
+/// Configuration for the auto-approve gate bypass.
+///
+/// When `enabled = true` and all listed `conditions` are satisfied, the
+/// `human_gate` stage logs `[auto-approve] conditions met — applying without prompt`
+/// and proceeds without interactive input. Any unsatisfied condition falls back
+/// to the normal interactive prompt.
+///
+/// Supported conditions:
+/// - `"reviewer_approved"` — reviewer verdict is `approve`
+/// - `"no_flags"` — reviewer raised no flag items (findings list is empty)
+/// - `"severity_below"` — no Critical corrective actions (currently: findings is empty)
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AutoApproveConfig {
+    /// Whether auto-approve is enabled. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// All conditions must be satisfied to auto-approve.
+    /// Supported: `"reviewer_approved"`, `"no_flags"`, `"severity_below"`.
+    #[serde(default)]
+    pub conditions: Vec<String>,
+}
+
+impl AutoApproveConfig {
+    /// Returns true if all configured conditions are satisfied by the verdict.
+    pub fn conditions_met(&self, verdict: &ReviewerVerdict) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        // If no conditions listed, auto-approve never fires (require explicit config).
+        if self.conditions.is_empty() {
+            return false;
+        }
+        for cond in &self.conditions {
+            let satisfied = match cond.as_str() {
+                "reviewer_approved" => verdict.verdict == VerdictDecision::Approve,
+                "no_flags" => verdict.findings.is_empty(),
+                "severity_below" => verdict.findings.is_empty(),
+                other => {
+                    tracing::warn!(
+                        condition = other,
+                        "unknown auto_approve condition — treating as unsatisfied"
+                    );
+                    false
+                }
+            };
+            if !satisfied {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Configuration for the post-sync build step.
+///
+/// After `pr_sync` completes (PR merged + VCS synced), if `enabled = true` and
+/// `command` is set, the command is run in the workspace root. This lets the batch
+/// build loop end each phase with a freshly installed binary.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostSyncBuildConfig {
+    /// Whether the post-sync build step is enabled. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Shell command to run after sync. Example: `"bash install_local.sh"`.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Timeout in seconds. Default: 600 (10 minutes).
+    #[serde(default = "default_post_sync_timeout")]
+    pub timeout_secs: u64,
+    /// What to do on command failure: `"halt"` (default) or `"warn"`.
+    #[serde(default)]
+    pub on_failure: PostSyncOnFailure,
+}
+
+impl Default for PostSyncBuildConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            command: None,
+            timeout_secs: default_post_sync_timeout(),
+            on_failure: PostSyncOnFailure::Halt,
+        }
+    }
+}
+
+fn default_post_sync_timeout() -> u64 {
+    600
+}
+
+/// Behavior when the post-sync build command exits non-zero.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PostSyncOnFailure {
+    /// Stop the workflow and require manual resume (default).
+    #[default]
+    Halt,
+    /// Log a warning and continue to the next phase.
+    Warn,
 }
 
 fn default_require_pr() -> bool {
@@ -1075,17 +1183,34 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
     // Computed early so both the dry-run block and the execution block can use it.
     let has_goto = def.stages.iter().any(|s| s.kind == StageKind::Goto);
 
-    // Clone so we can override `require_pr` based on VCS settings.
+    // Clone so we can override settings based on .ta/workflow.toml (project-level source of truth).
     let mut owned_config = def.workflow.config.clone();
-    // Read the project's workflow.toml submit section. If the VCS adapter is "git" with
-    // auto_review enabled (i.e. PRs are expected), override require_pr = true regardless
-    // of what the workflow definition says. This makes VCS settings the single source of truth.
     let submit_config_path = opts.workspace_root.join(".ta").join("workflow.toml");
     {
         let wf = ta_submit::WorkflowConfig::load_or_default(&submit_config_path);
+        // VCS adapter: require_pr = true when git + auto_review.
         let git_with_review = wf.submit.adapter == "git" && wf.submit.auto_review != Some(false);
         if git_with_review {
             owned_config.require_pr = true;
+        }
+        // Auto-approve: project-level config overrides workflow YAML config.
+        if wf.workflow.auto_approve.enabled {
+            owned_config.auto_approve = AutoApproveConfig {
+                enabled: true,
+                conditions: wf.workflow.auto_approve.conditions.clone(),
+            };
+        }
+        // Post-sync build: project-level config overrides workflow YAML config.
+        if wf.workflow.post_sync_build.enabled {
+            owned_config.post_sync_build = PostSyncBuildConfig {
+                enabled: true,
+                command: wf.workflow.post_sync_build.command.clone(),
+                timeout_secs: wf.workflow.post_sync_build.timeout_secs,
+                on_failure: match wf.workflow.post_sync_build.on_failure.as_str() {
+                    "warn" => PostSyncOnFailure::Warn,
+                    _ => PostSyncOnFailure::Halt,
+                },
+            };
         }
     }
     let config = &owned_config;
@@ -2729,6 +2854,28 @@ fn stage_human_gate(
     })?;
 
     let verdict_clone = verdict.clone();
+
+    // Auto-approve: skip interactive prompt when all configured conditions are met.
+    if config.auto_approve.conditions_met(&verdict_clone) {
+        println!(
+            "  [auto-approve] conditions met — applying without prompt (verdict={}, confidence={:.0}%)",
+            verdict_clone.verdict,
+            verdict_clone.confidence * 100.0
+        );
+        run.audit_trail.push(StageAuditEntry {
+            stage: "human_gate".to_string(),
+            agent: "auto-approve".to_string(),
+            verdict: Some("auto-approved".to_string()),
+            duration_secs: 0,
+            at: Utc::now(),
+        });
+        return Ok(Some(format!(
+            "verdict={} — auto-approved (conditions: {})",
+            verdict_clone.verdict,
+            config.auto_approve.conditions.join(", ")
+        )));
+    }
+
     let decision = evaluate_human_gate(&verdict_clone, &config.gate_on_verdict, true)?;
 
     match decision {
@@ -3031,6 +3178,8 @@ fn stage_pr_sync(
                         e
                     ),
                 }
+                // Post-sync build step: run the configured command after merge+sync.
+                run_post_sync_build(run, config, workspace_root)?;
                 return Ok(Some(format!("PR merged after {}s", elapsed)));
             }
             PrPollResult::Closed => {
@@ -3060,6 +3209,105 @@ fn stage_pr_sync(
                     elapsed, config.pr_poll_interval_secs
                 );
                 std::thread::sleep(std::time::Duration::from_secs(config.pr_poll_interval_secs));
+            }
+        }
+    }
+}
+
+/// Run the post-sync build command if configured.
+///
+/// Called after `pr_sync` completes (PR merged + VCS synced). If `post_sync_build.enabled`
+/// is true and a command is set, runs it in the workspace root with a timeout.
+/// On failure:
+/// - `on_failure = "halt"` (default): returns an error with resume instructions.
+/// - `on_failure = "warn"`: logs the failure and returns Ok to continue the loop.
+fn run_post_sync_build(
+    run: &GovernedWorkflowRun,
+    config: &WorkflowConfig,
+    workspace_root: &Path,
+) -> anyhow::Result<()> {
+    let psb = &config.post_sync_build;
+    if !psb.enabled {
+        return Ok(());
+    }
+    let command = match &psb.command {
+        Some(c) if !c.is_empty() => c.clone(),
+        _ => return Ok(()),
+    };
+
+    println!();
+    println!("  [post-sync-build] Running: {}", command);
+    println!("  [post-sync-build] Timeout: {}s", psb.timeout_secs);
+
+    let start = std::time::Instant::now();
+    let status = std::process::Command::new("sh")
+        .args(["-c", &command])
+        .current_dir(workspace_root)
+        .status();
+
+    let elapsed = start.elapsed().as_secs();
+
+    // Timeout check: if the command ran longer than the timeout, we can't actually enforce
+    // it here (we'd need a thread/process group), but we can detect and report a hung
+    // command that somehow returned.
+    if elapsed >= psb.timeout_secs {
+        let msg = format!(
+            "Post-sync build timed out after {}s (command: {}).\n\
+             The command ran longer than timeout_secs = {}.\n\
+             Fix the build before continuing. Re-run with:\n  ta workflow resume {}",
+            elapsed,
+            command,
+            psb.timeout_secs,
+            &run.run_id[..8.min(run.run_id.len())]
+        );
+        match psb.on_failure {
+            PostSyncOnFailure::Warn => {
+                println!("  [post-sync-build] [warn] {}", msg);
+                return Ok(());
+            }
+            PostSyncOnFailure::Halt => anyhow::bail!("{}", msg),
+        }
+    }
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("  [post-sync-build] completed in {}s", elapsed);
+            Ok(())
+        }
+        Ok(s) => {
+            let exit_code = s.code().unwrap_or(-1);
+            let msg = format!(
+                "Post-sync build failed (exit {}) after {}s.\n\
+                 Command: {}\n\
+                 Fix the build before continuing. Re-run with:\n  ta workflow resume {}",
+                exit_code,
+                elapsed,
+                command,
+                &run.run_id[..8.min(run.run_id.len())]
+            );
+            match psb.on_failure {
+                PostSyncOnFailure::Warn => {
+                    println!("  [post-sync-build] [warn] {}", msg);
+                    Ok(())
+                }
+                PostSyncOnFailure::Halt => anyhow::bail!("{}", msg),
+            }
+        }
+        Err(e) => {
+            let msg = format!(
+                "Post-sync build command could not be launched: {}\n\
+                 Command: {}\n\
+                 Fix the issue before continuing. Re-run with:\n  ta workflow resume {}",
+                e,
+                command,
+                &run.run_id[..8.min(run.run_id.len())]
+            );
+            match psb.on_failure {
+                PostSyncOnFailure::Warn => {
+                    println!("  [post-sync-build] [warn] {}", msg);
+                    Ok(())
+                }
+                PostSyncOnFailure::Halt => anyhow::bail!("{}", msg),
             }
         }
     }
@@ -4549,5 +4797,276 @@ stages:
         let result = find_workflow_def(dir.path(), "nonexistent-workflow");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    // ── build.yaml sub-workflow resolves (v0.15.15.5) ─────────────────────────
+
+    #[test]
+    fn build_yaml_resolves_as_sub_workflow() {
+        let dir = tempdir().unwrap();
+        let templates_dir = dir.path().join("templates").join("workflows");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        // Write the canonical build.yaml with all 5 stages.
+        let yaml = r#"workflow:
+  name: build
+  description: Governed per-phase build sub-workflow.
+  config:
+    reviewer_agent: claude-code
+    gate_on_verdict: auto
+stages:
+  - name: run_goal
+    description: Run the agent goal.
+  - name: review_draft
+    description: Review the draft.
+    depends_on:
+      - run_goal
+  - name: human_gate
+    description: Gate on verdict.
+    depends_on:
+      - review_draft
+  - name: apply_draft
+    description: Apply the draft.
+    depends_on:
+      - human_gate
+  - name: pr_sync
+    description: Poll PR merge and sync.
+    depends_on:
+      - apply_draft
+"#;
+        std::fs::write(templates_dir.join("build.yaml"), yaml).unwrap();
+
+        let def = find_workflow_def(dir.path(), "build").unwrap();
+        assert_eq!(def.workflow.name, "build");
+        assert_eq!(def.stages.len(), 5);
+        let names: Vec<&str> = def.stages.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "run_goal",
+                "review_draft",
+                "human_gate",
+                "apply_draft",
+                "pr_sync"
+            ]
+        );
+    }
+
+    #[test]
+    fn build_yaml_dry_run_completes() {
+        let dir = tempdir().unwrap();
+        let templates_dir = dir.path().join("templates").join("workflows");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        let yaml = r#"workflow:
+  name: build
+  description: Governed per-phase build sub-workflow.
+  config: {}
+stages:
+  - name: run_goal
+    description: Run the goal.
+  - name: review_draft
+    description: Review.
+    depends_on: [run_goal]
+  - name: human_gate
+    description: Gate.
+    depends_on: [review_draft]
+  - name: apply_draft
+    description: Apply.
+    depends_on: [human_gate]
+  - name: pr_sync
+    description: Sync.
+    depends_on: [apply_draft]
+"#;
+        std::fs::write(templates_dir.join("build.yaml"), yaml).unwrap();
+
+        let opts = RunOptions {
+            workspace_root: dir.path(),
+            workflow_name: "build",
+            goal_title: "v0.15.15.5 — test",
+            dry_run: true,
+            resume_run_id: None,
+            agent: "claude-code",
+            plan_phase: None,
+            depth: 0,
+        };
+        // Dry-run should succeed without invoking any external commands.
+        run_governed_workflow(&opts).unwrap();
+    }
+
+    // ── auto-approve conditions (v0.15.15.5) ──────────────────────────────────
+
+    #[test]
+    fn auto_approve_conditions_met_proceeds_without_prompt() {
+        let config = AutoApproveConfig {
+            enabled: true,
+            conditions: vec!["reviewer_approved".to_string(), "no_flags".to_string()],
+        };
+        let verdict = ReviewerVerdict {
+            verdict: VerdictDecision::Approve,
+            findings: vec![],
+            confidence: 0.95,
+        };
+        assert!(config.conditions_met(&verdict));
+    }
+
+    #[test]
+    fn auto_approve_disabled_never_fires() {
+        let config = AutoApproveConfig {
+            enabled: false,
+            conditions: vec!["reviewer_approved".to_string()],
+        };
+        let verdict = ReviewerVerdict {
+            verdict: VerdictDecision::Approve,
+            findings: vec![],
+            confidence: 0.95,
+        };
+        assert!(!config.conditions_met(&verdict));
+    }
+
+    #[test]
+    fn auto_approve_no_conditions_never_fires() {
+        let config = AutoApproveConfig {
+            enabled: true,
+            conditions: vec![],
+        };
+        let verdict = ReviewerVerdict {
+            verdict: VerdictDecision::Approve,
+            findings: vec![],
+            confidence: 0.95,
+        };
+        assert!(!config.conditions_met(&verdict));
+    }
+
+    #[test]
+    fn auto_approve_falls_back_when_reviewer_flagged() {
+        let config = AutoApproveConfig {
+            enabled: true,
+            conditions: vec!["reviewer_approved".to_string(), "no_flags".to_string()],
+        };
+        let verdict = ReviewerVerdict {
+            verdict: VerdictDecision::Flag,
+            findings: vec!["performance concern".to_string()],
+            confidence: 0.7,
+        };
+        assert!(!config.conditions_met(&verdict));
+    }
+
+    #[test]
+    fn auto_approve_falls_back_when_findings_present() {
+        let config = AutoApproveConfig {
+            enabled: true,
+            conditions: vec!["reviewer_approved".to_string(), "no_flags".to_string()],
+        };
+        let verdict = ReviewerVerdict {
+            verdict: VerdictDecision::Approve,
+            findings: vec!["minor style nit".to_string()],
+            confidence: 0.85,
+        };
+        // "no_flags" condition fails because findings is non-empty.
+        assert!(!config.conditions_met(&verdict));
+    }
+
+    #[test]
+    fn auto_approve_severity_below_condition_passes_when_no_findings() {
+        let config = AutoApproveConfig {
+            enabled: true,
+            conditions: vec![
+                "reviewer_approved".to_string(),
+                "severity_below".to_string(),
+            ],
+        };
+        let verdict = ReviewerVerdict {
+            verdict: VerdictDecision::Approve,
+            findings: vec![],
+            confidence: 0.9,
+        };
+        assert!(config.conditions_met(&verdict));
+    }
+
+    // ── post-sync build config (v0.15.15.5) ───────────────────────────────────
+
+    #[test]
+    fn post_sync_build_disabled_by_default() {
+        let config = PostSyncBuildConfig::default();
+        assert!(!config.enabled);
+        assert!(config.command.is_none());
+        assert_eq!(config.timeout_secs, 600);
+        assert_eq!(config.on_failure, PostSyncOnFailure::Halt);
+    }
+
+    #[test]
+    fn post_sync_build_warn_continues_on_failure() {
+        let dir = tempdir().unwrap();
+        let run = GovernedWorkflowRun::new("test-psb", "build", "test goal");
+        let config = WorkflowConfig {
+            post_sync_build: PostSyncBuildConfig {
+                enabled: true,
+                command: Some("exit 1".to_string()),
+                timeout_secs: 60,
+                on_failure: PostSyncOnFailure::Warn,
+            },
+            ..Default::default()
+        };
+        // on_failure=warn should return Ok even when command fails.
+        let result = run_post_sync_build(&run, &config, dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn post_sync_build_halt_errors_on_failure() {
+        let dir = tempdir().unwrap();
+        let run = GovernedWorkflowRun::new("test-psb-halt", "build", "test goal");
+        let config = WorkflowConfig {
+            post_sync_build: PostSyncBuildConfig {
+                enabled: true,
+                command: Some("exit 1".to_string()),
+                timeout_secs: 60,
+                on_failure: PostSyncOnFailure::Halt,
+            },
+            ..Default::default()
+        };
+        let err = run_post_sync_build(&run, &config, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("Post-sync build failed"));
+        assert!(err.to_string().contains("ta workflow resume"));
+    }
+
+    #[test]
+    fn post_sync_build_succeeds_when_command_passes() {
+        let dir = tempdir().unwrap();
+        let run = GovernedWorkflowRun::new("test-psb-ok", "build", "test goal");
+        let config = WorkflowConfig {
+            post_sync_build: PostSyncBuildConfig {
+                enabled: true,
+                command: Some("true".to_string()),
+                timeout_secs: 60,
+                on_failure: PostSyncOnFailure::Halt,
+            },
+            ..Default::default()
+        };
+        assert!(run_post_sync_build(&run, &config, dir.path()).is_ok());
+    }
+
+    #[test]
+    fn post_sync_build_skipped_when_disabled() {
+        let dir = tempdir().unwrap();
+        let run = GovernedWorkflowRun::new("test-psb-skip", "build", "test goal");
+        let config = WorkflowConfig::default(); // enabled = false
+                                                // Should be a no-op regardless of workspace state.
+        assert!(run_post_sync_build(&run, &config, dir.path()).is_ok());
+    }
+
+    #[test]
+    fn post_sync_build_skipped_when_no_command() {
+        let dir = tempdir().unwrap();
+        let run = GovernedWorkflowRun::new("test-psb-nocmd", "build", "test goal");
+        let config = WorkflowConfig {
+            post_sync_build: PostSyncBuildConfig {
+                enabled: true,
+                command: None,
+                timeout_secs: 60,
+                on_failure: PostSyncOnFailure::Halt,
+            },
+            ..Default::default()
+        };
+        assert!(run_post_sync_build(&run, &config, dir.path()).is_ok());
     }
 }
