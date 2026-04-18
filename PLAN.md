@@ -11595,6 +11595,46 @@ ta draft apply <id> --auto-repair   ← build loop: silent repair, take
 
 ---
 
+### v0.15.19.4 — Version-Check False-Positive Fix
+<!-- status: pending -->
+
+**Goal**: Eliminate the spurious `VERSION MISMATCH` warning that fires on every `ta draft apply` when the draft contains a version bump. The warning is structurally false: the bump is correct (it's in the PR), but the post-apply check reads from the main working tree after git has restored it — so it always sees the old version. This creates noise that obscures real mismatches and trains users to ignore the warning.
+
+**Root cause (two bugs):**
+
+1. **Auto-clean timing** (`draft.rs:7152` vs `draft.rs:7321`): `auto_clean` deletes the staging directory before the post-apply check runs. The check uses `goal.workspace_path.join("Cargo.toml").exists()` to decide whether staging was present — but staging is already gone, so it always evaluates to `false` and routes to `validate_cargo_version_as_fallback` (the loud warning path).
+
+2. **`--git-commit` working-tree restoration**: After committing to the feature branch, git checks the working tree back out to `main`. The main `Cargo.toml` is still at the old version. The post-apply check reads from the working tree and fires the mismatch — even though the correct bumped version is in the just-committed feature branch.
+
+**Fix design:**
+
+- **Bug 1**: Capture `staging_was_present` (bool) as a local variable immediately before `apply_package` / before auto-clean runs. Pass it into the post-apply check rather than re-checking the filesystem after auto-clean has already deleted the directory.
+
+- **Bug 2**: In the post-apply version check, inspect the applied-artifact list. If `Cargo.toml` (or `fs://workspace/Cargo.toml`) is in the artifact set that was committed to the feature branch, the version bump is in the PR — do NOT fire the mismatch warning. Instead print: `[version] Bump (A → B) is in PR — will land on merge. ✓`. Only fire the existing mismatch warning if Cargo.toml was NOT in the artifact set (genuine omission) or if no PR was created.
+
+- **No change to the pre-copy validation gate** — that correctly catches the case where staging has the wrong version before any files are written.
+
+**Items:**
+
+1. [ ] **Capture `staging_was_present` before auto-clean** (`draft.rs`): Declare `let staging_was_present = goal.workspace_path.join("Cargo.toml").exists();` before the auto-clean block (currently `~line 7125`), not after it. Remove the redundant re-check at line 7321.
+
+2. [ ] **Track `cargo_toml_in_artifacts`** (`draft.rs`): After VCS apply, check whether `Cargo.toml` (relative) or `fs://workspace/Cargo.toml` appears in the set of applied artifact paths. Expose as `let cargo_toml_in_artifacts: bool`.
+
+3. [ ] **Replace mismatch warning with info message** (`validate_cargo_version_as_fallback` or call site): When `cargo_toml_in_artifacts && vcs_pr_url.is_some()`, skip the `╔══ VERSION MISMATCH` box entirely and print `[version] Bump (source: A → draft: B) is in PR #{n} — will land on merge. ✓`. When `!cargo_toml_in_artifacts`, fire the existing warning (genuine omission).
+
+4. [ ] **Update `validate_cargo_version_as_fallback` signature** or add a new thin wrapper that accepts `cargo_in_artifacts: bool` and `pr_url: Option<&str>` to avoid threading context through unrelated callers.
+
+5. [ ] **Tests**:
+   - `version_check_suppressed_when_cargo_in_artifacts_and_pr_created`: mock artifact list with Cargo.toml + mock PR URL → no warning printed, info message printed.
+   - `version_check_fires_when_cargo_not_in_artifacts`: mock artifact list without Cargo.toml → existing warning fires as before.
+   - `staging_was_present_captured_before_autoclean`: unit test that auto-clean deletes the path and the check still reports `staging_was_present = true` (captured before delete).
+
+6. [ ] **USAGE.md**: Add a note under the apply section explaining the `[version] Bump … is in PR` info message and when to expect it.
+
+#### Version: `0.15.19-alpha.4`
+
+---
+
 ### v0.15.20 — Orchestrated Workflow: Work Planner + Implementor Split
 <!-- status: pending -->
 **Goal**: Refactor the implementation node in orchestrated workflows (governed-goal, plan-build-phases, plan-implement-review) so that the single "implement" stage is split into two sequential nodes: a **Work Planner** that reasons about what needs to change and records explicit decisions, followed by an **Implementor** that takes the planner's output as authoritative context and writes the code. This makes the decision record structural rather than voluntary — the planner's output IS the decision log. The implementor is constrained to execute the plan, not re-derive it.
