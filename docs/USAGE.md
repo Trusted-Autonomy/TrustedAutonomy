@@ -11641,6 +11641,99 @@ session/<session-id>/applied/<item-id>  →  { goal_id, draft_id, applied_at }
 
 This makes session history queryable and surfaces applied outcomes in future conversations.
 
+### Advisor Agent
+
+By default, `ta session run` uses a binary gate prompt (`[A]pply / [S]kip / [Q]uit`) to ask for approval before applying each item. Add `--gate agent` to replace this with an **advisor agent** — a conversational agent that presents what changed in plain English, proactively flags risks, answers your questions, and applies or denies the draft based on your response.
+
+```bash
+ta session run --gate agent
+ta session run --gate agent --advisor-security suggest
+ta session run --gate agent --persona my-advisor
+```
+
+Or set `agent` as the default gate when creating the session:
+
+```bash
+ta session start <plan-id> --gate agent --advisor-security read_only
+```
+
+#### What the advisor does
+
+When an item completes, instead of a prompt, the advisor:
+
+1. Reads the draft package (change summary, decision log, file list).
+2. Presents what changed in plain English — no raw diffs unless you ask.
+3. Proactively flags concerns: missing tests, breaking changes, incomplete work.
+4. Asks: _"Here's what changed. Any concerns before I apply?"_
+5. Interprets your response naturally:
+   - **"apply"** / **"looks good"** / **"yes"** → approves and applies the draft.
+   - **"skip"** / **"no"** / **"don't apply"** → denies the draft, moves to the next item.
+   - **"also add X"** / **"fix Y"** → presents the `ta run "..."` command to run next (or fires it in `auto` mode).
+   - **"why did you use approach Z?"** → answers from the decision log, then returns to step 2.
+
+#### Security levels
+
+The advisor's autonomy is controlled by `--advisor-security`:
+
+| Level | What the advisor can do |
+|-------|------------------------|
+| `read_only` (default) | Answer questions and present diffs. Cannot start goals or apply drafts on its own. |
+| `suggest` | Presents exact `ta run "..."` commands for you to copy-paste. |
+| `auto` | At ≥80% intent confidence, fires `ta run` directly without asking. Still requires explicit approval to apply. |
+
+Configure in `.ta/workflow.toml`:
+
+```toml
+[session]
+gate = "agent"
+advisor_security = "read_only"   # read_only | suggest | auto
+```
+
+#### Multi-phase milestone summary
+
+When a session runs multiple phases back-to-back, the advisor presents a structured summary before asking for final approval:
+
+```
+--- Phase Run Summary ---
+Phases completed: v0.15.14 → v0.15.14.1 → v0.15.14.2
+
+Phase v0.15.14: Hierarchical Workflows
+  Decisions: fan-out uses tokio::spawn, milestone draft on phase boundary
+  Files changed: 4 (workflow_manager.rs, session.rs, ...)
+  [▶ expand diff]
+
+Phase v0.15.14.1: Human Review Items schema
+  Decisions: HumanReviewItem stored in plan.md TOML block
+  Files changed: 2
+  [▶ expand diff]
+
+Apply all? (y/skip/ask about a phase)
+---
+```
+
+You can ask the advisor about any individual phase before deciding.
+
+#### Custom advisor persona
+
+Copy the built-in advisor template to customise it:
+
+```bash
+cp templates/agents/advisor.yaml .ta/agents/my-advisor.yaml
+# Edit my-advisor.yaml to change the system prompt
+ta session run --gate agent --persona my-advisor
+```
+
+#### Advisor timeout
+
+The advisor waits up to 30 minutes by default. Configure in `.ta/workflow.toml`:
+
+```toml
+[session]
+advisor_timeout_mins = 60   # default: 30
+```
+
+If the advisor times out, the session pauses. Resume with `ta session run <id>`.
+
 ---
 
 ## Troubleshooting

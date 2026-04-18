@@ -23,8 +23,9 @@ use ta_goal::GoalRunStore;
 use ta_mcp_gateway::GatewayConfig;
 use ta_memory::memory_store_from_config;
 use ta_session::{
-    GateMode, PlanDocument, SessionManager, WorkflowItemState, WorkflowSession,
-    WorkflowSessionManager, WorkflowSessionState,
+    poll_draft_outcome, spawn_advisor_agent, AdvisorConfig, AdvisorOutcome, GateMode, PlanDocument,
+    SessionManager, WorkflowItemState, WorkflowSession, WorkflowSessionManager,
+    WorkflowSessionState,
 };
 use uuid::Uuid;
 
@@ -95,9 +96,18 @@ pub enum SessionCommands {
     Start {
         /// Plan ID returned by `ta new plan --from brief.md`.
         plan_id: String,
-        /// Gate mode: auto (default), prompt, or always.
+        /// Gate mode: auto (default), prompt, always, or agent.
+        /// Use `agent` to enable the advisor agent for conversational review.
         #[arg(long, default_value = "auto")]
         gate: String,
+        /// Advisor persona name (only used when --gate agent).
+        /// References `.ta/personas/<name>.toml`. Defaults to "advisor".
+        #[arg(long)]
+        persona: Option<String>,
+        /// Advisor security level (only used when --gate agent).
+        /// One of: read_only (default), suggest, auto.
+        #[arg(long)]
+        advisor_security: Option<String>,
     },
 
     /// Interactively review plan items before execution (v0.14.11).
@@ -115,17 +125,26 @@ pub enum SessionCommands {
     /// Runs each accepted item in order, with an AwaitHuman gate between items
     /// (configurable). Streams progress to stdout. On interruption, saves state
     /// so `ta session run` can resume.
+    ///
+    /// Use `--gate agent` to replace the binary [A]pply/[S]kip/[Q]uit prompt
+    /// with an advisor agent that presents changes conversationally.
     Run {
         /// Workflow session ID (full UUID or prefix). If omitted, uses the
         /// most recently created session with accepted items.
         id: Option<String>,
-        /// Gate mode override (auto, prompt, always). Overrides the session's
-        /// saved gate mode for this run.
+        /// Gate mode override (auto, prompt, always, agent). Overrides the
+        /// session's saved gate mode for this run.
         #[arg(long)]
         gate: Option<String>,
         /// Maximum number of items to execute concurrently (default: 1 = sequential).
         #[arg(long, default_value = "1")]
         parallel: usize,
+        /// Advisor persona name for --gate agent (defaults to "advisor").
+        #[arg(long)]
+        persona: Option<String>,
+        /// Advisor security level for --gate agent: read_only (default), suggest, auto.
+        #[arg(long)]
+        advisor_security: Option<String>,
     },
 
     /// List workflow (project-level) sessions (v0.14.11).
@@ -181,11 +200,33 @@ pub fn execute(cmd: &SessionCommands, config: &GatewayConfig) -> anyhow::Result<
         SessionCommands::Status { id, live } => session_status(config, id.as_deref(), *live),
         SessionCommands::Close { id, no_draft } => close_session(config, id, *no_draft),
         // ── Workflow session commands ──────────────────────────────────────
-        SessionCommands::Start { plan_id, gate } => start_session(config, plan_id, gate),
+        SessionCommands::Start {
+            plan_id,
+            gate,
+            persona,
+            advisor_security,
+        } => start_session(
+            config,
+            plan_id,
+            gate,
+            persona.as_deref(),
+            advisor_security.as_deref(),
+        ),
         SessionCommands::Review { id } => review_session(config, id.as_deref()),
-        SessionCommands::Run { id, gate, parallel } => {
-            run_session(config, id.as_deref(), gate.as_deref(), *parallel)
-        }
+        SessionCommands::Run {
+            id,
+            gate,
+            parallel,
+            persona,
+            advisor_security,
+        } => run_session(
+            config,
+            id.as_deref(),
+            gate.as_deref(),
+            *parallel,
+            persona.as_deref(),
+            advisor_security.as_deref(),
+        ),
         SessionCommands::Projects { all } => list_workflow_sessions(config, *all),
     }
 }
@@ -474,14 +515,40 @@ pub enum SessionHealthStatus {
 // ── Workflow session helpers ──────────────────────────────────────────────────
 
 /// `ta session start <plan-id>` — instantiate a WorkflowSession from a PlanDocument.
-fn start_session(config: &GatewayConfig, plan_id: &str, gate: &str) -> anyhow::Result<()> {
-    let gate_mode: GateMode = gate.parse().map_err(|e: String| {
+fn start_session(
+    config: &GatewayConfig,
+    plan_id: &str,
+    gate: &str,
+    persona: Option<&str>,
+    advisor_security: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut gate_mode: GateMode = gate.parse().map_err(|e: String| {
         anyhow::anyhow!(
-            "Invalid --gate value '{}': {}\nUse: auto, prompt, or always.",
+            "Invalid --gate value '{}': {}\nUse: auto, prompt, always, or agent.",
             gate,
             e
         )
     })?;
+
+    // Apply persona and advisor_security overrides when gate = agent.
+    if let GateMode::Agent {
+        persona: ref mut p,
+        security: ref mut s,
+    } = gate_mode
+    {
+        if let Some(pname) = persona {
+            *p = Some(pname.to_string());
+        }
+        if let Some(sec_str) = advisor_security {
+            *s = sec_str.parse().map_err(|e: String| {
+                anyhow::anyhow!(
+                    "Invalid --advisor-security value '{}': {}\nUse: read_only, suggest, or auto.",
+                    sec_str,
+                    e
+                )
+            })?;
+        }
+    }
 
     // Load the PlanDocument from memory.
     let plan_uuid = Uuid::parse_str(plan_id).map_err(|_| {
@@ -557,6 +624,10 @@ fn start_session(config: &GatewayConfig, plan_id: &str, gate: &str) -> anyhow::R
     );
     println!("  Items: {} item(s)", session.items.len());
     println!("  Gate:  {}", session.gate_mode);
+    if matches!(&session.gate_mode, GateMode::Agent { .. }) {
+        println!("         Advisor agent will present changes conversationally at each gate.");
+        println!("         Configure: --advisor-security [read_only|suggest|auto]");
+    }
     println!("  State: {}", session.state);
     println!();
     println!("Next: review plan items before execution:");
@@ -724,6 +795,8 @@ fn run_session(
     id: Option<&str>,
     gate_override: Option<&str>,
     parallel: usize,
+    persona_override: Option<&str>,
+    advisor_security_override: Option<&str>,
 ) -> anyhow::Result<()> {
     let sessions_dir = config.workspace_root.join(".ta/sessions");
     let mgr = WorkflowSessionManager::new(sessions_dir)?;
@@ -748,6 +821,22 @@ fn run_session(
         session.gate_mode = gate_str
             .parse()
             .map_err(|e: String| anyhow::anyhow!("Invalid --gate value: {}", e))?;
+    }
+
+    // Apply persona and advisor_security overrides when gate = agent.
+    if let GateMode::Agent {
+        persona: ref mut p,
+        security: ref mut s,
+    } = session.gate_mode
+    {
+        if let Some(pname) = persona_override {
+            *p = Some(pname.to_string());
+        }
+        if let Some(sec_str) = advisor_security_override {
+            *s = sec_str
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!("Invalid --advisor-security value: {}", e))?;
+        }
     }
 
     let accepted_count = session.count_by_state(&WorkflowItemState::Accepted);
@@ -940,6 +1029,122 @@ fn run_session(
                         );
                         return Ok(());
                     }
+                }
+            }
+            GateMode::Agent { persona, security } => {
+                // Advisor gate: spawn the advisor agent to converse with the human.
+                if let Some(ref draft_id_str) = draft_id_str {
+                    if let Ok(draft_uuid) = Uuid::parse_str(draft_id_str) {
+                        println!();
+                        println!("  ┌─ Advisor gate ──────────────────────────────────────────");
+                        println!("  │  Item:     {}", item.title);
+                        println!(
+                            "  │  Draft:    {}",
+                            &draft_id_str[..8.min(draft_id_str.len())]
+                        );
+                        println!("  │  Security: {}", security);
+                        if let Some(ref p) = persona {
+                            println!("  │  Persona:  {}", p);
+                        }
+                        println!("  │  Spawning advisor agent...");
+                        println!("  └───────────────────────────────────────────────────────");
+
+                        let ta_bin = std::env::current_exe()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|_| "ta".to_string());
+
+                        let advisor_cfg = AdvisorConfig::new(
+                            config.workspace_root.clone(),
+                            draft_uuid,
+                            item.title.clone(),
+                            session.session_id,
+                            item_id,
+                        )
+                        .with_security(security.clone())
+                        .with_persona(persona.clone().unwrap_or_else(|| "advisor".to_string()));
+
+                        match spawn_advisor_agent(&advisor_cfg, std::path::Path::new(&ta_bin)) {
+                            Ok(advisor_goal_id) => {
+                                println!(
+                                    "  Advisor running (goal {}).",
+                                    &advisor_goal_id.to_string()[..8]
+                                );
+                                session.set_item_advisor(item_id, advisor_goal_id);
+                                mgr.save(&session)?;
+
+                                // Poll for draft outcome (advisor applies or denies).
+                                let timeout = advisor_cfg.timeout;
+                                let outcome = poll_draft_outcome(
+                                    &config.workspace_root,
+                                    draft_uuid,
+                                    timeout,
+                                    std::time::Duration::from_secs(3),
+                                );
+
+                                match outcome {
+                                    AdvisorOutcome::Applied => {
+                                        println!("  ✓ Advisor: draft applied by human approval.");
+                                        // Advisor already applied the draft; mark complete.
+                                        session.complete_item(item_id, draft_id_uuid);
+                                        mgr.save(&session)?;
+                                        applied += 1;
+                                        executed += 1;
+                                        continue;
+                                    }
+                                    AdvisorOutcome::Denied => {
+                                        println!("  → Advisor: draft denied by human.");
+                                        session
+                                            .update_item_state(item_id, WorkflowItemState::Skipped);
+                                        mgr.save(&session)?;
+                                        executed += 1;
+                                        continue;
+                                    }
+                                    AdvisorOutcome::TimedOut => {
+                                        eprintln!(
+                                            "  ✗ Advisor timed out after {} minutes waiting for \
+                                             human response. Item left at gate.",
+                                            timeout.as_secs() / 60
+                                        );
+                                        session.update_item_state(
+                                            item_id,
+                                            WorkflowItemState::Accepted,
+                                        );
+                                        session.transition(WorkflowSessionState::Paused)?;
+                                        mgr.save(&session)?;
+                                        println!(
+                                            "Session paused. Resume with: ta session run {}",
+                                            &session.session_id.to_string()[..8]
+                                        );
+                                        return Ok(());
+                                    }
+                                    AdvisorOutcome::SpawnFailed { reason } => {
+                                        eprintln!(
+                                            "  ✗ Advisor spawn failed: {}\n\
+                                             Falling back to manual gate.",
+                                            reason
+                                        );
+                                        // Fall back to prompt gate.
+                                        false
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "  ✗ Failed to spawn advisor: {}\nFalling back to manual gate.",
+                                    e
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        // Could not parse draft UUID — fall back to auto.
+                        println!("  Gate: agent (no valid draft ID) — proceeding auto.");
+                        true
+                    }
+                } else {
+                    // No draft — nothing to advise on; proceed.
+                    println!("  Gate: agent (no draft) — proceeding.");
+                    true
                 }
             }
         };
@@ -1367,7 +1572,7 @@ mod tests {
     fn start_session_unknown_plan_id_errors() {
         let temp = TempDir::new().unwrap();
         let config = GatewayConfig::for_project(temp.path());
-        let result = start_session(&config, "invalid-not-a-uuid", "auto");
+        let result = start_session(&config, "invalid-not-a-uuid", "auto", None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid plan ID"));
     }
@@ -1377,7 +1582,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = GatewayConfig::for_project(temp.path());
         let uuid = Uuid::new_v4().to_string();
-        let result = start_session(&config, &uuid, "auto");
+        let result = start_session(&config, &uuid, "auto", None, None);
         assert!(result.is_err());
         // Should report plan not found in memory.
         assert!(result.unwrap_err().to_string().contains("not found"));
@@ -1388,9 +1593,32 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config = GatewayConfig::for_project(temp.path());
         let uuid = Uuid::new_v4().to_string();
-        let result = start_session(&config, &uuid, "badgate");
+        let result = start_session(&config, &uuid, "badgate", None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("gate"));
+    }
+
+    #[test]
+    fn start_session_gate_agent_parses() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let uuid = Uuid::new_v4().to_string();
+        // "agent" is a valid gate mode — should fail on plan lookup, not gate parse.
+        let result = start_session(&config, &uuid, "agent", None, None);
+        assert!(result.is_err());
+        // Error should be about plan not found, not gate mode.
+        let err = result.unwrap_err().to_string();
+        assert!(!err.contains("Unknown gate mode"), "got: {}", err);
+    }
+
+    #[test]
+    fn start_session_gate_agent_invalid_security_errors() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let uuid = Uuid::new_v4().to_string();
+        let result = start_session(&config, &uuid, "agent", None, Some("bad_security"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("advisor-security"));
     }
 
     #[test]

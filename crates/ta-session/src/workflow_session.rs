@@ -11,6 +11,46 @@ use uuid::Uuid;
 use crate::error::SessionError;
 use crate::plan::{PlanDocument, PlanItem};
 
+/// Security level for the advisor agent: controls what actions it may take autonomously.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvisorSecurity {
+    /// Advisor can only answer questions and present diffs — never starts a goal or
+    /// applies a draft autonomously.
+    #[default]
+    ReadOnly,
+    /// Advisor presents the exact `ta run "..."` command for the human to copy-paste.
+    Suggest,
+    /// At ≥80% intent confidence, advisor fires `ta run` directly without prompting.
+    Auto,
+}
+
+impl std::fmt::Display for AdvisorSecurity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdvisorSecurity::ReadOnly => write!(f, "read_only"),
+            AdvisorSecurity::Suggest => write!(f, "suggest"),
+            AdvisorSecurity::Auto => write!(f, "auto"),
+        }
+    }
+}
+
+impl std::str::FromStr for AdvisorSecurity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().replace('-', "_").as_str() {
+            "read_only" | "readonly" => Ok(AdvisorSecurity::ReadOnly),
+            "suggest" => Ok(AdvisorSecurity::Suggest),
+            "auto" => Ok(AdvisorSecurity::Auto),
+            other => Err(format!(
+                "Unknown advisor security level '{}'. Valid values: read_only, suggest, auto.",
+                other
+            )),
+        }
+    }
+}
+
 /// Gate mode controlling how often the human is asked to approve before applying.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +62,15 @@ pub enum GateMode {
     Prompt,
     /// Require explicit human approval for every gate (synonym for Prompt).
     Always,
+    /// Spawn an advisor agent to present changes and converse with the human.
+    Agent {
+        /// Optional persona name (references `.ta/personas/<name>.toml`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona: Option<String>,
+        /// Controls what the advisor is allowed to do autonomously.
+        #[serde(default)]
+        security: AdvisorSecurity,
+    },
 }
 
 impl std::fmt::Display for GateMode {
@@ -30,6 +79,10 @@ impl std::fmt::Display for GateMode {
             GateMode::Auto => write!(f, "auto"),
             GateMode::Prompt => write!(f, "prompt"),
             GateMode::Always => write!(f, "always"),
+            GateMode::Agent { persona, security } => match persona {
+                Some(p) => write!(f, "agent(persona={}, security={})", p, security),
+                None => write!(f, "agent(security={})", security),
+            },
         }
     }
 }
@@ -42,8 +95,12 @@ impl std::str::FromStr for GateMode {
             "auto" => Ok(GateMode::Auto),
             "prompt" => Ok(GateMode::Prompt),
             "always" => Ok(GateMode::Always),
+            "agent" => Ok(GateMode::Agent {
+                persona: None,
+                security: AdvisorSecurity::ReadOnly,
+            }),
             other => Err(format!(
-                "Unknown gate mode '{}'. Valid values: auto, prompt, always.",
+                "Unknown gate mode '{}'. Valid values: auto, prompt, always, agent.",
                 other
             )),
         }
@@ -87,6 +144,11 @@ pub enum WorkflowItemState {
     Running,
     /// Agent completed; paused at AwaitHuman gate awaiting human verdict.
     AtGate,
+    /// Advisor agent is active, conversing with the human about this item.
+    AdvisorActive {
+        /// Goal run ID of the advisor agent process.
+        advisor_goal_id: Uuid,
+    },
     /// Draft applied successfully — item is done.
     Complete,
     /// User chose to skip this item during review.
@@ -104,6 +166,7 @@ impl std::fmt::Display for WorkflowItemState {
             WorkflowItemState::Accepted => write!(f, "accepted"),
             WorkflowItemState::Running => write!(f, "running"),
             WorkflowItemState::AtGate => write!(f, "at_gate"),
+            WorkflowItemState::AdvisorActive { .. } => write!(f, "advisor_active"),
             WorkflowItemState::Complete => write!(f, "complete"),
             WorkflowItemState::Skipped => write!(f, "skipped"),
             WorkflowItemState::Deferred => write!(f, "deferred"),
@@ -295,6 +358,24 @@ impl WorkflowSession {
             .find(|i| i.state == WorkflowItemState::AtGate)
     }
 
+    /// Return the item with an active advisor agent, if any.
+    pub fn advisor_active(&self) -> Option<&WorkflowSessionItem> {
+        self.items
+            .iter()
+            .find(|i| matches!(i.state, WorkflowItemState::AdvisorActive { .. }))
+    }
+
+    /// Set item state to AdvisorActive with the given advisor goal run ID.
+    pub fn set_item_advisor(&mut self, item_id: Uuid, advisor_goal_id: Uuid) -> bool {
+        if let Some(item) = self.items.iter_mut().find(|i| i.item_id == item_id) {
+            item.state = WorkflowItemState::AdvisorActive { advisor_goal_id };
+            self.updated_at = Utc::now();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Returns true when all items are in a terminal state.
     pub fn all_items_terminal(&self) -> bool {
         self.items.iter().all(|i| i.state.is_terminal())
@@ -476,6 +557,22 @@ mod tests {
         assert_eq!(GateMode::Auto.to_string(), "auto");
         assert_eq!(GateMode::Prompt.to_string(), "prompt");
         assert_eq!(GateMode::Always.to_string(), "always");
+        assert_eq!(
+            GateMode::Agent {
+                persona: None,
+                security: AdvisorSecurity::ReadOnly
+            }
+            .to_string(),
+            "agent(security=read_only)"
+        );
+        assert_eq!(
+            GateMode::Agent {
+                persona: Some("my-advisor".to_string()),
+                security: AdvisorSecurity::Suggest
+            }
+            .to_string(),
+            "agent(persona=my-advisor, security=suggest)"
+        );
     }
 
     #[test]
@@ -483,6 +580,13 @@ mod tests {
         assert_eq!("auto".parse::<GateMode>().unwrap(), GateMode::Auto);
         assert_eq!("prompt".parse::<GateMode>().unwrap(), GateMode::Prompt);
         assert_eq!("always".parse::<GateMode>().unwrap(), GateMode::Always);
+        assert_eq!(
+            "agent".parse::<GateMode>().unwrap(),
+            GateMode::Agent {
+                persona: None,
+                security: AdvisorSecurity::ReadOnly
+            }
+        );
         let err = "bad".parse::<GateMode>();
         assert!(err.is_err());
         assert!(err.unwrap_err().contains("Unknown gate mode"));
@@ -492,6 +596,33 @@ mod tests {
     fn gate_mode_case_insensitive_parse() {
         assert_eq!("AUTO".parse::<GateMode>().unwrap(), GateMode::Auto);
         assert_eq!("Prompt".parse::<GateMode>().unwrap(), GateMode::Prompt);
+        assert_eq!(
+            "AGENT".parse::<GateMode>().unwrap(),
+            GateMode::Agent {
+                persona: None,
+                security: AdvisorSecurity::ReadOnly,
+            }
+        );
+    }
+
+    #[test]
+    fn advisor_security_round_trip() {
+        assert_eq!(
+            "read_only".parse::<AdvisorSecurity>().unwrap(),
+            AdvisorSecurity::ReadOnly
+        );
+        assert_eq!(
+            "suggest".parse::<AdvisorSecurity>().unwrap(),
+            AdvisorSecurity::Suggest
+        );
+        assert_eq!(
+            "auto".parse::<AdvisorSecurity>().unwrap(),
+            AdvisorSecurity::Auto
+        );
+        assert_eq!(AdvisorSecurity::ReadOnly.to_string(), "read_only");
+        assert_eq!(AdvisorSecurity::Suggest.to_string(), "suggest");
+        assert_eq!(AdvisorSecurity::Auto.to_string(), "auto");
+        assert!("bogus".parse::<AdvisorSecurity>().is_err());
     }
 
     #[test]
@@ -504,6 +635,34 @@ mod tests {
         assert!(!WorkflowItemState::Accepted.is_terminal());
         assert!(!WorkflowItemState::Running.is_terminal());
         assert!(!WorkflowItemState::AtGate.is_terminal());
+        assert!(!WorkflowItemState::AdvisorActive {
+            advisor_goal_id: Uuid::new_v4()
+        }
+        .is_terminal());
+    }
+
+    #[test]
+    fn advisor_active_state() {
+        let plan = two_item_plan();
+        let mut session = WorkflowSession::from_plan(
+            &plan,
+            GateMode::Agent {
+                persona: None,
+                security: AdvisorSecurity::ReadOnly,
+            },
+        );
+        let item_id = session.items[0].item_id;
+        let advisor_id = Uuid::new_v4();
+        assert!(session.set_item_advisor(item_id, advisor_id));
+        let active = session.advisor_active().unwrap();
+        assert_eq!(active.item_id, item_id);
+        assert_eq!(
+            active.state,
+            WorkflowItemState::AdvisorActive {
+                advisor_goal_id: advisor_id
+            }
+        );
+        assert_eq!(active.state.to_string(), "advisor_active");
     }
 
     #[test]
