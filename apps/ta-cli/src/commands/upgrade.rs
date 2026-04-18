@@ -562,7 +562,9 @@ mod tests {
             "must not produce a duplicate [config] section header"
         );
         // Must still be valid TOML.
-        content.parse::<toml::Value>().expect("result must be valid TOML");
+        content
+            .parse::<toml::Value>()
+            .expect("result must be valid TOML");
     }
 
     #[test]
