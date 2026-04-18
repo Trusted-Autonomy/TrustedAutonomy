@@ -13,6 +13,7 @@ pub mod conversation;
 pub mod credentials;
 pub mod daemon;
 pub mod dev;
+pub mod doctor;
 pub mod draft;
 pub mod email_manager;
 pub mod events;

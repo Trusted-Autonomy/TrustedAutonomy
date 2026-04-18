@@ -282,8 +282,20 @@ enum Commands {
         #[arg(long)]
         delete_stale: bool,
     },
-    /// System-wide health check: toolchain, agent binaries, daemon, plugins, .ta integrity.
-    Doctor,
+    /// System-wide health check: runtime chain, auth validation, agent binaries, daemon, VCS.
+    ///
+    /// Validates the full TA runtime and reports the active authentication mode for the
+    /// configured agent framework. Auth checking is agent-agnostic — it reads the framework
+    /// manifest and validates whichever auth method applies (API key, session, local service).
+    ///
+    /// Examples:
+    ///   ta doctor              # human-readable output
+    ///   ta doctor --json       # machine-readable JSON for CI
+    Doctor {
+        /// Output results as a JSON array (for CI / scripted use).
+        #[arg(long)]
+        json: bool,
+    },
 
     // ── ONBOARDING ──────────────────────────────────────────────────────────
     /// First-time setup wizard: configure AI provider, agent, and planning framework.
@@ -1005,7 +1017,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Sync => commands::sync::execute(&config),
         Commands::Verify { goal_id } => commands::verify::execute(&config, goal_id.as_deref()),
         Commands::Analysis { command } => commands::analysis::execute(command, &config),
-        Commands::Doctor => commands::goal::doctor(&config),
+        Commands::Doctor { json } => commands::doctor::execute(&config, *json),
         Commands::Conversation { goal_id, json } => {
             commands::conversation::execute(&config, goal_id, *json)
         }

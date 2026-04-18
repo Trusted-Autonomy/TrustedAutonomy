@@ -51,6 +51,7 @@
 //! ```
 
 pub mod adapter;
+pub mod auth_spec;
 pub mod bare_process;
 pub mod config;
 pub mod credential;
@@ -63,6 +64,7 @@ pub use adapter::{
     AgentHandle, Result, RuntimeAdapter, RuntimeError, RuntimeStatus, SpawnRequest, StdinMode,
     StdoutMode, TransportInfo,
 };
+pub use auth_spec::{detect_auth_mode, AgentAuthSpec, AuthCheckResult, AuthMethodSpec};
 pub use bare_process::{apply_credentials_to_env, BareProcessRuntime};
 pub use config::{RuntimeConfig, RuntimeRegistry};
 pub use credential::ScopedCredential;

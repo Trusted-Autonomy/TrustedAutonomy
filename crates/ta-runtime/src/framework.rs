@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth_spec::{AgentAuthSpec, AuthMethodSpec};
+
 /// How goal context is injected into the agent before launch.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -105,6 +107,11 @@ pub struct AgentFrameworkManifest {
     /// Whether this is a built-in framework (vs user-defined).
     #[serde(default)]
     pub builtin: bool,
+    /// Authentication specification for this framework.
+    /// Built-ins populate this in code; custom manifests declare `[auth]` in YAML.
+    /// Defaults to no-auth-required when absent from a custom manifest.
+    #[serde(default)]
+    pub auth: AgentAuthSpec,
 }
 
 fn default_version() -> String {
@@ -122,6 +129,26 @@ fn default_context_file() -> String {
 impl AgentFrameworkManifest {
     /// Returns the built-in catalog of known framework manifests.
     pub fn builtins() -> Vec<AgentFrameworkManifest> {
+        // Shared auth spec for claude-code and claude-flow (both use Anthropic credentials).
+        let claude_auth = AgentAuthSpec {
+            required: true,
+            methods: vec![
+                AuthMethodSpec::EnvVar {
+                    name: "ANTHROPIC_API_KEY".to_string(),
+                    label: "API key".to_string(),
+                    setup_hint: "export ANTHROPIC_API_KEY=sk-ant-...".to_string(),
+                    required: true,
+                },
+                AuthMethodSpec::SessionFile {
+                    config_dir_unix: "~/.config/claude/".to_string(),
+                    config_dir_windows: String::new(),
+                    check_cmd: "claude auth status".to_string(),
+                    label: "subscription session".to_string(),
+                    setup_hint: "claude auth login".to_string(),
+                },
+            ],
+        };
+
         vec![
             AgentFrameworkManifest {
                 name: "claude-code".to_string(),
@@ -144,6 +171,7 @@ impl AgentFrameworkManifest {
                     ..Default::default()
                 },
                 builtin: true,
+                auth: claude_auth.clone(),
             },
             AgentFrameworkManifest {
                 name: "codex".to_string(),
@@ -162,6 +190,15 @@ impl AgentFrameworkManifest {
                     ..Default::default()
                 },
                 builtin: true,
+                auth: AgentAuthSpec {
+                    required: true,
+                    methods: vec![AuthMethodSpec::EnvVar {
+                        name: "OPENAI_API_KEY".to_string(),
+                        label: "API key".to_string(),
+                        setup_hint: "export OPENAI_API_KEY=sk-...".to_string(),
+                        required: true,
+                    }],
+                },
             },
             AgentFrameworkManifest {
                 name: "claude-flow".to_string(),
@@ -179,6 +216,8 @@ impl AgentFrameworkManifest {
                     ..Default::default()
                 },
                 builtin: true,
+                // claude-flow delegates to Claude — same auth requirements.
+                auth: claude_auth,
             },
             AgentFrameworkManifest {
                 name: "ollama".to_string(),
@@ -196,6 +235,26 @@ impl AgentFrameworkManifest {
                     ..Default::default()
                 },
                 builtin: true,
+                // Ollama: local service check only; no upstream creds by default.
+                // Users who proxy a remote provider add upstream_auth to .ta/agents/ollama.yaml.
+                auth: AgentAuthSpec {
+                    required: false,
+                    methods: vec![AuthMethodSpec::LocalService {
+                        url_env_var: "OLLAMA_HOST".to_string(),
+                        default_url: "http://localhost:11434".to_string(),
+                        health_endpoint: "/api/tags".to_string(),
+                        service_auth: vec![AuthMethodSpec::EnvVar {
+                            name: "OLLAMA_API_KEY".to_string(),
+                            label: "service API key".to_string(),
+                            setup_hint:
+                                "export OLLAMA_API_KEY=<your-key>  (only if access control is enabled)"
+                                    .to_string(),
+                            required: false,
+                        }],
+                        upstream_auth: vec![],
+                        required: false,
+                    }],
+                },
             },
         ]
     }
@@ -536,5 +595,96 @@ args:
         let manifest = AgentFrameworkManifest::resolve("custom-yaml-fw", dir.path());
         assert!(manifest.is_some());
         assert_eq!(manifest.unwrap().command, "custom-bin");
+    }
+
+    #[test]
+    fn ollama_builtin_manifest_yaml_roundtrips() {
+        let ollama = AgentFrameworkManifest::builtin("ollama").unwrap();
+        let yaml = serde_yaml::to_string(&ollama).unwrap();
+        let back: AgentFrameworkManifest = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.name, "ollama");
+        // Ollama auth is optional by design.
+        assert!(!back.auth.required);
+        // service_auth carries the OLLAMA_API_KEY optional env var.
+        let local_svc = back.auth.methods.first().expect("should have a method");
+        if let crate::auth_spec::AuthMethodSpec::LocalService {
+            service_auth,
+            upstream_auth,
+            required,
+            ..
+        } = local_svc
+        {
+            assert!(!required, "ollama LocalService should be required=false");
+            assert_eq!(service_auth.len(), 1);
+            assert!(
+                upstream_auth.is_empty(),
+                "built-in ollama has no upstream_auth"
+            );
+        } else {
+            panic!("expected LocalService method in ollama manifest");
+        }
+    }
+
+    #[test]
+    fn custom_manifest_with_upstream_auth_roundtrips() {
+        let yaml = r#"
+name: custom-ollama
+command: ta-agent-ollama
+auth:
+  required: false
+  methods:
+    - type: local_service
+      default_url: "http://localhost:11434"
+      health_endpoint: "/api/tags"
+      service_auth:
+        - type: env_var
+          name: OLLAMA_API_KEY
+          required: false
+      upstream_auth:
+        - type: env_var
+          name: OPENAI_API_KEY
+          required: true
+"#;
+        let manifest: AgentFrameworkManifest = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(manifest.name, "custom-ollama");
+        assert!(!manifest.auth.required);
+        let method = manifest.auth.methods.first().expect("should have a method");
+        if let crate::auth_spec::AuthMethodSpec::LocalService {
+            service_auth,
+            upstream_auth,
+            ..
+        } = method
+        {
+            assert_eq!(service_auth.len(), 1);
+            assert_eq!(upstream_auth.len(), 1);
+            if let crate::auth_spec::AuthMethodSpec::EnvVar { name, required, .. } =
+                upstream_auth.first().unwrap()
+            {
+                assert_eq!(name, "OPENAI_API_KEY");
+                assert!(required);
+            } else {
+                panic!("expected EnvVar in upstream_auth");
+            }
+        } else {
+            panic!("expected LocalService method");
+        }
+    }
+
+    #[test]
+    fn builtin_manifests_all_have_auth() {
+        for m in AgentFrameworkManifest::builtins() {
+            // All built-in manifests should have at least one auth method OR be non-required.
+            // claude-code, codex, claude-flow require auth; ollama does not.
+            if m.name == "ollama" {
+                assert!(!m.auth.required, "ollama auth should be optional");
+            } else {
+                assert!(m.auth.required, "built-in '{}' should require auth", m.name);
+                assert!(
+                    !m.auth.methods.is_empty(),
+                    "built-in '{}' should have at least one auth method",
+                    m.name
+                );
+            }
+        }
     }
 }

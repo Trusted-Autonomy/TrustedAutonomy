@@ -3119,8 +3119,11 @@ fn goal_pre_flight(config: &GatewayConfig, title: Option<&str>) -> anyhow::Resul
     }
 }
 
-/// System-wide health check (ta doctor).
-pub fn doctor(config: &GatewayConfig) -> anyhow::Result<()> {
+// `ta doctor` was redesigned and moved to commands/doctor.rs (v0.15.17).
+// This old implementation body is no longer called; it is kept only to
+// preserve compile-ability until tests below are updated to the new command.
+// TODO(v0.15.18): delete this function entirely.
+fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
     println!("TA Doctor -- System Health Check");
     println!("{}", "=".repeat(43));
 
@@ -4138,25 +4141,17 @@ mod tests {
 
     #[test]
     fn doctor_gc_checks_emit_warning_for_stale_staging() {
-        // This test verifies the GC check logic: a stale directory that has no
-        // corresponding active goal is detected and counted.
+        // Verifies that doctor runs without panicking for a project with a staging dir.
         let dir = tempfile::tempdir().unwrap();
         let staging_dir = dir.path().join(".ta").join("staging");
         std::fs::create_dir_all(&staging_dir).unwrap();
 
-        // Create a subdirectory that represents a stale staging workspace.
         let stale = staging_dir.join("old-goal-1234");
         std::fs::create_dir_all(&stale).unwrap();
 
-        // Manually set the modification time to be >7 days ago by touching an
-        // entry with an old timestamp via utime. On most platforms we can't
-        // set mtime easily in test, so we just verify the code path runs
-        // without panicking.
         let config = GatewayConfig::for_project(dir.path());
-
-        // The doctor() fn writes to stdout; just verify it returns Ok.
-        // We can't easily control mtime in tests, so we verify no panic.
-        let _ = doctor(&config);
+        // doctor::execute returns Err only on hard failures (not warnings).
+        let _ = crate::commands::doctor::execute(&config, false);
     }
 
     // ── v0.15.13.5: delete resets in_progress plan phase ──────────────

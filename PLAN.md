@@ -10981,7 +10981,7 @@ Secrets required (GitHub Actions repository secrets):
 ---
 
 ### v0.15.17 — `ta doctor`: Auth Validation & Agent-Agnostic Auth Spec
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: A `ta doctor` command that validates the full TA runtime chain and reports the active authentication mode with clear, actionable output. Auth checking must be abstracted at the `AgentFrameworkManifest` level so it works for any configured agent — not just Claude. Each framework declares what auth methods it accepts; `ta doctor` checks whichever framework is active.
 
 **Depends on**: v0.13.11 (platform installers), v0.15.5 (terms acceptance gate)
