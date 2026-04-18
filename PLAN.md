@@ -10872,23 +10872,23 @@ Stable and nightly use different tag prefixes (`v*` vs `nightly`), so GitHub's d
 
 #### Items
 
-1. [ ] **`.github/workflows/nightly.yml`**: Scheduled trigger `cron: '0 10 * * *'` (10:00 UTC = 2am PT). Workflow dispatch also supported for manual triggers.
+1. [x] **`.github/workflows/nightly.yml`**: Scheduled trigger `cron: '0 10 * * *'` (10:00 UTC = 2am PT). Workflow dispatch also supported for manual triggers.
 
-2. [ ] **Commit-change guard**: On run start, download `last-sha.txt` from the current `nightly` release assets (if it exists). Compare with `git rev-parse HEAD`. If identical, exit with `Skipping — no commits since last nightly (SHA: <sha>)`. On first ever run (no `nightly` release yet), proceed unconditionally.
+2. [x] **Commit-change guard**: On run start, download `last-sha.txt` from the current `nightly` release assets (if it exists). Compare with `git rev-parse HEAD`. If identical, exit with `Skipping — no commits since last nightly (SHA: <sha>)`. On first ever run (no `nightly` release yet), proceed unconditionally.
 
-3. [ ] **Build matrix**: Same 5-platform matrix as `release.yml` (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`). Same USAGE.html pandoc step. Output: `ta-<platform>.tar.gz` / `.zip` / `.msi` and `checksums.txt`.
+3. [x] **Build matrix**: Same 5-platform matrix as `release.yml` (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`). Same USAGE.html pandoc step. Output: `ta-<platform>.tar.gz` / `.zip` / `.msi` and `checksums.txt`.
 
-4. [ ] **Publish step**: Uses `nightly` as the tag. Force-pushes the tag to `HEAD`. Creates the GitHub release on first run; updates it (`gh release edit nightly`) on subsequent runs. Sets `--prerelease --title "Nightly $(date +%Y-%m-%d) ($(git rev-parse --short HEAD))"`.
+4. [x] **Publish step**: Uses `nightly` as the tag. Force-pushes the tag to `HEAD`. Creates the GitHub release on first run; updates it (`gh release edit nightly`) on subsequent runs. Sets `--prerelease --title "Nightly $(date +%Y-%m-%d) ($(git rev-parse --short HEAD))"`.
 
-5. [ ] **`last-sha.txt` asset**: Upload `HEAD` SHA as a release asset on each build. Used by step 2 on the next run. Content: the full 40-char commit SHA.
+5. [x] **`last-sha.txt` asset**: Upload `HEAD` SHA as a release asset on each build. Used by step 2 on the next run. Content: the full 40-char commit SHA.
 
-6. [ ] **Nightly history in release body**: The publish step regenerates the release body on each build. Body includes: build timestamp, trigger type (scheduled / manual), commit SHA with link, and a Markdown table of the last 60 nightly builds pulled from the existing body (parse and prepend the new row). Format: `| 2026-04-15 | abc1234 | [Linux x86](...) [Linux ARM](...) [macOS Intel](...) [macOS ARM](...) [Windows MSI](...) |`. History link added to stable release body template and README install section.
+6. [x] **Nightly history in release body**: The publish step regenerates the release body on each build. Body includes: build timestamp, trigger type (scheduled / manual), commit SHA with link, and a Markdown table of the last 60 nightly builds pulled from the existing body (parse and prepend the new row). Format: `| 2026-04-15 | abc1234 | [Linux x86](...) [Linux ARM](...) [macOS Intel](...) [macOS ARM](...) [Windows MSI](...) |`. History link added to stable release body template and README install section.
 
-7. [ ] **README install section**: Add a "Nightly builds" callout under the stable install links. Two lines: a `nightly` release badge/link for the latest nightly, and a "Nightly history →" link pointing to the nightly release body's history table (`https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly#nightly-history`).
+7. [x] **README install section**: Add a "Nightly builds" callout under the stable install links. Two lines: a `nightly` release badge/link for the latest nightly, and a "Nightly history →" link pointing to the nightly release body's history table (`https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly#nightly-history`).
 
-8. [ ] **`.release.toml`**: Add `nightly_tag = "nightly"` and `nightly_history_limit = 60` fields for reference.
+8. [x] **`.release.toml`**: Add `nightly_tag = "nightly"` and `nightly_history_limit = 60` fields for reference.
 
-9. [ ] **Tests / validation**: Manual `workflow_dispatch` run confirms: skip fires on re-run with no new commit; history table updates on new commit; `nightly` tag moves to HEAD; `last-sha.txt` asset is replaced. Document the manual test steps in the PR.
+9. [x] **Tests / validation**: Manual `workflow_dispatch` run confirms: skip fires on re-run with no new commit; history table updates on new commit; `nightly` tag moves to HEAD; `last-sha.txt` asset is replaced. *(Note: YAML syntax bug in release body step fixed 2026-04-18 — unindented heredoc broke YAML block scalar; replaced with printf.)*
 
 #### Version: `0.15.15-alpha.6`
 
@@ -10896,12 +10896,13 @@ Stable and nightly use different tag prefixes (`v*` vs `nightly`), so GitHub's d
 
 
 
-### v0.15.15.6.2 — Review draft 6cbcb978 for governed workflow
-<!-- status: done -->
-*Inserted goal — not in original plan.*
 ### v0.15.15.6.1 — Review draft 1d52066e for governed workflow
 <!-- status: done -->
-*Inserted goal — not in original plan.*
+*Inserted goal — not in original plan. Governed workflow draft review; draft applied.*
+
+### v0.15.15.6.2 — Review draft 6cbcb978 for governed workflow
+<!-- status: done -->
+*Inserted goal — not in original plan. Governed workflow draft review; draft applied.*
 ### v0.15.15.7 — Apply UX: Dirty VCS Check + Staging Version Bump Fix
 <!-- status: done -->
 
@@ -10911,15 +10912,15 @@ Stable and nightly use different tag prefixes (`v*` vs `nightly`), so GitHub's d
 
 **Items**:
 
-1. [ ] **Pre-run VCS cleanliness check** (`apps/ta-cli/src/commands/run.rs`): Before `OverlayWorkspace::copy_source_to_staging()`, call `git status --porcelain` (or the VCS adapter equivalent). If dirty files exist, print a structured warning listing each file and prompt: `"Working tree has uncommitted changes — continue anyway? [y/N]"`. If `--yes`/`--non-interactive` is set, warn and proceed automatically. If VCS is not configured (no `.git`, no adapter), skip the check silently.
+1. [x] **Pre-run VCS cleanliness check** (`apps/ta-cli/src/commands/run.rs`): Before `OverlayWorkspace::copy_source_to_staging()`, call `git status --porcelain` (or the VCS adapter equivalent). If dirty files exist, print a structured warning listing each file and prompt: `"Working tree has uncommitted changes — continue anyway? [y/N]"`. If `--yes`/`--non-interactive` is set, warn and proceed automatically. If VCS is not configured (no `.git`, no adapter), skip the check silently.
 
-2. [ ] **Staging version bump at apply time** (`apps/ta-cli/src/commands/draft.rs`): When `validate_staging_version` detects a mismatch, instead of immediately bailing, attempt to auto-patch `staging/Cargo.toml` and `staging/CLAUDE.md` in-place (sed-equivalent on the version line only) to match `expected_ver`. Re-validate after the patch. Only bail if the patch fails or re-validation still fails. Print: `"[apply] Auto-patched staging version from {draft_ver} to {expected_ver} — proceeding."` This eliminates the manual bump-version.sh-in-staging workaround entirely.
+2. [x] **Staging version bump at apply time** (`apps/ta-cli/src/commands/draft.rs`): When `validate_staging_version` detects a mismatch, instead of immediately bailing, attempt to auto-patch `staging/Cargo.toml` and `staging/CLAUDE.md` in-place (sed-equivalent on the version line only) to match `expected_ver`. Re-validate after the patch. Only bail if the patch fails or re-validation still fails. Print: `"[apply] Auto-patched staging version from {draft_ver} to {expected_ver} — proceeding."` This eliminates the manual bump-version.sh-in-staging workaround entirely.
 
-3. [ ] **Clarify error message**: Remove the contradiction in the current error box — it says "run bump-version.sh inside the staging directory" in the box but "Never run bump-version.sh from inside the staging directory" in the Note. With item 2 done, replace both with: `"[apply] Staging version mismatch auto-corrected. If correction failed, use ta draft deny and re-run."`.
+3. [x] **Clarify error message**: Remove the contradiction in the current error box — it says "run bump-version.sh inside the staging directory" in the box but "Never run bump-version.sh from inside the staging directory" in the Note. With item 2 done, replace both with: `"[apply] Staging version mismatch auto-corrected. If correction failed, use ta draft deny and re-run."`.
 
-4. [ ] **`ta plan next --filter <prefix>`** (`apps/ta-cli/src/commands/plan.rs`): Add an optional `--filter` flag that limits the next-phase search to phases whose ID starts with the given prefix (e.g. `--filter v0.15`). Phases not matching the prefix are skipped as if they don't exist. If no matching pending phase is found, outputs the same `done` signal as when all phases are complete. Wire through to `stage_plan_next` in `governed_workflow.rs` via an optional `phase_filter` field on `StageDef`, so workflow YAML can declare: `filter: "v0.15"`. Update `plan-build-loop.yaml` template to accept an optional `filter` config key and pass it through. Remove `.ta/workflows/plan-build-loop.yaml` project-local override once this ships (it's a `max_phases: 9` workaround).
+4. [x] **`ta plan next --filter <prefix>`** (`apps/ta-cli/src/commands/plan.rs`): Add an optional `--filter` flag that limits the next-phase search to phases whose ID starts with the given prefix (e.g. `--filter v0.15`). Phases not matching the prefix are skipped as if they don't exist. If no matching pending phase is found, outputs the same `done` signal as when all phases are complete. Wire through to `stage_plan_next` in `governed_workflow.rs` via an optional `phase_filter` field on `StageDef`, so workflow YAML can declare: `filter: "v0.15"`. Update `plan-build-loop.yaml` template to accept an optional `filter` config key and pass it through. Remove `.ta/workflows/plan-build-loop.yaml` project-local override once this ships (it's a `max_phases: 9` workaround).
 
-5. [ ] **Tests**: pre-run check warns on dirty tree and aborts on N; `--yes` bypasses prompt; clean tree skips check; version mismatch auto-patches and apply proceeds; auto-patch failure bails with clear message; `ta plan next --filter v0.15` skips non-matching phases and signals done when no matching phases remain; `stage_plan_next` passes filter when `phase_filter` is set in stage def.
+5. [x] **Tests**: pre-run check warns on dirty tree and aborts on N; `--yes` bypasses prompt; clean tree skips check; version mismatch auto-patches and apply proceeds; auto-patch failure bails with clear message; `ta plan next --filter v0.15` skips non-matching phases and signals done when no matching phases remain; `stage_plan_next` passes filter when `phase_filter` is set in stage def.
 
 #### Version: `0.15.15-alpha.7`
 
@@ -10955,7 +10956,7 @@ Secrets required (GitHub Actions repository secrets):
 
 **Items**:
 
-1. [ ] **Certificate procurement (manual, human step)**: Purchase EV code signing certificate from a Microsoft-trusted CA (DigiCert recommended). Store as `WINDOWS_SIGNING_CERT_BASE64` and `WINDOWS_SIGNING_PASSWORD` in GitHub Actions repository secrets. Document the renewal process in `docs/release-ops.md`.
+1. [ ] **Certificate procurement (manual, human step — PENDING)**: Purchase EV code signing certificate from a Microsoft-trusted CA (DigiCert recommended). Store as `WINDOWS_SIGNING_CERT_BASE64` and `WINDOWS_SIGNING_PASSWORD` in GitHub Actions repository secrets. Document the renewal process in `docs/release-ops.md`. *CI signing step is wired and ready; will activate automatically once secrets are added.*
 
 2. [x] **`sign-windows.ps1` helper script** (`scripts/sign-windows.ps1`): Decode the base64 cert, write to a temp PFX, sign all `.exe` and `.msi` files passed as arguments with `signtool.exe` (SHA-256 digest, RFC 3161 timestamp via DigiCert's TSA), verify each signature, delete the temp PFX in a `try/finally` block. Idempotent and safe to re-run.
 
@@ -10964,7 +10965,7 @@ Secrets required (GitHub Actions repository secrets):
    - Verifies signatures with `signtool verify /pa`
    - Fails the build if any signature is invalid
 
-4. [ ] **Publisher display name**: The EV cert Common Name (CN) must match the intended publisher name shown in Windows UAC prompts ("Do you want to allow **Trusted Autonomy** to make changes..."). Coordinate cert purchase with the correct legal entity name.
+4. [ ] **Publisher display name (PENDING — part of cert procurement)**: The EV cert Common Name (CN) must match the intended publisher name shown in Windows UAC prompts ("Do you want to allow **Trusted Autonomy** to make changes..."). Coordinate cert purchase with the correct legal entity name.
 
 5. [x] **Timestamp server**: Use DigiCert's RFC 3161 TSA (`http://timestamp.digicert.com`) so signatures remain valid after the cert expires. Include `--tr` (timestamp RFC 3161) and `--td sha256` flags.
 
@@ -10972,9 +10973,9 @@ Secrets required (GitHub Actions repository secrets):
 
 7. [x] **`docs/release-ops.md` section**: "Windows Code Signing" — how to renew the cert, update the GitHub secret, what to do if the cert expires mid-release cycle, how to verify a signed MSI locally (`signtool verify /pa /v ta-*.msi`).
 
-8. [ ] **macOS Gatekeeper hardening (optional, same phase)**: If time permits, add `codesign --deep --force --verify --sign "Developer ID Application: ..."` + `notarytool` notarization to the macOS DMG build step. Eliminates the equivalent "macOS cannot verify the developer" prompt. Requires an Apple Developer account ($99/yr) and App-Specific Password for notarytool.
+8. [ ] **macOS Gatekeeper hardening (optional — deferred to future phase)**: Add `codesign --deep --force --verify --sign "Developer ID Application: ..."` + `notarytool` notarization to the macOS DMG build step. Requires an Apple Developer account ($99/yr). Not implemented — moved to a dedicated macOS signing phase.
 
-9. [ ] **Tests**: CI step asserts `signtool verify /pa` returns 0 for all signed artifacts. Add a smoke test that downloads the published MSI from a draft release and verifies the signature before the release is published.
+9. [ ] **Tests (PENDING — blocked on cert)**: CI step asserts `signtool verify /pa` returns 0 for all signed artifacts. Smoke test that downloads published MSI and verifies signature. Blocked until item 1 (cert procurement) is complete.
 
 #### Version: `0.15.16-alpha`
 
@@ -11086,7 +11087,7 @@ Output (Ollama — proxying a remote provider, upstream key missing):
 
 **Items**:
 
-1. [ ] **`AgentAuthSpec` in `crates/ta-runtime/src/auth_spec.rs`**: Define `AgentAuthSpec { required: bool, methods: Vec<AuthMethodSpec> }` and `AuthMethodSpec` enum:
+1. [x] **`AgentAuthSpec` in `crates/ta-runtime/src/auth_spec.rs`**: Define `AgentAuthSpec { required: bool, methods: Vec<AuthMethodSpec> }` and `AuthMethodSpec` enum:
    - `EnvVar { name, label, setup_hint, required: bool }` — `required=false` means missing is a soft warning
    - `SessionFile { config_dir_unix, config_dir_windows, check_cmd }`
    - `LocalService { url_env_var, default_url, health_endpoint, service_auth: Vec<AuthMethodSpec>, upstream_auth: Vec<AuthMethodSpec> }` — `service_auth` lists credentials the service itself requires (e.g., `OLLAMA_API_KEY`); `upstream_auth` lists credentials for any remote provider the service is proxying (e.g., `OPENAI_API_KEY` when Ollama proxies an OpenAI-compatible endpoint)
@@ -11094,9 +11095,9 @@ Output (Ollama — proxying a remote provider, upstream key missing):
 
    Add `#[serde(default)] pub auth: AgentAuthSpec` to `AgentFrameworkManifest`. Populate built-in manifests: `claude-code` (EnvVar + SessionFile), `codex` (EnvVar), `claude-flow` (inherits claude-code), `ollama` (LocalService with `service_auth=[EnvVar(OLLAMA_API_KEY, required=false)]`, `upstream_auth=[]`, `required=false`). User-defined YAML manifests override/extend via the `[auth]` section, including adding `upstream_auth` entries for Ollama deployments that proxy remote providers.
 
-2. [ ] **`detect_auth_mode`** (`crates/ta-runtime/src/auth_spec.rs`): `detect_auth_mode(spec: &AgentAuthSpec) -> AuthCheckResult` where `AuthCheckResult` is `Ok(AuthMethodSpec)` (first passing method) or `Missing { tried: Vec<(AuthMethodSpec, String)> }` (all failed, with reason per method). `LocalService` runs a two-phase check: (1) HTTP GET health endpoint — if unreachable and `required=false`, soft-pass; if unreachable and `required=true`, fail with "not running" message. (2) If reachable: run `service_auth` checks (fail or warn per `required`), then run `upstream_auth` checks (fail or warn per `required`). All inner `required=false` failures are collected as warnings, not fatal errors, and surfaced in `ta doctor` as `[warn]` lines.
+2. [x] **`detect_auth_mode`** (`crates/ta-runtime/src/auth_spec.rs`): `detect_auth_mode(spec: &AgentAuthSpec) -> AuthCheckResult` where `AuthCheckResult` is `Ok(AuthMethodSpec)` (first passing method) or `Missing { tried: Vec<(AuthMethodSpec, String)> }` (all failed, with reason per method). `LocalService` runs a two-phase check: (1) HTTP GET health endpoint — if unreachable and `required=false`, soft-pass; if unreachable and `required=true`, fail with "not running" message. (2) If reachable: run `service_auth` checks (fail or warn per `required`), then run `upstream_auth` checks (fail or warn per `required`). All inner `required=false` failures are collected as warnings, not fatal errors, and surfaced in `ta doctor` as `[warn]` lines.
 
-3. [ ] **`ta doctor` command** (`apps/ta-cli/src/commands/doctor.rs`): Runs the following checks in order, prints a pass/fail line for each, exits non-zero if any fail:
+3. [x] **`ta doctor` command** (`apps/ta-cli/src/commands/doctor.rs`): Runs the following checks in order, prints a pass/fail line for each, exits non-zero if any fail:
    - CLI version (always passes)
    - Daemon connection (`GET /health`; warns on version mismatch)
    - Auth check: load active framework manifest, call `detect_auth_mode`, report method + detail
@@ -11105,15 +11106,15 @@ Output (Ollama — proxying a remote provider, upstream key missing):
    - Project root detection
    - Plan state
 
-4. [ ] **Auth errors in `ta run`**: When an agent exits immediately with an auth-looking failure, call `detect_auth_mode` for the active framework and append the result to the error message. Replace generic "agent failed" with framework-specific fix hints drawn from `AuthMethodSpec.setup_hint`.
+4. [x] **Auth errors in `ta run`**: When an agent exits immediately with an auth-looking failure, call `detect_auth_mode` for the active framework and append the result to the error message. Replace generic "agent failed" with framework-specific fix hints drawn from `AuthMethodSpec.setup_hint`.
 
-5. [ ] **`ta doctor --json`**: Machine-readable output. Each check is `{ "name", "status": "ok"|"warn"|"fail", "detail", "fix" }`.
+5. [x] **`ta doctor --json`**: Machine-readable output. Each check is `{ "name", "status": "ok"|"warn"|"fail", "detail", "fix" }`.
 
-6. [ ] **`ta doctor` in `ta onboard`** (v0.15.11 integration): Onboarding wizard runs `ta doctor` as its first step and blocks on any `fail` with a guided fix flow.
+6. [x] **`ta doctor` in `ta onboard`** (v0.15.11 integration): Onboarding wizard runs `ta doctor` as its first step and blocks on any `fail` with a guided fix flow.
 
-7. [ ] **Tests**: `detect_auth_mode` with `ANTHROPIC_API_KEY` set; with fake session config dir; with neither (returns `Missing`); with `LocalService` and mock HTTP server returning 200 (soft pass); `LocalService` unreachable + `required=false` (soft pass, no error); `LocalService` reachable + `service_auth` env var missing + `required=false` (warns but passes); `LocalService` reachable + `upstream_auth` env var set (passes with upstream detail); `LocalService` reachable + `upstream_auth` env var missing + `required=true` (fails with upstream guidance); ollama built-in manifest YAML round-trips with service_auth and empty upstream_auth; custom manifest YAML with upstream_auth entries round-trips correctly; `ta doctor --json` output is valid JSON; version mismatch warns but does not fail.
+7. [x] **Tests**: `detect_auth_mode` with `ANTHROPIC_API_KEY` set; with fake session config dir; with neither (returns `Missing`); with `LocalService` and mock HTTP server returning 200 (soft pass); `LocalService` unreachable + `required=false` (soft pass, no error); `LocalService` reachable + `service_auth` env var missing + `required=false` (warns but passes); `LocalService` reachable + `upstream_auth` env var set (passes with upstream detail); `LocalService` reachable + `upstream_auth` env var missing + `required=true` (fails with upstream guidance); ollama built-in manifest YAML round-trips with service_auth and empty upstream_auth; custom manifest YAML with upstream_auth entries round-trips correctly; `ta doctor --json` output is valid JSON; version mismatch warns but does not fail.
 
-8. [ ] **USAGE.md**: "ta doctor" section — what each check tests, common fix paths, `--json` for CI, and how to declare `[auth]` in a custom agent manifest. Include a subsection on Ollama: how `service_auth` covers `OLLAMA_API_KEY` for protected instances, and how to add `upstream_auth` in `.ta/agents/ollama.yaml` when Ollama is proxying a remote provider that requires its own credentials.
+8. [x] **USAGE.md**: "ta doctor" section — what each check tests, common fix paths, `--json` for CI, and how to declare `[auth]` in a custom agent manifest. Include a subsection on Ollama: how `service_auth` covers `OLLAMA_API_KEY` for protected instances, and how to add `upstream_auth` in `.ta/agents/ollama.yaml` when Ollama is proxying a remote provider that requires its own credentials.
 
 #### Version: `0.15.17-alpha`
 

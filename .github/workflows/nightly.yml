@@ -349,44 +349,34 @@ jobs:
           # Prepend the new row, keep up to NIGHTLY_HISTORY_LIMIT rows.
           ALL_ROWS="${NEW_ROW}"
           if [ -n "$HISTORY_ROWS" ]; then
-            ALL_ROWS="${NEW_ROW}
-${HISTORY_ROWS}"
+            ALL_ROWS="$(printf '%s\n%s' "${NEW_ROW}" "${HISTORY_ROWS}")"
           fi
           # Trim to limit
           ALL_ROWS=$(echo "$ALL_ROWS" | head -n "${NIGHTLY_HISTORY_LIMIT}")
 
-          # Build the full release body
-          cat > nightly-body.md << BODYEOF
-## Nightly Build — ${BUILD_DATE}
-
-**Commit**: [${HEAD_SHA_SHORT}](https://github.com/${REPO}/commit/${HEAD_SHA})
-**Built**: ${BUILD_TIMESTAMP} (${TRIGGER_TYPE})
-**Branch**: main
-
-> This is an automated nightly pre-release built from the latest commit on \`main\`.
-> For stable releases, see the [latest release](https://github.com/${REPO}/releases/latest).
-
-### Download
-
-| Platform | Archive | Installer |
-|----------|---------|-----------|
-| Linux x86_64 | [tar.gz](${ASSET_BASE}/ta-nightly-x86_64-unknown-linux-musl.tar.gz) | — |
-| Linux ARM64 | [tar.gz](${ASSET_BASE}/ta-nightly-aarch64-unknown-linux-musl.tar.gz) | — |
-| macOS Intel | [tar.gz](${ASSET_BASE}/ta-nightly-x86_64-apple-darwin.tar.gz) | — |
-| macOS ARM (M1/M2) | [tar.gz](${ASSET_BASE}/ta-nightly-aarch64-apple-darwin.tar.gz) | — |
-| Windows x86_64 | [zip](${ASSET_BASE}/ta-nightly-x86_64-pc-windows-msvc.zip) | [msi](${ASSET_BASE}/ta-nightly-x86_64-pc-windows-msvc.msi) |
-
-[SHA256SUMS.txt](${ASSET_BASE}/SHA256SUMS.txt)
-
----
-
-## Nightly History {#nightly-history}
-
-| Date | Commit | Trigger | Downloads |
-|------|--------|---------|-----------|
-${ALL_ROWS}
-
-BODYEOF
+          # Build the full release body (avoid heredoc — unindented content breaks YAML block scalars)
+          {
+            printf '## Nightly Build -- %s\n\n' "${BUILD_DATE}"
+            printf '**Commit**: [%s](https://github.com/%s/commit/%s)\n' "${HEAD_SHA_SHORT}" "${REPO}" "${HEAD_SHA}"
+            printf '**Built**: %s (%s)\n' "${BUILD_TIMESTAMP}" "${TRIGGER_TYPE}"
+            printf '**Branch**: main\n\n'
+            printf '> This is an automated nightly pre-release built from the latest commit on `main`.\n'
+            printf '> For stable releases, see the [latest release](https://github.com/%s/releases/latest).\n\n' "${REPO}"
+            printf '### Download\n\n'
+            printf '| Platform | Archive | Installer |\n'
+            printf '|----------|---------|------------|\n'
+            printf '| Linux x86_64 | [tar.gz](%s/ta-nightly-x86_64-unknown-linux-musl.tar.gz) | -- |\n' "${ASSET_BASE}"
+            printf '| Linux ARM64 | [tar.gz](%s/ta-nightly-aarch64-unknown-linux-musl.tar.gz) | -- |\n' "${ASSET_BASE}"
+            printf '| macOS Intel | [tar.gz](%s/ta-nightly-x86_64-apple-darwin.tar.gz) | -- |\n' "${ASSET_BASE}"
+            printf '| macOS ARM (M1/M2) | [tar.gz](%s/ta-nightly-aarch64-apple-darwin.tar.gz) | -- |\n' "${ASSET_BASE}"
+            printf '| Windows x86_64 | [zip](%s/ta-nightly-x86_64-pc-windows-msvc.zip) | [msi](%s/ta-nightly-x86_64-pc-windows-msvc.msi) |\n\n' "${ASSET_BASE}" "${ASSET_BASE}"
+            printf '[SHA256SUMS.txt](%s/SHA256SUMS.txt)\n\n' "${ASSET_BASE}"
+            printf '---\n\n'
+            printf '## Nightly History {#nightly-history}\n\n'
+            printf '| Date | Commit | Trigger | Downloads |\n'
+            printf '|------|--------|---------|------------|\n'
+            printf '%s\n' "${ALL_ROWS}"
+          } > nightly-body.md
 
           echo "body_file=nightly-body.md" >> $GITHUB_OUTPUT
 
