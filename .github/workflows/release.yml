@@ -232,6 +232,26 @@ jobs:
             -o "artifacts\${{ env.BINARY_NAME }}-$env:TAG-x86_64-pc-windows-msvc.msi"
           Write-Host "MSI created: artifacts\${{ env.BINARY_NAME }}-$env:TAG-x86_64-pc-windows-msvc.msi"
 
+      # ── Windows code signing (v0.15.16) ──────────────────────────────────────
+      # Signs ta.exe, ta-daemon.exe, and the MSI with an EV code signing cert.
+      # Skipped automatically when WINDOWS_SIGNING_CERT_BASE64 is not set.
+      - name: Sign Windows artifacts
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+          TAG: ${{ steps.get_version.outputs.version }}
+        run: |
+          $exeDir = "target\x86_64-pc-windows-msvc\release"
+          $msiPath = Get-ChildItem -Path artifacts -Filter '*.msi' | Select-Object -First 1 -ExpandProperty FullName
+          $filesToSign = @(
+            "$exeDir\ta.exe",
+            "$exeDir\ta-daemon.exe"
+          )
+          if ($msiPath) { $filesToSign += $msiPath }
+          & scripts\sign-windows.ps1 @filesToSign
+
       # ── macOS pkg + DMG (v0.13.11) ───────────────────────────────────────────
       # Build on ARM runner (aarch64-apple-darwin) — one DMG covers both arches.
       - name: Build macOS pkg and DMG

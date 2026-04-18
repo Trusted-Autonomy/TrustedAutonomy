@@ -10926,7 +10926,7 @@ Stable and nightly use different tag prefixes (`v*` vs `nightly`), so GitHub's d
 ---
 
 ### v0.15.16 — Windows Code Signing (EV Certificate + CI Integration)
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Eliminate the Microsoft SmartScreen "Windows protected your PC" warning on the TA Windows MSI installer by signing all Windows binaries and the MSI with an Extended Validation (EV) code signing certificate. EV certs bypass SmartScreen's reputation-building period — signed EV binaries show no warning on first install regardless of download count. Ships with a fully automated signing step in the release CI workflow.
 
 **Depends on**: v0.13.11 (platform installers — WiX MSI build in release.yml)
@@ -10957,20 +10957,20 @@ Secrets required (GitHub Actions repository secrets):
 
 1. [ ] **Certificate procurement (manual, human step)**: Purchase EV code signing certificate from a Microsoft-trusted CA (DigiCert recommended). Store as `WINDOWS_SIGNING_CERT_BASE64` and `WINDOWS_SIGNING_PASSWORD` in GitHub Actions repository secrets. Document the renewal process in `docs/release-ops.md`.
 
-2. [ ] **`sign-windows.ps1` helper script** (`scripts/sign-windows.ps1`): Decode the base64 cert, write to a temp PFX, sign all `.exe` and `.msi` files passed as arguments with `signtool.exe` (SHA-256 digest, RFC 3161 timestamp via DigiCert's TSA), verify each signature, delete the temp PFX. Idempotent and safe to re-run.
+2. [x] **`sign-windows.ps1` helper script** (`scripts/sign-windows.ps1`): Decode the base64 cert, write to a temp PFX, sign all `.exe` and `.msi` files passed as arguments with `signtool.exe` (SHA-256 digest, RFC 3161 timestamp via DigiCert's TSA), verify each signature, delete the temp PFX in a `try/finally` block. Idempotent and safe to re-run.
 
-3. [ ] **Release workflow signing step** (`release.yml`): After the WiX MSI build step (`Build Windows MSI`), add a `Sign Windows artifacts` step that:
+3. [x] **Release workflow signing step** (`release.yml`): After the WiX MSI build step (`Build Windows MSI`), add a `Sign Windows artifacts` step that:
    - Calls `sign-windows.ps1` on `ta.exe`, `ta-daemon.exe`, and the `.msi` artifact
    - Verifies signatures with `signtool verify /pa`
    - Fails the build if any signature is invalid
 
 4. [ ] **Publisher display name**: The EV cert Common Name (CN) must match the intended publisher name shown in Windows UAC prompts ("Do you want to allow **Trusted Autonomy** to make changes..."). Coordinate cert purchase with the correct legal entity name.
 
-5. [ ] **Timestamp server**: Use DigiCert's RFC 3161 TSA (`http://timestamp.digicert.com`) so signatures remain valid after the cert expires. Include `--tr` (timestamp RFC 3161) and `--td sha256` flags.
+5. [x] **Timestamp server**: Use DigiCert's RFC 3161 TSA (`http://timestamp.digicert.com`) so signatures remain valid after the cert expires. Include `--tr` (timestamp RFC 3161) and `--td sha256` flags.
 
-6. [ ] **Verification in CI**: After signing, run `signtool verify /pa artifacts/ta-*.msi` and fail the workflow if exit code is non-zero. This catches cert expiry or misconfigured secrets before a release ships.
+6. [x] **Verification in CI**: After signing, run `signtool verify /pa artifacts/ta-*.msi` and fail the workflow if exit code is non-zero. This catches cert expiry or misconfigured secrets before a release ships.
 
-7. [ ] **`docs/release-ops.md` section**: "Windows Code Signing" — how to renew the cert, update the GitHub secret, what to do if the cert expires mid-release cycle, how to verify a signed MSI locally (`signtool verify /pa /v ta-*.msi`).
+7. [x] **`docs/release-ops.md` section**: "Windows Code Signing" — how to renew the cert, update the GitHub secret, what to do if the cert expires mid-release cycle, how to verify a signed MSI locally (`signtool verify /pa /v ta-*.msi`).
 
 8. [ ] **macOS Gatekeeper hardening (optional, same phase)**: If time permits, add `codesign --deep --force --verify --sign "Developer ID Application: ..."` + `notarytool` notarization to the macOS DMG build step. Eliminates the equivalent "macOS cannot verify the developer" prompt. Requires an Apple Developer account ($99/yr) and App-Specific Password for notarytool.
 
