@@ -302,6 +302,21 @@ fn run_init(
         std::fs::write(&project_toml_path, "[project]\nversion = \"0.1.0-alpha\"\n")?;
     }
 
+    // Write .ta/project-meta.toml tracking the TA version used at init (v0.15.18).
+    let meta_path = ta_dir.join("project-meta.toml");
+    if !meta_path.exists() {
+        let ta_version = env!("CARGO_PKG_VERSION");
+        let meta_content = format!(
+            "# Written by ta init / ta upgrade. Do not edit manually — managed by TA.\ninitialized_with = {:?}\nlast_upgraded    = {:?}\n",
+            ta_version, ta_version,
+        );
+        std::fs::write(&meta_path, meta_content)?;
+        println!(
+            "  Created .ta/project-meta.toml (initialized_with = {})",
+            ta_version
+        );
+    }
+
     // Game engine templates: additional files.
     let is_game_engine = matches!(
         project_type,
@@ -1349,6 +1364,18 @@ mod tests {
         // Check memory seed.
         let memory_dir = ta_dir.join("memory");
         assert!(memory_dir.exists());
+
+        // project-meta.toml must be written with initialized_with set (v0.15.18).
+        let meta_path = ta_dir.join("project-meta.toml");
+        assert!(
+            meta_path.exists(),
+            "project-meta.toml should be created by ta init"
+        );
+        let meta_content = std::fs::read_to_string(&meta_path).unwrap();
+        assert!(
+            meta_content.contains("initialized_with"),
+            "project-meta.toml should contain initialized_with"
+        );
     }
 
     #[test]

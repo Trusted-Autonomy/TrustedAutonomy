@@ -65,8 +65,11 @@ impl CheckResult {
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-/// Execute `ta doctor [--json]`.
-pub fn execute(config: &GatewayConfig, json: bool) -> anyhow::Result<()> {
+/// Execute `ta doctor [--json] [--fix-denied]`.
+pub fn execute(config: &GatewayConfig, json: bool, fix_denied: bool) -> anyhow::Result<()> {
+    if fix_denied {
+        return execute_fix_denied(config);
+    }
     let checks = run_all_checks(config);
     let fail_count = checks
         .iter()
@@ -168,6 +171,12 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
 
     // 12. Stale ephemeral file.
     results.push(check_stale_ephemeral(config));
+
+    // 13. Project upgrade state (v0.15.18).
+    results.push(check_upgrade_state(config));
+
+    // 14. Goals in pr_ready state with denied drafts (v0.15.18).
+    results.extend(check_pr_ready_denied(config));
 
     results
 }
@@ -624,6 +633,186 @@ fn check_stale_ephemeral(config: &GatewayConfig) -> CheckResult {
     } else {
         CheckResult::ok("Ephemeral files", "clean".to_string())
     }
+}
+
+// ── Upgrade state check (v0.15.18) ────────────────────────────────────────────
+
+fn check_upgrade_state(config: &GatewayConfig) -> CheckResult {
+    let ta_dir = config.workspace_root.join(".ta");
+    if !ta_dir.exists() {
+        return CheckResult::ok(
+            "Project upgrade",
+            "no .ta directory (not a TA project)".to_string(),
+        );
+    }
+    let (pending_count, _steps) = super::upgrade::check_pending(&config.workspace_root);
+    if pending_count == 0 {
+        CheckResult::ok("Project upgrade", "up to date".to_string())
+    } else {
+        CheckResult::warn(
+            "Project upgrade",
+            format!("{} pending upgrade step(s)", pending_count),
+            "Run: ta upgrade",
+        )
+    }
+}
+
+// ── pr_ready + denied draft check (v0.15.18) ─────────────────────────────────
+
+fn check_pr_ready_denied(config: &GatewayConfig) -> Vec<CheckResult> {
+    use ta_changeset::DraftStatus;
+    use ta_goal::{GoalRunState, GoalRunStore};
+
+    let mut results = Vec::new();
+
+    let store = match GoalRunStore::new(&config.goals_dir) {
+        Ok(s) => s,
+        Err(_) => return results,
+    };
+
+    let goals = store.list().unwrap_or_default();
+    let pr_ready: Vec<_> = goals
+        .into_iter()
+        .filter(|g| matches!(g.state, GoalRunState::PrReady))
+        .collect();
+
+    if pr_ready.is_empty() {
+        return results;
+    }
+
+    // Load all draft packages to cross-reference.
+    let all_pkgs = super::draft::load_all_packages(config).unwrap_or_default();
+
+    let mut denied_goals: Vec<(String, String, u64)> = Vec::new(); // (id, title, staging_bytes)
+    for goal in &pr_ready {
+        if let Some(pkg_id) = goal.pr_package_id {
+            if let Some(pkg) = all_pkgs.iter().find(|p| p.package_id == pkg_id) {
+                if matches!(pkg.status, DraftStatus::Denied { .. }) {
+                    let staging_bytes = dir_size_bytes(&goal.workspace_path);
+                    denied_goals.push((
+                        goal.goal_run_id.to_string()[..8].to_string(),
+                        goal.title.clone(),
+                        staging_bytes,
+                    ));
+                }
+            }
+        }
+    }
+
+    if denied_goals.is_empty() {
+        return results;
+    }
+
+    let total_gb: f64 =
+        denied_goals.iter().map(|(_, _, b)| *b as f64).sum::<f64>() / (1024.0 * 1024.0 * 1024.0);
+    let list: Vec<String> = denied_goals
+        .iter()
+        .map(|(id, title, bytes)| {
+            format!(
+                "{} '{}' ({:.1} MB)",
+                id,
+                title,
+                *bytes as f64 / (1024.0 * 1024.0)
+            )
+        })
+        .collect();
+    let detail = format!(
+        "{} goal(s) are pr_ready with a denied draft ({:.2} GB staging): {}",
+        denied_goals.len(),
+        total_gb,
+        list.join(", "),
+    );
+    results.push(CheckResult::warn(
+        "GC denied drafts",
+        detail,
+        "Run 'ta doctor --fix-denied' to clean up, or re-run the phase to supersede.".to_string(),
+    ));
+    results
+}
+
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+// ── --fix-denied handler ──────────────────────────────────────────────────────
+
+fn execute_fix_denied(config: &GatewayConfig) -> anyhow::Result<()> {
+    use std::io::{self, Write};
+    use ta_changeset::DraftStatus;
+    use ta_goal::{GoalRunState, GoalRunStore};
+
+    let store = GoalRunStore::new(&config.goals_dir)?;
+    let goals = store.list().unwrap_or_default();
+    let pr_ready: Vec<_> = goals
+        .into_iter()
+        .filter(|g| matches!(g.state, GoalRunState::PrReady))
+        .collect();
+
+    let all_pkgs = super::draft::load_all_packages(config).unwrap_or_default();
+
+    let mut found = false;
+    for goal in &pr_ready {
+        if let Some(pkg_id) = goal.pr_package_id {
+            if let Some(pkg) = all_pkgs.iter().find(|p| p.package_id == pkg_id) {
+                if matches!(pkg.status, DraftStatus::Denied { .. }) {
+                    found = true;
+                    let staging_mb =
+                        dir_size_bytes(&goal.workspace_path) as f64 / (1024.0 * 1024.0);
+                    println!(
+                        "Goal {} '{}' — staging {:.1} MB, denied on {}",
+                        &goal.goal_run_id.to_string()[..8],
+                        goal.title,
+                        staging_mb,
+                        goal.updated_at.format("%Y-%m-%d"),
+                    );
+                    print!("  [d]elete staging + mark closed, [s]kip? [d/s]: ");
+                    io::stdout().flush().ok();
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input).ok();
+                    if input.trim().eq_ignore_ascii_case("d") {
+                        if goal.workspace_path.exists() {
+                            std::fs::remove_dir_all(&goal.workspace_path)?;
+                            println!("  Deleted staging: {}", goal.workspace_path.display());
+                        }
+                        // Mark goal as closed.
+                        let mut updated = goal.clone();
+                        updated.state = GoalRunState::Failed {
+                            reason: "closed by ta doctor --fix-denied".to_string(),
+                        };
+                        store.save(&updated)?;
+                        println!(
+                            "  Goal {} marked closed.",
+                            &goal.goal_run_id.to_string()[..8]
+                        );
+                    } else {
+                        println!("  Skipped.");
+                    }
+                }
+            }
+        }
+    }
+
+    if !found {
+        println!("No pr_ready goals with denied drafts found.");
+    }
+    Ok(())
 }
 
 // ── Config helpers ───────────────────────────────────────────────────────────

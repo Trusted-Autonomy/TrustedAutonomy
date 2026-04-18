@@ -291,11 +291,29 @@ enum Commands {
     /// Examples:
     ///   ta doctor              # human-readable output
     ///   ta doctor --json       # machine-readable JSON for CI
+    ///   ta doctor --fix-denied # interactively clean up pr_ready goals with denied drafts
     Doctor {
         /// Output results as a JSON array (for CI / scripted use).
         #[arg(long)]
         json: bool,
+        /// Interactively clean up goals that are pr_ready with a denied draft (v0.15.18).
+        ///
+        /// For each such goal, prompts to delete staging + mark closed, or skip.
+        #[arg(long)]
+        fix_denied: bool,
     },
+
+    /// Upgrade project-level TA configuration to the current binary version (v0.15.18).
+    ///
+    /// Detects project-level changes required since the project was last initialized or
+    /// upgraded (e.g., new gitignore entries, config schema fields). Applies them automatically.
+    ///
+    /// Examples:
+    ///   ta upgrade              # apply all pending steps
+    ///   ta upgrade --dry-run    # show what would be applied without changing anything
+    ///   ta upgrade --force      # re-run all steps regardless of version
+    ///   ta upgrade --acknowledge ".ta/review/"  # suppress a warning for intentional omission
+    Upgrade(commands::upgrade::UpgradeArgs),
 
     // ── ONBOARDING ──────────────────────────────────────────────────────────
     /// First-time setup wizard: configure AI provider, agent, and planning framework.
@@ -1017,7 +1035,10 @@ fn main() -> anyhow::Result<()> {
         Commands::Sync => commands::sync::execute(&config),
         Commands::Verify { goal_id } => commands::verify::execute(&config, goal_id.as_deref()),
         Commands::Analysis { command } => commands::analysis::execute(command, &config),
-        Commands::Doctor { json } => commands::doctor::execute(&config, *json),
+        Commands::Doctor { json, fix_denied } => {
+            commands::doctor::execute(&config, *json, *fix_denied)
+        }
+        Commands::Upgrade(args) => commands::upgrade::execute(&config, args),
         Commands::Conversation { goal_id, json } => {
             commands::conversation::execute(&config, goal_id, *json)
         }

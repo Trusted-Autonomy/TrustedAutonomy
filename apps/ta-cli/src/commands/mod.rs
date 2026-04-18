@@ -51,6 +51,7 @@ pub mod sync;
 pub mod template;
 pub mod terms;
 pub mod token;
+pub mod upgrade;
 pub mod verify;
 pub mod version_guard;
 pub mod webhook;

@@ -4151,7 +4151,7 @@ mod tests {
 
         let config = GatewayConfig::for_project(dir.path());
         // doctor::execute returns Err only on hard failures (not warnings).
-        let _ = crate::commands::doctor::execute(&config, false);
+        let _ = crate::commands::doctor::execute(&config, false, false);
     }
 
     // ── v0.15.13.5: delete resets in_progress plan phase ──────────────

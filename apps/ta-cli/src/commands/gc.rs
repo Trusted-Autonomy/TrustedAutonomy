@@ -467,7 +467,44 @@ pub fn execute(
         );
     }
 
+    // Warn about pr_ready/denied goals (v0.15.18) — gc never auto-deletes these.
+    warn_pr_ready_denied(config, &goals);
+
     Ok(())
+}
+
+/// Warn if any goals are pr_ready with a denied draft.
+///
+/// `ta gc` does not delete these automatically — the user must run
+/// `ta doctor --fix-denied` or start a new goal for the same phase to supersede.
+fn warn_pr_ready_denied(config: &GatewayConfig, goals: &[ta_goal::GoalRun]) {
+    let pr_ready: Vec<_> = goals
+        .iter()
+        .filter(|g| matches!(g.state, GoalRunState::PrReady))
+        .collect();
+
+    if pr_ready.is_empty() {
+        return;
+    }
+
+    // Load drafts to check which are denied.
+    let all_pkgs = super::draft::load_all_packages(config).unwrap_or_default();
+    let denied_count = pr_ready
+        .iter()
+        .filter(|g| {
+            g.pr_package_id
+                .and_then(|id| all_pkgs.iter().find(|p| p.package_id == id))
+                .map(|p| matches!(p.status, ta_changeset::DraftStatus::Denied { .. }))
+                .unwrap_or(false)
+        })
+        .count();
+
+    if denied_count > 0 {
+        println!(
+            "\n[warn] {} pr_ready goal(s) with denied draft — not deleted by gc.\n       Run 'ta doctor' to review, or 'ta doctor --fix-denied' to clean up.",
+            denied_count
+        );
+    }
 }
 
 /// `ta gc --status`: print a table of all goals with staging dirs.

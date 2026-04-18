@@ -77,15 +77,26 @@ pub struct ExcludePatterns {
 }
 
 impl ExcludePatterns {
-    /// V1 TEMPORARY: Load exclude patterns from `.taignore` in source_dir, or use defaults.
+    /// V1 TEMPORARY: Load exclude patterns from `.taignore` in source_dir, merged with defaults.
+    ///
+    /// Always applies DEFAULT_EXCLUDES as a baseline so build artifacts (target/, node_modules/,
+    /// etc.) are excluded even if the project's .taignore predates those entries being added.
+    /// Prior to v0.15.18, if .taignore existed, DEFAULT_EXCLUDES were skipped — this caused
+    /// old projects without `target/` in their .taignore to copy the full Rust build cache.
     pub fn load(source_dir: &Path) -> Self {
+        let mut base = Self::defaults();
         let taignore_path = source_dir.join(".taignore");
         if taignore_path.exists() {
             if let Ok(content) = fs::read_to_string(&taignore_path) {
-                return Self::from_taignore(&content);
+                let from_file = Self::from_taignore(&content);
+                for pat in from_file.patterns {
+                    if !base.patterns.contains(&pat) {
+                        base.patterns.push(pat);
+                    }
+                }
             }
         }
-        Self::defaults()
+        base
     }
 
     /// V1 TEMPORARY: Create exclude patterns from `.taignore` file content.
@@ -1882,9 +1893,11 @@ mod tests {
     }
 
     #[test]
-    fn taignore_overrides_defaults() {
+    fn taignore_merges_with_defaults() {
+        // v0.15.18: ExcludePatterns::load always merges DEFAULT_EXCLUDES with .taignore
+        // patterns so build artifacts are excluded even if .taignore doesn't list them.
         let source = create_source_project();
-        // Create a .taignore that only excludes "secret/".
+        // Create a .taignore that only lists "secret/" (no target/).
         fs::write(
             source.path().join(".taignore"),
             "# Custom excludes\nsecret/\n",
@@ -1902,11 +1915,46 @@ mod tests {
             OverlayWorkspace::create("goal-1", source.path(), staging_root.path(), excludes)
                 .unwrap();
 
-        // .taignore says only "secret/" — so target/ IS copied, secret/ is NOT.
-        assert!(overlay.staging_dir().join("target").exists());
-        assert!(!overlay.staging_dir().join("secret").exists());
+        // DEFAULT_EXCLUDES (target/) and .taignore (secret/) are both applied.
+        assert!(
+            !overlay.staging_dir().join("target").exists(),
+            "target/ must be excluded by default even when .taignore doesn't list it"
+        );
+        assert!(
+            !overlay.staging_dir().join("secret").exists(),
+            "secret/ must be excluded by .taignore"
+        );
         // .ta/ is always excluded regardless of .taignore.
         assert!(!overlay.staging_dir().join(".ta").exists());
+    }
+
+    #[test]
+    fn taignore_load_always_excludes_target() {
+        // Even for a project with a .taignore that predates target/ being in defaults,
+        // ExcludePatterns::load must exclude target/ because DEFAULT_EXCLUDES are always applied.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        // Create a minimal .taignore without target/.
+        fs::write(root.join(".taignore"), "# old project\n.env\n").unwrap();
+        // Create target/ with some fake build output.
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("target/debug/app"), "binary").unwrap();
+        fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+
+        let excludes = ExcludePatterns::load(root);
+        // Create staging area.
+        let staging_root = TempDir::new().unwrap();
+        let overlay =
+            OverlayWorkspace::create("goal-1", root, staging_root.path(), excludes).unwrap();
+
+        assert!(
+            !overlay.staging_dir().join("target").exists(),
+            "staging copy of a workspace with a non-empty target/ dir must not contain target/"
+        );
+        assert!(
+            overlay.staging_dir().join("main.rs").exists(),
+            "source files should still be copied"
+        );
     }
 
     #[test]

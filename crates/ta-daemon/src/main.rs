@@ -199,6 +199,10 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Project-meta version check (v0.15.18).
+    // Warn if the project was last upgraded with an older version of TA.
+    check_project_meta_version(&project_root);
+
     // Set up cross-platform signal handling (v0.10.16).
     // The shutdown notifier is shared with background tasks so they can
     // gracefully terminate when SIGINT/SIGTERM is received.
@@ -409,4 +413,70 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── Project-meta version check (v0.15.18) ────────────────────────────────────
+
+/// Check if the project was last upgraded with a significantly older TA version.
+///
+/// Emits a tracing warn and a status line if the project is more than 1 minor
+/// version behind the running daemon. The user can resolve with `ta upgrade`.
+fn check_project_meta_version(project_root: &std::path::Path) {
+    let meta_path = project_root.join(".ta/project-meta.toml");
+    if !meta_path.exists() {
+        return;
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Meta {
+        #[serde(default)]
+        last_upgraded: String,
+    }
+
+    let content = match std::fs::read_to_string(&meta_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let meta: Meta = match toml::from_str(&content) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    if meta.last_upgraded.is_empty() {
+        return;
+    }
+
+    let current_ver = env!("CARGO_PKG_VERSION");
+    let (cur_maj, cur_min, _) = parse_semver(current_ver);
+    let (up_maj, up_min, _) = parse_semver(&meta.last_upgraded);
+
+    let minor_behind = if cur_maj > up_maj || (cur_maj == up_maj && cur_min > up_min) {
+        (cur_maj - up_maj) * 100 + cur_min.saturating_sub(up_min)
+    } else {
+        0
+    };
+
+    if minor_behind > 1 {
+        tracing::warn!(
+            last_upgraded = %meta.last_upgraded,
+            current = %current_ver,
+            "project was last upgraded with {} which is {} minor version(s) behind {} — run 'ta upgrade'",
+            meta.last_upgraded,
+            minor_behind,
+            current_ver,
+        );
+    }
+}
+
+fn parse_semver(v: &str) -> (u32, u32, u32) {
+    let stripped = v.split('-').next().unwrap_or(v);
+    let parts: Vec<u32> = stripped
+        .splitn(3, '.')
+        .map(|s| s.parse().unwrap_or(0))
+        .collect();
+    (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+        parts.get(2).copied().unwrap_or(0),
+    )
 }

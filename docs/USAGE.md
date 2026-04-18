@@ -2696,6 +2696,53 @@ ta goal pre-flight
 ta goal pre-flight "My new feature"
 ```
 
+### Upgrading an Existing Project (`ta upgrade`)
+
+When a new version of TA adds project-level requirements (new gitignore entries, config schema fields, workflow keys), existing projects need to be updated to stay compatible. `ta upgrade` detects and applies these changes automatically.
+
+```bash
+ta upgrade              # apply all pending upgrade steps
+ta upgrade --dry-run    # show what would be applied; exits 1 if any steps are pending
+ta upgrade --force      # re-run all steps regardless of last_upgraded version
+ta upgrade --acknowledge ".ta/review/"  # suppress a step for an intentional omission
+```
+
+Example output:
+
+```
+  [ok]  .ta/review/ already in .gitignore
+  [fix] Added .ta/review/ to .taignore
+  [ok]  workflow.toml schema is current
+
+Upgraded project from 0.15.17-alpha → 0.15.18-alpha (1 step(s) applied, 2 already ok).
+```
+
+**How it works:**
+- `ta init` writes `.ta/project-meta.toml` recording the TA version used at project creation
+- `ta upgrade` compares `last_upgraded` against the current binary and runs any steps introduced since then
+- Each step is idempotent — safe to re-run with `--force`
+
+**Suppressing false positives:** If you intentionally removed an entry (e.g., you manage `.gitignore` with another tool), use `--acknowledge` to silence that step:
+
+```bash
+ta upgrade --acknowledge ".ta/review/"
+```
+
+This adds the pattern to `acknowledged_omissions` in `.ta/config.local.toml`.
+
+**`ta doctor` integration:** `ta doctor` includes a "Project upgrade" check. If pending steps exist, it shows `[warn] N pending upgrade step(s) — run 'ta upgrade' to apply`.
+
+**Cleaning up denied drafts:** Goals that had their draft denied remain `pr_ready` with staging on disk. Run `ta doctor --fix-denied` to interactively clean them up:
+
+```bash
+ta doctor --fix-denied
+# For each pr_ready + denied goal, prompts:
+# Goal abc12345 'Fix login bug' — staging 52.3 MB, denied on 2026-04-10
+#   [d]elete staging + mark closed, [s]kip? [d/s]: d
+```
+
+---
+
 ### System Health Check (`ta doctor`)
 
 Run a comprehensive system check covering project structure, daemon, git, disk space, and plugins:

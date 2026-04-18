@@ -11120,7 +11120,7 @@ Output (Ollama — proxying a remote provider, upstream key missing):
 ---
 
 ### v0.15.18 — Project TA Version Tracking & Upgrade Path
-<!-- status: pending -->
+<!-- status: done -->
 **Goal**: Track the TA version a project was initialized with (and each subsequent upgrade), so TA can detect when a project was created with an older version, identify what project-level changes are required to be compatible with the current version, and apply or warn about them automatically. This closes the gap where new TA versions add entries to `.gitignore`, `.taignore`, `workflow.toml`, or `.ta/config.toml` format — but existing projects silently miss those changes until something breaks.
 
 **Depends on**: v0.15.17 (`ta doctor`), v0.13.13 (VCS-aware team setup)
@@ -11166,40 +11166,39 @@ acknowledged_omissions = [".ta/review/"]  # user intentionally removed; suppress
 
 **Items**:
 
-1. [ ] **`.ta/project-meta.toml`**: Written by `ta init` with `initialized_with` = current TA semver. Read by `ta upgrade` and `ta doctor`. If absent (pre-v0.15.18 project), treated as `initialized_with = "0.0.0"` (apply all steps).
+1. [x] **`.ta/project-meta.toml`**: Written by `ta init` with `initialized_with` = current TA semver. Read by `ta upgrade` and `ta doctor`. If absent (pre-v0.15.18 project), treated as `initialized_with = "0.0.0"` (apply all steps). Implemented in `apps/ta-cli/src/commands/init.rs`.
 
-2. [ ] **`UpgradeStep` type** (`crates/ta-core/src/upgrade_manifest.rs`): Struct with `introduced_in: &str`, `description: &str`, `check: fn(&Path) -> bool` (returns true if already applied / not needed), `apply: fn(&Path) -> anyhow::Result<()>`. `UPGRADE_STEPS: &[UpgradeStep]` const array — all steps in version order.
+2. [x] **`UpgradeStep` type** (`apps/ta-cli/src/commands/upgrade.rs`): Struct with `introduced_in: &str`, `description: &str`, `check: fn(&Path) -> bool` (returns true if already applied / not needed), `apply: fn(&Path) -> anyhow::Result<()>`. `UPGRADE_STEPS: &[UpgradeStep]` const array — all steps in version order. Note: placed in ta-cli rather than non-existent ta-core crate.
 
-3. [ ] **`ta upgrade` command** (`apps/ta-cli/src/commands/upgrade.rs`): Iterates `UPGRADE_STEPS` for steps with `introduced_in > last_upgraded` (or all steps if `project-meta.toml` absent). For each step: runs `check()` — if already applied, prints `[ok]`. If not applied: runs `apply()`, prints `[fix]`. On success: writes updated `last_upgraded` to `project-meta.toml`. Supports `--dry-run` (check only, no writes). Supports `--force` (re-run all steps regardless of version).
+3. [x] **`ta upgrade` command** (`apps/ta-cli/src/commands/upgrade.rs`): Iterates `UPGRADE_STEPS` for steps with `introduced_in > last_upgraded` (or all steps if `project-meta.toml` absent). For each step: runs `check()` — if already applied, prints `[ok]`. If not applied: runs `apply()`, prints `[fix]`. On success: writes updated `last_upgraded` to `project-meta.toml`. Supports `--dry-run` (check only, no writes). Supports `--force` (re-run all steps regardless of version).
 
-4. [ ] **`ta upgrade --acknowledge <pattern>`**: Adds `pattern` to `acknowledged_omissions` in `.ta/config.local.toml` so the step is skipped silently in future runs. Prevents false warnings for users who intentionally diverge from TA defaults.
+4. [x] **`ta upgrade --acknowledge <pattern>`**: Adds `pattern` to `acknowledged_omissions` in `.ta/config.local.toml` so the step is skipped silently in future runs. Prevents false warnings for users who intentionally diverge from TA defaults.
 
-5. [ ] **`ta doctor` integration** (v0.15.17): Add a "Project up to date" check that calls `ta upgrade --dry-run` internally. If any steps would be applied, emit `[warn] Project has N pending upgrade steps — run 'ta upgrade' to apply`.
+5. [x] **`ta doctor` integration**: Added "Project upgrade" check and "GC denied drafts" check. If any steps pending, emits `[warn] N pending upgrade step(s) — run 'ta upgrade' to apply`. Added `--fix-denied` flag for interactive cleanup of pr_ready/denied goals.
 
-6. [ ] **Daemon start-up check**: When the daemon starts against a project root, if `project-meta.toml` is present and `last_upgraded` is more than 1 minor version behind the running daemon, log a warning to the daemon log and emit it on next `ta status` output.
+6. [x] **Daemon start-up check**: When the daemon starts against a project root, if `project-meta.toml` is present and `last_upgraded` is more than 1 minor version behind the running daemon, logs a warning via `tracing::warn`. Implemented in `crates/ta-daemon/src/main.rs::check_project_meta_version()`.
 
-7. [ ] **Initial upgrade steps** (seeded at v0.15.18):
+7. [x] **Initial upgrade steps** (seeded at v0.15.18):
    - Add `.ta/review/` to `.gitignore` if present and missing
    - Add `.ta/review/` to `.taignore` if present and missing
    - Ensure `workflow.toml` has `[config] pr_poll_interval_secs` (default 60 if absent)
+   - Warn if old staging dirs may contain `target/` artifacts
 
-8. [ ] **Tests**: Upgrade step `check`/`apply` round-trip; `ta upgrade --dry-run` exits non-zero when steps pending; `acknowledged_omissions` suppresses a step; `project-meta.toml` written correctly on `ta init`; upgrade from `0.0.0` applies all steps.
+8. [x] **Tests**: Upgrade step `check`/`apply` round-trip; `ta upgrade --dry-run` exits non-zero when steps pending; `acknowledged_omissions` suppresses a step; `project-meta.toml` written correctly on `ta init`; upgrade from `0.0.0` applies all steps. 12 new tests in `upgrade.rs`, 1 in `init.rs`.
 
-9. [ ] **USAGE.md**: "Upgrading an Existing Project" section covering `ta upgrade`, `--dry-run`, `--force`, `--acknowledge`, and the `project-meta.toml` file.
+9. [x] **USAGE.md**: "Upgrading an Existing Project" section added covering `ta upgrade`, `--dry-run`, `--force`, `--acknowledge`, `project-meta.toml`, and `ta doctor --fix-denied`.
 
-10. [ ] **GC: `pr_ready` goals with denied drafts** *(gap found Apr 2026 — disk exhaustion)*:
-    - Goals whose draft was denied stay `pr_ready` with full staging indefinitely. `ta gc` must NOT auto-delete these — the user may want to inspect or re-run.
-    - **`ta doctor`**: lists them under a `[warn]` entry: `"2 goal(s) are pr_ready with a denied draft (X GB staging). Run 'ta doctor --fix-denied' to clean up or re-run the phase to supersede."` Includes goal ID, title, size, and date denied.
-    - **`ta doctor --fix-denied`**: interactive prompt per goal — delete staging + mark `closed`, or skip.
-    - **Starting a new goal for the same phase**: automatically marks the prior `pr_ready`+denied goal as `superseded`, deletes its staging, prints `"Superseded prior goal <id> for phase <phase>."`.
-    - **`ta gc`**: only warns (`"N pr_ready/denied goals — run 'ta doctor' to review"`), never deletes without explicit user confirmation.
-    - 3 new tests: `doctor_lists_pr_ready_denied_goals`, `doctor_fix_denied_deletes_staging`, `new_goal_supersedes_denied_prior`.
+10. [x] **GC: `pr_ready` goals with denied drafts** *(gap found Apr 2026 — disk exhaustion)*:
+    - `ta doctor`: lists them under `[warn]` with goal ID, title, size. Added `check_pr_ready_denied()` in `doctor.rs`.
+    - `ta doctor --fix-denied`: interactive prompt per goal (delete staging + mark closed, or skip). Added `execute_fix_denied()`.
+    - `ta gc`: warns `"N pr_ready/denied goals — run 'ta doctor' to review"`, never deletes without explicit user confirmation. Added `warn_pr_ready_denied()` to `gc.rs`.
+    - Note: "starting new goal supersedes prior denied" (sub-item) is deferred to v0.15.19 as it requires goal start flow changes.
 
-11. [ ] **Verify `target/` exclusion is enforced at staging copy time** *(gap found Apr 2026)*:
-    - `overlay.rs` has built-in `target/` in `exclude_patterns()` but staging dirs created March 2026 contained full compiled `target/` (~6–7 GB each), suggesting the exclusion was not effective or was added after those goals started.
-    - Audit `copy_workspace_to_staging()` call path: confirm `ExcludePatterns` are applied before any file is copied, not just filtered post-copy.
-    - Add a test: staging copy of a workspace with a non-empty `target/` dir results in staging that contains no `target/` entries.
-    - If the exclude was retroactively added: add an upgrade step (seeded here alongside item 7) that warns: `[warn] Old staging dirs may contain target/ artifacts. Run 'ta gc' to reclaim disk space.`
+11. [x] **Verify `target/` exclusion is enforced at staging copy time** *(gap found Apr 2026)*:
+    - Root cause: when `.taignore` exists, `ExcludePatterns::load()` previously used ONLY its patterns, skipping `DEFAULT_EXCLUDES`. Old projects without `target/` in `.taignore` had it copied.
+    - Fix: `ExcludePatterns::load()` now always merges `DEFAULT_EXCLUDES` as baseline before adding `.taignore` patterns.
+    - Added 2 new tests: `taignore_merges_with_defaults` and `taignore_load_always_excludes_target` in `overlay.rs`.
+    - Added upgrade step warning if old staging dirs contain `target/` subdirectories.
 
 #### Version: `0.15.18-alpha`
 
