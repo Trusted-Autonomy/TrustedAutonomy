@@ -4340,6 +4340,64 @@ pub fn validate_staging_version(
     Ok(())
 }
 
+/// In-place version patch for staging workspace (v0.15.15.7).
+///
+/// Rewrites the `version = "..."` line in `staging_path/Cargo.toml` and the
+/// `**Current version**: \`...\`` line in `staging_path/CLAUDE.md` from
+/// `from_ver` to `to_ver`. Only touches lines that contain the expected old version.
+///
+/// This replaces the manual "run bump-version.sh inside staging" workaround.
+pub fn patch_staging_version(
+    staging_path: &Path,
+    from_ver: &str,
+    to_ver: &str,
+) -> anyhow::Result<()> {
+    // Patch Cargo.toml
+    let cargo_path = staging_path.join("Cargo.toml");
+    if cargo_path.exists() {
+        let original = std::fs::read_to_string(&cargo_path)?;
+        let expected_line = format!("version = \"{}\"", from_ver);
+        let replacement_line = format!("version = \"{}\"", to_ver);
+        let mut replaced = false;
+        let updated: String = original
+            .lines()
+            .map(|line| {
+                if !replaced && line == expected_line {
+                    replaced = true;
+                    replacement_line.clone()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + if original.ends_with('\n') { "\n" } else { "" };
+        if !replaced {
+            anyhow::bail!(
+                "patch_staging_version: could not find `version = \"{}\"` in {}",
+                from_ver,
+                cargo_path.display()
+            );
+        }
+        std::fs::write(&cargo_path, updated)?;
+    }
+
+    // Patch CLAUDE.md (best-effort — not all projects have it)
+    let claude_path = staging_path.join("CLAUDE.md");
+    if claude_path.exists() {
+        let original = std::fs::read_to_string(&claude_path)?;
+        let old_marker = format!("**Current version**: `{}`", from_ver);
+        let new_marker = format!("**Current version**: `{}`", to_ver);
+        if original.contains(&old_marker) {
+            let updated = original.replacen(&old_marker, &new_marker, 1);
+            std::fs::write(&claude_path, updated)?;
+        }
+        // If marker absent, skip — CLAUDE.md version line is optional.
+    }
+
+    Ok(())
+}
+
 /// Post-copy version validation fallback used when staging was unavailable (GC'd or
 /// embedded-patch path). Shows the "staging was unavailable" box header so operators can
 /// distinguish this secondary check from a pre-copy block.
@@ -5526,9 +5584,11 @@ fn apply_package(
             vec![]
         };
 
-        // v0.15.15.3.3: Pre-copy version validation gate.
+        // v0.15.15.7: Pre-copy version validation gate with auto-patch.
         // Validate version BEFORE writing any files. If the staging Cargo.toml (or CLAUDE.md)
-        // does not match the phase's expected version, block immediately — zero recovery cost.
+        // does not match the phase's expected version, attempt an in-place auto-patch so the
+        // operator doesn't need to run bump-version.sh manually inside staging.
+        // Only bail if the patch itself fails or re-validation still fails.
         if !dry_run && !phase_ids_for_precopy.is_empty() {
             let last_phase = phase_ids_for_precopy
                 .last()
@@ -5538,37 +5598,48 @@ fn apply_package(
                 let staging_cargo = goal.workspace_path.join("Cargo.toml");
                 if staging_cargo.exists() {
                     if let Err(e) = validate_staging_version(&goal.workspace_path, &expected_ver) {
-                        eprintln!();
-                        eprintln!(
-                            "╔══════════════════════════════════════════════════════════════╗"
-                        );
-                        eprintln!(
-                            "║  VERSION MISMATCH — apply blocked (no files written)         ║"
-                        );
-                        eprintln!(
-                            "╠══════════════════════════════════════════════════════════════╣"
-                        );
-                        eprintln!("║  {}  {:<43}║", e.field, "");
-                        eprintln!("║  Draft has:   {:<47}║", e.draft_ver);
-                        eprintln!("║  Phase needs: {:<47}║", e.expected_ver);
-                        eprintln!(
-                            "╠══════════════════════════════════════════════════════════════╣"
-                        );
-                        eprintln!(
-                            "║  Fix: run bump-version.sh inside the staging directory,      ║"
-                        );
-                        eprintln!(
-                            "║       or deny the draft and re-run the goal with an explicit ║"
-                        );
-                        eprintln!(
-                            "║       version bump.                                          ║"
-                        );
-                        eprintln!("║  Staging: {:<52}║", goal.workspace_path.display());
-                        eprintln!(
-                            "╚══════════════════════════════════════════════════════════════╝"
-                        );
-                        eprintln!();
-                        anyhow::bail!("{}", e);
+                        // Auto-patch: rewrite version lines in staging Cargo.toml and CLAUDE.md.
+                        match patch_staging_version(
+                            &goal.workspace_path,
+                            &e.draft_ver,
+                            &expected_ver,
+                        ) {
+                            Ok(()) => {
+                                eprintln!(
+                                    "[apply] Auto-patched staging version from {} to {} — proceeding.",
+                                    e.draft_ver, expected_ver
+                                );
+                                // Re-validate to confirm the patch worked.
+                                if let Err(e2) =
+                                    validate_staging_version(&goal.workspace_path, &expected_ver)
+                                {
+                                    eprintln!();
+                                    eprintln!(
+                                        "[apply] Auto-patch succeeded but re-validation failed: {}",
+                                        e2
+                                    );
+                                    eprintln!(
+                                        "[apply] Staging version mismatch auto-correction failed. \
+                                         Use `ta draft deny` and re-run the goal."
+                                    );
+                                    eprintln!();
+                                    anyhow::bail!("{}", e2);
+                                }
+                            }
+                            Err(patch_err) => {
+                                eprintln!();
+                                eprintln!(
+                                    "[apply] Staging version auto-patch failed: {}",
+                                    patch_err
+                                );
+                                eprintln!(
+                                    "[apply] Staging version mismatch auto-correction failed. \
+                                     Use `ta draft deny` and re-run the goal."
+                                );
+                                eprintln!();
+                                anyhow::bail!("{}", e);
+                            }
+                        }
                     }
                 }
                 // If staging Cargo.toml is absent (staging GC'd), skip pre-copy check and
@@ -14119,5 +14190,99 @@ fn run() {
             pkg_after.status, status_before,
             "draft status must not have changed after a failed apply"
         );
+    }
+
+    // ── v0.15.15.7: patch_staging_version tests ──────────────────────────────
+
+    #[test]
+    fn patch_staging_version_updates_cargo_toml() {
+        let dir = TempDir::new().unwrap();
+        let cargo = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &cargo,
+            "[workspace.package]\nversion = \"0.15.15-alpha.6\"\nname = \"ta\"\n",
+        )
+        .unwrap();
+
+        patch_staging_version(dir.path(), "0.15.15-alpha.6", "0.15.15-alpha.7").unwrap();
+
+        let after = std::fs::read_to_string(&cargo).unwrap();
+        assert!(
+            after.contains("version = \"0.15.15-alpha.7\""),
+            "version should be updated: {}",
+            after
+        );
+        assert!(
+            !after.contains("0.15.15-alpha.6"),
+            "old version should be gone: {}",
+            after
+        );
+    }
+
+    #[test]
+    fn patch_staging_version_updates_claude_md() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.15-alpha.6\"\n",
+        )
+        .unwrap();
+        let claude = dir.path().join("CLAUDE.md");
+        std::fs::write(
+            &claude,
+            "## Current State\n\n**Current version**: `0.15.15-alpha.6`\n\nSome text.\n",
+        )
+        .unwrap();
+
+        patch_staging_version(dir.path(), "0.15.15-alpha.6", "0.15.15-alpha.7").unwrap();
+
+        let after = std::fs::read_to_string(&claude).unwrap();
+        assert!(
+            after.contains("**Current version**: `0.15.15-alpha.7`"),
+            "CLAUDE.md version should be updated: {}",
+            after
+        );
+    }
+
+    #[test]
+    fn patch_staging_version_fails_when_from_ver_absent() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.15-alpha.5\"\n",
+        )
+        .unwrap();
+
+        let result = patch_staging_version(dir.path(), "0.15.15-alpha.6", "0.15.15-alpha.7");
+        assert!(
+            result.is_err(),
+            "should fail when from_ver is not present in Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn validate_staging_version_passes_on_match() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.15-alpha.7\"\n",
+        )
+        .unwrap();
+        assert!(validate_staging_version(dir.path(), "0.15.15-alpha.7").is_ok());
+    }
+
+    #[test]
+    fn validate_staging_version_fails_on_mismatch() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.15-alpha.6\"\n",
+        )
+        .unwrap();
+        let result = validate_staging_version(dir.path(), "0.15.15-alpha.7");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.draft_ver, "0.15.15-alpha.6");
+        assert_eq!(err.expected_ver, "0.15.15-alpha.7");
     }
 }

@@ -49,7 +49,13 @@ pub enum PlanCommands {
         check_versions: bool,
     },
     /// Show the next pending phase and suggest creating a goal for it.
-    Next,
+    Next {
+        /// Only consider phases whose ID starts with this prefix (e.g. `--filter v0.15`).
+        /// Phases not matching are skipped as if they don't exist.
+        /// When no matching pending phase is found, emits the same "all complete" signal.
+        #[arg(long)]
+        filter: Option<String>,
+    },
     /// Show plan change history (status transitions recorded in .ta/plan_history.jsonl).
     History,
     /// Validate completed work against the plan for a given phase.
@@ -316,7 +322,7 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             }
             result
         }
-        PlanCommands::Next => show_next(config),
+        PlanCommands::Next { filter } => show_next(config, filter.as_deref()),
         PlanCommands::History => show_history(config),
         PlanCommands::Validate { phase } => validate_phase(config, phase),
         PlanCommands::Init { source, yes } => plan_init(config, source, *yes),
@@ -1460,17 +1466,27 @@ pub fn check_version_sync(phases: &[PlanPhase]) -> Option<String> {
     }
 }
 
-fn show_next(config: &GatewayConfig) -> anyhow::Result<()> {
+fn show_next(config: &GatewayConfig, filter: Option<&str>) -> anyhow::Result<()> {
     let phases = load_plan(&config.workspace_root)?;
 
+    // Apply prefix filter when provided — only consider matching phases.
+    let filtered: Vec<PlanPhase> = if let Some(prefix) = filter {
+        phases
+            .into_iter()
+            .filter(|p| p.id.starts_with(prefix))
+            .collect()
+    } else {
+        phases
+    };
+
     // Find next pending (prefer after in_progress, fallback to first pending).
-    let after_current = phases
+    let after_current = filtered
         .iter()
         .rev()
         .find(|p| p.status == PlanStatus::InProgress)
         .map(|p| p.id.as_str());
 
-    let next = find_next_pending(&phases, after_current);
+    let next = find_next_pending(&filtered, after_current);
 
     match next {
         Some(phase) => {
@@ -5022,5 +5038,62 @@ Build it.
             extract_semver_from_title(title),
             Some("v0.15.15.2".to_string())
         );
+    }
+
+    // ── v0.15.15.7: find_next_pending with filter tests ──────────────────────
+
+    fn make_phase(id: &str, status: PlanStatus) -> PlanPhase {
+        PlanPhase {
+            id: id.to_string(),
+            title: format!("Phase {}", id),
+            status,
+            depends_on: vec![],
+            human_review_items: vec![],
+        }
+    }
+
+    #[test]
+    fn find_next_pending_filter_skips_non_matching_phases() {
+        let phases = vec![
+            make_phase("v0.14.1", PlanStatus::Pending),
+            make_phase("v0.15.1", PlanStatus::Pending),
+            make_phase("v0.15.2", PlanStatus::Pending),
+        ];
+        // With filter "v0.15", only v0.15.x phases are visible.
+        let filtered: Vec<PlanPhase> = phases
+            .into_iter()
+            .filter(|p| p.id.starts_with("v0.15"))
+            .collect();
+        let next = find_next_pending(&filtered, None);
+        assert_eq!(next.map(|p| p.id.as_str()), Some("v0.15.1"));
+    }
+
+    #[test]
+    fn find_next_pending_filter_signals_done_when_all_matching_done() {
+        let phases = vec![
+            make_phase("v0.15.1", PlanStatus::Done),
+            make_phase("v0.15.2", PlanStatus::Done),
+            make_phase("v0.16.1", PlanStatus::Pending), // won't be seen
+        ];
+        let filtered: Vec<PlanPhase> = phases
+            .into_iter()
+            .filter(|p| p.id.starts_with("v0.15"))
+            .collect();
+        let next = find_next_pending(&filtered, None);
+        assert!(
+            next.is_none(),
+            "should signal done when all matching phases are done"
+        );
+    }
+
+    #[test]
+    fn find_next_pending_no_filter_returns_first_pending() {
+        let phases = vec![
+            make_phase("v0.14.1", PlanStatus::Done),
+            make_phase("v0.15.1", PlanStatus::Pending),
+            make_phase("v0.15.2", PlanStatus::Pending),
+        ];
+        let next = find_next_pending(&phases, None);
+        assert_eq!(next.map(|p| p.id.as_str()), Some("v0.15.1"));
     }
 }

@@ -10894,8 +10894,16 @@ Stable and nightly use different tag prefixes (`v*` vs `nightly`), so GitHub's d
 
 ---
 
+
+
+### v0.15.15.6.2 — Review draft 6cbcb978 for governed workflow
+<!-- status: in_progress -->
+*Inserted goal — not in original plan.*
+### v0.15.15.6.1 — Review draft 1d52066e for governed workflow
+<!-- status: in_progress -->
+*Inserted goal — not in original plan.*
 ### v0.15.15.7 — Apply UX: Dirty VCS Check + Staging Version Bump Fix
-<!-- status: pending -->
+<!-- status: done -->
 
 **Goal**: Eliminate the two recurring apply blockers that have caused multiple failed apply attempts: (1) `ta run` should warn and prompt when the VCS working tree has uncommitted changes before copying source to staging — catching drift early instead of producing confusing warnings at apply time. (2) The staging version bump path is broken — running `bump-version.sh` from the project root updates only source, not staging, and running it from staging fails silently or gets undone by rollback. The fix must be deterministic and operator-free. (3) `ta plan next` needs a `--filter` flag so the batch build loop can be scoped to a version prefix without a project-local `max_phases` hack.
 
