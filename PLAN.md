@@ -11334,6 +11334,38 @@ The diff is nested and expandable per phase. The advisor presents this context o
 
 ---
 
+### v0.15.19.1 — Workflow Event Bus & Subscription Core
+<!-- status: done -->
+**Goal**: Add persistent named subscriptions to the event system so that long-running automations can react to TA events without polling. A subscription is a durable binding between an event filter and an action (log, workflow, notify, webhook). Subscriptions survive daemon restarts by tracking a cursor (last-processed event timestamp) and replaying from that point on startup.
+
+**Depends on**: v0.15.19 (stable SessionEvent schema, FsEventStore, in-process EventBus)
+
+**Why subscriptions over routing**: The existing `event-routing.yaml` is a static, project-wide config that applies to all daemons. Subscriptions are dynamic (created via CLI), named (removable by name), and durable (cursor-based replay). Both coexist: routing handles synchronous, one-shot reactions; subscriptions handle long-running integrations.
+
+---
+
+#### Items
+
+1. [x] **`SubscriptionFilter` and `SubscriptionAction` types** (`crates/ta-events/src/subscription.rs`): `SubscriptionFilter` variants: `All`, `ByTypes { types }`, `ByGoal { goal_id }`, `ByPhase { phase }`, `And { filters }`. `SubscriptionAction` variants: `Log`, `RunWorkflow { workflow, params }`, `Notify { channels, template }`, `Webhook { url, headers, secret }`. All serialise to tagged JSON (`kind` discriminant).
+
+2. [x] **`Subscription` struct** (`crates/ta-events/src/subscription.rs`): `id` (Uuid), `name` (unique), `description`, `filter`, `action`, `cursor` (last processed event timestamp), `created_at`, `enabled`. `matches()` method gates on `enabled` + filter evaluation.
+
+3. [x] **`SubscriptionStore`** (`crates/ta-events/src/subscription.rs`): Persists to `.ta/subscriptions.json` (atomic write via temp file). CRUD: `add()` (rejects duplicate names), `remove(id)`, `get(id)`, `get_by_name(name)`, `update_cursor(id, ts)`, `set_enabled(id, enabled)`, `list()`. 10 tests.
+
+4. [x] **`SubscriptionDispatcher`** (`crates/ta-events/src/dispatcher.rs`): `dispatch(envelope)` evaluates all enabled subscriptions against a single event and returns `Vec<DispatchRecord>`. `dispatch_replay(event_store)` replays all events after each subscription's cursor. `advance_cursor(id, ts)` updates the cursor post-dispatch. `format_dispatch_summary(records)` for CLI output. 9 tests.
+
+5. [x] **`DispatchRecord`** (`crates/ta-events/src/dispatcher.rs`): `subscription_id`, `subscription_name`, `action`, `event_id`, `event_type`, `event_timestamp`, `envelope`. Callers own execution — the dispatcher only evaluates and returns; it never fires workflows or webhooks directly.
+
+6. [x] **Updated `ta-events` public API** (`crates/ta-events/src/lib.rs`): Re-exports `Subscription`, `SubscriptionAction`, `SubscriptionFilter`, `SubscriptionStore`, `SubscriptionDispatcher`, `DispatchRecord`, `format_dispatch_summary`. New error variants `SubscriptionNotFound(Uuid)` and `SubscriptionAlreadyExists(String)` in `EventError`.
+
+7. [x] **`ta events subscriptions` CLI** (`apps/ta-cli/src/commands/events.rs`): `add --name <n> [--type <t>...] [--phase <p>] [--action log|workflow:<n>|notify:<c>|webhook:<u>] [--description <d>]`, `list`, `remove <name-or-id>`, `enable <name-or-id> [--disable]`, `replay <name-or-id> [--dry-run]`. Action format parsed from `--action` string. Filter built from `--type` + `--phase` args (single filter or `And` composition).
+
+#### Tests: 28 new tests (subscription.rs: 10, dispatcher.rs: 9, existing bus/store/hook tests unchanged). Total ta-events: 110 tests.
+
+#### Version: `0.15.19-alpha` (sub-phase, no version bump)
+
+---
+
 ### v0.15.20 — Orchestrated Workflow: Work Planner + Implementor Split
 <!-- status: pending -->
 **Goal**: Refactor the implementation node in orchestrated workflows (governed-goal, plan-build-phases, plan-implement-review) so that the single "implement" stage is split into two sequential nodes: a **Work Planner** that reasons about what needs to change and records explicit decisions, followed by an **Implementor** that takes the planner's output as authoritative context and writes the code. This makes the decision record structural rather than voluntary — the planner's output IS the decision log. The implementor is constrained to execute the plan, not re-derive it.

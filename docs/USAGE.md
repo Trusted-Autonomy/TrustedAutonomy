@@ -6090,6 +6090,95 @@ MCP-connected agents (orchestrators, macro goal agents) can query events program
 
 The response includes a `cursor` timestamp — pass it back as `since` on the next call to get only newer events. This enables efficient polling without re-reading old events.
 
+#### Event subscriptions
+
+Subscriptions are persistent, named bindings between an event filter and an action. Unlike event routing (which is a static YAML file applying to the whole project), subscriptions are created dynamically via the CLI and survive daemon restarts. Each subscription tracks a **cursor** — the timestamp of the last event it processed — so it picks up exactly where it left off after a restart.
+
+**Create a subscription:**
+
+```bash
+# Log every event (default action)
+ta events subscriptions add --name watch-all --action log
+
+# Trigger a workflow when a goal fails
+ta events subscriptions add \
+  --name fix-on-failure \
+  --type goal_failed \
+  --action workflow:ci-fix
+
+# Notify Slack and email when a draft is approved
+ta events subscriptions add \
+  --name draft-approved-notify \
+  --type draft_approved \
+  --action notify:slack,email \
+  --description "Ping team when draft is approved"
+
+# Post to a webhook for any event in plan phase v0.15.19.1
+ta events subscriptions add \
+  --name phase-webhook \
+  --phase v0.15.19.1 \
+  --action webhook:https://hooks.example.com/ta-events
+
+# Combine type and phase filters (AND logic)
+ta events subscriptions add \
+  --name watch-phase-failures \
+  --type goal_failed \
+  --phase v0.15.20 \
+  --action notify:slack
+```
+
+**Manage subscriptions:**
+
+```bash
+# List all subscriptions (shows name, enabled, action, cursor)
+ta events subscriptions list
+
+# Remove by name or UUID
+ta events subscriptions remove fix-on-failure
+ta events subscriptions remove a1b2c3d4
+
+# Disable without removing (skipped during dispatch)
+ta events subscriptions enable watch-all --disable
+
+# Re-enable
+ta events subscriptions enable watch-all
+```
+
+**Replay missed events:**
+
+After a daemon restart, subscriptions resume automatically from their cursor. You can also trigger replay manually:
+
+```bash
+# Show what would be dispatched (no cursor update)
+ta events subscriptions replay fix-on-failure --dry-run
+
+# Advance cursor to latest matching event
+ta events subscriptions replay fix-on-failure
+```
+
+**Action formats:**
+
+| Format | Description |
+|--------|-------------|
+| `log` | Write a log entry to `.ta/subscription-dispatch.log` |
+| `workflow:<name>` | Start the named workflow with the event as context |
+| `notify:<channels>` | Deliver to comma-separated channel names (e.g. `slack,email`) |
+| `webhook:<url>` | POST the event envelope as JSON to the URL |
+
+**Filter composition:**
+
+When both `--type` and `--phase` are specified, both must match (AND logic). Multiple `--type` flags combine as OR (any of the listed types).
+
+**Subscription vs. routing comparison:**
+
+| | Event routing | Subscriptions |
+|--|---|---|
+| Config location | `.ta/event-routing.yaml` | `.ta/subscriptions.json` |
+| Creation | Edit YAML file | `ta events subscriptions add` |
+| Restart resume | Stateless (fires on each match) | Cursor-based (no replay gaps) |
+| Named | No | Yes — removable by name |
+| Dynamic | No | Yes — enabled/disabled live |
+
 #### JSON output
 
 Key CLI commands support `--json` for programmatic consumption:

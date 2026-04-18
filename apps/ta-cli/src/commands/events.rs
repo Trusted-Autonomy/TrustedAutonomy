@@ -1,11 +1,12 @@
-// events.rs -- Event system CLI: listen, hooks, tokens, routing.
+// events.rs -- Event system CLI: listen, hooks, tokens, routing, subscriptions.
 
 use std::cmp::Reverse;
 
 use clap::Subcommand;
 use ta_events::router::{EventRouter, ResponseStrategy, RoutingConfig};
 use ta_events::store::{EventQueryFilter, FsEventStore};
-use ta_events::{EventStore, HookConfig, HookRunner};
+use ta_events::subscription::{Subscription, SubscriptionAction, SubscriptionFilter};
+use ta_events::{EventStore, HookConfig, HookRunner, SubscriptionStore};
 use ta_mcp_gateway::GatewayConfig;
 
 #[derive(Subcommand)]
@@ -39,6 +40,57 @@ pub enum EventsCommands {
     Routing {
         #[command(subcommand)]
         command: RoutingCommands,
+    },
+    /// Manage persistent event subscriptions (v0.15.19.1).
+    Subscriptions {
+        #[command(subcommand)]
+        command: SubscriptionsCommands,
+    },
+}
+
+/// Subcommands for `ta events subscriptions`.
+#[derive(Subcommand)]
+pub enum SubscriptionsCommands {
+    /// Create a new subscription.
+    Add {
+        /// Unique name for this subscription.
+        #[arg(long)]
+        name: String,
+        /// Event types to match (repeatable; omit for all events).
+        #[arg(long = "type")]
+        event_types: Vec<String>,
+        /// Filter by plan phase.
+        #[arg(long)]
+        phase: Option<String>,
+        /// Action: log (default), workflow:<name>, notify:<channel,...>, webhook:<url>
+        #[arg(long, default_value = "log")]
+        action: String,
+        /// Optional description.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List all subscriptions.
+    List,
+    /// Remove a subscription by name or ID.
+    Remove {
+        /// Subscription name or UUID.
+        target: String,
+    },
+    /// Enable or disable a subscription.
+    Enable {
+        /// Subscription name or UUID.
+        target: String,
+        /// Disable instead of enabling.
+        #[arg(long)]
+        disable: bool,
+    },
+    /// Replay unprocessed events for a subscription from its cursor.
+    Replay {
+        /// Subscription name or UUID.
+        target: String,
+        /// Show what would be dispatched without updating the cursor.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -74,6 +126,7 @@ pub fn execute(cmd: &EventsCommands, config: &GatewayConfig) -> anyhow::Result<(
             dry_run,
         } => prune_events(config, *older_than_days, *dry_run),
         EventsCommands::Routing { command } => handle_routing(command, config),
+        EventsCommands::Subscriptions { command } => handle_subscriptions(command, config),
     }
 }
 
@@ -416,6 +469,278 @@ fn routing_set(config: &GatewayConfig, event_type: &str, strategy_str: &str) -> 
     println!("Updated event routing: {} -> {}", event_type, strategy);
     println!("  Config written to {}", config_path.display());
     println!("  Run 'ta events routing test {}' to verify.", event_type);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Subscription handlers
+// ---------------------------------------------------------------------------
+
+fn handle_subscriptions(cmd: &SubscriptionsCommands, config: &GatewayConfig) -> anyhow::Result<()> {
+    match cmd {
+        SubscriptionsCommands::Add {
+            name,
+            event_types,
+            phase,
+            action,
+            description,
+        } => subscriptions_add(
+            config,
+            name,
+            event_types,
+            phase.as_deref(),
+            action,
+            description.as_deref(),
+        ),
+        SubscriptionsCommands::List => subscriptions_list(config),
+        SubscriptionsCommands::Remove { target } => subscriptions_remove(config, target),
+        SubscriptionsCommands::Enable { target, disable } => {
+            subscriptions_enable(config, target, !disable)
+        }
+        SubscriptionsCommands::Replay { target, dry_run } => {
+            subscriptions_replay(config, target, *dry_run)
+        }
+    }
+}
+
+/// Parse the `--action` string into a `SubscriptionAction`.
+///
+/// Supported formats:
+/// - `log`
+/// - `workflow:<name>`
+/// - `notify:<channel>[,<channel>...]`
+/// - `webhook:<url>`
+fn parse_action(action: &str) -> anyhow::Result<SubscriptionAction> {
+    if action == "log" {
+        return Ok(SubscriptionAction::Log);
+    }
+    if let Some(name) = action.strip_prefix("workflow:") {
+        return Ok(SubscriptionAction::RunWorkflow {
+            workflow: name.to_string(),
+            params: Default::default(),
+        });
+    }
+    if let Some(channels_str) = action.strip_prefix("notify:") {
+        let channels: Vec<String> = channels_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+        return Ok(SubscriptionAction::Notify {
+            channels,
+            template: None,
+        });
+    }
+    if let Some(url) = action.strip_prefix("webhook:") {
+        return Ok(SubscriptionAction::Webhook {
+            url: url.to_string(),
+            headers: Default::default(),
+            secret: None,
+        });
+    }
+    anyhow::bail!(
+        "unrecognised action format '{}'. \
+         Expected: log | workflow:<name> | notify:<channel,...> | webhook:<url>",
+        action
+    )
+}
+
+/// Resolve a subscription by name or UUID string.
+fn resolve_subscription(store: &SubscriptionStore, target: &str) -> anyhow::Result<Subscription> {
+    // Try UUID first.
+    if let Ok(id) = target.parse::<uuid::Uuid>() {
+        return store
+            .get(id)?
+            .ok_or_else(|| anyhow::anyhow!("no subscription with ID {}", id));
+    }
+    // Fall back to name lookup.
+    store
+        .get_by_name(target)?
+        .ok_or_else(|| anyhow::anyhow!("no subscription named '{}'", target))
+}
+
+fn subscriptions_add(
+    config: &GatewayConfig,
+    name: &str,
+    event_types: &[String],
+    phase: Option<&str>,
+    action_str: &str,
+    description: Option<&str>,
+) -> anyhow::Result<()> {
+    let ta_dir = config.workspace_root.join(".ta");
+    let store = SubscriptionStore::new(&ta_dir);
+
+    let filter = build_filter(event_types, phase)?;
+    let action = parse_action(action_str)?;
+
+    let mut sub = Subscription::new(name, filter, action);
+    if let Some(desc) = description {
+        sub.description = Some(desc.to_string());
+    }
+    let sub_id = sub.id;
+
+    store.add(sub)?;
+
+    println!("Subscription created: {} ({})", name, sub_id);
+    println!("  Action:  {}", action_str);
+    if !event_types.is_empty() {
+        println!("  Filter:  types = [{}]", event_types.join(", "));
+    }
+    if let Some(p) = phase {
+        println!("  Filter:  phase = {}", p);
+    }
+    println!();
+    println!("  Run 'ta events subscriptions list' to see all subscriptions.");
+    println!(
+        "  Run 'ta events subscriptions replay {}' to catch up on missed events.",
+        name
+    );
+    Ok(())
+}
+
+/// Build a `SubscriptionFilter` from CLI args.
+fn build_filter(event_types: &[String], phase: Option<&str>) -> anyhow::Result<SubscriptionFilter> {
+    let mut filters: Vec<SubscriptionFilter> = Vec::new();
+
+    if !event_types.is_empty() {
+        filters.push(SubscriptionFilter::ByTypes {
+            types: event_types.to_vec(),
+        });
+    }
+    if let Some(p) = phase {
+        filters.push(SubscriptionFilter::ByPhase {
+            phase: p.to_string(),
+        });
+    }
+
+    match filters.len() {
+        0 => Ok(SubscriptionFilter::All),
+        1 => Ok(filters.remove(0)),
+        _ => Ok(SubscriptionFilter::And { filters }),
+    }
+}
+
+fn subscriptions_list(config: &GatewayConfig) -> anyhow::Result<()> {
+    let ta_dir = config.workspace_root.join(".ta");
+    let store = SubscriptionStore::new(&ta_dir);
+    let subs = store.list()?;
+
+    println!("Event Subscriptions");
+    println!("{}", "=".repeat(60));
+
+    if subs.is_empty() {
+        println!("  No subscriptions. Create one with:");
+        println!();
+        println!("    ta events subscriptions add --name <name> --type goal_failed --action log");
+        println!();
+        println!("  See 'ta events subscriptions add --help' for all options.");
+        return Ok(());
+    }
+
+    println!(
+        "  {:<4} {:<20} {:<8} {:<24} CURSOR",
+        "ID", "NAME", "ENABLED", "ACTION"
+    );
+    println!("  {}", "-".repeat(70));
+
+    for sub in &subs {
+        let id_short = sub.id.to_string();
+        let id_display: String = id_short.chars().take(8).collect();
+        let cursor_display = sub
+            .cursor
+            .map(|ts| ts.format("%Y-%m-%dT%H:%M").to_string())
+            .unwrap_or_else(|| "(never)".to_string());
+
+        println!(
+            "  {:<4} {:<20} {:<8} {:<24} {}",
+            id_display,
+            sub.name.chars().take(20).collect::<String>(),
+            if sub.enabled { "yes" } else { "no" },
+            sub.action.describe().chars().take(24).collect::<String>(),
+            cursor_display,
+        );
+    }
+
+    println!();
+    println!("  {} subscription(s).", subs.len());
+    Ok(())
+}
+
+fn subscriptions_remove(config: &GatewayConfig, target: &str) -> anyhow::Result<()> {
+    let ta_dir = config.workspace_root.join(".ta");
+    let store = SubscriptionStore::new(&ta_dir);
+    let sub = resolve_subscription(&store, target)?;
+    let id = sub.id;
+    let name = sub.name.clone();
+
+    store.remove(id)?;
+    println!("Removed subscription '{}' ({}).", name, id);
+    Ok(())
+}
+
+fn subscriptions_enable(config: &GatewayConfig, target: &str, enable: bool) -> anyhow::Result<()> {
+    let ta_dir = config.workspace_root.join(".ta");
+    let store = SubscriptionStore::new(&ta_dir);
+    let sub = resolve_subscription(&store, target)?;
+
+    store.set_enabled(sub.id, enable)?;
+    println!(
+        "Subscription '{}' {}.",
+        sub.name,
+        if enable { "enabled" } else { "disabled" }
+    );
+    Ok(())
+}
+
+fn subscriptions_replay(config: &GatewayConfig, target: &str, dry_run: bool) -> anyhow::Result<()> {
+    let ta_dir = config.workspace_root.join(".ta");
+    let sub_store = SubscriptionStore::new(&ta_dir);
+    let sub = resolve_subscription(&sub_store, target)?;
+
+    let ev_store = FsEventStore::new(ta_dir.join("events"));
+    let filter = ta_events::store::EventQueryFilter {
+        since: sub.cursor,
+        ..Default::default()
+    };
+    let events = ev_store.query(&filter)?;
+
+    let matching: Vec<_> = events.iter().filter(|e| sub.matches(e)).collect();
+
+    println!(
+        "Replay: subscription '{}' (cursor: {})",
+        sub.name,
+        sub.cursor
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_else(|| "(none)".to_string())
+    );
+    println!("{}", "=".repeat(60));
+
+    if matching.is_empty() {
+        println!("  No unprocessed events found.");
+        return Ok(());
+    }
+
+    for envelope in &matching {
+        println!(
+            "  {} {} {}",
+            envelope.timestamp.format("%Y-%m-%dT%H:%M:%S"),
+            envelope.event_type,
+            envelope.id
+        );
+    }
+
+    println!();
+    println!("  {} event(s) pending dispatch.", matching.len());
+
+    if dry_run {
+        println!("  (dry-run — cursor not updated)");
+    } else {
+        // Advance cursor to the latest event timestamp.
+        if let Some(last) = matching.last() {
+            sub_store.update_cursor(sub.id, last.timestamp)?;
+            println!("  Cursor advanced to {}.", last.timestamp.to_rfc3339());
+        }
+    }
 
     Ok(())
 }

@@ -37,4 +37,10 @@ pub enum EventError {
         strategy: String,
         reason: String,
     },
+
+    #[error("subscription not found: {0}")]
+    SubscriptionNotFound(uuid::Uuid),
+
+    #[error("subscription with name '{0}' already exists")]
+    SubscriptionAlreadyExists(String),
 }
