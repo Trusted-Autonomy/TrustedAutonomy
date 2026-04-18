@@ -26,9 +26,15 @@ workflow:
     # Set to false to only pause at the human_gate instead of stopping.
     stop_on_flag: true
 
+    # Optional: limit the loop to phases whose ID starts with this prefix.
+    # Example: filter: "v0.15"  — only processes v0.15.x phases.
+    # Omit or leave blank to process all pending phases.
+    # filter: ""
+
 stages:
   - name: plan_next
     kind: plan_next
+    # phase_filter: "v0.15"   # uncomment to scope the loop to a version prefix
     description: |
       Call `ta plan next` to get the next pending plan phase.
       Outputs: phase_id, phase_title, done (bool).

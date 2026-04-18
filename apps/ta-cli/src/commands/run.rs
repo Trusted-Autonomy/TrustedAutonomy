@@ -1350,6 +1350,18 @@ pub fn execute(
     // This runs before the goal is created so we don't start work we can't store.
     super::gc::enforce_staging_cap(config);
 
+    // v0.15.15.7: Pre-run VCS cleanliness check.
+    // Warn (and optionally abort) when the source working tree has uncommitted
+    // changes. Dirty source → staging is dirty too → confusing apply-time drift.
+    // Skip silently when VCS is absent (no .git ancestor) or in headless mode with
+    // no-prompt behavior.
+    {
+        let check_root = source
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| config.workspace_root.clone());
+        check_vcs_clean(&check_root, headless)?;
+    }
+
     // 1. Start the goal (creates overlay workspace), or reuse an existing one
     //    when --goal-id is passed (v0.9.5.1: prevents duplicate goal creation
     //    when the MCP orchestrator's ta_goal_start already created the goal).
@@ -5738,6 +5750,100 @@ fn append_progress_journal(
     }
 }
 
+// v0.15.15.7: Pre-run VCS cleanliness check.
+//
+// Runs `git status --porcelain` in `project_root`. When the tree is dirty:
+//   - headless=true  → prints a warning and proceeds (automated workflow).
+//   - headless=false → prints the dirty file list and prompts [y/N].
+//
+// Returns `Ok(())` to continue, `Err(...)` to abort. Silently skips when:
+//   - `project_root` has no `.git` ancestor (not a git repo).
+//   - git is not on PATH.
+fn check_vcs_clean(project_root: &std::path::Path, headless: bool) -> anyhow::Result<()> {
+    // Quick-exit if there is no .git directory at or above project_root.
+    let is_git = {
+        let mut dir = project_root.to_path_buf();
+        let mut found = false;
+        loop {
+            if dir.join(".git").exists() {
+                found = true;
+                break;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        found
+    };
+    if !is_git {
+        return Ok(());
+    }
+
+    let output = match std::process::Command::new("git")
+        .args([
+            "-C",
+            &project_root.to_string_lossy(),
+            "status",
+            "--porcelain",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Ok(()), // git not available — skip silently
+    };
+
+    if !output.status.success() {
+        return Ok(()); // git failed for unrelated reason — don't block
+    }
+
+    let dirty = String::from_utf8_lossy(&output.stdout);
+    if dirty.trim().is_empty() {
+        return Ok(());
+    }
+
+    // Build the file list (up to 20 shown).
+    let files: Vec<&str> = dirty.lines().collect();
+    let shown = files.len().min(20);
+    eprintln!();
+    eprintln!(
+        "WARNING: Working tree has {} uncommitted change(s) — staging will capture this state:",
+        files.len()
+    );
+    for f in &files[..shown] {
+        eprintln!("  {}", f);
+    }
+    if files.len() > shown {
+        eprintln!("  ... ({} more)", files.len() - shown);
+    }
+    eprintln!();
+
+    if headless {
+        eprintln!(
+            "[run] Proceeding with dirty working tree (headless/non-interactive mode). \
+             Commit or stash changes before running to avoid apply-time drift."
+        );
+        eprintln!();
+        return Ok(());
+    }
+
+    // Interactive: prompt the operator.
+    eprint!("Working tree has uncommitted changes — continue anyway? [y/N] ");
+    use std::io::BufRead;
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    let _ = stdin.lock().read_line(&mut line);
+    let answer = line.trim().to_lowercase();
+    if answer != "y" {
+        anyhow::bail!(
+            "Goal creation cancelled — working tree has uncommitted changes.\n\
+             Commit or stash your changes, then retry:\n\
+             \n  git stash\n  ta run ...\n  git stash pop"
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7323,5 +7429,76 @@ plan_pending_window = 7
         );
         // In CI/test: not a TTY, spawn may succeed or fail — either way no panic.
         let _ = result;
+    }
+
+    // ── v0.15.15.7: check_vcs_clean tests ────────────────────────────────────
+
+    #[test]
+    fn check_vcs_clean_skips_non_git_directory() {
+        // A plain directory with no .git ancestor should always return Ok.
+        let dir = tempfile::tempdir().unwrap();
+        let result = check_vcs_clean(dir.path(), false);
+        assert!(result.is_ok(), "non-git dir should pass: {:?}", result);
+    }
+
+    #[test]
+    fn check_vcs_clean_passes_for_clean_git_repo() {
+        // Create a minimal git repo with a committed file — clean tree.
+        let dir = tempfile::tempdir().unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir.path())
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir.path())
+            .output();
+        std::fs::write(dir.path().join("README.md"), "hello").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir.path())
+            .output();
+
+        let result = check_vcs_clean(dir.path(), false);
+        assert!(result.is_ok(), "clean git repo should pass: {:?}", result);
+    }
+
+    #[test]
+    fn check_vcs_clean_headless_proceeds_on_dirty_tree() {
+        // Create a git repo with an uncommitted change; headless=true should proceed (Ok).
+        let dir = tempfile::tempdir().unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir.path())
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir.path())
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(dir.path())
+            .output();
+        // Write an uncommitted file to make the tree dirty.
+        std::fs::write(dir.path().join("dirty.txt"), "change").unwrap();
+
+        let result = check_vcs_clean(dir.path(), true);
+        assert!(
+            result.is_ok(),
+            "headless mode should proceed on dirty tree: {:?}",
+            result
+        );
     }
 }

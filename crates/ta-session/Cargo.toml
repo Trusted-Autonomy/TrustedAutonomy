@@ -18,8 +18,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 # Workspace crates
-ta-goal = { path = "../ta-goal", version = "0.15.15-alpha.6" }
-ta-changeset = { path = "../ta-changeset", version = "0.15.15-alpha.6" }
+ta-goal = { path = "../ta-goal", version = "0.15.15-alpha.7" }
+ta-changeset = { path = "../ta-changeset", version = "0.15.15-alpha.7" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

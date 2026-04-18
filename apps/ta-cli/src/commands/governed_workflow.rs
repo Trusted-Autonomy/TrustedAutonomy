@@ -282,6 +282,11 @@ pub struct StageDef {
     /// When absent, the language is auto-detected from workspace marker files.
     #[serde(default)]
     pub lang: Option<String>,
+    /// For `kind = "plan_next"` / `"loop_next"`: only consider phases whose ID
+    /// starts with this prefix (passed as `--filter` to `ta plan next`).
+    /// When absent, all pending phases are considered.
+    #[serde(default)]
+    pub phase_filter: Option<String>,
 }
 
 // ── New step kinds (v0.15.13 + v0.15.14) ─────────────────────────────────────
@@ -1631,8 +1636,8 @@ fn execute_stage(
     config: &WorkflowConfig,
 ) -> anyhow::Result<Option<String>> {
     match stage_def.kind {
-        StageKind::PlanNext => stage_plan_next(run, &stage_def.name, opts),
-        StageKind::LoopNext => stage_loop_next(run, &stage_def.name, opts),
+        StageKind::PlanNext => stage_plan_next(run, stage_def, opts),
+        StageKind::LoopNext => stage_loop_next(run, stage_def, opts),
         StageKind::Workflow => stage_run_subworkflow(run, stage_def, opts, config),
         StageKind::ApplyDraftBranch => stage_apply_draft_branch(run, stage_def, opts, config),
         StageKind::AggregateDraft => stage_aggregate_draft(run, stage_def, opts),
@@ -1674,21 +1679,35 @@ fn execute_stage(
 ///
 /// Shells out to `ta plan next`, parses the output, and stores structured
 /// results in `run.outputs[stage_name]` for downstream template interpolation.
+/// When `stage_def.phase_filter` is set, passes `--filter <prefix>` so only
+/// phases matching that prefix are considered.
 fn stage_plan_next(
     run: &mut GovernedWorkflowRun,
-    stage_name: &str,
+    stage_def: &StageDef,
     opts: &RunOptions,
 ) -> anyhow::Result<Option<String>> {
-    println!("  Running: ta plan next");
+    let stage_name = &stage_def.name;
+    let filter_msg = stage_def
+        .phase_filter
+        .as_deref()
+        .map(|f| format!(" --filter {}", f))
+        .unwrap_or_default();
+    println!("  Running: ta plan next{}", filter_msg);
+
+    let mut args = vec![
+        "--project-root".to_string(),
+        opts.workspace_root.to_string_lossy().to_string(),
+        "plan".to_string(),
+        "next".to_string(),
+        "--no-version-check".to_string(),
+    ];
+    if let Some(ref prefix) = stage_def.phase_filter {
+        args.push("--filter".to_string());
+        args.push(prefix.clone());
+    }
 
     let output = std::process::Command::new("ta")
-        .args([
-            "--project-root",
-            &opts.workspace_root.to_string_lossy(),
-            "plan",
-            "next",
-            "--no-version-check",
-        ])
+        .args(&args)
         .output()
         .map_err(|e| anyhow::anyhow!("Failed to invoke 'ta plan next': {}", e))?;
 
@@ -1721,15 +1740,14 @@ fn stage_plan_next(
 /// Stage executor for `kind = "loop_next"` (v0.15.14).
 ///
 /// Alias for `plan_next` — runs `ta plan next` and emits the same structured
-/// outputs. The distinction enables future filtering via `[phases]` config
-/// and makes workflow templates self-documenting about loop intent.
+/// outputs. Passes `phase_filter` through when set on the stage def.
 fn stage_loop_next(
     run: &mut GovernedWorkflowRun,
-    stage_name: &str,
+    stage_def: &StageDef,
     opts: &RunOptions,
 ) -> anyhow::Result<Option<String>> {
     // Delegate entirely to stage_plan_next — same behavior, same output format.
-    stage_plan_next(run, stage_name, opts)
+    stage_plan_next(run, stage_def, opts)
 }
 
 /// Stage executor for `kind = "apply_draft_branch"` (v0.15.14).
@@ -3537,6 +3555,7 @@ mod tests {
             on_partial_failure: None,
             max_parallel: None,
             lang: None,
+            phase_filter: None,
         }
     }
 
@@ -4130,6 +4149,34 @@ kind = "plan_next"
 "#;
         let stage: StageDef = toml::from_str(toml_str).unwrap();
         assert_eq!(stage.kind, StageKind::PlanNext);
+        assert!(stage.phase_filter.is_none());
+    }
+
+    #[test]
+    fn stage_kind_plan_next_with_phase_filter_deserializes() {
+        let toml_str = r#"
+name = "plan_next"
+description = "Get next phase scoped to v0.15"
+kind = "plan_next"
+phase_filter = "v0.15"
+"#;
+        let stage: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(stage.kind, StageKind::PlanNext);
+        assert_eq!(stage.phase_filter.as_deref(), Some("v0.15"));
+    }
+
+    #[test]
+    fn stage_def_phase_filter_absent_defaults_to_none() {
+        let toml_str = r#"
+name = "plan_next"
+description = "no filter"
+kind = "plan_next"
+"#;
+        let stage: StageDef = toml::from_str(toml_str).unwrap();
+        assert!(
+            stage.phase_filter.is_none(),
+            "phase_filter should default to None"
+        );
     }
 
     // ── Depth guard (v0.15.13) ────────────────────────────────────────────────
@@ -4332,6 +4379,7 @@ kind = "static_analysis"
             on_partial_failure: None,
             max_parallel: None,
             lang: None,
+            phase_filter: None,
         };
 
         let opts = RunOptions {
@@ -4393,6 +4441,7 @@ kind = "static_analysis"
             on_partial_failure: None,
             max_parallel: None,
             lang: None,
+            phase_filter: None,
         };
 
         let opts = RunOptions {
@@ -4440,6 +4489,7 @@ kind = "static_analysis"
             on_partial_failure: None,
             max_parallel: None,
             lang: None,
+            phase_filter: None,
         };
 
         let result = stage_join(&mut run, &stage_def).unwrap();
@@ -4473,6 +4523,7 @@ kind = "static_analysis"
             on_partial_failure: None, // default = halt
             max_parallel: None,
             lang: None,
+            phase_filter: None,
         };
 
         let err = stage_join(&mut run, &stage_def).unwrap_err();
@@ -4504,6 +4555,7 @@ kind = "static_analysis"
             on_partial_failure: Some("continue".to_string()),
             max_parallel: None,
             lang: None,
+            phase_filter: None,
         };
 
         let result = stage_join(&mut run, &stage_def);
@@ -4600,6 +4652,7 @@ kind = "apply_draft"
             on_partial_failure: None,
             max_parallel: None,
             lang: None,
+            phase_filter: None,
         }
     }
 

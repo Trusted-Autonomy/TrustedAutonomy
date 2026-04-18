@@ -17,7 +17,7 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
 reqwest = { workspace = true }
-ta-changeset = { path = "../../ta-changeset", version = "0.15.15-alpha.6" }
+ta-changeset = { path = "../../ta-changeset", version = "0.15.15-alpha.7" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
