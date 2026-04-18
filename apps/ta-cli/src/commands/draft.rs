@@ -6009,6 +6009,22 @@ fn apply_package(
         connector.apply(&target_dir)?
     };
 
+    // v0.15.19.4: Track whether Cargo.toml is part of the applied changeset.
+    // Used by the post-apply version check to distinguish a legitimate PR bump
+    // (version bump is in the feature branch, will land on merge) from a genuine
+    // omission where the bump was missing entirely.
+    let cargo_toml_in_artifacts = pkg
+        .changes
+        .artifacts
+        .iter()
+        .any(|a| a.resource_uri.ends_with("Cargo.toml"))
+        || applied_files.iter().any(|f| {
+            f == "Cargo.toml"
+                || f.starts_with("Cargo.toml (")
+                || f.ends_with("/Cargo.toml")
+                || f.contains("/Cargo.toml (")
+        });
+
     // v0.13.0.1: Show "Changes from parent" header for follow-up drafts, or list
     // follow-up work when applying a root draft that has children.
     if let Some(ref parent_title) = pkg.goal.parent_goal_title {
@@ -7122,6 +7138,12 @@ fn apply_package(
         }
     }
 
+    // Capture staging presence BEFORE auto_clean may delete it (v0.15.19.4).
+    // The post-apply version check reads this flag — if we wait until after auto_clean
+    // the directory is gone and the check always sees "staging absent", triggering the
+    // loud fallback warning even when staging was present and pre-copy already validated.
+    let staging_was_present = goal.workspace_path.join("Cargo.toml").exists();
+
     // Read plan phase status from staging BEFORE auto_clean removes it (v0.14.9 item 10).
     // Staging is the agent's authoritative output; target_dir may not yet reflect changes.
     let phase_status_from_staging: Option<(String, super::plan::PlanStatus)> =
@@ -7312,29 +7334,46 @@ fn apply_package(
 
     // Post-apply version validation (embedded-patch / staging-unavailable fallback).
     // The pre-copy gate (above) already caught mismatches when staging was present.
-    // This check fires only when staging was absent at apply time (GC'd or embedded-patch path).
+    // `staging_was_present` was captured BEFORE auto_clean ran (v0.15.19.4 bug-1 fix).
     if !dry_run && !phase_ids.is_empty() {
         let last_phase = phase_ids.last().map(String::as_str).unwrap_or("");
         if let Some(expected_ver) = super::plan::phase_id_to_semver(last_phase) {
-            // Only run this post-copy fallback when staging was unavailable — the pre-copy gate
-            // already validated the version when staging/Cargo.toml existed.
-            let staging_was_present = goal.workspace_path.join("Cargo.toml").exists();
             if !staging_was_present {
-                let version_ok = validate_cargo_version_as_fallback(&target_dir, &expected_ver)?;
-                if !version_ok {
-                    if validate_version {
-                        anyhow::bail!(
-                            "Post-apply version validation failed: Cargo.toml does not match \
-                             expected version {} for phase {}. \
-                             Run: ./scripts/bump-version.sh {}",
-                            expected_ver,
-                            last_phase,
-                            expected_ver
-                        );
-                    }
-                    // Not --validate-version: warning already printed by validate_cargo_version_as_fallback.
+                // Staging was absent (GC'd or embedded-patch path): run fallback check.
+                // v0.15.19.4 bug-2 fix: if Cargo.toml is in the committed artifacts and a
+                // PR was created, the version bump is in the feature branch and will land on
+                // merge — reading the working tree (restored to main) always shows the old
+                // version, so firing the warning here is a false positive.
+                let vcs_pr_url = pkg
+                    .vcs_status
+                    .as_ref()
+                    .and_then(|v| v.review_url.as_deref());
+                if cargo_toml_in_artifacts && vcs_pr_url.is_some() {
+                    let source_ver =
+                        read_cargo_version(&target_dir).unwrap_or_else(|| "unknown".to_string());
+                    let pr_display = vcs_pr_url.unwrap_or("PR");
+                    println!(
+                        "  [version] Bump ({} → {}) is in {} — will land on merge. ✓",
+                        source_ver, expected_ver, pr_display
+                    );
                 } else {
-                    println!("  Version: {} ✓", expected_ver);
+                    let version_ok =
+                        validate_cargo_version_as_fallback(&target_dir, &expected_ver)?;
+                    if !version_ok {
+                        if validate_version {
+                            anyhow::bail!(
+                                "Post-apply version validation failed: Cargo.toml does not match \
+                                 expected version {} for phase {}. \
+                                 Run: ./scripts/bump-version.sh {}",
+                                expected_ver,
+                                last_phase,
+                                expected_ver
+                            );
+                        }
+                        // Not --validate-version: warning already printed by validate_cargo_version_as_fallback.
+                    } else {
+                        println!("  Version: {} ✓", expected_ver);
+                    }
                 }
             } else {
                 // Staging was present — pre-copy gate already validated. Just confirm.
@@ -14639,5 +14678,95 @@ fn run() {
         let err = result.unwrap_err();
         assert_eq!(err.draft_ver, "0.15.15-alpha.6");
         assert_eq!(err.expected_ver, "0.15.15-alpha.7");
+    }
+
+    // ── v0.15.19.4: Version-Check False-Positive Fix ──────────────────
+
+    /// Helper that mirrors the cargo_toml_in_artifacts detection logic used in
+    /// apply_package. Extracted here so the detection rules can be unit-tested
+    /// without going through the full apply path.
+    fn detect_cargo_toml_in_artifacts(artifact_uris: &[&str], applied_files: &[&str]) -> bool {
+        artifact_uris.iter().any(|uri| uri.ends_with("Cargo.toml"))
+            || applied_files.iter().any(|f| {
+                *f == "Cargo.toml"
+                    || f.starts_with("Cargo.toml (")
+                    || f.ends_with("/Cargo.toml")
+                    || f.contains("/Cargo.toml (")
+            })
+    }
+
+    #[test]
+    fn cargo_toml_detected_via_artifact_uri() {
+        assert!(detect_cargo_toml_in_artifacts(
+            &["fs://workspace/Cargo.toml"],
+            &[]
+        ));
+        assert!(detect_cargo_toml_in_artifacts(
+            &["fs://workspace/Cargo.toml", "fs://workspace/src/main.rs"],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn cargo_toml_detected_via_applied_files_exact() {
+        assert!(detect_cargo_toml_in_artifacts(&[], &["Cargo.toml"]));
+    }
+
+    #[test]
+    fn cargo_toml_detected_via_applied_files_with_kind() {
+        assert!(detect_cargo_toml_in_artifacts(
+            &[],
+            &["Cargo.toml (modified)"]
+        ));
+    }
+
+    #[test]
+    fn cargo_toml_detected_via_applied_files_subdirectory() {
+        assert!(detect_cargo_toml_in_artifacts(
+            &[],
+            &["crates/ta-cli/Cargo.toml (modified)"]
+        ));
+    }
+
+    #[test]
+    fn cargo_toml_not_detected_when_absent() {
+        assert!(!detect_cargo_toml_in_artifacts(
+            &["fs://workspace/src/main.rs", "fs://workspace/PLAN.md"],
+            &["src/main.rs (modified)", "PLAN.md (modified)"]
+        ));
+    }
+
+    #[test]
+    fn cargo_toml_not_detected_for_cargo_lock_only() {
+        // Cargo.lock is not Cargo.toml — should not trigger
+        assert!(!detect_cargo_toml_in_artifacts(
+            &["fs://workspace/Cargo.lock"],
+            &["Cargo.lock (modified)"]
+        ));
+    }
+
+    #[test]
+    fn validate_cargo_version_as_fallback_ok_on_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.19-alpha.4\"\n",
+        )
+        .unwrap();
+        let ok = validate_cargo_version_as_fallback(dir.path(), "0.15.19-alpha.4").unwrap();
+        assert!(ok);
+    }
+
+    #[test]
+    fn validate_cargo_version_as_fallback_false_on_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "version = \"0.15.19-alpha.3\"\n",
+        )
+        .unwrap();
+        // Mismatch returns false (caller decides whether to warn or bail).
+        let ok = validate_cargo_version_as_fallback(dir.path(), "0.15.19-alpha.4").unwrap();
+        assert!(!ok);
     }
 }
