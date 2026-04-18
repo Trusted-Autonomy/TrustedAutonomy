@@ -572,8 +572,14 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            // Loop to handle retries — HTTP client may reconnect under concurrent test load.
+            for _ in 0..10 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+                    }
+                    Err(_) => break,
+                }
             }
         });
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -620,8 +626,14 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            // Loop to handle retries — HTTP client may reconnect under concurrent test load.
+            for _ in 0..10 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+                    }
+                    Err(_) => break,
+                }
             }
         });
         std::thread::sleep(std::time::Duration::from_millis(50));
