@@ -226,6 +226,24 @@ pub enum PlanCommands {
     ///   ta plan review defer v0.15.3 1 --to v0.15.4  — defer item 1 to a later phase
     #[command(subcommand)]
     Review(ReviewCommands),
+    /// Scan PLAN.md for phases whose items are all `[x]` but lack `<!-- status: done -->`.
+    ///
+    /// `--dry-run` lists them; `--apply` adds the marker. Prevents false-pending from
+    /// phases that completed before status markers were introduced.
+    ///
+    /// Also detects phases with no status marker at all and reports them separately.
+    ///
+    /// Examples:
+    ///   ta plan fix-markers --dry-run
+    ///   ta plan fix-markers --apply
+    FixMarkers {
+        /// Preview changes without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Write `<!-- status: done -->` markers to PLAN.md.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Generate a PLAN.md from a description or document using an agent goal.
     ///
     /// The agent reads the input, proposes a phased plan, and outputs a PLAN.md
@@ -309,6 +327,20 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
                         }
                         if warnings.is_empty() {
                             println!("Phase order check: OK (no out-of-order phases detected)");
+                        }
+                        // v0.15.19.4.2: Also report missing status markers.
+                        if let Ok(content) =
+                            std::fs::read_to_string(config.workspace_root.join("PLAN.md"))
+                        {
+                            let missing = detect_missing_status_markers(&content);
+                            if !missing.is_empty() {
+                                println!(
+                                    "[warn] {} phase(s) have no status marker — \
+                                     add <!-- status: done --> to suppress \
+                                     (run: ta plan fix-markers --dry-run)",
+                                    missing.len()
+                                );
+                            }
                         }
                     }
                     if *check_versions {
@@ -394,6 +426,7 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             source.as_deref(),
         ),
         PlanCommands::Review(sub) => plan_review(config, sub),
+        PlanCommands::FixMarkers { dry_run, apply } => plan_fix_markers(config, *dry_run, *apply),
     }
 }
 
@@ -1390,7 +1423,8 @@ pub fn phase_id_to_semver(phase_id: &str) -> Option<String> {
 /// Check for out-of-order phases: a `Done` phase appears after a `Pending` phase
 /// in document order (for phases with semver-style IDs only).
 ///
-/// Returns a list of human-readable warning strings.
+/// Returns deduplicated human-readable warning strings: one line per pending phase
+/// showing the count of later-done phases (v0.15.19.4.2 deduplication).
 pub fn check_phase_order(phases: &[PlanPhase]) -> Vec<String> {
     // Collect (index, id, status) for semver phases only.
     let semver_phases: Vec<(usize, &PlanPhase)> = phases
@@ -1399,25 +1433,136 @@ pub fn check_phase_order(phases: &[PlanPhase]) -> Vec<String> {
         .filter(|(_, p)| parse_semver_id(&p.id).is_some())
         .collect();
 
-    let mut warnings = Vec::new();
+    // pending_ids_in_order: insertion-ordered list of pending phase IDs
+    // pending_later_done: parallel counts of Done phases appearing after each pending phase
+    let mut pending_ids_in_order: Vec<String> = Vec::new();
+    let mut pending_later_done: Vec<usize> = Vec::new();
 
-    // Walk document order: find the first Pending phase, then check if any
-    // later (higher-index) phase is Done.
-    let mut first_pending: Option<&PlanPhase> = None;
     for (_, phase) in &semver_phases {
-        if first_pending.is_none() && phase.status == PlanStatus::Pending {
-            first_pending = Some(phase);
-        } else if let Some(pending) = first_pending {
-            if phase.status == PlanStatus::Done {
-                warnings.push(format!(
-                    "Phase {} is done but {} is still pending — phases are out of order.",
-                    phase.id, pending.id,
-                ));
+        if phase.status == PlanStatus::Pending {
+            pending_ids_in_order.push(phase.id.clone());
+            pending_later_done.push(0);
+        } else if phase.status == PlanStatus::Done {
+            // Count this Done phase against all currently-seen Pending phases.
+            for count in pending_later_done.iter_mut() {
+                *count += 1;
             }
         }
     }
 
-    warnings
+    // Emit one line per pending phase that has later-done violations.
+    pending_ids_in_order
+        .iter()
+        .zip(pending_later_done.iter())
+        .filter_map(|(pid, &count)| {
+            if count == 0 {
+                return None;
+            }
+            Some(format!(
+                "[warn] {} is still pending — {} later phase(s) are complete (out of order)",
+                pid, count
+            ))
+        })
+        .collect()
+}
+
+/// Detect phases that have no `<!-- status: ... -->` marker in PLAN.md content.
+///
+/// Returns a list of phase IDs that are missing a status marker.
+/// These phases parse as `Pending` due to the `find_status_in_lookahead` fallback,
+/// which may produce false "pending" counts in `ta plan status`.
+pub fn detect_missing_status_markers(content: &str) -> Vec<String> {
+    use regex::Regex;
+
+    let status_re = match Regex::new(r"<!--\s*status:\s*\w+\s*-->") {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+
+    // Phase header patterns (same as default schema).
+    let header_patterns: &[&str] = &[
+        r"^###\s+(v[\d]+\.[\d]+\.[\d]+(?:\.[\d]+)?)\s+[—\-]",
+        r"^##\s+Phase\s+([\w.]+)\s+[—\-]",
+        r"^###\s+(v[\d]+\.[\d]+)\s+[—\-]",
+    ];
+    let compiled: Vec<_> = header_patterns
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect();
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut missing = Vec::new();
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let mut matched_id: Option<String> = None;
+        for pat in &compiled {
+            if let Some(caps) = pat.captures(trimmed) {
+                matched_id = caps.get(1).map(|m| m.as_str().to_string());
+                break;
+            }
+        }
+        if let Some(id) = matched_id {
+            // Check if next non-empty line has a status marker.
+            let next = lines.get(i + 1).map(|l| l.trim()).unwrap_or("");
+            if !status_re.is_match(next) {
+                missing.push(id);
+            }
+        }
+    }
+
+    missing
+}
+
+/// Scan PLAN.md for phases where all items are `[x]` but status marker is not `done`.
+///
+/// Returns `(phase_id, line_number_of_header)` pairs.
+pub fn find_phases_needing_done_marker(content: &str) -> Vec<(String, usize)> {
+    use regex::Regex;
+
+    let schema = PlanSchema::default_schema();
+    let phases = parse_plan_with_schema(content, &schema);
+    let missing_markers = detect_missing_status_markers(content);
+    let missing_set: std::collections::HashSet<&str> =
+        missing_markers.iter().map(|s| s.as_str()).collect();
+
+    let mut result = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Phase header detection (same patterns).
+    let header_patterns: &[&str] = &[
+        r"^###\s+(v[\d]+\.[\d]+\.[\d]+(?:\.[\d]+)?)\s+[—\-]",
+        r"^##\s+Phase\s+([\w.]+)\s+[—\-]",
+        r"^###\s+(v[\d]+\.[\d]+)\s+[—\-]",
+    ];
+    let compiled_re = Regex::new(r"<!--\s*status:\s*(\w+)\s*-->").ok();
+
+    for phase in &phases {
+        // Only flag if all plan items are checked.
+        if phase.status == PlanStatus::Done {
+            continue; // Already marked done.
+        }
+        if !missing_set.contains(phase.id.as_str()) && phase.status != PlanStatus::Pending {
+            continue; // Has a non-done status marker — user intent.
+        }
+        // Find the header line for this phase.
+        let header_line_idx = lines.iter().position(|l| {
+            let trimmed = l.trim();
+            header_patterns.iter().any(|p| {
+                Regex::new(p)
+                    .ok()
+                    .and_then(|r| r.captures(trimmed))
+                    .map(|caps| caps.get(1).map(|m| m.as_str()) == Some(phase.id.as_str()))
+                    .unwrap_or(false)
+            })
+        });
+        let _ = compiled_re.as_ref(); // suppress unused warning
+        if let Some(idx) = header_line_idx {
+            result.push((phase.id.clone(), idx + 1));
+        }
+    }
+
+    result
 }
 
 /// Check whether the binary version is ahead of the highest sequential completed phase.
@@ -3114,6 +3259,93 @@ fn extract_plan_items(text: &str) -> Vec<String> {
 
 // ── ta plan review ────────────────────────────────────────────────
 
+/// `ta plan fix-markers` — scan for phases missing `<!-- status: done -->` markers.
+fn plan_fix_markers(config: &GatewayConfig, dry_run: bool, apply: bool) -> anyhow::Result<()> {
+    if !dry_run && !apply {
+        println!("Usage: ta plan fix-markers --dry-run  (preview) or --apply  (write markers)");
+        return Ok(());
+    }
+
+    let plan_path = config.workspace_root.join("PLAN.md");
+    if !plan_path.exists() {
+        anyhow::bail!("PLAN.md not found at {}", plan_path.display());
+    }
+
+    let content = std::fs::read_to_string(&plan_path)?;
+
+    // Phases with all [x] items but no `<!-- status: done -->` marker.
+    let phases_needing_marker = find_phases_needing_done_marker(&content);
+
+    // Phases with no status marker at all.
+    let missing_markers = detect_missing_status_markers(&content);
+
+    if phases_needing_marker.is_empty() && missing_markers.is_empty() {
+        println!("No phases need fix-markers treatment. Plan is clean.");
+        return Ok(());
+    }
+
+    if !phases_needing_marker.is_empty() {
+        println!(
+            "{} phase(s) have all items checked but no <!-- status: done --> marker:",
+            phases_needing_marker.len()
+        );
+        for (id, line) in &phases_needing_marker {
+            println!("  {} (line {})", id, line);
+        }
+    }
+
+    if !missing_markers.is_empty() {
+        println!(
+            "\n{} phase(s) have no status marker at all (defaulting to pending):",
+            missing_markers.len()
+        );
+        println!("  Run `ta plan fix-markers --apply` to add <!-- status: done --> where all items are checked.");
+        for id in &missing_markers {
+            println!("  {}", id);
+        }
+    }
+
+    if apply && !phases_needing_marker.is_empty() {
+        // Insert `<!-- status: done -->` after each phase header that needs it.
+        let mut new_content = content.clone();
+        // Process in reverse line order so inserts don't shift earlier line numbers.
+        let mut sorted = phases_needing_marker.clone();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (id, line_num) in &sorted {
+            // Find the header line and insert marker after it.
+            let lines: Vec<&str> = new_content.lines().collect();
+            if *line_num == 0 || *line_num > lines.len() {
+                continue;
+            }
+            let insert_after = line_num - 1; // 0-based
+            let mut rebuilt = String::new();
+            for (i, l) in lines.iter().enumerate() {
+                rebuilt.push_str(l);
+                rebuilt.push('\n');
+                if i == insert_after {
+                    rebuilt.push_str("<!-- status: done -->\n");
+                }
+            }
+            new_content = rebuilt;
+            println!(
+                "[fix-markers] Added <!-- status: done --> after phase {} (line {})",
+                id, line_num
+            );
+        }
+
+        std::fs::write(&plan_path, &new_content)?;
+        println!(
+            "fix-markers: wrote {} marker(s) to PLAN.md.",
+            phases_needing_marker.len()
+        );
+    } else if dry_run {
+        println!("\n(dry-run) Re-run with --apply to write markers.");
+    }
+
+    Ok(())
+}
+
 /// Handle `ta plan review` and its subcommands.
 pub fn plan_review(config: &GatewayConfig, cmd: &ReviewCommands) -> anyhow::Result<()> {
     let store = HumanReviewStore::new(&config.workspace_root);
@@ -4536,13 +4768,16 @@ Build it.
         ];
         let warnings = check_phase_order(&phases);
         assert_eq!(warnings.len(), 1);
-        assert!(
-            warnings[0].contains("v0.3.0"),
-            "Warning should mention the out-of-order done phase"
-        );
+        // v0.15.19.4.2: warning is per-pending-phase, not per-done-phase.
         assert!(
             warnings[0].contains("v0.2.0"),
-            "Warning should mention the blocking pending phase"
+            "Warning should mention the blocking pending phase: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("1 later phase"),
+            "Warning should count later done phases: {}",
+            warnings[0]
         );
     }
 
@@ -4568,6 +4803,77 @@ Build it.
         assert!(
             check_phase_order(&phases).is_empty(),
             "Non-semver phases should be ignored"
+        );
+    }
+
+    // ── v0.15.19.4.2: Phase order dedup + missing marker tests ──────────────
+
+    #[test]
+    fn check_phase_order_deduplicates_to_one_per_pending() {
+        let phases = vec![
+            PlanPhase {
+                id: "v0.1.0".to_string(),
+                title: "First".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+            PlanPhase {
+                id: "v0.2.0".to_string(),
+                title: "Pending".to_string(),
+                status: PlanStatus::Pending,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+            PlanPhase {
+                id: "v0.3.0".to_string(),
+                title: "Done after pending".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+            PlanPhase {
+                id: "v0.4.0".to_string(),
+                title: "Also done after pending".to_string(),
+                status: PlanStatus::Done,
+                depends_on: vec![],
+                human_review_items: vec![],
+            },
+        ];
+        let warnings = check_phase_order(&phases);
+        // One pending phase → exactly one warning line, not two.
+        assert_eq!(
+            warnings.len(),
+            1,
+            "Expected 1 deduplicated warning, got: {:?}",
+            warnings
+        );
+        assert!(
+            warnings[0].contains("v0.2.0"),
+            "Should mention the pending phase: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("2 later phase"),
+            "Should count 2 later done phases: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn detect_missing_status_markers_finds_headerless_phases() {
+        let content = "### v0.1.0 — Phase with marker\n<!-- status: done -->\n\
+                       ### v0.2.0 — Phase without marker\n\nSome content\n";
+        let missing = detect_missing_status_markers(content);
+        assert!(
+            missing.contains(&"v0.2.0".to_string()),
+            "Should detect v0.2.0 as missing marker: {:?}",
+            missing
+        );
+        assert!(
+            !missing.contains(&"v0.1.0".to_string()),
+            "Should not flag v0.1.0 (has marker): {:?}",
+            missing
         );
     }
 

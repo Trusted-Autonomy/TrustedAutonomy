@@ -4889,6 +4889,18 @@ As you complete planned work items, update PLAN.md to reflect progress:
 - Do NOT change the `<!-- status: ... -->` marker — only `ta draft apply` transitions phase status
 - If you complete all remaining items in a phase, note that in your change_summary.json
 
+## Progress Reporting
+
+After completing each plan item, print a structured heartbeat:
+```
+[progress] item <N>: <brief description> — done
+```
+After completing all items for this phase:
+```
+[progress] phase v0.X.Y: all items complete — building draft
+```
+The workflow monitors these lines to show real-time progress. Print them to stdout.
+
 ## Documentation Updates
 
 If your changes affect user-facing behavior (new commands, changed flags, new config options, workflow changes):

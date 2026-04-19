@@ -31,6 +31,12 @@ pub struct ReviewReport {
     /// Unified diff against source PLAN.md incorporating all non-conflict resolutions.
     /// `None` when there is nothing to patch (already clean or no PLAN.md in draft).
     pub plan_patch: Option<String>,
+    /// When true: this draft touched only PLAN.md and all newly-checked items were
+    /// found in the source workspace, confirming it is a catch-up record (not fabrication).
+    /// When false (the default): either non-PLAN.md artifacts exist or verification
+    /// was not performed.
+    #[serde(default)]
+    pub source_verified: bool,
 }
 
 impl ReviewReport {
@@ -80,6 +86,17 @@ impl ReviewReport {
     }
 }
 
+/// Returns true when a draft's artifact list contains only PLAN.md.
+/// Used to trigger source-verification mode in the reviewer.
+pub fn is_planmd_only_draft(artifact_uris: &[&str]) -> bool {
+    if artifact_uris.is_empty() {
+        return false;
+    }
+    artifact_uris.iter().all(|uri| {
+        uri.ends_with("/PLAN.md") || *uri == "fs://workspace/PLAN.md" || *uri == "PLAN.md"
+    })
+}
+
 /// Returns true if the gap text refers to tests or documentation (non-functional).
 ///
 /// Used to classify unchecked plan items when determining the recommended action.
@@ -120,7 +137,23 @@ pub fn render_review_verdict_and_action(
         .map(|id| format!("ta draft apply {}", id))
         .unwrap_or_else(|| "ta draft apply <id>".to_string());
 
-    if report.coverage_gaps.is_empty() && report.conflicts.is_empty() {
+    if report.source_verified {
+        // PLAN.md-only catch-up draft: all checked items verified in source.
+        if color {
+            out.push_str(&format!(
+                "\x1b[32m[review] {}: [PASS]\x1b[0m\n",
+                verdict_header
+            ));
+            out.push_str(
+                "  \x1b[32mItems verified present in source — catch-up PLAN.md update.\x1b[0m\n",
+            );
+            out.push_str(&format!("  \x1b[32mReady to apply: {}\x1b[0m\n", apply_cmd));
+        } else {
+            out.push_str(&format!("[review] {}: [PASS]\n", verdict_header));
+            out.push_str("  Items verified present in source — catch-up PLAN.md update.\n");
+            out.push_str(&format!("  Ready to apply: {}\n", apply_cmd));
+        }
+    } else if report.coverage_gaps.is_empty() && report.conflicts.is_empty() {
         if color {
             out.push_str(&format!(
                 "\x1b[32m[review] {}: [PASS]\x1b[0m\n",
@@ -289,6 +322,7 @@ mod tests {
                 })
                 .collect(),
             plan_patch: None,
+            source_verified: false,
         }
     }
 
@@ -301,6 +335,7 @@ mod tests {
             conflicts: vec![],
             coverage_gaps: vec![],
             plan_patch: None,
+            source_verified: false,
         }
     }
 
@@ -443,5 +478,47 @@ mod tests {
         let without_phase = render_review_verdict_and_action(&report, None, None, None, false);
         assert!(without_phase.contains("Verdict:"));
         assert!(!without_phase.contains("Verdict for"));
+    }
+
+    // ── v0.15.19.4.2: Source-verification tests ──────────────────────────────
+
+    #[test]
+    fn reviewer_passes_planmd_only_when_source_verified() {
+        let mut report = make_clean_report();
+        report.source_verified = true;
+        let output = render_review_verdict_and_action(
+            &report,
+            Some("v0.15.19.4.1"),
+            Some("abc12345"),
+            Some("Catch-up goal"),
+            false,
+        );
+        assert!(output.contains("[PASS]"), "should be pass: {}", output);
+        assert!(
+            output.contains("verified present in source"),
+            "should note source verification: {}",
+            output
+        );
+        assert!(
+            output.contains("catch-up PLAN.md update"),
+            "should note catch-up: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn is_planmd_only_draft_detects_single_planmd() {
+        assert!(is_planmd_only_draft(&["fs://workspace/PLAN.md"]));
+        assert!(is_planmd_only_draft(&["PLAN.md"]));
+        assert!(is_planmd_only_draft(&["workspace/PLAN.md"]));
+    }
+
+    #[test]
+    fn is_planmd_only_draft_rejects_mixed() {
+        assert!(!is_planmd_only_draft(&[
+            "fs://workspace/PLAN.md",
+            "fs://workspace/src/foo.rs"
+        ]));
+        assert!(!is_planmd_only_draft(&[]));
     }
 }

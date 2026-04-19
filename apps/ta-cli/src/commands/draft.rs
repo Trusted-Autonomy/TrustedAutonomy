@@ -1064,6 +1064,30 @@ fn run_plan_review(
     // Find unchecked items in the phase being applied.
     let coverage_gaps = compute_coverage_gaps(&merge_result, &diff_content);
 
+    // v0.15.19.4.2: Emit [plan] heartbeat lines for coverage status.
+    emit_plan_heartbeat_lines(&merge_result.merged, &coverage_gaps);
+
+    // v0.15.19.4.2: Source-verification for PLAN.md-only drafts.
+    // When the draft touches only PLAN.md and all newly-checked items are already
+    // in the source workspace, this is a catch-up record, not a fabrication.
+    let is_planmd_only = {
+        use ta_changeset::review_report::is_planmd_only_draft;
+        let uris: Vec<&str> = artifacts.iter().map(|a| a.resource_uri.as_str()).collect();
+        is_planmd_only_draft(&uris)
+    };
+
+    let source_verified = if is_planmd_only {
+        verify_checked_items_in_source(&merge_result, &staging_content, source_path)
+    } else {
+        false
+    };
+
+    if source_verified {
+        println!(
+            "[review] PLAN.md-only draft: all checked items verified in source — catch-up update."
+        );
+    }
+
     // Compute plan_patch as a unified diff of merged vs source.
     let plan_patch = if merge_result.merged != source_content {
         Some(build_unified_diff(
@@ -1083,6 +1107,7 @@ fn run_plan_review(
         conflicts: merge_result.conflicts,
         coverage_gaps,
         plan_patch,
+        source_verified,
     };
 
     report.save(&config.workspace_root)?;
@@ -1107,6 +1132,26 @@ fn collect_diff_content(
         }
         let sourced = source_path.join(rel);
         if let Ok(s) = std::fs::read_to_string(&sourced) {
+            content.push_str(&s);
+        }
+    }
+    content
+}
+
+/// Collect content from all non-PLAN.md artifacts that were applied to target_dir.
+/// Used for auto-check coverage during apply (v0.15.19.4.2).
+fn collect_apply_diff_content(artifacts: &[Artifact], target_dir: &std::path::Path) -> String {
+    let mut content = String::new();
+    for artifact in artifacts {
+        let rel = artifact
+            .resource_uri
+            .strip_prefix("fs://workspace/")
+            .unwrap_or(&artifact.resource_uri);
+        if rel == "PLAN.md" || rel.ends_with("/PLAN.md") {
+            continue; // Skip PLAN.md itself — we're checking code against plan items.
+        }
+        let path = target_dir.join(rel);
+        if let Ok(s) = std::fs::read_to_string(&path) {
             content.push_str(&s);
         }
     }
@@ -1142,6 +1187,124 @@ fn compute_coverage_gaps(
         }
     }
     all_gaps
+}
+
+/// v0.15.19.4.2: Emit `[plan]` heartbeat lines after coverage check.
+fn emit_plan_heartbeat_lines(merged: &str, gaps: &[ta_changeset::review_report::CoverageGap]) {
+    use ta_changeset::coverage::build_plan_heartbeat_lines;
+    use ta_changeset::plan_merge::parse_plan_sections;
+
+    let sections = parse_plan_sections(merged);
+    for section in &sections {
+        if section.id.starts_with("__") {
+            continue;
+        }
+        let unchecked: Vec<(usize, &str)> = section
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !item.checked)
+            .map(|(i, item)| (i + 1, item.text.as_str()))
+            .collect();
+        if unchecked.is_empty() {
+            continue;
+        }
+        let section_gaps: Vec<_> = gaps
+            .iter()
+            .filter(|g| g.phase_id == section.id)
+            .cloned()
+            .collect();
+        for line in build_plan_heartbeat_lines(&section.id, &unchecked, &section_gaps) {
+            println!("{}", line);
+        }
+    }
+}
+
+/// v0.15.19.4.2: Verify that checked items in the agent's PLAN.md exist in source.
+///
+/// For a PLAN.md-only draft, check whether items newly marked `[x]` (present in
+/// staging but `[ ]` in base) have tokens that appear somewhere in source. Returns
+/// true only if every newly-checked item is found.
+fn verify_checked_items_in_source(
+    merge_result: &ta_changeset::plan_merge::MergeResult,
+    staging_content: &str,
+    source_path: &std::path::Path,
+) -> bool {
+    use ta_changeset::coverage::token_found_in_source;
+    use ta_changeset::plan_merge::parse_plan_sections;
+
+    // Find items that are `[x]` in staging (agent version).
+    let staging_sections = parse_plan_sections(staging_content);
+    let mut newly_checked: Vec<String> = Vec::new();
+
+    for section in &staging_sections {
+        if section.id.starts_with("__") {
+            continue;
+        }
+        for item in &section.items {
+            if item.checked {
+                newly_checked.push(item.text.clone());
+            }
+        }
+    }
+
+    // Suppress "verified" verdict if there are any conflicts (still uncertain).
+    if !merge_result.conflicts.is_empty() || newly_checked.is_empty() {
+        return false;
+    }
+
+    // Every newly-checked item must have at least one token in the source.
+    newly_checked
+        .iter()
+        .all(|text| token_found_in_source(text, source_path))
+}
+
+/// v0.15.19.4.2: Auto-upgrade `[ ]` items to `[x]` in draft PLAN.md when
+/// coverage checker finds their tokens in the diff. Returns the updated content.
+pub fn auto_check_covered_items(plan_content: &str, diff_content: &str) -> String {
+    use ta_changeset::coverage::check_coverage;
+    use ta_changeset::plan_merge::parse_plan_sections;
+
+    let sections = parse_plan_sections(plan_content);
+    let mut result = plan_content.to_string();
+
+    for section in &sections {
+        if section.id.starts_with("__") {
+            continue;
+        }
+        let unchecked: Vec<(usize, &str)> = section
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !item.checked)
+            .map(|(i, item)| (i + 1, item.text.as_str()))
+            .collect();
+        if unchecked.is_empty() {
+            continue;
+        }
+        let gaps = check_coverage(&section.id, &unchecked, diff_content);
+        let gap_numbers: std::collections::HashSet<usize> =
+            gaps.iter().map(|g| g.item_number).collect();
+
+        // Items not in gaps have coverage — auto-check them.
+        for (item_number, item_text) in &unchecked {
+            if !gap_numbers.contains(item_number) {
+                // Replace `[ ] <text>` with `[x] <text>` in the content.
+                let pattern = format!("[ ] {}", item_text);
+                let replacement = format!("[x] {}", item_text);
+                if result.contains(&pattern) {
+                    println!(
+                        "[apply] Auto-checked item {} (coverage match): {}",
+                        item_number,
+                        &item_text.chars().take(60).collect::<String>()
+                    );
+                    result = result.replacen(&pattern, &replacement, 1);
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Build a simple unified-diff-style patch between two strings.
@@ -6210,6 +6373,16 @@ fn apply_package(
     if !git_commit && !phase_ids.is_empty() {
         let plan_path = target_dir.join("PLAN.md");
         if plan_path.exists() {
+            // v0.15.19.4.2: Auto-check PLAN.md items with coverage matches before phase status update.
+            let diff_content_for_check =
+                collect_apply_diff_content(&pkg.changes.artifacts, &target_dir);
+            let plan_before_check = std::fs::read_to_string(&plan_path)?;
+            let plan_after_check =
+                auto_check_covered_items(&plan_before_check, &diff_content_for_check);
+            if plan_after_check != plan_before_check {
+                std::fs::write(&plan_path, &plan_after_check)?;
+            }
+
             let mut content = std::fs::read_to_string(&plan_path)?;
             let mut last_phase_id = String::new();
 
@@ -14850,5 +15023,34 @@ fn run() {
         // Mismatch returns false (caller decides whether to warn or bail).
         let ok = validate_cargo_version_as_fallback(dir.path(), "0.15.19-alpha.4").unwrap();
         assert!(!ok);
+    }
+
+    // ── v0.15.19.4.2 tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_auto_checks_item_with_coverage_match() {
+        // Item `[ ]` in PLAN.md (dash format), token in diff → applied version has `[x]`.
+        let plan_content = "### v0.1.0 — Phase\n<!-- status: pending -->\n\
+                            - [ ] Add JsonFileStore persistence layer\n";
+        let diff_content = "impl JsonFileStore {}\n";
+        let result = auto_check_covered_items(plan_content, diff_content);
+        assert!(
+            result.contains("[x] Add JsonFileStore"),
+            "Should auto-check covered item: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn auto_check_leaves_uncovered_items_unchecked() {
+        let plan_content = "### v0.1.0 — Phase\n<!-- status: pending -->\n\
+                            - [ ] Implement FancyAlgorithm with caching\n";
+        let diff_content = "fn nothing_related() {}\n";
+        let result = auto_check_covered_items(plan_content, diff_content);
+        assert!(
+            result.contains("[ ] Implement FancyAlgorithm"),
+            "Uncovered item should stay unchecked: {}",
+            result
+        );
     }
 }

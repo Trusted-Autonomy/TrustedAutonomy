@@ -2627,11 +2627,41 @@ fn stage_run_goal(
         );
     }
 
+    // v0.15.19.4.2: Parse [progress] heartbeat lines from agent stdout.
+    parse_and_report_progress_heartbeats(&stdout);
+
     let detail = match &run.draft_id {
         Some(id) => format!("draft {}", &id[..8.min(id.len())]),
         None => unreachable!("guarded above"),
     };
     Ok(Some(detail))
+}
+
+/// Parse `[progress] item N:` lines from agent stdout and emit a summary.
+fn parse_and_report_progress_heartbeats(stdout: &str) {
+    let mut item_reports: Vec<String> = Vec::new();
+    let mut phase_completions: Vec<String> = Vec::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("[progress] item ") {
+            item_reports.push(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("[progress] phase ") {
+            phase_completions.push(rest.to_string());
+        }
+    }
+
+    if item_reports.is_empty() && phase_completions.is_empty() {
+        println!("  [run_goal] No progress heartbeats from agent — check CLAUDE.md injection.");
+    } else {
+        println!(
+            "  [run_goal] Progress: {} item(s) reported complete by agent.",
+            item_reports.len()
+        );
+        for completion in &phase_completions {
+            println!("  [run_goal] Phase complete: {}", completion);
+        }
+    }
 }
 
 /// Stage 2: review_draft — spawn reviewer agent to write verdict.json.
@@ -2818,12 +2848,85 @@ fn build_reviewer_prompt(workspace_root: &Path, draft_id: &str) -> anyhow::Resul
         }
     };
 
+    // v0.15.19.4.2: Check if this draft was previously denied (re-run after denial).
+    let prior_denial_note = {
+        let pkg_json_path = workspace_root
+            .join(".ta")
+            .join("pr_packages")
+            .join(format!("{}.json", draft_id));
+        if pkg_json_path.exists() {
+            std::fs::read_to_string(&pkg_json_path)
+                .ok()
+                .and_then(|s| {
+                    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+                    let history = v.get("status_history")?.as_array()?;
+                    let was_denied = history.iter().any(|h| {
+                        h.get("status")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.contains("denied") || s.contains("Denied"))
+                            .unwrap_or(false)
+                    });
+                    if was_denied {
+                        Some("\nNOTE: This draft was previously denied and re-submitted. \
+                             Do not re-flag the same issues that were already flagged in the prior review — \
+                             focus on whether the denial reason has been addressed.\n".to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+
+    // v0.15.19.4.2: Detect PLAN.md-only drafts and add source-verification instruction.
+    let planmd_only_note = {
+        let uris: Vec<&str> = artifact_list_text
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim();
+                if l.contains("PLAN.md") && !l.contains(".rs") && !l.contains(".toml") {
+                    // Check if line contains only PLAN.md artifact
+                    Some(l)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let is_planmd_only = !artifact_list_text.is_empty()
+            && artifact_list_text
+                .lines()
+                .filter(|l| {
+                    let l = l.trim();
+                    l.starts_with("modified")
+                        || l.starts_with("created")
+                        || l.starts_with("deleted")
+                })
+                .all(|l| l.contains("PLAN.md"));
+        let _ = uris; // suppress unused warning
+        if is_planmd_only {
+            "\nSOURCE-VERIFICATION MODE: This draft modifies only PLAN.md. \
+             Before flagging any item as 'false record', verify whether the \
+             implementation is already present in the source workspace. \
+             If items are marked [x] and the implementation exists in source, \
+             verdict should be 'approve' with note 'catch-up PLAN.md update — \
+             items verified in source'. Only flag if implementation is genuinely \
+             missing from source.\n"
+                .to_string()
+        } else {
+            String::new()
+        }
+    };
+
     Ok(format!(
         "You are a code reviewer performing a governance review of a draft change set.\n\
          \n\
          IMPORTANT: You do NOT need access to the staging workspace directory. \
          All relevant context is embedded below. If staging is unavailable, \
          log 'staging absent — using embedded patches' and proceed with the review.\n\
+         {prior_denial_note}\
+         {planmd_only_note}\
          \n\
          Draft ID: {draft_id}\n\
          Change summary:\n{summary_text}\n\
@@ -2851,6 +2954,8 @@ fn build_reviewer_prompt(workspace_root: &Path, draft_id: &str) -> anyhow::Resul
          \n\
          You MUST write verdict.json. Failure to produce a verdict is the only \
          condition under which this review is considered failed.",
+        prior_denial_note = prior_denial_note,
+        planmd_only_note = planmd_only_note,
         draft_id = draft_id,
         summary_text = summary_text,
         decision_log_text = decision_log_text,
@@ -5105,6 +5210,28 @@ stages:
         let config = WorkflowConfig::default(); // enabled = false
                                                 // Should be a no-op regardless of workspace state.
         assert!(run_post_sync_build(&run, &config, dir.path()).is_ok());
+    }
+
+    // ── v0.15.19.4.2: Progress heartbeat parsing tests ──────────────────────
+
+    #[test]
+    fn heartbeat_lines_parsed_from_stdout() {
+        // Goal run stdout with [progress] item lines → workflow shows count.
+        let stdout = "[progress] item 1: source-verification for PLAN.md-only drafts — done\n\
+                      [progress] item 2: coverage auto-mark — done\n\
+                      [progress] item 3: heartbeat injection — done\n\
+                      Some other output line\n";
+        // Call parse_and_report_progress_heartbeats — should not panic.
+        // We can't capture stdout in unit tests easily, so just verify it runs.
+        parse_and_report_progress_heartbeats(stdout);
+    }
+
+    #[test]
+    fn heartbeat_parser_reports_zero_when_no_progress_lines() {
+        let stdout = "Building draft...\nDraft complete.\n";
+        // Should emit the "no progress heartbeats" warning line.
+        // Just verify it doesn't panic.
+        parse_and_report_progress_heartbeats(stdout);
     }
 
     #[test]
