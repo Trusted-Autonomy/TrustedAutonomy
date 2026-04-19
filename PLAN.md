@@ -11537,8 +11537,6 @@ The merge is a three-way comparison: `base` (the PLAN.md at staging-creation tim
 **Invocation — part of the draft lifecycle, not `ta doctor`**:
 
 ```
-
-```
 ta draft build --latest          ← triggers review automatically
     ↓
 ta draft view <id>               ← shows ReviewReport above artifact list
