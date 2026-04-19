@@ -162,6 +162,7 @@ fn make_draft_package() -> DraftPackage {
         ignored_artifacts: vec![],
         baseline_artifacts: vec![],
         agent_decision_log: vec![],
+        work_plan: None,
         goal_shortref: None,
         draft_seq: 0,
         plan_phase: None,

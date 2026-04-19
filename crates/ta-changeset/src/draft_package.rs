@@ -570,6 +570,14 @@ pub struct DraftPackage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_decision_log: Vec<DecisionLogEntry>,
 
+    /// Planner work plan (v0.15.20).
+    ///
+    /// Populated from `.ta/work-plan.json` when a `plan_work` stage preceded the
+    /// implementor. Shown as the "Implementation Plan" section in `ta draft view`
+    /// before the file diff, giving reviewers reasoning context before code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_plan: Option<serde_json::Value>,
+
     /// Goal shortref inherited from the parent GoalRun (v0.14.7.3).
     ///
     /// First 8 lowercase hex characters of `goal.goal_id`. Populated at `ta draft build`
@@ -659,6 +667,47 @@ pub struct Plan {
     pub next_steps: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decision_log: Vec<DecisionLogEntry>,
+}
+
+/// Implementation step from the work planner (v0.15.20).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkPlanDataStep {
+    pub step: u32,
+    pub file: String,
+    pub action: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// Decision from the work planner (v0.15.20).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkPlanDataDecision {
+    pub decision: String,
+    pub rationale: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_affected: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+}
+
+/// Structured work plan data for rendering in `ta draft view` (v0.15.20).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkPlanData {
+    pub goal: String,
+    pub decisions: Vec<WorkPlanDataDecision>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub implementation_plan: Vec<WorkPlanDataStep>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_scope: Vec<String>,
+}
+
+impl WorkPlanData {
+    /// Try to parse from a `serde_json::Value` stored in `DraftPackage::work_plan`.
+    pub fn from_value(v: &serde_json::Value) -> Option<Self> {
+        serde_json::from_value(v.clone()).ok()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -842,6 +891,7 @@ pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
         ignored_artifacts: vec![],
         baseline_artifacts: vec![],
         agent_decision_log: vec![],
+        work_plan: None,
         goal_shortref: Some(goal_shortref.to_string()),
         draft_seq,
         plan_phase: None,
@@ -993,6 +1043,7 @@ mod tests {
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            work_plan: None,
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,

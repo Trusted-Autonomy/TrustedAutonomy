@@ -1,0 +1,72 @@
+# plan-implement-split.yaml — Planner + Implementor split workflow (v0.15.20).
+#
+# Refactors the single "implement" stage into two sequential nodes:
+#   1. plan_work  — read-only planner agent reasons and writes .ta/work-plan.json
+#   2. run_goal   — implementor agent reads the plan and writes code
+#
+# This makes decision recording structural rather than voluntary: the planner's
+# output IS the decision log. Reviewers see the plan before the diff.
+#
+# Usage:
+#   ta workflow run plan-implement-split --goal "Add JWT authentication"
+#   ta workflow run plan-implement-split --goal "Refactor auth module" --phase v0.15.21
+
+workflow:
+  name: plan-implement-split
+  description: |
+    Planner + Implementor two-stage workflow (v0.15.20).
+    The planner (read-only) analyzes the codebase and writes a structured work plan.
+    The implementor receives the plan as context and executes it faithfully.
+    Reviewers see the planner's decisions before the code diff in ta draft view.
+  config:
+    reviewer_agent: claude-code
+
+    # Gate behaviour after the reviewer writes verdict.json.
+    gate_on_verdict: auto
+
+    notify_channels: []
+    pr_poll_interval_secs: 120
+    sync_timeout_hours: 72
+
+stages:
+  - name: plan_work
+    kind: plan_work
+    description: |
+      Spawn a read-only planner agent that analyzes the goal and codebase,
+      then writes a structured work plan to .ta/work-plans/<run_id>/work-plan.json.
+      Fails if the agent exits without writing a parseable, non-empty work plan.
+
+  - name: run_goal
+    description: |
+      Run the implementor agent. The work plan from the plan_work stage is injected
+      into CLAUDE.md as the first section, constraining the agent to execute the plan
+      rather than re-derive it. If the agent encounters a blocker, it writes
+      .ta/work-plan-blockers.json and exits.
+    depends_on:
+      - plan_work
+
+  - name: review_draft
+    description: |
+      Spawn a reviewer agent that reads the draft artifacts and the work plan,
+      verifies the implementation matches the plan, and writes a verdict.
+    depends_on:
+      - run_goal
+
+  - name: human_gate
+    description: |
+      Read verdict.json. On approve + gate=auto: advance. On flag: prompt human.
+      On reject: deny draft, write audit entry, stop.
+    depends_on:
+      - review_draft
+
+  - name: apply_draft
+    description: "Apply the approved draft to the source directory with a git commit."
+    depends_on:
+      - human_gate
+
+  - name: pr_sync
+    description: |
+      Poll for PR merge. On MERGED: update goal state, emit GoalSynced audit entry.
+      On CLOSED without merge: emit GoalAbandoned audit entry.
+    depends_on:
+      - apply_draft

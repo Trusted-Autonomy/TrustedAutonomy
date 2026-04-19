@@ -972,6 +972,70 @@ fn load_agent_decisions(staging_path: &std::path::Path) -> Vec<DecisionLogEntry>
     }
 }
 
+/// Load work plan from `.ta/work-plan.json` in staging and convert to
+/// (JSON value for DraftPackage, Vec<DecisionLogEntry> for agent_decision_log).
+///
+/// Returns `(None, vec![])` when no work plan is present (backward compat).
+fn load_work_plan_for_draft(
+    staging_path: &std::path::Path,
+) -> (Option<serde_json::Value>, Vec<DecisionLogEntry>) {
+    let path = staging_path.join(".ta").join("work-plan.json");
+    if !path.exists() {
+        return (None, vec![]);
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: could not read .ta/work-plan.json: {}", e);
+            return (None, vec![]);
+        }
+    };
+    let raw: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Warning: could not parse .ta/work-plan.json: {}", e);
+            return (None, vec![]);
+        }
+    };
+
+    // Convert decisions array to DecisionLogEntry for agent_decision_log.
+    let entries: Vec<DecisionLogEntry> = raw
+        .get("decisions")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let decision = entry.get("decision")?.as_str()?.to_string();
+                    let rationale = entry.get("rationale")?.as_str()?.to_string();
+                    let alternatives = entry
+                        .get("alternatives")
+                        .and_then(|a| a.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let confidence = entry
+                        .get("confidence")
+                        .and_then(|c| c.as_f64())
+                        .map(|c| c as f32);
+                    Some(DecisionLogEntry {
+                        decision,
+                        rationale,
+                        alternatives,
+                        alternatives_considered: vec![],
+                        confidence,
+                        context: Some("work-planner".to_string()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    (Some(raw), entries)
+}
+
 /// Load agent progress journal checkpoints as human-readable strings for draft evidence (v0.14.7.2).
 ///
 /// Reads `.ta/ta-progress.json` from the staging workspace.
@@ -2129,13 +2193,29 @@ pub(crate) fn build_package(
         );
     }
 
+    // v0.15.20: Load work plan from staging and merge decisions into agent_decision_log.
+    let (work_plan_value, work_plan_decisions) = load_work_plan_for_draft(&goal.workspace_path);
+    if !work_plan_decisions.is_empty() {
+        println!(
+            "Work plan: {} decision(s) merged from .ta/work-plan.json",
+            work_plan_decisions.len()
+        );
+    }
+
     // v0.14.7: Load agent-authored decision log from .ta-decisions.json.
-    let agent_decision_log = load_agent_decisions(&goal.workspace_path);
+    let mut agent_decision_log = load_agent_decisions(&goal.workspace_path);
     if !agent_decision_log.is_empty() {
         println!(
             "Agent decision log: {} decision(s) captured from .ta-decisions.json",
             agent_decision_log.len()
         );
+    }
+    // v0.15.20: Prepend work plan decisions (they take priority — the planner output
+    // is the authoritative decision record when a plan_work stage was used).
+    if !work_plan_decisions.is_empty() {
+        let mut merged = work_plan_decisions;
+        merged.extend(agent_decision_log);
+        agent_decision_log = merged;
     }
 
     // v0.14.7.2: Load agent progress journal from .ta/ta-progress.json.
@@ -2257,8 +2337,9 @@ pub(crate) fn build_package(
         ignored_artifacts: vec![],
         baseline_artifacts: vec![], // Set below if this is a follow-up (v0.14.3.5).
         agent_decision_log,
-        goal_shortref: None, // Set below with display_id (v0.14.7.3).
-        draft_seq: 0,        // Set below with display_id (v0.14.7.3).
+        work_plan: work_plan_value, // v0.15.20: Planner work plan (if plan_work stage ran).
+        goal_shortref: None,        // Set below with display_id (v0.14.7.3).
+        draft_seq: 0,               // Set below with display_id (v0.14.7.3).
         plan_phase: goal.plan_phase.clone(), // Inherit from GoalRun (v0.15.15.2).
     };
 
@@ -2809,6 +2890,7 @@ fn build_memory_only_draft(
         ignored_artifacts: vec![],
         baseline_artifacts: vec![],
         agent_decision_log: vec![],
+        work_plan: None,
         goal_shortref: None,
         draft_seq: 0,
         plan_phase: None,

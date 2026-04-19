@@ -620,6 +620,79 @@ impl TerminalAdapter {
         output
     }
 
+    /// Render the "Implementation Plan" section from work-plan.json (v0.15.20).
+    ///
+    /// Shows the planner's decisions, implementation steps, and out-of-scope items
+    /// before the file diff so reviewers see the reasoning context first.
+    fn render_work_plan(&self, ctx: &RenderContext) -> String {
+        use crate::draft_package::WorkPlanData;
+        let work_plan = match ctx
+            .package
+            .work_plan
+            .as_ref()
+            .and_then(WorkPlanData::from_value)
+        {
+            Some(wp) => wp,
+            None => return String::new(),
+        };
+
+        let bold = self.bold();
+        let reset = self.reset();
+        let dim = self.dim();
+
+        let mut output = format!(
+            "\n{bold}▸ Implementation Plan ({} decision(s), {} step(s)):{reset}\n",
+            work_plan.decisions.len(),
+            work_plan.implementation_plan.len(),
+        );
+
+        if !work_plan.decisions.is_empty() {
+            output.push_str(&format!("  {bold}Decisions:{reset}\n"));
+            for d in &work_plan.decisions {
+                let conf = d
+                    .confidence
+                    .map(|c| format!(" {dim}[{:.0}%]{reset}", c * 100.0))
+                    .unwrap_or_default();
+                output.push_str(&format!("  ▸ {}{}{}\n", d.decision, conf, reset));
+                output.push_str(&format!("      {dim}Rationale:{reset} {}\n", d.rationale));
+                if !d.alternatives.is_empty() {
+                    output.push_str(&format!(
+                        "      {dim}Alternatives:{reset} {}\n",
+                        d.alternatives.join(", ")
+                    ));
+                }
+                if !d.files_affected.is_empty() {
+                    output.push_str(&format!(
+                        "      {dim}Files:{reset} {}\n",
+                        d.files_affected.join(", ")
+                    ));
+                }
+            }
+        }
+
+        if !work_plan.implementation_plan.is_empty() {
+            output.push_str(&format!("  {bold}Steps:{reset}\n"));
+            for step in &work_plan.implementation_plan {
+                output.push_str(&format!(
+                    "  {}. {} — {}\n",
+                    step.step, step.file, step.action
+                ));
+                if !step.detail.is_empty() {
+                    output.push_str(&format!("      {dim}{}{reset}\n", step.detail));
+                }
+            }
+        }
+
+        if !work_plan.out_of_scope.is_empty() {
+            output.push_str(&format!("  {bold}Out of scope:{reset}\n"));
+            for item in &work_plan.out_of_scope {
+                output.push_str(&format!("  {dim}✗{reset} {}\n", item));
+            }
+        }
+
+        output
+    }
+
     /// Render the "Design Decisions" section from alternatives_considered (v0.9.5).
     fn render_design_decisions(&self, ctx: &RenderContext) -> String {
         let alts = &ctx.package.summary.alternatives_considered;
@@ -743,6 +816,7 @@ impl OutputAdapter for TerminalAdapter {
                 return Ok(output);
             }
             Some(SectionFilter::Decisions) => {
+                output.push_str(&self.render_work_plan(ctx));
                 output.push_str(&self.render_agent_decision_log(ctx));
                 output.push_str(&self.render_design_decisions(ctx));
                 if output.is_empty() {
@@ -791,6 +865,9 @@ impl OutputAdapter for TerminalAdapter {
 
         // ── Summary ──
         output.push_str(&self.render_header(ctx));
+
+        // ── Implementation Plan (v0.15.20) ──
+        output.push_str(&self.render_work_plan(ctx));
 
         // ── Agent Decision Log (v0.14.7) ──
         output.push_str(&self.render_agent_decision_log(ctx));
@@ -941,6 +1018,7 @@ mod tests {
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            work_plan: None,
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,

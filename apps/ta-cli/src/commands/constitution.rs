@@ -1876,6 +1876,7 @@ fn create_review_draft(
         ignored_artifacts: vec![],
         baseline_artifacts: vec![],
         agent_decision_log: vec![],
+        work_plan: None,
         goal_shortref: Some(review_id_str[..8].to_string()),
         draft_seq: 1,
         plan_phase: None,

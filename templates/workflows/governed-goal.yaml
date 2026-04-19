@@ -33,6 +33,10 @@ workflow:
     # Maximum hours to wait for PR merge before declaring timeout.
     sync_timeout_hours: 72
 
+    # To split run_goal into planner + implementor, use plan-implement-split.yaml
+    # instead. That template adds a plan_work stage (kind: plan_work) before run_goal
+    # so a read-only agent writes .ta/work-plan.json first (v0.15.20).
+
 stages:
   - name: run_goal
     description: "Run the agent goal in a TA-mediated staging workspace. Produces a draft."

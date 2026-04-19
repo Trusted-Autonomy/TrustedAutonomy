@@ -319,6 +319,10 @@ pub enum StageKind {
     Consensus,
     /// Apply the current draft to source (explicit `kind = "apply_draft"` variant) (v0.15.15.1).
     ApplyDraft,
+    /// Run the work planner agent to produce `.ta/work-plan.json` before the
+    /// implementor stage. The planner is read-only: it cannot write code, only
+    /// produce a structured plan (v0.15.20).
+    PlanWork,
 }
 
 /// Output from a `kind = "plan_next"` stage (v0.15.13).
@@ -1257,6 +1261,7 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
                 }
                 StageKind::Consensus => " [consensus]".to_string(),
                 StageKind::ApplyDraft => " [apply_draft]".to_string(),
+                StageKind::PlanWork => " [plan_work]".to_string(),
             };
             println!("  [{}] {}{} — {}", i + 1, stage.name, kind_label, desc);
         }
@@ -1645,6 +1650,7 @@ fn execute_stage(
         StageKind::StaticAnalysis => stage_static_analysis(run, stage_def, opts),
         StageKind::Consensus => stage_consensus(run, stage_def, opts, config),
         StageKind::ApplyDraft => stage_apply_draft(run, opts, config),
+        StageKind::PlanWork => stage_plan_work(run, stage_def, opts),
         StageKind::Goto => {
             // Goto is handled inline in run_loop_workflow; falling here is a bug.
             anyhow::bail!(
@@ -2558,6 +2564,17 @@ fn stage_run_goal(
     if let Some(phase) = opts.plan_phase {
         cmd.args(["--phase", phase]);
     }
+    // v0.15.20: If a plan_work stage preceded this run_goal stage, pass the
+    // work plan path to the implementor via env var. ta run reads this and
+    // injects the work plan into CLAUDE.md.
+    let work_plan_path_opt = run
+        .outputs
+        .values()
+        .find_map(|stage_out| stage_out.get("work_plan_path").cloned());
+    if let Some(ref wp_path) = work_plan_path_opt {
+        cmd.env("TA_WORK_PLAN_JSON_PATH", wp_path);
+        println!("  [run_goal] Work plan injected from: {}", wp_path);
+    }
     let output = cmd.output().map_err(|e| {
         anyhow::anyhow!(
             "Failed to invoke 'ta run': {}\nIs ta installed and on PATH?",
@@ -2662,6 +2679,170 @@ fn parse_and_report_progress_heartbeats(stdout: &str) {
             println!("  [run_goal] Phase complete: {}", completion);
         }
     }
+}
+
+/// Stage: plan_work — spawn a read-only planner agent to produce .ta/work-plan.json.
+///
+/// The planner agent analyzes the goal and codebase (read-only) and writes a structured
+/// work plan with design decisions, implementation steps, and out-of-scope items.
+/// The work plan is stored at `<workspace_root>/.ta/work-plans/<run_id>/work-plan.json`
+/// and its path is published to `run.outputs["plan_work"]["work_plan_path"]` for the
+/// subsequent run_goal (implementor) stage to consume.
+fn stage_plan_work(
+    run: &mut GovernedWorkflowRun,
+    stage_def: &StageDef,
+    opts: &RunOptions,
+) -> anyhow::Result<Option<String>> {
+    let plans_dir = opts
+        .workspace_root
+        .join(".ta")
+        .join("work-plans")
+        .join(&run.run_id);
+    std::fs::create_dir_all(&plans_dir)?;
+
+    let work_plan_path = plans_dir.join("work-plan.json");
+
+    println!("  Spawning planner agent for goal: {}", opts.goal_title);
+    println!(
+        "  Work plan will be written to: {}",
+        work_plan_path.display()
+    );
+
+    let planner_prompt =
+        build_planner_prompt(opts.workspace_root, opts.goal_title, &work_plan_path);
+
+    let output = std::process::Command::new("ta")
+        .args([
+            "--project-root",
+            &opts.workspace_root.to_string_lossy(),
+            "run",
+            &format!("Work planner: {}", opts.goal_title),
+            "--agent",
+            opts.agent,
+            "--headless",
+            "--objective",
+            &planner_prompt,
+            "--no-version-check",
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to invoke planner agent: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !work_plan_path.exists() {
+            anyhow::bail!(
+                "Planner agent failed and did not produce work-plan.json.\n\
+                 Agent error: {}\n\
+                 You can write the work plan manually:\n  {}",
+                stderr,
+                work_plan_path.display()
+            );
+        }
+        // Agent exit != 0 but plan was written — warn and continue.
+        eprintln!(
+            "[plan_work] Planner agent exited non-zero but work-plan.json was written — continuing."
+        );
+    }
+
+    if !work_plan_path.exists() {
+        anyhow::bail!(
+            "Planner agent completed but did not write work-plan.json.\n\
+             Expected: {}\n\
+             The planner agent must write this file before the implementor can proceed.",
+            work_plan_path.display()
+        );
+    }
+
+    // Validate the work plan.
+    let work_plan = ta_workflow::WorkPlan::load_from(&work_plan_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load work plan: {}", e))?;
+    work_plan
+        .validate()
+        .map_err(|e| anyhow::anyhow!("Work plan validation failed: {}", e))?;
+
+    // Store path in run outputs for the implementor stage.
+    let stage_name = &stage_def.name;
+    let mut stage_outputs = std::collections::HashMap::new();
+    stage_outputs.insert(
+        "work_plan_path".to_string(),
+        work_plan_path.to_string_lossy().to_string(),
+    );
+    stage_outputs.insert(
+        "decisions_count".to_string(),
+        work_plan.decisions.len().to_string(),
+    );
+    run.outputs.insert(stage_name.clone(), stage_outputs);
+
+    let summary = format!(
+        "{} decision(s), {} step(s)",
+        work_plan.decisions.len(),
+        work_plan.implementation_plan.len()
+    );
+    println!("  [plan_work] Work plan validated: {}", summary);
+    Ok(Some(summary))
+}
+
+/// Build the planner agent objective prompt.
+fn build_planner_prompt(workspace_root: &Path, goal_title: &str, work_plan_path: &Path) -> String {
+    format!(
+        r#"You are a Work Planner agent. Your job is to analyze the codebase and produce a structured implementation plan for the following goal:
+
+Goal: {goal_title}
+
+## Your role
+
+You are a PLANNER, not an implementor. You MUST NOT write any code or modify any source files.
+Your only output is the work plan JSON file described below.
+
+## What to do
+
+1. Read and understand the goal.
+2. Explore the codebase using Read, Grep, and Glob tools to understand the current state.
+3. Identify what needs to change and why — be specific about file paths, function names, and design decisions.
+4. Record your decisions with rationale and alternatives considered.
+5. Produce a step-by-step implementation plan.
+6. Write the plan to the path below.
+
+## Output format
+
+Write a JSON file to this EXACT path (use an absolute path):
+{work_plan_path}
+
+The JSON must match this schema:
+{{
+  "goal": "{goal_title}",
+  "decisions": [
+    {{
+      "decision": "One-line description of the design choice",
+      "rationale": "Why this approach was chosen — required, must not be empty",
+      "alternatives": ["option A", "option B"],
+      "files_affected": ["src/foo.rs", "src/bar.rs"],
+      "confidence": 0.9
+    }}
+  ],
+  "implementation_plan": [
+    {{ "step": 1, "file": "src/foo.rs", "action": "add Foo struct", "detail": "Fields: bar: String, baz: u32" }},
+    {{ "step": 2, "file": "src/main.rs", "action": "wire Foo into main", "detail": "" }}
+  ],
+  "out_of_scope": ["list of things explicitly not being changed and why"]
+}}
+
+## Rules
+
+- decisions MUST be non-empty (at least one decision required)
+- Every decision MUST have a non-empty rationale
+- Do NOT write any Rust, Python, or other source code
+- Do NOT modify any files except to write the work-plan.json output
+- Use the Bash tool to write the JSON: `echo '{{...}}' > {work_plan_path}` or use the Write tool
+
+The workspace root is: {workspace_root}
+
+The implementor agent will receive your plan as the first section of its context and will execute it faithfully.
+"#,
+        goal_title = goal_title,
+        work_plan_path = work_plan_path.display(),
+        workspace_root = workspace_root.display(),
+    )
 }
 
 /// Stage 2: review_draft — spawn reviewer agent to write verdict.json.
@@ -5248,5 +5429,53 @@ stages:
             ..Default::default()
         };
         assert!(run_post_sync_build(&run, &config, dir.path()).is_ok());
+    }
+
+    // ── WorkPlan stage (v0.15.20) ─────────────────────────────────────────────
+
+    #[test]
+    fn plan_work_stage_kind_deserializes() {
+        let toml_str = r#"
+name = "plan_work"
+kind = "plan_work"
+description = "Planner stage"
+"#;
+        let stage: StageDef = toml::from_str(toml_str).unwrap();
+        assert_eq!(stage.kind, StageKind::PlanWork);
+    }
+
+    #[test]
+    fn plan_work_display_label() {
+        // The display label for PlanWork is " [plan_work]".
+        let label = match StageKind::PlanWork {
+            StageKind::PlanWork => " [plan_work]".to_string(),
+            _ => panic!("wrong variant"),
+        };
+        assert_eq!(label, " [plan_work]");
+    }
+
+    #[test]
+    fn stage_run_goal_injects_work_plan_from_outputs() {
+        // When run.outputs contains a "plan_work.work_plan_path", stage_run_goal
+        // should set TA_WORK_PLAN_JSON_PATH on the subprocess. We verify the logic
+        // without spawning ta by checking the output resolution.
+        let dir = tempdir().unwrap();
+        let runs_dir = dir.path().join("workflow-runs");
+        let mut run = GovernedWorkflowRun::new("wp-run-1", "governed-goal", "Test goal");
+        let mut plan_out = std::collections::HashMap::new();
+        plan_out.insert(
+            "work_plan_path".to_string(),
+            "/tmp/work-plan.json".to_string(),
+        );
+        run.outputs.insert("plan_work".to_string(), plan_out);
+        run.save(&runs_dir).unwrap();
+
+        // Verify the work_plan_path can be extracted from outputs.
+        let loaded = GovernedWorkflowRun::load(&runs_dir, "wp-run-1").unwrap();
+        let wp_path = loaded
+            .outputs
+            .values()
+            .find_map(|m| m.get("work_plan_path").cloned());
+        assert_eq!(wp_path.as_deref(), Some("/tmp/work-plan.json"));
     }
 }

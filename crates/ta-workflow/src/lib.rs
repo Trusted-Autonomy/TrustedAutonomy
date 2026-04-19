@@ -22,6 +22,7 @@ pub mod swarm;
 pub mod trigger;
 pub mod validate;
 pub mod verdict;
+pub mod work_plan;
 pub mod yaml_engine;
 
 pub use artifact_dag::{render_ascii, render_dot, MissingInput, ResolvedDag};
@@ -43,6 +44,7 @@ pub use swarm::{IntegrationConfig, SubGoalSpec, SubGoalStatus, SwarmState};
 pub use ta_changeset::ArtifactType;
 pub use trigger::{TriggerCondition, TriggerConfig, TriggerWaitRecord};
 pub use verdict::{Finding, Severity, Verdict, VerdictDecision};
+pub use work_plan::{ImplementationStep, WorkPlan, WorkPlanDecision};
 pub use yaml_engine::YamlWorkflowEngine;
 
 use chrono::{DateTime, Utc};
