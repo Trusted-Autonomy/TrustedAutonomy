@@ -1504,6 +1504,10 @@ pub fn execute(
         )?;
         tracing::info!(goal_id = %goal.goal_run_id, "CLAUDE.md injected");
 
+        // v0.15.20: If a work plan path was passed via env var (from a preceding
+        // plan_work stage in a governed workflow), inject it into CLAUDE.md.
+        inject_work_plan_if_present(&staging_path)?;
+
         // Inject persona section if --persona was specified (v0.14.20).
         if let Some(pname) = persona_name {
             match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
@@ -5440,6 +5444,63 @@ fn build_solutions_section_for_inject(config: &GatewayConfig) -> String {
     section
 }
 
+/// v0.15.20: Inject work plan into CLAUDE.md if TA_WORK_PLAN_JSON_PATH is set.
+///
+/// When a `plan_work` stage precedes `run_goal` in a governed workflow, the
+/// orchestrator sets this env var so the implementor sees the planner's output
+/// as the first section of its context.
+fn inject_work_plan_if_present(staging_path: &Path) -> anyhow::Result<()> {
+    let wp_path = match std::env::var("TA_WORK_PLAN_JSON_PATH") {
+        Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        _ => return Ok(()),
+    };
+
+    if !wp_path.exists() {
+        tracing::warn!(
+            path = %wp_path.display(),
+            "TA_WORK_PLAN_JSON_PATH set but file does not exist — skipping work plan injection"
+        );
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&wp_path).map_err(|e| {
+        anyhow::anyhow!("Failed to read work plan from {}: {}", wp_path.display(), e)
+    })?;
+
+    // Parse to validate and build the CLAUDE.md section.
+    let plan: ta_workflow::WorkPlan = serde_json::from_str(&content).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse work plan JSON from {}: {}",
+            wp_path.display(),
+            e
+        )
+    })?;
+
+    // Copy work plan to staging .ta/ for draft build-time access.
+    let staging_ta_dir = staging_path.join(".ta");
+    std::fs::create_dir_all(&staging_ta_dir)?;
+    std::fs::write(staging_ta_dir.join("work-plan.json"), &content)?;
+
+    // Append the implementation plan section to CLAUDE.md.
+    let claude_md_path = staging_path.join("CLAUDE.md");
+    let existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
+    let plan_section = plan.to_claude_md_section();
+    std::fs::write(&claude_md_path, format!("{}{}", existing, plan_section))?;
+
+    tracing::info!(
+        decisions = plan.decisions.len(),
+        steps = plan.implementation_plan.len(),
+        "Work plan injected into CLAUDE.md"
+    );
+    println!(
+        "  Work plan: {} decision(s), {} step(s) injected into context",
+        plan.decisions.len(),
+        plan.implementation_plan.len()
+    );
+
+    Ok(())
+}
+
 /// Restore the original CLAUDE.md content before computing diffs.
 /// This removes TA's injection so it doesn't appear in PR packages.
 fn restore_claude_md(staging_path: &Path) -> anyhow::Result<()> {
@@ -6489,6 +6550,7 @@ pre_launch:
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            work_plan: None,
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
@@ -6655,6 +6717,7 @@ pre_launch:
             ignored_artifacts: vec![],
             baseline_artifacts: vec![],
             agent_decision_log: vec![],
+            work_plan: None,
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,

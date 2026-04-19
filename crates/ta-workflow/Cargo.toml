@@ -10,6 +10,7 @@ keywords = ["ai", "agent", "autonomy", "workflow", "orchestration"]
 categories = ["development-tools"]
 
 [dependencies]
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -18,7 +19,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
-ta-changeset = { path = "../ta-changeset", version = "0.15.19-alpha.4.2" }
+ta-changeset = { path = "../ta-changeset", version = "0.15.20-alpha" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
