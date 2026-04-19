@@ -1307,6 +1307,22 @@ pub fn auto_check_covered_items(plan_content: &str, diff_content: &str) -> Strin
     result
 }
 
+/// v0.15.19.4.2: Generate a synthetic plan patch by auto-checking covered items.
+///
+/// Returns `Some(unified_diff)` when at least one `[ ]` item was upgraded to `[x]`
+/// based on token matches in `diff_content`, otherwise `None`.
+pub fn auto_generate_synthetic_plan_patch(
+    plan_content: &str,
+    diff_content: &str,
+) -> Option<String> {
+    let updated = auto_check_covered_items(plan_content, diff_content);
+    if updated != plan_content {
+        Some(build_unified_diff(plan_content, &updated, "PLAN.md"))
+    } else {
+        None
+    }
+}
+
 /// Build a simple unified-diff-style patch between two strings.
 fn build_unified_diff(original: &str, modified: &str, label: &str) -> String {
     let orig_lines: Vec<&str> = original.lines().collect();
@@ -2534,6 +2550,36 @@ pub(crate) fn build_package(
             Err(e) => {
                 tracing::warn!("Plan review failed (non-fatal): {}", e);
                 println!("[review] Plan audit skipped: {}", e);
+            }
+        }
+    }
+
+    // v0.15.19.4.2: When PLAN.md is not in the draft, auto-generate a synthetic plan
+    // patch from code artifact coverage so `ta draft apply` can still auto-check items.
+    if !has_plan_artifact {
+        let plan_path = source_dir.join("PLAN.md");
+        if let Ok(plan_content) = std::fs::read_to_string(&plan_path) {
+            let diff_content =
+                collect_diff_content(&goal.workspace_path, source_dir, &pkg.changes.artifacts);
+            if let Some(patch) = auto_generate_synthetic_plan_patch(&plan_content, &diff_content) {
+                use ta_changeset::review_report::ReviewReport;
+                println!(
+                    "[review] Auto-generated plan patch from code coverage \
+                     (no PLAN.md in draft)."
+                );
+                let synthetic_report = ReviewReport {
+                    draft_id: package_id,
+                    generated_at: chrono::Utc::now(),
+                    silent_fixes: vec![],
+                    agent_additions: vec![],
+                    conflicts: vec![],
+                    coverage_gaps: vec![],
+                    plan_patch: Some(patch),
+                    source_verified: false,
+                };
+                if let Err(e) = synthetic_report.save(&config.workspace_root) {
+                    tracing::warn!("Failed to save synthetic plan patch: {}", e);
+                }
             }
         }
     }
@@ -15051,6 +15097,77 @@ fn run() {
             result.contains("[ ] Implement FancyAlgorithm"),
             "Uncovered item should stay unchecked: {}",
             result
+        );
+    }
+
+    // ── v0.15.19.4.2: Reviewer source-verification integration tests ─────────
+
+    #[test]
+    fn reviewer_passes_planmd_only_when_tokens_in_source() {
+        // Mock source workspace with matching function name.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("store.rs"), "pub struct JsonFileStore {}\n").unwrap();
+
+        // Staging PLAN.md has the item checked.
+        let staging = "### v0.1.0 — Phase\n<!-- status: pending -->\n\
+                       - [x] Add JsonFileStore persistence layer\n";
+
+        use ta_changeset::plan_merge::MergeResult;
+        let merge_result = MergeResult {
+            merged: staging.to_string(),
+            silent_fixes: vec![],
+            agent_additions: vec![],
+            conflicts: vec![],
+        };
+
+        let verified = verify_checked_items_in_source(&merge_result, staging, dir.path());
+        assert!(
+            verified,
+            "should find 'JsonFileStore' token in source and return true"
+        );
+    }
+
+    #[test]
+    fn reviewer_flags_planmd_only_when_tokens_missing() {
+        // Source has no matching code for the checked item.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("other.rs"), "fn unrelated() {}\n").unwrap();
+
+        let staging = "### v0.1.0 — Phase\n<!-- status: pending -->\n\
+                       - [x] Add FancyNonExistentAlgorithm\n";
+
+        use ta_changeset::plan_merge::MergeResult;
+        let merge_result = MergeResult {
+            merged: staging.to_string(),
+            silent_fixes: vec![],
+            agent_additions: vec![],
+            conflicts: vec![],
+        };
+
+        let verified = verify_checked_items_in_source(&merge_result, staging, dir.path());
+        assert!(
+            !verified,
+            "should not find 'FancyNonExistentAlgorithm' and return false"
+        );
+    }
+
+    #[test]
+    fn coverage_auto_generates_plan_patch_when_missing() {
+        // Draft has no PLAN.md artifact; code diff has matching token.
+        let plan_content = "### v0.1.0 — Phase\n<!-- status: pending -->\n\
+                            - [ ] Add JsonFileStore persistence layer\n";
+        let diff_content = "pub struct JsonFileStore {}\n";
+
+        let patch = auto_generate_synthetic_plan_patch(plan_content, diff_content);
+        assert!(
+            patch.is_some(),
+            "should generate a patch when token found in diff"
+        );
+        let patch = patch.unwrap();
+        assert!(
+            patch.contains("[x]"),
+            "generated patch should auto-check the covered item: {}",
+            patch
         );
     }
 }

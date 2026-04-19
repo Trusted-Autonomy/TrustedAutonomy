@@ -2398,6 +2398,71 @@ Coverage gaps never block apply — they are informational reminders that a plan
 
 **Note**: this review is not `ta doctor`. `ta doctor` validates your runtime environment (auth, daemon health, agent binary). The plan review is a draft-lifecycle gate that runs automatically — you do not need to invoke it manually.
 
+### Plan Auto-Correction
+
+`ta draft build` and `ta draft apply` automatically reconcile PLAN.md item state with code coverage — you do not need to rely on agents to check boxes correctly.
+
+#### Auto-check during build
+
+When `ta draft build` runs, uncovered `[ ]` items in the active phase are checked against the artifact diffs. If a token from the item description is found in the changed code, the item is upgraded to `[x]` in the plan patch that `ta draft apply` will use. This runs **whether or not the agent included PLAN.md in its draft**.
+
+When PLAN.md is not in the draft artifacts, `ta draft build` auto-generates a synthetic plan patch from the code artifact diff:
+
+```
+[review] Auto-generated plan patch from code coverage (no PLAN.md in draft).
+```
+
+You will also see per-item coverage heartbeats in the build log:
+
+```
+[plan] v0.15.19.4 item 1: verified (token: version_check_suppressed) ✓
+[plan] v0.15.19.4 item 2: not found (gap) — Supervisor verdict — phase ID in header
+```
+
+#### Auto-check during apply
+
+`ta draft apply` re-runs coverage against the applied diff before updating PLAN.md. Items that are `[ ]` in the draft but covered in the diff are silently upgraded:
+
+```
+[apply] Auto-checked item 3 (coverage match): Coverage checker: auto-mark items [x] i…
+```
+
+If an item is `[x]` but no coverage is found and the item is not already in source, a warning is emitted so you can verify manually.
+
+#### Source-verification for PLAN.md-only drafts
+
+When a draft touches only PLAN.md (a catch-up record marking items complete after the fact), the reviewer checks whether the newly-checked items already exist in the source workspace. If they do, the verdict is `[PASS]` with a note:
+
+```
+[review] Verdict for v0.15.19.4: [PASS]
+  Items verified present in source — catch-up PLAN.md update.
+  Ready to apply: ta draft apply <id>
+```
+
+If the items are not in source, the verdict is `[WARN]` flagging potential false completion.
+
+#### Agent progress heartbeats
+
+Agents are expected to emit structured progress lines to stdout so the workflow can show real-time item progress:
+
+```
+[progress] item 1: source-verification for PLAN.md-only drafts — done
+[progress] item 2: coverage auto-mark — done
+[progress] phase v0.15.19.4.2: all items complete — building draft
+```
+
+After a goal run, the workflow reports:
+
+```
+[run_goal] Progress: 4/7 items reported complete by agent.
+```
+
+If an agent emits no heartbeats, a warning is shown:
+
+```
+[run_goal] No progress heartbeats from agent — check CLAUDE.md injection.
+```
+
 ### Draft Lifecycle Hygiene
 
 ```bash
