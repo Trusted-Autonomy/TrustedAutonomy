@@ -565,7 +565,7 @@ mod tests {
     #[test]
     #[cfg(not(windows))] // raw-TCP mock server is unreliable on Windows CI
     fn local_service_reachable_service_auth_optional_missing_warns() {
-        use std::io::Write;
+        use std::io::{Read, Write};
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -576,6 +576,11 @@ mod tests {
             for _ in 0..10 {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Drain the request before responding to avoid connection-reset races
+                        // on Linux CI where the client may not finish sending headers before
+                        // the server closes the connection.
+                        let mut buf = [0u8; 4096];
+                        let _ = stream.read(&mut buf);
                         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
                     }
                     Err(_) => break,
@@ -619,7 +624,7 @@ mod tests {
     #[test]
     #[cfg(not(windows))] // raw-TCP mock server is unreliable on Windows CI
     fn local_service_reachable_upstream_auth_set_passes() {
-        use std::io::Write;
+        use std::io::{Read, Write};
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -630,6 +635,11 @@ mod tests {
             for _ in 0..10 {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Drain the request before responding to avoid connection-reset races
+                        // on Linux CI where the client may not finish sending headers before
+                        // the server closes the connection.
+                        let mut buf = [0u8; 4096];
+                        let _ = stream.read(&mut buf);
                         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
                     }
                     Err(_) => break,
