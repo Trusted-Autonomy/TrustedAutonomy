@@ -1459,6 +1459,14 @@ ta draft apply <draft-id> --no-submit  # copy files only, no VCS ops
 ta draft apply <draft-id> --dry-run    # preview what would happen
 ```
 
+When a draft includes a version bump tied to a plan phase, `ta draft apply` prints an info line rather than a warning:
+
+```
+  [version] Bump (0.15.19-alpha.3 → 0.15.19-alpha.4) is in https://github.com/org/repo/pull/42 — will land on merge. ✓
+```
+
+This means the version bump was committed to the feature branch and will land on `main` when the PR merges. No manual action is required — the CI `version-check` job will pass once the PR is merged.
+
 ### Workflow Selection
 
 Every `ta run` uses a named *workflow* that controls how the goal is dispatched. The default is `single-agent` (one agent, one staging directory), which is backwards-compatible with all existing usage.

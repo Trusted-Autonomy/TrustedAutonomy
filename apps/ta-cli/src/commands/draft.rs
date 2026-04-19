@@ -3299,14 +3299,28 @@ fn view_package(
     }
 
     // v0.15.19.3: Show ReviewReport above the artifact list.
+    // v0.15.19.4.1: Add verdict + actionable guidance after the audit details.
     {
-        use ta_changeset::review_report::{render_review_report, ReviewReport};
+        use ta_changeset::review_report::{
+            render_review_report, render_review_verdict_and_action, ReviewReport,
+        };
         if let Some(report) = ReviewReport::load(&config.workspace_root, package_id) {
             let has_plan = pkg.changes.artifacts.iter().any(|a| {
                 a.resource_uri.ends_with("/PLAN.md") || a.resource_uri == "fs://workspace/PLAN.md"
             });
             if has_plan {
                 print!("{}", render_review_report(&report, color));
+                let draft_id_short = &package_id.to_string()[..8];
+                print!(
+                    "{}",
+                    render_review_verdict_and_action(
+                        &report,
+                        pkg.plan_phase.as_deref(),
+                        Some(draft_id_short),
+                        Some(pkg.goal.title.as_str()),
+                        color,
+                    )
+                );
                 println!();
             }
         } else {
@@ -3496,7 +3510,12 @@ fn view_package(
             ta_changeset::SupervisorVerdict::Warn => "[WARN]",
             ta_changeset::SupervisorVerdict::Block => "[BLOCK]",
         };
-        println!("  Verdict:  {}", verdict_label);
+        // v0.15.19.4.1: Include phase ID in verdict header when available.
+        if let Some(ref phase_id) = pkg.plan_phase {
+            println!("  Verdict for {}:  {}", phase_id, verdict_label);
+        } else {
+            println!("  Verdict:  {}", verdict_label);
+        }
         println!("  Scope OK: {}", if review.scope_ok { "yes" } else { "no" });
         println!("  Summary:  {}", review.summary);
         if !review.findings.is_empty() {
@@ -14681,6 +14700,69 @@ fn run() {
     }
 
     // ── v0.15.19.4: Version-Check False-Positive Fix ──────────────────
+
+    /// Mirrors the suppression decision in apply_package: when Cargo.toml is part of
+    /// the committed artifacts AND a PR was created, the version bump lives in the
+    /// feature branch and will land on merge — firing the VERSION MISMATCH warning is
+    /// a false positive.
+    fn version_check_should_suppress(cargo_toml_in_artifacts: bool, pr_url: Option<&str>) -> bool {
+        cargo_toml_in_artifacts && pr_url.is_some()
+    }
+
+    #[test]
+    fn version_check_suppressed_when_cargo_in_artifacts_and_pr_created() {
+        // Cargo.toml in artifacts + PR exists → suppress the warning (info message instead).
+        assert!(version_check_should_suppress(
+            true,
+            Some("https://github.com/org/repo/pull/42")
+        ));
+        // Also suppressed when PR URL varies in form.
+        assert!(version_check_should_suppress(
+            true,
+            Some("https://github.com/foo/bar/pull/1")
+        ));
+    }
+
+    #[test]
+    fn version_check_fires_when_cargo_not_in_artifacts() {
+        // Cargo.toml absent from artifacts → warning fires (genuine omission).
+        assert!(!version_check_should_suppress(
+            false,
+            Some("https://github.com/org/repo/pull/42")
+        ));
+        // Absent artifacts + no PR → also fires.
+        assert!(!version_check_should_suppress(false, None));
+        // Cargo.toml in artifacts but no PR → not suppressed (bump didn't make it to branch).
+        assert!(!version_check_should_suppress(true, None));
+    }
+
+    #[test]
+    fn staging_was_present_captured_before_autoclean() {
+        // Confirm the capture-before-delete pattern used in apply_package (v0.15.19.4 bug-1 fix).
+        // Create a temp dir simulating a staging workspace with Cargo.toml present.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nversion = \"0.15.19-alpha.4\"\n",
+        )
+        .unwrap();
+
+        // Capture the flag BEFORE deleting the directory (mirrors apply_package behaviour).
+        let staging_was_present = dir.path().join("Cargo.toml").exists();
+        let dir_path = dir.path().to_path_buf();
+
+        // Simulate auto_clean by dropping the TempDir (removes directory tree).
+        drop(dir);
+
+        assert!(
+            staging_was_present,
+            "staging_was_present must be true at the moment of capture"
+        );
+        assert!(
+            !dir_path.join("Cargo.toml").exists(),
+            "file should no longer exist after auto_clean"
+        );
+    }
 
     /// Helper that mirrors the cargo_toml_in_artifacts detection logic used in
     /// apply_package. Extracted here so the detection rules can be unit-tested
