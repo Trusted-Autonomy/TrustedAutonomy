@@ -11631,36 +11631,80 @@ ta draft apply <id> --auto-repair   ← build loop: silent repair, take
 ---
 
 ### v0.15.19.4.1 — Version-Check Fix: Integration Tests, USAGE.md, and Supervisor Guidance
-<!-- status: pending -->
+<!-- status: done -->
 
 **Goal**: Complete the two unchecked items from v0.15.19.4 (integration tests and USAGE.md) and improve the plan-review supervisor verdict to emit actionable next steps — not just findings. The plan review agent currently lists what's wrong but leaves the user to reason about what to do; it should recommend a specific course of action with concrete commands.
 
-**Context**: v0.15.19.4 correctly fixed the two root-cause bugs. The plan-review agent flagged items 5 and 6 as incomplete and left the PLAN.md status as `pending` (correct). However, its verdict said "two items remain incomplete" without telling the user *what to do next*. The user had to ask Claude Code to interpret the verdict and recommend `ta run ... --follow-up`. That reasoning should come from the supervisor itself.
+**Context**: v0.15.19.4 correctly fixed the two root-cause bugs. The plan-review agent flagged items 5 and 6 as incomplete and left the PLAN.md status as `pending` (correct). However, its verdict said "two items remain incomplete" without telling the user *what to do next*. The user had to ask Claude Code to interpret the verdict and recommend `ta run ... --follow-up`. That reasoning should come from the supervisor itself. All items shipped in PR #401; PLAN.md was updated via direct apply after reviewer false-positive (see v0.15.19.4.2 for reviewer fix).
 
 **Items:**
 
-1. [ ] **Integration test: `version_check_suppressed_when_cargo_in_artifacts_and_pr_created`** (`apps/ta-cli/src/commands/draft.rs`): Build a minimal mock scenario — artifact list contains `fs://workspace/Cargo.toml`, `pr_url` is `Some("https://github.com/org/repo/pull/42")`, source version is old. Assert: no `VERSION MISMATCH` box printed to stderr; info message `[version] Bump … is in PR` is printed; function returns without error.
+1. [x] **Integration test: `version_check_suppressed_when_cargo_in_artifacts_and_pr_created`** (`apps/ta-cli/src/commands/draft.rs:14713`): Confirmed present in source.
 
-2. [ ] **Integration test: `version_check_fires_when_cargo_not_in_artifacts`**: Same setup but artifact list does NOT contain Cargo.toml. Assert: `VERSION MISMATCH` box is printed (existing warning behavior preserved for genuine omissions).
+2. [x] **Integration test: `version_check_fires_when_cargo_not_in_artifacts`** (`apps/ta-cli/src/commands/draft.rs:14727`): Confirmed present in source.
 
-3. [ ] **Integration test: `staging_was_present_captured_before_autoclean`**: Create a temp staging dir with a `Cargo.toml`, capture `staging_was_present = path.join("Cargo.toml").exists()` before deletion, delete the dir, then assert `staging_was_present == true` and `path.join("Cargo.toml").exists() == false`. Confirms the capture-before-delete pattern is correct.
+3. [x] **Integration test: `staging_was_present_captured_before_autoclean`** (`apps/ta-cli/src/commands/draft.rs:14740`): Confirmed present in source.
 
-4. [ ] **USAGE.md — apply section**: Add a note explaining the `[version] Bump (A → B) is in PR #N — will land on merge. ✓` info message. Sample text: "When a draft includes a version bump, `ta draft apply` prints an info line rather than a warning — the bump is committed to the PR branch and will land on main when the PR merges. No manual action required."
+4. [x] **USAGE.md — apply section** (`docs/USAGE.md:1462`): Note explaining the info message confirmed present.
 
-5. [ ] **Supervisor verdict — actionable guidance** (`crates/ta-changeset/src/review_report.rs` or wherever `ReviewReport` verdict is formatted): When the verdict is `Warn` and there are unchecked plan items, append a **Recommended action** block:
-   - If unchecked items are tests/docs only (non-functional): recommend `ta draft apply <id>` then `ta run "<goal-title>" --follow-up --phase <phase>` with the specific phase ID filled in.
-   - If unchecked items include functional code: recommend `ta draft deny <id> --reason "incomplete: <item summary>"` then `ta run "<goal-title>" --follow-up`.
-   - If verdict is `Pass` with all items checked: print `Ready to apply: ta draft apply <id>`.
-   - Classify items as tests/docs vs functional by checking item text for keywords: `test`, `USAGE`, `docs`, `README`, `comment`, `doc` (case-insensitive). All others are functional.
+5. [x] **Supervisor verdict — actionable guidance** (`crates/ta-changeset/src/review_report.rs:96,159,178`): `Recommended action` block confirmed present in source.
 
-6. [ ] **Supervisor verdict — phase ID in header**: Include the phase ID in the verdict header so the user can construct the follow-up command without looking it up: `Verdict for v0.15.19.4: [WARN]` instead of just `Verdict: [WARN]`.
+6. [x] **Supervisor verdict — phase ID in header** (`crates/ta-changeset/src/review_report.rs:441`): `Verdict for v0.15.19.4:` format confirmed present.
 
-7. [ ] **Tests for supervisor guidance** (`crates/ta-changeset/src/review_report.rs` tests):
-   - `verdict_warn_tests_docs_only_recommends_apply_then_followup`: unchecked items all contain "test"/"USAGE" → recommended action includes `ta draft apply` and `ta run --follow-up`.
-   - `verdict_warn_functional_recommends_deny`: unchecked item is "implement X feature" → recommended action includes `ta draft deny`.
-   - `verdict_pass_recommends_apply`: all items checked → output includes `Ready to apply`.
+7. [x] **Tests for supervisor guidance** (`crates/ta-changeset/src/review_report.rs:308,356,391`): All three named tests confirmed present in source.
 
 #### Version: `0.15.19-alpha.4.1`
+
+---
+
+### v0.15.19.4.2 — Reviewer Agent: Source-Verification + Plan Auto-Correction + Goal Heartbeats
+<!-- status: pending -->
+
+**Goal**: Fix three related workflow quality gaps exposed by the v0.15.19.4.1 false-positive denial:
+
+1. **Reviewer false-positive on PLAN.md-only drafts**: The reviewer flagged a "catch-up" goal (code already in source, PLAN.md just needs checking) as a false record. The reviewer must verify whether items are already in source before penalising a PLAN.md-only diff.
+
+2. **Plan auto-correction during draft build/apply**: PLAN.md item state should be auto-derived from code coverage, not rely on the agent voluntarily checking boxes. The coverage checker (v0.15.19.3) already greps for tokens — elevate it so `ta draft build` emits checkmarks automatically and `ta draft apply` enforces consistency.
+
+3. **Agent heartbeat + progress output during goal runs**: Agents currently produce no structured progress during a run, making it hard to know if work is proceeding or stalled. Inject structured `[progress]` heartbeats into the agent's CLAUDE.md context so the workflow can show item-level progress.
+
+**Cleaner architecture recommendation**: Rather than patching each of these in isolation, the root fix is: **PLAN.md item state is a derived output, not agent-authored input**. The coverage checker owns it; the agent writes code; the build step reconciles. This removes the incentive for agents to "check the box" without doing the work.
+
+**Items:**
+
+1. [ ] **Reviewer: source-verification for PLAN.md-only drafts** (`crates/ta-changeset/src/review_report.rs` + reviewer agent prompt): When a draft's artifact list contains only `PLAN.md` and all items are `[x]`, before flagging as "false record", grep the source workspace for 2–3 key tokens from each item (function names, file paths, command names). If tokens found in source: verdict `Pass` with note `"Items verified present in source — catch-up PLAN.md update."` If tokens NOT found: verdict `Flag` with `"Items marked complete but not found in source — implementation missing."` Add `source_verified: bool` field to `ReviewReport`.
+
+2. [ ] **Reviewer: recognise `Denied` + re-run as different from `Flag`**: When the workflow reviewer re-reviews a previously-denied draft (e.g., manual override path), it should not re-flag with the same finding. Check draft history for prior `Denied` state before emitting findings — avoids compounding errors.
+
+3. [ ] **Coverage checker: auto-mark items `[x]` in plan_patch** (`crates/ta-changeset/src/coverage.rs`): Upgrade from heuristic-only to prescriptive: when coverage score ≥ 1 token found in diff, include the item as `[x]` in `plan_patch` (already partially done). Add: when a draft contains no PLAN.md artifact but the coverage checker finds matches, auto-generate a PLAN.md patch and add it as a synthetic artifact. This means `ta draft build` always produces a correct PLAN.md without agent cooperation.
+
+4. [ ] **`ta draft build` — emit `[plan]` heartbeat lines**: After coverage check, print one line per phase item: `[plan] v0.15.19.4.1 item 1: verified (token: version_check_suppressed) ✓` or `[plan] v0.15.19.4.1 item 2: not found (gap) —`. These lines appear in the workflow log so operators see plan reconciliation progress without reading the full report.
+
+5. [ ] **Goal run heartbeats in CLAUDE.md injection** (`apps/ta-cli/src/commands/run.rs`): Append a `## Progress Reporting` section to the injected CLAUDE.md context:
+   ```
+   ## Progress Reporting
+   After completing each plan item, print a structured heartbeat:
+     [progress] item <N>: <brief description> — done
+   After completing all items for this phase:
+     [progress] phase v0.X.Y: all items complete — building draft
+   The workflow monitors these lines to show real-time progress.
+   ```
+   The workflow log already captures stdout; these lines surface without any new plumbing.
+
+6. [ ] **Workflow stage: parse `[progress]` lines from `run_goal` stdout** (`apps/ta-cli/src/commands/governed_workflow.rs`): After `run_goal` completes, scan the captured output for `[progress] item N:` lines. Emit a summary: `[run_goal] Progress: 4/7 items reported complete by agent.` If 0 progress lines: warn `[run_goal] No progress heartbeats from agent — check CLAUDE.md injection.`
+
+7. [ ] **`ta draft apply` — enforce plan consistency before copy** (`apps/ta-cli/src/commands/draft.rs`): Before applying files, run the coverage checker against the draft artifacts. If any phase item is `[ ]` in the draft's PLAN.md but coverage finds its tokens in the diff: auto-upgrade to `[x]` in the applied version and log `[apply] Auto-checked item N (coverage match).` If item is `[x]` but coverage finds nothing and the item is NOT already in source: emit a warning `[apply] Item N checked but no coverage found — verify manually.`
+
+8. [ ] **Tests**:
+   - `reviewer_passes_planmd_only_when_tokens_in_source`: mock source workspace with matching function name, draft with only PLAN.md → verdict Pass.
+   - `reviewer_flags_planmd_only_when_tokens_missing`: same setup, token absent from source → verdict Flag.
+   - `coverage_auto_generates_plan_patch_when_missing`: draft has no PLAN.md artifact but code matches item tokens → synthetic PLAN.md patch added.
+   - `heartbeat_lines_parsed_from_stdout`: goal run stdout with `[progress] item 3: done` → workflow summary shows `3/7 items`.
+   - `apply_auto_checks_item_with_coverage_match`: item `[ ]` in draft PLAN.md, token in diff → applied version has `[x]`.
+
+9. [ ] **USAGE.md**: "Plan Auto-Correction" section — explains that `ta draft build` auto-checks items based on code coverage, agents should emit `[progress]` heartbeats, and `ta draft apply` validates consistency. Include the `[progress]` format so agents can use it.
+
+#### Version: `0.15.19-alpha.4.2`
 
 ---
 
