@@ -29,7 +29,7 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             failed_staging_retention_hours: 4,
-            max_staging_gb: 20,
+            max_staging_gb: 5,
         }
     }
 }
@@ -762,14 +762,32 @@ pub fn check_staging_cap(config: &GatewayConfig, max_staging_gb: u32) -> (u64, b
 ///
 /// If total staging exceeds `max_staging_gb`, GC the oldest failed/completed
 /// dirs to bring usage below the cap. Returns `true` if space was freed.
+///
+/// The effective cap comes from `[staging] staging_max_gb` in workflow.toml (default 5 GB,
+/// v0.15.22.1), falling back to `[gc] max_staging_gb` in daemon.toml (legacy, default 5 GB).
+/// Set either to 0 to disable that source's cap.
 pub fn enforce_staging_cap(config: &GatewayConfig) -> bool {
     let gc_cfg = load_gc_config(&config.workspace_root);
-    if gc_cfg.max_staging_gb == 0 {
+
+    // Prefer workflow.toml [staging] staging_max_gb when non-zero; fall back to gc config.
+    let wf_cfg = ta_submit::WorkflowConfig::load_or_default(
+        &config.workspace_root.join(".ta/workflow.toml"),
+    );
+    let workflow_max_gb = wf_cfg.staging.staging_max_gb;
+    let effective_max_gb: u32 = if workflow_max_gb > 0.0 {
+        workflow_max_gb.ceil() as u32
+    } else if gc_cfg.max_staging_gb > 0 {
+        gc_cfg.max_staging_gb
+    } else {
+        return false;
+    };
+
+    if effective_max_gb == 0 {
         return false;
     }
 
-    let cap_bytes = gc_cfg.max_staging_gb as u64 * 1_073_741_824;
-    let (total, exceeds) = check_staging_cap(config, gc_cfg.max_staging_gb);
+    let cap_bytes = effective_max_gb as u64 * 1_073_741_824;
+    let (total, exceeds) = check_staging_cap(config, effective_max_gb);
     if !exceeds {
         return false;
     }
@@ -934,7 +952,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = load_gc_config(dir.path());
         assert_eq!(cfg.failed_staging_retention_hours, 4);
-        assert_eq!(cfg.max_staging_gb, 20);
+        assert_eq!(cfg.max_staging_gb, 5);
     }
 
     #[test]
@@ -950,5 +968,11 @@ mod tests {
         let cfg = load_gc_config(dir.path());
         assert_eq!(cfg.failed_staging_retention_hours, 2);
         assert_eq!(cfg.max_staging_gb, 10);
+    }
+
+    #[test]
+    fn gc_config_default_max_staging_gb_is_5() {
+        let cfg = GcConfig::default();
+        assert_eq!(cfg.max_staging_gb, 5, "default cap must be 5 GB, not 20 GB");
     }
 }

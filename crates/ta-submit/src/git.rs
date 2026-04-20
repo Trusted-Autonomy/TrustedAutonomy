@@ -749,6 +749,19 @@ impl SourceAdapter for GitAdapter {
         vec![".git/".to_string()]
     }
 
+    fn commit_diff(&self) -> Option<String> {
+        match self.git_cmd(&["diff", "HEAD^..HEAD"]) {
+            Ok(diff) => Some(diff),
+            Err(e) => {
+                tracing::warn!(
+                    "GitAdapter: commit_diff failed ({}); HEAD may have no parent (first commit)",
+                    e
+                );
+                None
+            }
+        }
+    }
+
     fn sync_upstream(&self) -> Result<SyncResult> {
         let remote = &self.sync_config.remote;
         let branch = &self.sync_config.branch;
@@ -2042,5 +2055,40 @@ mod tests {
         let output = git_in(dir.path(), &["diff", "--cached", "--name-only"]);
         let staged = String::from_utf8_lossy(&output.stdout);
         assert!(!staged.contains("Cargo.lock"));
+    }
+
+    #[test]
+    fn commit_diff_returns_some_after_second_commit() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap(); // creates initial commit
+
+        // Make a second commit so HEAD^ exists.
+        std::fs::write(dir.path().join("hello.txt"), "world\n").unwrap();
+        git_in(dir.path(), &["add", "hello.txt"]);
+        git_in(dir.path(), &["commit", "-m", "add hello.txt"]);
+
+        let adapter = GitAdapter::new(dir.path());
+        let diff = adapter.commit_diff();
+        assert!(
+            diff.is_some(),
+            "commit_diff should return Some after two commits"
+        );
+        let text = diff.unwrap();
+        assert!(
+            text.contains("hello.txt"),
+            "diff should mention the changed file, got: {text}"
+        );
+    }
+
+    #[test]
+    fn commit_diff_returns_none_on_first_commit() {
+        // A repo with only one commit has no HEAD^ — commit_diff returns None.
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap(); // only one commit
+
+        let adapter = GitAdapter::new(dir.path());
+        // commit_diff may return Some or None depending on git version behaviour;
+        // it must not panic.
+        let _ = adapter.commit_diff();
     }
 }

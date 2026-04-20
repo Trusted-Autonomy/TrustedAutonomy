@@ -202,6 +202,20 @@ pub trait SourceAdapter: Send + Sync {
         vec![]
     }
 
+    /// Return the diff of the most recent commit as a UTF-8 string.
+    ///
+    /// Git: `git diff HEAD^..HEAD` — the full unified diff of HEAD vs its parent.
+    /// Perforce: `p4 describe -du <changelist>` — returns `None` when no CL ID is available.
+    /// SVN: `svn diff -c HEAD` — returns `None` on error.
+    /// External: calls the plugin's `commit_diff` hook when declared; `None` otherwise.
+    /// None adapter: always `None` (no VCS).
+    ///
+    /// Used by the post-commit secret scanner in `draft.rs`. A `None` return means
+    /// no diff is available and the scan is silently skipped.
+    fn commit_diff(&self) -> Option<String> {
+        None
+    }
+
     /// Save working state before apply operations.
     ///
     /// Git: saves the current branch name so it can be restored after commit.
@@ -431,5 +445,11 @@ mod tests {
         assert!(restored.updated);
         assert_eq!(restored.conflicts, vec!["a.rs"]);
         assert_eq!(restored.new_commits, 5);
+    }
+
+    #[test]
+    fn commit_diff_default_returns_none() {
+        let adapter = MockAdapter;
+        assert_eq!(adapter.commit_diff(), None);
     }
 }

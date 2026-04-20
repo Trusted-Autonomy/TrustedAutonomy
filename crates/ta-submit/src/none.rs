@@ -108,6 +108,12 @@ mod tests {
         assert!(result.remote_ref.starts_with("none-"));
     }
 
+    #[test]
+    fn commit_diff_always_returns_none() {
+        let adapter = NoneAdapter::new();
+        assert_eq!(adapter.commit_diff(), None);
+    }
+
     // Note: Tests for commit() and open_review() require PRPackage construction
     // which has a complex structure. These will be added as integration tests
     // that use actual PRPackage instances from ta-changeset test utilities.

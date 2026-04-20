@@ -31,19 +31,19 @@ async-stream = { workspace = true }
 sha2 = { workspace = true }
 
 # Internal crates
-ta-mcp-gateway = { path = "../ta-mcp-gateway", version = "0.15.22-alpha" }
-ta-changeset = { path = "../ta-changeset", version = "0.15.22-alpha" }
-ta-memory = { path = "../ta-memory", version = "0.15.22-alpha" }
-ta-events = { path = "../ta-events", version = "0.15.22-alpha" }
-ta-goal = { path = "../ta-goal", version = "0.15.22-alpha" }
-ta-audit = { path = "../ta-audit", version = "0.15.22-alpha" }
-ta-policy = { path = "../ta-policy", version = "0.15.22-alpha" }
-ta-connector-slack = { path = "../ta-connectors/slack", version = "0.15.22-alpha" }
-ta-connector-email = { path = "../ta-connectors/email", version = "0.15.22-alpha" }
+ta-mcp-gateway = { path = "../ta-mcp-gateway", version = "0.15.22-alpha.1" }
+ta-changeset = { path = "../ta-changeset", version = "0.15.22-alpha.1" }
+ta-memory = { path = "../ta-memory", version = "0.15.22-alpha.1" }
+ta-events = { path = "../ta-events", version = "0.15.22-alpha.1" }
+ta-goal = { path = "../ta-goal", version = "0.15.22-alpha.1" }
+ta-audit = { path = "../ta-audit", version = "0.15.22-alpha.1" }
+ta-policy = { path = "../ta-policy", version = "0.15.22-alpha.1" }
+ta-connector-slack = { path = "../ta-connectors/slack", version = "0.15.22-alpha.1" }
+ta-connector-email = { path = "../ta-connectors/email", version = "0.15.22-alpha.1" }
 reqwest = { workspace = true }
-ta-output-schema = { path = "../ta-output-schema", version = "0.15.22-alpha" }
-ta-extension = { path = "../ta-extension", version = "0.15.22-alpha" }
-ta-session = { path = "../ta-session", version = "0.15.22-alpha" }
+ta-output-schema = { path = "../ta-output-schema", version = "0.15.22-alpha.1" }
+ta-extension = { path = "../ta-extension", version = "0.15.22-alpha.1" }
+ta-session = { path = "../ta-session", version = "0.15.22-alpha.1" }
 which = "7"
 libc = { workspace = true }
 async-trait = "0.1"

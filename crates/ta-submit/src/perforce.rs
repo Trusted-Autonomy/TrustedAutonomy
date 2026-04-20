@@ -206,6 +206,17 @@ impl SourceAdapter for PerforceAdapter {
         vec![".p4config".to_string(), ".p4ignore".to_string()]
     }
 
+    fn commit_diff(&self) -> Option<String> {
+        // Get the most recent submitted changelist number.
+        let cl = match self.p4_cmd(&["changes", "-s", "submitted", "-m", "1"]) {
+            Ok(out) => out,
+            Err(_) => return None,
+        };
+        // Output format: "Change <N> on <date> by <user> '<desc>'"
+        let cl_num = cl.split_whitespace().nth(1)?;
+        self.p4_cmd(&["describe", "-du", cl_num]).ok()
+    }
+
     fn save_state(&self) -> Result<Option<SavedVcsState>> {
         // Save current client and pending changelist info.
         let client = self

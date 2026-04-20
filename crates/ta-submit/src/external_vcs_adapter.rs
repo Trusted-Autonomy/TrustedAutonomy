@@ -364,6 +364,19 @@ impl SourceAdapter for ExternalVcsAdapter {
         })
     }
 
+    fn commit_diff(&self) -> Option<String> {
+        if !self.has_capability("commit_diff") {
+            return None;
+        }
+        self.call::<serde_json::Value>("commit_diff", serde_json::Value::Object(Default::default()))
+            .ok()
+            .and_then(|v| {
+                v.get("diff")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string())
+            })
+    }
+
     fn save_state(&self) -> Result<Option<SavedVcsState>> {
         let result: SaveStateResult =
             self.call("save_state", serde_json::Value::Object(Default::default()))?;

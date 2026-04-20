@@ -159,6 +159,16 @@ impl SourceAdapter for SvnAdapter {
         vec![".svn/".to_string()]
     }
 
+    fn commit_diff(&self) -> Option<String> {
+        match self.svn_cmd(&["diff", "-c", "HEAD"]) {
+            Ok(diff) => Some(diff),
+            Err(e) => {
+                tracing::warn!("SvnAdapter: commit_diff failed ({}); scan skipped", e);
+                None
+            }
+        }
+    }
+
     fn revision_id(&self) -> Result<String> {
         // `svn info` outputs "Revision: 1234" among other fields.
         let info = self.svn_cmd(&["info"])?;

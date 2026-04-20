@@ -288,6 +288,10 @@ impl OverlayWorkspace {
 
         // Detect the best available COW file-copy strategy (APFS/Btrfs/Full).
         let copy_strategy = detect_strategy(&staging_dir);
+        // TODO(cow): Future — lazy copy-on-write via hardlinks for read-only files.
+        // Interface: `HardlinkStrategy::new(source_dir, staging_dir)` copies only
+        // modified files on first write. Requires O_NOFOLLOW-safe hardlink checks and
+        // cross-device fallback. Implement after OverlayStagingMode::Smart stabilises.
 
         tracing::info!(
             goal_id = %goal_id,

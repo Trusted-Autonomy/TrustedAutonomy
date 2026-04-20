@@ -1350,15 +1350,20 @@ pub fn execute(
     // This runs before the goal is created so we don't start work we can't store.
     super::gc::enforce_staging_cap(config);
 
-    // v0.15.15.7: Pre-run VCS cleanliness check.
-    // Warn (and optionally abort) when the source working tree has uncommitted
-    // changes. Dirty source → staging is dirty too → confusing apply-time drift.
-    // Skip silently when VCS is absent (no .git ancestor) or in headless mode with
-    // no-prompt behavior.
+    // v0.15.22.1: Auto-commit .ta/ audit trail jsonl files if dirty.
+    // These files are updated by TA itself and should not pollute the staging copy
+    // with uncommitted state. Committing them here prevents the working-tree warning.
     {
         let check_root = source
             .map(|p| p.to_owned())
             .unwrap_or_else(|| config.workspace_root.clone());
+        auto_commit_ta_jsonl(&check_root);
+
+        // v0.15.15.7: Pre-run VCS cleanliness check.
+        // Warn (and optionally abort) when the source working tree has uncommitted
+        // changes. Dirty source → staging is dirty too → confusing apply-time drift.
+        // Skip silently when VCS is absent (no .git ancestor) or in headless mode with
+        // no-prompt behavior.
         check_vcs_clean(&check_root, headless)?;
     }
 
@@ -5823,6 +5828,88 @@ fn append_progress_journal(
     }
 }
 
+/// Auto-commit dirty `.ta/` audit trail jsonl files before a goal starts (v0.15.22.1).
+///
+/// Stages and commits the three workflow audit files if any are modified or
+/// untracked, using message "chore: auto-commit workflow audit trail (pre-goal)".
+/// This prevents the "Working tree has uncommitted changes" warning that appears
+/// every time a goal starts because these files are updated by TA itself.
+///
+/// Silently skips when:
+/// - `project_root` is not inside a git repo.
+/// - git is not on PATH.
+/// - No audit files exist or have changes (most common case).
+fn auto_commit_ta_jsonl(project_root: &std::path::Path) {
+    const AUDIT_FILES: &[&str] = &[
+        ".ta/goal-audit.jsonl",
+        ".ta/plan_history.jsonl",
+        ".ta/velocity-history.jsonl",
+    ];
+
+    let run_git = |args: &[&str]| -> Option<std::process::Output> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(project_root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .ok()
+    };
+
+    // Check if this is even a git repo.
+    let check = run_git(&["rev-parse", "--is-inside-work-tree"]);
+    if check.map(|o| o.status.success()) != Some(true) {
+        return;
+    }
+
+    // Stage only known audit files that exist on disk.
+    // Using explicit paths avoids accidentally staging other .ta/ files.
+    let mut staged = 0usize;
+    for &f in AUDIT_FILES {
+        if !project_root.join(f).exists() {
+            continue;
+        }
+        if let Some(out) = run_git(&["add", f]) {
+            if out.status.success() {
+                staged += 1;
+            }
+        }
+    }
+
+    if staged == 0 {
+        return;
+    }
+
+    // Check if there's actually anything staged (git add on an unmodified
+    // tracked file is a no-op — the index doesn't change).
+    let index_status = run_git(&["diff", "--cached", "--name-only"]);
+    let has_staged = index_status
+        .map(|o| !o.stdout.is_empty() && o.status.success())
+        .unwrap_or(false);
+
+    if !has_staged {
+        return;
+    }
+
+    match run_git(&[
+        "commit",
+        "-m",
+        "chore: auto-commit workflow audit trail (pre-goal)",
+    ]) {
+        Some(out) if out.status.success() => {
+            tracing::info!(
+                "auto-committed {} workflow audit file(s) before goal start",
+                staged
+            );
+        }
+        _ => {
+            tracing::warn!(
+                "could not auto-commit .ta/ audit trail; dirty files will appear in staging"
+            );
+        }
+    }
+}
+
 // v0.15.15.7: Pre-run VCS cleanliness check.
 //
 // Runs `git status --porcelain` in `project_root`. When the tree is dirty:
@@ -7575,5 +7662,80 @@ plan_pending_window = 7
             "headless mode should proceed on dirty tree: {:?}",
             result
         );
+    }
+
+    // ── auto_commit_ta_jsonl tests (v0.15.22.1) ───────────────────────────────
+
+    fn init_test_git(dir: &std::path::Path) {
+        let run = |args: &[&str]| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .output();
+        };
+        run(&["init"]);
+        run(&["config", "user.email", "test@test.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(dir.join("README.md"), "hi").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "init"]);
+    }
+
+    fn git_log_count(dir: &std::path::Path) -> usize {
+        let out = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn auto_commit_ta_jsonl_no_op_on_clean_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        init_test_git(dir.path());
+        let before = git_log_count(dir.path());
+
+        auto_commit_ta_jsonl(dir.path()); // nothing dirty — must not commit
+
+        assert_eq!(git_log_count(dir.path()), before, "no commit on clean tree");
+    }
+
+    #[test]
+    fn auto_commit_ta_jsonl_commits_dirty_audit_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_test_git(dir.path());
+
+        // Create .ta/ and a dirty audit file.
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/goal-audit.jsonl"),
+            "{\"event\":\"test\"}\n",
+        )
+        .unwrap();
+
+        let before = git_log_count(dir.path());
+        auto_commit_ta_jsonl(dir.path());
+        let after = git_log_count(dir.path());
+
+        assert_eq!(
+            after,
+            before + 1,
+            "should have committed the dirty audit file"
+        );
+    }
+
+    #[test]
+    fn auto_commit_ta_jsonl_no_op_on_non_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // No git init — must not panic or commit.
+        auto_commit_ta_jsonl(dir.path()); // must not panic
     }
 }

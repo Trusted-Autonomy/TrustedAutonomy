@@ -2614,13 +2614,24 @@ ta gc --delete-stale
 
 If total staging size exceeds the cap, the oldest failed and completed staging directories are removed before a new goal is allowed to start. This prevents runaway accumulation even if the daemon was offline.
 
+The default cap is **5 GB**. You can configure it per-project in `.ta/workflow.toml`:
+
+```toml
+# .ta/workflow.toml
+[staging]
+staging_max_gb = 5.0    # Remove oldest completed/failed staging when total exceeds this (default: 5 GB)
+auto_clean = true       # Auto-delete staging immediately after a successful draft apply (default: true)
+```
+
+Set `staging_max_gb = 0` to disable the cap check entirely. The `auto_clean` flag ensures staging is deleted as soon as a draft is applied successfully — this is the primary defence against accumulation.
+
 #### Configuration
 
 ```toml
 # .ta/daemon.toml
 [gc]
 failed_staging_retention_hours = 4   # How long to keep failed/denied staging (default: 4)
-max_staging_gb = 20                  # Total staging cap before auto-GC before new goal (default: 20)
+max_staging_gb = 5                   # Total staging cap before auto-GC before new goal (default: 5)
 gc_interval_hours = 6                # How often the daemon runs periodic GC (default: 6)
 
 [timeouts]
@@ -2644,7 +2655,7 @@ When `ta run` is invoked in a non-interactive context (daemon-mediated, CI, `ta 
 
 **Heartbeat-based liveness** (background draft builds): When the background build is used, the subprocess writes a heartbeat file to `.ta/heartbeats/<goal-id>` every 30 seconds. The daemon watchdog checks the heartbeat mtime — if no heartbeat for `heartbeat_timeout_secs`, the build is declared stuck and the goal is marked Failed. On completion, the background process writes `.ta/heartbeats/<goal-id>.done` and the watchdog stops checking.
 
-Setting `failed_staging_retention_hours = 0` disables the failed-goal window (they are cleaned up on the next GC pass regardless of age). Setting `max_staging_gb = 0` disables the cap check.
+Setting `failed_staging_retention_hours = 0` disables the failed-goal window (they are cleaned up on the next GC pass regardless of age). Setting `max_staging_gb = 0` (in either config file) disables the cap check from that source.
 
 ### Autonomous Operations (`ta operations`)
 

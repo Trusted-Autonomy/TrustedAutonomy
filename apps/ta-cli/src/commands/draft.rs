@@ -1474,6 +1474,20 @@ fn apply_plan_patch(
             if let Some(orig) = line.strip_prefix('-') {
                 if let Some(new_line) = patch_lines.next() {
                     if let Some(repl) = new_line.strip_prefix('+') {
+                        // Status marker lines are source-authoritative — staging never
+                        // wins on them. Skip any hunk that would replace a
+                        // `<!-- status: done -->` marker with `---` (the common
+                        // regression when staging predates manual marker additions).
+                        let orig_is_done = orig.trim() == "<!-- status: done -->";
+                        let repl_is_separator = repl.trim() == "---";
+                        if orig_is_done && repl_is_separator {
+                            tracing::debug!(
+                                "plan-patch: skipping hunk that would demote \
+                                 '<!-- status: done -->' to '---' (source is authoritative)"
+                            );
+                            continue;
+                        }
+
                         if let Some(pos) = lines.iter().position(|l| l == orig) {
                             lines[pos] = repl.to_string();
                             changed = true;
@@ -7278,87 +7292,51 @@ fn apply_package(
                         // lock files or auto-stage candidates were missed.
                         check_post_commit_dirty_files(&target_dir, &workflow_config);
 
-                        // ── Commit diff secret scan (v0.15.22) ───────────────
+                        // ── Commit diff secret scan (v0.15.22 / v0.15.22.1) ─
                         // Scan the committed diff as an extra safety net. Real
                         // credentials in a commit are always [error] — the user
                         // must rotate the secret even though the commit succeeded.
-                        //
-                        // TODO(v0.15.22.1): replace this git-specific block with
-                        // `adapter.commit_diff()` so Perforce, SVN, and external
-                        // VCS adapters each provide their own diff. See PLAN.md
-                        // phase v0.15.22.1 for the full design.
-                        if adapter.name() != "git" {
+                        // Each adapter provides its own diff via commit_diff();
+                        // None means the adapter has no diff to offer (first commit,
+                        // no changelist, no VCS) and the scan is silently skipped.
+                        if let Some(diff_text) = adapter.commit_diff() {
+                            use ta_changeset::secret_scan;
+                            let findings = secret_scan::scan_for_secrets_classified(
+                                &diff_text,
+                                "<commit diff>",
+                                &target_dir,
+                            );
+                            let real_in_commit: Vec<_> = findings
+                                .iter()
+                                .filter(|f| f.classification.is_real_credential())
+                                .collect();
+                            if !real_in_commit.is_empty() {
+                                eprintln!();
+                                eprintln!(
+                                    "[error] {} real credential(s) found in the committed diff!",
+                                    real_in_commit.len()
+                                );
+                                for f in &real_in_commit {
+                                    eprintln!(
+                                        "  [error] {} at line {}: {}",
+                                        f.pattern_name, f.line_number, f.context
+                                    );
+                                }
+                                eprintln!(
+                                    "  The commit was created but the secret may now be \
+                                     in VCS history. ROTATE the credential immediately."
+                                );
+                                eprintln!(
+                                    "  Consider amending or force-pushing to remove it \
+                                     from history if the branch has not been pushed."
+                                );
+                            }
+                        } else {
                             tracing::debug!(
-                                "post-commit secret scan: skipped for non-git adapter '{}'",
+                                "post-commit secret scan: no diff from adapter '{}'; scan skipped",
                                 adapter.name()
                             );
-                        } else {
-                            match std::process::Command::new("git")
-                                .args(["diff", "HEAD^..HEAD"])
-                                .current_dir(&target_dir)
-                                .output()
-                            {
-                                Ok(diff_output) if diff_output.status.success() => {
-                                    match String::from_utf8(diff_output.stdout) {
-                                        Ok(diff_text) => {
-                                            use ta_changeset::secret_scan;
-                                            let findings = secret_scan::scan_for_secrets_classified(
-                                                &diff_text,
-                                                "<commit diff>",
-                                                &target_dir,
-                                            );
-                                            let real_in_commit: Vec<_> = findings
-                                                .iter()
-                                                .filter(|f| f.classification.is_real_credential())
-                                                .collect();
-                                            if !real_in_commit.is_empty() {
-                                                eprintln!();
-                                                eprintln!(
-                                                "[error] {} real credential(s) found in the committed diff!",
-                                                real_in_commit.len()
-                                            );
-                                                for f in &real_in_commit {
-                                                    eprintln!(
-                                                        "  [error] {} at line {}: {}",
-                                                        f.pattern_name, f.line_number, f.context
-                                                    );
-                                                }
-                                                eprintln!(
-                                                "  The commit was created but the secret may now be \
-                                                 in VCS history. ROTATE the credential immediately."
-                                            );
-                                                eprintln!(
-                                                "  Consider amending or force-pushing to remove it \
-                                                 from history if the branch has not been pushed."
-                                            );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                            "post-commit secret scan: commit diff is not valid UTF-8 \
-                                             ({}); scan skipped",
-                                            e
-                                        );
-                                        }
-                                    }
-                                }
-                                Ok(diff_output) => {
-                                    tracing::warn!(
-                                        "post-commit secret scan: git diff HEAD^..HEAD failed \
-                                     (exit {:?}); scan skipped — check that HEAD^ exists \
-                                     (first commit has no parent)",
-                                        diff_output.status.code()
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "post-commit secret scan: could not run git diff — {}; \
-                                     scan skipped",
-                                        e
-                                    );
-                                }
-                            }
-                        } // end else adapter.name() == "git"
+                        }
                     }
                     Err(e) => {
                         eprintln!("Stage/commit failed: {}", e);
@@ -15652,5 +15630,69 @@ fn run() {
     fn safe_rel_path_rejects_absolute_path_in_uri() {
         let p = safe_rel_path("fs://workspace//etc/passwd");
         assert!(p.is_none(), "root-dir component must be rejected");
+    }
+
+    // ── plan-patch marker regression tests (v0.15.22.1) ─────────────────────
+
+    fn make_review_report(patch: Option<String>) -> ta_changeset::review_report::ReviewReport {
+        ta_changeset::review_report::ReviewReport {
+            draft_id: uuid::Uuid::new_v4(),
+            generated_at: chrono::Utc::now(),
+            silent_fixes: vec![],
+            agent_additions: vec![],
+            conflicts: vec![],
+            coverage_gaps: vec![],
+            plan_patch: patch,
+            source_verified: false,
+            prior_denial: false,
+        }
+    }
+
+    #[test]
+    fn plan_patch_skips_hunk_demoting_done_marker_to_separator() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let plan_path = dir.path().join("PLAN.md");
+
+        // Source PLAN.md already has <!-- status: done -->
+        std::fs::write(
+            &plan_path,
+            "### Phase v1.0\n<!-- status: done -->\n\nSome content.\n",
+        )
+        .unwrap();
+
+        // Patch tries to replace `<!-- status: done -->` with `---` (the regression).
+        let patch = "--- a/PLAN.md\n+++ b/PLAN.md\n-<!-- status: done -->\n+---\n";
+        let report = make_review_report(Some(patch.to_string()));
+
+        apply_plan_patch(&plan_path, &report).unwrap();
+
+        let after = std::fs::read_to_string(&plan_path).unwrap();
+        assert!(
+            after.contains("<!-- status: done -->"),
+            "status marker must survive: got {after:?}"
+        );
+    }
+
+    #[test]
+    fn plan_patch_applies_normal_hunks() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let plan_path = dir.path().join("PLAN.md");
+
+        std::fs::write(&plan_path, "### Phase v1.0\n<!-- status: pending -->\n").unwrap();
+
+        // Normal hunk: change pending → in_progress (not a status-marker regression).
+        let patch =
+            "--- a/PLAN.md\n+++ b/PLAN.md\n-<!-- status: pending -->\n+<!-- status: in_progress -->\n";
+        let report = make_review_report(Some(patch.to_string()));
+
+        apply_plan_patch(&plan_path, &report).unwrap();
+
+        let after = std::fs::read_to_string(&plan_path).unwrap();
+        assert!(
+            after.contains("<!-- status: in_progress -->"),
+            "normal marker update must be applied: got {after:?}"
+        );
     }
 }

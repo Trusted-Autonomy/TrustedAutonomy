@@ -1801,6 +1801,11 @@ pub struct StagingConfig {
     /// Staging strategy for large workspaces (v0.13.13). Default: Full.
     #[serde(default)]
     pub strategy: StagingStrategy,
+    /// Maximum total staging disk usage in GB before pre-goal GC (v0.15.22.1).
+    /// When total staging exceeds this value, oldest completed/failed staging dirs
+    /// are removed before a new goal is created. Set to 0 to disable. Default: 5.
+    #[serde(default = "default_staging_max_gb")]
+    pub staging_max_gb: f64,
 }
 
 impl Default for StagingConfig {
@@ -1809,6 +1814,7 @@ impl Default for StagingConfig {
             auto_clean: default_auto_clean(),
             min_disk_mb: default_min_disk_mb(),
             strategy: StagingStrategy::Full,
+            staging_max_gb: default_staging_max_gb(),
         }
     }
 }
@@ -1818,6 +1824,9 @@ fn default_auto_clean() -> bool {
 }
 fn default_min_disk_mb() -> u64 {
     2048
+}
+fn default_staging_max_gb() -> f64 {
+    5.0
 }
 
 /// Check available disk space in MB.
