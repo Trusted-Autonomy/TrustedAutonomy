@@ -261,6 +261,13 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
                     name
                 )
             })?;
+            // Parse --param key=value pairs into a map for governed workflow stages.
+            let mut param_map = std::collections::HashMap::new();
+            for pair in params.iter() {
+                if let Some((k, v)) = pair.split_once('=') {
+                    param_map.insert(k.to_string(), v.to_string());
+                }
+            }
             let opts = RunOptions {
                 workspace_root: &config.workspace_root,
                 workflow_name: name,
@@ -270,6 +277,7 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
                 agent,
                 plan_phase: phase.as_deref(),
                 depth: 0,
+                params: param_map,
             };
             governed_workflow::run_governed_workflow(&opts)
         }

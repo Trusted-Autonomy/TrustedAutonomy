@@ -1027,6 +1027,9 @@ pub struct RunOptions<'a> {
     pub plan_phase: Option<&'a str>,
     /// Sub-workflow recursion depth. 0 = top-level. Hard limit: 5 (v0.15.13).
     pub depth: u32,
+    /// Resolved `--param key=value` pairs from the CLI (v0.15.23+).
+    /// Used to thread template params (e.g. phase_filter) into stage executors.
+    pub params: std::collections::HashMap<String, String>,
 }
 
 // ── Template interpolation & condition evaluation (v0.15.13) ─────────────────
@@ -1277,15 +1280,29 @@ pub fn run_governed_workflow(opts: &RunOptions) -> anyhow::Result<()> {
         // For loop workflows: call `ta plan next` once to show what would run first.
         if has_goto {
             println!();
-            println!("Next phase preview (calls `ta plan next`):");
+            // Resolve phase_filter from stage defs or top-level params.
+            let dry_run_filter = def
+                .stages
+                .iter()
+                .find_map(|s| s.phase_filter.as_deref())
+                .or_else(|| opts.params.get("phase_filter").map(|s| s.as_str()));
+            let filter_msg = dry_run_filter
+                .map(|f| format!(" --filter {}", f))
+                .unwrap_or_default();
+            println!("Next phase preview (calls `ta plan next{}`):", filter_msg);
+            let mut preview_args = vec![
+                "--project-root".to_string(),
+                opts.workspace_root.to_string_lossy().to_string(),
+                "plan".to_string(),
+                "next".to_string(),
+                "--no-version-check".to_string(),
+            ];
+            if let Some(f) = dry_run_filter {
+                preview_args.push("--filter".to_string());
+                preview_args.push(f.to_string());
+            }
             let output = std::process::Command::new("ta")
-                .args([
-                    "--project-root",
-                    &opts.workspace_root.to_string_lossy(),
-                    "plan",
-                    "next",
-                    "--no-version-check",
-                ])
+                .args(&preview_args)
                 .output();
             match output {
                 Ok(o) if o.status.success() => {
@@ -1693,9 +1710,13 @@ fn stage_plan_next(
     opts: &RunOptions,
 ) -> anyhow::Result<Option<String>> {
     let stage_name = &stage_def.name;
-    let filter_msg = stage_def
+    // Resolve phase_filter: stage YAML field takes priority; fall back to
+    // --param phase_filter=<value> passed on the CLI (v0.15.23+).
+    let effective_filter = stage_def
         .phase_filter
         .as_deref()
+        .or_else(|| opts.params.get("phase_filter").map(|s| s.as_str()));
+    let filter_msg = effective_filter
         .map(|f| format!(" --filter {}", f))
         .unwrap_or_default();
     println!("  Running: ta plan next{}", filter_msg);
@@ -1707,9 +1728,9 @@ fn stage_plan_next(
         "next".to_string(),
         "--no-version-check".to_string(),
     ];
-    if let Some(ref prefix) = stage_def.phase_filter {
+    if let Some(prefix) = effective_filter {
         args.push("--filter".to_string());
-        args.push(prefix.clone());
+        args.push(prefix.to_string());
     }
 
     let output = std::process::Command::new("ta")
@@ -2520,6 +2541,7 @@ fn stage_run_subworkflow(
         agent: opts.agent,
         plan_phase: child_phase.as_deref(),
         depth: opts.depth + 1,
+        params: opts.params.clone(),
     };
 
     // We need to capture the child run ID. Run the child workflow, then find
@@ -4071,6 +4093,7 @@ mod tests {
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
         // dry_run=true validates the stage graph without executing agents.
         let result = run_governed_workflow(&opts);
@@ -4099,6 +4122,7 @@ mod tests {
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
         // dry_run should succeed and print the graph.
         run_governed_workflow(&opts).unwrap();
@@ -4119,6 +4143,7 @@ mod tests {
             agent: "claude-code",
             plan_phase: Some("v0.4.0"),
             depth: 0,
+            params: Default::default(),
         };
         // plan_phase is visible on the options; the dry-run path would print it.
         assert_eq!(opts.plan_phase, Some("v0.4.0"));
@@ -4138,6 +4163,7 @@ mod tests {
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
         assert!(opts.plan_phase.is_none());
     }
@@ -4555,6 +4581,7 @@ kind = "plan_next"
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
         // Should succeed (dry-run doesn't execute anything).
         run_governed_workflow(&opts).unwrap();
@@ -4694,6 +4721,7 @@ kind = "static_analysis"
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
 
         let result = stage_aggregate_draft(&mut run, &stage_def, &opts).unwrap();
@@ -4756,6 +4784,7 @@ kind = "static_analysis"
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
 
         stage_aggregate_draft(&mut run, &stage_def, &opts).unwrap();
@@ -5001,6 +5030,7 @@ kind = "apply_draft"
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
         let result = stage_consensus(&mut run, &stage_def, &opts, &config).unwrap();
         assert!(result.is_some());
@@ -5040,6 +5070,7 @@ kind = "apply_draft"
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
         let err = stage_consensus(&mut run, &stage_def, &opts, &config).unwrap_err();
         assert!(err.to_string().contains("BLOCKED"));
@@ -5062,6 +5093,7 @@ kind = "apply_draft"
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
         // With 1 timed-out reviewer (score=0.0), proceed=false → BLOCKED
         let err = stage_consensus(&mut run, &stage_def, &opts, &config).unwrap_err();
@@ -5243,6 +5275,7 @@ stages:
             agent: "claude-code",
             plan_phase: None,
             depth: 0,
+            params: Default::default(),
         };
         // Dry-run should succeed without invoking any external commands.
         run_governed_workflow(&opts).unwrap();
