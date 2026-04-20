@@ -7639,7 +7639,7 @@ All three launchers follow the same logic:
 
 ---
 ### v0.15.22.1 — VCS-Agnostic Commit Diff Scan, Apply Loop Reliability III & Staging GC
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Complete the VCS-agnostic post-commit scan from v0.15.22 and fix three persistent apply-loop reliability issues: (1) `.ta/` jsonl files dirty at goal start, (2) staging directory accumulation (observed at 47+ GB), (3) plan-patch non-idempotent marker regression on every draft apply.
 

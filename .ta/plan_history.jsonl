@@ -268,3 +268,4 @@
 {"new_status":"pending","note":"phase reset to pending — goal denied","old_status":"in_progress","phase_id":"v0.15.22","timestamp":"2026-04-20T03:48:26.053012+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.22","timestamp":"2026-04-20T03:52:16.582475+00:00"}
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.15.22","timestamp":"2026-04-20T04:24:35.275260+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.22.1","timestamp":"2026-04-20T05:52:33.479102+00:00"}
