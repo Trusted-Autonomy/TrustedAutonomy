@@ -140,6 +140,20 @@ fn agent_config_to_json(config: &DaemonConfig) -> Value {
     })
 }
 
+/// Convert the `shell.advisor` section of DaemonConfig to a JSON Value.
+fn advisor_config_to_json(config: &DaemonConfig) -> Value {
+    let security = &config.shell.advisor.security;
+    let description = match security.as_str() {
+        "auto" => "Advisor may fire goals automatically at ≥80% intent confidence.",
+        "suggest" => "Advisor presents goal commands as clickable buttons for human confirmation.",
+        _ => "Advisor answers questions and shows commands as copyable text only.",
+    };
+    json!({
+        "security": security,
+        "description": description,
+    })
+}
+
 /// Convert the `vcs` (routing) section of DaemonConfig to a JSON Value.
 fn vcs_config_to_json(config: &DaemonConfig) -> Value {
     json!({
@@ -191,6 +205,7 @@ pub async fn get_settings(
         "vcs" => vcs_config_to_json(&config),
         "workflow" => workflow_config_to_json(&config),
         "notifications" => notifications_config_to_json(&config),
+        "advisor" => advisor_config_to_json(&config),
         "policy" => json!({
             "file_read": true,
             "file_write": true,
@@ -214,7 +229,7 @@ pub async fn get_settings(
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({
-                    "error": format!("Unknown settings section: '{}'. Valid sections: agent, vcs, workflow, policy, constitution, notifications, memory.", section)
+                    "error": format!("Unknown settings section: '{}'. Valid sections: agent, advisor, vcs, workflow, policy, constitution, notifications, memory.", section)
                 })),
             )
                 .into_response();
@@ -302,6 +317,37 @@ pub async fn put_settings(
             let updated = workflow_config_to_json(&config);
             Json(json!({ "section": section, "data": updated })).into_response()
         }
+        "advisor" => {
+            let mut config = read_daemon_config(&state.project_root);
+            if let Some(v) = data.get("security").and_then(|v| v.as_str()) {
+                match v {
+                    "read_only" | "suggest" | "auto" => {
+                        config.shell.advisor.security = v.to_string();
+                    }
+                    other => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": format!(
+                                    "Invalid advisor security level '{}'. Valid values: read_only, suggest, auto.",
+                                    other
+                                )
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            if let Err(e) = write_daemon_config(&state.project_root, &config) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e })),
+                )
+                    .into_response();
+            }
+            let updated = advisor_config_to_json(&config);
+            Json(json!({ "section": section, "data": updated })).into_response()
+        }
         "policy" | "constitution" | "memory" => {
             // These sections don't map directly to daemon.toml; accept and echo back.
             Json(json!({ "section": section, "data": data })).into_response()
@@ -309,7 +355,7 @@ pub async fn put_settings(
         _ => (
             StatusCode::NOT_FOUND,
             Json(json!({
-                "error": format!("Unknown settings section: '{}'. Valid sections: agent, vcs, workflow, policy, constitution, notifications, memory.", section)
+                "error": format!("Unknown settings section: '{}'. Valid sections: agent, advisor, vcs, workflow, policy, constitution, notifications, memory.", section)
             })),
         )
             .into_response(),
@@ -529,5 +575,36 @@ mod tests {
         let response = put_settings(State(state), Path("agent".to_string()), Json(body)).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_settings_advisor_returns_json() {
+        let dir = tempdir().unwrap();
+        let state = make_state(dir.path().to_path_buf());
+        let response = get_settings(State(state), Path("advisor".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn put_settings_advisor_valid_security_level() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        let state = make_state(dir.path().to_path_buf());
+        let body = json!({ "data": { "security": "suggest" } });
+        let response = put_settings(State(state), Path("advisor".to_string()), Json(body)).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn put_settings_advisor_invalid_security_level_rejected() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        let state = make_state(dir.path().to_path_buf());
+        let body = json!({ "data": { "security": "turbo_mode" } });
+        let response = put_settings(State(state), Path("advisor".to_string()), Json(body)).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

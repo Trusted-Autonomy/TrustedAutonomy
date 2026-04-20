@@ -10,6 +10,7 @@
 //   /api/drafts   — draft review (existing, from web.rs)
 //   /api/memory   — memory store (existing, from web.rs)
 
+pub mod advisor;
 pub mod agent;
 pub mod auth;
 pub mod cmd;
@@ -395,6 +396,10 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         // Velocity stats API (v0.15.14.2).
         .route("/api/stats/velocity", get(stats::velocity_aggregate))
         .route("/api/stats/velocity-detail", get(stats::velocity_detail))
+        // Studio Advisor API (v0.15.21).
+        .route("/api/advisor/message", post(advisor::handle_message))
+        .route("/api/advisor/tools", get(advisor::get_tools))
+        .route("/api/advisor/config", get(advisor::get_config))
         // Daemon lifecycle routes (v0.10.10).
         .route("/api/shutdown", post(shutdown_daemon))
         // Auth middleware on all API routes.

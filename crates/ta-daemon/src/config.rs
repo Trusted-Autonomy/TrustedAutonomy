@@ -299,6 +299,43 @@ pub struct ShellQaConfig {
     /// Web shell UI configuration (v0.11.7).
     #[serde(default)]
     pub ui: ShellUiConfig,
+    /// Studio Advisor configuration (v0.15.21).
+    #[serde(default)]
+    pub advisor: AdvisorConfig,
+}
+
+/// Studio Advisor configuration (v0.15.21).
+///
+/// Controls the advisor agent in TA Studio. The advisor replaces the QA agent
+/// pattern with an opinionated, human-side assistant that can proactively flag
+/// concerns and (depending on `security`) take limited autonomous actions.
+///
+/// ```toml
+/// [shell.advisor]
+/// security = "read_only"  # "read_only" (default) | "suggest" | "auto"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdvisorConfig {
+    /// Security level controlling autonomous actions.
+    ///
+    /// - `read_only`: advisor answers questions only, shows commands as text
+    /// - `suggest`: presents `ta run "..."` as a clickable button in Studio
+    /// - `auto`: fires `ta run` directly at ≥80% intent confidence
+    #[serde(default = "default_advisor_security")]
+    pub security: String,
+}
+
+fn default_advisor_security() -> String {
+    "read_only".to_string()
+}
+
+impl Default for AdvisorConfig {
+    fn default() -> Self {
+        Self {
+            security: default_advisor_security(),
+        }
+    }
 }
 
 /// Web shell UI configuration (v0.11.7).
@@ -1914,6 +1951,32 @@ mod tests {
         assert!(config.shell.qa_agent.auto_start); // default
         assert_eq!(config.shell.qa_agent.agent, "claude-code"); // default
         assert_eq!(config.shell.qa_agent.idle_timeout_secs, 120); // overridden
+    }
+
+    #[test]
+    fn advisor_config_defaults() {
+        let config = AdvisorConfig::default();
+        assert_eq!(config.security, "read_only");
+    }
+
+    #[test]
+    fn advisor_config_roundtrip() {
+        let toml_str = r#"
+            [shell.advisor]
+            security = "suggest"
+        "#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.shell.advisor.security, "suggest");
+    }
+
+    #[test]
+    fn advisor_config_defaults_when_absent() {
+        let toml_str = r#"
+            [shell.qa_agent]
+            idle_timeout_secs = 120
+        "#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.shell.advisor.security, "read_only");
     }
 
     #[test]

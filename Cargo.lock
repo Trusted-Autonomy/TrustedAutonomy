@@ -3642,6 +3642,7 @@ dependencies = [
  "ta-memory",
  "ta-output-schema",
  "ta-policy",
+ "ta-session",
  "tempfile",
  "tokio",
  "tokio-rustls 0.26.4",
