@@ -37,6 +37,10 @@ pub struct ReviewReport {
     /// was not performed.
     #[serde(default)]
     pub source_verified: bool,
+    /// When true, this draft was previously denied and is being re-reviewed.
+    /// Functional coverage gaps are downgraded from "recommend deny" to a warning.
+    #[serde(default)]
+    pub prior_denial: bool,
 }
 
 impl ReviewReport {
@@ -192,6 +196,18 @@ pub fn render_review_verdict_and_action(
             out.push_str("  Recommended action:\n");
             out.push_str(&format!("    {}\n", apply_cmd));
             out.push_str(&format!("    {}\n", followup_cmd));
+        } else if report.prior_denial {
+            // Previously denied and re-submitted: downgrade from "deny" to warning only.
+            out.push_str(
+                "  Unchecked items include functional code — previously denied and re-submitted.\n",
+            );
+            out.push_str("  Previously denied and re-submitted — flagging as warning only.\n");
+            out.push_str(
+                "  Reviewer: verify re-submission addresses prior denial before applying.\n",
+            );
+            out.push_str("  Recommended action:\n");
+            out.push_str(&format!("    {}\n", apply_cmd));
+            out.push_str(&format!("    {}\n", followup_cmd));
         } else {
             let first_excerpt = &report.coverage_gaps[0].text_excerpt;
             let summary: String = first_excerpt.chars().take(60).collect();
@@ -323,6 +339,7 @@ mod tests {
                 .collect(),
             plan_patch: None,
             source_verified: false,
+            prior_denial: false,
         }
     }
 
@@ -336,6 +353,7 @@ mod tests {
             coverage_gaps: vec![],
             plan_patch: None,
             source_verified: false,
+            prior_denial: false,
         }
     }
 
@@ -520,5 +538,74 @@ mod tests {
             "fs://workspace/src/foo.rs"
         ]));
         assert!(!is_planmd_only_draft(&[]));
+    }
+
+    // ── v0.15.19.4.3: Prior-denial history tests ─────────────────────────────
+
+    #[test]
+    fn reviewer_downgrade_flag_to_warn_on_prior_denial() {
+        let mut report = make_report_with_gaps(vec![(
+            "v0.15.19.4.3",
+            "implement X feature in governed_workflow.rs",
+        )]);
+        report.prior_denial = true;
+        let output = render_review_verdict_and_action(
+            &report,
+            Some("v0.15.19.4.3"),
+            Some("abc12345"),
+            Some("My Goal"),
+            false,
+        );
+        assert!(
+            output.contains("[WARN]"),
+            "should be warn verdict: {}",
+            output
+        );
+        assert!(
+            !output.contains("ta draft deny"),
+            "should NOT recommend deny on prior denial: {}",
+            output
+        );
+        assert!(
+            output.contains("Previously denied and re-submitted"),
+            "should note prior denial: {}",
+            output
+        );
+        assert!(
+            output.contains("ta draft apply abc12345"),
+            "should recommend apply: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn reviewer_flag_unchanged_with_no_prior_denial() {
+        let report = make_report_with_gaps(vec![(
+            "v0.15.19.4.3",
+            "implement X feature in governed_workflow.rs",
+        )]);
+        // prior_denial defaults to false
+        let output = render_review_verdict_and_action(
+            &report,
+            Some("v0.15.19.4.3"),
+            Some("abc12345"),
+            Some("My Goal"),
+            false,
+        );
+        assert!(
+            output.contains("[WARN]"),
+            "should be warn verdict: {}",
+            output
+        );
+        assert!(
+            output.contains("ta draft deny"),
+            "should recommend deny when no prior denial: {}",
+            output
+        );
+        assert!(
+            !output.contains("Previously denied"),
+            "should not mention prior denial: {}",
+            output
+        );
     }
 }

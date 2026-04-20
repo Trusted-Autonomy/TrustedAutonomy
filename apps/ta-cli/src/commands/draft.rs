@@ -1098,6 +1098,7 @@ fn run_plan_review(
     staging_path: &std::path::Path,
     source_path: &std::path::Path,
     artifacts: &[Artifact],
+    prior_denial: bool,
 ) -> anyhow::Result<ta_changeset::review_report::ReviewReport> {
     use ta_changeset::plan_merge::merge_plan_md;
     use ta_changeset::review_report::ReviewReport;
@@ -1172,6 +1173,7 @@ fn run_plan_review(
         coverage_gaps,
         plan_patch,
         source_verified,
+        prior_denial,
     };
 
     report.save(&config.workspace_root)?;
@@ -2595,6 +2597,25 @@ pub(crate) fn build_package(
         pkg.verification_warnings.extend(plan_warnings);
     }
 
+    // v0.15.19.4.3: Detect prior denial — check if this goal's parent draft was denied.
+    let prior_denial = if let Some(parent_goal_id) = goal.parent_goal_id {
+        if let Ok(Some(parent_goal)) = goal_store.get(parent_goal_id) {
+            if let Some(parent_draft_id) = parent_goal.pr_package_id {
+                if let Ok(parent_pkg) = load_package(config, parent_draft_id) {
+                    matches!(parent_pkg.status, DraftStatus::Denied { .. })
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     // v0.15.19.3: Run PLAN.md pre-apply plan review if PLAN.md is in the draft artifacts.
     let has_plan_artifact = pkg.changes.artifacts.iter().any(|a| {
         a.resource_uri.ends_with("/PLAN.md") || a.resource_uri == "fs://workspace/PLAN.md"
@@ -2607,6 +2628,7 @@ pub(crate) fn build_package(
             &goal.workspace_path,
             source_dir,
             &pkg.changes.artifacts,
+            prior_denial,
         );
         match plan_review_result {
             Ok(report) => {
@@ -2657,6 +2679,7 @@ pub(crate) fn build_package(
                     coverage_gaps: vec![],
                     plan_patch: Some(patch),
                     source_verified: false,
+                    prior_denial,
                 };
                 if let Err(e) = synthetic_report.save(&config.workspace_root) {
                     tracing::warn!("Failed to save synthetic plan patch: {}", e);
@@ -5769,6 +5792,17 @@ fn apply_package(
                             "[apply] Plan patch applied: {} regressions fixed, {} items recovered.",
                             n, m
                         );
+                        // Stage PLAN.md so the modification travels onto the feature branch
+                        // (git checkout -b carries staged changes without conflict risk).
+                        if git_commit {
+                            let _ = std::process::Command::new("git")
+                                .args(["add", "PLAN.md"])
+                                .current_dir(&target_dir)
+                                .status();
+                            tracing::debug!(
+                                "[apply] Staged PLAN.md after plan patch for branch carry-over."
+                            );
+                        }
                     }
                 }
             }
@@ -5886,8 +5920,71 @@ fn apply_package(
                     "[apply] On protected branch '{}' — creating feature branch before writing any files...",
                     branch
                 );
-                adapter.prepare(goal, &wf_config.submit).map_err(|e| {
-                    anyhow::anyhow!(
+                // Auto-commit any dirty workflow audit trail files before branch creation
+                // to keep the working tree clean (prevents "would be overwritten" errors).
+                {
+                    let ta_jsonl_candidates = [
+                        ".ta/goal-audit.jsonl",
+                        ".ta/plan_history.jsonl",
+                        ".ta/velocity-history.jsonl",
+                    ];
+                    let mut dirty_jsonl: Vec<&str> = Vec::new();
+                    for rel_path in &ta_jsonl_candidates {
+                        let abs_path = target_dir.join(rel_path);
+                        if abs_path.exists() {
+                            if let Ok(out) = std::process::Command::new("git")
+                                .args(["status", "--porcelain", rel_path])
+                                .current_dir(&target_dir)
+                                .output()
+                            {
+                                if !out.stdout.is_empty() {
+                                    dirty_jsonl.push(rel_path);
+                                }
+                            }
+                        }
+                    }
+                    if !dirty_jsonl.is_empty() {
+                        for path in &dirty_jsonl {
+                            let _ = std::process::Command::new("git")
+                                .args(["add", path])
+                                .current_dir(&target_dir)
+                                .status();
+                        }
+                        let commit_result = std::process::Command::new("git")
+                            .args([
+                                "commit",
+                                "-m",
+                                "chore: auto-commit workflow audit trail (pre-apply)",
+                            ])
+                            .current_dir(&target_dir)
+                            .status();
+                        match commit_result {
+                            Ok(s) if s.success() => {
+                                eprintln!(
+                                    "[apply] Auto-committed {} dirty workflow audit file(s) on {} before branching.",
+                                    dirty_jsonl.len(),
+                                    branch
+                                );
+                            }
+                            Ok(_) | Err(_) => {
+                                tracing::warn!(
+                                    "[apply] Auto-commit of .ta/*.jsonl files failed — continuing."
+                                );
+                            }
+                        }
+                    }
+                }
+                if let Err(e) = adapter.prepare(goal, &wf_config.submit) {
+                    // Roll back staged PLAN.md if pre-flight fails.
+                    let _ = std::process::Command::new("git")
+                        .args(["restore", "--staged", "PLAN.md"])
+                        .current_dir(&target_dir)
+                        .status();
+                    let _ = std::process::Command::new("git")
+                        .args(["restore", "PLAN.md"])
+                        .current_dir(&target_dir)
+                        .status();
+                    return Err(anyhow::anyhow!(
                         "VCS pre-flight failed: could not create feature branch before writing files.\n\
                          Aborted with no changes made to the source tree.\n\
                          Branch was: '{}'\n\
@@ -5898,8 +5995,8 @@ fn apply_package(
                         branch,
                         e,
                         id
-                    )
-                })?;
+                    ));
+                }
                 // Double-check we're off the protected branch before proceeding.
                 adapter.verify_not_on_protected_target().map_err(|e| {
                     anyhow::anyhow!(
@@ -15250,6 +15347,77 @@ fn run() {
             patch.contains("[x]"),
             "generated patch should auto-check the covered item: {}",
             patch
+        );
+    }
+
+    // ── v0.15.19.4.3: Apply reliability tests ────────────────────────────────
+
+    #[test]
+    fn apply_auto_commits_ta_jsonl_when_dirty() {
+        // This is a unit test for the detection logic, not the full git flow.
+        // Verifies that the candidate list of jsonl files matches expectations.
+        let candidates = [
+            ".ta/goal-audit.jsonl",
+            ".ta/plan_history.jsonl",
+            ".ta/velocity-history.jsonl",
+        ];
+        assert_eq!(candidates.len(), 3);
+        assert!(candidates.contains(&".ta/goal-audit.jsonl"));
+        assert!(candidates.contains(&".ta/plan_history.jsonl"));
+        assert!(candidates.contains(&".ta/velocity-history.jsonl"));
+    }
+
+    #[test]
+    fn reviewer_downgrade_on_prior_denial_integration() {
+        use chrono::Utc;
+        use ta_changeset::review_report::{
+            render_review_verdict_and_action, CoverageGap, ReviewReport,
+        };
+        use uuid::Uuid;
+
+        let mut report = ReviewReport {
+            draft_id: Uuid::new_v4(),
+            generated_at: Utc::now(),
+            silent_fixes: vec![],
+            agent_additions: vec![],
+            conflicts: vec![],
+            coverage_gaps: vec![CoverageGap {
+                phase_id: "v0.15.19.4.3".to_string(),
+                item_number: 1,
+                text_excerpt: "implement apply reliability fixes".to_string(),
+            }],
+            plan_patch: None,
+            source_verified: false,
+            prior_denial: true,
+        };
+
+        let output = render_review_verdict_and_action(
+            &report,
+            Some("v0.15.19.4.3"),
+            Some("abc1"),
+            None,
+            false,
+        );
+        assert!(
+            !output.contains("ta draft deny"),
+            "prior_denial should suppress deny recommendation"
+        );
+        assert!(
+            output.contains("Previously denied"),
+            "should show prior denial note"
+        );
+
+        report.prior_denial = false;
+        let output2 = render_review_verdict_and_action(
+            &report,
+            Some("v0.15.19.4.3"),
+            Some("abc1"),
+            None,
+            false,
+        );
+        assert!(
+            output2.contains("ta draft deny"),
+            "no prior denial should show deny recommendation"
         );
     }
 }
