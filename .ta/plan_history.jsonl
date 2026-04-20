@@ -271,4 +271,7 @@
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.22.1","timestamp":"2026-04-20T05:52:33.479102+00:00"}
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.15.22.1","timestamp":"2026-04-20T06:17:15.989161+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.23","timestamp":"2026-04-20T14:52:20.968753+00:00"}
+<<<<<<< HEAD
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.15.23","timestamp":"2026-04-20T15:39:48.819798+00:00"}
+=======
+>>>>>>> ea4733ced1 (chore: auto-commit workflow audit trail (pre-apply))
