@@ -1872,8 +1872,9 @@ fn plan_create(
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max - 3])
+    if s.chars().count() > max {
+        let cut: String = s.chars().take(max - 3).collect();
+        format!("{}...", cut)
     } else {
         s.to_string()
     }
