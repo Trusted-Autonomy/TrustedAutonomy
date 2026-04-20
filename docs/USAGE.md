@@ -3988,11 +3988,41 @@ level = "mid"
 extra_forbidden_tools = ["Bash(*aws*)", "Bash(*gcloud*)"]
 ```
 
-**Secret scanning** runs over all staged artifact text content at `ta draft apply` time. It detects AWS access keys, GitHub PATs, private key PEM headers, generic API keys, and secret assignments.
+**Secret Scanning**
 
-- `warn` (default for `low`/`mid`): prints findings, continues.
-- `block` (default for `high`): prints findings, aborts apply.
+The scanner runs over all staged artifact text content at `ta draft apply` time and classifies each finding into one of three levels:
+
+| Level | Label | Description | Action |
+|-------|-------|-------------|--------|
+| `RealCredential` | `[error]` | Literal token with known-service prefix (Slack `xoxb-*`, Anthropic `sk-ant-*`, GitHub `ghp_*`, Discord, AWS) or high Shannon entropy | Always shown; blocks apply at `security.level = "high"` |
+| `Ambiguous` | `[warn]` | Matches a secret pattern but evidence is insufficient to confirm | Always shown; never blocks |
+| `DocExample` | `[info]` | Recognized documentation placeholder (`your_token_here`, `<your_token>`, `...`) | Suppressed by default — never blocks |
+
+This means `export TA_SLACK_BOT_TOKEN=your_token_here` in `USAGE.md` is silently ignored, while a real `xoxb-1234-...` token is flagged as `[error]`.
+
+**Scan modes** (set via `[security] level` or override):
+
+- `warn` (default for `low`/`mid`): prints real and ambiguous findings, continues.
+- `block` (default for `high`): prints findings, aborts apply when real credentials are detected.
 - `off`: disables scanning entirely — must be set explicitly.
+
+**`real_credential_action`** — fine-grained control over real credential handling:
+
+```toml
+[security]
+level = "mid"
+real_credential_action = "error"   # "error" (default) | "warn" | "block"
+```
+
+- `"error"` (default): always shown as `[error]`; blocks apply only when `level = "high"`.
+- `"warn"`: always shown as `[warn]`; never blocks regardless of level.
+- `"block"`: always blocks apply regardless of security level.
+
+**What to do when a real credential is flagged:**
+
+1. Remove the credential from the staged files.
+2. **Rotate the secret** — the credential may have been in a diff or log. Rotation is always required for real credentials, even if apply was not blocked.
+3. Or add the path to `.ta-secret-ignore` if the match is a known false positive (e.g., a test fixture with a synthetic token).
 
 To exclude a path from scanning, add it to `.ta-secret-ignore` (one glob pattern per line, same syntax as `.taignore`):
 
@@ -4000,6 +4030,8 @@ To exclude a path from scanning, add it to `.ta-secret-ignore` (one glob pattern
 fixtures/**
 tests/data/*.env
 ```
+
+When `ta draft apply --git-commit` is used, the scanner also checks the committed diff after the commit is created. If real credentials are found in the commit, you are prompted to rotate and optionally amend the commit before pushing.
 
 **Audit chain verification** (`mid` and `high`):
 

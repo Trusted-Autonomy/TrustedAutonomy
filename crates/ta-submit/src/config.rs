@@ -1876,6 +1876,14 @@ pub struct SecurityConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_scan: Option<ta_goal::SecretScanMode>,
 
+    /// Controls what happens when a real credential is detected (v0.15.22).
+    ///
+    /// - `"error"` (default): Always shown as [error]; blocks apply at security.level = "high".
+    /// - `"warn"`: Always shown as [warn]; never blocks.
+    /// - `"block"`: Always blocks apply regardless of security level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real_credential_action: Option<ta_changeset::secret_scan::RealCredentialAction>,
+
     /// Extra forbidden tool patterns added on top of the level preset.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_forbidden_tools: Vec<String>,

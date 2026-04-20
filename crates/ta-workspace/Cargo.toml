@@ -17,7 +17,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 sha2 = "0.10"
-ta-changeset = { path = "../ta-changeset", version = "0.15.21-alpha" }
+ta-changeset = { path = "../ta-changeset", version = "0.15.22-alpha" }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

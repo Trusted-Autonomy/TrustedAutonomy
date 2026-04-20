@@ -1180,6 +1180,28 @@ fn run_plan_review(
     Ok(report)
 }
 
+/// Strip `fs://workspace/` prefix and canonicalize the resulting relative path,
+/// rejecting any URI whose path escapes the workspace root via `..` components.
+///
+/// Returns `None` if the URI contains traversal components or is otherwise invalid.
+fn safe_rel_path(resource_uri: &str) -> Option<std::path::PathBuf> {
+    // Reject URIs that don't carry the expected workspace prefix — non-workspace URIs
+    // (http://, file://, bare paths) are never valid artifact locations and must not
+    // fall through to path processing.
+    let rel_str = resource_uri.strip_prefix("fs://workspace/")?;
+    // Reject any component that is `..` to prevent path traversal.
+    use std::path::Component;
+    let path = std::path::Path::new(rel_str);
+    for component in path.components() {
+        match component {
+            Component::ParentDir => return None,
+            Component::RootDir | Component::Prefix(_) => return None,
+            _ => {}
+        }
+    }
+    Some(path.to_path_buf())
+}
+
 /// Collect concatenated diff content for coverage analysis.
 fn collect_diff_content(
     staging_path: &std::path::Path,
@@ -1188,15 +1210,18 @@ fn collect_diff_content(
 ) -> String {
     let mut content = String::new();
     for artifact in artifacts {
-        let rel = artifact
-            .resource_uri
-            .strip_prefix("fs://workspace/")
-            .unwrap_or(&artifact.resource_uri);
-        let staged = staging_path.join(rel);
+        let Some(rel) = safe_rel_path(&artifact.resource_uri) else {
+            tracing::warn!(
+                uri = %artifact.resource_uri,
+                "collect_diff_content: rejected path-traversal URI"
+            );
+            continue;
+        };
+        let staged = staging_path.join(&rel);
         if let Ok(s) = std::fs::read_to_string(&staged) {
             content.push_str(&s);
         }
-        let sourced = source_path.join(rel);
+        let sourced = source_path.join(&rel);
         if let Ok(s) = std::fs::read_to_string(&sourced) {
             content.push_str(&s);
         }
@@ -1209,14 +1234,14 @@ fn collect_diff_content(
 fn collect_apply_diff_content(artifacts: &[Artifact], target_dir: &std::path::Path) -> String {
     let mut content = String::new();
     for artifact in artifacts {
-        let rel = artifact
-            .resource_uri
-            .strip_prefix("fs://workspace/")
-            .unwrap_or(&artifact.resource_uri);
-        if rel == "PLAN.md" || rel.ends_with("/PLAN.md") {
+        let Some(rel) = safe_rel_path(&artifact.resource_uri) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy();
+        if rel_str == "PLAN.md" || rel_str.ends_with("/PLAN.md") {
             continue; // Skip PLAN.md itself — we're checking code against plan items.
         }
-        let path = target_dir.join(rel);
+        let path = target_dir.join(&rel);
         if let Ok(s) = std::fs::read_to_string(&path) {
             content.push_str(&s);
         }
@@ -5854,38 +5879,43 @@ fn apply_package(
         }
     }
 
-    // ── Secret scan (v0.15.14.4) ─────────────────────────────────────────────
-    // Run before any file writes. Scans text content of draft artifacts for
-    // high-confidence secret patterns (AWS keys, GitHub PATs, PEM headers, etc.).
-    // Mode is determined by the security profile — always on unless explicitly
-    // set to `[security.secrets] scan = "off"`.
+    // ── Secret scan (v0.15.22) ───────────────────────────────────────────────
+    // Run before any file writes. Classifies findings as RealCredential,
+    // Ambiguous, or DocExample. Only RealCredential findings can block apply.
+    // Doc examples (like `export VAR=your_token_here`) are never shown unless
+    // --verbose (future flag), preventing alert fatigue from documentation.
     {
-        use ta_changeset::secret_scan;
+        use ta_changeset::secret_scan::{self, RealCredentialAction, SecretClassification};
         use ta_goal::SecretScanMode;
 
         let wf_path = config.workspace_root.join(".ta/workflow.toml");
         let wf = ta_submit::WorkflowConfig::load_or_default(&wf_path);
         let overrides = wf.security.to_overrides();
         let profile = ta_goal::SecurityProfile::from_level(wf.security.level, &overrides);
+        let credential_action = wf
+            .security
+            .real_credential_action
+            .unwrap_or(RealCredentialAction::Error);
 
         if profile.secret_scan_mode != SecretScanMode::Off {
             let staging_path = &goal.workspace_path;
             let mut all_findings = Vec::new();
 
             for artifact in &pkg.changes.artifacts {
-                // Only scan text artifacts that have diff content.
-                let rel_path = artifact
-                    .resource_uri
-                    .strip_prefix("fs://workspace/")
-                    .unwrap_or(artifact.resource_uri.as_str());
-
-                // Try to read the staged file content for scanning.
-                let staged_file = staging_path.join(rel_path);
+                let Some(rel) = safe_rel_path(&artifact.resource_uri) else {
+                    tracing::warn!(
+                        uri = %artifact.resource_uri,
+                        "secret scan: rejected path-traversal URI"
+                    );
+                    continue;
+                };
+                let rel_path = rel.to_string_lossy().into_owned();
+                let staged_file = staging_path.join(&rel);
                 if staged_file.exists() {
                     if let Ok(content) = std::fs::read_to_string(&staged_file) {
-                        let findings = secret_scan::scan_for_secrets(
+                        let findings = secret_scan::scan_for_secrets_classified(
                             &content,
-                            rel_path,
+                            &rel_path,
                             &config.workspace_root,
                         );
                         all_findings.extend(findings);
@@ -5893,31 +5923,69 @@ fn apply_package(
                 }
             }
 
-            if !all_findings.is_empty() {
-                match profile.secret_scan_mode {
-                    SecretScanMode::Warn => {
-                        secret_scan::print_findings(&all_findings);
-                        eprintln!(
-                            "[warn] {} secret finding(s) in draft — apply continuing \
-                             (set [security] level = \"high\" or [security.secrets] scan = \"block\" to abort).",
-                            all_findings.len()
-                        );
-                    }
-                    SecretScanMode::Block => {
-                        secret_scan::print_block_cta(&all_findings);
-                        anyhow::bail!(
-                            "Apply blocked: {} secret finding(s) in draft artifacts. \
-                             Remove secrets or add to .ta-secret-ignore before applying.",
-                            all_findings.len()
-                        );
-                    }
-                    SecretScanMode::Off => {}
-                }
-            } else {
+            let real_count = all_findings
+                .iter()
+                .filter(|f| f.classification.is_real_credential())
+                .count();
+            let ambiguous_count = all_findings
+                .iter()
+                .filter(|f| matches!(f.classification, SecretClassification::Ambiguous))
+                .count();
+
+            if all_findings.is_empty() {
                 tracing::debug!(
                     "Secret scan: no findings in {} artifact(s)",
                     pkg.changes.artifacts.len()
                 );
+            } else {
+                // Determine whether to block based on credential_action and scan mode.
+                let should_block = real_count > 0
+                    && match credential_action {
+                        RealCredentialAction::Block => true,
+                        RealCredentialAction::Error => {
+                            profile.secret_scan_mode == SecretScanMode::Block
+                        }
+                        RealCredentialAction::Warn => false,
+                    };
+
+                if should_block {
+                    secret_scan::print_block_cta_classified(&all_findings);
+                    anyhow::bail!(
+                        "Apply blocked: {} real credential(s) detected in draft artifacts ({}). \
+                         Remove the secret and rotate it, or add the path to .ta-secret-ignore.",
+                        real_count,
+                        all_findings
+                            .iter()
+                            .filter(|f| f.classification.is_real_credential())
+                            .map(|f| format!("{}:{}", f.file_path, f.line_number))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                } else {
+                    secret_scan::print_classified_findings(&all_findings, false);
+                    if real_count > 0 {
+                        eprintln!(
+                            "[error] {} real credential(s) detected in draft — apply continuing \
+                             (set [security] level = \"high\" or real_credential_action = \"block\" to abort).",
+                            real_count
+                        );
+                    }
+                    if ambiguous_count > 0 {
+                        eprintln!(
+                            "[warn] {} ambiguous secret pattern(s) in draft — review before committing.",
+                            ambiguous_count
+                        );
+                    }
+                }
+
+                // Summary for scan mode Warn (non-blocking).
+                if !should_block && profile.secret_scan_mode == SecretScanMode::Warn {
+                    tracing::debug!(
+                        "Secret scan: {} real, {} ambiguous finding(s) — scan mode is warn",
+                        real_count,
+                        ambiguous_count
+                    );
+                }
             }
         }
     }
@@ -7209,6 +7277,88 @@ fn apply_package(
                         // Post-apply dirty-tree check (v0.14.3.7): warn if any
                         // lock files or auto-stage candidates were missed.
                         check_post_commit_dirty_files(&target_dir, &workflow_config);
+
+                        // ── Commit diff secret scan (v0.15.22) ───────────────
+                        // Scan the committed diff as an extra safety net. Real
+                        // credentials in a commit are always [error] — the user
+                        // must rotate the secret even though the commit succeeded.
+                        //
+                        // TODO(v0.15.22.1): replace this git-specific block with
+                        // `adapter.commit_diff()` so Perforce, SVN, and external
+                        // VCS adapters each provide their own diff. See PLAN.md
+                        // phase v0.15.22.1 for the full design.
+                        if adapter.name() != "git" {
+                            tracing::debug!(
+                                "post-commit secret scan: skipped for non-git adapter '{}'",
+                                adapter.name()
+                            );
+                        } else {
+                            match std::process::Command::new("git")
+                                .args(["diff", "HEAD^..HEAD"])
+                                .current_dir(&target_dir)
+                                .output()
+                            {
+                                Ok(diff_output) if diff_output.status.success() => {
+                                    match String::from_utf8(diff_output.stdout) {
+                                        Ok(diff_text) => {
+                                            use ta_changeset::secret_scan;
+                                            let findings = secret_scan::scan_for_secrets_classified(
+                                                &diff_text,
+                                                "<commit diff>",
+                                                &target_dir,
+                                            );
+                                            let real_in_commit: Vec<_> = findings
+                                                .iter()
+                                                .filter(|f| f.classification.is_real_credential())
+                                                .collect();
+                                            if !real_in_commit.is_empty() {
+                                                eprintln!();
+                                                eprintln!(
+                                                "[error] {} real credential(s) found in the committed diff!",
+                                                real_in_commit.len()
+                                            );
+                                                for f in &real_in_commit {
+                                                    eprintln!(
+                                                        "  [error] {} at line {}: {}",
+                                                        f.pattern_name, f.line_number, f.context
+                                                    );
+                                                }
+                                                eprintln!(
+                                                "  The commit was created but the secret may now be \
+                                                 in VCS history. ROTATE the credential immediately."
+                                            );
+                                                eprintln!(
+                                                "  Consider amending or force-pushing to remove it \
+                                                 from history if the branch has not been pushed."
+                                            );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                            "post-commit secret scan: commit diff is not valid UTF-8 \
+                                             ({}); scan skipped",
+                                            e
+                                        );
+                                        }
+                                    }
+                                }
+                                Ok(diff_output) => {
+                                    tracing::warn!(
+                                        "post-commit secret scan: git diff HEAD^..HEAD failed \
+                                     (exit {:?}); scan skipped — check that HEAD^ exists \
+                                     (first commit has no parent)",
+                                        diff_output.status.code()
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "post-commit secret scan: could not run git diff — {}; \
+                                     scan skipped",
+                                        e
+                                    );
+                                }
+                            }
+                        } // end else adapter.name() == "git"
                     }
                     Err(e) => {
                         eprintln!("Stage/commit failed: {}", e);
@@ -15464,5 +15614,43 @@ fn run() {
             output2.contains("ta draft deny"),
             "no prior denial should show deny recommendation"
         );
+    }
+
+    // ── safe_rel_path path-traversal rejection tests (v0.15.22 item 6/7) ────
+
+    #[test]
+    fn safe_rel_path_accepts_valid_workspace_uri() {
+        let p = safe_rel_path("fs://workspace/src/main.rs");
+        assert_eq!(p, Some(std::path::PathBuf::from("src/main.rs")));
+    }
+
+    #[test]
+    fn safe_rel_path_rejects_traversal_uri() {
+        // fs://workspace/../../../etc/passwd must be rejected.
+        let p = safe_rel_path("fs://workspace/../../../etc/passwd");
+        assert!(p.is_none(), "path traversal URI must be rejected");
+    }
+
+    #[test]
+    fn safe_rel_path_rejects_non_workspace_uri() {
+        // URIs without the fs://workspace/ prefix are not valid artifact locations.
+        let p = safe_rel_path("http://example.com/file.rs");
+        assert!(p.is_none(), "non-workspace URI must be rejected");
+    }
+
+    #[test]
+    fn safe_rel_path_rejects_bare_path() {
+        // A bare relative path without the workspace prefix must be rejected.
+        let p = safe_rel_path("src/main.rs");
+        assert!(
+            p.is_none(),
+            "bare path without fs://workspace/ prefix must be rejected"
+        );
+    }
+
+    #[test]
+    fn safe_rel_path_rejects_absolute_path_in_uri() {
+        let p = safe_rel_path("fs://workspace//etc/passwd");
+        assert!(p.is_none(), "root-dir component must be rejected");
     }
 }

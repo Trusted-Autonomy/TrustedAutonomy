@@ -11875,7 +11875,7 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 ---
 
 ### v0.15.22 — Secret Scan: Real-Threat Discrimination
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Distinguish real credential leaks from documentation examples. Currently, `export TA_SLACK_BOT_TOKEN=...` in `USAGE.md` triggers the same finding level as an actual token embedded in source. This creates alert fatigue and erodes trust in the scanner.
 
