@@ -4756,6 +4756,51 @@ pub fn bump_workspace_version(
         }
     }
 
+    // --- Subcrate Cargo.toml internal dep versions ---
+    // Any subcrate that declares a path dependency on another ta-* crate with an explicit
+    // version constraint (e.g. `ta-audit = { path = "...", version = "^0.15.19-alpha.4.3" }`)
+    // must also be updated. Without this, Cargo fails to resolve the workspace after the
+    // workspace version is bumped (the old constraint no longer matches the new version).
+    let subcrate_patterns = ["apps/**/Cargo.toml", "crates/**/Cargo.toml"];
+    // Regex: ta-<name> = { ..., version = "...", ... } (any order of fields)
+    let dep_version_re =
+        regex::Regex::new(r#"(ta-[a-z-]+ = \{ [^}]*version = ")[^"]+(")"#).unwrap();
+    for pattern in &subcrate_patterns {
+        let glob_pattern = workspace_dir.join(pattern);
+        let glob_str = glob_pattern.to_string_lossy();
+        if let Ok(entries) = glob::glob(&glob_str) {
+            for entry in entries.flatten() {
+                let original = match std::fs::read_to_string(&entry) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let updated = dep_version_re
+                    .replace_all(&original, |caps: &regex::Captures| {
+                        format!("{}{}{}", &caps[1], new_version, &caps[2])
+                    })
+                    .into_owned();
+                if updated != original && std::fs::write(&entry, &updated).is_ok() {
+                    modified.push(entry);
+                }
+            }
+        }
+    }
+
+    // --- docs/USAGE.md version badge ---
+    let usage_path = workspace_dir.join("docs").join("USAGE.md");
+    if usage_path.exists() {
+        let original = std::fs::read_to_string(&usage_path)?;
+        let updated = regex_replace_first(
+            &original,
+            r"\*\*Version\*\* = [^\s\n]+",
+            &format!("**Version** = {}", new_version),
+        );
+        if updated != original {
+            std::fs::write(&usage_path, &updated)?;
+            modified.push(usage_path);
+        }
+    }
+
     if modified.is_empty() {
         Ok(BumpResult::AlreadyCurrent)
     } else {
