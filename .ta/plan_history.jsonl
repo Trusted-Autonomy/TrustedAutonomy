@@ -264,3 +264,6 @@
 {"new_status":"done","old_status":"done","phase_id":"v0.15.19.4","timestamp":"2026-04-20T00:20:59.198810+00:00"}
 {"new_status":"done","old_status":"done","phase_id":"v0.15.19.4","timestamp":"2026-04-20T00:21:28.929840+00:00"}
 {"new_status":"done","old_status":"pending","phase_id":"v0.15.21","timestamp":"2026-04-20T02:03:36.091075+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.22","timestamp":"2026-04-20T03:19:26.873147+00:00"}
+{"new_status":"pending","note":"phase reset to pending — goal denied","old_status":"in_progress","phase_id":"v0.15.22","timestamp":"2026-04-20T03:48:26.053012+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.22","timestamp":"2026-04-20T03:52:16.582475+00:00"}
