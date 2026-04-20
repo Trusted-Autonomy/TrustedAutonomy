@@ -15,7 +15,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 sha2 = { workspace = true }
-ta-policy = { path = "../ta-policy", version = "0.15.19-alpha.4.3" }
+ta-policy = { path = "../ta-policy", version = "0.15.21-alpha" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
