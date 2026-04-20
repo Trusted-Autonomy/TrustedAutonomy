@@ -2278,7 +2278,8 @@ fn stage_static_analysis(
 /// VCS sync helper: pull the latest changes after a PR merge (v0.15.14).
 ///
 /// Loads the workflow VCS config and runs the appropriate sync command.
-/// For git adapters this is `git pull --ff-only`. Errors are non-fatal:
+/// For git adapters: first checks out main (in case the apply flow left us on a feature
+/// branch), then runs `git pull --rebase origin main`. Errors are non-fatal:
 /// the caller prints a warning and suggests a manual sync.
 fn do_vcs_sync(workspace_root: &Path) -> anyhow::Result<()> {
     let config_path = workspace_root.join(".ta").join("workflow.toml");
@@ -2286,14 +2287,30 @@ fn do_vcs_sync(workspace_root: &Path) -> anyhow::Result<()> {
 
     // For git adapter (the common case and default).
     if wf.submit.adapter == "git" || wf.submit.adapter.is_empty() {
+        // Ensure we are on main before pulling (the apply flow leaves us on a
+        // feature branch after the commit; pr_sync is the right place to return).
+        let checkout = std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(workspace_root)
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to invoke git checkout main: {}", e))?;
+        if !checkout.status.success() {
+            // Non-fatal: warn and fall through to pull attempt.
+            tracing::warn!(
+                "git checkout main failed (exit {}) — attempting pull anyway:\n{}",
+                checkout.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&checkout.stderr)
+            );
+        }
+
         let output = std::process::Command::new("git")
-            .args(["pull", "--ff-only"])
+            .args(["pull", "--rebase", "origin", "main"])
             .current_dir(workspace_root)
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to invoke git pull: {}", e))?;
         if !output.status.success() {
             anyhow::bail!(
-                "git pull --ff-only failed (exit {}):\n{}",
+                "git pull --rebase origin main failed (exit {}):\n{}",
                 output.status.code().unwrap_or(-1),
                 String::from_utf8_lossy(&output.stderr)
             );
