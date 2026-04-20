@@ -7638,35 +7638,33 @@ All three launchers follow the same logic:
 4. [x] **Projects page in TA Studio**: New `/projects` route in the web UI. Layout: "Recent Projects" card list + "Open from Path" form + "Open from Git" form. Each recent-project card has an "Open" button and a "Remove from recents" ×. Clicking "Open" calls `/api/project/open`, redirects to `/` on success. "Open from Path" shows the path field + Browse button (calls `/api/project/browse`). "Open from Git" shows a URL field + directory override + Clone button.
 
 ---
-### v0.15.22.1 — VCS-Agnostic Commit Diff Scan & Raw-Git Audit
+### v0.15.22.1 — VCS-Agnostic Commit Diff Scan, Apply Loop Reliability III & Staging GC
 <!-- status: pending -->
-6. [x] **macOS `TA Studio.app` launcher**: Shell script wrapped in an `.app` bundle using Automator or a minimal `Info.plist` + shell shim. Script: check daemon health → start if needed → wait → open browser → error dialog on timeout. Built by the macOS packaging step and included in the DMG.
 
-7. [x] **Windows `TA Studio.bat` + MSI shortcut**: `.bat` file in the MSI install directory. MSI `main.wxs` gains a "TA Studio" Start Menu shortcut targeting `TA Studio.bat` (alongside the existing "TA Documentation" shortcut). Launcher: `START /B ta.exe daemon start --background`, loop health check, `START http://localhost:7700`. Error: `msg * "TA Studio could not start..."`.
-4. [ ] **`SvnAdapter::commit_diff()`** (`crates/ta-submit/src/svn.rs`): Implement using `svn diff -c HEAD`. Returns `None` on error.
-8. [x] **Linux `ta-studio` script + `.desktop` file**: Shell script at `/usr/local/bin/ta-studio` installed by the tarball. `.desktop` file at `/usr/local/share/applications/ta-studio.desktop` (`Exec=ta-studio`, `Icon=ta-studio`, `Categories=Development;`). Error via `zenity --error` with `notify-send` fallback.
-|---|---|---|---|
-9. [x] **`recent-projects.json` structure**:
-   ```json
-   [
-     { "path": "/home/user/projects/my-game", "name": "My Game", "last_opened": "2026-04-01T10:00:00Z" },
-     ...
-   ]
+**Goal**: Complete the VCS-agnostic post-commit scan from v0.15.22 and fix three persistent apply-loop reliability issues: (1) `.ta/` jsonl files dirty at goal start, (2) staging directory accumulation (observed at 47+ GB), (3) plan-patch non-idempotent marker regression on every draft apply.
 
-5. [ ] **`ExternalVcsAdapter::commit_diff()`** (`crates/ta-submit/src/external_vcs_adapter.rs`): Call the plugin's `commit_diff` hook if declared in the plugin manifest; return `None` otherwise.
-10. [x] **Tests**: `/api/project/open` writes recent-projects and returns project name; `/api/project/list` returns sorted recents; redirect logic when no active project; launcher scripts parse health check correctly (unit-testable shell function); recent-projects capped at 20; duplicate paths deduplicated.
-7. [ ] **Wire into draft.rs post-commit scan**: Replace the `if adapter.name() != "git"` guard and raw `Command::new("git")` block with `if let Some(diff_text) = adapter.commit_diff() { ... }`. Remove the TODO comment.
-11. [x] **USAGE.md "Opening a Project" section**: How to use the Project Browser, how the launchers work on each platform, how to set a default clone directory in `daemon.toml`.
+#### Items
 
-#### Version: `0.14.8.4-alpha`
+1. [ ] **`GitAdapter::commit_diff()`** (`crates/ta-submit/src/git.rs`): Implement using the `SourceAdapter` trait. Returns the diff of HEAD vs HEAD^ as a `String`. Propagates errors to caller rather than silently swallowing. Replaces the raw `Command::new("git")` block in `draft.rs`.
+2. [ ] **`PerforceAdapter::commit_diff()`** (`crates/ta-submit/src/perforce.rs`): Implement using `p4 describe -du <changelist>`. Returns `None` when no changelist ID is available.
+3. [ ] **`SvnAdapter::commit_diff()`** (`crates/ta-submit/src/svn.rs`): Implement using `svn diff -c HEAD`. Returns `None` on error.
+4. [ ] **`ExternalVcsAdapter::commit_diff()`** (`crates/ta-submit/src/external_vcs_adapter.rs`): Call the plugin's `commit_diff` hook if declared in the plugin manifest; return `None` otherwise.
+5. [ ] **`NoneAdapter::commit_diff()`** (`crates/ta-submit/src/none.rs`): Always returns `None` (no VCS, no diff).
+6. [ ] **Wire into draft.rs post-commit scan**: Replace the `if adapter.name() != "git"` guard and raw `Command::new("git")` block with `if let Some(diff_text) = adapter.commit_diff() { ... }`. Remove the TODO comment.
+7. [ ] **Raw-git audit in `governed_workflow.rs` and `run.rs`**: Find every `Command::new("git")` call. Classify each as: (a) must stay (bootstrap/no-adapter context), (b) no-op (already guarded), or (c) promote to adapter method. Fix class (c) occurrences.
+8. [ ] **Auto-commit `.ta/` jsonl at `ta run` start** (`apps/ta-cli/src/commands/run.rs`): Before copying workspace to staging, check if `goal-audit.jsonl`, `plan_history.jsonl`, or `velocity-history.jsonl` are dirty. If yes, commit them directly on the current branch with message `"chore: auto-commit workflow audit trail (pre-goal)"`. Eliminates the "WARNING: Working tree has uncommitted changes" noise at every goal start.
+9. [ ] **Plan-patch marker regression fix** (`apps/ta-cli/src/commands/draft.rs`): The plan-patch diff from staging replaces `<!-- status: done -->` with `---` whenever staging predates manual marker additions to source. Fix: when applying a plan-patch hunk that would change a status marker line from `<!-- status: done -->` to `---`, skip that hunk. Status marker lines are source-authoritative — staging never wins on them.
+10. [ ] **Staging directory GC** (`apps/ta-cli/src/commands/draft.rs`, `crates/ta-workspace/src/overlay.rs`): (a) Auto-delete staging dir immediately on successful apply (not just on GC threshold). (b) Add `[workspace] staging_max_gb = 5.0` config key (default 5 GB, not 20 GB). (c) On goal start, if staging total exceeds cap, remove oldest completed/failed dirs before creating new staging. (d) Future: lazy copy-on-write via hardlinks for read-only files — spec the interface in a `// TODO(cow):` comment, implement if time permits.
+11. [ ] **Tests**: `commit_diff()` returns diff text for git adapter. Perforce/SVN/external return `None` when no changelist. `NoneAdapter` always returns `None`. Post-commit scan in `draft.rs` scans when `commit_diff()` returns `Some`, skips when `None`. Auto-commit fires on dirty `.ta/` at goal start. Plan-patch skips status marker hunks. Staging GC removes oldest dirs when cap exceeded.
+12. [ ] **USAGE.md**: Update "Draft Apply" section with note on staging GC and the new `staging_max_gb` config key.
+
+#### Version: `0.15.22-alpha.1`
 
 ---
-6. [ ] **`NoneAdapter::commit_diff()`** (`crates/ta-submit/src/none.rs`): Always returns `None` (no VCS, no diff).
+
 ### v0.14.9 — Qwen3.5 Local Agent Profiles & Ollama Install Flow
 <!-- status: done -->
 **Goal**: First-class support for Qwen3.5 (4B, 9B, 27B) as local TA agents via Ollama. The `ta-agent-ollama` binary already supports any OpenAI-compatible endpoint — this phase adds: ready-to-use agent profiles for each size, a `ta agent install` flow that drives Ollama model pulls, Qwen3.x thinking-mode integration, hardware guidance, and size-adaptive selection so TA automatically picks the right model for the task.
-9. [ ] **Raw-git audit in `governed_workflow.rs` and `run.rs`**: Lines 2292/2306 in `governed_workflow.rs` and 5855/7523 in `run.rs`. Apply the same classification: guard, no-op, or promote to adapter method.
-10. [ ] **Tests**: For each new adapter method, verify: git adapter returns diff text. Perforce/SVN/external return `None` when no changelist ID is present. `NoneAdapter` always returns `None`. Post-commit scan in draft.rs scans when `commit_diff()` returns `Some`, skips (no log spam) when it returns `None`.
 
 #### Background
 
