@@ -12006,14 +12006,14 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 
 #### Items
 
-1. [ ] **Entity extractor** (`crates/ta-workflow/src/intent.rs`): Extract from natural language: `version_ref` (e.g., `v0.15`), `intent_verb` (implement/build/run/complete), `scope_modifier` (remaining/all/next/pending). Regex + keyword list, no ML.
-2. [ ] **Template matcher**: Score templates by overlap of extracted entities against template `metadata.tags` and `description`. Top candidate selected if score ≥ 0.80. Below threshold → ask a clarifying question.
+1. [x] **Entity extractor** (`crates/ta-workflow/src/intent.rs`): Extract from natural language: `version_ref` (e.g., `v0.15`), `intent_verb` (implement/build/run/complete), `scope_modifier` (remaining/all/next/pending). Regex + keyword list, no ML.
+2. [x] **Template matcher**: Score templates by overlap of extracted entities against template `metadata.tags` and `description`. Top candidate selected if score ≥ 0.80. Below threshold → ask a clarifying question.
 
 
-5. [ ] **Confidence gate**: Score ≥ 0.80 → present card + numbered confirm (`1. Run  2. Adjust  3. Different workflow  4. Cancel`). Score < 0.80 → ask clarifying question first. No silent execution.
-6. [ ] **`ta workflow run` intent path**: When `<name>` doesn't match a known template name, try intent resolution. Explicit template name always takes precedence over intent resolution.
-7. [ ] **Advisor integration** (`crates/ta-workflow/src/intent.rs`): `resolve_intent(text, plan_ctx) -> ResolutionResult` is callable from advisor agent. Advisor presents the resolution card via numbered options in its chat response.
-8. [ ] **Tests**: "implement remaining v0.15" → `plan-build-phases`, `phase_filter=v0.15`. "run next phase" → `build`, `phase=plan.next_pending_phase`. Low-confidence input → clarifying question returned. Explicit template name bypasses resolver.
+5. [x] **Confidence gate**: Score ≥ 0.80 → present card + numbered confirm (`1. Run  2. Adjust  3. Different workflow  4. Cancel`). Score < 0.80 → ask clarifying question first. No silent execution.
+6. [x] **`ta workflow run` intent path**: When `<name>` doesn't match a known template name, try intent resolution. Explicit template name always takes precedence over intent resolution.
+7. [x] **Advisor integration** (`crates/ta-workflow/src/intent.rs`): `resolve_intent(text, plan_ctx) -> ResolutionResult` is callable from advisor agent. Advisor presents the resolution card via numbered options in its chat response.
+8. [x] **Tests**: "implement remaining v0.15" → `plan-build-phases`, `phase_filter=v0.15`. "run next phase" → `build`, `phase=plan.next_pending_phase`. Low-confidence input → clarifying question returned. Explicit template name bypasses resolver.
 
 
 ---
