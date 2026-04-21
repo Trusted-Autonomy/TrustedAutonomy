@@ -843,6 +843,40 @@ fn run_pipeline(
     }
     let (commits, last_tag) = collect_commits_since_tag(&config.workspace_root, from_tag)?;
 
+    // v0.15.24.3: Optional pre-release PLAN.md compaction.
+    let workflow_toml = config.workspace_root.join(".ta/workflow.toml");
+    let wf_config = ta_submit::WorkflowConfig::load_or_default(&workflow_toml);
+    if wf_config.plan.compact_plan {
+        println!("[pre-release] compact_plan=true — running `ta plan compact`...");
+        if dry_run {
+            println!(
+                "[pre-release] (dry-run) Would run: ta plan compact{}",
+                wf_config
+                    .plan
+                    .compact_through
+                    .as_deref()
+                    .map(|t| format!(" --through {}", t))
+                    .unwrap_or_default()
+            );
+        } else {
+            let compact_args = super::plan::PlanCommands::Compact {
+                dry_run: false,
+                through: wf_config.plan.compact_through.clone(),
+            };
+            match super::plan::execute(&compact_args, config) {
+                Ok(()) => println!("[pre-release] Plan compaction complete."),
+                Err(e) => {
+                    eprintln!(
+                        "[pre-release] Warning: plan compact failed (non-fatal): {}",
+                        e
+                    );
+                    eprintln!("[pre-release] Continuing release pipeline. Compact PLAN.md manually after release.");
+                }
+            }
+        }
+        println!();
+    }
+
     let total = pipeline.steps.len();
     let start_idx = from_step.map(|s| s.saturating_sub(1)).unwrap_or(0);
 

@@ -4849,6 +4849,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 - Do NOT modify files outside this directory
 - All your changes will be captured as a draft for human review
+- Do NOT add `---` horizontal rules inside phase content in PLAN.md — only one `---` separator between phases is valid. Interior `---` lines cause stray-separator warnings and are removed by post-apply normalization.
 
 ## Agent Progress Journal (strongly encouraged)
 

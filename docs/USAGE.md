@@ -2086,6 +2086,75 @@ ta plan create --template feature    # Feature template
 ta plan from docs/PRD.md             # Generate plan from a product document (interactive)
 ta plan add "Add auth middleware"    # Add a phase to the existing plan (interactive)
 ta plan add "Quick fix" --auto       # Add phase non-interactively (best-guess placement)
+ta plan compact                      # Archive completed milestones to PLAN-ARCHIVE.md
+ta plan compact --dry-run            # Preview what would be compacted without changes
+ta plan compact --through v0.14      # Compact only milestones up to and including v0.14
+ta plan lint                         # Detect PLAN.md structural issues
+ta plan lint --fix                   # Auto-fix mechanical issues (consecutive separators, etc.)
+ta plan human-tasks                  # List pending human-action items from PLAN.md
+ta plan human-tasks --done 2         # Mark human task #2 as complete
+```
+
+#### Plan Compaction
+
+As a project grows, PLAN.md accumulates hundreds of completed phases that slow parsing and make the file unwieldy. `ta plan compact` archives completed milestones (e.g., all `v0.14.*` phases) to `PLAN-ARCHIVE.md`, replacing them with a one-line summary in PLAN.md:
+
+```bash
+# Archive all fully-completed milestones (all phases in the milestone are done)
+ta plan compact
+
+# Preview without writing
+ta plan compact --dry-run
+
+# Archive milestones up to and including v0.14 (leave v0.15+ in place)
+ta plan compact --through v0.14
+```
+
+The command is idempotent — running it twice produces the same result. PLAN-ARCHIVE.md is append-only and accumulates all previously compacted milestone sections.
+
+To trigger compaction automatically before each release, add to `.ta/workflow.toml`:
+
+```toml
+[plan]
+compact_plan = true
+compact_through = "v0.14"  # optional: compact only up to this milestone
+```
+
+#### Plan Lint
+
+`ta plan lint` detects four classes of structural problems in PLAN.md:
+
+| Error class | Description |
+|---|---|
+| `consecutive-separators` | Two or more `---` separators in a row (stray interior rules) |
+| `missing-status-marker` | A phase heading with no `<!-- status: ... -->` marker |
+| `misplaced-status-marker` | A `<!-- status: ... -->` that appears outside a phase block |
+| `unchecked-item-in-done-phase` | An unchecked `[ ]` item inside a `<!-- status: done -->` phase |
+
+```bash
+ta plan lint               # Print issues with line numbers
+ta plan lint --fix         # Auto-fix consecutive-separators; prints a fix summary
+```
+
+`--fix` only applies mechanical corrections (removing duplicate separators). Issues requiring judgment (missing markers, unchecked items) are reported but not auto-corrected.
+
+#### Human Tasks
+
+PLAN.md can contain a sentinel-delimited section for tasks that require manual human action — code-signing, legal sign-off, hardware validation, etc. TA's parser ignores this section so it never affects phase ordering or status tracking.
+
+The section uses `<!-- ta: human-tasks-start -->` / `<!-- ta: human-tasks-end -->` delimiters:
+
+```markdown
+<!-- ta: human-tasks-start -->
+## Human Tasks
+- [ ] Code-signing cert review before stable release (introduced: v0.15.24.3)
+- [ ] Manual hardware validation before promoting alpha → stable (introduced: v0.15.24.3)
+<!-- ta: human-tasks-end -->
+```
+
+```bash
+ta plan human-tasks          # List all tasks with index numbers and done/pending status
+ta plan human-tasks --done 1 # Mark task #1 as done (updates the [ ] → [x] in PLAN.md)
 ```
 
 #### Phase Lifecycle and Claim Locking
