@@ -12047,7 +12047,40 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 
 ---
 
+### v0.15.24.2 — Phase Claim Locking: Prevent Duplicate Workflow Dispatch
+<!-- status: pending -->
 
+**Goal**: Fix the root cause of the v0.15.24 duplicate-goal incident: `find_next_pending` returns `InProgress` phases as actionable, so a plan-build loop iteration started a second goal for a phase that was already claimed by a prior iteration. Fix `in_progress` to mean "claimed — skip me", enforce atomic claim via `ta run`, enforce `done` transition via `ta draft apply`, and add a loop-level dispatch history guard as a second line of defence.
+
+**Why**: The plan-build loop dispatched v0.15.24 twice because (a) `InProgress` was treated the same as `Pending` in `find_next_pending`, and (b) there was no per-run record of which phases had already been dispatched. This is also a correctness requirement for future parallel workflows: multiple workers must be able to each claim a distinct phase without collision. The `in_progress` marker is the claim token — it must be exclusive and respected.
+
+**Root cause confirmed** (code analysis):
+- `PlanStatus::is_actionable()` returns `true` for both `Pending` and `InProgress` (plan.rs:448)
+- `find_next_pending` uses `is_actionable()` as its filter — so an `in_progress` phase is always returned as the next candidate
+- `ta run` does not write the `in_progress` marker; `ta draft apply` writes `in_progress` (not `done`) — so after apply the phase is still a candidate on the next loop iteration
+- The loop has no memory of previously dispatched phase IDs within a single run
+
+#### Items
+
+1. [ ] **`is_actionable()` fix** (`apps/ta-cli/src/commands/plan.rs`): `InProgress` is NOT actionable for new dispatch — return `true` only for `Pending`. `find_next_pending` must skip `in_progress` phases entirely. Add a separate `find_in_progress` query for introspection/resume use cases that explicitly need it.
+
+2. [ ] **`ta run` writes `in_progress` marker** (`apps/ta-cli/src/commands/run.rs`): At goal start (after staging copy is ready, before agent launches), atomically write `<!-- status: in_progress -->` to the source PLAN.md and commit it to the current branch. This is the claim token. If the marker is already `in_progress` when `ta run` attempts to claim it, abort with a clear error: `"Phase v0.X.Y is already in_progress — claimed by another goal. Use --force to override."`.
+
+3. [ ] **`ta draft apply` writes `done` marker** (`apps/ta-cli/src/commands/draft.rs`): On successful apply with `--git-commit`, transition the phase from `in_progress` → `done` in the apply commit. This replaces the current behaviour where apply writes `in_progress` and leaves `done` unset. The apply commit must include both the code changes and the PLAN.md status transition atomically.
+
+4. [ ] **Loop dispatch history guard** (`apps/ta-cli/src/commands/governed_workflow.rs`): `GovernedWorkflowRun` tracks a `dispatched_phases: Vec<String>` field. Before dispatching a goal, `stage_plan_next` checks this list — if the selected `phase_id` is already present, halt with: `"SAFETY: phase <id> was already dispatched in this run (iteration N). This indicates a status-marker race. Halting to avoid duplicate work."`. After successful dispatch, append to `dispatched_phases` and persist.
+
+5. [ ] **Ordering: `run` → `apply` → `done` validation** (`apps/ta-cli/src/commands/plan.rs`): In `record_history`, validate that transitions follow the legal state machine: `pending → in_progress → done`. Any other transition (e.g. `pending → done`, `in_progress → in_progress`, `done → in_progress`) logs `[warn]` and, in strict mode (`plan.strict_transitions = true` in `.ta/config.toml`), returns an error.
+
+6. [ ] **`plan_history.jsonl` + `goal-audit.jsonl` bundled into apply commit** (carry-forward from v0.15.24.1 item 1 if not yet complete): Daemon must not write these files as standalone commits to `main`. Validated by checking that no `chore: auto-commit workflow audit trail` commit appears on `main` outside of a draft apply commit.
+
+7. [ ] **Tests**: `find_next_pending` skips `in_progress` phases. `ta run` on already-`in_progress` phase → error. `ta draft apply` transitions `in_progress → done`. Loop dispatches phase A, plan_next returns A again (status race simulated) → halted by dispatch guard. State machine rejects `pending → done` direct transition in strict mode.
+
+8. [ ] **USAGE.md "Phase Lifecycle"** section: Document the three-state machine (`pending → in_progress → done`), who writes each transition (`ta run` claims, `ta draft apply` completes), and what `in_progress` means for parallel workflows (exclusive claim, other workers skip it).
+
+#### Version: `0.15.24-alpha.2`
+
+---
 
 
 **Goal**: Replace the binary `auto_approve = true/false` with a rule-based constitution section. Rules are expressed as file-pattern conditions with approve/review/block actions. The constitution section is amended via the same review-gate flow as drafts — no silent policy changes.
