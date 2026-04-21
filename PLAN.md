@@ -7296,7 +7296,6 @@ Quick start:
 **Depends on**: v0.16.3 (ta-agent-ollama extracted to standalone plugin)
 
 
-
 #### Hardware sizing
 
 | Profile name | Model | Min VRAM / RAM | Target hardware |
