@@ -14,14 +14,16 @@
   <img src="https://img.shields.io/badge/license-Apache--2.0-lightgrey" alt="License">
 </p>
 
-**Trusted Autonomy** is a local-first, Rust-based substrate for running autonomous AI agents **safely**, **reviewably**, and **without changing how agents behave**.
+**Trusted Autonomy** is a wrapper to *safely* run autonomous AI agent workflows **with human review**, and **without changing how agents behave**.
 
-It is not an agent framework.  
-It is not an orchestrator.  
+It is not an agent framework. Use Claude, Codex, a local LLM, or any agent system you want. 
+Swap them with just a simple config change. Set a different agent framework for a workflow. Easily A/B test a workflow with two agents.
 
-It is a **trust and control plane** that sits underneath *any* agent or multi-agent system and ensures:
+Trusted Autonomy governs how agents interact with the outside world without the agents knowing. They work as if they have full access. TA wraps them into a virtual space so writing files, DB operations, sending email, or posting to a website is captured.
+The agent sees this modified version of the world. When a goal is complete, the human is notified to review a **draft** of all changes. Approving the draft makes the agents changes in the real world. The human can reject or correct the agent's work before it actually hits your project.
 
-- agents can operate autonomously inside a defined charter
+TA ensures:
+- agents operate autonomously inside a defined charter
 - all real-world effects are staged, reviewable, and auditable
 - humans remain in control at meaningful boundaries (a draft at each milestones in simple English with detailed diffs for deep inspection)
 - orchestration layers remain swappable and unaware of the substrate
@@ -32,7 +34,7 @@ It is a **trust and control plane** that sits underneath *any* agent or multi-ag
 
 ## Why Trusted Autonomy
 
-Today's agent tooling forces trade-offs forcing choices between security and convenience; many people opt for convenience. This shouldn't be the choice for tech and non-tech users alike. Default behavior is locked down requiring **constant permission prompts** (secure but annoying) or folder level access that stil requires many approvals with options to "always allow". An all too common alternative, or the result of many "yeah, always allow" choices is **full auto-approve** (convenient but risky). Users get tired of approving seemingly trivial actions, needing to constantly check and babysit their smart agents, and disable safeguards — many users without understanding the security consequences. Experienced users can configure fine-grained tool permissions in frameworks like Claude Code or Claude Flow, but doing this well requires knowing which actions are actually dangerous, how they interact, and what to scope — a level of security reasoning that shouldn't be a prerequisite for safe agent use. M
+Today's agent tooling forces trade-offs between security and convenience; many people opt for convenience. This shouldn't be the choice for tech and non-tech users alike. Default behavior is locked down requiring **constant permission prompts** (secure but annoying) or folder level access that stil requires many approvals with options to "always allow". An all too common alternative, or the result of many "yeah, always allow" choices is **full auto-approve** (convenient but risky). Users get tired of approving seemingly trivial actions, needing to constantly check and babysit their smart agents, and disable safeguards — many users without understanding the security consequences. Experienced users can configure fine-grained tool permissions in frameworks like Claude Code or Claude Flow, but doing this well requires knowing which actions are actually dangerous, how they interact, and what to scope — a level of security reasoning that shouldn't be a prerequisite for safe agent use.
 
 The standard answer is to run agents inside a VM with strict network controls and file access mappings. That works, but it requires a reasonable amount of technical sophistication to manage correctly, requires some customization per workflow, and requires some knowledge to track and review diffs - all of which is time not focused on the users goal. There are two classes of problem to solve: malicious intent (purposefully built Claude skills to cause harm as witnissed in recent Clawdbot security scans), and well-intentioned AI doing the wrong thing for the "right" reasons. VMs solve the former, humans have to engage to solve the latter. TA helps with both.
 
@@ -69,10 +71,11 @@ Trusted Autonomy achieves this by:
 ## What this is (and is not)
 
 ### This **is**
-- a capability-gated runtime substrate
+- a runtime layer that abstracts all agent operations that change the state of your project
 - a policy-enforced MCP gateway
-- a staging and review system for agent actions
+- a staging and AI + Human review system for agent actions
 - a foundation for high-autonomy workflows with human trust
+- a workflow system to easily create and share multi-step workflows and what agents to run at each step
 
 ### This is **not**
 - an “Agent OS VM”
