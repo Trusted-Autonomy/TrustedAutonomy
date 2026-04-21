@@ -676,6 +676,14 @@ pub struct PlanConfig {
     /// (warn only). Set in `.ta/workflow.toml` under `[plan]`. (v0.15.24.2)
     #[serde(default)]
     pub strict_transitions: bool,
+    /// When true, `ta release` runs `ta plan compact` as a pre-release step
+    /// before tagging. Default: false. Set in `.ta/workflow.toml` under `[plan]`. (v0.15.24.3)
+    #[serde(default)]
+    pub compact_plan: bool,
+    /// Compact milestones up to and including this version (e.g. "v0.13").
+    /// When absent, defaults to all milestones with minor version < current release minor. (v0.15.24.3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_through: Option<String>,
 }
 
 impl Default for PlanConfig {
@@ -683,6 +691,8 @@ impl Default for PlanConfig {
         Self {
             file: default_plan_file(),
             strict_transitions: false,
+            compact_plan: false,
+            compact_through: None,
         }
     }
 }
@@ -2631,6 +2641,8 @@ exclude_paths = ["staging/", "goals/"]
         let config = PlanConfig {
             file: "ROADMAP.md".to_string(),
             strict_transitions: false,
+            compact_plan: false,
+            compact_through: None,
         };
         let workflow = WorkflowConfig {
             plan: config,

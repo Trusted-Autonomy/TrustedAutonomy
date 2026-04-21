@@ -6775,6 +6775,19 @@ fn apply_package(
                 last_phase_id = phase.clone();
             }
 
+            // v0.15.24.3: Normalise stray --- horizontal rules inserted by agents.
+            let normalised = super::plan::normalize_plan_horizontal_rules(&content);
+            if normalised != content {
+                eprintln!(
+                    "[plan-update] Normalised {} stray horizontal-rule(s) in PLAN.md",
+                    content
+                        .matches("---")
+                        .count()
+                        .saturating_sub(normalised.matches("---").count())
+                );
+                content = normalised;
+            }
+
             std::fs::write(&plan_path, &content)?;
 
             // Auto-bump workspace version to match the completed phase.
@@ -7076,6 +7089,15 @@ fn apply_package(
                                 &super::plan::PlanStatus::Done,
                             );
                             last_phase_id = phase.clone();
+                        }
+
+                        // v0.15.24.3: Normalise stray --- horizontal rules.
+                        let normalised = super::plan::normalize_plan_horizontal_rules(&content);
+                        if normalised != content {
+                            eprintln!(
+                                "[plan-update] Normalised stray horizontal-rule(s) in PLAN.md (VCS path)"
+                            );
+                            content = normalised;
                         }
 
                         std::fs::write(&plan_path, &content)?;
