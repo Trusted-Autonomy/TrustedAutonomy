@@ -7103,9 +7103,6 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 - `ta run` does not write the `in_progress` marker; `ta draft apply` writes `in_progress` (not `done`) — so after apply the phase is still a candidate on the next loop iteration
 - The loop has no memory of previously dispatched phase IDs within a single run
 
-
-```
-
 #### Version: `0.15.24-alpha.2`
 
 ---
@@ -7217,25 +7214,31 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 3. [ ] **Desktop notifications**: `vscode.window.showInformationMessage` (or `showWarningMessage`) on goal completion, draft ready, and approval-needed events — polled via SSE from the daemon.
 
 4. [ ] **Walkthrough**: VS Code onboarding walkthrough ("Get Started with TA") covering: install daemon, configure `workflow.toml` for Python/TS/Node, start first goal, approve first draft.
-**Items**:
 
 #### Version: `0.16.0-alpha`
 
 ---
 
+### v0.16.1 — JetBrains IDE Plugin (PyCharm, WebStorm, IntelliJ)
+<!-- status: pending -->
 
-5. [ ] **Plugin scaffold**: Kotlin plugin using the IntelliJ Platform SDK. Published to JetBrains Marketplace as `com.trusted-autonomy.ta`. Supports PyCharm 2024.1+, WebStorm 2024.1+, IntelliJ IDEA 2024.1+.
+1. [ ] **Plugin scaffold**: Kotlin plugin using the IntelliJ Platform SDK. Published to JetBrains Marketplace as `com.trusted-autonomy.ta`. Supports PyCharm 2024.1+, WebStorm 2024.1+, IntelliJ IDEA 2024.1+.
 
-6. [ ] **Daemon connectivity**: HTTP client connecting to `http://127.0.0.1:7700`. Health check on IDE startup.
-   ```toml
+2. [ ] **Daemon connectivity**: HTTP client connecting to `http://127.0.0.1:7700`. Health check on IDE startup.
 
-7. [ ] **Marketplace publishing**: CI workflow to build and publish to JetBrains Marketplace on `v*` tags.
+3. [ ] **Marketplace publishing**: CI workflow to build and publish to JetBrains Marketplace on `v*` tags.
 
+#### Version: `0.16.1-alpha`
 
-8. [ ] **Diff view**: Opens staging diff in a split buffer using `vim.diff()` or `diffview.nvim`.
-9. [ ] **Floating window**: `:TA status` shows daemon health and active goal in a floating window.
-10. [ ] **Commands**: `:TA start`, `:TA approve <id>`, `:TA deny <id>`, `:TA shell`.
-11. [ ] **luarocks / GitHub Releases packaging**: Distribute via `luarocks` and GitHub Releases.
+---
+
+### v0.16.2 — Neovim Plugin
+<!-- status: pending -->
+
+1. [ ] **Diff view**: Opens staging diff in a split buffer using `vim.diff()` or `diffview.nvim`.
+2. [ ] **Floating window**: `:TA status` shows daemon health and active goal in a floating window.
+3. [ ] **Commands**: `:TA start`, `:TA approve <id>`, `:TA deny <id>`, `:TA shell`.
+4. [ ] **luarocks / GitHub Releases packaging**: Distribute via `luarocks` and GitHub Releases.
 
 #### Version: `0.16.2-alpha`
 
@@ -7275,8 +7278,6 @@ See the [ta-agent-ollama README] for model selection, hardware requirements,
 
 2. [ ] **Plugin manifest**: `ta-agent-ollama` ships a `plugin.toml` declaring its capabilities, supported agent frameworks, min TA version, and install instructions. TA's plugin registry resolves it at `ta agent install ollama`.
 
-   ```
-
 3. [ ] **`ta plugin` command** (if not already present): `ta plugin install <source>`, `ta plugin list`, `ta plugin remove <name>`. Source formats: `github:<org>/<repo>`, `crates:<crate-name>`, local path. Used to install community agent plugins beyond the first-party set.
 
 4. [ ] **Migration guide**: For existing users who have `ta-agent-ollama` configured via the monorepo build, provide a one-command migration: `ta agent migrate ollama` — detects existing config, installs the standalone plugin, updates profile paths, verifies connectivity.
@@ -7290,15 +7291,11 @@ See the [ta-agent-ollama README] for model selection, hardware requirements,
 ### v0.16.3.1 — Gemma 4 Agent Profiles (ta-agent-ollama plugin)
 <!-- status: pending -->
 
-so users can run Gemma 4 locally with zero configuration, at the right size for their hardware.
+**Goal**: Add Gemma 4 agent profiles to `ta-agent-ollama` so users can run Gemma 4 locally with zero configuration, at the right size for their hardware.
 
 **Depends on**: v0.16.3 (ta-agent-ollama extracted to standalone plugin)
 
-**Why Gemma 4**: Google's Gemma 4 family (released April 2025) has strong coding and reasoning
-performance in the sub-14B tier, making it the best choice for M1/M2 Macs and mid-range
-Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 8GB VRAM
-
-**Items**:
+**Why Gemma 4**: Google's Gemma 4 family (released April 2025) has strong coding and reasoning performance in the sub-14B tier, making it the best choice for M1/M2 Macs and mid-range Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 8GB VRAM.
 
 #### Hardware sizing
 
@@ -7339,17 +7336,20 @@ Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 
 4. [ ] **Tests**: Profile TOML round-trips. `ta doctor` hardware detection selects correct tier. `ta agent install gemma4` on a simulated 8 GB system installs `gemma4-4b` not `gemma4-27b`.
 
 
+---
+
+### v0.16.4 — Windows Sandbox (AppContainer + Job Objects)
+<!-- status: pending -->
+
 **Depends on**: v0.15.16 (Windows EV signing — establishes working Windows CI pipeline)
 
-**Design**:
+**Design**: For high-security mode, create an AppContainer (`CreateAppContainerProfile`) and launch the agent in it. AppContainers restrict filesystem access to the staging workspace path and named capabilities. Network access restricted to `[sandbox.allow_network]` hosts via a network filter driver hook.
 
-- **AppContainer**: For high-security mode, create an AppContainer (`CreateAppContainerProfile`) and launch the agent in it. AppContainers restrict filesystem access to the staging workspace path and named capabilities. Network access restricted to `[sandbox.allow_network]` hosts via a network filter driver hook.
+1. [ ] **Job Object wrapper** (`crates/ta-runtime/src/sandbox_windows.rs`): `SandboxProvider::WindowsJobObject` variant. `CreateJobObject`, `AssignProcessToJobObject`, `SetInformationJobObject` with `JOBOBJECT_BASIC_LIMIT_INFORMATION` and `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`. Process tree torn down on TA exit. Kills zombie agent processes.
 
-**Items**:
-5. [ ] **Job Object wrapper** (`crates/ta-runtime/src/sandbox_windows.rs`): `SandboxProvider::WindowsJobObject` variant. `CreateJobObject`, `AssignProcessToJobObject`, `SetInformationJobObject` with `JOBOBJECT_BASIC_LIMIT_INFORMATION` and `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`. Process tree torn down on TA exit. Kills zombie agent processes.
+2. [ ] **CI test** (Windows runner): Spawn a sandboxed agent subprocess, attempt to write outside the staging path, assert it is denied. Assert process tree is torn down when Job Object handle closes.
 
-6. [ ] **CI test** (Windows runner): Spawn a sandboxed agent subprocess, attempt to write outside the staging path, assert it is denied. Assert process tree is torn down when Job Object handle closes.
-7. [ ] **USAGE.md**: Windows sandbox section — what each containment level restricts, how to enable, elevation requirement for AppContainer, `ta doctor` sandbox check.
+3. [ ] **USAGE.md**: Windows sandbox section — what each containment level restricts, how to enable, elevation requirement for AppContainer, `ta doctor` sandbox check.
 
 > **Focus**: Tier 2 managed-paths filesystem governance (SHA journal, Postgres/MySQL staging), followed by the unified `ta release` command system. Governance infrastructure comes first so the release pipeline itself can run under full governance.
 
@@ -7366,17 +7366,24 @@ Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 
 
 #### Version: `0.17.0-alpha`
 
+---
+
+### v0.17.1 — Database Proxy (Postgres, MySQL, SQLite)
+<!-- status: pending -->
 
 **Depends on**: v0.17.0 (URI journal pattern established for governed resources)
 
-**Items**:
-6. [ ] **`ta-db-proxy-postgres` crate** (`crates/ta-db-proxy-postgres/`): Implements `DbProxyPlugin`. Connects to a Postgres logical replication slot created at goal start. Agent connects to a read-write replica or the primary (configured via `db://postgres/<conn>#<table>` URI). WAL events captured to JSONL mutation log during the goal. `apply()` replays log against target; `deny()` discards log and drops replication slot.
+1. [ ] **`ta-db-proxy-postgres` crate** (`crates/ta-db-proxy-postgres/`): Implements `DbProxyPlugin`. Connects to a Postgres logical replication slot created at goal start. Agent connects to a read-write replica or the primary (configured via `db://postgres/<conn>#<table>` URI). WAL events captured to JSONL mutation log during the goal. `apply()` replays log against target; `deny()` discards log and drops replication slot.
 
-7. [ ] **Constitution rules for DB** (default `constitution.toml`): `[[rules.warn]]` fires when a DB draft contains > N rows modified (configurable, default 100). `[[rules.block]]` fires on schema-altering statements (`DROP TABLE`, `TRUNCATE`, `ALTER TABLE DROP COLUMN`) unless `allow_schema_drops = true` in `[actions.db_query]`.
-8. [ ] **`ta-db-proxy` registry** (`crates/ta-db-proxy/src/registry.rs`): Maps URI scheme + driver to the correct plugin backend. `db://postgres/*` → `PostgresProxyPlugin`; `db://sqlite/*` → `SqliteProxyPlugin`; `db://mysql/*` → `MysqlProxyPlugin`. Plugins are optional features — `ta-db-proxy-postgres` behind `[features] postgres`.
+2. [ ] **Constitution rules for DB** (default `constitution.toml`): `[[rules.warn]]` fires when a DB draft contains > N rows modified (configurable, default 100). `[[rules.block]]` fires on schema-altering statements (`DROP TABLE`, `TRUNCATE`, `ALTER TABLE DROP COLUMN`) unless `allow_schema_drops = true` in `[actions.db_query]`.
+3. [ ] **`ta-db-proxy` registry** (`crates/ta-db-proxy/src/registry.rs`): Maps URI scheme + driver to the correct plugin backend. `db://postgres/*` → `PostgresProxyPlugin`; `db://sqlite/*` → `SqliteProxyPlugin`; `db://mysql/*` → `MysqlProxyPlugin`. Plugins are optional features — `ta-db-proxy-postgres` behind `[features] postgres`.
 
-9. [ ] **`policy = "review"` as default** for `[actions.db_query]`: Default is `review` (not `auto`). Every DB mutation is held for human review showing the row-level diff before execution. `policy = "auto"` requires explicit opt-in.
-10. [ ] **Tests**: Postgres replication slot created/dropped on goal start/deny; WAL capture round-trip; row-level diff rendering for INSERT/UPDATE/DELETE; schema-drop constitution rule blocks `DROP TABLE`; credential vault resolves DSN without exposing it to agent; large-mutation warning fires at configured threshold.
+4. [ ] **`policy = "review"` as default** for `[actions.db_query]`: Default is `review` (not `auto`). Every DB mutation is held for human review showing the row-level diff before execution. `policy = "auto"` requires explicit opt-in.
+5. [ ] **Tests**: Postgres replication slot created/dropped on goal start/deny; WAL capture round-trip; row-level diff rendering for INSERT/UPDATE/DELETE; schema-drop constitution rule blocks `DROP TABLE`; credential vault resolves DSN without exposing it to agent; large-mutation warning fires at configured threshold.
+
+#### Version: `0.17.1-alpha`
+
+---
 
 > **Focus**: Unified `ta release` command system. Builds on the governed filesystem from v0.17.0-v0.17.1 — release pipelines run under full governance. that works for any release type — binary distributions, content deliveries, service deployments — via a pluggable `ReleaseAdapter` abstraction. Replaces the current ad-hoc dispatch/channel/VCS approach with a single coherent model and a simplified command surface.
 
@@ -7536,18 +7543,22 @@ Code releases use semver. Content releases don't. Decide:
 
 #### Version: `0.18.0-alpha`
 
+---
+
+### v0.18.1 — Host-Wide FUSE Filesystem + External Process Governance
+<!-- status: pending -->
 
 **Goal**: Extend Tier 2 managed paths from v0.17.0 to cover writes from any process — not just the TA agent process. ComfyUI, SimpleTuner, game engines, and arbitrary daemons writing to governed paths are captured in the SHA journal. The URI journal becomes a host-wide audit record for all filesystem activity in governed paths, regardless of which process produced it.
 
 **Depends on**: v0.17.0 (SHA journal, URI journal, FUSE daemon baseline), v0.18.0 (SA credential store — external process governance is an SA-tier capability)
 
-**Items**:
+1. [ ] **Checkpoint and rollback**: `ta checkpoint create "before-training-run"` records a named snapshot of all governed-path SHA entries. `ta checkpoint restore "before-training-run"` rewrites real paths to pre-checkpoint SHA blobs. Enables "undo this SimpleTuner run" without re-training.
+2. [ ] **Large file policy** (`max_sha_store_mb` per governed path): When the SHA store for a path exceeds the limit, the oldest blobs (not referenced by a live checkpoint) are evicted. Warning emitted. GC is automatic.
 
-4. [ ] **Checkpoint and rollback**: `ta checkpoint create "before-training-run"` records a named snapshot of all governed-path SHA entries. `ta checkpoint restore "before-training-run"` rewrites real paths to pre-checkpoint SHA blobs. Enables "undo this SimpleTuner run" without re-training.
-5. [ ] **Large file policy** (`max_sha_store_mb` per governed path): When the SHA store for a path exceeds the limit, the oldest blobs (not referenced by a live checkpoint) are evicted. Warning emitted. GC is automatic.
+3. [ ] **`ta governed status`**: Shows all active FUSE mounts, session-level governed paths, SHA store sizes, live checkpoints, and the last 10 writes per governed path.
+4. [ ] **Tests**: ComfyUI mock process writes to governed path → captured in journal with correct process attribution; checkpoint/restore round-trip; eviction when max size exceeded; DB mutation from external process captured via replication slot.
 
-6. [ ] **`ta governed status`**: Shows all active FUSE mounts, session-level governed paths, SHA store sizes, live checkpoints, and the last 10 writes per governed path.
-7. [ ] **Tests**: ComfyUI mock process writes to governed path → captured in journal with correct process attribution; checkpoint/restore round-trip; eviction when max size exceeded; DB mutation from external process captured via replication slot.
+#### Version: `0.18.1-alpha`
 
 > Items in this section are under active consideration for deferral, scoping reduction, or removal. Review before each release cycle.
 
