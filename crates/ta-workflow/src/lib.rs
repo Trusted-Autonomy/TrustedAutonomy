@@ -8,12 +8,14 @@
 //   - Serial phase chains with gate evaluation (v0.13.7)
 //   - Parallel agent swarm coordination (v0.13.7)
 //   - Multi-agent consensus review workflow (v0.15.15)
+//   - Natural language → workflow intent resolver (v0.15.24)
 
 pub mod artifact_dag;
 pub mod artifact_store;
 pub mod consensus;
 pub mod definition;
 pub mod error;
+pub mod intent;
 pub mod interaction;
 pub mod params;
 pub mod process_engine;
@@ -34,6 +36,10 @@ pub use consensus::{
 pub use definition::{
     FailureRouting, RoleDefinition, StageDefinition, StageReview, WorkflowCatalog,
     WorkflowDefinition,
+};
+pub use intent::{
+    extract_intent, format_confirmation_card, resolve_intent, ExtractedIntent, IntentVerb,
+    ResolutionResult, ScopeModifier, TemplateCandidate, CONFIDENCE_THRESHOLD,
 };
 pub use params::{
     interpolate, version_prefix_from_id, ParamDecl, ParamValues, PlanContext, TemplateEntry,

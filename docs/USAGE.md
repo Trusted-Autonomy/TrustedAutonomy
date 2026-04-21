@@ -5025,6 +5025,38 @@ Two parameterized templates ship with `ta`:
 | `plan-build-phases`   | Iterate pending PLAN.md phases; uses `phase_filter` and `max_phases` |
 | `governed-goal`       | Full governed coding loop (run → review → gate → apply → PR)         |
 
+### Natural Language Intent Resolution
+
+When you pass free-form text instead of a template name, `ta workflow run` attempts to resolve a matching template automatically. No LLM is required — the resolver uses keyword matching and plan context.
+
+```bash
+# Both of these resolve to plan-build-phases with phase_filter=v0.15
+ta workflow run "implement remaining v0.15"
+ta workflow run "run next phase"
+```
+
+**How it works:**
+
+1. TA extracts three signals from your input:
+   - **version_ref** — a version string like `v0.15` or `v0.15.24`
+   - **intent_verb** — an action word: `implement`, `build`, `run`, `complete`, `execute`
+   - **scope_modifier** — a scope word: `remaining`, `all`, `next`, `pending`
+2. Each template is scored against these signals (0.0–1.0).
+3. If the top score ≥ 0.80, TA shows a confirmation card:
+
+   ```
+   Resolved workflow for: "implement remaining v0.15"
+     Template:    plan-build-phases (100% confidence)
+     Description: Iterate pending PLAN.md phases through the governed build workflow.
+     Params:      phase_filter=v0.15
+
+   1. Run    2. Adjust params    3. Different workflow    4. Cancel
+   ```
+
+4. If the score is below the threshold, TA asks a clarifying question and exits.
+
+**Explicit template names always take precedence** — if the name you supply matches a known template exactly, intent resolution is skipped.
+
 ---
 
 ## Advanced Features
