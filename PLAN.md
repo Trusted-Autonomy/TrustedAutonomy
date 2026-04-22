@@ -7136,6 +7136,22 @@ ta draft apply <id>              ← prompts if conflicts present
 
 ---
 
+### v0.15.24.5 — Preserve Phase Items on Draft Apply (Fix Protected-File mtime Bug)
+<!-- status: pending -->
+
+**Goal**: Fix `ta draft apply` stripping all checklist items from a phase when the agent edits PLAN.md in staging. Items should survive until `ta plan compact` — only compaction is allowed to summarise and remove them.
+
+**Why**: `DEFAULT_PROTECTED_FILES` includes `PLAN.md` to prevent staging from overwriting source, but the guard used `source_mtime > staging_mtime` to decide which wins. The agent always writes staging PLAN.md during the goal run, giving it a fresh mtime — so staging always won, overwriting source with the agent's stripped version. The mtime heuristic is wrong for this use case: `apply_plan_patch` and `update_phase_status` already apply all needed status changes to source PLAN.md; the agent's wholesale copy adds nothing useful and destroys item history.
+
+**Depends on**: v0.15.24.4
+
+1. [x] **Remove mtime check from protected-file guard** (`apps/ta-cli/src/commands/draft.rs`): When `keep_source_from_policy = true` and contents differ, always skip the artifact and keep source — no mtime comparison. Log a clear message explaining why staging changes were discarded.
+2. [ ] **Tests**: goal that modifies PLAN.md in staging (removes items) → apply keeps source items intact; goal with `conflict_policy: staging-wins` for PLAN.md → staging still wins; goal where staging and source PLAN.md are identical → no skip, artifact applied normally.
+
+#### Version: `0.15.24-alpha.5`
+
+---
+
 ### v0.15.25 — Auto-Approve Constitution: Rule-Based Policy + Amendment Flow
 <!-- status: pending -->
 
