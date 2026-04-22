@@ -2123,4 +2123,181 @@ mod tests {
         // it must not panic.
         let _ = adapter.commit_diff();
     }
+
+    // ── v0.15.24.4: fetch-before-branch tests ────────────────────────────────
+
+    /// prepare() fetches origin and creates the feature branch from the remote's
+    /// commit, not from the stale local HEAD.
+    #[test]
+    fn prepare_branches_from_remote_when_remote_is_ahead() {
+        let remote_dir = tempdir().unwrap();
+        init_git_repo(remote_dir.path()).unwrap();
+
+        let local_dir = tempdir().unwrap();
+        let remote_path = remote_dir.path().to_string_lossy().to_string();
+        git_in(local_dir.path(), &["clone", &remote_path, "."]);
+
+        // Detect the actual default branch name (git may use "main" or "master").
+        let local_branch = String::from_utf8_lossy(
+            &git_in(local_dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]).stdout,
+        )
+        .trim()
+        .to_string();
+
+        // Advance the remote with one extra commit after cloning, so remote is ahead.
+        std::fs::write(remote_dir.path().join("extra.txt"), "remote-only\n").unwrap();
+        git_in(remote_dir.path(), &["add", "extra.txt"]);
+        git_in(remote_dir.path(), &["commit", "-m", "Remote extra commit"]);
+
+        let remote_head =
+            String::from_utf8_lossy(&git_in(remote_dir.path(), &["rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_string();
+        let local_head_before =
+            String::from_utf8_lossy(&git_in(local_dir.path(), &["rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_string();
+
+        assert_ne!(
+            remote_head, local_head_before,
+            "remote must be ahead of local before prepare()"
+        );
+
+        let config = SubmitConfig {
+            git: crate::config::GitConfig {
+                target_branch: local_branch.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let adapter = GitAdapter::with_config(local_dir.path(), config.clone());
+        let goal = GoalRun::new(
+            "Remote Ahead Goal",
+            "Test",
+            "test-agent",
+            local_dir.path().to_path_buf(),
+            local_dir.path().join("store"),
+        );
+
+        adapter.prepare(&goal, &config).unwrap();
+
+        let feature_head =
+            String::from_utf8_lossy(&git_in(local_dir.path(), &["rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_string();
+
+        assert_eq!(
+            feature_head, remote_head,
+            "prepare() must branch from origin/{} (fetched), not stale local HEAD",
+            local_branch
+        );
+        assert_ne!(
+            feature_head, local_head_before,
+            "feature branch must not start from old local HEAD"
+        );
+    }
+
+    /// prepare() succeeds when the remote is unreachable, falling back to local HEAD.
+    #[test]
+    fn prepare_offline_fallback_branches_from_local_head() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+
+        let local_head =
+            String::from_utf8_lossy(&git_in(dir.path(), &["rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_string();
+
+        // Use a remote name that doesn't exist to simulate offline / no-remote.
+        let config = SubmitConfig {
+            git: crate::config::GitConfig {
+                remote: "nonexistent-remote".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let adapter = GitAdapter::with_config(dir.path(), config.clone());
+        let goal = GoalRun::new(
+            "Offline Fallback Goal",
+            "Test",
+            "test-agent",
+            dir.path().to_path_buf(),
+            dir.path().join("store"),
+        );
+
+        assert!(
+            adapter.prepare(&goal, &config).is_ok(),
+            "prepare() must succeed even when remote is unreachable"
+        );
+
+        let feature_head =
+            String::from_utf8_lossy(&git_in(dir.path(), &["rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_string();
+
+        assert_eq!(
+            feature_head, local_head,
+            "offline fallback must branch from local HEAD"
+        );
+    }
+
+    /// prepare() called a second time with the same goal checks out the existing
+    /// branch rather than failing or creating a duplicate.
+    #[test]
+    fn prepare_existing_branch_checkout() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+
+        let initial_branch = String::from_utf8_lossy(
+            &git_in(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]).stdout,
+        )
+        .trim()
+        .to_string();
+
+        // Use offline config so fetch doesn't block on a missing remote.
+        let config = SubmitConfig {
+            git: crate::config::GitConfig {
+                remote: "nonexistent-remote".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let adapter = GitAdapter::with_config(dir.path(), config.clone());
+        let goal = GoalRun::new(
+            "Existing Branch Goal",
+            "Test",
+            "test-agent",
+            dir.path().to_path_buf(),
+            dir.path().join("store"),
+        );
+
+        // First call: creates the feature branch.
+        adapter.prepare(&goal, &config).unwrap();
+        let feature_branch = String::from_utf8_lossy(
+            &git_in(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert!(
+            feature_branch.starts_with("ta/"),
+            "should be on feature branch: {}",
+            feature_branch
+        );
+
+        // Switch back to the initial branch.
+        git_in(dir.path(), &["checkout", &initial_branch]);
+
+        // Second call with the same goal: must check out the existing branch without error.
+        adapter.prepare(&goal, &config).unwrap();
+        let current = String::from_utf8_lossy(
+            &git_in(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]).stdout,
+        )
+        .trim()
+        .to_string();
+
+        assert_eq!(
+            current, feature_branch,
+            "second prepare() must switch to existing branch, not create a new one"
+        );
+    }
 }

@@ -23,20 +23,20 @@ tokio = { workspace = true }
 regex = { workspace = true }
 
 # Internal crates
-ta-audit = { path = "../ta-audit", version = "0.15.24-alpha.3" }
-ta-events = { path = "../ta-events", version = "0.15.24-alpha.3" }
-ta-memory = { path = "../ta-memory", version = "0.15.24-alpha.3" }
-ta-changeset = { path = "../ta-changeset", version = "0.15.24-alpha.3" }
-ta-connector-fs = { path = "../ta-connectors/fs", version = "0.15.24-alpha.3" }
-ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.15.24-alpha.3" }
-ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.15.24-alpha.3" }
-ta-connector-unity = { path = "../ta-connectors/unity", version = "0.15.24-alpha.3" }
-ta-goal = { path = "../ta-goal", version = "0.15.24-alpha.3" }
-ta-policy = { path = "../ta-policy", version = "0.15.24-alpha.3" }
-ta-workspace = { path = "../ta-workspace", version = "0.15.24-alpha.3" }
-ta-workflow = { path = "../ta-workflow", version = "0.15.24-alpha.3" }
-ta-actions = { path = "../ta-actions", version = "0.15.24-alpha.3" }
-ta-submit = { path = "../ta-submit", version = "0.15.24-alpha.3" }
+ta-audit = { path = "../ta-audit", version = "0.15.24-alpha.4" }
+ta-events = { path = "../ta-events", version = "0.15.24-alpha.4" }
+ta-memory = { path = "../ta-memory", version = "0.15.24-alpha.4" }
+ta-changeset = { path = "../ta-changeset", version = "0.15.24-alpha.4" }
+ta-connector-fs = { path = "../ta-connectors/fs", version = "0.15.24-alpha.4" }
+ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.15.24-alpha.4" }
+ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.15.24-alpha.4" }
+ta-connector-unity = { path = "../ta-connectors/unity", version = "0.15.24-alpha.4" }
+ta-goal = { path = "../ta-goal", version = "0.15.24-alpha.4" }
+ta-policy = { path = "../ta-policy", version = "0.15.24-alpha.4" }
+ta-workspace = { path = "../ta-workspace", version = "0.15.24-alpha.4" }
+ta-workflow = { path = "../ta-workflow", version = "0.15.24-alpha.4" }
+ta-actions = { path = "../ta-actions", version = "0.15.24-alpha.4" }
+ta-submit = { path = "../ta-submit", version = "0.15.24-alpha.4" }
 
 
 [dev-dependencies]
