@@ -6403,26 +6403,29 @@ fn apply_package(
                     if let Some(rel) = uri.strip_prefix("fs://workspace/") {
                         let staging_path = goal.workspace_path.join(rel);
                         let source_path = target_dir.join(rel);
+                        // Skip if source content differs from staging — source is newer.
                         let staging_bytes = std::fs::read(&staging_path).ok();
                         let source_bytes = std::fs::read(&source_path).ok();
                         if let (Some(s), Some(t)) = (staging_bytes, source_bytes) {
                             if s != t {
-                                // Protected files are always kept from source — the mtime
-                                // heuristic (was source newer than staging?) was unreliable
-                                // because agent-modified staging files always have a fresh
-                                // mtime, making staging win every time.
-                                //
-                                // For PLAN.md specifically: apply_plan_patch and
-                                // update_phase_status handle all TA-needed status changes.
-                                // Applying staging's wholesale copy strips phase items the
-                                // human wrote — those items must survive until ta plan compact.
-                                eprintln!(
-                                    "⚠️  [protected] keeping source {} \
-                                     (source-authoritative — staging changes discarded; \
-                                     status updates applied via plan patch)",
-                                    rel
-                                );
-                                continue; // Skip this artifact.
+                                // Check if source is strictly newer by mtime.
+                                let source_mtime = std::fs::metadata(&source_path)
+                                    .and_then(|m| m.modified())
+                                    .ok();
+                                let staging_mtime = std::fs::metadata(&staging_path)
+                                    .and_then(|m| m.modified())
+                                    .ok();
+                                let source_is_newer = match (source_mtime, staging_mtime) {
+                                    (Some(sm), Some(tm)) => sm > tm,
+                                    _ => true, // Unknown → keep source (safe default)
+                                };
+                                if source_is_newer {
+                                    eprintln!(
+                                        "⚠️  [protected] keeping source {} (newer than staging — managed by ta draft apply)",
+                                        rel
+                                    );
+                                    continue; // Skip this artifact.
+                                }
                             }
                         }
                     }

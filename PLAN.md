@@ -7145,7 +7145,7 @@ ta draft apply <id>              ← prompts if conflicts present
 
 **Depends on**: v0.15.24.4
 
-1. [x] **Remove mtime check from protected-file guard** (`apps/ta-cli/src/commands/draft.rs`): When `keep_source_from_policy = true` and contents differ, always skip the artifact and keep source — no mtime comparison. Log a clear message explaining why staging changes were discarded.
+1. [ ] **Replace mtime check with 3-way merge** (`apps/ta-cli/src/commands/draft.rs`, `crates/ta-changeset/src/plan_merge.rs`): During apply, call `merge_plan_md(base_snapshot, staging, source)` for protected files instead of using mtime to pick a winner. `base_snapshot` is the PLAN.md at staging-creation time (store in draft package). The merge result correctly combines new phases from staging with items added to source after goal start, without either side losing content. (`apps/ta-cli/src/commands/draft.rs`): When `keep_source_from_policy = true` and contents differ, always skip the artifact and keep source — no mtime comparison. Log a clear message explaining why staging changes were discarded.
 2. [ ] **Tests**: goal that modifies PLAN.md in staging (removes items) → apply keeps source items intact; goal with `conflict_policy: staging-wins` for PLAN.md → staging still wins; goal where staging and source PLAN.md are identical → no skip, artifact applied normally.
 
 #### Version: `0.15.24-alpha.5`
