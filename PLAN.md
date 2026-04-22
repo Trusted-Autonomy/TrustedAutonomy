@@ -7174,7 +7174,7 @@ ta draft apply <id>              ← prompts if conflicts present
 
 ---
 
-
+### v0.15.27 — Workflow Template Library: Install, Publish, Search
 <!-- status: pending -->
 
 **Goal**: Let users install workflow templates from a URL or registry, publish their own templates, and search the built-in template index — all via `ta workflow install/publish/search`.
