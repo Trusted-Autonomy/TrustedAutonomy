@@ -7136,17 +7136,28 @@ ta draft apply <id>              ← prompts if conflicts present
 
 ---
 
-### v0.15.24.5 — Preserve Phase Items on Draft Apply (Fix Protected-File mtime Bug)
+### v0.15.24.5 — Preserve Phase Items on Draft Apply (3-Way Merge for Protected Files)
 <!-- status: pending -->
 
-**Goal**: Fix `ta draft apply` stripping all checklist items from a phase when the agent edits PLAN.md in staging. Items should survive until `ta plan compact` — only compaction is allowed to summarise and remove them.
+**Goal**: Fix `ta draft apply` stripping all checklist items from a phase when the agent edits PLAN.md in staging. Items must survive until `ta plan compact` — only compaction is allowed to summarise and remove them.
 
-**Why**: `DEFAULT_PROTECTED_FILES` includes `PLAN.md` to prevent staging from overwriting source, but the guard used `source_mtime > staging_mtime` to decide which wins. The agent always writes staging PLAN.md during the goal run, giving it a fresh mtime — so staging always won, overwriting source with the agent's stripped version. The mtime heuristic is wrong for this use case: `apply_plan_patch` and `update_phase_status` already apply all needed status changes to source PLAN.md; the agent's wholesale copy adds nothing useful and destroys item history.
+**Why**: `DEFAULT_PROTECTED_FILES` includes `PLAN.md` to prevent staging from overwriting source, but the current guard uses `source_mtime > staging_mtime` to decide which wins. The agent always writes staging PLAN.md during the goal run, giving it a fresh mtime — so staging always wins, overwriting source with the agent's stripped version and destroying all item history.
+
+**Why NOT unconditional source-keep (the simpler-looking fix)**: Simply always keeping source when content differs (skipping the artifact entirely) would break goals whose entire purpose is to add new phases to PLAN.md in staging. Those new phases are in the staging PLAN.md but not in source — keeping source unconditionally silently discards the agent's actual work. This approach was implemented in a previous attempt and explicitly reverted. **Do not implement unconditional source-keep.**
+
+**The correct fix — 3-way merge**: Store the PLAN.md content at staging-creation time as a base snapshot in the draft package. At apply time, merge all three versions: what changed between base→staging (agent's additions) gets applied onto source (which may have accumulated its own changes). This preserves both the agent's new phases AND source's item history.
 
 **Depends on**: v0.15.24.4
 
-1. [ ] **Replace mtime check with 3-way merge** (`apps/ta-cli/src/commands/draft.rs`, `crates/ta-changeset/src/plan_merge.rs`): During apply, call `merge_plan_md(base_snapshot, staging, source)` for protected files instead of using mtime to pick a winner. `base_snapshot` is the PLAN.md at staging-creation time (store in draft package). The merge result correctly combines new phases from staging with items added to source after goal start, without either side losing content. (`apps/ta-cli/src/commands/draft.rs`): When `keep_source_from_policy = true` and contents differ, always skip the artifact and keep source — no mtime comparison. Log a clear message explaining why staging changes were discarded.
-2. [ ] **Tests**: goal that modifies PLAN.md in staging (removes items) → apply keeps source items intact; goal with `conflict_policy: staging-wins` for PLAN.md → staging still wins; goal where staging and source PLAN.md are identical → no skip, artifact applied normally.
+1. [ ] **`DraftPackage` base snapshot** (`crates/ta-changeset/src/lib.rs` or wherever `DraftPackage` is defined): Add `plan_md_base: Option<String>` field. During `ta draft build`, if PLAN.md is in `DEFAULT_PROTECTED_FILES`, capture the PLAN.md content from the staging overlay's base (the source copy made at goal-start time) and store it in this field. Serialise/deserialise with the rest of the package.
+
+2. [ ] **3-way merge function** (`crates/ta-changeset/src/plan_merge.rs`, new file): Implement `merge_plan_md(base: &str, staging: &str, source: &str) -> String`. Identify lines present in `staging` but not `base` (agent additions) and lines present in `source` but not `base` (post-goal source additions). Apply both sets of additions to `source`. Phase blocks added by the agent (new `### v0.X.Y` sections) are appended in order. Existing phase items in source are never removed.
+
+3. [ ] **Wire into apply path** (`apps/ta-cli/src/commands/draft.rs`, protected-file guard ~line 6402): Replace the mtime comparison with: if `plan_md_base` is present in the package, call `merge_plan_md(base, staging_content, source_content)` and write the merged result; if `plan_md_base` is absent (legacy package), fall back to keeping source unchanged and log a warning. Remove all mtime logic for this case.
+
+4. [ ] **Tests**: (a) goal that strips items from a phase → apply keeps source items intact; (b) goal that adds a new phase section → new section is present in result and source items are intact; (c) goal where staging and source are identical → result equals source; (d) legacy package (no base snapshot) → source kept, warning logged.
+
+5. [ ] **USAGE.md**: Add one sentence to the "Protected files" section explaining that PLAN.md is merged rather than overwritten.
 
 #### Version: `0.15.24-alpha.5`
 
