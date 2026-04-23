@@ -1860,6 +1860,116 @@ ta constitution review --no-agent          # exact dedup only, skip model call
 ta constitution review --model claude-opus-4-6  # override model for semantic review
 ```
 
+### Auto-Approve Constitution (`[[approval_rules]]`)
+
+The `[[approval_rules]]` section in `.ta/constitution.toml` replaces the binary `auto_approve.enabled = true/false` with a declarative, file-pattern-based policy. Rules are evaluated in order (first-match-wins per path); the most-restrictive action across all changed paths determines the outcome.
+
+Each rule specifies:
+- **`patterns`** — glob list. A path matches the rule if it matches *any* pattern.
+- **`action`** — `approve`, `review`, or `block`.
+- **`label`** — optional human-readable description for `ta constitution show`.
+
+#### Default rules
+
+`ta constitution init-toml` generates these defaults:
+
+```toml
+[[approval_rules]]
+patterns = ["docs/**", "*.md"]
+action   = "approve"
+label    = "Documentation files"
+
+[[approval_rules]]
+patterns = ["src/auth/**", "*_token*", "*.pem", "*.key", "*.pfx", "*.p12", ".env", ".env.*"]
+action   = "block"
+label    = "Security-sensitive files"
+
+[[approval_rules]]
+patterns = ["**"]
+action   = "review"
+label    = "All other files (default)"
+```
+
+#### Actions
+
+| Action    | Effect                                                              |
+|-----------|---------------------------------------------------------------------|
+| `approve` | Draft is auto-approved without human review.                        |
+| `review`  | Draft is routed to human review (default for unmatched paths).      |
+| `block`   | Draft is blocked; cannot be approved until the rule is amended.     |
+
+When multiple files are changed, the **most-restrictive action wins** across all paths: `block > review > approve`.
+
+#### Viewing active rules
+
+```bash
+ta constitution show
+```
+
+Prints the current `[[approval_rules]]` with action and patterns:
+
+```
+=== Auto-Approve Constitution Rules (.ta/constitution.toml) ===
+
+  Rule  Action      Patterns
+  ------------------------------------------------------------
+  [0 ]  approve     docs/**, *.md
+        Documentation files
+  [1 ]  block       src/auth/**, *_token*, *.pem, *.key
+        Security-sensitive files
+  [2 ]  review      **
+        All other files (default)
+
+  Evaluation: first-match-wins per path; most restrictive wins across files.
+  Amendment:  `ta constitution amend` to propose changes via draft review.
+```
+
+#### Amending rules
+
+Constitution policy is governed — no silent changes. Edit `.ta/constitution.toml` locally, then stage the amendment as a reviewable draft:
+
+```bash
+# 1. Edit the rules
+$EDITOR .ta/constitution.toml
+
+# 2. Preview the diff without creating a draft
+ta constitution amend --dry-run
+
+# 3. Stage the amendment as a draft
+ta constitution amend
+
+# Output:
+# Constitution amendment staged as draft a3f2b1c0.
+#
+# Next steps:
+#   ta draft view a3f2b1c0     — review the diff
+#   ta draft approve a3f2b1c0  — approve the change
+#   ta draft apply a3f2b1c0    — apply to workspace
+```
+
+After `ta draft apply`, the new rules take effect for subsequent auto-approve decisions.
+
+If `.ta/constitution.toml` does not yet exist, `ta constitution amend` creates it with the default approval rules and prompts you to review before staging.
+
+#### Validating rules
+
+```bash
+ta constitution validate
+```
+
+Checks the `[[approval_rules]]` section for overlapping patterns. A later rule that is completely shadowed by an earlier catch-all can never be reached, which is usually a misconfiguration.
+
+```
+Validating 3 approval rule(s)...
+
+  WARN: rule[1] pattern "docs/**" is always shadowed by rule[0] (first-match-wins)
+
+1 warning(s): later rules with shadowed patterns can never be reached.
+Consider reordering rules so more specific patterns appear before catch-alls.
+```
+
+Exit code 0 = valid; exit code 1 = overlap warnings found.
+
 ### Desktop Notifications
 
 TA sends a system notification when a draft is ready for review, so you don't have to watch the terminal. On macOS this uses Notification Center (via `osascript`); on Linux it uses `notify-send`.

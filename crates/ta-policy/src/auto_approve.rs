@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::access_filter::AccessFilter;
+use crate::approval_rules::{evaluate_approval_rules, ApprovalAction, ApprovalRule};
 use crate::document::{AutoApproveDraftConfig, PolicyDocument, SecurityLevel};
 
 /// Minimal draft info needed for auto-approval evaluation.
@@ -49,6 +50,96 @@ pub enum AutoApproveDecision {
 impl AutoApproveDecision {
     pub fn is_approved(&self) -> bool {
         matches!(self, AutoApproveDecision::Approved { .. })
+    }
+}
+
+/// Evaluate a draft using the rule-based constitution (v0.15.25).
+///
+/// When `constitution_rules` is non-empty the rules take precedence over
+/// the binary `auto_approve.enabled` flag.  Rules are evaluated with
+/// first-match-wins semantics per path; the most-restrictive action across
+/// all changed paths determines the outcome:
+///
+/// - `approve` → `Approved` (skips the binary-flag path entirely)
+/// - `review`  → `Denied` (routes to human review)
+/// - `block`   → `Denied` with a "blocked by constitution rule" message
+///
+/// The agent security-level check still applies — a `Supervised` or `Strict`
+/// agent is always denied regardless of the rules.
+///
+/// Falls back to [`should_auto_approve_draft`] when `constitution_rules` is empty.
+pub fn should_auto_approve_with_rules(
+    draft: &DraftInfo,
+    doc: &PolicyDocument,
+    constitution_rules: &[ApprovalRule],
+) -> AutoApproveDecision {
+    // Agent security level check always applies.
+    let agent_level = doc
+        .agents
+        .get(&draft.agent_id)
+        .and_then(|a| a.security_level)
+        .unwrap_or(doc.security_level);
+    if agent_level >= SecurityLevel::Supervised {
+        return AutoApproveDecision::Denied {
+            blockers: vec![format!(
+                "agent '{}' security level is {} (requires human review)",
+                draft.agent_id, agent_level
+            )],
+        };
+    }
+
+    // If no constitution rules, fall back to binary flag evaluation.
+    if constitution_rules.is_empty() {
+        return should_auto_approve_draft(draft, doc);
+    }
+
+    let bare_paths: Vec<&str> = draft
+        .changed_paths
+        .iter()
+        .map(|p| crate::approval_rules::strip_uri_prefix(p))
+        .collect();
+
+    match evaluate_approval_rules(constitution_rules, &bare_paths) {
+        None => should_auto_approve_draft(draft, doc),
+        Some(decision) => match decision.action {
+            ApprovalAction::Approve => {
+                let reasons: Vec<String> = decision
+                    .reasons
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "constitution rule[{}]: {} → approve ({})",
+                            r.matched_rule_index.map_or(-1, |i| i as i64),
+                            r.path,
+                            r.matched_pattern.as_deref().unwrap_or("no pattern")
+                        )
+                    })
+                    .collect();
+                AutoApproveDecision::Approved { reasons }
+            }
+            ApprovalAction::Block => {
+                let blockers: Vec<String> = decision
+                    .reasons
+                    .iter()
+                    .filter(|r| r.action == ApprovalAction::Block)
+                    .map(|r| {
+                        format!(
+                            "path '{}' blocked by constitution rule[{}] (pattern: {})",
+                            r.path,
+                            r.matched_rule_index.map_or(-1, |i| i as i64),
+                            r.matched_pattern.as_deref().unwrap_or("?")
+                        )
+                    })
+                    .collect();
+                AutoApproveDecision::Denied { blockers }
+            }
+            ApprovalAction::Review => AutoApproveDecision::Denied {
+                blockers: vec![format!(
+                    "constitution rules require human review for {} path(s)",
+                    draft.changed_paths.len()
+                )],
+            },
+        },
     }
 }
 

@@ -47,10 +47,17 @@ pub use constitution::{
 };
 pub use context::PolicyContext;
 pub mod access_filter;
+pub mod approval_rules;
 pub mod auto_approve;
 
 pub use access_filter::AccessFilter;
-pub use auto_approve::{AutoApproveDecision, DraftInfo};
+pub use approval_rules::{
+    default_approval_rules, evaluate_approval_rules, validate_approval_rules, ApprovalAction,
+    ApprovalRule, ApprovalRuleDecision, OverlapWarning,
+};
+pub use auto_approve::{
+    should_auto_approve_draft, should_auto_approve_with_rules, AutoApproveDecision, DraftInfo,
+};
 pub use document::{
     AgentPolicyOverride, AutoApproveConditions, AutoApproveConfig, AutoApproveDraftConfig,
     BudgetConfig, EscalationConfig, PolicyDefaults, PolicyDocument, PolicyEnforcement,

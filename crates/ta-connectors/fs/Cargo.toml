@@ -16,10 +16,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-ta-changeset = { path = "../../ta-changeset", version = "0.15.24-alpha.5" }
-ta-workspace = { path = "../../ta-workspace", version = "0.15.24-alpha.5" }
-ta-audit = { path = "../../ta-audit", version = "0.15.24-alpha.5" }
+ta-changeset = { path = "../../ta-changeset", version = "0.15.25-alpha" }
+ta-workspace = { path = "../../ta-workspace", version = "0.15.25-alpha" }
+ta-audit = { path = "../../ta-audit", version = "0.15.25-alpha" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-ta-policy = { path = "../../ta-policy", version = "0.15.24-alpha.5" }
+ta-policy = { path = "../../ta-policy", version = "0.15.25-alpha" }

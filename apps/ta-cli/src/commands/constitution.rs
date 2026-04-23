@@ -101,6 +101,27 @@ pub enum ConstitutionCommands {
         #[arg(long)]
         no_agent: bool,
     },
+    /// Stage the current `.ta/constitution.toml` as a draft for review (v0.15.25).
+    ///
+    /// The auto-approve constitution (`[[approval_rules]]`) is policy — changes
+    /// must go through the standard review gate. Edit `.ta/constitution.toml`
+    /// locally, then run this command to package your changes as a reviewable
+    /// draft.  After `ta draft approve <id>` + `ta draft apply <id>`, the new
+    /// rules take effect.
+    ///
+    /// If `.ta/constitution.toml` does not yet exist, a default file is created
+    /// with doc-approve / auth-block / catch-all-review rules.
+    Amend {
+        /// Print the proposed diff without creating a draft.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Check the `[[approval_rules]]` section for schema errors and overlapping
+    /// patterns (v0.15.25).
+    ///
+    /// Exit code 0 = valid; exit code 1 = overlapping patterns that may indicate
+    /// unreachable rules. Does not require a running daemon.
+    Validate,
 }
 
 pub fn execute(command: &ConstitutionCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -121,6 +142,8 @@ pub fn execute(command: &ConstitutionCommands, config: &GatewayConfig) -> anyhow
             model,
             no_agent,
         } => review_constitution(config, *dry_run, model.as_deref(), *no_agent),
+        ConstitutionCommands::Amend { dry_run } => amend_constitution(config, *dry_run),
+        ConstitutionCommands::Validate => validate_constitution_cmd(&config.workspace_root),
     }
 }
 
@@ -348,20 +371,60 @@ The project name is: **{name}**"#,
 }
 
 fn show_constitution(config: &GatewayConfig) -> anyhow::Result<()> {
-    let path = config.workspace_root.join(".ta/constitution.md");
-    if !path.exists() {
+    // Show approval_rules from constitution.toml first (v0.15.25).
+    let toml_path = config.workspace_root.join(".ta/constitution.toml");
+    if toml_path.exists() {
+        match ProjectConstitutionConfig::load(&config.workspace_root)? {
+            Some(cc) if !cc.approval_rules.is_empty() => {
+                println!("=== Auto-Approve Constitution Rules (.ta/constitution.toml) ===");
+                println!();
+                println!("  {:<4}  {:<10}  Patterns", "Rule", "Action");
+                println!("  {}", "-".repeat(60));
+                for (i, rule) in cc.approval_rules.iter().enumerate() {
+                    let label = rule.label.as_deref().unwrap_or("").to_string();
+                    let patterns_str = rule.patterns.join(", ");
+                    println!(
+                        "  [{:<2}]  {:<10}  {}",
+                        i,
+                        rule.action.to_string(),
+                        patterns_str
+                    );
+                    if !label.is_empty() {
+                        println!("          {}", label);
+                    }
+                }
+                println!();
+                println!(
+                    "  Evaluation: first-match-wins per path; most restrictive wins across files."
+                );
+                println!(
+                    "  Amendment:  `ta constitution amend` to propose changes via draft review."
+                );
+                println!();
+            }
+            Some(_) => {
+                println!("No [[approval_rules]] found in .ta/constitution.toml.");
+                println!("  Run `ta constitution init-toml` to scaffold defaults, or");
+                println!("  add [[approval_rules]] entries manually.");
+                println!();
+            }
+            None => {}
+        }
+    }
+
+    // Show behavioral constitution markdown.
+    let md_path = config.workspace_root.join(".ta/constitution.md");
+    if md_path.exists() {
+        let content = std::fs::read_to_string(&md_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read .ta/constitution.md: {}", e))?;
+        println!("=== .ta/constitution.md ===");
+        println!();
+        println!("{}", content);
+    } else if !toml_path.exists() {
         println!("No .ta/constitution.md found.");
         println!();
         println!("Run `ta constitution init` to draft one.");
-        return Ok(());
     }
-
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("Failed to read .ta/constitution.md: {}", e))?;
-
-    println!("=== .ta/constitution.md ===");
-    println!();
-    println!("{}", content);
     Ok(())
 }
 
@@ -551,6 +614,13 @@ pub struct ProjectConstitutionConfig {
     /// Validation steps at draft stages.
     #[serde(default)]
     pub validate: Vec<ValidationStep>,
+    /// Rule-based auto-approve policy (v0.15.25).
+    ///
+    /// Ordered list: first matching rule wins. Applies to draft auto-approval.
+    /// When non-empty, these rules override the binary `auto_approve.enabled` flag.
+    /// Amended via `ta constitution amend` — changes require draft review.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_rules: Vec<ta_policy::ApprovalRule>,
 }
 
 impl Default for ProjectConstitutionConfig {
@@ -564,6 +634,7 @@ impl Default for ProjectConstitutionConfig {
                 agent_review: false,
             },
             validate: vec![],
+            approval_rules: vec![],
         }
     }
 }
@@ -698,6 +769,7 @@ impl ProjectConstitutionConfig {
                     on_failure: "warn".to_string(),
                 },
             ],
+            approval_rules: ta_policy::default_approval_rules(),
         }
     }
 
@@ -744,12 +816,20 @@ fn apply_extends_ta_default(project: ProjectConstitutionConfig) -> ProjectConsti
         base.validate
     };
 
+    // approval_rules: project rules win if non-empty; otherwise use base (none by default).
+    let merged_approval_rules = if !project.approval_rules.is_empty() {
+        project.approval_rules
+    } else {
+        base.approval_rules
+    };
+
     ProjectConstitutionConfig {
         extends: None, // consumed
         rules: merged_rules,
         scan: merged_scan,
         release: project.release,
         validate: merged_validate,
+        approval_rules: merged_approval_rules,
     }
 }
 
@@ -1091,6 +1171,400 @@ fn constitution_template_for_language(lang: &str) -> ProjectConstitutionConfig {
         _ => {} // "rust" — ta_default() already has the right validate steps
     }
     config
+}
+
+// ── v0.15.25 — Auto-Approve Constitution Amendment + Validation ──────────────
+
+/// Stage `.ta/constitution.toml` as a reviewable draft (v0.15.25).
+///
+/// Amendment flow:
+///   1. User edits `.ta/constitution.toml` locally (or one is created from defaults).
+///   2. `ta constitution amend` compares the local file to the last git-committed
+///      version and packages the diff as a draft.
+///   3. The reviewer sees the exact changes via `ta draft view <id>`.
+///   4. `ta draft apply <id>` copies the new file into the workspace.
+fn amend_constitution(config: &GatewayConfig, dry_run: bool) -> anyhow::Result<()> {
+    let project_root = &config.workspace_root;
+    let toml_path = project_root.join(".ta/constitution.toml");
+
+    // Read or scaffold the constitution.toml.
+    let (current_content, is_new) = if toml_path.exists() {
+        let content = std::fs::read_to_string(&toml_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read .ta/constitution.toml: {}", e))?;
+        (content, false)
+    } else {
+        // Scaffold defaults so there's something to amend.
+        let default_config =
+            constitution_template_for_language(&detect_constitution_language(project_root));
+        let content = toml::to_string_pretty(&default_config)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize default constitution: {}", e))?;
+        (content, true)
+    };
+
+    // Resolve the committed baseline (git show HEAD:.ta/constitution.toml).
+    // Falls back to empty string when the file is new or git is not available.
+    let baseline = committed_constitution(project_root).unwrap_or_default();
+
+    if !is_new && current_content.trim() == baseline.trim() {
+        println!("No changes to .ta/constitution.toml since last commit.");
+        println!("Edit the file first, then run `ta constitution amend` again.");
+        return Ok(());
+    }
+
+    if dry_run {
+        if is_new {
+            println!("Would create .ta/constitution.toml with default approval rules:");
+        } else {
+            println!("Would stage .ta/constitution.toml changes as a draft.");
+        }
+        println!();
+        let diff = constitution_unified_diff(".ta/constitution.toml", &baseline, &current_content);
+        println!("{}", diff);
+        return Ok(());
+    }
+
+    // Write the file if it doesn't exist yet.
+    if is_new {
+        std::fs::create_dir_all(project_root.join(".ta"))
+            .map_err(|e| anyhow::anyhow!("Failed to create .ta directory: {}", e))?;
+        std::fs::write(&toml_path, &current_content)
+            .map_err(|e| anyhow::anyhow!("Failed to write .ta/constitution.toml: {}", e))?;
+        println!("Created .ta/constitution.toml with default approval rules.");
+        println!("Review the rules, then run `ta constitution amend` again to stage as a draft.");
+        return Ok(());
+    }
+
+    // Package as a draft.
+    let package_id = create_constitution_amend_draft(config, &baseline, &current_content)?;
+
+    println!(
+        "Constitution amendment staged as draft {}.",
+        &package_id.to_string()[..8]
+    );
+    println!();
+    println!("Next steps:");
+    println!(
+        "  ta draft view {}     — review the diff",
+        &package_id.to_string()[..8]
+    );
+    println!(
+        "  ta draft approve {}  — approve the change",
+        &package_id.to_string()[..8]
+    );
+    println!(
+        "  ta draft apply {}    — apply to workspace",
+        &package_id.to_string()[..8]
+    );
+    Ok(())
+}
+
+/// Validate the `[[approval_rules]]` section for schema errors and overlapping patterns.
+fn validate_constitution_cmd(project_root: &Path) -> anyhow::Result<()> {
+    let config = ProjectConstitutionConfig::load(project_root)?;
+
+    let approval_rules = match &config {
+        Some(c) if !c.approval_rules.is_empty() => &c.approval_rules,
+        Some(_) => {
+            println!("No [[approval_rules]] found in .ta/constitution.toml.");
+            println!("  Run `ta constitution init-toml` to add defaults.");
+            return Ok(());
+        }
+        None => {
+            println!("No .ta/constitution.toml found.");
+            println!("  Run `ta constitution init-toml` to scaffold one.");
+            return Ok(());
+        }
+    };
+
+    println!("Validating {} approval rule(s)...", approval_rules.len());
+    println!();
+
+    let warnings = ta_policy::validate_approval_rules(approval_rules);
+
+    if warnings.is_empty() {
+        println!("  OK — no overlapping or unreachable patterns detected.");
+    } else {
+        for w in &warnings {
+            println!("  WARN: {}", w);
+        }
+        println!();
+        println!(
+            "{} warning(s): later rules with shadowed patterns can never be reached.",
+            warnings.len()
+        );
+        println!("Consider reordering rules so more specific patterns appear before catch-alls.");
+        std::process::exit(1);
+    }
+
+    // Summary of effective rules.
+    println!();
+    println!("Active approval rules (first-match-wins):");
+    for (i, rule) in approval_rules.iter().enumerate() {
+        println!(
+            "  [{}] {:>7}  {}",
+            i,
+            rule.action.to_string().to_uppercase(),
+            rule.patterns.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Retrieve the last git-committed content of `.ta/constitution.toml`, if any.
+fn committed_constitution(project_root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["show", "HEAD:.ta/constitution.toml"])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        String::from_utf8(output.stdout).ok()
+    } else {
+        None
+    }
+}
+
+/// Build a draft package for a constitution amendment.
+fn create_constitution_amend_draft(
+    config: &GatewayConfig,
+    original: &str,
+    updated: &str,
+) -> anyhow::Result<uuid::Uuid> {
+    use chrono::Utc;
+    use ta_changeset::changeset::{ChangeKind, ChangeSet, CommitIntent};
+    use ta_changeset::diff::DiffContent;
+    use ta_changeset::draft_package::{
+        AgentIdentity, Artifact, ChangeType, Changes, DraftPackage, DraftStatus, Goal, Iteration,
+        Plan, Provenance, ReviewRequests, Risk, Signatures, Summary, WorkspaceRef,
+    };
+    use ta_goal::{GoalRun, GoalRunState, GoalRunStore};
+    use ta_workspace::ChangeStore;
+    use ta_workspace::JsonFileStore;
+
+    let review_id = uuid::Uuid::new_v4();
+    let review_id_str = review_id.to_string();
+    let now = Utc::now();
+
+    // Stage the updated file.
+    let staging_dir = config.staging_dir.join(&review_id_str);
+    let ta_staging = staging_dir.join(".ta");
+    std::fs::create_dir_all(&ta_staging).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create staging directory {}: {}",
+            ta_staging.display(),
+            e
+        )
+    })?;
+    std::fs::write(ta_staging.join("constitution.toml"), updated)
+        .map_err(|e| anyhow::anyhow!("Failed to write updated constitution to staging: {}", e))?;
+
+    // Changeset.
+    let store_path = config.store_dir.join(&review_id_str);
+    std::fs::create_dir_all(&store_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create store directory {}: {}",
+            store_path.display(),
+            e
+        )
+    })?;
+
+    let diff_text = constitution_unified_diff(".ta/constitution.toml", original, updated);
+    let change_type = if original.is_empty() {
+        ChangeType::Add
+    } else {
+        ChangeType::Modify
+    };
+    let diff_content = if original.is_empty() {
+        DiffContent::CreateFile {
+            content: updated.to_string(),
+        }
+    } else {
+        DiffContent::UnifiedDiff { content: diff_text }
+    };
+
+    let changeset = ChangeSet::new(
+        "fs://workspace/.ta/constitution.toml".to_string(),
+        ChangeKind::FsPatch,
+        diff_content,
+    )
+    .with_commit_intent(CommitIntent::RequestCommit);
+
+    let mut cs_store = JsonFileStore::new(&store_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open changeset store: {}", e))?;
+    cs_store
+        .save(&review_id_str, &changeset)
+        .map_err(|e| anyhow::anyhow!("Failed to save changeset: {}", e))?;
+
+    // GoalRun record.
+    let goal_run = GoalRun {
+        goal_run_id: review_id,
+        tag: Some(format!("constitution-amend-{}", &review_id_str[..8])),
+        title: "Constitution Amendment".to_string(),
+        objective: "Amend the auto-approve constitution rules.".to_string(),
+        agent_id: "ta-constitution-amend".to_string(),
+        state: GoalRunState::Running,
+        manifest_id: uuid::Uuid::new_v4(),
+        workspace_path: staging_dir.clone(),
+        store_path: store_path.clone(),
+        source_dir: None,
+        plan_phase: None,
+        parent_goal_id: None,
+        source_snapshot: None,
+        is_macro: false,
+        parent_macro_id: None,
+        sub_goal_ids: vec![],
+        workflow_id: None,
+        stage: None,
+        role: None,
+        context_from: vec![],
+        thread_id: None,
+        project_name: config
+            .workspace_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string()),
+        agent_pid: None,
+        heartbeat_required: false,
+        pr_url: None,
+        pr_package_id: None,
+        progress_note: None,
+        vcs_isolation: None,
+        initiated_by: None,
+        memory_entries_created: vec![],
+        created_at: now,
+        updated_at: now,
+        input_tokens: 0,
+        output_tokens: 0,
+        agent_model: String::new(),
+    };
+
+    let goal_store = GoalRunStore::new(&config.goals_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to open goal store: {}", e))?;
+    goal_store
+        .save(&goal_run)
+        .map_err(|e| anyhow::anyhow!("Failed to save goal run: {}", e))?;
+
+    // Build DraftPackage.
+    let package_id = uuid::Uuid::new_v4();
+    let pkg = DraftPackage {
+        package_version: "1.0.0".to_string(),
+        package_id,
+        created_at: now,
+        goal: Goal {
+            goal_id: review_id_str.clone(),
+            title: "Constitution Amendment".to_string(),
+            objective: "Amend the auto-approve constitution rules.".to_string(),
+            success_criteria: vec!["Approval rules updated in .ta/constitution.toml".to_string()],
+            constraints: vec!["Changes take effect only after ta draft apply".to_string()],
+            parent_goal_title: None,
+        },
+        iteration: Iteration {
+            iteration_id: uuid::Uuid::new_v4().to_string(),
+            sequence: 1,
+            workspace_ref: WorkspaceRef {
+                ref_type: "constitution_amend".to_string(),
+                ref_name: staging_dir.to_string_lossy().to_string(),
+                base_ref: None,
+            },
+        },
+        agent_identity: AgentIdentity {
+            agent_id: "ta-constitution-amend".to_string(),
+            agent_type: "constitution-amend".to_string(),
+            constitution_id: "ta-default".to_string(),
+            capability_manifest_hash: "constitution-amend".to_string(),
+            orchestrator_run_id: None,
+        },
+        summary: Summary {
+            what_changed: "Amended .ta/constitution.toml approval rules".to_string(),
+            why: "User-initiated amendment of auto-approve policy rules via \
+                  `ta constitution amend`. Changes follow the standard draft \
+                  review gate — no silent policy updates."
+                .to_string(),
+            impact: "Auto-approve decisions will use the updated rule set after apply.".to_string(),
+            rollback_plan: "Deny this draft — no changes applied until approved.".to_string(),
+            open_questions: vec![],
+            alternatives_considered: vec![],
+        },
+        plan: Plan {
+            completed_steps: vec!["Staged updated .ta/constitution.toml".to_string()],
+            next_steps: vec![],
+            decision_log: vec![],
+        },
+        changes: Changes {
+            artifacts: vec![Artifact {
+                resource_uri: "fs://workspace/.ta/constitution.toml".to_string(),
+                change_type,
+                diff_ref: "changeset:0".to_string(),
+                tests_run: vec![],
+                disposition: Default::default(),
+                rationale: Some(
+                    "Constitution amendment: updated [[approval_rules]] section.".to_string(),
+                ),
+                dependencies: vec![],
+                explanation_tiers: None,
+                comments: None,
+                amendment: None,
+                kind: None,
+            }],
+            patch_sets: vec![],
+            pending_actions: vec![],
+        },
+        risk: Risk {
+            risk_score: 5,
+            findings: vec![],
+            policy_decisions: vec![],
+        },
+        provenance: Provenance {
+            inputs: vec![],
+            tool_trace_hash: "constitution-amend".to_string(),
+        },
+        review_requests: ReviewRequests {
+            requested_actions: vec![],
+            reviewers: vec![],
+            required_approvals: 1,
+            notes_to_reviewer: Some(
+                "Review the [[approval_rules]] changes carefully — these control \
+                 which drafts are auto-approved without human review."
+                    .to_string(),
+            ),
+        },
+        signatures: Signatures {
+            package_hash: "constitution-amend".to_string(),
+            agent_signature: "constitution-amend".to_string(),
+            gateway_attestation: None,
+        },
+        status: DraftStatus::PendingReview,
+        verification_warnings: vec![],
+        validation_log: vec![],
+        display_id: Some(format!("{}-01", &review_id_str[..8])),
+        tag: Some(format!("constitution-amend-{}", &review_id_str[..8])),
+        vcs_status: None,
+        parent_draft_id: None,
+        pending_approvals: vec![],
+        supervisor_review: None,
+        ignored_artifacts: vec![],
+        baseline_artifacts: vec![],
+        agent_decision_log: vec![],
+        work_plan: None,
+        goal_shortref: Some(review_id_str[..8].to_string()),
+        draft_seq: 1,
+        plan_phase: None,
+        plan_md_base: None,
+    };
+
+    super::draft::save_package(config, &pkg)
+        .map_err(|e| anyhow::anyhow!("Failed to save draft package: {}", e))?;
+
+    // Update GoalRun to PrReady.
+    let mut updated_goal = goal_run;
+    updated_goal.state = GoalRunState::PrReady;
+    updated_goal.pr_package_id = Some(package_id);
+    updated_goal.updated_at = Utc::now();
+    goal_store
+        .save(&updated_goal)
+        .map_err(|e| anyhow::anyhow!("Failed to update goal run: {}", e))?;
+
+    Ok(package_id)
 }
 
 fn check_toml(project_root: &Path, json: bool) -> anyhow::Result<()> {
@@ -1515,6 +1989,7 @@ fn generate_merged_toml(
         scan: config.scan.clone(),
         release: config.release.clone(),
         validate: config.validate.clone(),
+        approval_rules: config.approval_rules.clone(),
     };
 
     // Serialize base TOML.
