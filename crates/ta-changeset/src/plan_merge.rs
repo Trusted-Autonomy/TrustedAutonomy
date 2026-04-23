@@ -730,4 +730,97 @@ mod tests {
             ConflictType::ItemTextConflict
         );
     }
+
+    // --- v0.15.24.5 tests ---
+
+    #[test]
+    fn agent_strips_items_source_items_preserved() {
+        // (a) Agent removes all items from a phase in staging.
+        // The merged result must still contain the source's items — the agent
+        // cannot silently delete plan items that the reviewer relies on.
+        let base = make_plan(&[("v0.2.0", "pending", &["- [ ] item one", "- [ ] item two"])]);
+        // Agent wrote a stripped version with no items.
+        let staging = make_plan(&[("v0.2.0", "pending", &[])]);
+        let source = base.clone();
+
+        let result = merge_plan_md(&base, &staging, &source);
+
+        assert_eq!(result.conflicts.len(), 0);
+        assert!(result.merged.contains("item one"), "item one must survive");
+        assert!(result.merged.contains("item two"), "item two must survive");
+    }
+
+    #[test]
+    fn agent_adds_new_phase_source_items_intact() {
+        // (b) Agent adds a new phase section not in base or source.
+        // The new section must appear in merged output AND the existing phase's
+        // items must remain intact.
+        let base = make_plan(&[("v0.1.0", "done", &["- [x] existing item"])]);
+        let new_phase = make_plan(&[("v0.1.1", "pending", &["- [ ] new task"])]);
+        let staging_content = format!("{}{}", base, new_phase);
+        let source = base.clone();
+
+        let result = merge_plan_md(&base, &staging_content, &source);
+
+        assert_eq!(result.conflicts.len(), 0);
+        assert!(
+            result.agent_additions.iter().any(|a| a.contains("v0.1.1")),
+            "new phase must be reported as agent addition"
+        );
+        assert!(
+            result.merged.contains("v0.1.1"),
+            "new phase must be in merged output"
+        );
+        assert!(
+            result.merged.contains("new task"),
+            "new phase items must be in merged output"
+        );
+        assert!(
+            result.merged.contains("existing item"),
+            "original items must be preserved"
+        );
+    }
+
+    #[test]
+    fn staging_identical_to_source_result_equals_source() {
+        // (c) When staging and source are identical, the merged result equals source.
+        let base = make_plan(&[("v0.3.0", "pending", &["- [ ] alpha", "- [ ] beta"])]);
+        let source = make_plan(&[("v0.3.0", "in_progress", &["- [ ] alpha", "- [ ] beta"])]);
+        let staging = source.clone(); // staging == source
+
+        let result = merge_plan_md(&base, &staging, &source);
+
+        assert_eq!(result.conflicts.len(), 0);
+        // Result should match source (both sides agree on the same content).
+        assert!(result.merged.contains("in_progress"));
+        assert!(result.merged.contains("alpha"));
+        assert!(result.merged.contains("beta"));
+    }
+
+    #[test]
+    fn agent_checked_items_preserved_in_merge() {
+        // (a) Agent checked off items that source still has unchecked.
+        // The checkbox union rule must apply: [x] wins.
+        let base = make_plan(&[(
+            "v0.4.0",
+            "pending",
+            &["- [ ] step A", "- [ ] step B", "- [ ] step C"],
+        )]);
+        let staging = make_plan(&[(
+            "v0.4.0",
+            "pending",
+            &["- [x] step A", "- [x] step B", "- [ ] step C"],
+        )]);
+        let source = base.clone();
+
+        let result = merge_plan_md(&base, &staging, &source);
+
+        assert_eq!(result.conflicts.len(), 0);
+        let checked = result.merged.matches("- [x]").count();
+        assert_eq!(checked, 2, "agent's two checked items must be present");
+        assert!(
+            result.merged.contains("step C"),
+            "unchecked item must survive"
+        );
+    }
 }

@@ -1880,6 +1880,7 @@ fn create_review_draft(
         goal_shortref: Some(review_id_str[..8].to_string()),
         draft_seq: 1,
         plan_phase: None,
+        plan_md_base: None,
     };
 
     super::draft::save_package(config, &pkg)

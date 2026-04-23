@@ -602,6 +602,19 @@ pub struct DraftPackage {
     /// a column in `ta draft list`. Empty for goals not linked to a plan phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_phase: Option<String>,
+
+    /// PLAN.md content at staging-creation time (v0.15.24.5).
+    ///
+    /// Captured from `<staging>/.ta/plan_base.md` at `ta draft build` time.
+    /// Used during `ta draft apply` to perform a 3-way merge: agent additions
+    /// (base→staging diff) are applied on top of source (which may have accumulated
+    /// its own changes since the goal started). Preserves both the agent's new
+    /// phase sections AND source's item history that the agent never saw.
+    ///
+    /// `None` for legacy drafts built before v0.15.24.5 — apply falls back to
+    /// keeping source unchanged and logging a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_md_base: Option<String>,
 }
 
 /// VCS tracking information for post-apply lifecycle monitoring (v0.11.2.3).
@@ -895,6 +908,7 @@ pub fn make_test_pkg(goal_shortref: &str, draft_seq: u32) -> DraftPackage {
         goal_shortref: Some(goal_shortref.to_string()),
         draft_seq,
         plan_phase: None,
+        plan_md_base: None,
     }
 }
 
@@ -1047,6 +1061,7 @@ mod tests {
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            plan_md_base: None,
         }
     }
 

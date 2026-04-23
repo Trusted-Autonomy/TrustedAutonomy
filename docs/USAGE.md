@@ -2495,6 +2495,8 @@ ta draft apply <id> --auto-repair
 
 Coverage gaps never block apply — they are informational reminders that a plan item may not yet be implemented.
 
+**Protected files**: `PLAN.md` is never overwritten wholesale on apply — instead, `ta draft apply` performs a 3-way merge (agent additions vs. source history) so both the agent's new phase sections and any items added to source since the goal started are preserved in the final result.
+
 **Note**: this review is not `ta doctor`. `ta doctor` validates your runtime environment (auth, daemon health, agent binary). The plan review is a draft-lifecycle gate that runs automatically — you do not need to invoke it manually.
 
 #### Per-item completion table

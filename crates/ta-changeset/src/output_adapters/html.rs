@@ -404,6 +404,7 @@ mod tests {
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            plan_md_base: None,
         };
         pkg.status = DraftStatus::PendingReview;
 
@@ -520,6 +521,7 @@ mod tests {
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            plan_md_base: None,
         };
 
         let adapter = HtmlAdapter::new();
@@ -632,6 +634,7 @@ mod tests {
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            plan_md_base: None,
         };
         pkg.agent_decision_log = vec![DecisionLogEntry {
             decision: "Used Ed25519 over RSA".to_string(),

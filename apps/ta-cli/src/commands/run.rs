@@ -6761,6 +6761,7 @@ pre_launch:
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            plan_md_base: None,
         };
 
         // Save the draft package.
@@ -6928,6 +6929,7 @@ pre_launch:
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            plan_md_base: None,
         };
 
         super::super::draft::save_package(&config, &parent_draft).unwrap();

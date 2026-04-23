@@ -2423,7 +2423,26 @@ pub(crate) fn build_package(
         goal_shortref: None,        // Set below with display_id (v0.14.7.3).
         draft_seq: 0,               // Set below with display_id (v0.14.7.3).
         plan_phase: goal.plan_phase.clone(), // Inherit from GoalRun (v0.15.15.2).
+        plan_md_base: None,         // Set below if plan_base.md exists in staging (v0.15.24.5).
     };
+
+    // v0.15.24.5: Capture PLAN.md base snapshot for 3-way merge on apply.
+    // plan_base.md is written by `ta goal start` at staging-creation time.
+    let plan_base_path = goal.workspace_path.join(".ta").join("plan_base.md");
+    if plan_base_path.exists() {
+        match std::fs::read_to_string(&plan_base_path) {
+            Ok(base_content) => {
+                pkg.plan_md_base = Some(base_content);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[build] Warning: could not read .ta/plan_base.md — PLAN.md 3-way merge \
+                     will not be available on apply: {}",
+                    e
+                );
+            }
+        }
+    }
 
     // v0.12.2.1: Track parent_draft_id and compute composited diff for follow-up chains.
     //
@@ -2998,6 +3017,7 @@ fn build_memory_only_draft(
         goal_shortref: None,
         draft_seq: 0,
         plan_phase: None,
+        plan_md_base: None,
     };
 
     // Set display_id and shortref/seq (mirrors build_package logic).
@@ -6401,30 +6421,86 @@ fn apply_package(
                 };
                 if keep_source_from_policy {
                     if let Some(rel) = uri.strip_prefix("fs://workspace/") {
+                        let is_plan_md = rel == "PLAN.md" || rel.ends_with("/PLAN.md");
                         let staging_path = goal.workspace_path.join(rel);
                         let source_path = target_dir.join(rel);
-                        // Skip if source content differs from staging — source is newer.
-                        let staging_bytes = std::fs::read(&staging_path).ok();
-                        let source_bytes = std::fs::read(&source_path).ok();
-                        if let (Some(s), Some(t)) = (staging_bytes, source_bytes) {
-                            if s != t {
-                                // Check if source is strictly newer by mtime.
-                                let source_mtime = std::fs::metadata(&source_path)
-                                    .and_then(|m| m.modified())
-                                    .ok();
-                                let staging_mtime = std::fs::metadata(&staging_path)
-                                    .and_then(|m| m.modified())
-                                    .ok();
-                                let source_is_newer = match (source_mtime, staging_mtime) {
-                                    (Some(sm), Some(tm)) => sm > tm,
-                                    _ => true, // Unknown → keep source (safe default)
-                                };
-                                if source_is_newer {
-                                    eprintln!(
-                                        "⚠️  [protected] keeping source {} (newer than staging — managed by ta draft apply)",
-                                        rel
-                                    );
-                                    continue; // Skip this artifact.
+
+                        if is_plan_md {
+                            // v0.15.24.5: 3-way merge for PLAN.md.
+                            // mtime comparison is unreliable for PLAN.md because the
+                            // agent always writes it during the run, giving staging a
+                            // fresh mtime regardless of whether it has newer content.
+                            let staging_content = std::fs::read_to_string(&staging_path).ok();
+                            let source_content = std::fs::read_to_string(&source_path).ok();
+                            if let (Some(staging_str), Some(source_str)) =
+                                (staging_content, source_content)
+                            {
+                                if staging_str != source_str {
+                                    if let Some(ref base_str) = pkg.plan_md_base {
+                                        use ta_changeset::plan_merge::merge_plan_md;
+                                        let merge_result =
+                                            merge_plan_md(base_str, &staging_str, &source_str);
+                                        if !merge_result.agent_additions.is_empty() {
+                                            eprintln!(
+                                                "[protected] PLAN.md: 3-way merge preserved {} agent addition(s)",
+                                                merge_result.agent_additions.len()
+                                            );
+                                        }
+                                        if !merge_result.conflicts.is_empty() {
+                                            eprintln!(
+                                                "⚠️  [protected] PLAN.md: {} conflict(s) in 3-way merge — taking source for conflicts",
+                                                merge_result.conflicts.len()
+                                            );
+                                        }
+                                        if let Err(e) = std::fs::write(
+                                            &source_path,
+                                            merge_result.merged.as_bytes(),
+                                        ) {
+                                            eprintln!(
+                                                "⚠️  [protected] PLAN.md merge write failed: {}",
+                                                e
+                                            );
+                                        }
+                                    } else {
+                                        // Legacy package: no base snapshot captured at
+                                        // staging-creation time — keep source unchanged.
+                                        eprintln!(
+                                            "⚠️  [protected] PLAN.md: no base snapshot in draft \
+                                             package — keeping source unchanged (legacy draft). \
+                                             Re-run the goal to get 3-way merge behavior."
+                                        );
+                                    }
+                                }
+                                // Always skip overlay for PLAN.md — either we wrote the
+                                // merged version above, or staging == source (no-op), or
+                                // we kept source unchanged. In all cases the git adapter
+                                // will auto-stage PLAN.md as a critical file.
+                                continue;
+                            }
+                            // Fall through if we can't read one or both files.
+                        } else {
+                            // Non-PLAN.md protected files: mtime guard as before.
+                            let staging_bytes = std::fs::read(&staging_path).ok();
+                            let source_bytes = std::fs::read(&source_path).ok();
+                            if let (Some(s), Some(t)) = (staging_bytes, source_bytes) {
+                                if s != t {
+                                    let source_mtime = std::fs::metadata(&source_path)
+                                        .and_then(|m| m.modified())
+                                        .ok();
+                                    let staging_mtime = std::fs::metadata(&staging_path)
+                                        .and_then(|m| m.modified())
+                                        .ok();
+                                    let source_is_newer = match (source_mtime, staging_mtime) {
+                                        (Some(sm), Some(tm)) => sm > tm,
+                                        _ => true, // Unknown → keep source (safe default)
+                                    };
+                                    if source_is_newer {
+                                        eprintln!(
+                                            "⚠️  [protected] keeping source {} (newer than staging — managed by ta draft apply)",
+                                            rel
+                                        );
+                                        continue; // Skip this artifact.
+                                    }
                                 }
                             }
                         }

@@ -1022,6 +1022,7 @@ mod tests {
             goal_shortref: None,
             draft_seq: 0,
             plan_phase: None,
+            plan_md_base: None,
         }
     }
 
