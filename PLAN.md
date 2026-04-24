@@ -7132,32 +7132,65 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 
 ---
 
-### v0.15.28 — Live Human Interjection: `ta advise` + Studio Sidebar
+### v0.15.28 — Unified Agent Context Channel + Live Human Interjection
 <!-- status: pending -->
 
-**Goal**: Let the human interject into a running agent or at any workflow review point without stopping the workflow. `ta advise [--goal <id>] <message>` sends a message to the advisor agent in the daemon; the advisor decides whether to answer directly or append the note to a polling file the agent reads. The Studio version surfaces the same capability as a persistent sidebar command accessible from any tab. Also makes interactive planning the default mode for `ta plan` and Studio Plan tab, so spec ambiguities are resolved *before* the implementor runs.
+**Goal**: All agent context injection and mid-run human interjection follow one common path (`AgentContextChannel` trait) that diverges only at the per-adapter boundary. This makes adding or improving any agent type (Codex, Ollama, future models) a one-file change with no ripple through TA's core logic. Built on top: `ta advise` CLI command, Studio sidebar, workflow discussion option, and interactive planning as default for `ta plan` and Studio Plan tab.
 
-**Why**: Agents are currently fire-and-forget — once a goal starts there is no channel to course-correct. The v0.15.26 typescript/index.html ambiguity is the canonical example: the agent made a reasonable call on an ambiguous spec, the human had a different expectation, and neither had a channel to resolve it mid-run. Two complementary fixes: (1) pre-run interactive planning so the spec is unambiguous before work starts; (2) live injection so the human can still course-correct during a run.
+**Why**: Agent injection currently hardcodes CLAUDE.md everywhere (run.rs, governed_workflow.rs, reviewer spawner) and the proposed mid-run injection had no defined abstraction. Codex supports interactive mid-session context updates through the VS Code language model API (`vscode.lm` conversation management) — not just at startup — so the "Codex = restart-only" assumption is wrong for the VS Code integration case. A clean channel abstraction means each adapter opts in to the capabilities it supports (initial inject, live polling, API-push, restart-queue) and the common path routes correctly without knowing the agent type.
 
-**Depends on**: v0.15.21 (Studio advisor agent), v0.15.26 (advisor panel + `ta advisor ask`), v0.15.27 (workflow template library)
+**Depends on**: v0.13.3 (AgentFrameworkManifest), v0.15.21 (Studio advisor agent), v0.15.26 (advisor panel + `ta advisor ask`), v0.15.27 (workflow template library)
 
-#### Injection Mechanism
+#### Architecture: AgentContextChannel
 
-Direct mid-run CLAUDE.md write does not work for most agents — Claude Code reads CLAUDE.md once at startup and holds it in context; Codex gets a fixed system prompt. The correct approach is a **polling file**: daemon writes to `.ta/advisor-notes/<goal-id>.md`; the constitution (injected at goal start) instructs Claude Code to read this file before each major action step. Claude Code WILL re-read files on demand — this is the hook. For Codex and other frameworks that can't re-read mid-run, notes are queued and injected at the next restart/follow-up. Framework manifests (`AgentFrameworkManifest.polling_notes_file`) declare whether live polling is supported.
+All injection flows through a single trait. Adapters implement what they support; the common path calls the trait:
 
-1. [ ] **`ta advise [--goal <id>] <message>` CLI command** (`apps/ta-cli/src/commands/advise.rs`): Sends `message` to the daemon. `--goal` defaults to active/latest goal. Advisor classifies: (a) direct answer (informational), (b) append note to `.ta/advisor-notes/<goal-id>.md` for agent polling, or (c) queue for next `ta_ask_human` callback. Prints the routing decision.
+```
+pub trait AgentContextChannel: Send + Sync {
+    /// Inject full context at goal start (always called).
+    fn inject_initial(&self, ctx: &AgentContext) -> Result<()>;
 
-2. [ ] **Daemon `POST /api/advisor/inject` endpoint** (`crates/ta-daemon/src/api/advisor.rs`): Accepts `{ goal_id, message, routing_hint? }`. Advisor writes `## Human Note (<timestamp>)\n<message>` to `.ta/advisor-notes/<goal-id>.md` (append-only, never truncates). Claude Code constitution rule: "Before each major action, read `.ta/advisor-notes/<goal-id>.md` if it exists and act on any new notes." Codex/other: notes queued for next restart.
+    /// Inject a mid-run human note. Returns how the note was handled.
+    fn inject_note(&self, note: &HumanNote) -> Result<NoteDelivery>;
 
-3. [ ] **Studio sidebar command** (`crates/ta-daemon/assets/index.html`): Persistent `ta advise` input visible from all Studio tabs. Shows active goal title. Posts to `/api/advisor/inject`. Advisor response rendered inline. Shortcut: `Cmd+Shift+K` (distinct from `Cmd+K` intent bar).
+    /// What delivery modes this channel supports.
+    fn capabilities(&self) -> ChannelCapabilities;
 
-4. [ ] **Workflow discussion option at review points** (`apps/ta-cli/src/commands/governed_workflow.rs`): Every `prompt_human_gate_*` call renders a `D. Discuss` option alongside Approve/Deny/Follow-up. Selecting D enters a short interactive loop (`read_stdin_line`) where the human can ask questions; advisor answers from daemon. Non-blocking — human still chooses Approve/Deny/Follow-up after discussion.
+    /// Restore the channel to pre-goal state (called on goal end/restore).
+    fn restore(&self) -> Result<()>;
+}
 
-5. [ ] **Injection visibility**: `ta goal status <id>` shows `Injections: N human note(s)` when notes exist. `ta advise --list [--goal <id>]` shows full injection history.
+pub enum NoteDelivery {
+    LivePolled,    // written to polling file; agent reads on next cycle
+    ApiPushed,     // sent via agent framework API (e.g. vscode.lm)
+    Queued,        // stored; injected at next restart/follow-up
+    Answered,      // advisor answered directly; no agent injection needed
+}
+```
 
-6. [ ] **Interactive planning as default for `ta plan` and Studio Plan tab**: `ta plan` (without subcommand) and the Studio Plan tab open an interactive planning session by default: advisor agent reads the next pending phase spec, surfaces ambiguities as numbered questions, and the human confirms or amends before `ta run` launches. Session transcript saved to `.ta/sessions/<phase>.md` and injected into the implementor's context. `--no-interactive` / `--auto` skips the session for CI/scripted use. Studio Plan tab: session runs in the advisor panel; "Start Implementation" button is gated on session completion.
+**Per-adapter implementations** (`crates/ta-runtime/src/channels/`):
+- **`ClaudeCodeChannel`**: `inject_initial` → write to `CLAUDE.md`. `inject_note` → append to `.ta/advisor-notes/<goal-id>.md`; constitution rule instructs the agent to read this before each major action (`LivePolled`).
+- **`CodexChannel`** (VS Code integration): `inject_initial` → write system-prompt file. `inject_note` → push via `vscode.lm` conversation API if running inside VS Code extension (`ApiPushed`); otherwise `Queued` for restart.
+- **`OllamaChannel`**: `inject_initial` → write `.ta/agent_context.md`. `inject_note` → `Queued` (system-prompt restart).
+- **`GenericFileChannel`**: `inject_initial` → write to manifest-declared `context_file`. `inject_note` → `Queued`.
 
-7. [ ] **`interactive-plan-build` workflow template**: Extends `plan-build-phases` with a mandatory `planning_session` stage before each `run_goal` stage. Stage uses `ta_ask_human` to let planner and human align. Controlled by `planning_session = true` in `workflow.toml` or `--param planning_session=true` on `ta workflow run`. Default for `ta plan build` command; opt-out for headless/CI runs.
+`AgentFrameworkManifest` gains a `channel_type: ChannelType` field that selects the implementation. The common path in `run.rs` calls `channel.inject_initial()` and never references CLAUDE.md directly.
+
+1. [ ] **`AgentContextChannel` trait + four adapter implementations** (`crates/ta-runtime/src/channels/`): Trait + `ClaudeCodeChannel`, `CodexChannel`, `OllamaChannel`, `GenericFileChannel`. `AgentFrameworkManifest` gains `channel_type` field. Unit tests: each adapter's `inject_initial` writes to the correct location; `CodexChannel::inject_note` returns `ApiPushed` when VS Code API is reachable, `Queued` otherwise.
+
+2. [ ] **Migrate `inject_claude_md()` → `channel.inject_initial()`** (`apps/ta-cli/src/commands/run.rs`): Replace hardcoded CLAUDE.md path with channel. Backup/restore also uses channel's `restore()`. All call sites updated (run.rs, governed_workflow.rs, reviewer spawner in plan.rs). `inject_claude_md` becomes a shim calling `ClaudeCodeChannel::inject_initial` for the transition period; deprecated in this phase, removed in v0.15.30.
+
+3. [ ] **`ta advise [--goal <id>] <message>` CLI + `POST /api/advisor/inject` endpoint**: Daemon advisor classifies the message; calls `channel.inject_note()` on the active goal's channel. Prints the returned `NoteDelivery` variant so the human knows whether the note was live-polled, API-pushed, or queued. `.ta/advisor-notes/` directory added to `.gitignore`.
+
+4. [ ] **Studio sidebar `ta advise` command** (`crates/ta-daemon/assets/index.html`): Persistent input visible from all Studio tabs. Shows active goal + channel capability badge (`Live` / `Queued`). Posts to `/api/advisor/inject`. Shortcut `Cmd+Shift+K`.
+
+5. [ ] **Workflow discussion option at every review gate** (`apps/ta-cli/src/commands/governed_workflow.rs`): `D. Discuss` option added to every `prompt_human_gate_*` call. Opens short `read_stdin_line` loop; advisor answers from daemon. Human still picks Approve/Deny/Follow-up after. Channel capability shown: `[Live injection active]` or `[Notes will apply at next restart]`.
+
+6. [ ] **Interactive planning as default for `ta plan` + Studio Plan tab**: `ta plan` and the Studio Plan tab default to an interactive planning session — advisor reads the next pending phase spec, surfaces ambiguities as numbered questions, human confirms or amends. Transcript saved to `.ta/sessions/<phase>.md` and injected via channel at goal start. `--auto` / `--no-interactive` skips for CI. Studio: "Start Implementation" gated on confirmed session.
+
+7. [ ] **`interactive-plan-build` workflow template**: Extends `plan-build-phases` with a `planning_session` stage before each `run_goal`. `ta_ask_human` used for alignment. `planning_session = true` in `workflow.toml`; opt-out with `--param planning_session=false`. Default for `ta plan build`.
+
+8. [ ] **Injection visibility + constitution rule**: `ta goal status <id>` shows `Channel: ClaudeCode (Live)` and `Notes: N injected`. `.ta/constitution.toml` gains `[rules.no-direct-claude-md]`: pattern scan for `"CLAUDE.md"` string literals outside `channels/` and `framework.rs`. Severity `high`.
 
 #### Version: `0.15.28-alpha`
 
@@ -7190,24 +7223,24 @@ Direct mid-run CLAUDE.md write does not work for most agents — Claude Code rea
 
 ---
 
-### v0.15.30 — Agent Framework Abstraction: No CLAUDE.md Assumptions in TA Source
+### v0.15.30 — Agent Framework Abstraction: Remove Shims, Full Enforcement
 <!-- status: pending -->
 
-**Goal**: TA's injection, constitution enforcement, and context-building logic must not assume Claude Code or CLAUDE.md. All agent interaction must go through the `AgentFrameworkManifest` abstraction introduced in v0.13.3. Constitution rules enforce this on all future agent work in this codebase.
+**Goal**: Remove the `inject_claude_md()` shim left by v0.15.28, complete the migration of all remaining hardcoded CLAUDE.md references, and activate the constitution enforcement rule across the codebase. After this phase, adding a new agent type requires only a new `AgentContextChannel` implementation and a manifest entry — no changes to TA's core logic.
 
-**Why**: v0.13.3 built `AgentFrameworkManifest` with `context_file`, `context_inject_mode()`, and `polling_notes_file` — the skeleton is there. But `inject_claude_md()` in `run.rs` still hardcodes the filename, the reviewer goal spawner hardcodes `CLAUDE.md`, and the constitution injection in `governed_workflow.rs` hardcodes the file path. Codex, Ollama, Claude-Flow, BMAD, and any future framework each have a different context injection model; hardcoding CLAUDE.md means those paths silently fail or inject into the wrong file. The polling-file mechanism in v0.15.28 also needs this abstraction to work correctly per-framework.
+**Why**: v0.15.28 introduces `AgentContextChannel` and migrates the primary path, but leaves a compatibility shim for the transition period. This phase finishes the job: removes the shim, hunts down any remaining `"CLAUDE.md"` literals that slipped through, and turns the constitution rule from `warn` to `block` so future agents cannot reintroduce the assumption.
 
-**Depends on**: v0.13.3 (AgentFramework trait + manifest), v0.15.28 (live interjection polling file)
+**Depends on**: v0.15.28 (AgentContextChannel trait + four adapters + shim)
 
-1. [ ] **`inject_claude_md()` → `inject_agent_context(framework: &dyn AgentFramework)`** (`apps/ta-cli/src/commands/run.rs`): Replace the hardcoded `CLAUDE.md` filename with `framework.context_file()`. For Claude Code this returns `CLAUDE.md`; for Codex it returns the system-prompt file; for Ollama it returns `.ta/agent_context.md`. Backup/restore logic uses the same resolved path.
+1. [ ] **Remove `inject_claude_md()` shim**: Delete the deprecated function from `run.rs`. Verify all call sites now use `channel.inject_initial()`. Update tests that referenced the old function name.
 
-2. [ ] **Constitution injection routes through framework manifest**: `governed_workflow.rs`, `plan.rs`, and the reviewer goal spawner resolve the framework manifest for the active agent and call `framework.context_file()` rather than hardcoding `CLAUDE.md`. If the framework has `context_inject_mode = "none"`, skip file injection and pass context via the framework's native mechanism (e.g., system prompt prepend for Codex).
+2. [ ] **Audit remaining `"CLAUDE.md"` literals**: Run the `no-direct-claude-md` constitution rule in `--report` mode against the full workspace. Fix each remaining hit (likely in test fixtures, USAGE.md examples, and any doc comments that reference the file by name). Test fixture references are allowed only inside `channels/claude_code.rs` and `framework.rs`.
 
-3. [ ] **`polling_notes_file` in `AgentFrameworkManifest`**: Add `polling_notes_file: Option<String>` field. Claude Code manifest sets `".ta/advisor-notes/{goal_id}.md"`. Codex manifest sets `null` (queued for restart). Ollama manifest sets `null` (uses system-prompt restart). `POST /api/advisor/inject` reads the manifest to decide whether to write the file or queue the note.
+3. [ ] **Escalate constitution rule severity to `block`**: Change `[rules.no-direct-claude-md]` from `warn` to `block` in `.ta/constitution.toml`. From this point, any PR introducing a bare `"CLAUDE.md"` literal outside the allowed files fails the pre-draft-build validation.
 
-4. [ ] **Constitution rule**: Add `[rules.agent-framework-abstraction]` to `.ta/constitution.toml`. Pattern: any hardcoded `"CLAUDE.md"` string literal outside of `crates/ta-runtime/src/framework.rs` (the manifest definitions) and `run.rs`'s migration shim. Severity `high`. Also: any direct construction of agent commands without going through `AgentFramework::build_command()`.
+4. [ ] **`ta agent list` framework info**: `ta agent list` shows each configured agent's resolved channel — name, channel type, `inject_mode`, live-injection capability (`Live` / `Queued`). Makes the abstraction observable without reading manifests.
 
-5. [ ] **`ta agent list` framework info**: `ta agent list` shows the resolved framework for each configured agent YAML — name, context_file, inject_mode, polling_notes_file. Makes the abstraction visible and debuggable without reading manifests manually.
+5. [ ] **Codex VS Code channel validation**: Integration test that starts a Codex-framework goal inside the VS Code extension context and verifies `inject_note` returns `ApiPushed` (not `Queued`). Requires `VSCODE_IPC_HOOK_CLI` env var to be set; test is `#[ignore]` by default, runnable via `cargo test -- --ignored` in the extension dev environment.
 
 #### Version: `0.15.30-alpha`
 
