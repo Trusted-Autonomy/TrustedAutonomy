@@ -1,0 +1,61 @@
+# interactive-plan-build.yaml — Plan-build with pre-phase planning sessions (v0.15.28)
+#
+# Extends plan-build-phases with a planning_session stage before each run_goal.
+# The planning session surfaces the phase spec, asks alignment questions, and
+# saves a session transcript injected via the context channel at goal start.
+#
+# Usage:
+#   ta workflow run interactive-plan-build --goal "Build all pending phases"
+#
+# To skip interactive sessions (e.g. in CI):
+#   ta workflow run interactive-plan-build --param planning_session=false
+
+workflow:
+  name: interactive-plan-build
+  description: |
+    PR-per-phase build loop with interactive planning sessions.
+    Before each phase runs, the advisor surfaces ambiguities as numbered
+    questions and the human confirms or amends. Transcript saved to
+    .ta/sessions/<phase>.md and injected via context channel at goal start.
+    Skip planning sessions with --param planning_session=false.
+  config:
+    max_phases: 99
+    stop_on_flag: true
+    planning_session: true
+
+stages:
+  - name: plan_next
+    kind: plan_next
+    description: "Get next pending plan phase."
+
+  - name: planning_session
+    kind: ask_human
+    condition: "!plan_next.done && config.planning_session"
+    depends_on:
+      - plan_next
+    prompt: |
+      Planning session for {{plan_next.phase_id}} — {{plan_next.phase_title}}
+
+      Review the phase spec and confirm you're ready to start, or provide
+      amendments. Type 'skip' to proceed without discussion.
+    save_to: ".ta/sessions/{{plan_next.phase_id}}.md"
+    description: "Interactive alignment session before phase implementation."
+
+  - name: run_phase
+    kind: workflow
+    workflow: build
+    goal: "{{plan_next.phase_id}} — {{plan_next.phase_title}}"
+    phase: "{{plan_next.phase_id}}"
+    condition: "!plan_next.done"
+    depends_on:
+      - plan_next
+      - planning_session
+    description: "Run governed build workflow for this phase."
+
+  - name: loop
+    kind: goto
+    target: plan_next
+    condition: "!plan_next.done"
+    depends_on:
+      - run_phase
+    description: "Loop until all phases complete."

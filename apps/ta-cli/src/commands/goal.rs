@@ -1435,6 +1435,30 @@ fn show_status(
                 println!("By:       {}", by);
             }
             println!("Agent:    {}", g.agent_id);
+            // Channel info (v0.15.28)
+            let channel_display = if g.agent_id == "claude-code" || g.agent_id == "claude-flow" {
+                "ClaudeCode (Live)"
+            } else if g.agent_id == "codex" {
+                "Codex (Queued)"
+            } else if g.agent_id.starts_with("ollama") {
+                "Ollama (Queued)"
+            } else {
+                "GenericFile (Queued)"
+            };
+            println!("Channel:  {}", channel_display);
+            // Count injected notes.
+            let notes_path = g
+                .workspace_path
+                .join(".ta/advisor-notes")
+                .join(format!("{}.md", g.goal_run_id));
+            if notes_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&notes_path) {
+                    let count = content.matches("## Human note").count();
+                    if count > 0 {
+                        println!("Notes:    {} injected", count);
+                    }
+                }
+            }
             println!("Created:  {}", g.created_at.to_rfc3339());
             println!("Updated:  {}", g.updated_at.to_rfc3339());
             if let Some(ref src) = g.source_dir {

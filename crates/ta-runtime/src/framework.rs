@@ -112,6 +112,10 @@ pub struct AgentFrameworkManifest {
     /// Defaults to no-auth-required when absent from a custom manifest.
     #[serde(default)]
     pub auth: AgentAuthSpec,
+    /// Agent context channel type for unified injection (v0.15.28).
+    /// Selects which AgentContextChannel implementation is used.
+    #[serde(default)]
+    pub channel_type: crate::channels::ChannelType,
 }
 
 fn default_version() -> String {
@@ -172,6 +176,7 @@ impl AgentFrameworkManifest {
                 },
                 builtin: true,
                 auth: claude_auth.clone(),
+                channel_type: crate::channels::ChannelType::ClaudeCode,
             },
             AgentFrameworkManifest {
                 name: "codex".to_string(),
@@ -199,6 +204,7 @@ impl AgentFrameworkManifest {
                         required: true,
                     }],
                 },
+                channel_type: crate::channels::ChannelType::Codex,
             },
             AgentFrameworkManifest {
                 name: "claude-flow".to_string(),
@@ -218,6 +224,7 @@ impl AgentFrameworkManifest {
                 builtin: true,
                 // claude-flow delegates to Claude — same auth requirements.
                 auth: claude_auth,
+                channel_type: crate::channels::ChannelType::ClaudeCode,
             },
             AgentFrameworkManifest {
                 name: "ollama".to_string(),
@@ -235,6 +242,7 @@ impl AgentFrameworkManifest {
                     ..Default::default()
                 },
                 builtin: true,
+                channel_type: crate::channels::ChannelType::Ollama,
                 // Ollama: local service check only; no upstream creds by default.
                 // Users who proxy a remote provider add upstream_auth to .ta/agents/ollama.yaml.
                 auth: AgentAuthSpec {

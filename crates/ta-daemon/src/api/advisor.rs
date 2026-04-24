@@ -7,6 +7,7 @@
 //   POST /api/advisor/message  — classify intent and return action + numbered options
 //   GET  /api/advisor/tools    — list available tools by security level
 //   GET  /api/advisor/config   — return current advisor config
+//   POST /api/advisor/inject   — inject a mid-run note to the active goal's agent (v0.15.28)
 
 use std::sync::Arc;
 
@@ -18,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::AppState;
+use ta_goal::{GoalRunState, GoalRunStore};
+use ta_runtime::{build_channel, AgentFrameworkManifest, ChannelType, HumanNote};
 use ta_session::classify_intent;
 use ta_session::workflow_session::AdvisorSecurity;
 use ta_session::Intent;
@@ -330,6 +333,181 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         description: description.to_string(),
     })
     .into_response()
+}
+
+// ── Inject endpoint (v0.15.28) ────────────────────────────────────────────────
+
+/// Request body for `POST /api/advisor/inject`.
+#[derive(Debug, Deserialize)]
+pub struct InjectRequest {
+    /// The note/instruction to send to the agent.
+    pub message: String,
+    /// Goal ID (or prefix) to target. Defaults to the most recent running goal.
+    #[serde(default)]
+    pub goal_id: Option<String>,
+}
+
+/// Response from `POST /api/advisor/inject`.
+#[derive(Debug, Serialize)]
+pub struct InjectResponse {
+    /// How the note was delivered: "live-polled", "api-pushed", "queued", "answered".
+    pub delivery: String,
+    /// The goal ID that received the note.
+    pub goal_id: String,
+    /// Path to the notes file (where applicable).
+    pub notes_file: Option<String>,
+    /// The message that was injected.
+    pub message: String,
+}
+
+/// `POST /api/advisor/inject` — Inject a mid-run human note to the active goal's agent.
+///
+/// Resolves the target goal (from `goal_id` or the most recently running goal),
+/// builds the appropriate `AgentContextChannel`, calls `inject_note()`, and returns
+/// the `NoteDelivery` result so the caller knows whether the agent received it live.
+pub async fn handle_inject(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<InjectRequest>,
+) -> impl IntoResponse {
+    let message = body.message.trim().to_string();
+    if message.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "message is required"})),
+        )
+            .into_response();
+    }
+
+    // Load the goal store.
+    let store = match GoalRunStore::new(&state.goals_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to load goal store from {:?}: {}", state.goals_dir, e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Resolve the target goal.
+    let goal = match resolve_inject_goal(&store, body.goal_id.as_deref()) {
+        Ok(g) => g,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": e,
+                    "hint": "Start a goal with `ta run` or pass an explicit --goal <id>."
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let goal_id_str = goal.goal_run_id.to_string();
+    let staging_path = goal.workspace_path.clone();
+
+    // Resolve channel type from the goal's agent framework manifest.
+    let channel_type = AgentFrameworkManifest::resolve(&goal.agent_id, &state.project_root)
+        .map(|m| m.channel_type)
+        .unwrap_or(ChannelType::ClaudeCode);
+
+    // Get context_file from manifest (default "CLAUDE.md").
+    let context_file = AgentFrameworkManifest::resolve(&goal.agent_id, &state.project_root)
+        .map(|m| m.context_file)
+        .unwrap_or_else(|| "CLAUDE.md".to_string());
+
+    // Build the channel.
+    let channel = build_channel(&channel_type, staging_path.clone(), &context_file);
+
+    // Build and inject the note.
+    let note = HumanNote::new(&goal_id_str, &message);
+    match channel.inject_note(&note) {
+        Ok(delivery) => {
+            // Best-effort notes file path (ClaudeCode pattern).
+            let notes_file = if channel_type == ChannelType::ClaudeCode {
+                let path = staging_path
+                    .join(".ta/advisor-notes")
+                    .join(format!("{}.md", goal_id_str));
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            };
+
+            tracing::info!(
+                goal_id = %goal_id_str,
+                delivery = %delivery,
+                agent_id = %goal.agent_id,
+                channel = %channel_type,
+                "Human note injected via POST /api/advisor/inject"
+            );
+
+            Json(InjectResponse {
+                delivery: delivery.to_string(),
+                goal_id: goal_id_str,
+                notes_file,
+                message,
+            })
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": format!(
+                    "Failed to inject note into goal {}: {}. \
+                     Check that the staging directory exists: {:?}",
+                    goal_id_str, e, staging_path
+                )
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// Resolve the target goal for injection.
+///
+/// If `goal_id_hint` is provided, find the goal by ID prefix.
+/// Otherwise, return the most recently running goal.
+fn resolve_inject_goal(
+    store: &GoalRunStore,
+    goal_id_hint: Option<&str>,
+) -> Result<ta_goal::GoalRun, String> {
+    let goals = store
+        .list()
+        .map_err(|e| format!("Failed to list goals: {}", e))?;
+
+    if let Some(hint) = goal_id_hint {
+        // Find by ID prefix.
+        let matched: Vec<_> = goals
+            .iter()
+            .filter(|g| g.goal_run_id.to_string().starts_with(hint))
+            .collect();
+        match matched.len() {
+            0 => Err(format!(
+                "No goal found matching prefix '{}'. \
+                 Use `ta goal list` to see available goals.",
+                hint
+            )),
+            1 => Ok(matched[0].clone()),
+            n => Err(format!(
+                "Ambiguous prefix '{}' matches {} goals. Use a longer prefix.",
+                hint, n
+            )),
+        }
+    } else {
+        // Find the most recently running goal.
+        goals
+            .into_iter()
+            .find(|g| g.state == GoalRunState::Running)
+            .ok_or_else(|| {
+                "No goal is currently running. \
+                 Start a goal with `ta run` or pass an explicit --goal <id>."
+                    .to_string()
+            })
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -740,6 +740,26 @@ impl ProjectConstitutionConfig {
                 severity: "medium".to_string(),
             },
         );
+        // Context-channel enforcement rule (v0.15.28): agent context must go through
+        // AgentContextChannel::inject_initial(), not direct CLAUDE.md file writes.
+        rules.insert(
+            "no-direct-claude-md".to_string(),
+            ConstitutionRule {
+                description: Some(
+                    "All agent context injection must go through AgentContextChannel::inject_initial(), \
+                     not direct CLAUDE.md file writes. String literal \"CLAUDE.md\" must not appear \
+                     outside of crates/ta-runtime/src/channels/ and crates/ta-runtime/src/framework.rs. \
+                     This ensures every agent type (Codex, Ollama, custom) gets context correctly. \
+                     Enforced by scanning for the pattern '\"CLAUDE.md\"' in source files outside the \
+                     allowed paths. Introduced in v0.15.28."
+                        .to_string(),
+                ),
+                inject_fns: vec![],
+                restore_fns: vec![],
+                patterns: vec!["\"CLAUDE.md\"".to_string()],
+                severity: "high".to_string(),
+            },
+        );
         ProjectConstitutionConfig {
             extends: None,
             rules,

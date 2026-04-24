@@ -293,6 +293,32 @@ pub enum PlanCommands {
         #[arg(long)]
         done: Option<usize>,
     },
+    /// Build pending plan phases by running governed goals in sequence.
+    ///
+    /// For each pending phase, optionally shows an interactive planning session
+    /// (the default) before starting the goal. The planning session displays the
+    /// phase spec and asks for confirmation before proceeding.
+    ///
+    /// Use `--auto` to skip all interactive sessions (CI/unattended use).
+    ///
+    /// Examples:
+    ///   ta plan build                      — interactive (default), asks before each phase
+    ///   ta plan build --auto               — non-interactive, proceeds without confirmation
+    ///   ta plan build --filter v0.15       — only build phases matching the prefix
+    ///   ta plan build --max-phases 3       — stop after building 3 phases
+    #[command(name = "build")]
+    Build {
+        /// Skip interactive planning sessions (default: interactive).
+        /// Use for CI or when you want to proceed without alignment questions.
+        #[arg(long)]
+        auto: bool,
+        /// Only build phases whose ID starts with this prefix (e.g. `--filter v0.15`).
+        #[arg(long)]
+        filter: Option<String>,
+        /// Stop after building this many phases (default: unlimited).
+        #[arg(long, default_value_t = 99)]
+        max_phases: u32,
+    },
     /// Generate a PLAN.md from a description or document using an agent goal.
     ///
     /// The agent reads the input, proposes a phased plan, and outputs a PLAN.md
@@ -481,6 +507,11 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
         }
         PlanCommands::Lint { fix } => plan_lint_cmd(config, *fix),
         PlanCommands::HumanTasks { done } => plan_human_tasks_cmd(config, *done),
+        PlanCommands::Build {
+            auto,
+            filter,
+            max_phases,
+        } => plan_build(config, *auto, filter.as_deref(), *max_phases),
     }
 }
 
@@ -4562,6 +4593,313 @@ fn plan_human_tasks_cmd(config: &GatewayConfig, done: Option<usize>) -> anyhow::
     Ok(())
 }
 
+/// Extract the first paragraph of a phase's description from PLAN.md content.
+///
+/// Searches for the phase header matching `phase_id` and collects non-empty lines
+/// after the status marker until the next phase header or blank-line break.
+/// Returns at most `max_chars` characters (truncating with "...").
+pub fn extract_phase_description(content: &str, phase_id: &str, max_chars: usize) -> String {
+    // Normalise the phase ID for matching (strip leading 'v').
+    let target = phase_id.strip_prefix('v').unwrap_or(phase_id);
+
+    // Detect phase header lines. Supports both "## Phase N — Title" and "### vX.Y.Z — Title".
+    let header_re = match Regex::new(
+        r"^(?:##\s+Phase\s+([\w.]+)(?:\s+—\s+.+)?|###\s+v?([\d.]+[a-z]?)\s+—\s+.+)$",
+    ) {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+    let status_re = match Regex::new(r"<!--\s*status:\s*\w+\s*-->") {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut in_phase = false;
+    let mut past_status = false;
+    let mut description_lines: Vec<&str> = Vec::new();
+
+    for (i, &line) in lines.iter().enumerate() {
+        if !in_phase {
+            // Check if this line is the header for our target phase.
+            if let Some(caps) = header_re.captures(line.trim()) {
+                let id = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map(|m| {
+                        m.as_str()
+                            .trim()
+                            .strip_prefix('v')
+                            .unwrap_or(m.as_str().trim())
+                    })
+                    .unwrap_or("");
+                if id == target {
+                    in_phase = true;
+                    past_status = false;
+                }
+            }
+            continue;
+        }
+
+        // We are inside our target phase.
+        let trimmed = line.trim();
+
+        // Skip the status marker line.
+        if !past_status && status_re.is_match(trimmed) {
+            past_status = true;
+            continue;
+        }
+
+        // Stop at the next phase header.
+        if i > 0 && header_re.is_match(trimmed) {
+            break;
+        }
+
+        // Stop at `---` separators.
+        if trimmed == "---" {
+            break;
+        }
+
+        if past_status {
+            description_lines.push(line);
+            // Stop at the first blank line after collecting at least one non-empty line.
+            if trimmed.is_empty() && description_lines.iter().any(|l| !l.trim().is_empty()) {
+                break;
+            }
+        }
+    }
+
+    // Collect non-empty lines into a single paragraph.
+    let raw: String = description_lines
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if raw.len() <= max_chars {
+        raw
+    } else {
+        format!("{}...", &raw[..max_chars.saturating_sub(3)])
+    }
+}
+
+/// Run `ta plan build`: iterate pending phases, optionally asking for confirmation
+/// before each one (interactive planning session).
+///
+/// When `auto` is false (default) the command shows the phase spec and asks:
+///   `Ready to start this phase? [Y/n/q to quit]: `
+///
+/// When `auto` is true it skips the prompt and proceeds immediately.
+/// A session transcript is saved to `.ta/sessions/<phase_id>.md` for each phase.
+fn plan_build(
+    config: &GatewayConfig,
+    auto: bool,
+    filter: Option<&str>,
+    max_phases: u32,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    // Load the plan.
+    let schema = PlanSchema::load_or_default(&config.workspace_root);
+    let plan_path = config.workspace_root.join(&schema.source);
+    if !plan_path.exists() {
+        anyhow::bail!(
+            "No {} found in {}.\n\
+             Create a plan first with `ta plan create` or `ta plan from <doc>`.",
+            schema.source,
+            config.workspace_root.display()
+        );
+    }
+
+    let sessions_dir = config.workspace_root.join(".ta/sessions");
+    std::fs::create_dir_all(&sessions_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create sessions directory '{}': {}",
+            sessions_dir.display(),
+            e
+        )
+    })?;
+
+    let mut phases_built: u32 = 0;
+
+    loop {
+        if phases_built >= max_phases {
+            println!("Reached --max-phases limit ({}). Stopping.", max_phases);
+            break;
+        }
+
+        // Reload the plan on each iteration to pick up status changes.
+        let phases = load_plan(&config.workspace_root)?;
+        let filtered: Vec<PlanPhase> = if let Some(prefix) = filter {
+            phases
+                .into_iter()
+                .filter(|p| p.id.starts_with(prefix) || format!("v{}", p.id).starts_with(prefix))
+                .collect()
+        } else {
+            phases
+        };
+
+        let after_current = find_in_progress(&filtered).map(|p| p.id.clone());
+        let next = find_next_pending(&filtered, after_current.as_deref());
+
+        let phase = match next {
+            Some(p) => p.clone(),
+            None => {
+                println!("All plan phases are complete or in progress. Nothing to build.");
+                break;
+            }
+        };
+
+        // Extract the phase description for the planning session header.
+        let plan_content = std::fs::read_to_string(&plan_path).unwrap_or_default();
+        let description = extract_phase_description(&plan_content, &phase.id, 500);
+
+        if !auto {
+            // Show the planning session header.
+            println!("\n=== Planning Session: {} — {} ===", phase.id, phase.title);
+            if !description.is_empty() {
+                println!("{}", description);
+            }
+            println!();
+
+            print!("Ready to start this phase? [Y/n/q to quit]: ");
+            std::io::stdout().flush().ok();
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let choice = input.trim().to_lowercase();
+
+            // Save session transcript.
+            let timestamp = chrono_now_iso();
+            let transcript = format!(
+                "# Planning Session: {} — {}\n\nTimestamp: {}\n\n## Phase Description\n\n{}\n\n## Decision\n\nUser response: `{}`\n",
+                phase.id,
+                phase.title,
+                timestamp,
+                if description.is_empty() { "(no description available)" } else { &description },
+                input.trim()
+            );
+            let session_file = sessions_dir.join(format!("{}.md", phase.id.replace('/', "-")));
+            if let Err(e) = std::fs::write(&session_file, &transcript) {
+                eprintln!(
+                    "Warning: could not save session transcript to '{}': {}",
+                    session_file.display(),
+                    e
+                );
+            }
+
+            match choice.as_str() {
+                "q" | "quit" => {
+                    println!("Exiting build loop.");
+                    return Ok(());
+                }
+                "n" | "no" => {
+                    println!("Skipping phase {} — {}.", phase.id, phase.title);
+                    // Mark as deferred? No — per spec, just skip this iteration.
+                    // We cannot advance to the next without risking infinite loops
+                    // unless we track which phases were skipped. Break for safety.
+                    println!(
+                        "Note: to skip permanently, use `ta plan mark-done {}` or defer it.\n\
+                         Stopping build loop to avoid re-prompting the same phase.",
+                        phase.id
+                    );
+                    return Ok(());
+                }
+                _ => {
+                    // "y", "", or any other key → proceed.
+                }
+            }
+        } else {
+            println!(
+                "Building phase {} — {} (--auto mode)",
+                phase.id, phase.title
+            );
+        }
+
+        // Run the governed build workflow for this phase.
+        println!(
+            "\nStarting goal for phase {} — {}...",
+            phase.id, phase.title
+        );
+        let goal_title = format!("implement {} — {}", phase.id, phase.title);
+
+        super::run::execute(
+            config,
+            Some(&goal_title),
+            "claude-code",
+            None, // source
+            &goal_title,
+            Some(&phase.id),
+            None,  // follow_up
+            None,  // follow_up_draft
+            None,  // follow_up_goal
+            None,  // objective_file
+            false, // no_launch
+            !auto, // interactive
+            false, // macro_goal
+            None,  // resume
+            false, // headless
+            false, // skip_verify
+            false, // quiet
+            None,  // existing_goal_id
+            None,  // workflow
+            None,  // persona_name
+        )?;
+
+        phases_built += 1;
+        println!(
+            "\n[progress] phase {}: goal started — built {}/{} phases so far",
+            phase.id, phases_built, max_phases
+        );
+    }
+
+    if phases_built > 0 {
+        println!("\nBuild complete: started {} goal(s).", phases_built);
+    }
+
+    Ok(())
+}
+
+/// Return the current UTC timestamp as an ISO 8601 string.
+/// Uses a simple approach without pulling in the `chrono` crate.
+fn chrono_now_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Format as YYYY-MM-DDTHH:MM:SSZ using integer arithmetic.
+    let s = secs;
+    let sec = s % 60;
+    let min = (s / 60) % 60;
+    let hour = (s / 3600) % 24;
+    let days = s / 86400;
+    // Compute date from days since epoch (simple Gregorian, accurate for modern dates).
+    let (year, month, day) = days_to_ymd(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, min, sec
+    )
+}
+
+/// Convert days-since-Unix-epoch to (year, month, day).
+fn days_to_ymd(days: u64) -> (u32, u32, u32) {
+    // Using the algorithm from https://howardhinnant.github.io/date_algorithms.html
+    // (civil_from_days), shifted for u64.
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u32, m as u32, d as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6669,5 +7007,90 @@ Build it.
         // The real phase should still be found
         let next = find_next_pending(&phases, None);
         assert_eq!(next.map(|p| p.id.as_str()), Some("v0.15.1"));
+    }
+
+    // ── extract_phase_description tests ──────────────────────────
+
+    #[test]
+    fn extract_phase_description_returns_first_paragraph() {
+        let plan = r#"### v0.15.28 — My Phase
+<!-- status: pending -->
+
+This is the goal description for the phase.
+It spans multiple lines.
+
+More content here that is part of a second paragraph.
+"#;
+        let desc = extract_phase_description(plan, "v0.15.28", 500);
+        assert!(
+            desc.contains("This is the goal description"),
+            "Expected description, got: {:?}",
+            desc
+        );
+        // Should stop at first blank line after first non-empty content.
+        assert!(
+            !desc.contains("More content"),
+            "Should not include second paragraph, got: {:?}",
+            desc
+        );
+    }
+
+    #[test]
+    fn extract_phase_description_truncates_long_content() {
+        let long_text = "A".repeat(600);
+        let plan = format!(
+            "### v0.1.0 — Test\n<!-- status: pending -->\n\n{}\n",
+            long_text
+        );
+        let desc = extract_phase_description(&plan, "v0.1.0", 500);
+        assert!(
+            desc.len() <= 500,
+            "Expected at most 500 chars, got {}",
+            desc.len()
+        );
+        assert!(desc.ends_with("..."), "Expected truncation marker");
+    }
+
+    #[test]
+    fn extract_phase_description_handles_missing_phase() {
+        let plan = "### v0.1.0 — Test\n<!-- status: pending -->\nContent.\n";
+        let desc = extract_phase_description(plan, "v99.99.99", 500);
+        assert!(
+            desc.is_empty(),
+            "Expected empty string for missing phase, got: {:?}",
+            desc
+        );
+    }
+
+    #[test]
+    fn extract_phase_description_works_with_v_prefix_normalisation() {
+        let plan = "### v0.5.0 — Phase Five\n<!-- status: pending -->\n\nGoal text.\n";
+        // Pass without leading 'v'.
+        let desc = extract_phase_description(plan, "0.5.0", 500);
+        assert_eq!(desc, "Goal text.", "Got: {:?}", desc);
+    }
+
+    // ── chrono_now_iso / days_to_ymd tests ───────────────────────
+
+    #[test]
+    fn days_to_ymd_unix_epoch() {
+        let (y, m, d) = days_to_ymd(0);
+        assert_eq!((y, m, d), (1970, 1, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_known_date() {
+        // 2024-01-01 = 19723 days since 1970-01-01
+        let (y, m, d) = days_to_ymd(19723);
+        assert_eq!((y, m, d), (2024, 1, 1));
+    }
+
+    #[test]
+    fn chrono_now_iso_format() {
+        let ts = chrono_now_iso();
+        // Should be "YYYY-MM-DDTHH:MM:SSZ"
+        assert_eq!(ts.len(), 20, "Expected 20 chars, got {:?}", ts);
+        assert!(ts.ends_with('Z'), "Expected Z suffix, got {:?}", ts);
+        assert!(ts.contains('T'), "Expected T separator, got {:?}", ts);
     }
 }

@@ -454,6 +454,23 @@ enum Commands {
         #[command(subcommand)]
         command: commands::advisor::AdvisorCommands,
     },
+
+    /// Send a mid-run note to the active goal's agent (shorthand for `ta advisor advise`).
+    ///
+    /// The note is delivered via the goal's context channel. The delivery mode
+    /// is printed so you know whether the agent saw it live (live-polled),
+    /// via API push (api-pushed), or will see it at the next restart (queued).
+    ///
+    /// Examples:
+    ///   ta advise "please focus on the auth module"
+    ///   ta advise --goal abc123 "add more test coverage"
+    Advise {
+        /// The note/instruction to send to the agent.
+        message: String,
+        /// Goal ID (or prefix) to target. Defaults to the most recent running goal.
+        #[arg(long)]
+        goal: Option<String>,
+    },
     /// Author, validate, and manage agent configurations.
     Agent {
         #[command(subcommand)]
@@ -958,6 +975,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Context { command } => commands::context::execute(command, &config),
         Commands::Credentials { command } => commands::credentials::execute(command, &config),
         Commands::Advisor { command } => commands::advisor::execute(command, &config),
+        Commands::Advise { message, goal } => {
+            commands::advisor::advise(&config, message, goal.as_deref())
+        }
         Commands::Agent { command } => commands::agent::execute(command, &config),
         Commands::Constitution { command } => commands::constitution::execute(command, &config),
         Commands::Memory { command } => commands::memory::execute(command, &config),
