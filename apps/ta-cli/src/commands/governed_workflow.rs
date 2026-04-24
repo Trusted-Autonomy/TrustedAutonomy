@@ -973,14 +973,71 @@ pub fn evaluate_human_gate(
 }
 
 /// Prompt the human and return true if they confirmed (y/Y).
-fn prompt_human_gate(_verdict: &ReviewerVerdict, prompt: &str) -> anyhow::Result<bool> {
-    print!("{}", prompt);
-    std::io::stdout().flush().ok();
-    let stdin = std::io::stdin();
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line).ok();
-    let answer = line.trim().to_lowercase();
-    Ok(answer == "y" || answer == "yes")
+///
+/// In addition to Y/N the user can enter D to open a short discussion loop
+/// with the advisor before returning to the gate prompt.
+fn prompt_human_gate(verdict: &ReviewerVerdict, prompt: &str) -> anyhow::Result<bool> {
+    use ta_session::workflow_session::AdvisorSecurity;
+    use ta_session::{AdvisorContext, AdvisorSession};
+
+    // Indicate channel capability.
+    let channel_note = if std::env::var("VSCODE_IPC_HOOK_CLI").is_ok() {
+        "[Live injection active]"
+    } else {
+        "[Notes will apply at next restart]"
+    };
+
+    // Use the first reviewer finding as context for the advisor, if available.
+    let selection: Option<String> = verdict.findings.first().cloned();
+
+    loop {
+        println!(
+            "\nOptions: [Y] Approve  [N] Deny  [D] Discuss  {}",
+            channel_note
+        );
+        print!("{}", prompt);
+        std::io::stdout().flush().ok();
+
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line).ok();
+        let answer = line.trim().to_lowercase();
+
+        match answer.as_str() {
+            "d" | "discuss" => {
+                println!(
+                    "Discussing with advisor. Type your question or note (empty line to return):"
+                );
+                let stdin = std::io::stdin();
+                for input_line in stdin.lock().lines() {
+                    let input = input_line.unwrap_or_default();
+                    if input.trim().is_empty() {
+                        break;
+                    }
+                    // Use AdvisorSession to classify and respond.
+                    let ctx = AdvisorContext {
+                        tab: "governance".to_string(),
+                        selection: selection.clone(),
+                    };
+                    let session =
+                        AdvisorSession::from_message(&input, &AdvisorSecurity::ReadOnly, &ctx);
+                    println!("\nAdvisor: {}", session.response);
+                    if !session.options.is_empty() {
+                        for opt in &session.options {
+                            println!("  {}. {}", opt.number, opt.label);
+                        }
+                    }
+                    println!("\nContinue discussing (empty line to return to gate):");
+                }
+                // Loop back to re-print the gate prompt.
+            }
+            "y" | "yes" => return Ok(true),
+            "n" | "no" | "" => return Ok(false),
+            _ => {
+                println!("Please enter Y, N, or D.");
+            }
+        }
+    }
 }
 
 // ── PR sync poll ──────────────────────────────────────────────────────────────

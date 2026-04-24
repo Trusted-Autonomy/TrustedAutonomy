@@ -4690,8 +4690,6 @@ max_response_length = "2000 words"
   │
 7. [x] **USAGE.md**: "Agent Personas" section (format, usage in goals and workflows), "Workflows" section (Studio tab, creation from description), "New Project" section (wizard flow, plan generation, semver bootstrap).
 #### Version: `0.14.20-alpha`
----
-#### Design
 ? Template [python-ml]:
 ? VCS: (auto-detected: git) ✓          ← prompts if not detectable: git/perforce/svn/none
 ? Create GitHub remote? [Y/n] Y
@@ -4857,7 +4855,6 @@ visual_diff_threshold = 0.3  # max fraction of image that can change for localiz
 - All names that follow `<name>.local.toml` are already correct and stay unchanged: `daemon.local.toml`.
 - Only `local.workflow.toml` needs renaming.
 <!-- status: done -->
-   ```toml
 1. [x] **Update `LOCAL_TA_PATHS`** in `crates/ta-workspace/src/partitioning.rs`: replace `"local.workflow.toml"` with `"workflow.local.toml"` (old name retained with comment so existing files stay gitignored).
 2. [x] **Update `docs/USAGE.md`** to reflect the new name (was already using `workflow.local.toml`; added migration note).
 <!-- status: done -->
@@ -4877,10 +4874,10 @@ visual_diff_threshold = 0.3  # max fraction of image that can change for localiz
 1. [x] **`Artifact.embedded_patch`** (`ta-changeset/src/draft_package.rs`): add `embedded_patch: Option<String>` field. Backwards-compatible (`#[serde(default)]`).
 <!-- status: done -->
 2. [x] **Embed at build time** (`apps/ta-cli/src/commands/draft.rs` `build_package`): after the overlay diff loop, for each modified/added/deleted artifact, compute a unified diff against the source baseline and store in `artifact.embedded_patch`. Use the `DiffContent` already computed — serialize it as a standard `-u` diff string.
-
+1. [x] **`AgentContextChannel` trait + four adapter implementations** (`crates/ta-runtime/src/channels/`): Trait + `ClaudeCodeChannel`, `CodexChannel`, `OllamaChannel`, `GenericFileChannel`. `AgentFrameworkManifest` gains `channel_type` field. Unit tests: each adapter's `inject_initial` writes to the correct location; `CodexChannel::inject_note` returns `ApiPushed` when VS Code API is reachable, `Queued` otherwise.
 3. [x] **Fallback apply** (`apply_package` in `draft.rs`): when `goal.workspace_path` does not exist, check that all artifacts have `embedded_patch`. If yes, apply each patch to source using the `diffy` crate (already in workspace) or `patch` subprocess. If any artifact lacks it, keep the existing error message and add: "This package predates embedded-patch support (v0.15.6.1). Re-run the goal to regenerate."
 4. [x] **Tests**: build a package → delete staging dir → apply succeeds from embedded patch. New-file case. Binary-file case (base64 roundtrip). Package without `embedded_patch` keeps old error path.
-
+2. [x] **Migrate `inject_claude_md()` → `channel.inject_initial()`** (`apps/ta-cli/src/commands/run.rs`): Replace hardcoded CLAUDE.md path with channel. Backup/restore also uses channel's `restore()`. All call sites updated (run.rs, governed_workflow.rs, reviewer spawner in plan.rs). `inject_claude_md` becomes a shim calling `ClaudeCodeChannel::inject_initial` for the transition period; deprecated in this phase, removed in v0.15.30.
 5. [x] **Tests for v0.15.6 `workflow.local.toml` merge** (deferred from v0.15.6 item 6): confirm `workflow.local.toml` is loaded and merged; confirm `local.workflow.toml` triggers the deprecation warning and is still applied.
 ---
 ### v0.15.6.2 — Finalizing Timeout Fix + Aggressive Auto-GC
@@ -4892,7 +4889,7 @@ visual_diff_threshold = 0.3  # max fraction of image that can change for localiz
 1. [x] **Increase finalizing timeout**: `[timeouts] finalizing_s = 600` added to `DaemonConfig` (`crates/ta-daemon/src/config.rs`). `WatchdogConfig::from_config()` now accepts `Option<&TimeoutsConfig>` as a third param and prefers `timeouts.finalizing_s` over the legacy `ops.finalize_timeout_secs`. Default watchdog `finalize_timeout_secs` also raised from 300 → 600.
 <!-- status: done -->
 2. [x] **Async draft build**: `try_spawn_background_draft_build()` added to `run.rs`. After the agent exits, writes a `DraftBuildContext` JSON to `.ta/draft-build-ctx/<goal-id>.json`, then spawns `ta draft build <goal_id> --apply-context-file <path>` as a detached background process (process group 0 on Unix). Falls back to synchronous build if spawn fails or in headless mode (callers need the draft ID synchronously).
-
+3. [x] **`ta advise [--goal <id>] <message>` CLI + `POST /api/advisor/inject` endpoint**: Daemon advisor classifies the message; calls `channel.inject_note()` on the active goal's channel. Prints the returned `NoteDelivery` variant so the human knows whether the note was live-polled, API-pushed, or queued. `.ta/advisor-notes/` directory added to `.gitignore`.
 <!-- status: done -->
 3. [x] **Aggressive GC defaults**: `GcConfig.failed_staging_retention_hours` defaults to **4** in `config.rs`. `ta gc` main loop uses a 4-hour cutoff for failed/denied goals.
 <!-- status: done -->
@@ -4904,51 +4901,43 @@ visual_diff_threshold = 0.3  # max fraction of image that can change for localiz
 7. [x] **Tests**: `gc_status_prints_table`, `gc_failed_uses_aggressive_cutoff`, `check_staging_cap_returns_false_when_zero`, `periodic_gc_removes_old_failed_staging`, `load_gc_config_returns_defaults_when_no_file`, `load_gc_config_reads_from_daemon_toml` — 6 new tests in `gc.rs`.
 #### Design
 8. [x] **USAGE.md "Disk & GC"** section added: staging disk model, automatic GC behavior, `ta gc --status` output, `ta gc --delete-stale`, staging size cap, and `[gc]` / `[timeouts]` config reference.
-
+4. [x] **Studio sidebar `ta advise` command** (`crates/ta-daemon/assets/index.html`): Persistent input visible from all Studio tabs. Shows active goal + channel capability badge (`Live` / `Queued`). Posts to `/api/advisor/inject`. Shortcut `Cmd+Shift+K`.
 #### Version: `0.15.6.2-alpha`
-
+5. [x] **Workflow discussion option at every review gate** (`apps/ta-cli/src/commands/governed_workflow.rs`): `D. Discuss` option added to every `prompt_human_gate_*` call. Opens short `read_stdin_line` loop; advisor answers from daemon. Human still picks Approve/Deny/Follow-up after. Channel capability shown: `[Live injection active]` or `[Notes will apply at next restart]`.
 ---
 ### v0.15.7 — Velocity Stats: Committed Aggregate & Multi-Machine Rollup
 <!-- status: done -->
 **Goal**: Make velocity data committable, team-visible, and conflict-free. Currently `velocity-stats.jsonl` is purely local (gitignored), so stats never aggregate across machines or team members. This phase introduces a committed `velocity-history.jsonl` that is auto-staged on `ta draft apply --git-commit`, using the same append-only pattern as `plan_history.jsonl`.
 - `velocity-stats.jsonl` — stays LOCAL (raw per-machine log, unchanged)
-
+6. [x] **Interactive planning as default for `ta plan` + Studio Plan tab**: `ta plan` and the Studio Plan tab default to an interactive planning session — advisor reads the next pending phase spec, surfaces ambiguities as numbered questions, human confirms or amends. Transcript saved to `.ta/sessions/<phase>.md` and injected via channel at goal start. `--auto` / `--no-interactive` skips for CI. Studio: "Start Implementation" gated on confirmed session.
 - Written by `ta draft apply --git-commit` (same moment `plan_history.jsonl` is updated)
 - Each entry tagged with `machine_id` (hostname hash) and `committer` (from git config) so multi-machine appends are unique lines → no merge conflicts
-
+7. [x] **`interactive-plan-build` workflow template**: Extends `plan-build-phases` with a `planning_session` stage before each `run_goal`. `ta_ask_human` used for alignment. `planning_session = true` in `workflow.toml`; opt-out with `--param planning_session=false`. Default for `ta plan build`.
 1. [x] **Write on apply**: `apply_package` §8c block in `apps/ta-cli/src/commands/draft.rs` writes to `.ta/velocity-history.jsonl` when `git_commit=true`, stamped with `machine_id` and `committer`. Uses `VelocityHistoryStore::for_project(target_dir)` — writes to the source project, not staging, so it's captured by `adapter.commit()`.
-
+8. [x] **Injection visibility + constitution rule**: `ta goal status <id>` shows `Channel: ClaudeCode (Live)` and `Notes: N injected`. `.ta/constitution.toml` gains `[rules.no-direct-claude-md]`: pattern scan for `"CLAUDE.md"` string literals outside `channels/` and `framework.rs`. Severity `high`.
 2. [x] **Add to `SHARED_TA_PATHS`** in `partitioning.rs` (`velocity-history.jsonl` added). Auto-staged via `git.rs` `auto_stage_candidates()` alongside `plan_history.jsonl`.
-
 3. [x] **`ta stats velocity` team + conflict view**: `--team` flag removed in favour of always showing per-contributor breakdown and phase conflict warnings. `aggregate_by_contributor()` groups committed entries by committer/machine_id. `detect_phase_conflicts()` flags plan phases with entries from more than one contributor. Both shown automatically in `ta stats velocity` output. `PhaseConflict` struct added to `velocity.rs`. 2 new tests: `detect_phase_conflicts_flags_multi_contributor_phases`, `detect_phase_conflicts_no_conflicts_when_single_contributor`.
-
 4. [x] **`ta stats export`**: updated CSV header includes `machine_id` and `committer` columns. `--committed-only` flag added to export only the shared history.
-
-
 5. [x] **Tests**: `velocity_history_store_append_and_load`, `velocity_history_empty_when_no_file`, `merge_deduplicates_by_goal_id`, `migrate_promotes_local_entries_to_history`, `aggregate_by_contributor_groups_by_committer`, `old_entry_without_machine_id_deserializes_ok`, `machine_id_is_eight_hex_chars`, `machine_id_is_stable` (8 tests in `velocity.rs`). `apply_with_git_commit` extended to assert `velocity-history.jsonl` is written with correct fields. `auto_stage_candidates_includes_builtin_and_plan_history` updated.
 ---
 ### v0.15.7.1 — Background Process Lifecycle: Heartbeat, Event Notification & Reviewer Resilience
 <!-- status: done -->
 **Goal**: Replace the static finalizing timeout with a heartbeat-based liveness model. Surface background draft build completion inline (shell/Studio notification, no opaque CTA). Fix reviewer agents so they work from the draft package — never from staging — making them resilient to GC and staging cleanup.
-
 **Why this phase exists**: v0.15.6.2 solved the timeout by raising it from 300s→600s and moving draft build to background. But the underlying model is still wrong:
 - **Static timeout**: the watchdog kills at T+600s regardless of whether the background process is actively working. A slow machine building a large workspace will time out even though the process is healthy.
-
+#### Design
 - **Reviewer failures**: the governed-goal workflow spawns a reviewer agent that inherits a staging dir reference. When GC cleans that dir (4h for failed goals, startup pass), the reviewer fails. The reviewer doesn't need staging — it needs the draft package. Since v0.15.6.1 added embedded patches to every artifact, reviewers can read the diff directly from the package without touching disk.
-   ```
 **Not in scope**: Changing the background spawn model itself (it's correct — agents should exit fast). Changing GC retention (4h is right). Only the heartbeat, notification, and reviewer agent wiring change.
-
+---
 #### Design: Heartbeat-based watchdog
 **New**: `WatchdogConfig { heartbeat_interval_secs: 30, heartbeat_timeout_secs: 120 }` — watchdog checks `.ta/heartbeats/<goal-id>` mtime. If mtime is older than `heartbeat_timeout_secs`, goal is considered hung. Background processes write heartbeats every `heartbeat_interval_secs`. Wall-clock timeout is removed entirely for background processes; it remains only for the initial agent spawn (up to `agent_start_timeout_secs: 60`).
 ```toml
-
 heartbeat_timeout_secs  = 120  # watchdog: if no heartbeat for this long, kill
-
+   ```toml
 Background draft build loop:
-
+   ```
   → watchdog: if .ta/heartbeats/<goal-id> mtime > 120s ago → kill, mark failed
   → on completion: write .ta/heartbeats/<goal-id>.done, emit DraftBuilt event
-
 The daemon event bus already has `draft_built` events (from v0.14.8.3). When background draft build completes, it writes a sentinel file `.ta/heartbeats/<goal-id>.done`. The daemon's file watcher picks this up and emits `EventKind::DraftBuilt { goal_id, draft_id }` on the event bus.
 
 `ta shell` is already subscribed to events. When `DraftBuilt` fires, the shell prints inline:
@@ -5281,7 +5270,7 @@ agent              = "claude-code"    # implementation agent
 **Workflow integration**: Goals that produce social content (`ta run "Write a LinkedIn post about the cinepipe launch"`) go through the same supervisory gate as email: constitution check → supervisor score → if pass, `create_draft` or `create_scheduled`; if flag, TA review queue first. The `[[supervisor]]` config from the email workflow template is reused as a shared concept.
 
 **Goal examples**:
-```bash
+
 
         highlight the AI pipeline angle, no specific client names"
 
@@ -6676,7 +6665,7 @@ ta draft apply <id>              ← prompts if conflicts present
 
 `ta doctor` is not involved — doctor validates the runtime environment (auth, daemon, agent binary). Review is a draft-lifecycle concern.
 
-**Items**:
+
 
 11. [x] **`PlanMergeBase` tracking** (`crates/ta-changeset/src/plan_merge.rs`): When `ta goal start` creates staging, snapshot the source PLAN.md to `.ta/staging/<goal_id>/plan_base.md`. This is the three-way merge base. If absent (pre-v0.15.19.3 goals), fall back to two-way (source vs staging) with conservative conflict detection.
 
@@ -7131,9 +7120,8 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 #### Version: `0.15.27-alpha`
 
 ---
-
 ### v0.15.28 — Unified Agent Context Channel + Live Human Interjection
-<!-- status: pending -->
+<!-- status: done -->
 
 **Goal**: All agent context injection and mid-run human interjection follow one common path (`AgentContextChannel` trait) that diverges only at the per-adapter boundary. This makes adding or improving any agent type (Codex, Ollama, future models) a one-file change with no ripple through TA's core logic. Built on top: `ta advise` CLI command, Studio sidebar, workflow discussion option, and interactive planning as default for `ta plan` and Studio Plan tab.
 
@@ -7176,28 +7164,27 @@ pub enum NoteDelivery {
 
 `AgentFrameworkManifest` gains a `channel_type: ChannelType` field that selects the implementation. The common path in `run.rs` calls `channel.inject_initial()` and never references CLAUDE.md directly.
 
-1. [ ] **`AgentContextChannel` trait + four adapter implementations** (`crates/ta-runtime/src/channels/`): Trait + `ClaudeCodeChannel`, `CodexChannel`, `OllamaChannel`, `GenericFileChannel`. `AgentFrameworkManifest` gains `channel_type` field. Unit tests: each adapter's `inject_initial` writes to the correct location; `CodexChannel::inject_note` returns `ApiPushed` when VS Code API is reachable, `Queued` otherwise.
 
-2. [ ] **Migrate `inject_claude_md()` → `channel.inject_initial()`** (`apps/ta-cli/src/commands/run.rs`): Replace hardcoded CLAUDE.md path with channel. Backup/restore also uses channel's `restore()`. All call sites updated (run.rs, governed_workflow.rs, reviewer spawner in plan.rs). `inject_claude_md` becomes a shim calling `ClaudeCodeChannel::inject_initial` for the transition period; deprecated in this phase, removed in v0.15.30.
 
-3. [ ] **`ta advise [--goal <id>] <message>` CLI + `POST /api/advisor/inject` endpoint**: Daemon advisor classifies the message; calls `channel.inject_note()` on the active goal's channel. Prints the returned `NoteDelivery` variant so the human knows whether the note was live-polled, API-pushed, or queued. `.ta/advisor-notes/` directory added to `.gitignore`.
 
-4. [ ] **Studio sidebar `ta advise` command** (`crates/ta-daemon/assets/index.html`): Persistent input visible from all Studio tabs. Shows active goal + channel capability badge (`Live` / `Queued`). Posts to `/api/advisor/inject`. Shortcut `Cmd+Shift+K`.
 
-5. [ ] **Workflow discussion option at every review gate** (`apps/ta-cli/src/commands/governed_workflow.rs`): `D. Discuss` option added to every `prompt_human_gate_*` call. Opens short `read_stdin_line` loop; advisor answers from daemon. Human still picks Approve/Deny/Follow-up after. Channel capability shown: `[Live injection active]` or `[Notes will apply at next restart]`.
 
-6. [ ] **Interactive planning as default for `ta plan` + Studio Plan tab**: `ta plan` and the Studio Plan tab default to an interactive planning session — advisor reads the next pending phase spec, surfaces ambiguities as numbered questions, human confirms or amends. Transcript saved to `.ta/sessions/<phase>.md` and injected via channel at goal start. `--auto` / `--no-interactive` skips for CI. Studio: "Start Implementation" gated on confirmed session.
 
-7. [ ] **`interactive-plan-build` workflow template**: Extends `plan-build-phases` with a `planning_session` stage before each `run_goal`. `ta_ask_human` used for alignment. `planning_session = true` in `workflow.toml`; opt-out with `--param planning_session=false`. Default for `ta plan build`.
 
-8. [ ] **Injection visibility + constitution rule**: `ta goal status <id>` shows `Channel: ClaudeCode (Live)` and `Notes: N injected`. `.ta/constitution.toml` gains `[rules.no-direct-claude-md]`: pattern scan for `"CLAUDE.md"` string literals outside `channels/` and `framework.rs`. Severity `high`.
+
+
+
+
+
+
+
+
 
 #### Version: `0.15.28-alpha`
 
----
 
-### v0.15.29 — VCS Adapter Enforcement: Eliminate Direct Git Calls in TA Source
-<!-- status: pending -->
+
+
 
 **Goal**: All VCS operations in TA's own source code that affect a project (staging copies, branch creation, commits, pushes, dirty-check, log reads) must go through `SourceAdapter` — not raw `Command::new("git")`. A constitution rule enforces this on all future agents working in this codebase.
 
@@ -7222,9 +7209,8 @@ pub enum NoteDelivery {
 #### Version: `0.15.29-alpha`
 
 ---
-
 ### v0.15.30 — Agent Framework Abstraction: Remove Shims, Full Enforcement
-<!-- status: pending -->
+
 
 **Goal**: Remove the `inject_claude_md()` shim left by v0.15.28, complete the migration of all remaining hardcoded CLAUDE.md references, and activate the constitution enforcement rule across the codebase. After this phase, adding a new agent type requires only a new `AgentContextChannel` implementation and a manifest entry — no changes to TA's core logic.
 
@@ -7249,7 +7235,6 @@ pub enum NoteDelivery {
 ## v0.16 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
-
 ### v0.16.0 — VS Code Extension
 <!-- status: pending -->
 
@@ -7283,7 +7268,6 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 ### v0.16.1 — JetBrains IDE Plugin (PyCharm, WebStorm, IntelliJ)
 <!-- status: pending -->
 
-**Goal**: First-class JetBrains IDE integration for TA. Surfaces goal management, draft review, and approve/deny inline in PyCharm, WebStorm, and IntelliJ IDEA without leaving the editor.
 
 **Why**: JetBrains IDEs are the primary environment for Java, Kotlin, Python (PyCharm), and JavaScript/TypeScript (WebStorm) developers. Same rationale as the VS Code extension — reduces context-switching friction for non-Rust developers.
 
@@ -7299,7 +7283,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 ### v0.16.2 — Neovim Plugin
 <!-- status: pending -->
 
-**Goal**: A Lua plugin for Neovim that surfaces TA's core workflow in the editor without requiring a browser or separate UI.
+
 
 **Why**: Neovim users are a significant portion of the Rust/systems developer audience and strongly prefer terminal-native tools. A Lua plugin bridges TA with their existing workflow without requiring a browser or separate UI.
 
@@ -7314,7 +7298,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 ### v0.16.3 — Ollama Agent Framework Plugin (Extract & Standalone)
 <!-- status: pending -->
 
-**Goal**: Extract `ta-agent-ollama` from the TA monorepo into a standalone agent-framework plugin with its own repository, README, and usage documentation. TA's built-in USAGE.md "Local Models" section becomes a short pointer to the plugin project. This follows the same pattern as the VCS plugins (`ta-vcs-git`, `ta-vcs-p4`) — TA ships the plugin protocol and discovery, first-party plugins live in their own repos and are published to the plugin registry.
+```bash
 
 **Why extract**: Ollama support has its own dependency surface (Ollama binary, model management, thinking-mode tokens), release cadence (tracks Ollama API changes independently of TA core), and user audience (local-model users who may not need TA's full feature set). Keeping it in-tree makes the core binary heavier and couples TA releases to Ollama API changes.
 
@@ -7360,7 +7344,7 @@ See the [ta-agent-ollama README] for model selection, hardware requirements,
 ### v0.16.3.1 — Gemma 4 Agent Profiles (ta-agent-ollama plugin)
 
 
-so users can run Gemma 4 locally with zero configuration, at the right size for their hardware.
+**Items**:
 
 **Depends on**: v0.16.3 (ta-agent-ollama extracted to standalone plugin)
 

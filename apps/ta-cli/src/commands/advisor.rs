@@ -1,7 +1,9 @@
-// advisor.rs — CLI commands for the advisor agent (v0.15.26).
+// advisor.rs — CLI commands for the advisor agent (v0.15.26 + v0.15.28).
 //
 // Commands:
-//   ta advisor ask "<message>"   — classify intent and print numbered option card
+//   ta advisor ask "<message>"                  — classify intent and print numbered option card
+//   ta advisor advise "<message>"               — inject a mid-run note to the active goal
+//   ta advisor advise --goal <id> "<message>"   — target a specific goal
 //
 // The advisor classifies your input, returns a numbered menu of actions, and
 // accepts a number from stdin to confirm. Security level is read from daemon
@@ -14,7 +16,9 @@
 use std::io::{self, BufRead, Write};
 
 use clap::Subcommand;
+use ta_goal::{GoalRunState, GoalRunStore};
 use ta_mcp_gateway::GatewayConfig;
+use ta_runtime::{build_channel, AgentFrameworkManifest, ChannelType, HumanNote, NoteDelivery};
 use ta_session::workflow_session::AdvisorSecurity;
 use ta_session::{AdvisorContext, AdvisorSession};
 
@@ -48,6 +52,23 @@ pub enum AdvisorCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Send a mid-run note to the active goal's agent.
+    ///
+    /// The note is delivered via the goal's context channel. The delivery mode
+    /// is printed so you know whether the agent saw it live (live-polled),
+    /// via API push (api-pushed), or will see it at the next restart (queued).
+    ///
+    /// Examples:
+    ///   ta advisor advise "please focus on the auth module"
+    ///   ta advisor advise --goal abc123 "add more test coverage"
+    Advise {
+        /// The note/instruction to send to the agent.
+        message: String,
+        /// Goal ID (or prefix) to target. Defaults to the most recent running goal.
+        #[arg(long)]
+        goal: Option<String>,
+    },
 }
 
 pub fn execute(cmd: &AdvisorCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -68,6 +89,7 @@ pub fn execute(cmd: &AdvisorCommands, config: &GatewayConfig) -> anyhow::Result<
             *no_input,
             *json,
         ),
+        AdvisorCommands::Advise { message, goal } => advise(config, message, goal.as_deref()),
     }
 }
 
@@ -138,6 +160,137 @@ fn ask(
     };
 
     execute_option(opt, &security, config)
+}
+
+/// Inject a mid-run note to an active goal's agent via the unified context channel.
+///
+/// Resolves the target goal, selects the appropriate channel for its agent framework,
+/// calls `inject_note()`, and prints the delivery outcome with the notes file path
+/// so the user knows exactly where the note landed.
+pub fn advise(
+    config: &GatewayConfig,
+    message: &str,
+    goal_id_hint: Option<&str>,
+) -> anyhow::Result<()> {
+    let message = message.trim();
+    if message.is_empty() {
+        anyhow::bail!("Message cannot be empty. Provide a note for the agent.");
+    }
+
+    // Load goal store.
+    let goals_dir = config.workspace_root.join(".ta/goals");
+    let store = GoalRunStore::new(&goals_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to load goal store from {:?}: {}. \
+             Run `ta goal list` to verify the workspace.",
+            goals_dir,
+            e
+        )
+    })?;
+
+    // Resolve the target goal.
+    let goal = resolve_advise_goal(&store, goal_id_hint)?;
+    let goal_id_str = goal.goal_run_id.to_string();
+
+    // Resolve channel type from the agent framework manifest.
+    let manifest = AgentFrameworkManifest::resolve(&goal.agent_id, &config.workspace_root);
+    let channel_type = manifest
+        .as_ref()
+        .map(|m| m.channel_type.clone())
+        .unwrap_or(ChannelType::ClaudeCode);
+    let context_file = manifest
+        .map(|m| m.context_file)
+        .unwrap_or_else(|| "CLAUDE.md".to_string());
+
+    // Build the channel and inject the note.
+    let channel = build_channel(&channel_type, goal.workspace_path.clone(), &context_file);
+    let note = HumanNote::new(&goal_id_str, message);
+    let delivery = channel.inject_note(&note).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to inject note into goal {} (staging: {:?}): {}. \
+             Check that the staging directory exists and is accessible.",
+            goal_id_str,
+            goal.workspace_path,
+            e
+        )
+    })?;
+
+    // Print outcome.
+    match &delivery {
+        NoteDelivery::LivePolled => {
+            println!("Note injected — agent will read on next polling cycle.");
+        }
+        NoteDelivery::ApiPushed => {
+            println!("Note pushed via agent API — agent received it live.");
+        }
+        NoteDelivery::Queued => {
+            println!("Note queued — will be injected at next goal restart.");
+        }
+        NoteDelivery::Answered => {
+            println!("Advisor answered directly.");
+        }
+    }
+
+    // Show the notes file path for ClaudeCode channel.
+    if channel_type == ChannelType::ClaudeCode {
+        let notes_path = goal
+            .workspace_path
+            .join(".ta/advisor-notes")
+            .join(format!("{}.md", goal_id_str));
+        println!("Notes file: {}", notes_path.display());
+    }
+
+    println!(
+        "Goal: {} ({})",
+        &goal_id_str[..8.min(goal_id_str.len())],
+        goal.title
+    );
+    println!("Delivery:  {}", delivery);
+
+    Ok(())
+}
+
+/// Resolve the target goal for injection.
+///
+/// If `goal_id_hint` is provided, find the goal by ID prefix.
+/// Otherwise, return the most recently running goal.
+fn resolve_advise_goal(
+    store: &GoalRunStore,
+    goal_id_hint: Option<&str>,
+) -> anyhow::Result<ta_goal::GoalRun> {
+    let goals = store
+        .list()
+        .map_err(|e| anyhow::anyhow!("Failed to list goals: {}", e))?;
+
+    if let Some(hint) = goal_id_hint {
+        let matched: Vec<_> = goals
+            .iter()
+            .filter(|g| g.goal_run_id.to_string().starts_with(hint))
+            .collect();
+        match matched.len() {
+            0 => anyhow::bail!(
+                "No goal found matching prefix '{}'. \
+                 Use `ta goal list` to see available goals.",
+                hint
+            ),
+            1 => Ok(matched[0].clone()),
+            n => anyhow::bail!(
+                "Ambiguous prefix '{}' matches {} goals. Use a longer prefix.",
+                hint,
+                n
+            ),
+        }
+    } else {
+        goals
+            .into_iter()
+            .find(|g| g.state == GoalRunState::Running)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No goal is currently running. \
+                     Start a goal with `ta run` or pass --goal <id> to target a specific goal."
+                )
+            })
+    }
 }
 
 fn execute_option(

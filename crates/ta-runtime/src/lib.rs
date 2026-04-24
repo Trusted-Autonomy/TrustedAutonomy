@@ -53,6 +53,7 @@
 pub mod adapter;
 pub mod auth_spec;
 pub mod bare_process;
+pub mod channels;
 pub mod config;
 pub mod credential;
 pub mod framework;
@@ -66,6 +67,10 @@ pub use adapter::{
 };
 pub use auth_spec::{detect_auth_mode, AgentAuthSpec, AuthCheckResult, AuthMethodSpec};
 pub use bare_process::{apply_credentials_to_env, BareProcessRuntime};
+pub use channels::{
+    build_channel, AgentContext, AgentContextChannel, ChannelCapabilities, ChannelType,
+    ClaudeCodeChannel, CodexChannel, GenericFileChannel, HumanNote, NoteDelivery, OllamaChannel,
+};
 pub use config::{RuntimeConfig, RuntimeRegistry};
 pub use credential::ScopedCredential;
 pub use framework::{
