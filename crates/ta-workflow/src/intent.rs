@@ -401,6 +401,11 @@ mod tests {
                         "integer (default: 5) — Maximum phases to process".to_string(),
                     ),
                 ],
+                tags: vec![
+                    "plan".to_string(),
+                    "phases".to_string(),
+                    "automation".to_string(),
+                ],
             },
             TemplateEntry {
                 name: "governed-goal".to_string(),
@@ -412,6 +417,11 @@ mod tests {
                     "goal_title".to_string(),
                     "string [required] — Goal title to implement".to_string(),
                 )],
+                tags: vec![
+                    "governance".to_string(),
+                    "safe".to_string(),
+                    "coding".to_string(),
+                ],
             },
         ]
     }

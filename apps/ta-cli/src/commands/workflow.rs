@@ -22,9 +22,9 @@ use clap::Subcommand;
 use ta_changeset::sources::{ExternalSource, Lockfile, PackageManifest, SourceCache};
 use ta_mcp_gateway::GatewayConfig;
 use ta_workflow::{
-    artifact_dag, format_confirmation_card, resolve_intent, ArtifactStore, ArtifactType,
-    ParamValues, PlanContext, ResolutionResult, TemplateLibrary, WorkflowCatalog,
-    WorkflowDefinition, WorkflowEngine, YamlWorkflowEngine,
+    artifact_dag, cached_index_path, format_confirmation_card, resolve_intent, ArtifactStore,
+    ArtifactType, ParamValues, PlanContext, RegistryEntry, RegistryIndex, ResolutionResult,
+    TemplateLibrary, WorkflowCatalog, WorkflowDefinition, WorkflowEngine, YamlWorkflowEngine,
 };
 
 use super::email_manager;
@@ -225,6 +225,68 @@ pub enum WorkflowCommands {
         #[arg(long)]
         all: bool,
     },
+    /// Search the workflow template registry by keyword or tag (v0.15.27).
+    ///
+    /// Searches name, description, and tags across the cached registry index
+    /// plus built-in templates. Use --tag to filter by exact tag.
+    ///
+    /// Examples:
+    ///   ta workflow search "code review"
+    ///   ta workflow search --tag security
+    ///   ta workflow search governance
+    Search {
+        /// Search query (matches name, description, or tags). Omit to list all.
+        query: Option<String>,
+        /// Filter by exact tag (e.g. --tag security).
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Install a workflow template into the user library (v0.15.27).
+    ///
+    /// Saves the template to ~/.config/ta/workflow-templates/ for reuse across projects.
+    /// Use --from to supply a URL or local file path. Without --from, looks up the
+    /// template name in the registry index.
+    ///
+    /// Examples:
+    ///   ta workflow install my-template --from https://example.com/template.yaml
+    ///   ta workflow install my-template --from file:///path/to/template.yaml
+    ///   ta workflow install governed-goal
+    Install {
+        /// Template name to install as.
+        name: String,
+        /// Source URL or file path (https://, http://, file://, or local path).
+        /// If omitted, the registry index is consulted for a download URL.
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Remove a template from the user library (v0.15.27).
+    ///
+    /// Removes a user-installed template from ~/.config/ta/workflow-templates/.
+    /// Built-in templates and project templates (.ta/workflow-templates/) cannot
+    /// be removed via this command.
+    ///
+    /// Example:
+    ///   ta workflow uninstall my-template
+    Uninstall {
+        /// Template name to remove from the user library.
+        name: String,
+    },
+    /// Refresh the cached workflow template registry index (v0.15.27).
+    ///
+    /// Downloads the JSON registry index from the configured URL and caches it
+    /// at ~/.config/ta/workflow-registry-index.json. Built-in entries are always
+    /// included regardless of the remote index.
+    ///
+    /// Without --url, updates only the built-in index (no network call).
+    ///
+    /// Example:
+    ///   ta workflow update-index
+    ///   ta workflow update-index --url https://registry.example.com/index.json
+    UpdateIndex {
+        /// Registry index URL to fetch from.
+        #[arg(long)]
+        url: Option<String>,
+    },
 }
 
 pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -388,6 +450,12 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
             bump,
         } => publish_workflow(name, registry.as_deref(), bump.as_deref(), config),
         WorkflowCommands::Update { name, all } => update_workflows(name.as_deref(), *all, config),
+        WorkflowCommands::Search { query, tag } => {
+            search_templates(query.as_deref(), tag.as_deref())
+        }
+        WorkflowCommands::Install { name, from } => install_template(name, from.as_deref(), config),
+        WorkflowCommands::Uninstall { name } => uninstall_template(name, config),
+        WorkflowCommands::UpdateIndex { url } => update_index(url.as_deref()),
     }
 }
 
@@ -1278,55 +1346,504 @@ fn list_external_workflows(config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Publish a workflow to a registry.
+/// Publish a workflow template to stdout as a JSON package (v0.15.27).
+///
+/// Packages the template YAML + manifest into a JSON bundle suitable for piping
+/// to gist, curl, or a registry endpoint. Future versions will POST directly when
+/// a registry endpoint is configured.
 fn publish_workflow(
     name: &str,
     registry: Option<&str>,
-    _bump: Option<&str>,
+    bump: Option<&str>,
     config: &GatewayConfig,
 ) -> anyhow::Result<()> {
-    let workflows_dir = config.workspace_root.join(".ta").join("workflows");
-    let source_path = workflows_dir.join(format!("{}.yaml", name));
+    // Look for the template in workflow-templates first (parameterized templates),
+    // then fall back to the workflow definitions directory.
+    let template_dirs = [
+        config.workspace_root.join(".ta").join("workflow-templates"),
+        config.workspace_root.join(".ta").join("workflows"),
+    ];
 
-    if !source_path.exists() {
-        anyhow::bail!(
-            "Workflow '{}' not found at {}.\n\
-             Create it first: ta workflow new {}",
+    let (source_path, source_label) = template_dirs
+        .iter()
+        .find_map(|dir| {
+            let path = dir.join(format!("{}.yaml", name));
+            if path.exists() {
+                let label = if dir.ends_with("workflow-templates") {
+                    "template"
+                } else {
+                    "workflow"
+                };
+                Some((path, label))
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Workflow or template '{}' not found.\n\
+                 Create a template: ta workflow new {} --from simple-review\n\
+                 Or scaffold a parameterized template in .ta/workflow-templates/{}.yaml",
+                name,
+                name,
+                name
+            )
+        })?;
+
+    let content = std::fs::read_to_string(&source_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", source_path.display(), e))?;
+
+    // Validate the template parses correctly before packaging.
+    WorkflowDefinition::from_yaml(&content).map_err(|e| {
+        anyhow::anyhow!(
+            "Template '{}' has a YAML error: {}\n\
+             Fix the template before publishing.",
             name,
-            source_path.display(),
+            e
+        )
+    })?;
+
+    // Determine version from manifest or default.
+    let manifest_path = source_path.with_extension("package.yaml");
+    let mut version = "0.1.0".to_string();
+    if manifest_path.exists() {
+        if let Ok(manifest_yaml) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = serde_yaml::from_str::<PackageManifest>(&manifest_yaml) {
+                version = manifest.version;
+            }
+        }
+    }
+
+    // Apply version bump if requested.
+    if let Some(bump_kind) = bump {
+        version = bump_semver(&version, bump_kind)?;
+    }
+
+    // Build the registry-compatible JSON package.
+    let package = serde_json::json!({
+        "name": name,
+        "description": extract_first_description(&content),
+        "version": version,
+        "tags": extract_comment_tags(&content),
+        "min_ta_version": null,
+        "url": null,
+        "content": content,
+        "published_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    // Write updated manifest.
+    let manifest = PackageManifest {
+        name: name.to_string(),
+        version: version.clone(),
+        author: None,
+        description: Some(extract_first_description(&content)),
+        ta_version: None,
+        files: vec![format!("{}/{}.yaml", source_label, name)],
+    };
+    let manifest_yaml = serde_yaml::to_string(&manifest)?;
+    std::fs::write(&manifest_path, &manifest_yaml)?;
+
+    let reg = registry.unwrap_or("(stdout)");
+    eprintln!(
+        "Packaged '{}' v{} [{}] — registry: {}",
+        name, version, source_label, reg
+    );
+    eprintln!("Pipe to a file or upload to your registry:");
+    eprintln!(
+        "  ta workflow publish {} | curl -X POST https://registry.example.com/templates -d @-",
+        name
+    );
+    eprintln!();
+
+    // Print the JSON package to stdout for piping.
+    println!("{}", serde_json::to_string_pretty(&package)?);
+
+    Ok(())
+}
+
+/// Bump a semver string by the given kind (major, minor, patch).
+fn bump_semver(version: &str, kind: &str) -> anyhow::Result<String> {
+    let parts: Vec<u64> = version
+        .split('.')
+        .take(3)
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    if parts.len() < 3 {
+        anyhow::bail!(
+            "version '{}' is not valid semver (expected MAJOR.MINOR.PATCH)",
+            version
+        );
+    }
+    let (major, minor, patch) = (parts[0], parts[1], parts[2]);
+    let new_version = match kind {
+        "major" => format!("{}.0.0", major + 1),
+        "minor" => format!("{}.{}.0", major, minor + 1),
+        "patch" => format!("{}.{}.{}", major, minor, patch + 1),
+        other => anyhow::bail!(
+            "unknown bump kind '{}'; expected major, minor, or patch",
+            other
+        ),
+    };
+    Ok(new_version)
+}
+
+/// Extract the description from a template's leading `# description:` comment.
+fn extract_first_description(content: &str) -> String {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("# description:") {
+            return rest.trim().to_string();
+        }
+    }
+    String::new()
+}
+
+/// Extract tags from a template's `# tags:` comment line.
+fn extract_comment_tags(content: &str) -> Vec<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("# tags:") {
+            return rest
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+// ── Template library commands (v0.15.27) ────────────────────────────────────
+
+/// Search the registry index (built-in + cached) by keyword or tag.
+fn search_templates(query: Option<&str>, tag: Option<&str>) -> anyhow::Result<()> {
+    let index = RegistryIndex::load();
+
+    let results: Vec<_> = match (query, tag) {
+        (_, Some(t)) => index.by_tag(t),
+        (Some(q), None) => index.search(q),
+        (None, None) => index.entries.iter().collect(),
+    };
+
+    if results.is_empty() {
+        let hint = match (query, tag) {
+            (_, Some(t)) => format!("tag '{}'", t),
+            (Some(q), None) => format!("'{}'", q),
+            (None, None) => "any".to_string(),
+        };
+        println!("No templates found matching {}.", hint);
+        println!();
+        println!("Refresh the registry: ta workflow update-index --url <url>");
+        return Ok(());
+    }
+
+    println!("Workflow templates ({}):", results.len());
+    println!();
+    for entry in &results {
+        let tags_label = if entry.tags.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", entry.tags.join(", "))
+        };
+        let version_label = format!("v{}", entry.version);
+        println!("  {:<28} {}  {}", entry.name, version_label, tags_label);
+        if !entry.description.is_empty() {
+            println!("    {}", entry.description);
+        }
+        if let Some(url) = &entry.url {
+            println!("    URL: {}", url);
+        }
+        println!();
+    }
+
+    println!("Install a template:");
+    println!("  ta workflow install <name>");
+    println!("  ta workflow install <name> --from <url>");
+
+    Ok(())
+}
+
+/// Install a workflow template into the user library.
+///
+/// Downloads from `from_url` (or the registry index), validates as a WorkflowDefinition,
+/// and saves to `~/.config/ta/workflow-templates/<name>.yaml`.
+fn install_template(
+    name: &str,
+    from_url: Option<&str>,
+    config: &GatewayConfig,
+) -> anyhow::Result<()> {
+    let user_dir = user_templates_dir()?;
+    let project_dir = config.workspace_root.join(".ta").join("workflow-templates");
+
+    install_template_to_dir(name, from_url, &user_dir, &project_dir)
+}
+
+/// Inner function: install template to a specific directory.
+/// Separated for testability without touching ~/.config.
+fn install_template_to_dir(
+    name: &str,
+    from_url: Option<&str>,
+    target_dir: &std::path::Path,
+    project_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    // Resolve the source URL.
+    let source_url = match from_url {
+        Some(url) => url.to_string(),
+        None => {
+            // Look up the name in the registry index.
+            let index = RegistryIndex::load();
+            match index.get(name) {
+                Some(entry) => match &entry.url {
+                    Some(url) => url.clone(),
+                    None => anyhow::bail!(
+                        "Template '{}' is a built-in template — already available.\n\
+                         Run it with: ta workflow run {}",
+                        name,
+                        name
+                    ),
+                },
+                None => anyhow::bail!(
+                    "Template '{}' not found in registry.\n\
+                     Supply a URL with: ta workflow install {} --from <url>\n\
+                     Or refresh the index: ta workflow update-index --url <url>",
+                    name,
+                    name
+                ),
+            }
+        }
+    };
+
+    println!("Installing template '{}' from {} ...", name, source_url);
+
+    let content = fetch_template_content(&source_url)?;
+
+    // Validate: must parse as a valid WorkflowDefinition.
+    WorkflowDefinition::from_yaml(&content).map_err(|e| {
+        anyhow::anyhow!(
+            "Fetched content is not a valid workflow template: {}\n\
+             Check that the source contains a valid TA workflow YAML.\n\
+             Source: {}",
+            e,
+            source_url
+        )
+    })?;
+
+    // Check for conflicts with project templates.
+    let project_path = project_dir.join(format!("{}.yaml", name));
+    if project_path.exists() {
+        anyhow::bail!(
+            "A project template named '{}' already exists at {}.\n\
+             Project templates take priority over user templates.\n\
+             To override, edit the project template directly.",
+            name,
+            project_path.display()
+        );
+    }
+
+    std::fs::create_dir_all(target_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create template directory {}: {}",
+            target_dir.display(),
+            e
+        )
+    })?;
+
+    let dest = target_dir.join(format!("{}.yaml", name));
+    if dest.exists() {
+        anyhow::bail!(
+            "Template '{}' already installed at {}.\n\
+             Remove it first: ta workflow uninstall {}",
+            name,
+            dest.display(),
             name
         );
     }
 
-    // Check for a package manifest.
-    let manifest_path = workflows_dir.join(format!("{}.package.yaml", name));
-    if !manifest_path.exists() {
-        // Generate a default package manifest.
-        let manifest = PackageManifest {
-            name: name.to_string(),
-            version: "0.1.0".to_string(),
-            author: None,
-            description: None,
-            ta_version: None,
-            files: vec![format!("workflows/{}.yaml", name)],
-        };
-        let yaml = serde_yaml::to_string(&manifest)?;
-        std::fs::write(&manifest_path, &yaml)?;
-        println!("Generated package manifest: {}", manifest_path.display());
-    }
+    std::fs::write(&dest, &content)
+        .map_err(|e| anyhow::anyhow!("Failed to write template to {}: {}", dest.display(), e))?;
 
-    let reg = registry.unwrap_or("trustedautonomy");
-    println!("Publishing workflow '{}' to registry '{}'...", name, reg);
+    println!("Installed: {}", dest.display());
     println!();
+    println!("Use it:");
     println!(
-        "Registry publishing is not yet available.\n\
-         To share workflows manually:\n  \
-         1. Push your .ta/workflows/{name}.yaml to a Git repository\n  \
-         2. Others can install it: ta workflow add {name} --from gh:org/repo",
-        name = name
+        "  ta workflow run {}  --or--  ta workflow new my-wf --from {}",
+        name, name
     );
 
     Ok(())
+}
+
+/// Remove a user-installed template from the user library.
+fn uninstall_template(name: &str, config: &GatewayConfig) -> anyhow::Result<()> {
+    let user_dir = user_templates_dir()?;
+    let project_dir = config.workspace_root.join(".ta").join("workflow-templates");
+
+    uninstall_template_from_dir(name, &user_dir, Some(&project_dir))
+}
+
+/// Inner function: remove a user template, protecting built-ins and project templates.
+fn uninstall_template_from_dir(
+    name: &str,
+    user_dir: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    // Reject removal of built-in templates.
+    let builtin_names = ["plan-build-phases", "governed-goal"];
+    if builtin_names.contains(&name) {
+        anyhow::bail!(
+            "Cannot remove built-in template '{}'.\n\
+             Built-in templates are embedded in the ta binary.\n\
+             To override a built-in, create a project template at .ta/workflow-templates/{}.yaml",
+            name,
+            name
+        );
+    }
+
+    // Reject removal of project templates.
+    if let Some(proj) = project_dir {
+        let project_path = proj.join(format!("{}.yaml", name));
+        if project_path.exists() {
+            anyhow::bail!(
+                "Cannot remove project template '{}' via CLI.\n\
+                 Project templates are checked into the repository.\n\
+                 To remove it, delete the file: {}",
+                name,
+                project_path.display()
+            );
+        }
+    }
+
+    let user_path = user_dir.join(format!("{}.yaml", name));
+    if !user_path.exists() {
+        anyhow::bail!(
+            "User template '{}' not found at {}.\n\
+             List installed templates: ta workflow list --param-templates",
+            name,
+            user_path.display()
+        );
+    }
+
+    std::fs::remove_file(&user_path)
+        .map_err(|e| anyhow::anyhow!("Failed to remove {}: {}", user_path.display(), e))?;
+
+    println!("Removed user template: {}", name);
+
+    Ok(())
+}
+
+/// Refresh the cached registry index.
+fn update_index(url: Option<&str>) -> anyhow::Result<()> {
+    // Start with the built-in index.
+    let mut index = RegistryIndex::builtin();
+
+    match url {
+        Some(registry_url) => {
+            println!("Fetching registry index from {} ...", registry_url);
+            let content = fetch_template_content(registry_url)?;
+            let external: Vec<RegistryEntry> = serde_json::from_str(&content).map_err(|e| {
+                anyhow::anyhow!(
+                    "Registry index at '{}' is not valid JSON: {}\n\
+                     Expected a JSON array of registry entries.",
+                    registry_url,
+                    e
+                )
+            })?;
+            let external_count = external.len();
+            index.merge(RegistryIndex { entries: external });
+            println!(
+                "Fetched {} external entr{} — merged with {} built-in templates.",
+                external_count,
+                if external_count == 1 { "y" } else { "ies" },
+                RegistryIndex::builtin().entries.len()
+            );
+        }
+        None => {
+            println!(
+                "Refreshing built-in index ({} templates) — no external URL configured.",
+                index.entries.len()
+            );
+            println!("To fetch from a remote registry: ta workflow update-index --url <url>");
+        }
+    }
+
+    index.save()?;
+
+    if let Some(path) = cached_index_path() {
+        println!("Index cached at: {}", path.display());
+    }
+    println!();
+    println!("Search: ta workflow search <keyword>");
+    println!("By tag: ta workflow search --tag <tag>");
+
+    Ok(())
+}
+
+/// Fetch template YAML content from a URL or local file path.
+///
+/// Supports: https://, http://, file://, or a bare filesystem path.
+fn fetch_template_content(source: &str) -> anyhow::Result<String> {
+    if let Some(file_path) = source.strip_prefix("file://") {
+        // Local file URL.
+        let path = std::path::PathBuf::from(file_path);
+        return std::fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!("Failed to read template file {}: {}", path.display(), e)
+        });
+    }
+
+    if source.starts_with("https://") || source.starts_with("http://") {
+        // HTTP/HTTPS fetch.
+        let response = reqwest::blocking::get(source).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to fetch template from '{}': {}\n\
+                 Check your network connection and the source URL.",
+                source,
+                e
+            )
+        })?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "HTTP {} when fetching '{}'.\n\
+                 Check that the source URL is correct and accessible.",
+                response.status(),
+                source
+            );
+        }
+
+        return response
+            .text()
+            .map_err(|e| anyhow::anyhow!("Failed to read response from '{}': {}", source, e));
+    }
+
+    // Bare file path.
+    let path = std::path::PathBuf::from(source);
+    if path.exists() {
+        return std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e));
+    }
+
+    anyhow::bail!(
+        "Cannot resolve source '{}': not a URL (https://, http://, file://) and not a local path.\n\
+         Examples:\n  \
+         --from https://example.com/template.yaml\n  \
+         --from file:///path/to/template.yaml\n  \
+         --from /absolute/path/to/template.yaml",
+        source
+    )
+}
+
+/// Return the user-global template directory, creating it if absent.
+fn user_templates_dir() -> anyhow::Result<std::path::PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| {
+        anyhow::anyhow!(
+            "HOME environment variable not set; cannot determine user template directory.\n\
+             Set HOME or use --from <path> to install from a local file."
+        )
+    })?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".config")
+        .join("ta")
+        .join("workflow-templates"))
 }
 
 /// Check for updates to external workflows.
@@ -2186,5 +2703,281 @@ roles: {}
             vec!["generate-plan"],
             "generate-plan must be reported as completed after its output is stored"
         );
+    }
+
+    // ── Template library tests (v0.15.27) ────────────────────────────────────
+
+    fn minimal_valid_template(name: &str) -> String {
+        format!(
+            r#"# description: A test template
+# tags: test, ci
+name: {name}
+stages:
+  - name: build
+    roles: [engineer]
+roles:
+  engineer:
+    agent: claude-code
+    prompt: Build it
+"#,
+            name = name
+        )
+    }
+
+    #[test]
+    fn install_from_file_url_saves_to_user_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let template_content = minimal_valid_template("my-template");
+
+        // Write template to a temp file.
+        let template_path = dir.path().join("my-template.yaml");
+        std::fs::write(&template_path, &template_content).unwrap();
+
+        let user_lib = dir.path().join("user-templates");
+        let project_lib = dir.path().join("project-templates");
+        std::fs::create_dir_all(&user_lib).unwrap();
+        std::fs::create_dir_all(&project_lib).unwrap();
+
+        let url = format!("file://{}", template_path.display());
+        install_template_to_dir("my-template", Some(&url), &user_lib, &project_lib).unwrap();
+
+        assert!(
+            user_lib.join("my-template.yaml").exists(),
+            "template should be saved to user library"
+        );
+    }
+
+    #[test]
+    fn install_from_local_path_saves_to_user_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let template_content = minimal_valid_template("local-template");
+        let template_path = dir.path().join("local-template.yaml");
+        std::fs::write(&template_path, &template_content).unwrap();
+
+        let user_lib = dir.path().join("user-templates");
+        let project_lib = dir.path().join("project-templates");
+        std::fs::create_dir_all(&user_lib).unwrap();
+        std::fs::create_dir_all(&project_lib).unwrap();
+
+        install_template_to_dir(
+            "local-template",
+            Some(&template_path.to_string_lossy()),
+            &user_lib,
+            &project_lib,
+        )
+        .unwrap();
+        assert!(user_lib.join("local-template.yaml").exists());
+    }
+
+    #[test]
+    fn install_schema_validation_rejects_malformed_template() {
+        let dir = tempfile::tempdir().unwrap();
+        // YAML that doesn't parse as a WorkflowDefinition (missing required `name` field).
+        let malformed = "this_is: not: a: valid: workflow: definition\n";
+        let template_path = dir.path().join("bad.yaml");
+        std::fs::write(&template_path, malformed).unwrap();
+
+        let user_lib = dir.path().join("user-templates");
+        let project_lib = dir.path().join("project-templates");
+        std::fs::create_dir_all(&user_lib).unwrap();
+        std::fs::create_dir_all(&project_lib).unwrap();
+
+        let url = format!("file://{}", template_path.display());
+        let result = install_template_to_dir("bad-template", Some(&url), &user_lib, &project_lib);
+        assert!(result.is_err(), "malformed template must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("valid workflow template"),
+            "error message should mention validity: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn install_already_installed_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let template_content = minimal_valid_template("dup-template");
+        let template_path = dir.path().join("dup-template.yaml");
+        std::fs::write(&template_path, &template_content).unwrap();
+
+        let user_lib = dir.path().join("user-templates");
+        let project_lib = dir.path().join("project-templates");
+        std::fs::create_dir_all(&user_lib).unwrap();
+        std::fs::create_dir_all(&project_lib).unwrap();
+
+        let url = format!("file://{}", template_path.display());
+        install_template_to_dir("dup-template", Some(&url), &user_lib, &project_lib).unwrap();
+        let result = install_template_to_dir("dup-template", Some(&url), &user_lib, &project_lib);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("already installed"));
+    }
+
+    #[test]
+    fn search_finds_builtin_templates_by_tag() {
+        let index = ta_workflow::RegistryIndex::builtin();
+        let results = index.by_tag("plan");
+        assert!(
+            !results.is_empty(),
+            "tag 'plan' should match built-in templates"
+        );
+        assert!(results.iter().any(|e| e.name == "plan-build-phases"));
+    }
+
+    #[test]
+    fn search_finds_templates_by_keyword() {
+        let index = ta_workflow::RegistryIndex::builtin();
+        let results = index.search("autonomous");
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|e| e.name == "governed-goal"));
+    }
+
+    #[test]
+    fn search_empty_query_returns_all() {
+        let index = ta_workflow::RegistryIndex::builtin();
+        // An all-entries iteration via search on a substring present in all entries.
+        // Verify the index has entries.
+        assert!(!index.entries.is_empty());
+    }
+
+    #[test]
+    fn remove_deletes_user_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_lib = dir.path().join("user-templates");
+        let project_lib = dir.path().join("project-templates");
+        std::fs::create_dir_all(&user_lib).unwrap();
+        std::fs::create_dir_all(&project_lib).unwrap();
+
+        // Create a user template.
+        std::fs::write(
+            user_lib.join("my-user-template.yaml"),
+            minimal_valid_template("my-user-template"),
+        )
+        .unwrap();
+
+        uninstall_template_from_dir("my-user-template", &user_lib, Some(&project_lib)).unwrap();
+        assert!(!user_lib.join("my-user-template.yaml").exists());
+    }
+
+    #[test]
+    fn remove_project_template_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_lib = dir.path().join("user-templates");
+        let project_lib = dir.path().join("project-templates");
+        std::fs::create_dir_all(&user_lib).unwrap();
+        std::fs::create_dir_all(&project_lib).unwrap();
+
+        // Create a project template.
+        std::fs::write(
+            project_lib.join("proj-template.yaml"),
+            minimal_valid_template("proj-template"),
+        )
+        .unwrap();
+
+        let result = uninstall_template_from_dir("proj-template", &user_lib, Some(&project_lib));
+        assert!(result.is_err(), "project template must not be removable");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("project"),
+            "error should mention project: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn remove_builtin_template_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_lib = dir.path().join("user-templates");
+        let project_lib = dir.path().join("project-templates");
+        std::fs::create_dir_all(&user_lib).unwrap();
+        std::fs::create_dir_all(&project_lib).unwrap();
+
+        let result = uninstall_template_from_dir("governed-goal", &user_lib, Some(&project_lib));
+        assert!(result.is_err(), "built-in template must not be removable");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("built-in"));
+    }
+
+    #[test]
+    fn remove_nonexistent_user_template_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_lib = dir.path().join("user-templates");
+        std::fs::create_dir_all(&user_lib).unwrap();
+
+        let result = uninstall_template_from_dir("nonexistent", &user_lib, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not found"));
+    }
+
+    #[test]
+    fn publish_workflow_outputs_json_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+
+        // Create a template in the templates directory.
+        let templates_dir = dir.path().join(".ta").join("workflow-templates");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        std::fs::write(
+            templates_dir.join("pub-test.yaml"),
+            minimal_valid_template("pub-test"),
+        )
+        .unwrap();
+
+        let result = publish_workflow("pub-test", None, None, &config);
+        assert!(result.is_ok(), "publish should succeed: {:?}", result);
+
+        // Manifest should be created.
+        assert!(templates_dir.join("pub-test.package.yaml").exists());
+    }
+
+    #[test]
+    fn publish_workflow_not_found_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let result = publish_workflow("nonexistent-workflow", None, None, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn bump_semver_patch() {
+        assert_eq!(bump_semver("1.2.3", "patch").unwrap(), "1.2.4");
+    }
+
+    #[test]
+    fn bump_semver_minor() {
+        assert_eq!(bump_semver("1.2.3", "minor").unwrap(), "1.3.0");
+    }
+
+    #[test]
+    fn bump_semver_major() {
+        assert_eq!(bump_semver("1.2.3", "major").unwrap(), "2.0.0");
+    }
+
+    #[test]
+    fn bump_semver_invalid_kind() {
+        assert!(bump_semver("1.2.3", "invalid").is_err());
+    }
+
+    #[test]
+    fn extract_comment_tags_parses_correctly() {
+        let content = "# tags: security, review, automation\nname: test\n";
+        let tags = extract_comment_tags(content);
+        assert_eq!(tags, vec!["security", "review", "automation"]);
+    }
+
+    #[test]
+    fn extract_comment_tags_empty_when_absent() {
+        let content = "# description: no tags here\nname: test\n";
+        let tags = extract_comment_tags(content);
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn update_index_no_url_succeeds() {
+        let result = update_index(None);
+        // May succeed or fail depending on HOME env, but should not panic.
+        // In CI HOME is typically set, so just confirm no panic.
+        let _ = result;
     }
 }

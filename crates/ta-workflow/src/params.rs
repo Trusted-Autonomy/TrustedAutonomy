@@ -338,7 +338,7 @@ impl TemplateLibrary {
 
         // 3. Built-ins first (lowest priority — may be overridden).
         for (name, content) in BUILTIN_TEMPLATES {
-            let (description, params) = extract_template_meta(content);
+            let (description, params, tags) = extract_template_meta(content);
             entries.insert(
                 name.to_string(),
                 TemplateEntry {
@@ -346,6 +346,7 @@ impl TemplateLibrary {
                     description,
                     source: TemplateSource::Builtin,
                     params,
+                    tags,
                 },
             );
         }
@@ -408,7 +409,7 @@ impl TemplateLibrary {
             let Ok(content) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let (description, params) = extract_template_meta(&content);
+            let (description, params, tags) = extract_template_meta(&content);
             entries.insert(
                 stem.to_string(),
                 TemplateEntry {
@@ -416,6 +417,7 @@ impl TemplateLibrary {
                     description,
                     source: source.clone(),
                     params,
+                    tags,
                 },
             );
         }
@@ -430,6 +432,8 @@ pub struct TemplateEntry {
     pub source: TemplateSource,
     /// Parameter names with their summaries.
     pub params: Vec<(String, String)>,
+    /// Tags for discovery (parsed from `# tags:` comment or `tags:` YAML field).
+    pub tags: Vec<String>,
 }
 
 /// Where a template comes from.
@@ -461,17 +465,26 @@ fn user_templates_dir() -> Option<std::path::PathBuf> {
     )
 }
 
-/// Extract description and param list from a template YAML.
-fn extract_template_meta(content: &str) -> (String, Vec<(String, String)>) {
-    // Parse description from leading comments: first `# description:` line or first non-empty comment.
+/// Extract description, param list, and tags from a template YAML.
+///
+/// Tags are parsed from a `# tags: tag1, tag2` comment or a top-level `tags:` YAML field.
+fn extract_template_meta(content: &str) -> (String, Vec<(String, String)>, Vec<String>) {
     let mut description = String::new();
+    let mut comment_tags: Vec<String> = Vec::new();
+
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("# description:") {
-            description = rest.trim().to_string();
-            break;
-        }
-        if let Some(rest) = trimmed.strip_prefix('#') {
+            if description.is_empty() {
+                description = rest.trim().to_string();
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("# tags:") {
+            comment_tags = rest
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+        } else if let Some(rest) = trimmed.strip_prefix('#') {
             let comment = rest.trim();
             if !comment.is_empty()
                 && !comment.starts_with('!')
@@ -483,9 +496,11 @@ fn extract_template_meta(content: &str) -> (String, Vec<(String, String)>) {
         }
     }
 
-    // Parse params section from YAML.
     let mut params: Vec<(String, String)> = Vec::new();
+    let mut yaml_tags: Vec<String> = Vec::new();
+
     if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(content) {
+        // Parse params section.
         if let Some(serde_yaml::Value::Mapping(param_map)) = value.get("params") {
             for (key, val) in param_map {
                 let name = match key {
@@ -500,9 +515,23 @@ fn extract_template_meta(content: &str) -> (String, Vec<(String, String)>) {
                 params.push((name, summary));
             }
         }
+
+        // Parse tags from YAML field (overrides comment-based tags if both present).
+        if let Some(serde_yaml::Value::Sequence(seq)) = value.get("tags") {
+            yaml_tags = seq
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
     }
 
-    (description, params)
+    let tags = if !yaml_tags.is_empty() {
+        yaml_tags
+    } else {
+        comment_tags
+    };
+
+    (description, params, tags)
 }
 
 /// Built-in templates embedded in the binary.
@@ -515,6 +544,7 @@ const BUILTIN_TEMPLATES: &[(&str, &str)] = &[
 ];
 
 const TEMPLATE_PLAN_BUILD_PHASES: &str = r#"# description: Iterate pending PLAN.md phases through the governed build workflow.
+# tags: plan, phases, automation
 #
 # Parameters:
 #   phase_filter — only process phases matching this prefix (e.g., v0.15)
@@ -572,6 +602,7 @@ verdict:
 "#;
 
 const TEMPLATE_GOVERNED_GOAL: &str = r#"# description: Safe autonomous coding loop: run_goal → review → human_gate → apply → pr_sync.
+# tags: governance, safe, coding
 #
 # Parameters:
 #   goal_title — the goal to implement (required)

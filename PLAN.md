@@ -1607,7 +1607,6 @@ Slack (v0.10.3) and email (v0.10.4) are built as external plugins from the start
 #### Version: `0.10.2-alpha`
 ---
 ### v0.10.2.1 — Refactor Discord Channel to External Plugin
-
 1. [x] Extract core Discord logic (payload builders, embed formatting) into `plugins/ta-channel-discord/src/payload.rs`
 2. [x] Add `channel.toml` manifest for plugin discovery
 3. [x] Remove `ta-channel-discord` crate from workspace — Discord becomes a pre-installed plugin, not a compiled-in dependency
@@ -1635,7 +1634,6 @@ ta plugin build --all
 #### Version: `0.10.2-alpha.2`
 ---
 ### v0.10.3 — Slack Channel Plugin
-
 1. ✅ **Block Kit payloads**: Header, question section, context section, interactive buttons (yes/no, choice, freeform), interaction ID footer
 2. ✅ **Actionable error messages**: Missing token, missing channel ID, Slack API errors with permission hints
 3. ✅ **`allowed_users` env var**: `TA_SLACK_ALLOWED_USERS` documented for access control integration
@@ -1885,7 +1883,6 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 #### Version: `0.10.14-alpha`
 ---
 ### v0.10.15 — Deferred Items: Observability & Audit
-
 1. [x] **Automatic `agent_id` extraction** (from v0.9.6): `GatewayState::resolve_agent_id()` reads `TA_AGENT_ID` env var, falls back to `dev_session_id`, then "unknown". Used by `audit_tool_call()` on every MCP tool invocation.
 2. [x] **`caller_mode` in audit log entries** (from v0.9.6): Added `caller_mode`, `tool_name`, and `goal_run_id` fields to `AuditEvent` with builder methods. All tool-call audit entries include caller mode.
 3. [x] **Full tool-call audit logging in gateway** (from v0.9.3): Every `#[tool]` method in `TaGatewayServer` now calls `self.audit()` before delegation. `GatewayState::audit_tool_call()` writes per-call entries with tool name, target URI, goal ID, and caller mode to the JSONL audit log.
@@ -1902,7 +1899,7 @@ Agent: Added v0.10.14 — Agent Model Discovery & Status Display
 #### Version: `0.10.15-alpha.1`
 ---
 ### v0.10.16 — Deferred Items: Platform & Channel Hardening
-
+1. [x] **`ta workflow publish <name>`** (`apps/ta-cli/src/commands/workflow.rs`): Packages template YAML + manifest. For now: prints the package to stdout (for piping to gist/upload). Future: POST to registry endpoint when configured.
 **Goal**: Address deferred platform and channel items for production readiness.
 **Platform:**
 - ✅ **Sandbox configuration section** (item 3): `[sandbox]` section in `daemon.toml` with `enabled` and `config_path` fields. `SandboxSection` type with Default derive. Ready for gateway wiring in v0.11+.
@@ -1936,7 +1933,7 @@ See v0.9.9 design section above for the full architecture and user flow.
 8. [x] **Scrollback pre-slicing** (from v0.10.15.1): Pre-slices logical lines to bypass ratatui's `u16` scroll overflow. Both output pane and agent pane use `residual_scroll` instead of `Paragraph::scroll()`.
 ---
 ### v0.10.18 — Deferred Items: Workflow & Multi-Project
-
+4. [x] **USAGE.md "Workflow Library"** section: Installing, publishing, searching templates. Registry configuration. Difference between project / user / built-in templates.
 - [x] **Verify gaps**: Reviewed code to verify incomplete items and best integration points
 - [x] **Goal chaining context propagation** (from v0.9.8.2): `context_from: Vec<Uuid>` on GoalRun, gateway resolves prior goal metadata and injects "Prior Goal Context" markdown into new goals
 - [x] **Live scoring agent integration** (from v0.9.8.2): `score_verdicts()` with agent-first logic — tries external scorer binary, falls back to built-in numeric averaging. `ScorerConfig` in VerdictConfig
@@ -1958,7 +1955,6 @@ When an agent or command produces output longer than the visible terminal area i
 #### Version: `0.10.18-alpha.2`
 ---
 ### v0.10.18.3 — Verification Streaming, Heartbeat & Configurable Timeout
-
 **Goal**: Replace the silent, fire-and-forget verification model with streaming output, explicit progress heartbeats, and per-command configurable timeouts so the user always knows what is happening and never hits an opaque timeout.
 `run_single_command()` in `verify.rs` uses synchronous `try_wait()` polling with no output streaming. The user sees nothing until the command finishes or the 600s global timeout fires. `cargo test --workspace` legitimately exceeds 600s on this project, causing every `ta draft apply --git-commit` to fail with an opaque "Command timed out after 600s" error. There is no way to distinguish a hung process from a slow-but-progressing test suite.
 1. ✅ **Heartbeat for TA-internal verification commands**: Emits progress heartbeat every N seconds (configurable via `heartbeat_interval_secs`, default 30): `[label] still running... (Ns elapsed, M lines captured)`. Heartbeat interval configurable in `.ta/workflow.toml`.
@@ -1997,7 +1993,6 @@ The daemon passes `--accept-terms` when spawning `ta run` (cmd.rs line 123), sil
 #### Version: `0.10.18-alpha.4`
 ---
 ### v0.10.18.5 — Agent Stdin Relay & Interactive Prompt Handling
-
 TA already has `ta_ask_human` for MCP-aware agents to request human input — but that only works for agents that explicitly call the MCP tool. Launch-time stdin prompts from the agent binary itself (before MCP is even connected) are completely unhandled. This affects Claude Flow, potentially Codex, LangChain agents with setup steps, and any future agent with interactive configuration.
 Three layers, from simplest to most general:
 1. **Auto-answer map** (agent config) — pre-configured responses to known prompt patterns
@@ -2163,7 +2158,6 @@ example: shell-routing-01, fix-auth-03, v0.11.2.1-01
 #### Version: `0.11.2-alpha.4`
 ---
 ### v0.11.2.5 — Prompt Detection Hardening & Version Housekeeping
-
 **Goal**: Fix false-positive stdin prompt detection that makes `ta shell` unusable during goal runs, and update stale version tracking.
 1. **False stdin prompts**: `is_interactive_prompt()` in `cmd.rs:955` matches any line under 120 chars ending with `:` or `?`. Agent output like `**API** (crates/ta-daemon/src/api/status.rs):` triggers a `━━━ Agent Stdin Prompt ━━━` that never gets dismissed, locking the shell into `stdin>` mode.
 2. **`version.json` stale**: Still reads `0.10.12-alpha` from March 10. Workspace `Cargo.toml` is `0.11.2-alpha.4`. `ta status` and shell status bar may show wrong version depending on which source they read.
@@ -2190,7 +2184,7 @@ example: shell-routing-01, fix-auth-03, v0.11.2.1-01
 #### Version: `0.11.2-alpha.5`
 ---
 ### v0.11.3 — Self-Service Operations, Draft Amend & Plan Intelligence
-<!-- status: done -->
+---
 #### Daemon Observability (agent-accessible via MCP/API)
 1. [x] **`ta goal inspect <id>`**: Detailed goal status including PID, process health, elapsed time, last event, staging path, draft state, agent log tail. Available via daemon API so agents and shell can query it.
 2. [x] **`ta status --deep`**: Combined view of daemon health, active goals, pending drafts, pending questions, recent events, disk usage. Single command for "what's going on?"
@@ -4697,8 +4691,6 @@ max_response_length = "2000 words"
 7. [x] **USAGE.md**: "Agent Personas" section (format, usage in goals and workflows), "Workflows" section (Studio tab, creation from description), "New Project" section (wizard flow, plan generation, semver bootstrap).
 #### Version: `0.14.20-alpha`
 ---
-
-#### Design
 #### Design
 ? Template [python-ml]:
 ? VCS: (auto-detected: git) ✓          ← prompts if not detectable: git/perforce/svn/none
@@ -4839,7 +4831,6 @@ visual_diff_threshold = 0.3  # max fraction of image that can change for localiz
 7. [x] **USAGE.md "Asset Diff in Draft Review" section**: How it works, config options, example output, confidence score interpretation, visual diff enablement.
 ---
 #### Version: `0.15.4-alpha`
-
 <!-- status: done -->
 ### v0.15.5 — Terms Acceptance Gate on First-Run Operations
 <!-- status: done -->
@@ -4863,7 +4854,6 @@ visual_diff_threshold = 0.3  # max fraction of image that can change for localiz
 <!-- status: done -->
 <!-- status: done -->
 - `local.workflow.toml` → `workflow.local.toml` (rename the loaded filename and gitignore entries)
-
 - All names that follow `<name>.local.toml` are already correct and stay unchanged: `daemon.local.toml`.
 - Only `local.workflow.toml` needs renaming.
 <!-- status: done -->
@@ -5021,7 +5011,7 @@ The reviewer goal never marks `failed` because staging was absent — it marks `
 - Plugin discovery: `~/.config/ta/plugins/messaging/`, `.ta/plugins/messaging/`, `$PATH` (prefix `ta-messaging-`)
 - Credentials stored in OS keychain via `keyring` crate — plugin calls `ta adapter credentials get <key>` to retrieve; `ta adapter credentials set <key>` to store. Never written to disk in plaintext.
 
-```
+
 
 → { "op": "create_draft", "draft": { "to", "subject", "body_html", "in_reply_to", "thread_id" } }
 
@@ -6405,7 +6395,7 @@ ta upgrade
 acknowledged_omissions = [".ta/review/"]  # user intentionally removed; suppress warning
 ```
 
-**Items**:
+
 
 1. [x] **`.ta/project-meta.toml`**: Written by `ta init` with `initialized_with` = current TA semver. Read by `ta upgrade` and `ta doctor`. If absent (pre-v0.15.18 project), treated as `initialized_with = "0.0.0"` (apply all steps). Implemented in `apps/ta-cli/src/commands/init.rs`.
 
@@ -7053,7 +7043,6 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 #### Version: `0.15.24-alpha.4`
 
 ---
-
 ### v0.15.24.5 — Preserve Phase Items on Draft Apply (3-Way Merge for Protected Files)
 <!-- status: done -->
 
@@ -7079,9 +7068,8 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 
 #### Version: `0.15.24-alpha.5`
 
----
 
-### v0.15.25 — Auto-Approve Constitution: Rule-Based Policy + Amendment Flow
+
 <!-- status: done -->
 
 **Goal**: Replace the binary `auto_approve = true/false` with a rule-based constitution section. Rules are expressed as file-pattern conditions with approve/review/block actions. The constitution section is amended via the same review-gate flow as drafts — no silent policy changes.
@@ -7118,7 +7106,7 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 
 ---
 ### v0.15.27 — Workflow Template Library: Install, Publish, Search
-<!-- status: pending -->
+
 
 **Goal**: A discoverable library of reusable workflow templates that users can install from a registry, publish their own, and search by tag or capability. First-party templates ship with TA; community templates are fetched on demand.
 
@@ -7127,22 +7115,20 @@ The planner agent runs with read-only tools (Read, Grep, Glob) — it cannot wri
 **Depends on**: v0.15.23 (parameterized templates)
 
 
-1. [ ] **`ta workflow publish <name>`** (`apps/ta-cli/src/commands/workflow.rs`): Packages template YAML + manifest. For now: prints the package to stdout (for piping to gist/upload). Future: POST to registry endpoint when configured.
+2. [x] **Registry protocol**: Simple JSON index file at a configurable URL. Index entries: `{ name, description, version, tags, url, min_ta_version }`. `ta workflow update-index` refreshes the cached index. Default registry: built-in templates only (no external network call by default).
 
-2. [ ] **Registry protocol**: Simple JSON index file at a configurable URL. Index entries: `{ name, description, version, tags, url, min_ta_version }`. `ta workflow update-index` refreshes the cached index. Default registry: built-in templates only (no external network call by default).
+3. [x] **Tests**: `install` from file URL saves to user library. `search` finds templates by tag. `remove` deletes user template. Project template not removable via CLI. Schema validation rejects malformed template.
 
-3. [ ] **Tests**: `install` from file URL saves to user library. `search` finds templates by tag. `remove` deletes user template. Project template not removable via CLI. Schema validation rejects malformed template.
-4. [ ] **USAGE.md "Workflow Library"** section: Installing, publishing, searching templates. Registry configuration. Difference between project / user / built-in templates.
-
-#### Version: `0.15.27-alpha`
 
 ---
 
-## v0.16 — IDE Integration & Developer Experience
+#### Version: `0.15.27-alpha`
+
+
+```
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
 ### v0.16.0 — VS Code Extension
-<!-- status: pending -->
 
 **Goal**: A VS Code extension that surfaces TA's core workflow directly in the editor: start goals from the command palette, view draft diffs in the native diff viewer, approve/deny artifacts inline, and see live goal status in the sidebar. Python, TypeScript, and Node.js users (the primary audience) should be able to use TA without leaving VS Code.
 
@@ -7172,7 +7158,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1 — JetBrains IDE Plugin (PyCharm, WebStorm, IntelliJ)
-<!-- status: pending -->
+
 
 **Goal**: First-class JetBrains IDE integration for TA. Surfaces goal management, draft review, and approve/deny inline in PyCharm, WebStorm, and IntelliJ IDEA without leaving the editor.
 
@@ -7188,7 +7174,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.2 — Neovim Plugin
-<!-- status: pending -->
+#### Design
 
 
 **Why**: Neovim users are a significant portion of the Rust/systems developer audience and strongly prefer terminal-native tools. A Lua plugin bridges TA with their existing workflow without requiring a browser or separate UI.
@@ -7202,7 +7188,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.3 — Ollama Agent Framework Plugin (Extract & Standalone)
-<!-- status: pending -->
+**Items**:
 
 **Goal**: Extract `ta-agent-ollama` from the TA monorepo into a standalone agent-framework plugin with its own repository, README, and usage documentation. TA's built-in USAGE.md "Local Models" section becomes a short pointer to the plugin project. This follows the same pattern as the VCS plugins (`ta-vcs-git`, `ta-vcs-p4`) — TA ships the plugin protocol and discovery, first-party plugins live in their own repos and are published to the plugin registry.
 
@@ -7248,7 +7234,7 @@ See the [ta-agent-ollama README] for model selection, hardware requirements,
 
 ---
 ### v0.16.3.1 — Gemma 4 Agent Profiles (ta-agent-ollama plugin)
-<!-- status: pending -->
+
 
 so users can run Gemma 4 locally with zero configuration, at the right size for their hardware.
 
@@ -7326,7 +7312,6 @@ Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 
 3. [ ] **USAGE.md**: Windows sandbox section — what each containment level restricts, how to enable, elevation requirement for AppContainer, `ta doctor` sandbox check.
 
 > **Focus**: Tier 2 managed-paths filesystem governance (SHA journal, Postgres/MySQL staging), followed by the unified `ta release` command system. Governance infrastructure comes first so the release pipeline itself can run under full governance.
-
 ### v0.17.0 — Managed Paths: SHA Filesystem + URI Journal
 <!-- status: pending -->
 
@@ -7370,7 +7355,6 @@ Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 
 
 
 > **Focus**: Unified `ta release` command system. Builds on the governed filesystem from v0.17.0-v0.17.1 — release pipelines run under full governance. that works for any release type — binary distributions, content deliveries, service deployments — via a pluggable `ReleaseAdapter` abstraction. Replaces the current ad-hoc dispatch/channel/VCS approach with a single coherent model and a simplified command surface.
-
 ### v0.17.2 — Release Management Design Review (Pre-Phase)
 <!-- status: pending -->
 **Goal**: Before committing implementation, run a structured design session to finalise the `ta release` command surface, `ReleaseAdapter` trait, channel model, and how release fits into TA's broader conversational UX. Produces a signed-off design document (`docs/release-design.md`) that v0.17.1+ implement against.
@@ -7468,7 +7452,7 @@ Code releases use semver. Content releases don't. Decide:
 ### v0.17.3.1 — sage-lore Design Review
 <!-- status: pending -->
 
-**Goal**: Evaluate [sage-lore](https://github.com/kwg/sage-lore) (Rust, Scroll DSL, deterministic execution, scan-once security model) as a potential complement or integration target for TA's governance and orchestration layer. Produce a structured design review and recommendation.
+<!-- status: pending -->
 
 **Depends on**: v0.17.3
 
@@ -7594,7 +7578,7 @@ Add `<!-- sa-pivot: ready -->` to this section when v0.17.2 ships. Until then, S
 
 ## Projects On Top (separate repos, built on TA)
 
-Adds OCI/gVisor container isolation, hardware-bound audit trail signing (TPM 2.0, Apple Secure Enclave), and kernel-level network policy — for regulated deployments and environments running untrusted agent code. Depends on TA v0.13.3 (RuntimeAdapter) and v0.14.1 (AttestationBackend). Not yet started.
+
 
 ### TA Web UI *(separate project)*
 
@@ -7644,7 +7628,7 @@ A browser-based interface to TA's daemon API, aimed at users who need to start g
 
 ## Future Improvements (unscheduled)
 
-Process-based plugin architecture so third parties can publish TA adapters as independent packages. A Perforce vendor, JIRA integration company, or custom VCS provider can ship a `ta-submit-<name>` executable that TA discovers and communicates with via JSON-over-stdio protocol. Extends beyond VCS to any adapter type: notification channels (`ta-channel-slack`), storage backends (`ta-store-postgres`), output integrations (`ta-output-jira`). Includes `ta plugin install/list/remove` commands, a plugin manifest format, and a plugin registry (crates.io or TA-hosted). Design sketched in v0.9.8.4; implementation deferred until the in-process adapter pattern is validated.
+
 
 - **Community sync layer**: Publish anonymized entries to a shared registry (hosted service or federated protocol).
 

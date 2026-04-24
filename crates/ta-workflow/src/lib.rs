@@ -19,6 +19,7 @@ pub mod intent;
 pub mod interaction;
 pub mod params;
 pub mod process_engine;
+pub mod registry;
 pub mod scorer;
 pub mod serial_phases;
 pub mod swarm;
@@ -45,6 +46,7 @@ pub use params::{
     interpolate, version_prefix_from_id, ParamDecl, ParamValues, PlanContext, TemplateEntry,
     TemplateLibrary, TemplateSource,
 };
+pub use registry::{cached_index_path, RegistryEntry, RegistryIndex};
 // Re-export ArtifactType from ta-changeset for callers that only depend on ta-workflow.
 pub use error::WorkflowError;
 pub use interaction::{AwaitHumanConfig, InteractionRequest, InteractionResponse};

@@ -5294,6 +5294,149 @@ ta workflow run "run next phase"
 
 ---
 
+## Workflow Library
+
+The Workflow Library lets you discover, install, publish, and share workflow templates across projects and with the community. Templates are stored in three tiers:
+
+| Tier         | Location                                | Who controls it         |
+|--------------|-----------------------------------------|-------------------------|
+| Built-in     | Embedded in the `ta` binary             | TA team (read-only)     |
+| User         | `~/.config/ta/workflow-templates/`      | You (global)            |
+| Project      | `.ta/workflow-templates/` in your repo  | Your team (per-project) |
+
+Project templates override user templates, which override built-ins.
+
+### Searching Templates
+
+Search the registry by keyword or tag:
+
+```bash
+# List all templates in the registry
+ta workflow search
+
+# Search by keyword (matches name, description, or tags)
+ta workflow search "code review"
+ta workflow search governance
+
+# Filter by exact tag
+ta workflow search --tag security
+ta workflow search --tag plan
+```
+
+Example output:
+
+```
+Workflow templates (2):
+
+  governed-goal                v0.15.27  [governance, safe, coding]
+    Safe autonomous coding loop: run_goal → review → human_gate → apply → pr_sync.
+
+  plan-build-phases            v0.15.27  [plan, phases, automation]
+    Iterate pending PLAN.md phases through the governed build workflow.
+```
+
+### Installing Templates
+
+Install a template from a URL or local file into your user library:
+
+```bash
+# Install from a URL
+ta workflow install my-template --from https://example.com/template.yaml
+
+# Install from a local file (using file:// URL)
+ta workflow install my-template --from file:///path/to/template.yaml
+
+# Install from a bare file path
+ta workflow install my-template --from /path/to/template.yaml
+```
+
+The template is validated before saving — malformed YAML or missing required workflow fields are rejected.
+
+Once installed, the template is available everywhere:
+
+```bash
+ta workflow run my-template --goal "..."
+ta workflow new my-wf --from my-template
+ta workflow show my-template
+```
+
+### Removing User Templates
+
+Remove a user-installed template (user library only):
+
+```bash
+ta workflow uninstall my-template
+```
+
+- **Built-in templates** cannot be removed (they are embedded in the binary).
+- **Project templates** cannot be removed via CLI — delete the file from `.ta/workflow-templates/` directly.
+
+### Publishing Templates
+
+Package a template for sharing. The JSON bundle is printed to stdout for piping to gist, curl, or a registry endpoint:
+
+```bash
+# Package and print to stdout
+ta workflow publish my-workflow
+
+# Pipe to a file
+ta workflow publish my-workflow > my-workflow-package.json
+
+# Upload to a registry (example)
+ta workflow publish my-workflow | curl -X POST https://registry.example.com/templates -d @-
+
+# Bump version before publishing
+ta workflow publish my-workflow --bump minor
+```
+
+The package includes: name, description, tags, version, template YAML content, and a timestamp.
+
+A `.package.yaml` manifest is created alongside your template on first publish.
+
+### Registry Index
+
+The registry index is a JSON file listing available templates. TA ships a built-in index (no network call); external registries can be added via `update-index`:
+
+```bash
+# Refresh from a remote registry URL
+ta workflow update-index --url https://registry.example.com/index.json
+
+# Show current built-in index (no network)
+ta workflow update-index
+```
+
+The cached index is stored at `~/.config/ta/workflow-registry-index.json`. The index format:
+
+```json
+[
+  {
+    "name": "code-review",
+    "description": "Multi-stage code review workflow",
+    "version": "0.1.0",
+    "tags": ["review", "code-quality"],
+    "url": "https://example.com/templates/code-review.yaml",
+    "min_ta_version": "0.15.0"
+  }
+]
+```
+
+### Adding Tags to Your Templates
+
+Add a `# tags:` comment to make your templates discoverable:
+
+```yaml
+# description: Multi-stage security audit with OWASP review.
+# tags: security, audit, owasp
+
+name: security-audit
+params:
+  ...
+```
+
+Tags appear in `ta workflow search` and `ta workflow list --param-templates` output.
+
+---
+
 ## Advanced Features
 
 ### Runtime Adapter
