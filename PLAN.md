@@ -7180,16 +7180,6 @@ pub enum NoteDelivery {
 
 8. [x] **Interactive planning default + workflow template + Studio integration**: `ta plan` and Studio Plan tab open an interactive planning session by default. `interactive-plan-build` built-in workflow template added. Studio advisor sidebar routes `ta advise`-style messages through the same `/api/advisor/inject` endpoint. Constitution rule `no-direct-claude-md` added at severity `warn` (escalated to `block` in v0.15.30).
 
-
-
-
-
-
-
-
-
-
-
 #### Version: `0.15.28-alpha`
 
 ---
