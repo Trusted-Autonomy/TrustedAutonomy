@@ -26,3 +26,12 @@ allow_override = false
 # condition   = "always"
 # message     = "Social media posts require supervisor review before publishing."
 # allow_override = true
+
+# ── PLAN.md merge validation (v0.15.28.1) ──────────────────────────
+# Requires that `ta draft apply` always runs PLAN.md structural validation.
+# Blocks applies where the 3-way merge drops headings or status markers.
+# Exception: --skip-plan-merge flag (logged to audit trail with reason).
+[rules.plan-merge-validation]
+severity    = "block"
+description = "PLAN.md structural validation must pass on every draft apply"
+exception   = "--skip-plan-merge flag (emergency use only — logged to audit trail)"

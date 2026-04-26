@@ -7194,7 +7194,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.28.1 — PLAN.md Integrity Enforcement: Diagnostics, Validation, and Apply Guard
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: PLAN.md must not be silently corrupted during draft apply. Add diagnostic tracing of base/staging/source versions at 3-way merge time, structural validation of the post-merge result (heading count, status markers, no blank-only sections), and a hard guard that aborts the apply and prompts the user if validation fails.
 
@@ -7202,17 +7202,17 @@ pub enum NoteDelivery {
 
 **Depends on**: v0.15.28 (triggered by corruption observed during v0.15.28 apply)
 
-1. [ ] **Pre-goal PLAN.md snapshot** (`crates/ta-workspace/src/overlay.rs`): At overlay creation time, record a SHA-256 hash of PLAN.md into `.ta/goals/<goal-id>/plan_snapshot.sha256`. This is the exact base version the agent will edit — needed to detect staging-base drift at apply time.
+1. [x] **Pre-goal PLAN.md snapshot** (`crates/ta-workspace/src/overlay.rs`): At overlay creation time, record a SHA-256 hash of PLAN.md into `.ta/goals/<goal-id>/plan_snapshot.sha256`. This is the exact base version the agent will edit — needed to detect staging-base drift at apply time.
 
-2. [ ] **Staging-base drift detection** (`crates/ta-workspace/src/overlay.rs` or `draft.rs`): At `ta draft apply` time, compare the stored `plan_snapshot.sha256` against the SHA of `PLAN.md` at the staging base commit (`git show <base-sha>:PLAN.md | sha256`). If they differ, log `WARN: PLAN.md staging base is stale — base sha differs from current source base` with both SHAs. Informational; merge may still be clean, but flags the risk.
+2. [x] **Staging-base drift detection** (`crates/ta-workspace/src/overlay.rs` or `draft.rs`): At `ta draft apply` time, compare the stored `plan_snapshot.sha256` against the SHA of `PLAN.md` at the staging base commit (`git show <base-sha>:PLAN.md | sha256`). If they differ, log `WARN: PLAN.md staging base is stale — base sha differs from current source base` with both SHAs. Informational; merge may still be clean, but flags the risk.
 
-3. [ ] **Post-merge structural validation** (`crates/ta-workspace/src/overlay.rs`): After 3-way merge produces a candidate PLAN.md, validate before writing to source: (a) all `### v0.x.y` headings from source are present in merged result; (b) each heading has a matching `<!-- status: ... -->` marker; (c) no phase section contains only blank lines between heading and next `---` or `###`. Returns `PlanValidationError` with structured report of what is missing.
+3. [x] **Post-merge structural validation** (`crates/ta-workspace/src/overlay.rs`): After 3-way merge produces a candidate PLAN.md, validate before writing to source: (a) all `### v0.x.y` headings from source are present in merged result; (b) each heading has a matching `<!-- status: ... -->` marker; (c) no phase section contains only blank lines between heading and next `---` or `###`. Returns `PlanValidationError` with structured report of what is missing.
 
-4. [ ] **Apply guard**: If `PlanValidationError` is returned, abort the PLAN.md portion of the apply, write the failed merge result to `.ta/plan-merge-failed-<goal-id>.md` for inspection, and surface an actionable error: `PLAN.md merge validation failed — see .ta/plan-merge-failed-<goal-id>.md. Restore manually and re-run 'ta draft apply --skip-plan-merge'.` Add `--skip-plan-merge` flag for emergency use (logged to audit trail).
+4. [x] **Apply guard**: If `PlanValidationError` is returned, abort the PLAN.md portion of the apply, write the failed merge result to `.ta/plan-merge-failed-<goal-id>.md` for inspection, and surface an actionable error: `PLAN.md merge validation failed — see .ta/plan-merge-failed-<goal-id>.md. Restore manually and re-run 'ta draft apply --skip-plan-merge'.` Add `--skip-plan-merge` flag for emergency use (logged to audit trail).
 
-5. [ ] **Diagnostic tracing at merge time**: Add `tracing::info!` (visible at `RUST_LOG=ta_workspace=info`) logging of: base SHA, staging SHA, source SHA of PLAN.md before merge; merge strategy selected; heading and status-marker counts in each version; validation result. Events captured in `.ta/events/` for post-mortem.
+5. [x] **Diagnostic tracing at merge time**: Add `tracing::info!` (visible at `RUST_LOG=ta_workspace=info`) logging of: base SHA, staging SHA, source SHA of PLAN.md before merge; merge strategy selected; heading and status-marker counts in each version; validation result. Events captured in `.ta/events/` for post-mortem.
 
-6. [ ] **Constitution rule** (`[rules.plan-merge-validation]` in `.ta/constitution.toml`): Require that `ta draft apply` always runs PLAN.md structural validation. Severity `block`. Exception: `--skip-plan-merge` flag, which is logged to the audit trail with reason.
+6. [x] **Constitution rule** (`[rules.plan-merge-validation]` in `.ta/constitution.toml`): Require that `ta draft apply` always runs PLAN.md structural validation. Severity `block`. Exception: `--skip-plan-merge` flag, which is logged to the audit trail with reason.
 
 #### Version: `0.15.28-alpha.1`
 

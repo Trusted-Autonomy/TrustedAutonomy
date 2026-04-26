@@ -620,6 +620,22 @@ fn start_goal(
                     Err(e) => tracing::warn!("Could not snapshot plan_base.md: {}", e),
                 }
             }
+
+            // v0.15.28.1: Record SHA-256 of source PLAN.md at goal-start time.
+            // Stored at .ta/goals/<goal-id>/plan_snapshot.sha256 in the source project
+            // for drift detection at apply time (staging-base stale check).
+            if let Ok(content) = std::fs::read(&source_plan_md) {
+                use sha2::Digest as _;
+                let hash = format!("{:x}", sha2::Sha256::digest(&content));
+                let snap_path = config.goals_dir.join(&goal_id).join("plan_snapshot.sha256");
+                if let Err(e) = std::fs::create_dir_all(snap_path.parent().unwrap()) {
+                    tracing::warn!("Could not create goals dir for plan_snapshot.sha256: {}", e);
+                } else if let Err(e) = std::fs::write(&snap_path, &hash) {
+                    tracing::warn!("Could not write plan_snapshot.sha256: {}", e);
+                } else {
+                    tracing::info!(goal_id = %goal_id, sha256 = %hash, "PLAN.md snapshot recorded");
+                }
+            }
         }
 
         // Transition: Created → Configured → Running.

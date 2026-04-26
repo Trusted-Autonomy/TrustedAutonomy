@@ -626,6 +626,134 @@ fn is_status_advancement(old: Option<&str>, new: Option<&str>) -> bool {
     rank(new) > rank(old)
 }
 
+// ── Post-merge structural validation (v0.15.28.1) ───────────────────────────
+
+/// A missing heading or marker detected during post-merge validation.
+#[derive(Debug, Clone)]
+pub struct PlanValidationIssue {
+    /// The section ID (e.g. "v0.15.28") or a human-readable label for structural issues.
+    pub section_id: String,
+    /// Human-readable description of what is missing or malformed.
+    pub description: String,
+}
+
+/// Errors detected during post-merge PLAN.md structural validation.
+#[derive(Debug)]
+pub struct PlanValidationError {
+    pub issues: Vec<PlanValidationIssue>,
+}
+
+impl std::fmt::Display for PlanValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "PLAN.md merge validation failed:")?;
+        for issue in &self.issues {
+            writeln!(f, "  - [{}] {}", issue.section_id, issue.description)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PlanValidationError {}
+
+/// Validate the post-merge PLAN.md against the source PLAN.md.
+///
+/// Checks:
+/// (a) All `### v0.x.y` headings from source are present in the merged result.
+/// (b) Each heading in the merged result has a matching `<!-- status: ... -->` marker.
+/// (c) No phase section contains only blank lines between its heading and the next
+///     `---` or `###` separator (content-less sections indicate dropped content).
+///
+/// Returns `Ok(())` when valid, `Err(PlanValidationError)` with a structured
+/// report of what is missing.
+pub fn validate_plan_merge(merged: &str, source: &str) -> Result<(), PlanValidationError> {
+    let source_sections = parse_plan_sections(source);
+    let merged_sections = parse_plan_sections(merged);
+
+    let merged_ids: std::collections::HashSet<&str> =
+        merged_sections.iter().map(|s| s.id.as_str()).collect();
+
+    let mut issues = Vec::new();
+
+    // (a) All versioned source headings must be present in merged.
+    for src in &source_sections {
+        if src.id.starts_with("__") {
+            continue; // Skip preamble / tail pseudo-sections.
+        }
+        if !merged_ids.contains(src.id.as_str()) {
+            issues.push(PlanValidationIssue {
+                section_id: src.id.clone(),
+                description: format!(
+                    "heading '### {}' present in source but missing from merged result",
+                    src.id
+                ),
+            });
+        }
+    }
+
+    // (b) Each versioned merged heading must have a <!-- status: ... --> marker.
+    for sec in &merged_sections {
+        if sec.id.starts_with("__") {
+            continue;
+        }
+        if sec.status_marker.is_none() {
+            issues.push(PlanValidationIssue {
+                section_id: sec.id.clone(),
+                description: format!(
+                    "section '### {}' has no <!-- status: ... --> marker",
+                    sec.id
+                ),
+            });
+        }
+    }
+
+    // (c) No versioned section should contain only blank lines / status markers
+    //     (dropped content). A section body with only the status marker and blanks
+    //     indicates that goal descriptions, items, or sub-headings were lost.
+    for sec in &merged_sections {
+        if sec.id.starts_with("__") {
+            continue;
+        }
+        let body_has_content = sec.raw_body.lines().any(|l| {
+            let t = l.trim();
+            !t.is_empty() && t != "---" && !(t.starts_with("<!-- status:") && t.ends_with("-->"))
+        });
+        if !body_has_content {
+            issues.push(PlanValidationIssue {
+                section_id: sec.id.clone(),
+                description: format!(
+                    "section '### {}' body is blank — content may have been dropped by merge",
+                    sec.id
+                ),
+            });
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(PlanValidationError { issues })
+    }
+}
+
+/// Count `### v0.x.y` headings in a PLAN.md string.
+pub fn count_plan_headings(content: &str) -> usize {
+    content
+        .lines()
+        .filter(|l| extract_version_header(l).is_some())
+        .count()
+}
+
+/// Count `<!-- status: ... -->` markers in a PLAN.md string.
+pub fn count_status_markers(content: &str) -> usize {
+    content
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with("<!-- status:") && t.ends_with("-->")
+        })
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -822,5 +950,56 @@ mod tests {
             result.merged.contains("step C"),
             "unchecked item must survive"
         );
+    }
+
+    // --- v0.15.28.1 structural validation tests ---
+
+    #[test]
+    fn validate_clean_merge_passes() {
+        let plan = make_plan(&[("v0.5.0", "pending", &["- [ ] task one"])]);
+        assert!(validate_plan_merge(&plan, &plan).is_ok());
+    }
+
+    #[test]
+    fn validate_missing_heading_fails() {
+        let source = make_plan(&[
+            ("v0.5.0", "pending", &["- [ ] task one"]),
+            ("v0.5.1", "pending", &["- [ ] task two"]),
+        ]);
+        // merged is missing v0.5.1
+        let merged = make_plan(&[("v0.5.0", "pending", &["- [ ] task one"])]);
+
+        let err = validate_plan_merge(&merged, &source).unwrap_err();
+        assert!(err.issues.iter().any(|i| i.section_id == "v0.5.1"));
+    }
+
+    #[test]
+    fn validate_missing_status_marker_fails() {
+        let source = make_plan(&[("v0.6.0", "pending", &["- [ ] item"])]);
+        // merged lacks the status marker
+        let merged = "### v0.6.0 — Title\n\n- [ ] item\n\n---\n\n";
+
+        let err = validate_plan_merge(merged, &source).unwrap_err();
+        assert!(err.issues.iter().any(|i| i.section_id == "v0.6.0"));
+    }
+
+    #[test]
+    fn validate_blank_section_body_fails() {
+        let source = make_plan(&[("v0.7.0", "pending", &["- [ ] item"])]);
+        // merged section has only blank lines in body
+        let merged = "### v0.7.0 — Title\n<!-- status: pending -->\n\n\n---\n\n";
+
+        let err = validate_plan_merge(merged, &source).unwrap_err();
+        assert!(err.issues.iter().any(|i| i.section_id == "v0.7.0"));
+    }
+
+    #[test]
+    fn count_headings_and_markers() {
+        let plan = make_plan(&[
+            ("v0.1.0", "done", &["- [x] a"]),
+            ("v0.2.0", "pending", &["- [ ] b"]),
+        ]);
+        assert_eq!(count_plan_headings(&plan), 2);
+        assert_eq!(count_status_markers(&plan), 2);
     }
 }

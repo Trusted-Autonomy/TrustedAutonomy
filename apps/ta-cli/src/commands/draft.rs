@@ -243,6 +243,11 @@ pub enum DraftCommands {
         /// Coverage gaps do not block apply.
         #[arg(long)]
         auto_repair: bool,
+        /// Skip PLAN.md structural validation and 3-way merge guard.
+        /// Emergency escape hatch when the merge algorithm produces false positives.
+        /// Skipping is recorded in the audit trail with a warning.
+        #[arg(long)]
+        skip_plan_merge: bool,
     },
     /// Amend an artifact in a draft (replace content, apply patch, or drop).
     Amend {
@@ -702,6 +707,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
             validate_version,
             status,
             auto_repair,
+            skip_plan_merge,
         } => {
             if *status {
                 ApplyLock::print_status(&config.workspace_root);
@@ -799,6 +805,7 @@ pub fn execute(cmd: &DraftCommands, config: &GatewayConfig) -> anyhow::Result<()
                 *force_apply,
                 *validate_version,
                 *auto_repair,
+                *skip_plan_merge,
             )?;
 
             // --watch: poll until merged, then auto-sync.
@@ -3210,6 +3217,7 @@ fn apply_chain(
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )?;
     }
 
@@ -5633,6 +5641,7 @@ fn apply_package(
     force_apply: bool,
     validate_version: bool,
     auto_repair: bool,
+    skip_plan_merge: bool,
 ) -> anyhow::Result<()> {
     let package_id = resolve_draft_id(id, config)?;
 
@@ -6430,54 +6439,207 @@ fn apply_package(
                             // mtime comparison is unreliable for PLAN.md because the
                             // agent always writes it during the run, giving staging a
                             // fresh mtime regardless of whether it has newer content.
-                            let staging_content = std::fs::read_to_string(&staging_path).ok();
-                            let source_content = std::fs::read_to_string(&source_path).ok();
-                            if let (Some(staging_str), Some(source_str)) =
-                                (staging_content, source_content)
-                            {
-                                if staging_str != source_str {
-                                    if let Some(ref base_str) = pkg.plan_md_base {
-                                        use ta_changeset::plan_merge::merge_plan_md;
-                                        let merge_result =
-                                            merge_plan_md(base_str, &staging_str, &source_str);
-                                        if !merge_result.agent_additions.is_empty() {
+                            //
+                            // v0.15.28.1: --skip-plan-merge bypasses merge + validation
+                            // for emergency use; recorded as a warning in the audit trail.
+                            if skip_plan_merge {
+                                tracing::warn!(
+                                    goal_id = %goal.goal_run_id,
+                                    "PLAN.md structural validation and 3-way merge guard \
+                                     SKIPPED by --skip-plan-merge (emergency override)"
+                                );
+                                eprintln!(
+                                    "⚠️  [plan-merge] --skip-plan-merge: PLAN.md merge validation \
+                                     skipped. Source PLAN.md will be overwritten by staging copy."
+                                );
+                                // Fall through to normal overlay copy.
+                            } else {
+                                let staging_content = std::fs::read_to_string(&staging_path).ok();
+                                let source_content = std::fs::read_to_string(&source_path).ok();
+                                if let (Some(staging_str), Some(source_str)) =
+                                    (staging_content, source_content)
+                                {
+                                    // v0.15.28.1: Diagnostic tracing — SHA of each version.
+                                    use sha2::Digest as _;
+                                    let base_sha = pkg
+                                        .plan_md_base
+                                        .as_ref()
+                                        .map(|b| {
+                                            format!("{:x}", sha2::Sha256::digest(b.as_bytes()))
+                                        })
+                                        .unwrap_or_else(|| "none".to_string());
+                                    let staging_sha = format!(
+                                        "{:x}",
+                                        sha2::Sha256::digest(staging_str.as_bytes())
+                                    );
+                                    let source_sha = format!(
+                                        "{:x}",
+                                        sha2::Sha256::digest(source_str.as_bytes())
+                                    );
+
+                                    let source_heading_count =
+                                        ta_changeset::plan_merge::count_plan_headings(&source_str);
+                                    let staging_heading_count =
+                                        ta_changeset::plan_merge::count_plan_headings(&staging_str);
+                                    let source_marker_count =
+                                        ta_changeset::plan_merge::count_status_markers(&source_str);
+                                    let staging_marker_count =
+                                        ta_changeset::plan_merge::count_status_markers(
+                                            &staging_str,
+                                        );
+
+                                    tracing::info!(
+                                        goal_id = %goal.goal_run_id,
+                                        base_sha = %base_sha,
+                                        staging_sha = %staging_sha,
+                                        source_sha = %source_sha,
+                                        source_headings = source_heading_count,
+                                        staging_headings = staging_heading_count,
+                                        source_status_markers = source_marker_count,
+                                        staging_status_markers = staging_marker_count,
+                                        has_base = pkg.plan_md_base.is_some(),
+                                        "PLAN.md 3-way merge diagnostic"
+                                    );
+
+                                    // v0.15.28.1: Staging-base drift detection.
+                                    // Compare the SHA hash recorded at goal-start against the
+                                    // current source SHA. If they differ, the source PLAN.md
+                                    // has been updated since staging was created — the merge
+                                    // base may be stale, increasing corruption risk.
+                                    let snap_path = config
+                                        .goals_dir
+                                        .join(goal.goal_run_id.to_string())
+                                        .join("plan_snapshot.sha256");
+                                    if let Ok(stored_sha) = std::fs::read_to_string(&snap_path) {
+                                        let stored_sha = stored_sha.trim();
+                                        if stored_sha != source_sha.as_str() {
+                                            tracing::warn!(
+                                                goal_id = %goal.goal_run_id,
+                                                stored_sha = %stored_sha,
+                                                current_source_sha = %source_sha,
+                                                "PLAN.md staging base is stale — source has changed \
+                                                 since goal creation; merge base may produce gaps"
+                                            );
                                             eprintln!(
+                                            "⚠️  [plan-merge] PLAN.md staging-base drift detected: \
+                                             source was updated after staging was created.\n\
+                                             \x20  stored sha: {}\n\
+                                             \x20  current sha: {}\n\
+                                             \x20  Proceeding with merge (result will be validated).",
+                                            stored_sha, source_sha
+                                        );
+                                        }
+                                    }
+
+                                    if staging_str != source_str {
+                                        if let Some(ref base_str) = pkg.plan_md_base {
+                                            use ta_changeset::plan_merge::merge_plan_md;
+                                            let merge_result =
+                                                merge_plan_md(base_str, &staging_str, &source_str);
+
+                                            let base_heading_count =
+                                                ta_changeset::plan_merge::count_plan_headings(
+                                                    base_str,
+                                                );
+                                            let merged_heading_count =
+                                                ta_changeset::plan_merge::count_plan_headings(
+                                                    &merge_result.merged,
+                                                );
+                                            let merged_marker_count =
+                                                ta_changeset::plan_merge::count_status_markers(
+                                                    &merge_result.merged,
+                                                );
+
+                                            tracing::info!(
+                                                goal_id = %goal.goal_run_id,
+                                                base_headings = base_heading_count,
+                                                merged_headings = merged_heading_count,
+                                                merged_status_markers = merged_marker_count,
+                                                silent_fixes = merge_result.silent_fixes.len(),
+                                                agent_additions = merge_result.agent_additions.len(),
+                                                conflicts = merge_result.conflicts.len(),
+                                                "PLAN.md merge result"
+                                            );
+
+                                            if !merge_result.agent_additions.is_empty() {
+                                                eprintln!(
                                                 "[protected] PLAN.md: 3-way merge preserved {} agent addition(s)",
                                                 merge_result.agent_additions.len()
                                             );
-                                        }
-                                        if !merge_result.conflicts.is_empty() {
-                                            eprintln!(
+                                            }
+                                            if !merge_result.conflicts.is_empty() {
+                                                eprintln!(
                                                 "⚠️  [protected] PLAN.md: {} conflict(s) in 3-way merge — taking source for conflicts",
                                                 merge_result.conflicts.len()
                                             );
-                                        }
-                                        if let Err(e) = std::fs::write(
-                                            &source_path,
-                                            merge_result.merged.as_bytes(),
-                                        ) {
-                                            eprintln!(
+                                            }
+
+                                            // v0.15.28.1: Post-merge structural validation.
+                                            // Validate before writing to source. If headings or
+                                            // status markers are missing, abort and dump the
+                                            // failed merge for inspection.
+                                            use ta_changeset::plan_merge::validate_plan_merge;
+                                            if let Err(validation_err) = validate_plan_merge(
+                                                &merge_result.merged,
+                                                &source_str,
+                                            ) {
+                                                let fail_path = config
+                                                    .workspace_root
+                                                    .join(".ta")
+                                                    .join(format!(
+                                                        "plan-merge-failed-{}.md",
+                                                        goal.goal_run_id
+                                                    ));
+                                                tracing::error!(
+                                                    goal_id = %goal.goal_run_id,
+                                                    fail_path = %fail_path.display(),
+                                                    issues = validation_err.issues.len(),
+                                                    "PLAN.md merge validation failed — aborting PLAN.md apply"
+                                                );
+                                                let _ = std::fs::write(
+                                                    &fail_path,
+                                                    merge_result.merged.as_bytes(),
+                                                );
+                                                anyhow::bail!(
+                                                "PLAN.md merge validation failed — {} issue(s) detected.\n\
+                                                 Failed merge written to: {}\n\
+                                                 Restore PLAN.md manually, then re-run:\n  \
+                                                 ta draft apply {} --skip-plan-merge\n\n\
+                                                 Validation report:\n{}",
+                                                validation_err.issues.len(),
+                                                fail_path.display(),
+                                                &package_id.to_string()[..8],
+                                                validation_err
+                                            );
+                                            }
+
+                                            if let Err(e) = std::fs::write(
+                                                &source_path,
+                                                merge_result.merged.as_bytes(),
+                                            ) {
+                                                eprintln!(
                                                 "⚠️  [protected] PLAN.md merge write failed: {}",
                                                 e
                                             );
-                                        }
-                                    } else {
-                                        // Legacy package: no base snapshot captured at
-                                        // staging-creation time — keep source unchanged.
-                                        eprintln!(
+                                            }
+                                        } else {
+                                            // Legacy package: no base snapshot captured at
+                                            // staging-creation time — keep source unchanged.
+                                            eprintln!(
                                             "⚠️  [protected] PLAN.md: no base snapshot in draft \
                                              package — keeping source unchanged (legacy draft). \
                                              Re-run the goal to get 3-way merge behavior."
                                         );
+                                        }
                                     }
+                                    // Always skip overlay for PLAN.md — either we wrote the
+                                    // merged version above, or staging == source (no-op), or
+                                    // we kept source unchanged. In all cases the git adapter
+                                    // will auto-stage PLAN.md as a critical file.
+                                    continue;
                                 }
-                                // Always skip overlay for PLAN.md — either we wrote the
-                                // merged version above, or staging == source (no-op), or
-                                // we kept source unchanged. In all cases the git adapter
-                                // will auto-stage PLAN.md as a critical file.
-                                continue;
-                            }
-                            // Fall through if we can't read one or both files.
+                                // Fall through if we can't read one or both files.
+                            } // end !skip_plan_merge block
                         } else {
                             // Non-PLAN.md protected files: mtime guard as before.
                             let staging_bytes = std::fs::read(&staging_path).ok();
@@ -11372,6 +11534,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -11463,6 +11626,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -11645,6 +11809,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -11800,6 +11965,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         );
 
         // Apply must have returned an error.
@@ -12072,6 +12238,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -12140,6 +12307,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -12205,6 +12373,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -12269,6 +12438,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -12372,6 +12542,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         );
 
         assert!(result.is_err());
@@ -13371,6 +13542,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -13479,6 +13651,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -13894,6 +14067,7 @@ fn run() {
             false, // force_apply
             false, // validate_version
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -15095,6 +15269,7 @@ fn run() {
             false,
             false,
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap();
 
@@ -15114,6 +15289,7 @@ fn run() {
             false,
             false,
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap_err();
 
@@ -15193,6 +15369,7 @@ fn run() {
             false,
             false,
             false, // auto_repair
+            false, // skip_plan_merge
         )
         .unwrap_err();
 
@@ -15269,6 +15446,7 @@ fn run() {
             false,
             false,
             false, // auto_repair
+            false, // skip_plan_merge
         );
         // Must return an error — never silently succeed.
         assert!(
