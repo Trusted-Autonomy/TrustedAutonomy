@@ -7208,7 +7208,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.28.2 — PLAN.md Merge Safety: Pre-Merge Rebase and Atomic Status Commit
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Eliminate the two remaining root causes of PLAN.md staging-base drift: (1) the PLAN.md status change (`pending → in_progress`) is committed and pushed to main *before* staging is created, so staging base matches HEAD; (2) at apply time, before 3-way merge, PLAN.md is rebased against the latest main so the merge base is never stale.
 
