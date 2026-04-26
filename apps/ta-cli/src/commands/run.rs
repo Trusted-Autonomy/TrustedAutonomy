@@ -1367,6 +1367,80 @@ pub fn execute(
         check_vcs_clean(&check_root, headless)?;
     }
 
+    // v0.15.28.2: Atomic pre-staging phase claim + commit+push.
+    //
+    // Mark the plan phase in_progress and commit+push that change BEFORE
+    // OverlayWorkspace::create() copies the source to staging. This ensures
+    // the staging base SHA matches the committed HEAD so the 3-way merge at
+    // apply time has a clean, non-stale base.
+    //
+    // Flow:
+    //   1. Mark phase in_progress (daemon or direct write).
+    //   2. Commit PLAN.md + plan_history.jsonl with a dedicated commit.
+    //   3. Push to the tracking remote (abort if push fails).
+    //   4. Create overlay — staging base now == committed HEAD.
+    //
+    // Skipped when: no phase is specified, or this is a --goal-id reuse (the
+    // goal + phase were already claimed by an earlier `ta goal start`).
+    let pre_staging_phase_claimed = if let (Some(phase_id), None) = (phase, existing_goal_id) {
+        let source_root = source
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| config.workspace_root.clone());
+
+        // Step 1: claim the phase (daemon preferred for mutex; fallback to direct write).
+        let claimed = match try_daemon_claim_phase(&source_root, phase_id, None) {
+            Ok(ClaimOutcome::Claimed) => {
+                if !quiet {
+                    println!(
+                        "Plan: phase {} claimed via daemon (in_progress, pre-staging)",
+                        phase_id
+                    );
+                }
+                tracing::info!(phase = %phase_id, "phase claimed via daemon before staging");
+                true
+            }
+            Ok(ClaimOutcome::FallbackDirect) => {
+                // Daemon not running — write directly with pending-only guard.
+                match super::plan::mark_phase_in_source(&source_root, phase_id) {
+                    Ok(()) => {
+                        if !quiet {
+                            println!(
+                                "Plan: phase {} marked in_progress (direct, pre-staging)",
+                                phase_id
+                            );
+                        }
+                        tracing::info!(phase = %phase_id, "phase marked in_progress directly before staging");
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(phase = %phase_id, error = %e, "mark_phase_in_source failed pre-staging — will retry after goal creation");
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                // Daemon rejected the claim (phase already in_progress or done).
+                anyhow::bail!(
+                    "Phase {} could not be claimed: {}\n\
+                     Use `ta plan status` to check the current phase state.\n\
+                     If the phase was left in_progress by a crashed run, reset it with \
+                     `ta plan reset {}`.",
+                    phase_id,
+                    e,
+                    phase_id
+                );
+            }
+        };
+
+        // Step 2+3: commit + push only if the claim succeeded.
+        if claimed {
+            commit_and_push_plan_status(&source_root, phase_id, quiet)?;
+        }
+        claimed
+    } else {
+        false
+    };
+
     // 1. Start the goal (creates overlay workspace), or reuse an existing one
     //    when --goal-id is passed (v0.9.5.1: prevents duplicate goal creation
     //    when the MCP orchestrator's ta_goal_start already created the goal).
@@ -1458,40 +1532,45 @@ pub fn execute(
     let goal_id = goal.goal_run_id.to_string();
     let staging_path = goal.workspace_path.clone();
 
-    // v0.15.24.2: Claim the plan phase before launching the agent.
-    // Try the daemon endpoint first (atomic mutex + PLAN.md write); fall
-    // back to a direct file write when the daemon is not running.
-    if let Some(ref phase_id) = goal.plan_phase {
-        let source_root = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
-        match try_daemon_claim_phase(source_root, phase_id, &goal_id) {
-            Ok(ClaimOutcome::Claimed) => {
-                if !quiet {
-                    println!("Plan: phase {} claimed via daemon (in_progress)", phase_id);
+    // v0.15.24.2 / v0.15.28.2: Claim the plan phase before launching the agent.
+    // Pre-staging claim (v0.15.28.2) has already written in_progress and pushed
+    // the commit if a phase was specified — skip the claim here to avoid a 409
+    // from the daemon (phase already in_progress). If no pre-staging claim was
+    // made (no phase, or reused existing goal where phase was already claimed),
+    // fall back to the original daemon/direct claim flow.
+    if !pre_staging_phase_claimed {
+        if let Some(ref phase_id) = goal.plan_phase {
+            let source_root = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
+            match try_daemon_claim_phase(source_root, phase_id, Some(&goal_id)) {
+                Ok(ClaimOutcome::Claimed) => {
+                    if !quiet {
+                        println!("Plan: phase {} claimed via daemon (in_progress)", phase_id);
+                    }
                 }
-            }
-            Ok(ClaimOutcome::FallbackDirect) => {
-                // Daemon not running — use direct write with pending-only guard.
-                if let Err(e) = super::plan::mark_phase_in_source(source_root, phase_id) {
-                    tracing::warn!(
-                        phase = %phase_id,
-                        error = %e,
-                        "Failed to mark plan phase in_progress — continuing"
+                Ok(ClaimOutcome::FallbackDirect) => {
+                    // Daemon not running — use direct write with pending-only guard.
+                    if let Err(e) = super::plan::mark_phase_in_source(source_root, phase_id) {
+                        tracing::warn!(
+                            phase = %phase_id,
+                            error = %e,
+                            "Failed to mark plan phase in_progress — continuing"
+                        );
+                    } else if !quiet {
+                        println!("Plan: phase {} marked in_progress (direct)", phase_id);
+                    }
+                }
+                Err(e) => {
+                    // Daemon rejected the claim (phase already in_progress or done).
+                    anyhow::bail!(
+                        "Phase {} could not be claimed: {}\n\
+                         Use `ta plan status` to check the current phase state.\n\
+                         If the phase was left in_progress by a crashed run, reset it with \
+                         `ta plan reset {}`.",
+                        phase_id,
+                        e,
+                        phase_id
                     );
-                } else if !quiet {
-                    println!("Plan: phase {} marked in_progress (direct)", phase_id);
                 }
-            }
-            Err(e) => {
-                // Daemon rejected the claim (phase already in_progress or done).
-                anyhow::bail!(
-                    "Phase {} could not be claimed: {}\n\
-                     Use `ta plan status` to check the current phase state.\n\
-                     If the phase was left in_progress by a crashed run, reset it with \
-                     `ta plan reset {}`.",
-                    phase_id,
-                    e,
-                    phase_id
-                );
             }
         }
     }
@@ -5879,10 +5958,12 @@ enum ClaimOutcome {
 /// Returns `Err` only when the daemon is running but explicitly rejects the
 /// claim (phase already `in_progress` or `done`). Connection failures produce
 /// `Ok(FallbackDirect)` so the caller can fall back to the legacy direct write.
+///
+/// `goal_id` is `None` when called pre-staging (goal record not yet created).
 fn try_daemon_claim_phase(
     project_root: &Path,
     phase_id: &str,
-    goal_id: &str,
+    goal_id: Option<&str>,
 ) -> anyhow::Result<ClaimOutcome> {
     let daemon_url = super::daemon::resolve_daemon_url(project_root, None);
     let url = format!("{}/api/plan/phase/claim", daemon_url);
@@ -5913,6 +5994,168 @@ fn try_daemon_claim_phase(
         // Any other response or connection error → daemon not available, fall back.
         _ => Ok(ClaimOutcome::FallbackDirect),
     }
+}
+
+// ── Atomic pre-staging plan-status commit (v0.15.28.2) ─────────────────────
+
+/// Commit PLAN.md and plan_history.jsonl after marking a phase `in_progress`,
+/// then push the commit to the tracking remote.
+///
+/// This ensures the staging base SHA matches committed HEAD so the 3-way merge
+/// at apply time has a clean, non-stale base.
+///
+/// Returns `Err` (aborting the run) when:
+/// - The `git commit` fails (staged changes exist but commit failed).
+/// - The `git push` fails (commit was made but could not be pushed).
+///
+/// Silently skips (returns `Ok`) when:
+/// - Not a git repo, or `git` is not on PATH.
+/// - PLAN.md does not exist (no plan-based workflow).
+/// - Nothing was staged (phase already in_progress, content unchanged).
+/// - No remote tracking branch configured (local-only repos).
+fn commit_and_push_plan_status(
+    project_root: &std::path::Path,
+    phase_id: &str,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    let run_git = |args: &[&str]| -> Option<std::process::Output> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(project_root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .ok()
+    };
+
+    // Skip if not a git repo.
+    if run_git(&["rev-parse", "--is-inside-work-tree"]).map(|o| o.status.success()) != Some(true) {
+        return Ok(());
+    }
+
+    // Stage PLAN.md if it exists and is modified.
+    if project_root.join("PLAN.md").exists() {
+        if let Some(out) = run_git(&["add", "PLAN.md"]) {
+            if !out.status.success() {
+                anyhow::bail!(
+                    "Failed to stage PLAN.md for in_progress commit (phase {}).\n\
+                     Git error: {}",
+                    phase_id,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+    }
+
+    // Stage plan_history.jsonl if it exists (updated by mark_phase_in_source).
+    let history_path = project_root.join(".ta/plan_history.jsonl");
+    if history_path.exists() {
+        let _ = run_git(&["add", ".ta/plan_history.jsonl"]);
+    }
+
+    // Bail out early if nothing was staged.
+    let has_staged = run_git(&["diff", "--cached", "--name-only"])
+        .map(|o| !o.stdout.is_empty() && o.status.success())
+        .unwrap_or(false);
+    if !has_staged {
+        tracing::debug!(
+            phase = %phase_id,
+            "no staged changes for in_progress commit — already clean"
+        );
+        return Ok(());
+    }
+
+    // Commit with a clear, traceable message.
+    let commit_msg = format!("chore: mark phase {} in_progress (pre-staging)", phase_id);
+    match run_git(&["commit", "-m", &commit_msg]) {
+        Some(out) if out.status.success() => {
+            if !quiet {
+                println!("Plan: committed in_progress status for phase {}", phase_id);
+            }
+            tracing::info!(phase = %phase_id, "committed in_progress PLAN.md before staging");
+        }
+        Some(out) => {
+            anyhow::bail!(
+                "Failed to commit PLAN.md in_progress status before staging (phase {}).\n\
+                 The phase is marked in_progress on disk but the commit failed.\n\
+                 Fix the git state and retry, or roll back with:\n  \
+                 git reset HEAD~1   # undo the staged changes\n  \
+                 ta plan reset {}   # revert phase to pending\n\
+                 Git error: {}",
+                phase_id,
+                phase_id,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "Failed to run `git commit` for PLAN.md in_progress (phase {}).\n\
+                 Ensure git is installed and accessible on PATH.",
+                phase_id
+            );
+        }
+    }
+
+    // Push to the tracking remote. Skip gracefully if no upstream is configured.
+    let has_upstream = run_git(&[
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+    ])
+    .map(|o| o.status.success())
+    .unwrap_or(false);
+
+    if !has_upstream {
+        if !quiet {
+            println!(
+                "Plan: no remote tracking branch — skipping push for in_progress commit \
+                 (phase {})",
+                phase_id
+            );
+        }
+        tracing::info!(
+            phase = %phase_id,
+            "no upstream configured — skipping push of in_progress commit"
+        );
+        return Ok(());
+    }
+
+    match run_git(&["push"]) {
+        Some(out) if out.status.success() => {
+            if !quiet {
+                println!("Plan: pushed in_progress commit for phase {}", phase_id);
+            }
+            tracing::info!(phase = %phase_id, "pushed in_progress commit before staging");
+        }
+        Some(out) => {
+            anyhow::bail!(
+                "Failed to push in_progress commit for phase {}.\n\
+                 The local commit was created but could not be pushed — the run is aborted \
+                 to prevent a staging base that diverges from the remote.\n\
+                 Fix the push issue (check remote connectivity, branch protection, or \
+                 run `git pull --rebase` if the remote has new commits), then retry:\n  \
+                 ta run \"<same title>\" --phase {}\n\
+                 To roll back the local commit first:\n  \
+                 git reset HEAD~1\n  \
+                 ta plan reset {}\n\
+                 Git push error: {}",
+                phase_id,
+                phase_id,
+                phase_id,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "Failed to run `git push` for in_progress commit (phase {}).\n\
+                 Ensure git is installed and accessible on PATH.",
+                phase_id
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Silently skips when:
@@ -7859,5 +8102,87 @@ plan_pending_window = 7
         let dir = tempfile::tempdir().unwrap();
         // No git init — must not panic or commit.
         auto_commit_ta_jsonl(dir.path()); // must not panic
+    }
+
+    // ── commit_and_push_plan_status tests (v0.15.28.2) ────────────────────────
+
+    #[test]
+    fn commit_and_push_plan_status_commits_plan_md() {
+        let dir = tempfile::tempdir().unwrap();
+        init_test_git(dir.path());
+
+        // Write PLAN.md with in_progress status (simulates mark_phase_in_source).
+        std::fs::write(
+            dir.path().join("PLAN.md"),
+            "### v0.1.0\n<!-- status: in_progress -->\n",
+        )
+        .unwrap();
+
+        let before = git_log_count(dir.path());
+        commit_and_push_plan_status(dir.path(), "v0.1.0", true).unwrap();
+        let after = git_log_count(dir.path());
+
+        assert_eq!(after, before + 1, "should have committed PLAN.md");
+    }
+
+    #[test]
+    fn commit_and_push_plan_status_skips_when_nothing_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        init_test_git(dir.path());
+        // PLAN.md doesn't exist — nothing to commit.
+        let before = git_log_count(dir.path());
+        commit_and_push_plan_status(dir.path(), "v0.1.0", true).unwrap();
+        assert_eq!(
+            git_log_count(dir.path()),
+            before,
+            "no commit when PLAN.md absent"
+        );
+    }
+
+    #[test]
+    fn commit_and_push_plan_status_no_op_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        // No git repo — must succeed silently.
+        std::fs::write(dir.path().join("PLAN.md"), "### v0.1.0\n").unwrap();
+        commit_and_push_plan_status(dir.path(), "v0.1.0", true).unwrap();
+    }
+
+    #[test]
+    fn commit_and_push_plan_status_also_stages_plan_history() {
+        let dir = tempfile::tempdir().unwrap();
+        init_test_git(dir.path());
+
+        // Write both PLAN.md and plan_history.jsonl.
+        std::fs::write(
+            dir.path().join("PLAN.md"),
+            "### v0.1.0\n<!-- status: in_progress -->\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta/plan_history.jsonl"),
+            "{\"phase_id\":\"v0.1.0\",\"new_status\":\"in_progress\"}\n",
+        )
+        .unwrap();
+
+        commit_and_push_plan_status(dir.path(), "v0.1.0", true).unwrap();
+
+        // Both files should appear in the HEAD commit.
+        let out = std::process::Command::new("git")
+            .args(["show", "--name-only", "--format=", "HEAD"])
+            .current_dir(dir.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap();
+        let committed_files = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            committed_files.contains("PLAN.md"),
+            "PLAN.md should be in the commit"
+        );
+        assert!(
+            committed_files.contains("plan_history.jsonl"),
+            "plan_history.jsonl should be in the commit"
+        );
     }
 }

@@ -6455,7 +6455,20 @@ fn apply_package(
                                 // Fall through to normal overlay copy.
                             } else {
                                 let staging_content = std::fs::read_to_string(&staging_path).ok();
-                                let source_content = std::fs::read_to_string(&source_path).ok();
+                                // v0.15.28.2: Use the VCS HEAD version of PLAN.md as the
+                                // merge source rather than the on-disk working-tree copy.
+                                // Any doc commits pushed after staging was created are
+                                // included this way, giving the merge the true current state
+                                // and preventing stale-base corruption.
+                                // Falls back to on-disk if HEAD fetch is unavailable.
+                                let head_sha = ta_workspace::overlay::get_git_head_sha(&target_dir);
+                                let head_source_content =
+                                    ta_workspace::overlay::fetch_from_git_head(
+                                        &target_dir,
+                                        "PLAN.md",
+                                    );
+                                let source_content = head_source_content
+                                    .or_else(|| std::fs::read_to_string(&source_path).ok());
                                 if let (Some(staging_str), Some(source_str)) =
                                     (staging_content, source_content)
                                 {
@@ -6498,6 +6511,7 @@ fn apply_package(
                                         source_status_markers = source_marker_count,
                                         staging_status_markers = staging_marker_count,
                                         has_base = pkg.plan_md_base.is_some(),
+                                        head_sha = head_sha.as_deref().unwrap_or("none"),
                                         "PLAN.md 3-way merge diagnostic"
                                     );
 
@@ -6517,6 +6531,7 @@ fn apply_package(
                                                 goal_id = %goal.goal_run_id,
                                                 stored_sha = %stored_sha,
                                                 current_source_sha = %source_sha,
+                                                head_sha = head_sha.as_deref().unwrap_or("none"),
                                                 "PLAN.md staging base is stale — source has changed \
                                                  since goal creation; merge base may produce gaps"
                                             );

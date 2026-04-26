@@ -1146,6 +1146,91 @@ fn extract_path_from_conflict(description: &str) -> Option<String> {
     Some(after_file[..end].to_string())
 }
 
+// ── VCS HEAD fetch helpers (v0.15.28.2) ─────────────────────────
+
+/// Fetch the committed content of a file from the VCS HEAD at apply time.
+///
+/// Uses `git show HEAD:<relative_path>` from `source_dir`. This returns the
+/// version committed in HEAD, which may be newer than the on-disk working-tree
+/// copy when doc commits were pushed after the staging workspace was created.
+///
+/// Returns `None` when:
+/// - `source_dir` is not inside a git repository.
+/// - The file is not tracked in HEAD (new file or git unavailable).
+/// - The file content is not valid UTF-8.
+///
+/// Logs the HEAD SHA via `tracing::info` when a fetch succeeds, for
+/// traceability in apply-time diagnostics.
+pub fn fetch_from_git_head(source_dir: &std::path::Path, relative_path: &str) -> Option<String> {
+    // Walk up to find the git root.
+    let mut dir = Some(source_dir);
+    let git_root = loop {
+        match dir {
+            Some(d) if d.join(".git").exists() => break Some(d.to_path_buf()),
+            Some(d) => dir = d.parent(),
+            None => break None,
+        }
+    };
+
+    let root = git_root?;
+
+    // Compute the path relative to the git root.
+    let path_in_repo = std::path::Path::new(source_dir)
+        .strip_prefix(&root)
+        .ok()
+        .map(|rel| {
+            if rel.as_os_str().is_empty() {
+                relative_path.to_string()
+            } else {
+                format!("{}/{}", rel.to_string_lossy(), relative_path)
+            }
+        })
+        .unwrap_or_else(|| relative_path.to_string());
+
+    let out = std::process::Command::new("git")
+        .args(["show", &format!("HEAD:{}", path_in_repo)])
+        .current_dir(&root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+
+    let content = String::from_utf8(out.stdout).ok()?;
+
+    // Log the HEAD SHA for traceability in apply-time diagnostics.
+    if let Some(sha) = get_git_head_sha(source_dir) {
+        tracing::info!(
+            path = %relative_path,
+            head_sha = %sha,
+            "fetched {} from git HEAD for pre-merge rebase",
+            relative_path
+        );
+    }
+
+    Some(content)
+}
+
+/// Return the current git HEAD SHA for `project_root`, or `None` if git is
+/// unavailable or `project_root` is not inside a repository.
+pub fn get_git_head_sha(project_root: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project_root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
 // ── Staging mode resolution ─────────────────────────────────────
 
 /// Resolve the effective staging mode at workspace creation time.
@@ -2781,6 +2866,133 @@ mod tests {
             !paths.contains(&".ta-decisions.json"),
             "goal B diff must not include .ta-decisions.json from goal A, got: {:?}",
             paths
+        );
+    }
+
+    // ── v0.15.28.2: fetch_from_git_head and get_git_head_sha tests ───────────
+
+    /// Helper: init a bare-minimum git repo in `dir`, add and commit a file.
+    fn init_git_repo_with_file(dir: &std::path::Path, filename: &str, content: &str) {
+        use std::process::Command;
+
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_CEILING_DIRECTORIES")
+                .output()
+                .ok();
+        };
+
+        // Init (try --initial-branch first for newer git, fall back for older).
+        let ok = Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            git(&["init"]);
+        }
+
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+
+        fs::write(dir.join(filename), content).unwrap();
+        git(&["add", filename]);
+        git(&["commit", "-m", "initial"]);
+    }
+
+    #[test]
+    fn fetch_from_git_head_returns_committed_content() {
+        let repo = TempDir::new().unwrap();
+        let content = "# PLAN\nLine 1\nLine 2\n";
+        init_git_repo_with_file(repo.path(), "PLAN.md", content);
+
+        // Overwrite on-disk (uncommitted) — HEAD should still return the committed version.
+        fs::write(repo.path().join("PLAN.md"), "overwritten on disk").unwrap();
+
+        let result = fetch_from_git_head(repo.path(), "PLAN.md");
+        assert!(result.is_some(), "should fetch from HEAD");
+        assert_eq!(
+            result.unwrap(),
+            content,
+            "HEAD content should match the committed version, not the working-tree copy"
+        );
+    }
+
+    #[test]
+    fn fetch_from_git_head_returns_none_for_untracked_file() {
+        let repo = TempDir::new().unwrap();
+        // Init repo but don't add any files.
+        use std::process::Command;
+        let git_ok = Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(repo.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !git_ok {
+            Command::new("git")
+                .arg("init")
+                .current_dir(repo.path())
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .output()
+                .ok();
+        }
+
+        // File exists on disk but is not committed.
+        fs::write(repo.path().join("PLAN.md"), "not tracked").unwrap();
+
+        let result = fetch_from_git_head(repo.path(), "PLAN.md");
+        assert!(
+            result.is_none(),
+            "untracked file should return None from HEAD fetch"
+        );
+    }
+
+    #[test]
+    fn fetch_from_git_head_returns_none_outside_git_repo() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("PLAN.md"), "some content").unwrap();
+
+        let result = fetch_from_git_head(dir.path(), "PLAN.md");
+        assert!(result.is_none(), "non-git directory should return None");
+    }
+
+    #[test]
+    fn get_git_head_sha_returns_sha_in_repo() {
+        let repo = TempDir::new().unwrap();
+        init_git_repo_with_file(repo.path(), "README.md", "hello\n");
+
+        let sha = get_git_head_sha(repo.path());
+        assert!(sha.is_some(), "should return HEAD SHA in a git repo");
+        let sha = sha.unwrap();
+        assert_eq!(sha.len(), 40, "SHA-1 should be 40 hex chars, got: {}", sha);
+        assert!(
+            sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "SHA should be hex, got: {}",
+            sha
+        );
+    }
+
+    #[test]
+    fn get_git_head_sha_returns_none_outside_repo() {
+        let dir = TempDir::new().unwrap();
+        let sha = get_git_head_sha(dir.path());
+        assert!(
+            sha.is_none(),
+            "non-git directory should return None for SHA"
         );
     }
 }
