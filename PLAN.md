@@ -7224,7 +7224,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.29 — VCS Adapter Enforcement: Eliminate Direct Git Calls in TA Source
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: All VCS operations in TA's own source code that affect a project (staging copies, branch creation, commits, pushes, dirty-check, log reads) must go through `SourceAdapter` — not raw `Command::new("git")`. A constitution rule enforces this on all future agents working in this codebase.
 
