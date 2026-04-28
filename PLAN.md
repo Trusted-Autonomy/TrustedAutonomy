@@ -7286,7 +7286,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.29.1 — VCS Adapter Enforcement: Full Completion & Structural Fixes
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Complete VCS adapter enforcement to zero constitution violations. Fix the `release.rs` test-code gap, route remaining direct git calls in CLI commands, and resolve four architectural issues that v0.15.29 deferred: the `ta-submit`→`ta-goal` dependency cycle, `VcsHistoryReader` surface on `SourceAdapter`, pluggable `MergeTool` abstraction, and Perforce/SVN no-op implementations.
 
