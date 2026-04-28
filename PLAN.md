@@ -4976,63 +4976,63 @@ Background draft build loop:
   → watchdog: if .ta/heartbeats/<goal-id> mtime > 120s ago → kill, mark failed
   → on completion: write .ta/heartbeats/<goal-id>.done, emit DraftBuilt event
 The daemon event bus already has `draft_built` events (from v0.14.8.3). When background draft build completes, it writes a sentinel file `.ta/heartbeats/<goal-id>.done`. The daemon's file watcher picks this up and emits `EventKind::DraftBuilt { goal_id, draft_id }` on the event bus.
-
+### v0.15.29.1 — VCS Abstraction Layer Completion
 `ta shell` is already subscribed to events. When `DraftBuilt` fires, the shell prints inline:
-
+<!-- status: pending -->
 TA Studio already has an event SSE stream. When `DraftBuilt` fires, Studio shows a toast notification and updates the Goals tab — no page refresh required.
-
+**Goal**: Complete the VCS abstraction started in v0.15.29 by fixing the architectural issues that prevented full routing: invert the `ta-submit` → `ta-goal` dependency, add a `VcsHistoryReader` surface to `SourceAdapter`, abstract the merge algorithm out of the git layer, and implement the 8 new adapter methods for Perforce and SVN.
 The reviewer goal never marks `failed` because staging was absent — it marks `failed` only if the review itself produces no verdict. Remove item 9 from v0.15.19 (auto-closing reviewer goals) — fix the root cause instead.
-
-
+**Why**: v0.15.29 eliminated direct git calls in CLI code but left four structural gaps: (1) `ta-submit` depends on `ta-goal`, creating a cycle that prevents `ta-workspace` and `ta-goal` from ever importing `ta-submit`; (2) `fetch_from_git_head()` and `get_git_head_sha()` in `ta-workspace` are VCS history reads with no adapter path; (3) `git merge-file` in `three_way_merge()` uses git as a diff algorithm, not a VCS — it should be a pluggable `MergeTool`; (4) `PerforceAdapter` and `SvnAdapter` return no-ops for all 8 new methods added in v0.15.29.
+**Depends on**: v0.15.29 (new SourceAdapter methods, constitution rule)
 1. [x] **Heartbeat writer in background draft build** (`apps/ta-cli/src/commands/draft.rs`): In the `--apply-context-file` code path (background build), spawn a heartbeat thread that `touch`es `.ta/heartbeats/<goal-id>` every `heartbeat_interval_secs`. Stop the thread on build completion or error. Write `.ta/heartbeats/<goal-id>.done` on success, `.ta/heartbeats/<goal-id>.failed` on error.
-
+1. [ ] **Invert `ta-submit` / `ta-goal` dependency**: Extract `CommitContext` struct (`shortref: String`, `title: String`, `objective: String`, `plan_phase: Option<String>`) into `ta-goal` (or a new `ta-types` micro-crate). Change `SourceAdapter::prepare()`, `commit()`, `push()`, and `open_review()` to accept `&CommitContext` instead of `&GoalRun`. Remove `ta-goal` from `ta-submit`'s `[dependencies]`. Add a `From<&GoalRun> for CommitContext` conversion in `ta-cli` (the only place that ties them together). This breaks the cycle and allows `ta-workspace` and `ta-goal` to import `ta-submit` without circularity.
 2. [x] **Heartbeat-based watchdog** (`crates/ta-daemon/src/watchdog.rs`): Replace `finalize_timeout_secs` with `heartbeat_timeout_secs` (default 120) and `agent_start_timeout_secs` (default 60). For goals in `Finalizing` state with a background process: check `.ta/heartbeats/<goal-id>` mtime instead of wall-clock elapsed. If mtime > `heartbeat_timeout_secs` or `.failed` sentinel exists → mark goal `Failed`. Remove the 600s static check. Retain wall-clock for `Running` state (agent hasn't started writing heartbeats yet).
-
+2. [ ] **`VcsHistoryReader` surface on `SourceAdapter`**: Add two methods with default `None` implementations:
 3. [x] **`DraftBuilt` event with title** (`crates/ta-daemon/src/main.rs` or `crates/ta-events/src/`): File watcher already watches `.ta/store/`. Extend to watch `.ta/heartbeats/`. When `<goal-id>.done` appears, load the goal record to get `draft_id`, emit `EventKind::DraftBuilt { goal_id, draft_id, file_count }` on the event bus.
-
-
+   - `fn file_at_head(&self, repo_root: &Path, rel_path: &str) -> Option<Vec<u8>>` — Git: `git show HEAD:<rel_path>`, Perforce: `p4 print -q //...@head`, SVN: `svn cat --revision HEAD`.
+   - `fn head_rev_id(&self, repo_root: &Path) -> Option<String>` — Git: `git rev-parse HEAD`, Perforce: current CL number, SVN: revision number.
 4. [x] **Remove static exit CTA** (`apps/ta-cli/src/commands/run.rs`): Replace `"Agent exited. Draft build running in background (PID {pid}).\nRun \`ta draft list\` or \`ta status\` to check when the draft is ready."` with `"Agent exited. Building draft in background — you'll be notified when it's ready."`. The shell notification (item 4) delivers the actual result.
-
+   Implement in `GitAdapter`, `PerforceAdapter`, `SvnAdapter`. Update `fetch_from_git_head()` and `get_git_head_sha()` in `ta-workspace/src/overlay.rs` to accept an optional `&dyn SourceAdapter` and delegate to it when present, falling back to the current git-direct path when `None` (no adapter context available).
 5. [x] **Tests**: Heartbeat writer creates and updates `.ta/heartbeats/<goal-id>` during build. Watchdog marks goal failed when heartbeat mtime > timeout (no `.done` file). `DraftBuilt` event emitted when `.done` appears. Shell prints inline notification on `DraftBuilt` event. Reviewer proceeds without staging when `staging_required = false`. Reviewer `Failed` only on no-verdict, not on staging absence.
-
+3. [ ] **`MergeTool` abstraction in `ta-workspace`**: Define a `MergeTool` trait and a `MergeToolConfig` in `workflow.toml`:
 6. [x] **USAGE.md update**: Replace "Agent exited — check ta draft list" docs with "You'll be notified inline when the draft is ready." Document heartbeat config in `[timeouts]` section. Document reviewer resilience (staging not required).
-
+   ```toml
 #### Version: `0.15.7.1-alpha`
-
-
+   [merge]
+   default = "diff3"       # "diff3" | "agent" | "none"
 **Why**: On large workspaces (UE5 projects, Unity repos, large Node.js codebases), full-copy staging on Windows takes 5–30 seconds and duplicates gigabytes of files the agent never touches. ProjFS eliminates both costs — staging is instant and disk usage is proportional to agent activity, not workspace size.
-
+   [[merge.per_type]]
 - Auto-detection: check `Client-ProjFS` Windows optional feature at startup; fall back to `Smart` if not enabled
 ```toml
-
-
+   glob = "PLAN.md"
+   tool = "agent"
 7. [x] **`StagingStrategy::ProjFs` variant**: Added to `crates/ta-submit/src/config.rs` (`StagingStrategy::ProjFs`), `crates/ta-workspace/src/overlay.rs` (`OverlayStagingMode::ProjFs`), `crates/ta-workspace/src/copy_strategy.rs` (`CopyStrategy::Virtual`). Wired in `run.rs` and `goal.rs` (both match sites). Auto-selected on Windows when `Client-ProjFS` is enabled; falls back to `Smart` otherwise.
-
-
+   agent = "reviewer"
+   [[merge.per_type]]
 8. [x] **Installer integration**: `apps/ta-cli/wix/main.wxs` — optional `<Feature Id="ProjFS">` with descriptive title/description. Custom action `EnableClientProjFS` runs `Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart` on install when feature is selected.
-
+   glob = "*.lock"
 9. [x] **USAGE.md**: "Fast staging on Windows (ProjFS)" section added after the Copy-on-write staging paragraph — covers installation via installer or DISM, `strategy = "projfs"` config, fallback behavior, and how modified/created/deleted/unmodified files are handled.
-
+   tool = "none"           # always take ours for lock files
 ---
 ### v0.15.8.1 — Inline Draft Build for Interactive CLI
 <!-- status: done -->
 ```toml
-
+   ```
 **Why this phase exists**: The background build model (v0.15.6.2) was introduced to avoid the static watchdog timeout. That root cause is now fixed (v0.15.7.1 heartbeat watchdog). For interactive `ta run` invocations, blocking is strictly better:
 - The user is already waiting — the agent ran for minutes. 30 more seconds is invisible.
 - Inline build gives the user immediate next-step output without any follow-up command.
-
+   Built-in implementations: `Diff3MergeTool` (wraps `git merge-file` or the `diffy` crate for pure-Rust fallback), `AgentMergeTool` (calls a configured TA agent with base/ours/theirs as context), `NoneMergeTool` (always takes ours). `three_way_merge()` in `overlay.rs` accepts a `&dyn MergeTool` and dispatches to it. The default remains `Diff3MergeTool` so no behaviour change without config.
 **Background model stays for**: daemon-mediated runs (no TTY), `ta shell` (stays open to receive the event), headless CI invocations.
-
+4. [ ] **Implement 8 new `SourceAdapter` methods for `PerforceAdapter`**: `is_dirty` (`p4 diff -u` stderr count), `list_tracked_files` (`p4 have`), `head_sha` (current CL), `log_since` (`p4 changes`), `checkout_branch` (`p4 switch` stream), `create_tag` (`p4 label`), `tag_exists` (`p4 labels -e`), `push_tag` (no-op — labels are server-side). Use `self.p4_cmd()` pattern matching `git_cmd()` in `GitAdapter`.
 1. [x] **TTY detection** (`apps/ta-cli/src/commands/run.rs`): In `try_spawn_background_draft_build()`, check `std::io::stdout().is_terminal()`. If `true`, calls `build_draft_inline()` and returns `Some(BackgroundBuildHandle::Inline)`. Added `BackgroundBuildHandle` enum with `Inline` and `Background(u32)` variants.
-
+5. [ ] **Implement 8 new `SourceAdapter` methods for `SvnAdapter`**: `is_dirty` (`svn status --quiet`), `list_tracked_files` (`svn list -R`), `head_sha` (`svn info --show-item last-changed-revision`), `log_since` (`svn log -r <rev>:HEAD`), `checkout_branch` (`svn switch`), `create_tag` (`svn copy ... tags/<tag>`), `tag_exists` (`svn list` on tags/), `push_tag` (no-op — SVN copy is atomic). Use `self.svn_cmd()`.
 2. [x] **`build_draft_inline()`** (`apps/ta-cli/src/commands/draft.rs`): Builds draft synchronously with spinner thread. Attaches verification warnings, validation log, supervisor review. Prints `✓ Draft ready: "<title>" [<id>]` on completion. Returns `Err` on failure.
-
+6. [ ] **`git_committer()` in `velocity.rs`**: Replace the `git config user.name` call with `std::env::var("GIT_AUTHOR_NAME").ok()` (already set in the agent environment by `GitAdapter::stage_env()`). Fall back to `std::env::var("USER").or(std::env::var("USERNAME"))` for non-agent contexts. Removes the last direct git call from `ta-goal`.
 3. [x] **Tests**: 3 tests in `draft.rs` (`build_draft_inline_succeeds_and_creates_draft`, `build_draft_inline_attaches_verification_warnings`, `build_draft_inline_fails_gracefully_on_bad_goal_id`). 2 tests in `run.rs` (`background_build_handle_inline_variant_is_not_background`, `try_spawn_background_draft_build_returns_none_for_non_tty_with_no_project`).
-
+7. [ ] **Update `ExternalVcsAdapter` plugin protocol**: Add `FileAtHead { repo_root, rel_path }` and `HeadRevId { repo_root }` message types to `vcs_plugin_protocol.rs`. External plugins that declare the `history_read` capability receive these messages and return content/rev-id. Plugins that don't declare it get the default `None`.
 4. [x] **USAGE.md**: Added "After the agent exits — inline vs background build" section with example output. Updated heartbeat section to clarify background-only context.
-
-
+#### Version: `0.15.29-alpha.1`
+---
 - Built-in plugins: `ta-messaging-gmail`, `ta-messaging-outlook`, `ta-messaging-imap` (in `plugins/messaging/`)
 - Plugin discovery: `~/.config/ta/plugins/messaging/`, `.ta/plugins/messaging/`, `$PATH` (prefix `ta-messaging-`)
 - Credentials stored in OS keychain via `keyring` crate — plugin calls `ta adapter credentials get <key>` to retrieve; `ta adapter credentials set <key>` to store. Never written to disk in plaintext.
@@ -7271,19 +7271,19 @@ pub enum NoteDelivery {
 
 **Depends on**: v0.12.0.2 (VCS plugin architecture)
 
-1. [ ] **Audit and fix `ta-workspace/src/overlay.rs`**: ~8 direct git calls for `ls-files`, `log`, dirty-check, and staging-root commit. Route `ls-files` / dirty-check through `SourceAdapter::is_dirty()` / `SourceAdapter::list_tracked_files()`. Add those methods to the trait with git and no-op implementations.
+1. [x] **Audit and fix `ta-workspace/src/overlay.rs`**: ~8 direct git calls for `ls-files`, `log`, dirty-check, and staging-root commit. Route `ls-files` / dirty-check through `SourceAdapter::is_dirty()` / `SourceAdapter::list_tracked_files()`. Add those methods to the trait with git and no-op implementations.
 
-2. [ ] **Audit and fix `ta-workspace/src/partitioning.rs`**: 2 direct git calls (ls-files, rev-parse). Route through adapter or new `GitReadHelper` for read-only queries where no adapter instance is available (partitioning is workspace-level, pre-adapter selection).
+2. [x] **Audit and fix `ta-workspace/src/partitioning.rs`**: 2 direct git calls (ls-files, rev-parse). Route through adapter or new `GitReadHelper` for read-only queries where no adapter instance is available (partitioning is workspace-level, pre-adapter selection).
 
-3. [ ] **Audit and fix `ta-goal/src/velocity.rs`**: 1 direct git call (rev-parse HEAD for commit SHA). Add `SourceAdapter::head_sha() -> Option<String>` and route through it.
+3. [x] **Audit and fix `ta-goal/src/velocity.rs`**: 1 direct git call (rev-parse HEAD for commit SHA). Add `SourceAdapter::head_sha() -> Option<String>` and route through it.
 
-4. [ ] **Audit and fix `apps/ta-cli/src/commands/governed_workflow.rs`**: 2 direct git calls (checkout, log). These are in the PR-sync path — route through the adapter's `sync()` and `log_since()` methods. Add `log_since(ref: &str) -> Vec<CommitSummary>` to the trait.
+4. [x] **Audit and fix `apps/ta-cli/src/commands/governed_workflow.rs`**: 2 direct git calls (checkout, log). These are in the PR-sync path — route through the adapter's `sync()` and `log_since()` methods. Add `log_since(ref: &str) -> Vec<CommitSummary>` to the trait.
 
-5. [ ] **Audit and fix `apps/ta-cli/src/commands/release.rs`**: 15+ direct git calls (status, log, tag, push, add, commit). The release pipeline is the largest offender. Add `SourceAdapter::create_tag()`, `tag_exists()`, `push_tag()` and route remaining calls through them. git-specific helpers that are release-pipeline-only and genuinely have no multi-VCS meaning may stay in a `release_git.rs` helper with a `#[cfg(feature = "git-release")]` guard and a TODO comment.
+5. [x] **Audit and fix `apps/ta-cli/src/commands/release.rs`**: 15+ direct git calls (status, log, tag, push, add, commit). The release pipeline is the largest offender. Add `SourceAdapter::create_tag()`, `tag_exists()`, `push_tag()` and route remaining calls through them. git-specific helpers that are release-pipeline-only and genuinely have no multi-VCS meaning may stay in a `release_git.rs` helper with a `#[cfg(feature = "git-release")]` guard and a TODO comment.
 
-6. [ ] **Audit and fix `apps/ta-cli/src/commands/onboard.rs`**: 1 direct git call (status). Route through `SourceAdapter::is_dirty()`.
+6. [x] **Audit and fix `apps/ta-cli/src/commands/onboard.rs`**: 1 direct git call (status). Route through `SourceAdapter::is_dirty()`.
 
-7. [ ] **Constitution rule**: Add `[rules.vcs-adapter-enforcement]` to `.ta/constitution.toml` with a pattern scan for `Command::new("git")` outside of `crates/ta-submit/src/git.rs` and `build.rs`. Severity `high`. All future agent work in this codebase must route VCS operations through `SourceAdapter`.
+7. [x] **Constitution rule**: Add `[rules.vcs-adapter-enforcement]` to `.ta/constitution.toml` with a pattern scan for `Command::new("git")` outside of `crates/ta-submit/src/git.rs` and `build.rs`. Severity `high`. All future agent work in this codebase must route VCS operations through `SourceAdapter`.
 
 #### Version: `0.15.29-alpha`
 
