@@ -39,6 +39,7 @@ pub mod pr;
 pub mod pty_capture;
 pub mod publish;
 pub mod release;
+pub mod release_git;
 pub mod run;
 pub mod runbook;
 pub mod serve;

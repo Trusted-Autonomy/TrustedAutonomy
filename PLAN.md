@@ -7263,7 +7263,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.29 — VCS Adapter Enforcement: Eliminate Direct Git Calls in TA Source
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: All VCS operations in TA's own source code that affect a project (staging copies, branch creation, commits, pushes, dirty-check, log reads) must go through `SourceAdapter` — not raw `Command::new("git")`. A constitution rule enforces this on all future agents working in this codebase.
 
@@ -7855,3 +7855,42 @@ Key capabilities:
 
 
 - **Distribution**: Published as `ta-mcp-omniverse` + a companion Omniverse Extension installable via the Omniverse Extension Manager
+### v0.15.29.1 — VCS Abstraction Layer Completion
+<!-- status: pending -->
+
+**Goal**: Complete the VCS abstraction started in v0.15.29 by fixing the architectural issues that prevented full routing: invert the `ta-submit` → `ta-goal` dependency, add a `VcsHistoryReader` surface to `SourceAdapter`, abstract the merge algorithm out of the git layer, and implement the 8 new adapter methods for Perforce and SVN.
+
+**Why**: v0.15.29 eliminated direct git calls in CLI code but left four structural gaps: (1) `ta-submit` depends on `ta-goal`, creating a cycle that prevents `ta-workspace` and `ta-goal` from ever importing `ta-submit`; (2) `fetch_from_git_head()` and `get_git_head_sha()` in `ta-workspace` are VCS history reads with no adapter path; (3) `git merge-file` in `three_way_merge()` uses git as a diff algorithm, not a VCS — it should be a pluggable `MergeTool`; (4) `PerforceAdapter` and `SvnAdapter` return no-ops for all 8 new methods added in v0.15.29.
+
+**Depends on**: v0.15.29 (new SourceAdapter methods, constitution rule)
+
+1. [ ] **Invert `ta-submit` / `ta-goal` dependency**: Extract `CommitContext` struct (`shortref: String`, `title: String`, `objective: String`, `plan_phase: Option<String>`) into `ta-goal` (or a new `ta-types` micro-crate). Change `SourceAdapter::prepare()`, `commit()`, `push()`, and `open_review()` to accept `&CommitContext` instead of `&GoalRun`. Remove `ta-goal` from `ta-submit`'s `[dependencies]`. Add a `From<&GoalRun> for CommitContext` conversion in `ta-cli` (the only place that ties them together). This breaks the cycle and allows `ta-workspace` and `ta-goal` to import `ta-submit` without circularity.
+
+2. [ ] **`VcsHistoryReader` surface on `SourceAdapter`**: Add two methods with default `None` implementations:
+   - `fn file_at_head(&self, repo_root: &Path, rel_path: &str) -> Option<Vec<u8>>` — Git: `git show HEAD:<rel_path>`, Perforce: `p4 print -q //...@head`, SVN: `svn cat --revision HEAD`.
+   - `fn head_rev_id(&self, repo_root: &Path) -> Option<String>` — Git: `git rev-parse HEAD`, Perforce: current CL number, SVN: revision number.
+   Implement in `GitAdapter`, `PerforceAdapter`, `SvnAdapter`. Update `fetch_from_git_head()` and `get_git_head_sha()` in `ta-workspace/src/overlay.rs` to accept an optional `&dyn SourceAdapter` and delegate to it when present, falling back to the current git-direct path when `None` (no adapter context available).
+
+3. [ ] **`MergeTool` abstraction in `ta-workspace`**: Define a `MergeTool` trait and a `MergeToolConfig` in `workflow.toml`:
+   ```toml
+   [merge]
+   default = "diff3"       # "diff3" | "agent" | "none"
+   [[merge.per_type]]
+   glob = "PLAN.md"
+   tool = "agent"
+   agent = "reviewer"
+   [[merge.per_type]]
+   glob = "*.lock"
+   tool = "none"           # always take ours for lock files
+   ```
+   Built-in implementations: `Diff3MergeTool` (wraps `git merge-file` or the `diffy` crate for pure-Rust fallback), `AgentMergeTool` (calls a configured TA agent with base/ours/theirs as context), `NoneMergeTool` (always takes ours). `three_way_merge()` in `overlay.rs` accepts a `&dyn MergeTool` and dispatches to it. The default remains `Diff3MergeTool` so no behaviour change without config.
+
+4. [ ] **Implement 8 new `SourceAdapter` methods for `PerforceAdapter`**: `is_dirty` (`p4 diff -u` stderr count), `list_tracked_files` (`p4 have`), `head_sha` (current CL), `log_since` (`p4 changes`), `checkout_branch` (`p4 switch` stream), `create_tag` (`p4 label`), `tag_exists` (`p4 labels -e`), `push_tag` (no-op — labels are server-side). Use `self.p4_cmd()` pattern matching `git_cmd()` in `GitAdapter`.
+
+5. [ ] **Implement 8 new `SourceAdapter` methods for `SvnAdapter`**: `is_dirty` (`svn status --quiet`), `list_tracked_files` (`svn list -R`), `head_sha` (`svn info --show-item last-changed-revision`), `log_since` (`svn log -r <rev>:HEAD`), `checkout_branch` (`svn switch`), `create_tag` (`svn copy ... tags/<tag>`), `tag_exists` (`svn list` on tags/), `push_tag` (no-op — SVN copy is atomic). Use `self.svn_cmd()`.
+
+6. [ ] **`git_committer()` in `velocity.rs`**: Replace the `git config user.name` call with `std::env::var("GIT_AUTHOR_NAME").ok()` (already set in the agent environment by `GitAdapter::stage_env()`). Fall back to `std::env::var("USER").or(std::env::var("USERNAME"))` for non-agent contexts. Removes the last direct git call from `ta-goal`.
+
+7. [ ] **Update `ExternalVcsAdapter` plugin protocol**: Add `FileAtHead { repo_root, rel_path }` and `HeadRevId { repo_root }` message types to `vcs_plugin_protocol.rs`. External plugins that declare the `history_read` capability receive these messages and return content/rev-id. Plugins that don't declare it get the default `None`.
+
+#### Version: `0.15.29-alpha.1`

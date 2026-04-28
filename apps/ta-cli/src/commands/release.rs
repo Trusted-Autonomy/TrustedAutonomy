@@ -15,6 +15,8 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use ta_mcp_gateway::GatewayConfig;
 
+use crate::commands::release_git;
+
 // ── CLI definition ──────────────────────────────────────────────
 
 #[derive(Subcommand, Debug)]
@@ -593,11 +595,7 @@ fn record_release(project_root: &Path, version: &str) -> anyhow::Result<()> {
     let tag = format!("v{}", version);
 
     // Capture HEAD commit SHA.
-    let sha_out = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(project_root)
-        .output()?;
-    let commit = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+    let commit = release_git::git_head_sha(project_root).unwrap_or_default();
 
     // ISO 8601 timestamp (UTC).
     let released_at = {
@@ -678,62 +676,21 @@ fn collect_commits_since_tag(
     project_root: &Path,
     from_tag: Option<&str>,
 ) -> anyhow::Result<(String, Option<String>)> {
-    // Resolve the base tag: use the explicit override if given, otherwise ask git.
-    let last_tag = if let Some(tag) = from_tag {
-        // Validate the tag exists so we fail fast with a clear error.
-        let check = Command::new("git")
-            .args(["rev-parse", "--verify", tag])
-            .current_dir(project_root)
-            .output();
-        match check {
-            Ok(out) if out.status.success() => Some(tag.to_string()),
-            _ => anyhow::bail!(
-                "Tag '{}' not found in this repository.\n\
-                 Run `git tag` to list available tags.",
-                tag
-            ),
-        }
+    // Resolution order (highest priority first):
+    //   1. `from_tag` — explicit override, validated via git_verify_tag
+    //   2. `.ta/release-history.json` — tag from the last successful pipeline run
+    //   3. `git describe --tags --abbrev=0` — most recent git tag (fallback, in git_log_since_tag)
+    let resolved_tag: Option<String> = if let Some(tag) = from_tag {
+        release_git::git_verify_tag(project_root, tag)?;
+        Some(tag.to_string())
     } else {
         // Try the release history file first — most precise source of truth.
         let history = load_release_history(project_root);
-        if let Some(last) = history.last() {
-            Some(last.tag.clone())
-        } else {
-            // Fall back to git describe.
-            let out = Command::new("git")
-                .args(["describe", "--tags", "--abbrev=0"])
-                .current_dir(project_root)
-                .output();
-            match out {
-                Ok(o) if o.status.success() => {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                }
-                _ => None,
-            }
-        }
+        history.last().map(|r| r.tag.clone())
+        // If history is empty, git_log_since_tag will use git describe
     };
 
-    let log_args = match &last_tag {
-        Some(tag) => vec![
-            "log".to_string(),
-            format!("{}..HEAD", tag),
-            "--pretty=format:%s".to_string(),
-            "--no-merges".to_string(),
-        ],
-        None => vec![
-            "log".to_string(),
-            "--pretty=format:%s".to_string(),
-            "--no-merges".to_string(),
-        ],
-    };
-
-    let output = Command::new("git")
-        .args(&log_args)
-        .current_dir(project_root)
-        .output()?;
-
-    let commits = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok((commits, last_tag))
+    release_git::git_log_since_tag(project_root, resolved_tag.as_deref())
 }
 
 /// Backwards-compatible wrapper used by non-pipeline code paths.
@@ -1557,13 +1514,7 @@ fn run_constitution_check_step(
 fn execute_record_release_history_step(project_root: &Path, version: &str) -> anyhow::Result<()> {
     record_release(project_root, version)?;
     // Stage the file so the next git commit --amend picks it up.
-    let status = Command::new("git")
-        .args(["add", ".ta/release-history.json"])
-        .current_dir(project_root)
-        .status()?;
-    if !status.success() {
-        eprintln!("Warning: could not stage release-history.json for commit");
-    }
+    release_git::git_add(project_root, ".ta/release-history.json")?;
     Ok(())
 }
 
@@ -2062,36 +2013,12 @@ struct ReleaseEnvironment {
 impl ReleaseEnvironment {
     /// Probe the real environment from a project root.
     fn from_project(root: &Path) -> Self {
-        let git_clean = Command::new("git")
-            .args(["diff", "--quiet"])
-            .current_dir(root)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        let git_staged_clean = Command::new("git")
-            .args(["diff", "--cached", "--quiet"])
-            .current_dir(root)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        let existing_tags = Command::new("git")
-            .args(["tag", "-l"])
-            .current_dir(root)
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-
+        let working_tree_clean = !release_git::git_is_dirty(root);
+        let existing_tags = release_git::git_tags(root);
         let commits_since_tag = collect_commits_since_last_tag(root).map_err(|e| e.to_string());
 
         Self {
-            working_tree_clean: git_clean && git_staged_clean,
+            working_tree_clean,
             existing_tags,
             dev_script_exists: root.join("dev").exists(),
             commits_since_tag,
@@ -2491,11 +2418,7 @@ fn dispatch_release(
         r
     } else {
         // Try to parse from `git remote get-url origin`.
-        let out = Command::new("git")
-            .args(["remote", "get-url", "origin"])
-            .output()
-            .map_err(|e| anyhow::anyhow!("Cannot run git: {}", e))?;
-        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let url = release_git::git_remote_url(&config.workspace_root, "origin")?;
         // Parse github.com/owner/repo or git@github.com:owner/repo
         url.split("github.com")
             .nth(1)
@@ -2559,35 +2482,29 @@ fn dispatch_release(
                         println!("  Bumped version to {}", tag_semver);
 
                         // Commit the bump.
-                        let add_status = Command::new("git")
-                            .args(["add", "Cargo.toml", "CLAUDE.md"])
-                            .current_dir(&config.workspace_root)
-                            .status();
-                        let commit_status = Command::new("git")
-                            .args([
-                                "commit",
-                                "-m",
+                        let add_result = release_git::git_add(&config.workspace_root, "Cargo.toml")
+                            .and_then(|_| {
+                                release_git::git_add(&config.workspace_root, "CLAUDE.md")
+                            });
+                        let commit_result = add_result.and_then(|_| {
+                            release_git::git_commit(
+                                &config.workspace_root,
                                 &format!(
                                     "chore: bump version to {} for release {}",
                                     tag_semver, tag
                                 ),
-                            ])
-                            .current_dir(&config.workspace_root)
-                            .status();
-                        match (add_status, commit_status) {
-                            (Ok(a), Ok(c)) if a.success() && c.success() => {
+                            )
+                        });
+                        match commit_result {
+                            Ok(()) => {
                                 println!("  Committed version bump.");
                                 // Push.
-                                let push_status = Command::new("git")
-                                    .args(["push"])
-                                    .current_dir(&config.workspace_root)
-                                    .status();
-                                match push_status {
-                                    Ok(s) if s.success() => println!("  Pushed to remote."),
-                                    _ => println!("  Warning: push failed — commit is local only. Push manually before dispatching."),
+                                match release_git::git_push(&config.workspace_root, "origin", &[]) {
+                                    Ok(()) => println!("  Pushed to remote."),
+                                    Err(_) => println!("  Warning: push failed — commit is local only. Push manually before dispatching."),
                                 }
                             }
-                            _ => {
+                            Err(_) => {
                                 println!(
                                     "  Warning: version was bumped in files but git commit failed. \
                                      Stage and commit manually before dispatching."

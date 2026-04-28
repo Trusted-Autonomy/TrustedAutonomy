@@ -340,6 +340,59 @@ pub trait SourceAdapter: Send + Sync {
     ) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())
     }
+
+    /// Check if the working directory has uncommitted changes.
+    /// Default: false (no-op for non-VCS adapters).
+    fn is_dirty(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// List all tracked files in the working directory.
+    /// Default: empty (no-op for non-VCS adapters).
+    fn list_tracked_files(&self) -> Result<Vec<std::path::PathBuf>> {
+        Ok(vec![])
+    }
+
+    /// Get the current HEAD commit SHA.
+    /// Default: None (no-op for non-VCS adapters).
+    fn head_sha(&self) -> Option<String> {
+        None
+    }
+
+    /// Get commits since a ref (e.g., a tag). Empty string means all commits.
+    /// Default: empty (no-op for non-VCS adapters).
+    fn log_since(&self, ref_: &str) -> Result<Vec<CommitSummary>> {
+        let _ = ref_;
+        Ok(vec![])
+    }
+
+    /// Checkout a branch. Non-fatal: returns Ok(()) even if branch doesn't exist.
+    /// Default: no-op.
+    fn checkout_branch(&self, branch: &str) -> Result<()> {
+        let _ = branch;
+        Ok(())
+    }
+
+    /// Create a VCS tag. Git: `git tag -a <tag> -m <message>`.
+    /// Default: no-op.
+    fn create_tag(&self, tag: &str, message: &str) -> Result<()> {
+        let _ = (tag, message);
+        Ok(())
+    }
+
+    /// Check whether a tag already exists.
+    /// Default: false.
+    fn tag_exists(&self, tag: &str) -> Result<bool> {
+        let _ = tag;
+        Ok(false)
+    }
+
+    /// Push a tag to the remote.
+    /// Default: no-op.
+    fn push_tag(&self, tag: &str) -> Result<()> {
+        let _ = tag;
+        Ok(())
+    }
 }
 
 /// Result of merging a review (PR, shelved CL, etc.) into the target branch.
@@ -363,6 +416,13 @@ pub struct ReviewStatus {
     pub state: String,
     /// Whether CI checks are passing.
     pub checks_passing: Option<bool>,
+}
+
+/// Commit summary for log_since results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitSummary {
+    pub sha: String,
+    pub subject: String,
 }
 
 /// Backward-compatible alias: `SubmitAdapter` is the old name for `SourceAdapter`.

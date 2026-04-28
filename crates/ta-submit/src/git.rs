@@ -6,8 +6,8 @@ use ta_changeset::DraftPackage;
 use ta_goal::GoalRun;
 
 use crate::adapter::{
-    CommitResult, MergeResult, PushResult, Result, ReviewResult, ReviewStatus, SavedVcsState,
-    SourceAdapter, SubmitError, SyncResult,
+    CommitResult, CommitSummary, MergeResult, PushResult, Result, ReviewResult, ReviewStatus,
+    SavedVcsState, SourceAdapter, SubmitError, SyncResult,
 };
 use crate::config::SubmitConfig;
 use crate::config::SyncConfig;
@@ -964,6 +964,76 @@ impl SourceAdapter for GitAdapter {
         } else {
             Ok(format!("{}-dirty", hash))
         }
+    }
+
+    fn is_dirty(&self) -> Result<bool> {
+        // Check both staged and unstaged changes.
+        let status = self.git_cmd(&["status", "--porcelain"])?;
+        Ok(!status.trim().is_empty())
+    }
+
+    fn list_tracked_files(&self) -> Result<Vec<std::path::PathBuf>> {
+        let output = self.git_cmd(&["ls-files"])?;
+        Ok(output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| self.work_dir.join(l))
+            .collect())
+    }
+
+    fn head_sha(&self) -> Option<String> {
+        self.git_cmd(&["rev-parse", "HEAD"])
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    fn log_since(&self, ref_: &str) -> Result<Vec<CommitSummary>> {
+        let range = if ref_.is_empty() {
+            "HEAD".to_string()
+        } else {
+            format!("{}..HEAD", ref_)
+        };
+        let output = self.git_cmd(&["log", &range, "--pretty=format:%H %s", "--no-merges"])?;
+        let entries = output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| {
+                let (sha, subject) = l.split_once(' ')?;
+                Some(CommitSummary {
+                    sha: sha.to_string(),
+                    subject: subject.to_string(),
+                })
+            })
+            .collect();
+        Ok(entries)
+    }
+
+    fn checkout_branch(&self, branch: &str) -> Result<()> {
+        match self.git_cmd(&["checkout", branch]) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    branch = %branch,
+                    error = %e,
+                    "GitAdapter: checkout_branch failed — continuing"
+                );
+                Ok(()) // Non-fatal: callers handle the result of sync_upstream
+            }
+        }
+    }
+
+    fn create_tag(&self, tag: &str, message: &str) -> Result<()> {
+        self.git_cmd(&["tag", "-a", tag, "-m", message]).map(|_| ())
+    }
+
+    fn tag_exists(&self, tag: &str) -> Result<bool> {
+        let output = self.git_cmd(&["tag", "-l", tag]).unwrap_or_default();
+        Ok(!output.trim().is_empty())
+    }
+
+    fn push_tag(&self, tag: &str) -> Result<()> {
+        let remote = &self.sync_config.remote;
+        self.git_cmd(&["push", remote, tag]).map(|_| ())
     }
 
     fn protected_submit_targets(&self) -> Vec<String> {

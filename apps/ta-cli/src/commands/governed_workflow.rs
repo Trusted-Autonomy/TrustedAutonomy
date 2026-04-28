@@ -2385,46 +2385,26 @@ fn stage_static_analysis(
 
 /// VCS sync helper: pull the latest changes after a PR merge (v0.15.14).
 ///
-/// Loads the workflow VCS config and runs the appropriate sync command.
-/// For git adapters: first checks out main (in case the apply flow left us on a feature
-/// branch), then runs `git pull --rebase origin main`. Errors are non-fatal:
-/// the caller prints a warning and suggests a manual sync.
+/// Loads the workflow VCS config and runs the appropriate sync command via the
+/// SourceAdapter. This routes through the adapter layer instead of calling git
+/// directly, enabling non-git VCS support (v0.15.29).
 fn do_vcs_sync(workspace_root: &Path) -> anyhow::Result<()> {
     let config_path = workspace_root.join(".ta").join("workflow.toml");
     let wf = ta_submit::WorkflowConfig::load_or_default(&config_path);
+    let adapter = ta_submit::select_adapter_with_sync(workspace_root, &wf.submit, &wf.source.sync);
 
-    // For git adapter (the common case and default).
-    if wf.submit.adapter == "git" || wf.submit.adapter.is_empty() {
-        // Ensure we are on main before pulling (the apply flow leaves us on a
-        // feature branch after the commit; pr_sync is the right place to return).
-        let checkout = std::process::Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(workspace_root)
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to invoke git checkout main: {}", e))?;
-        if !checkout.status.success() {
-            // Non-fatal: warn and fall through to pull attempt.
-            tracing::warn!(
-                "git checkout main failed (exit {}) — attempting pull anyway:\n{}",
-                checkout.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&checkout.stderr)
-            );
-        }
+    // Ensure we are on the sync target branch before pulling.
+    // Non-fatal: adapter.checkout_branch returns Ok even on failure, logs a warning.
+    let _ = adapter.checkout_branch(&wf.source.sync.branch);
 
-        let output = std::process::Command::new("git")
-            .args(["pull", "--rebase", "origin", "main"])
-            .current_dir(workspace_root)
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to invoke git pull: {}", e))?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "git pull --rebase origin main failed (exit {}):\n{}",
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-    // Other adapters: no-op for now (they manage their own sync).
+    adapter
+        .sync_upstream()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "VCS sync failed — check your network connection and try `git pull --rebase` manually: {}",
+                e
+            )
+        })?;
     Ok(())
 }
 
