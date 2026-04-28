@@ -4976,30 +4976,27 @@ Background draft build loop:
   → watchdog: if .ta/heartbeats/<goal-id> mtime > 120s ago → kill, mark failed
   → on completion: write .ta/heartbeats/<goal-id>.done, emit DraftBuilt event
 The daemon event bus already has `draft_built` events (from v0.14.8.3). When background draft build completes, it writes a sentinel file `.ta/heartbeats/<goal-id>.done`. The daemon's file watcher picks this up and emits `EventKind::DraftBuilt { goal_id, draft_id }` on the event bus.
-### v0.15.29.1 — VCS Abstraction Layer Completion
+
 `ta shell` is already subscribed to events. When `DraftBuilt` fires, the shell prints inline:
-<!-- status: pending -->
+
 TA Studio already has an event SSE stream. When `DraftBuilt` fires, Studio shows a toast notification and updates the Goals tab — no page refresh required.
-**Goal**: Complete the VCS abstraction started in v0.15.29 by fixing the architectural issues that prevented full routing: invert the `ta-submit` → `ta-goal` dependency, add a `VcsHistoryReader` surface to `SourceAdapter`, abstract the merge algorithm out of the git layer, and implement the 8 new adapter methods for Perforce and SVN.
+
 The reviewer goal never marks `failed` because staging was absent — it marks `failed` only if the review itself produces no verdict. Remove item 9 from v0.15.19 (auto-closing reviewer goals) — fix the root cause instead.
-**Why**: v0.15.29 eliminated direct git calls in CLI code but left four structural gaps: (1) `ta-submit` depends on `ta-goal`, creating a cycle that prevents `ta-workspace` and `ta-goal` from ever importing `ta-submit`; (2) `fetch_from_git_head()` and `get_git_head_sha()` in `ta-workspace` are VCS history reads with no adapter path; (3) `git merge-file` in `three_way_merge()` uses git as a diff algorithm, not a VCS — it should be a pluggable `MergeTool`; (4) `PerforceAdapter` and `SvnAdapter` return no-ops for all 8 new methods added in v0.15.29.
-**Depends on**: v0.15.29 (new SourceAdapter methods, constitution rule)
+
+
 1. [x] **Heartbeat writer in background draft build** (`apps/ta-cli/src/commands/draft.rs`): In the `--apply-context-file` code path (background build), spawn a heartbeat thread that `touch`es `.ta/heartbeats/<goal-id>` every `heartbeat_interval_secs`. Stop the thread on build completion or error. Write `.ta/heartbeats/<goal-id>.done` on success, `.ta/heartbeats/<goal-id>.failed` on error.
-1. [ ] **Invert `ta-submit` / `ta-goal` dependency**: Extract `CommitContext` struct (`shortref: String`, `title: String`, `objective: String`, `plan_phase: Option<String>`) into `ta-goal` (or a new `ta-types` micro-crate). Change `SourceAdapter::prepare()`, `commit()`, `push()`, and `open_review()` to accept `&CommitContext` instead of `&GoalRun`. Remove `ta-goal` from `ta-submit`'s `[dependencies]`. Add a `From<&GoalRun> for CommitContext` conversion in `ta-cli` (the only place that ties them together). This breaks the cycle and allows `ta-workspace` and `ta-goal` to import `ta-submit` without circularity.
+
 2. [x] **Heartbeat-based watchdog** (`crates/ta-daemon/src/watchdog.rs`): Replace `finalize_timeout_secs` with `heartbeat_timeout_secs` (default 120) and `agent_start_timeout_secs` (default 60). For goals in `Finalizing` state with a background process: check `.ta/heartbeats/<goal-id>` mtime instead of wall-clock elapsed. If mtime > `heartbeat_timeout_secs` or `.failed` sentinel exists → mark goal `Failed`. Remove the 600s static check. Retain wall-clock for `Running` state (agent hasn't started writing heartbeats yet).
-2. [ ] **`VcsHistoryReader` surface on `SourceAdapter`**: Add two methods with default `None` implementations:
+
 3. [x] **`DraftBuilt` event with title** (`crates/ta-daemon/src/main.rs` or `crates/ta-events/src/`): File watcher already watches `.ta/store/`. Extend to watch `.ta/heartbeats/`. When `<goal-id>.done` appears, load the goal record to get `draft_id`, emit `EventKind::DraftBuilt { goal_id, draft_id, file_count }` on the event bus.
-   - `fn file_at_head(&self, repo_root: &Path, rel_path: &str) -> Option<Vec<u8>>` — Git: `git show HEAD:<rel_path>`, Perforce: `p4 print -q //...@head`, SVN: `svn cat --revision HEAD`.
-   - `fn head_rev_id(&self, repo_root: &Path) -> Option<String>` — Git: `git rev-parse HEAD`, Perforce: current CL number, SVN: revision number.
+
 4. [x] **Remove static exit CTA** (`apps/ta-cli/src/commands/run.rs`): Replace `"Agent exited. Draft build running in background (PID {pid}).\nRun \`ta draft list\` or \`ta status\` to check when the draft is ready."` with `"Agent exited. Building draft in background — you'll be notified when it's ready."`. The shell notification (item 4) delivers the actual result.
-   Implement in `GitAdapter`, `PerforceAdapter`, `SvnAdapter`. Update `fetch_from_git_head()` and `get_git_head_sha()` in `ta-workspace/src/overlay.rs` to accept an optional `&dyn SourceAdapter` and delegate to it when present, falling back to the current git-direct path when `None` (no adapter context available).
+
 5. [x] **Tests**: Heartbeat writer creates and updates `.ta/heartbeats/<goal-id>` during build. Watchdog marks goal failed when heartbeat mtime > timeout (no `.done` file). `DraftBuilt` event emitted when `.done` appears. Shell prints inline notification on `DraftBuilt` event. Reviewer proceeds without staging when `staging_required = false`. Reviewer `Failed` only on no-verdict, not on staging absence.
-3. [ ] **`MergeTool` abstraction in `ta-workspace`**: Define a `MergeTool` trait and a `MergeToolConfig` in `workflow.toml`:
+
 6. [x] **USAGE.md update**: Replace "Agent exited — check ta draft list" docs with "You'll be notified inline when the draft is ready." Document heartbeat config in `[timeouts]` section. Document reviewer resilience (staging not required).
-   ```toml
+
 #### Version: `0.15.7.1-alpha`
-   [merge]
-   default = "diff3"       # "diff3" | "agent" | "none"
 **Why**: On large workspaces (UE5 projects, Unity repos, large Node.js codebases), full-copy staging on Windows takes 5–30 seconds and duplicates gigabytes of files the agent never touches. ProjFS eliminates both costs — staging is instant and disk usage is proportional to agent activity, not workspace size.
    [[merge.per_type]]
 - Auto-detection: check `Client-ProjFS` Windows optional feature at startup; fall back to `Smart` if not enabled
@@ -7288,26 +7285,30 @@ pub enum NoteDelivery {
 #### Version: `0.15.29-alpha`
 
 ---
-### v0.15.29.1 — VCS Adapter Enforcement: Remaining Direct Git Calls
+### v0.15.29.1 — VCS Adapter Enforcement: Full Completion & Structural Fixes
 <!-- status: pending -->
 
-**Goal**: Eliminate the direct `Command::new("git")` calls that v0.15.29 left out of scope: the test helper in `release.rs`, and the 20+ calls spread across `draft.rs`, `pr.rs`, `run.rs`, `goal.rs`, `doctor.rs`, `constitution.rs`, `new.rs`, and other CLI commands. After this phase the constitution rule added in v0.15.29 produces zero violations across the workspace.
+**Goal**: Complete VCS adapter enforcement to zero constitution violations. Fix the `release.rs` test-code gap, route remaining direct git calls in CLI commands, and resolve four architectural issues that v0.15.29 deferred: the `ta-submit`→`ta-goal` dependency cycle, `VcsHistoryReader` surface on `SourceAdapter`, pluggable `MergeTool` abstraction, and Perforce/SVN no-op implementations.
 
-**Why**: v0.15.29 fixed the highest-impact paths (release pipeline, governed workflow) and established the constitution rule. The reviewer found that `release.rs:2811` contains a `Command::new("git")` call in a `#[cfg(test)]` helper (`git_init_with_commit`) that is not in the constitution's allowed list — only `crates/ta-submit/src/` has a test-fixture blanket exception. The remaining files were correctly out of scope for v0.15.29 but the constitution rule as written will now flag them on every agent run.
+**Why**: v0.15.29 fixed the highest-impact paths and established the constitution rule, but the reviewer found `release.rs:2811` (`git_init_with_commit` test helper) is outside the allowed list, and 20+ calls in `draft.rs`, `pr.rs`, `run.rs`, `goal.rs`, `doctor.rs`, `constitution.rs`, `new.rs` still violate the rule. Additionally four structural gaps remain: `ta-submit` imports `ta-goal` (creating a cycle), `fetch_from_git_head()` / `get_git_head_sha()` in `ta-workspace` use git directly, `git merge-file` is used as a diff algorithm (not a VCS operation), and Perforce/SVN return no-ops for all 8 new adapter methods.
 
 **Depends on**: v0.15.29 (constitution rule + SourceAdapter trait extensions)
 
-1. [ ] **Fix `apps/ta-cli/src/commands/release.rs:2811`** test helper: Move `git_init_with_commit` to a shared test-fixtures module (e.g. `crates/ta-submit/src/test_helpers.rs`) that is already in the constitution's allowed list, or add `apps/ta-cli/src/commands/release.rs` cfg(test) blocks to the `allowed_in` list with a comment explaining it is test-only fixture code.
+1. [ ] **Fix `release.rs:2811` test helper**: Move `git_init_with_commit` to a shared test-fixtures module in `crates/ta-submit/src/test_helpers.rs` (already in constitution's allowed list) or add a `cfg(test)` entry to `allowed_in` with an explanatory comment.
 
-2. [ ] **Audit and fix `apps/ta-cli/src/commands/draft.rs`**: Route remaining direct git calls through `SourceAdapter` or `GitReadHelper`. Likely candidates: status checks, log reads for draft metadata.
+2. [ ] **Audit and fix `draft.rs`, `pr.rs`, `run.rs`**: Route remaining direct git calls through `SourceAdapter::is_dirty()`, `head_sha()`, `GitReadHelper` (branch detection, remote URL lookup, log reads).
 
-3. [ ] **Audit and fix `apps/ta-cli/src/commands/pr.rs`**: Route git calls (branch detection, remote URL lookup) through adapter or `GitReadHelper`.
+3. [ ] **Audit and fix `goal.rs`, `doctor.rs`, `constitution.rs`, `new.rs`**: Route each remaining `Command::new("git")` call through the adapter or `GitReadHelper`. Calls with genuinely no multi-VCS equivalent get `// git-only: no adapter equivalent` comment and an `allowed_in` entry.
 
-4. [ ] **Audit and fix `apps/ta-cli/src/commands/run.rs`**: Route git calls (dirty-check before goal start, HEAD SHA lookup) through `SourceAdapter::is_dirty()` and `SourceAdapter::head_sha()`.
+4. [ ] **Invert `ta-submit` / `ta-goal` dependency**: Extract `CommitContext` struct into `ta-goal` (or a new `ta-types` micro-crate). Change `SourceAdapter::prepare()`, `commit()`, `push()`, `open_review()` to accept `&CommitContext` instead of `&GoalRun`. Add `From<&GoalRun> for CommitContext` in `ta-cli`. Breaks the cycle so `ta-workspace` and `ta-goal` can import `ta-submit`.
 
-5. [ ] **Audit and fix `apps/ta-cli/src/commands/goal.rs`, `doctor.rs`, `constitution.rs`, `new.rs`**: Collect all remaining `Command::new("git")` calls; route each through the adapter or add to `GitReadHelper` for read-only queries with no multi-VCS equivalent (these get a `// git-only: no adapter equivalent` comment and a separate `allowed_in` entry).
+5. [ ] **`VcsHistoryReader` surface on `SourceAdapter`**: Add `file_at_head(repo_root, rel_path) -> Option<Vec<u8>>` and `head_rev_id(repo_root) -> Option<String>` with default `None` impls. Implement in `GitAdapter`, `PerforceAdapter`, `SvnAdapter`. Update `fetch_from_git_head()` / `get_git_head_sha()` in `overlay.rs` to delegate to adapter when present.
 
-6. [ ] **Verify zero constitution violations**: Run `ta constitution check` (or the equivalent scan) across the full workspace and confirm no remaining hits outside the updated allowed list.
+6. [ ] **`MergeTool` abstraction in `ta-workspace`**: Define `MergeTool` trait and `MergeToolConfig` in `workflow.toml` (`default = "diff3"`, per-glob overrides). Implement `Diff3MergeTool` (wraps `git merge-file`), `AgentMergeTool` (LLM-based), `NoneMergeTool` (take-source). Route `three_way_merge()` through it.
+
+7. [ ] **Perforce/SVN adapter implementations**: Fill in the 8 methods added in v0.15.29 for `PerforceAdapter` and `SvnAdapter` — replace all no-ops with real implementations or explicit `Err(AdapterError::Unsupported)` with docs.
+
+8. [ ] **Verify zero constitution violations**: `ta constitution check` across full workspace → zero hits outside the updated `allowed_in` list.
 
 #### Version: `0.15.29-alpha.1`
 
@@ -7855,14 +7856,7 @@ Key capabilities:
 
 
 - **Distribution**: Published as `ta-mcp-omniverse` + a companion Omniverse Extension installable via the Omniverse Extension Manager
-### v0.15.29.1 — VCS Abstraction Layer Completion
-<!-- status: pending -->
 
-**Goal**: Complete the VCS abstraction started in v0.15.29 by fixing the architectural issues that prevented full routing: invert the `ta-submit` → `ta-goal` dependency, add a `VcsHistoryReader` surface to `SourceAdapter`, abstract the merge algorithm out of the git layer, and implement the 8 new adapter methods for Perforce and SVN.
-
-**Why**: v0.15.29 eliminated direct git calls in CLI code but left four structural gaps: (1) `ta-submit` depends on `ta-goal`, creating a cycle that prevents `ta-workspace` and `ta-goal` from ever importing `ta-submit`; (2) `fetch_from_git_head()` and `get_git_head_sha()` in `ta-workspace` are VCS history reads with no adapter path; (3) `git merge-file` in `three_way_merge()` uses git as a diff algorithm, not a VCS — it should be a pluggable `MergeTool`; (4) `PerforceAdapter` and `SvnAdapter` return no-ops for all 8 new methods added in v0.15.29.
-
-**Depends on**: v0.15.29 (new SourceAdapter methods, constitution rule)
 
 1. [ ] **Invert `ta-submit` / `ta-goal` dependency**: Extract `CommitContext` struct (`shortref: String`, `title: String`, `objective: String`, `plan_phase: Option<String>`) into `ta-goal` (or a new `ta-types` micro-crate). Change `SourceAdapter::prepare()`, `commit()`, `push()`, and `open_review()` to accept `&CommitContext` instead of `&GoalRun`. Remove `ta-goal` from `ta-submit`'s `[dependencies]`. Add a `From<&GoalRun> for CommitContext` conversion in `ta-cli` (the only place that ties them together). This breaks the cycle and allows `ta-workspace` and `ta-goal` to import `ta-submit` without circularity.
 
