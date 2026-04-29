@@ -7333,7 +7333,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.30 — Agent Framework Abstraction: Remove Shims, Full Enforcement
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Remove the `inject_claude_md()` shim left by v0.15.28, complete the migration of all remaining hardcoded CLAUDE.md references, and activate the constitution enforcement rule across the codebase. After this phase, adding a new agent type requires only a new `AgentContextChannel` implementation and a manifest entry — no changes to TA's core logic.
 
@@ -7343,13 +7343,13 @@ pub enum NoteDelivery {
 
 1. [x] **Remove `inject_claude_md()` shim**: Deleted from `run.rs`. Replaced with `build_context_content()` (returns `String`) and `inject_via_channel_for_test()` test helper. Production call site uses `ta_runtime::build_channel()` with channel type from `resolved_framework`. `restore_claude_md()` delegates to `ClaudeCodeChannel::restore()`. All 15 test call sites updated.
 
-2. [ ] **Audit remaining `"CLAUDE.md"` literals**: Run the `no-direct-claude-md` constitution rule in `--report` mode against the full workspace. Fix each remaining hit (likely in test fixtures, USAGE.md examples, and any doc comments that reference the file by name). Test fixture references are allowed only inside `channels/claude_code.rs` and `framework.rs`.
+2. [x] **Audit remaining `"CLAUDE.md"` literals**: Run the `no-direct-claude-md` constitution rule in `--report` mode against the full workspace. Fix each remaining hit (likely in test fixtures, USAGE.md examples, and any doc comments that reference the file by name). Test fixture references are allowed only inside `channels/claude_code.rs` and `framework.rs`.
 
-3. [ ] **Escalate constitution rule severity to `block`**: Change `[rules.no-direct-claude-md]` from `warn` to `block` in `.ta/constitution.toml`. From this point, any PR introducing a bare `"CLAUDE.md"` literal outside the allowed files fails the pre-draft-build validation.
+3. [x] **Escalate constitution rule severity to `block`**: Change `[rules.no-direct-claude-md]` from `warn` to `block` in `.ta/constitution.toml`. From this point, any PR introducing a bare `"CLAUDE.md"` literal outside the allowed files fails the pre-draft-build validation.
 
-4. [ ] **`ta agent list` framework info**: `ta agent list` shows each configured agent's resolved channel — name, channel type, `inject_mode`, live-injection capability (`Live` / `Queued`). Makes the abstraction observable without reading manifests.
+4. [x] **`ta agent list` framework info**: `ta agent list` shows each configured agent's resolved channel — name, channel type, `inject_mode`, live-injection capability (`Live` / `Queued`). Makes the abstraction observable without reading manifests.
 
-5. [ ] **Codex VS Code channel validation**: Integration test that starts a Codex-framework goal inside the VS Code extension context and verifies `inject_note` returns `ApiPushed` (not `Queued`). Requires `VSCODE_IPC_HOOK_CLI` env var to be set; test is `#[ignore]` by default, runnable via `cargo test -- --ignored` in the extension dev environment.
+5. [x] **Codex VS Code channel validation**: Integration test that starts a Codex-framework goal inside the VS Code extension context and verifies `inject_note` returns `ApiPushed` (not `Queued`). Requires `VSCODE_IPC_HOOK_CLI` env var to be set; test is `#[ignore]` by default, runnable via `cargo test -- --ignored` in the extension dev environment.
 
 #### Version: `0.15.30-alpha`
 
@@ -7372,6 +7372,32 @@ pub enum NoteDelivery {
 4. [ ] **Replace blanket run.rs exemption**: Remove `run.rs` from `no-direct-claude-md` `allowed_in`. After routing items 1-3, `run.rs` should have zero remaining `CLAUDE.md` literal references. Verify with `ta constitution check`.
 
 #### Version: `0.15.30-alpha.1`
+
+---
+### v0.15.30.2 — Release Pipeline: Complete, Clean, and Studio-Runnable
+<!-- status: pending -->
+
+**Goal**: `ta release run` is the single, complete release process for any TA project. A non-engineer can run a full stable or pre-release from TA Studio (with approval gates). The pipeline automatically manages all release metadata (`stable_release_tag`, `last_release_tag`, `.release.toml`) with no manual steps or leftover uncommitted files.
+
+**Why**: The current pipeline requires manual `.release.toml` edits before and after every release, does not distinguish stable vs pre-release in its metadata automation, leaves uncommitted files on main after completion, and has no Studio UI path. This violates the project constitution principle that `ta release run` is definitive and complete.
+
+**Constitution addition**: Add to `.ta/constitution.toml` — `ta release run` is the authoritative release mechanism for TA projects. It must be: (1) complete — no manual steps before or after; (2) clean — no uncommitted files remain; (3) VCS-agnostic — works through the release adapter layer; (4) Studio-runnable — a non-engineer can execute and approve from Studio with the same guarantees as CLI.
+
+**Depends on**: v0.15.30.1 (clean injection paths before release)
+
+1. [ ] **Auto-update `stable_release_tag` for non-prerelease runs**: When `--prerelease` is not set, the pipeline sets `stable_release_tag = <label>` in `.release.toml` after tagging and before the final push. No manual edit required.
+
+2. [ ] **Auto-update `last_release_tag` on completion**: After the push step succeeds, the pipeline writes `last_release_tag = <label>` to `.release.toml`, commits it to the current branch, and pushes. This is the final pipeline step — completion leaves the repo in a clean, committed state with accurate metadata for the next release's changelog.
+
+3. [ ] **No uncommitted files after release**: After `ta release run` completes, `git status` on the default branch is clean. Pipeline steps that write files (version bump, release history, `.release.toml` metadata) must all commit before the pipeline exits. Add a post-release clean-check step that fails visibly if uncommitted changes remain.
+
+4. [ ] **Studio release UI**: Add a Release panel to TA Studio that exposes `ta release run` with: version input, pre-release toggle, label field, from-tag override, and an approval gate modal for the two existing approval steps. A non-engineer can complete a full release without touching the terminal. Studio calls the same daemon API as the CLI.
+
+5. [ ] **Release adapter interface**: Define a `ReleaseAdapter` trait with: `bump_version()`, `commit_and_tag()`, `push()`, `create_release_draft()`, `publish_release()`, `dispatch_workflow()`. The git implementation is the default. Perforce and SVN adapters return `Err(Unsupported)` with actionable messages. Custom adapters can be provided via `.ta/release.yaml` `adapter:` key.
+
+6. [ ] **`ta release validate` pre-flight covers `.release.toml` staleness**: Warn if `last_release_tag` is more than N releases behind HEAD (configurable, default 5 tags). Warn if `stable_release_tag` does not match the last non-prerelease run. These are advisory — pipeline proceeds — but they surface configuration drift early.
+
+#### Version: `0.15.30-alpha.2`
 
 ---
 
