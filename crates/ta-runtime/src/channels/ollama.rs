@@ -26,6 +26,15 @@ impl OllamaChannel {
     fn notes_dir(&self) -> PathBuf {
         self.staging_path.join(".ta/advisor-notes")
     }
+
+    fn append_to_context_file(&self, section: &str) -> anyhow::Result<()> {
+        let path = self.context_path();
+        if path.exists() {
+            let existing = std::fs::read_to_string(&path)?;
+            std::fs::write(&path, format!("{}{}", existing, section))?;
+        }
+        Ok(())
+    }
 }
 
 impl AgentContextChannel for OllamaChannel {
@@ -71,6 +80,18 @@ impl AgentContextChannel for OllamaChannel {
     fn channel_type(&self) -> ChannelType {
         ChannelType::Ollama
     }
+
+    fn inject_persona(&self, persona_section: &str) -> anyhow::Result<()> {
+        self.append_to_context_file(persona_section)
+    }
+
+    fn inject_work_plan(&self, plan_section: &str) -> anyhow::Result<()> {
+        self.append_to_context_file(plan_section)
+    }
+
+    fn inject_failure_context(&self, failure_context: &str) -> anyhow::Result<()> {
+        self.append_to_context_file(failure_context)
+    }
 }
 
 #[cfg(test)]
@@ -103,5 +124,39 @@ mod tests {
         let note = HumanNote::new("g1", "Try a different approach");
         let delivery = ch.inject_note(&note).unwrap();
         assert_eq!(delivery, NoteDelivery::Queued);
+    }
+
+    #[test]
+    fn inject_persona_appends_to_context_file() {
+        let dir = TempDir::new().unwrap();
+        let ch = OllamaChannel::new(dir.path().to_path_buf());
+        let ctx = AgentContext {
+            goal_id: "g1".to_string(),
+            title: "T".to_string(),
+            content: "# Base\n".to_string(),
+            staging_path: dir.path().to_path_buf(),
+        };
+        ch.inject_initial(&ctx).unwrap();
+        ch.inject_persona("\n## Persona\n\nBe concise.\n").unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".ta/agent_context.md")).unwrap();
+        assert!(content.contains("# Base"));
+        assert!(content.contains("## Persona"));
+    }
+
+    #[test]
+    fn inject_failure_context_appends_to_context_file() {
+        let dir = TempDir::new().unwrap();
+        let ch = OllamaChannel::new(dir.path().to_path_buf());
+        let ctx = AgentContext {
+            goal_id: "g1".to_string(),
+            title: "T".to_string(),
+            content: "# Base\n".to_string(),
+            staging_path: dir.path().to_path_buf(),
+        };
+        ch.inject_initial(&ctx).unwrap();
+        ch.inject_failure_context("\n## Verification Failures\n\nFix it.\n")
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".ta/agent_context.md")).unwrap();
+        assert!(content.contains("## Verification Failures"));
     }
 }

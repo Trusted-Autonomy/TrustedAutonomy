@@ -10,6 +10,9 @@ pub use ollama::OllamaChannel;
 
 use std::path::PathBuf;
 
+/// Default context file name for the ClaudeCode channel.
+pub const DEFAULT_CONTEXT_FILE: &str = "CLAUDE.md";
+
 /// How a human note was delivered to the agent.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NoteDelivery {
@@ -127,6 +130,21 @@ pub trait AgentContextChannel: Send + Sync {
 
     /// Channel type name for display.
     fn channel_type(&self) -> ChannelType;
+
+    /// Append a persona section to the context file at goal start.
+    fn inject_persona(&self, _persona_section: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Append a work-plan section to the context file at goal start.
+    fn inject_work_plan(&self, _plan_section: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Append failure context to the context file before agent re-launch.
+    fn inject_failure_context(&self, _failure_context: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Build the appropriate channel for a given channel type and context file.

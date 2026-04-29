@@ -1240,6 +1240,17 @@ pub fn execute(
     let resolved_framework =
         ta_runtime::AgentFrameworkManifest::resolve(agent, &config.workspace_root);
 
+    // Channel type and context file are derived once from resolved_framework and reused
+    // at all injection sites (initial, persona, work-plan, failure-context re-inject).
+    let injection_channel_type = resolved_framework
+        .as_ref()
+        .map(|f| f.channel_type.clone())
+        .unwrap_or_default();
+    let injection_context_file = resolved_framework
+        .as_ref()
+        .map(|f| f.context_file.clone())
+        .unwrap_or_else(|| ta_runtime::DEFAULT_CONTEXT_FILE.to_string());
+
     // Gate ollama agent behind experimental flag (v0.13.17).
     if agent == "ollama" {
         let daemon_toml = config.workspace_root.join(".ta").join("daemon.toml");
@@ -1591,58 +1602,46 @@ pub fn execute(
             staging = %staging_path.display(),
             "Injecting CLAUDE.md context into staging workspace"
         );
-        {
-            let channel_type = resolved_framework
-                .as_ref()
-                .map(|f| f.channel_type.clone())
-                .unwrap_or_default();
-            let context_file = resolved_framework
-                .as_ref()
-                .map(|f| f.context_file.clone())
-                .unwrap_or_else(|| "CLAUDE.md".to_string());
-            let channel =
-                ta_runtime::build_channel(&channel_type, staging_path.clone(), &context_file);
-            let context_content = build_context_content(
-                title,
-                &goal_id,
-                goal.plan_phase.as_deref(),
-                goal.source_dir.as_deref(),
-                goal.parent_goal_id,
-                &goal_store,
-                config,
-                macro_goal,
-                interactive,
-                follow_up_context.as_deref(),
-                context_budget_chars,
-                done_window,
-                pending_window,
-                &context_mode,
-            )?;
-            let ctx = ta_runtime::channels::AgentContext {
-                goal_id: goal_id.clone(),
-                title: title.to_string(),
-                content: context_content,
-                staging_path: staging_path.clone(),
-            };
-            channel.inject_initial(&ctx)?;
-        }
-        tracing::info!(goal_id = %goal.goal_run_id, "CLAUDE.md injected");
+        let channel = ta_runtime::build_channel(
+            &injection_channel_type,
+            staging_path.clone(),
+            &injection_context_file,
+        );
+        let context_content = build_context_content(
+            title,
+            &goal_id,
+            goal.plan_phase.as_deref(),
+            goal.source_dir.as_deref(),
+            goal.parent_goal_id,
+            &goal_store,
+            config,
+            macro_goal,
+            interactive,
+            follow_up_context.as_deref(),
+            context_budget_chars,
+            done_window,
+            pending_window,
+            &context_mode,
+        )?;
+        let ctx = ta_runtime::channels::AgentContext {
+            goal_id: goal_id.clone(),
+            title: title.to_string(),
+            content: context_content,
+            staging_path: staging_path.clone(),
+        };
+        channel.inject_initial(&ctx)?;
+        tracing::info!(goal_id = %goal.goal_run_id, "Context injected");
 
         // v0.15.20: If a work plan path was passed via env var (from a preceding
-        // plan_work stage in a governed workflow), inject it into CLAUDE.md.
-        inject_work_plan_if_present(&staging_path)?;
+        // plan_work stage in a governed workflow), inject it through the channel.
+        inject_work_plan_if_present(&staging_path, &*channel)?;
 
         // Inject persona section if --persona was specified (v0.14.20).
         if let Some(pname) = persona_name {
             match ta_goal::PersonaConfig::load(&config.workspace_root, pname) {
                 Ok(persona) => {
-                    let persona_section = persona.to_claude_md_section();
-                    let claude_md_path = staging_path.join("CLAUDE.md");
-                    if let Ok(existing) = std::fs::read_to_string(&claude_md_path) {
-                        let updated = format!("{}{}", existing, persona_section);
-                        std::fs::write(&claude_md_path, updated)?;
-                    }
-                    tracing::info!(persona = %pname, "Persona injected into CLAUDE.md");
+                    channel.inject_persona(&persona.to_claude_md_section())?;
+                    tracing::info!(persona = %pname, "Persona injected into context file");
                 }
                 Err(e) => {
                     anyhow::bail!(
@@ -2480,20 +2479,18 @@ pub fn execute(
                                         failure_context.push('\n');
                                     }
 
-                                    // Re-inject CLAUDE.md with failure context.
+                                    // Re-inject failure context through the channel.
                                     if agent_config.injects_context_file {
-                                        let claude_md_path = staging_path.join("CLAUDE.md");
-                                        if let Ok(existing) =
-                                            std::fs::read_to_string(&claude_md_path)
-                                        {
-                                            let updated =
-                                                format!("{}\n{}", existing, failure_context);
-                                            let _ = std::fs::write(&claude_md_path, updated);
-                                        }
+                                        let fc_channel = ta_runtime::build_channel(
+                                            &injection_channel_type,
+                                            staging_path.clone(),
+                                            &injection_context_file,
+                                        );
+                                        let _ = fc_channel.inject_failure_context(&failure_context);
                                     }
 
                                     let fix_prompt = "Verification checks failed after your previous changes. \
-                                         Fix the issues described in the CLAUDE.md 'Verification Failures' \
+                                         Fix the issues described in the context file 'Verification Failures' \
                                          section. Run the failing commands to confirm they pass before exiting."
                                         .to_string();
 
@@ -2624,18 +2621,19 @@ pub fn execute(
                             failure_context.push('\n');
                         }
 
-                        // Re-inject CLAUDE.md with failure context.
+                        // Re-inject failure context through the channel.
                         if agent_config.injects_context_file {
-                            let claude_md_path = staging_path.join("CLAUDE.md");
-                            if let Ok(existing) = std::fs::read_to_string(&claude_md_path) {
-                                let updated = format!("{}\n{}", existing, failure_context);
-                                let _ = std::fs::write(&claude_md_path, updated);
-                            }
+                            let fc_channel = ta_runtime::build_channel(
+                                &injection_channel_type,
+                                staging_path.clone(),
+                                &injection_context_file,
+                            );
+                            let _ = fc_channel.inject_failure_context(&failure_context);
                         }
 
                         // Re-launch the agent with a fix prompt.
                         let fix_prompt = "Verification checks failed after your previous changes. \
-                             Fix the issues described in the CLAUDE.md 'Verification Failures' \
+                             Fix the issues described in the context file 'Verification Failures' \
                              section. Run the failing commands to confirm they pass before exiting."
                             .to_string();
                         println!(
@@ -4504,10 +4502,10 @@ pub(crate) fn compute_context_section_sizes(
 
     let header = header_approx.len() + instructions_approx.len();
 
-    // Read original CLAUDE.md from source_dir to measure it.
+    // Read original context file from source_dir to measure it.
     let original_claude_md = source_dir
         .and_then(|src| {
-            let path = src.join("CLAUDE.md");
+            let path = src.join(ta_runtime::DEFAULT_CONTEXT_FILE);
             std::fs::read_to_string(path).ok()
         })
         .map(|s| s.len())
@@ -5591,7 +5589,10 @@ fn build_solutions_section_for_inject(config: &GatewayConfig) -> String {
 /// When a `plan_work` stage precedes `run_goal` in a governed workflow, the
 /// orchestrator sets this env var so the implementor sees the planner's output
 /// as the first section of its context.
-fn inject_work_plan_if_present(staging_path: &Path) -> anyhow::Result<()> {
+fn inject_work_plan_if_present(
+    staging_path: &Path,
+    channel: &dyn ta_runtime::AgentContextChannel,
+) -> anyhow::Result<()> {
     let wp_path = match std::env::var("TA_WORK_PLAN_JSON_PATH") {
         Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
         _ => return Ok(()),
@@ -5609,7 +5610,7 @@ fn inject_work_plan_if_present(staging_path: &Path) -> anyhow::Result<()> {
         anyhow::anyhow!("Failed to read work plan from {}: {}", wp_path.display(), e)
     })?;
 
-    // Parse to validate and build the CLAUDE.md section.
+    // Parse to validate and build the context section.
     let plan: ta_workflow::WorkPlan = serde_json::from_str(&content).map_err(|e| {
         anyhow::anyhow!(
             "Failed to parse work plan JSON from {}: {}",
@@ -5623,16 +5624,13 @@ fn inject_work_plan_if_present(staging_path: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(&staging_ta_dir)?;
     std::fs::write(staging_ta_dir.join("work-plan.json"), &content)?;
 
-    // Append the implementation plan section to CLAUDE.md.
-    let claude_md_path = staging_path.join("CLAUDE.md");
-    let existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
-    let plan_section = plan.to_claude_md_section();
-    std::fs::write(&claude_md_path, format!("{}{}", existing, plan_section))?;
+    // Append the implementation plan section through the channel.
+    channel.inject_work_plan(&plan.to_claude_md_section())?;
 
     tracing::info!(
         decisions = plan.decisions.len(),
         steps = plan.implementation_plan.len(),
-        "Work plan injected into CLAUDE.md"
+        "Work plan injected into context file"
     );
     println!(
         "  Work plan: {} decision(s), {} step(s) injected into context",

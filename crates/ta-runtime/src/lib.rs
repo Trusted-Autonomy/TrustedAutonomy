@@ -70,6 +70,7 @@ pub use bare_process::{apply_credentials_to_env, BareProcessRuntime};
 pub use channels::{
     build_channel, AgentContext, AgentContextChannel, ChannelCapabilities, ChannelType,
     ClaudeCodeChannel, CodexChannel, GenericFileChannel, HumanNote, NoteDelivery, OllamaChannel,
+    DEFAULT_CONTEXT_FILE,
 };
 pub use config::{RuntimeConfig, RuntimeRegistry};
 pub use credential::ScopedCredential;

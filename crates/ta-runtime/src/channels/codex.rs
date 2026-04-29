@@ -41,6 +41,15 @@ impl CodexChannel {
     fn is_vscode_context() -> bool {
         std::env::var("VSCODE_IPC_HOOK_CLI").is_ok()
     }
+
+    fn append_to_context_file(&self, section: &str) -> anyhow::Result<()> {
+        let path = self.context_path();
+        if path.exists() {
+            let existing = std::fs::read_to_string(&path)?;
+            std::fs::write(&path, format!("{}{}", existing, section))?;
+        }
+        Ok(())
+    }
 }
 
 impl AgentContextChannel for CodexChannel {
@@ -134,6 +143,18 @@ impl AgentContextChannel for CodexChannel {
     fn channel_type(&self) -> ChannelType {
         ChannelType::Codex
     }
+
+    fn inject_persona(&self, persona_section: &str) -> anyhow::Result<()> {
+        self.append_to_context_file(persona_section)
+    }
+
+    fn inject_work_plan(&self, plan_section: &str) -> anyhow::Result<()> {
+        self.append_to_context_file(plan_section)
+    }
+
+    fn inject_failure_context(&self, failure_context: &str) -> anyhow::Result<()> {
+        self.append_to_context_file(failure_context)
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +208,38 @@ mod tests {
         ch.restore(dir.path()).unwrap();
         // No original — file should be gone.
         assert!(!dir.path().join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn inject_persona_appends_to_context_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Base\n").unwrap();
+        let ch = CodexChannel::new(dir.path().to_path_buf(), "AGENTS.md");
+        ch.inject_persona("\n## Persona\n\nBe concise.\n").unwrap();
+        let content = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(content.starts_with("# Base\n"));
+        assert!(content.contains("## Persona"));
+    }
+
+    #[test]
+    fn inject_work_plan_appends_to_context_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Base\n").unwrap();
+        let ch = CodexChannel::new(dir.path().to_path_buf(), "AGENTS.md");
+        ch.inject_work_plan("\n## Work Plan\n\nStep 1.\n").unwrap();
+        let content = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(content.contains("## Work Plan"));
+    }
+
+    #[test]
+    fn inject_failure_context_appends_to_context_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Base\n").unwrap();
+        let ch = CodexChannel::new(dir.path().to_path_buf(), "AGENTS.md");
+        ch.inject_failure_context("\n## Verification Failures\n\nFix it.\n")
+            .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(content.contains("## Verification Failures"));
     }
 
     /// Integration test: Codex channel in VS Code extension context returns ApiPushed.

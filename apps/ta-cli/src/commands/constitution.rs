@@ -765,7 +765,6 @@ impl ProjectConstitutionConfig {
                 allowed_in: vec![
                     "crates/ta-runtime/src/channels/claude_code.rs".to_string(),
                     "crates/ta-runtime/src/framework.rs".to_string(),
-                    "apps/ta-cli/src/commands/run.rs".to_string(),
                     "apps/ta-cli/src/commands/draft.rs".to_string(),
                     "apps/ta-cli/src/commands/release.rs".to_string(),
                     "apps/ta-cli/src/commands/init.rs".to_string(),
