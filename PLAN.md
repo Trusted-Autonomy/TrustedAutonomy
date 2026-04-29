@@ -7312,6 +7312,26 @@ pub enum NoteDelivery {
 #### Version: `0.15.29-alpha.1`
 
 ---
+### v0.15.29.2 — PLAN.md Integrity: Item Consistency Enforcement
+<!-- status: pending -->
+
+**Goal**: A `<!-- status: done -->` phase section must never contain unchecked `[ ]` items. Detect this inconsistency during validation and auto-correct it at apply time.
+
+**Why**: When a goal completes and sets `<!-- status: done -->`, the agent marks all items `[x]` in staging. However, if the plan-patch or 3-way merge step loses item content (blank lines from base drift, or plan-patch injected mid-section), some items can revert to `[ ]` while the status stays `done`. The v0.15.28.1 validator catches blank sections and missing status markers but not item/status agreement. This produces a misleading `done` section with unchecked items — observed in v0.15.29.1 immediately after merge.
+
+**Depends on**: v0.15.28.1 (validation infrastructure), v0.15.28.2 (pre-merge rebase)
+
+1. [ ] **Add item-status consistency check to post-merge validator** (`crates/ta-workspace/src/plan_validation.rs`): Scan every `<!-- status: done -->` section for `[ ]` items after merge. Report as `[vX.Y.Z] section is 'done' but N item(s) are unchecked — possible merge corruption`. Warning-level (not abort); status marker is authoritative.
+
+2. [ ] **Auto-correct at apply time**: When a phase transitions to `done` in this apply, auto-convert any remaining `[ ]` items to `[x]` before writing to source. Log each correction: `[plan] auto-checked item N in vX.Y.Z (phase is done; checkmark lost in merge)`.
+
+3. [ ] **Extend `ta plan status` output**: Flag `done` phases with unchecked items using `[!]` and message: `phase vX.Y.Z is marked done but has N unchecked item(s) — run 'ta plan repair' to fix`.
+
+4. [ ] **`ta plan repair` command** (`apps/ta-cli/src/commands/plan.rs`): Scan PLAN.md for all `done` phases with `[ ]` items and auto-check them, committing directly to the current branch.
+
+#### Version: `0.15.29-alpha.2`
+
+---
 ### v0.15.30 — Agent Framework Abstraction: Remove Shims, Full Enforcement
 <!-- status: pending -->
 
