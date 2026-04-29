@@ -7355,7 +7355,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.30.1 — Agent Framework: Secondary Injection Paths & run.rs Exemption Cleanup
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Route the three remaining direct CLAUDE.md writes in `run.rs` through the `AgentContextChannel` abstraction, and replace the blanket file-level `allowed_in` exemption for `run.rs` with function-level or line-range exemptions.
 
