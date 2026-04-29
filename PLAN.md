@@ -7313,7 +7313,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.29.2 — PLAN.md Integrity: Item Consistency Enforcement
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: A `<!-- status: done -->` phase section must never contain unchecked `[ ]` items. Detect this inconsistency during validation and auto-correct it at apply time.
 
