@@ -293,6 +293,16 @@ pub enum PlanCommands {
         #[arg(long)]
         done: Option<usize>,
     },
+    /// Auto-fix `done` phases that have unchecked `[ ]` items (v0.15.29.2).
+    ///
+    /// Scans PLAN.md for every `<!-- status: done -->` phase that still has
+    /// unchecked items and converts each `- [ ]` to `- [x]`. Writes the
+    /// corrected file in place and reports each fix.
+    ///
+    /// Examples:
+    ///   ta plan repair
+    #[command(name = "repair")]
+    Repair,
     /// Build pending plan phases by running governed goals in sequence.
     ///
     /// For each pending phase, optionally shows an interactive planning session
@@ -507,6 +517,7 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
         }
         PlanCommands::Lint { fix } => plan_lint_cmd(config, *fix),
         PlanCommands::HumanTasks { done } => plan_human_tasks_cmd(config, *done),
+        PlanCommands::Repair => plan_repair(config),
         PlanCommands::Build {
             auto,
             filter,
@@ -1524,6 +1535,28 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
         println!();
         for w in &dep_warnings {
             println!("DEPENDENCY WARNING: {}", w);
+        }
+    }
+
+    // v0.15.29.2: Flag done phases with unchecked items.
+    if let Ok(content) = std::fs::read_to_string(config.workspace_root.join("PLAN.md")) {
+        use ta_changeset::plan_merge::check_done_phase_item_consistency;
+        let item_issues = check_done_phase_item_consistency(&content);
+        if !item_issues.is_empty() {
+            println!();
+            for issue in &item_issues {
+                // Count unchecked items from the description string.
+                let count: usize = issue
+                    .description
+                    .split_whitespace()
+                    .find(|w| w.parse::<usize>().is_ok())
+                    .and_then(|w| w.parse().ok())
+                    .unwrap_or(0);
+                println!(
+                    "[!] phase {} is marked done but has {} unchecked item(s) — run 'ta plan repair' to fix",
+                    issue.section_id, count
+                );
+            }
         }
     }
 
@@ -4372,6 +4405,46 @@ fn plan_lint_cmd(config: &GatewayConfig, fix: bool) -> anyhow::Result<()> {
         println!("Run `ta plan lint --fix` to apply mechanical corrections.");
     }
 
+    Ok(())
+}
+
+// ── v0.15.29.2: PLAN.md Repair (item/status consistency) ───────────────────
+
+/// Auto-correct unchecked `[ ]` items inside `<!-- status: done -->` phases.
+///
+/// Reads PLAN.md, converts every `- [ ]` in a done phase to `- [x]`, writes
+/// the result back, and reports each corrected item.
+fn plan_repair(config: &GatewayConfig) -> anyhow::Result<()> {
+    let plan_path = config.workspace_root.join("PLAN.md");
+    if !plan_path.exists() {
+        anyhow::bail!("PLAN.md not found at {}", plan_path.display());
+    }
+
+    let content = std::fs::read_to_string(&plan_path)?;
+    use ta_changeset::plan_merge::auto_correct_done_phase_items;
+    let (corrected, corrections) = auto_correct_done_phase_items(&content);
+
+    if corrections.is_empty() {
+        println!("ta plan repair: no unchecked items found in done phases — nothing to fix.");
+        return Ok(());
+    }
+
+    std::fs::write(&plan_path, corrected.as_bytes())?;
+    println!(
+        "ta plan repair: auto-corrected {} item(s) in {} phase(s):",
+        corrections.len(),
+        {
+            let mut phases: Vec<&str> = corrections.iter().map(|(id, _)| id.as_str()).collect();
+            phases.dedup();
+            phases.len()
+        }
+    );
+    for (phase_id, item_num) in &corrections {
+        println!(
+            "  [plan] auto-checked item {} in {} (phase is done; checkmark was unchecked)",
+            item_num, phase_id
+        );
+    }
     Ok(())
 }
 

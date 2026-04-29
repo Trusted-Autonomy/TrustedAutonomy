@@ -754,6 +754,121 @@ pub fn count_status_markers(content: &str) -> usize {
         .count()
 }
 
+// ── Item/status consistency (v0.15.29.2) ─────────────────────────────────────
+
+/// Extract the status value from a `<!-- status: ... -->` line.
+fn extract_status_value(line: &str) -> Option<&str> {
+    let t = line.trim();
+    if t.starts_with("<!-- status:") && t.ends_with("-->") {
+        let inner = &t["<!-- status:".len()..t.len() - "-->".len()];
+        Some(inner.trim())
+    } else {
+        None
+    }
+}
+
+/// Check every `<!-- status: done -->` phase for unchecked `[ ]` items.
+///
+/// Returns one `PlanValidationIssue` per phase that has unchecked items.
+/// These are **warning-level** only — the status marker is authoritative.
+pub fn check_done_phase_item_consistency(content: &str) -> Vec<PlanValidationIssue> {
+    let mut issues = Vec::new();
+    let mut in_done_phase = false;
+    let mut current_phase_id = String::new();
+    let mut unchecked_count = 0usize;
+
+    let flush = |phase_id: &str, count: usize, out: &mut Vec<PlanValidationIssue>| {
+        if !phase_id.is_empty() && count > 0 {
+            out.push(PlanValidationIssue {
+                section_id: phase_id.to_string(),
+                description: format!(
+                    "section is 'done' but {} item(s) are unchecked — possible merge corruption",
+                    count
+                ),
+            });
+        }
+    };
+
+    for line in content.lines() {
+        let t = line.trim();
+        if let Some(id) = extract_version_header(line) {
+            flush(&current_phase_id, unchecked_count, &mut issues);
+            current_phase_id = id;
+            in_done_phase = false;
+            unchecked_count = 0;
+        } else if let Some(status) = extract_status_value(t) {
+            in_done_phase = status == "done";
+        } else if in_done_phase && (t.starts_with("- [ ] ") || t == "- [ ]") {
+            unchecked_count += 1;
+        }
+    }
+    flush(&current_phase_id, unchecked_count, &mut issues);
+
+    issues
+}
+
+/// Auto-correct unchecked `[ ]` items in `<!-- status: done -->` phases.
+///
+/// Returns `(corrected_content, corrections)` where each correction is
+/// `(phase_id, item_number_1based)`. Logs nothing itself — callers should
+/// print `[plan] auto-checked item N in vX.Y.Z (phase is done; checkmark lost in merge)`.
+pub fn auto_correct_done_phase_items(content: &str) -> (String, Vec<(String, usize)>) {
+    let mut in_done_phase = false;
+    let mut current_phase_id = String::new();
+    let mut item_num = 0usize;
+    let mut result_lines: Vec<String> = Vec::new();
+    let mut corrections: Vec<(String, usize)> = Vec::new();
+
+    for line in content.lines() {
+        let t = line.trim();
+
+        if let Some(id) = extract_version_header(line) {
+            current_phase_id = id;
+            in_done_phase = false;
+            item_num = 0;
+            result_lines.push(line.to_string());
+            continue;
+        } else if let Some(status) = extract_status_value(t) {
+            in_done_phase = status == "done";
+            result_lines.push(line.to_string());
+            continue;
+        }
+
+        if in_done_phase
+            && (t.starts_with("- [ ] ")
+                || t == "- [ ]"
+                || t.starts_with("- [x] ")
+                || t.starts_with("- [X] "))
+        {
+            item_num += 1;
+            if t.starts_with("- [ ] ") || t == "- [ ]" {
+                corrections.push((current_phase_id.clone(), item_num));
+                // Replace the first `[ ]` with `[x]` preserving leading whitespace.
+                let fixed = if let Some(pos) = line.find("- [ ]") {
+                    format!("{}{}[x]{}", &line[..pos], "- ", &line[pos + 5..])
+                } else {
+                    line.to_string()
+                };
+                result_lines.push(fixed);
+                continue;
+            }
+        }
+
+        result_lines.push(line.to_string());
+    }
+
+    let mut out = result_lines.join("\n");
+    // Restore the exact trailing newlines of the original content.
+    let trailing = content.len() - content.trim_end_matches('\n').len();
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    for _ in 0..trailing {
+        out.push('\n');
+    }
+    (out, corrections)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,5 +1116,74 @@ mod tests {
         ]);
         assert_eq!(count_plan_headings(&plan), 2);
         assert_eq!(count_status_markers(&plan), 2);
+    }
+
+    // --- v0.15.29.2 item consistency tests ---
+
+    #[test]
+    fn check_consistency_clean_done_phase() {
+        let plan = make_plan(&[("v0.1.0", "done", &["- [x] item one", "- [x] item two"])]);
+        let issues = check_done_phase_item_consistency(&plan);
+        assert!(issues.is_empty(), "all-checked done phase should be clean");
+    }
+
+    #[test]
+    fn check_consistency_detects_unchecked_in_done() {
+        let plan = make_plan(&[("v0.1.0", "done", &["- [x] done", "- [ ] missed"])]);
+        let issues = check_done_phase_item_consistency(&plan);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].section_id, "v0.1.0");
+        assert!(issues[0].description.contains("1 item(s) are unchecked"));
+    }
+
+    #[test]
+    fn check_consistency_pending_phase_ignored() {
+        let plan = make_plan(&[("v0.1.0", "pending", &["- [ ] not done yet"])]);
+        let issues = check_done_phase_item_consistency(&plan);
+        assert!(issues.is_empty(), "pending phases should not be flagged");
+    }
+
+    #[test]
+    fn check_consistency_counts_multiple_unchecked() {
+        let plan = make_plan(&[("v0.2.0", "done", &["- [ ] a", "- [ ] b", "- [x] c"])]);
+        let issues = check_done_phase_item_consistency(&plan);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].description.contains("2 item(s) are unchecked"));
+    }
+
+    #[test]
+    fn auto_correct_fixes_unchecked_in_done_phase() {
+        let plan = make_plan(&[("v0.1.0", "done", &["- [x] done", "- [ ] missed"])]);
+        let (corrected, corrections) = auto_correct_done_phase_items(&plan);
+        assert_eq!(corrections.len(), 1);
+        assert_eq!(corrections[0].0, "v0.1.0");
+        assert_eq!(corrections[0].1, 2); // 2nd item
+        assert!(
+            corrected.contains("- [x] missed"),
+            "unchecked item should be corrected"
+        );
+        assert!(
+            !corrected.contains("- [ ] missed"),
+            "original unchecked should be gone"
+        );
+    }
+
+    #[test]
+    fn auto_correct_leaves_pending_phase_alone() {
+        let plan = make_plan(&[("v0.1.0", "pending", &["- [ ] still pending"])]);
+        let (corrected, corrections) = auto_correct_done_phase_items(&plan);
+        assert!(
+            corrections.is_empty(),
+            "pending phase items must not be corrected"
+        );
+        assert_eq!(corrected, plan);
+    }
+
+    #[test]
+    fn auto_correct_no_change_when_clean() {
+        let plan = make_plan(&[("v0.1.0", "done", &["- [x] all good"])]);
+        let (corrected, corrections) = auto_correct_done_phase_items(&plan);
+        assert!(corrections.is_empty());
+        assert_eq!(corrected, plan);
     }
 }

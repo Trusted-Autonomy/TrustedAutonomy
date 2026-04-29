@@ -6593,7 +6593,11 @@ fn apply_package(
                                             // Validate before writing to source. If headings or
                                             // status markers are missing, abort and dump the
                                             // failed merge for inspection.
-                                            use ta_changeset::plan_merge::validate_plan_merge;
+                                            use ta_changeset::plan_merge::{
+                                                auto_correct_done_phase_items,
+                                                check_done_phase_item_consistency,
+                                                validate_plan_merge,
+                                            };
                                             if let Err(validation_err) = validate_plan_merge(
                                                 &merge_result.merged,
                                                 &source_str,
@@ -6628,9 +6632,37 @@ fn apply_package(
                                             );
                                             }
 
+                                            // v0.15.29.2: Item/status consistency check (warning-level).
+                                            let consistency_warnings =
+                                                check_done_phase_item_consistency(
+                                                    &merge_result.merged,
+                                                );
+                                            for w in &consistency_warnings {
+                                                tracing::warn!(
+                                                    section_id = %w.section_id,
+                                                    description = %w.description,
+                                                    "PLAN.md item/status inconsistency detected"
+                                                );
+                                                eprintln!(
+                                                    "[plan] warning: [{}] {}",
+                                                    w.section_id, w.description
+                                                );
+                                            }
+
+                                            // v0.15.29.2: Auto-correct unchecked items in done
+                                            // phases before writing to source.
+                                            let (final_merged, corrections) =
+                                                auto_correct_done_phase_items(&merge_result.merged);
+                                            for (phase_id, item_num) in &corrections {
+                                                eprintln!(
+                                                    "[plan] auto-checked item {} in {} (phase is done; checkmark lost in merge)",
+                                                    item_num, phase_id
+                                                );
+                                            }
+
                                             if let Err(e) = std::fs::write(
                                                 &source_path,
-                                                merge_result.merged.as_bytes(),
+                                                final_merged.as_bytes(),
                                             ) {
                                                 eprintln!(
                                                 "⚠️  [protected] PLAN.md merge write failed: {}",
