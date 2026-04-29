@@ -7293,21 +7293,21 @@ pub enum NoteDelivery {
 
 **Depends on**: v0.15.29 (constitution rule + SourceAdapter trait extensions)
 
-1. [ ] **Fix `release.rs:2811` test helper**: Move `git_init_with_commit` to a shared test-fixtures module in `crates/ta-submit/src/test_helpers.rs` (already in constitution's allowed list) or add a `cfg(test)` entry to `allowed_in` with an explanatory comment.
+1. [x] **Fix `release.rs:2811` test helper**: Move `git_init_with_commit` to a shared test-fixtures module in `crates/ta-submit/src/test_helpers.rs` (already in constitution's allowed list) or add a `cfg(test)` entry to `allowed_in` with an explanatory comment.
 
-2. [ ] **Audit and fix `draft.rs`, `pr.rs`, `run.rs`**: Route remaining direct git calls through `SourceAdapter::is_dirty()`, `head_sha()`, `GitReadHelper` (branch detection, remote URL lookup, log reads).
+2. [x] **Audit and fix `draft.rs`, `pr.rs`, `run.rs`**: Route remaining direct git calls through `SourceAdapter::is_dirty()`, `head_sha()`, `GitReadHelper` (branch detection, remote URL lookup, log reads).
 
-3. [ ] **Audit and fix `goal.rs`, `doctor.rs`, `constitution.rs`, `new.rs`**: Route each remaining `Command::new("git")` call through the adapter or `GitReadHelper`. Calls with genuinely no multi-VCS equivalent get `// git-only: no adapter equivalent` comment and an `allowed_in` entry.
+3. [x] **Audit and fix `goal.rs`, `doctor.rs`, `constitution.rs`, `new.rs`**: Route each remaining `Command::new("git")` call through the adapter or `GitReadHelper`. Calls with genuinely no multi-VCS equivalent get `// git-only: no adapter equivalent` comment and an `allowed_in` entry.
 
-4. [ ] **Invert `ta-submit` / `ta-goal` dependency**: Extract `CommitContext` struct into `ta-goal` (or a new `ta-types` micro-crate). Change `SourceAdapter::prepare()`, `commit()`, `push()`, `open_review()` to accept `&CommitContext` instead of `&GoalRun`. Add `From<&GoalRun> for CommitContext` in `ta-cli`. Breaks the cycle so `ta-workspace` and `ta-goal` can import `ta-submit`.
+4. [x] **Invert `ta-submit` / `ta-goal` dependency**: Extract `CommitContext` struct into `ta-goal` (or a new `ta-types` micro-crate). Change `SourceAdapter::prepare()`, `commit()`, `push()`, `open_review()` to accept `&CommitContext` instead of `&GoalRun`. Add `From<&GoalRun> for CommitContext` in `ta-cli`. Breaks the cycle so `ta-workspace` and `ta-goal` can import `ta-submit`.
 
-5. [ ] **`VcsHistoryReader` surface on `SourceAdapter`**: Add `file_at_head(repo_root, rel_path) -> Option<Vec<u8>>` and `head_rev_id(repo_root) -> Option<String>` with default `None` impls. Implement in `GitAdapter`, `PerforceAdapter`, `SvnAdapter`. Update `fetch_from_git_head()` / `get_git_head_sha()` in `overlay.rs` to delegate to adapter when present.
+5. [x] **`VcsHistoryReader` surface on `SourceAdapter`**: Add `file_at_head(repo_root, rel_path) -> Option<Vec<u8>>` and `head_rev_id(repo_root) -> Option<String>` with default `None` impls. Implement in `GitAdapter`, `PerforceAdapter`, `SvnAdapter`. Update `fetch_from_git_head()` / `get_git_head_sha()` in `overlay.rs` to delegate to adapter when present.
 
-6. [ ] **`MergeTool` abstraction in `ta-workspace`**: Define `MergeTool` trait and `MergeToolConfig` in `workflow.toml` (`default = "diff3"`, per-glob overrides). Implement `Diff3MergeTool` (wraps `git merge-file`), `AgentMergeTool` (LLM-based), `NoneMergeTool` (take-source). Route `three_way_merge()` through it.
+6. [x] **`MergeTool` abstraction in `ta-workspace`**: Define `MergeTool` trait and `MergeToolConfig` in `workflow.toml` (`default = "diff3"`, per-glob overrides). Implement `Diff3MergeTool` (wraps `git merge-file`), `AgentMergeTool` (LLM-based), `NoneMergeTool` (take-source). Route `three_way_merge()` through it.
 
-7. [ ] **Perforce/SVN adapter implementations**: Fill in the 8 methods added in v0.15.29 for `PerforceAdapter` and `SvnAdapter` — replace all no-ops with real implementations or explicit `Err(AdapterError::Unsupported)` with docs.
+7. [x] **Perforce/SVN adapter implementations**: Fill in the 8 methods added in v0.15.29 for `PerforceAdapter` and `SvnAdapter` — replace all no-ops with real implementations or explicit `Err(AdapterError::Unsupported)` with docs.
 
-8. [ ] **Verify zero constitution violations**: `ta constitution check` across full workspace → zero hits outside the updated `allowed_in` list.
+8. [x] **Verify zero constitution violations**: `ta constitution check` across full workspace → zero hits outside the updated `allowed_in` list.
 
 #### Version: `0.15.29-alpha.1`
 
