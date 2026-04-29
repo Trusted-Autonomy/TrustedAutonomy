@@ -1591,23 +1591,41 @@ pub fn execute(
             staging = %staging_path.display(),
             "Injecting CLAUDE.md context into staging workspace"
         );
-        inject_claude_md(
-            &staging_path,
-            title,
-            &goal_id,
-            goal.plan_phase.as_deref(),
-            goal.source_dir.as_deref(),
-            goal.parent_goal_id,
-            &goal_store,
-            config,
-            macro_goal,
-            interactive,
-            follow_up_context.as_deref(),
-            context_budget_chars,
-            done_window,
-            pending_window,
-            &context_mode,
-        )?;
+        {
+            let channel_type = resolved_framework
+                .as_ref()
+                .map(|f| f.channel_type.clone())
+                .unwrap_or_default();
+            let context_file = resolved_framework
+                .as_ref()
+                .map(|f| f.context_file.clone())
+                .unwrap_or_else(|| "CLAUDE.md".to_string());
+            let channel =
+                ta_runtime::build_channel(&channel_type, staging_path.clone(), &context_file);
+            let context_content = build_context_content(
+                title,
+                &goal_id,
+                goal.plan_phase.as_deref(),
+                goal.source_dir.as_deref(),
+                goal.parent_goal_id,
+                &goal_store,
+                config,
+                macro_goal,
+                interactive,
+                follow_up_context.as_deref(),
+                context_budget_chars,
+                done_window,
+                pending_window,
+                &context_mode,
+            )?;
+            let ctx = ta_runtime::channels::AgentContext {
+                goal_id: goal_id.clone(),
+                title: title.to_string(),
+                content: context_content,
+                staging_path: staging_path.clone(),
+            };
+            channel.inject_initial(&ctx)?;
+        }
         tracing::info!(goal_id = %goal.goal_run_id, "CLAUDE.md injected");
 
         // v0.15.20: If a work plan path was passed via env var (from a preceding
@@ -4378,6 +4396,7 @@ pub(crate) fn restore_mcp_server_config(staging_path: &Path) -> anyhow::Result<(
 
 // ── CLAUDE.md injection and restoration ─────────────────────────
 
+#[cfg(test)]
 const CLAUDE_MD_BACKUP: &str = ".ta/claude_md_original";
 pub(crate) const NO_ORIGINAL_SENTINEL: &str = "__TA_NO_ORIGINAL__";
 
@@ -4733,8 +4752,7 @@ Your execution pauses until they respond or the timeout expires.
 }
 
 #[allow(clippy::too_many_arguments)]
-fn inject_claude_md(
-    staging_path: &Path,
+fn build_context_content(
     title: &str,
     goal_id: &str,
     plan_phase: Option<&str>,
@@ -4749,43 +4767,7 @@ fn inject_claude_md(
     done_window: usize,
     pending_window: usize,
     context_mode: &ta_submit::config::ContextMode,
-) -> anyhow::Result<()> {
-    let claude_md_path = staging_path.join("CLAUDE.md");
-    let backup_path = staging_path.join(CLAUDE_MD_BACKUP);
-
-    // If a backup already exists from a previous injection (e.g., follow-up reusing
-    // parent staging), restore the original CLAUDE.md first so we inject fresh
-    // content on top of the real project file, not a stale injected copy.
-    if backup_path.exists() {
-        let saved_original = std::fs::read_to_string(&backup_path)?;
-        if saved_original == NO_ORIGINAL_SENTINEL {
-            if claude_md_path.exists() {
-                std::fs::remove_file(&claude_md_path)?;
-            }
-        } else {
-            std::fs::write(&claude_md_path, &saved_original)?;
-        }
-    }
-
-    // Read and save original content.
-    let original_content = if claude_md_path.exists() {
-        std::fs::read_to_string(&claude_md_path)?
-    } else {
-        NO_ORIGINAL_SENTINEL.to_string()
-    };
-
-    // Save backup to .ta/ in staging (excluded from copy and diff).
-    let backup_dir = staging_path.join(".ta");
-    std::fs::create_dir_all(&backup_dir)?;
-    std::fs::write(&backup_path, &original_content)?;
-
-    // Build injected content.
-    let existing_section = if original_content == NO_ORIGINAL_SENTINEL {
-        String::new()
-    } else {
-        original_content
-    };
-
+) -> anyhow::Result<String> {
     // Build plan context section if PLAN.md exists in source (windowed, v0.14.3.1).
     // v0.14.3.2: Skip plan injection when context_mode is "mcp" or "hybrid".
     let use_inject_mode = *context_mode == ta_submit::config::ContextMode::Inject;
@@ -4845,8 +4827,7 @@ fn inject_claude_md(
 
     // v0.14.3.1: Enforce context budget. Trim in priority order when over limit.
     if context_budget_chars > 0 {
-        let fixed_size = existing_section.len()
-            + plan_section.len()
+        let fixed_size = plan_section.len()
             + community_section.len()
             + macro_section.len()
             + interactive_section.len();
@@ -4909,7 +4890,7 @@ fn inject_claude_md(
         }
     }
 
-    let injected = format!(
+    let content = format!(
         r#"# Trusted Autonomy — Mediated Goal
 
 You are working on a TA-mediated goal in a staging workspace.
@@ -5030,10 +5011,7 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
 - Update version references if they exist in the docs
 - Update the `CLAUDE.md` "Current State" section if the test count changes
 
----
-
-{}
-"#,
+---"#,
         title,
         goal_id,
         plan_section,
@@ -5044,14 +5022,61 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
         solutions_section,
         community_section,
         context_tools_hint,
-        existing_section
     );
 
     // Replace placeholder in progress journal section with the actual goal ID.
-    let injected = injected.replace("GOAL_ID_PLACEHOLDER", goal_id);
+    let content = content.replace("GOAL_ID_PLACEHOLDER", goal_id);
 
-    std::fs::write(&claude_md_path, injected)?;
-    Ok(())
+    Ok(content)
+}
+
+/// Test helper: build context content and inject via ClaudeCodeChannel.
+/// Used in tests to exercise the full inject/restore pipeline without
+/// going through the production call site (which requires resolved_framework).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn inject_via_channel_for_test(
+    staging_path: &Path,
+    title: &str,
+    goal_id: &str,
+    plan_phase: Option<&str>,
+    source_dir: Option<&Path>,
+    parent_goal_id: Option<uuid::Uuid>,
+    goal_store: &ta_goal::GoalRunStore,
+    config: &GatewayConfig,
+    macro_goal: bool,
+    interactive: bool,
+    smart_follow_up_context: Option<&str>,
+    context_budget_chars: usize,
+    done_window: usize,
+    pending_window: usize,
+    context_mode: &ta_submit::config::ContextMode,
+) -> anyhow::Result<()> {
+    use ta_runtime::AgentContextChannel;
+    let content = build_context_content(
+        title,
+        goal_id,
+        plan_phase,
+        source_dir,
+        parent_goal_id,
+        goal_store,
+        config,
+        macro_goal,
+        interactive,
+        smart_follow_up_context,
+        context_budget_chars,
+        done_window,
+        pending_window,
+        context_mode,
+    )?;
+    let channel = ta_runtime::channels::ClaudeCodeChannel::new(staging_path.to_path_buf());
+    let ctx = ta_runtime::channels::AgentContext {
+        goal_id: goal_id.to_string(),
+        title: title.to_string(),
+        content,
+        staging_path: staging_path.to_path_buf(),
+    };
+    channel.inject_initial(&ctx)
 }
 
 /// Write a generic context file for non-Claude agents (v0.12.5).
@@ -5621,26 +5646,8 @@ fn inject_work_plan_if_present(staging_path: &Path) -> anyhow::Result<()> {
 /// Restore the original CLAUDE.md content before computing diffs.
 /// This removes TA's injection so it doesn't appear in PR packages.
 fn restore_claude_md(staging_path: &Path) -> anyhow::Result<()> {
-    let backup_path = staging_path.join(CLAUDE_MD_BACKUP);
-    let claude_md_path = staging_path.join("CLAUDE.md");
-
-    if !backup_path.exists() {
-        return Ok(()); // No backup — nothing to restore.
-    }
-
-    let original = std::fs::read_to_string(&backup_path)?;
-
-    if original == NO_ORIGINAL_SENTINEL {
-        // CLAUDE.md didn't exist originally — remove it.
-        if claude_md_path.exists() {
-            std::fs::remove_file(&claude_md_path)?;
-        }
-    } else {
-        // Restore original content.
-        std::fs::write(&claude_md_path, original)?;
-    }
-
-    Ok(())
+    use ta_runtime::AgentContextChannel;
+    ta_runtime::channels::ClaudeCodeChannel::new(staging_path.to_path_buf()).restore(staging_path)
 }
 
 /// Count files that differ between staging and source (v0.12.6 item 7).
@@ -6445,7 +6452,7 @@ mod tests {
         )
         .unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Test goal",
             "goal-123",
@@ -6490,7 +6497,7 @@ mod tests {
         let original = "# My Project\nExisting instructions.\n";
         std::fs::write(staging.path().join("CLAUDE.md"), original).unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Fix bug",
             "goal-123",
@@ -6530,7 +6537,7 @@ mod tests {
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
         // No CLAUDE.md exists initially.
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "New goal",
             "goal-456",
@@ -6563,7 +6570,7 @@ mod tests {
         let config = GatewayConfig::for_project(staging.path());
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Macro goal test",
             "goal-macro-789",
@@ -6597,7 +6604,7 @@ mod tests {
         let config = GatewayConfig::for_project(staging.path());
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Interactive goal",
             "goal-interactive-101",
@@ -6637,7 +6644,7 @@ mod tests {
         let config = GatewayConfig::for_project(staging.path());
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Non-interactive goal",
             "goal-nointeractive-102",
@@ -6669,7 +6676,7 @@ mod tests {
         let config = GatewayConfig::for_project(staging.path());
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Task marking test",
             "goal-taskmark-001",
@@ -7201,7 +7208,7 @@ pre_launch:
         std::fs::write(staging.path().join("CLAUDE.md"), original).unwrap();
 
         // First injection (parent goal).
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Parent goal",
             "goal-parent-111",
@@ -7226,7 +7233,7 @@ pre_launch:
         assert!(first_injected.contains("Original CLAUDE.md"));
 
         // Second injection (follow-up reusing same staging — no restore between).
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Follow-up goal",
             "goal-followup-222",
@@ -7639,7 +7646,7 @@ non_interactive_env:
         let config = GatewayConfig::for_project(staging.path());
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Budget test goal",
             "goal-budget-001",
@@ -7673,7 +7680,7 @@ non_interactive_env:
         let config = GatewayConfig::for_project(staging.path());
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "No-budget goal",
             "goal-nobudget-002",
@@ -7733,7 +7740,7 @@ plan_pending_window = 7
         )
         .unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "MCP mode goal",
             "goal-mcp-001",
@@ -7771,7 +7778,7 @@ plan_pending_window = 7
         let config = GatewayConfig::for_project(staging.path());
         let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "MCP hint goal",
             "goal-mcp-hint",
@@ -7814,7 +7821,7 @@ plan_pending_window = 7
         )
         .unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Hybrid mode goal",
             "goal-hybrid-001",
@@ -7858,7 +7865,7 @@ plan_pending_window = 7
         )
         .unwrap();
 
-        inject_claude_md(
+        inject_via_channel_for_test(
             staging.path(),
             "Inject mode goal",
             "goal-inject-001",

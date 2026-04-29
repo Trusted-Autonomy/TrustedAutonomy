@@ -6,8 +6,8 @@ use super::{
     AgentContext, AgentContextChannel, ChannelCapabilities, ChannelType, HumanNote, NoteDelivery,
 };
 
-const BACKUP_SUFFIX: &str = ".ta/claude_md_backup";
-const NO_ORIGINAL: &str = "__NO_ORIGINAL__";
+const BACKUP_SUFFIX: &str = ".ta/claude_md_original";
+const NO_ORIGINAL: &str = "__TA_NO_ORIGINAL__";
 
 /// Channel adapter for Claude Code agents.
 ///

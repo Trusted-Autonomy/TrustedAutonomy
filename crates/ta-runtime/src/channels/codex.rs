@@ -188,4 +188,49 @@ mod tests {
         // No original — file should be gone.
         assert!(!dir.path().join("AGENTS.md").exists());
     }
+
+    /// Integration test: Codex channel in VS Code extension context returns ApiPushed.
+    ///
+    /// Requires `VSCODE_IPC_HOOK_CLI` env var to be set (VS Code extension dev environment).
+    /// Run with: `cargo test -- --ignored codex_vscode_inject_note_returns_api_pushed`
+    #[test]
+    #[ignore]
+    fn codex_vscode_inject_note_returns_api_pushed() {
+        // This test only passes when run inside a VS Code extension context where
+        // VSCODE_IPC_HOOK_CLI is set. Skip if not in that environment.
+        if std::env::var("VSCODE_IPC_HOOK_CLI").is_err() {
+            eprintln!("Skipping: VSCODE_IPC_HOOK_CLI not set — not running in VS Code context");
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        let ch = CodexChannel::new(dir.path().to_path_buf(), "AGENTS.md");
+
+        // First inject initial context (simulates goal start).
+        let ctx = AgentContext {
+            goal_id: "vscode-goal-1".to_string(),
+            title: "VS Code Integration Test".to_string(),
+            content: "# Codex Context for VS Code\n".to_string(),
+            staging_path: dir.path().to_path_buf(),
+        };
+        ch.inject_initial(&ctx).unwrap();
+
+        // inject_note must return ApiPushed when VSCODE_IPC_HOOK_CLI is set.
+        let note = HumanNote::new("vscode-goal-1", "Please fix the login flow");
+        let delivery = ch.inject_note(&note).unwrap();
+        assert_eq!(
+            delivery,
+            NoteDelivery::ApiPushed,
+            "inject_note must return ApiPushed inside VS Code context (VSCODE_IPC_HOOK_CLI is set)"
+        );
+
+        // Note file should be written to .ta/advisor-notes/<goal-id>.md.
+        let notes_path = dir.path().join(".ta/advisor-notes/vscode-goal-1.md");
+        assert!(notes_path.exists(), "notes file should be created");
+        let content = std::fs::read_to_string(&notes_path).unwrap();
+        assert!(
+            content.contains("Please fix the login flow"),
+            "notes file should contain the injected message"
+        );
+    }
 }

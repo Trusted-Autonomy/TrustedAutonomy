@@ -324,9 +324,27 @@ fn validate_agent(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 fn list_agents(config: &GatewayConfig) -> anyhow::Result<()> {
+    // Resolve all frameworks (built-in + custom) to show channel info.
+    let all_frameworks = {
+        let mut m: std::collections::HashMap<String, AgentFrameworkManifest> =
+            std::collections::HashMap::new();
+        for f in AgentFrameworkManifest::builtins() {
+            m.insert(f.name.clone(), f);
+        }
+        for f in AgentFrameworkManifest::discover(&config.workspace_root) {
+            m.insert(f.name.clone(), f);
+        }
+        m
+    };
+
     let agents_dir = config.workspace_root.join(".ta").join("agents");
 
     println!("Configured agents:");
+    println!(
+        "  {:<20} {:<14} {:<12} LIVE",
+        "NAME", "CHANNEL", "INJECT_MODE"
+    );
+    println!("  {}", "-".repeat(65));
     if agents_dir.exists() {
         let mut found = false;
         let mut entries: Vec<_> = std::fs::read_dir(&agents_dir)?
@@ -349,27 +367,39 @@ fn list_agents(config: &GatewayConfig) -> anyhow::Result<()> {
                 .to_string_lossy()
                 .to_string();
 
-            // Try to read the command field.
-            let cmd = std::fs::read_to_string(entry.path())
-                .ok()
-                .and_then(|c| {
-                    serde_yaml::from_str::<std::collections::HashMap<String, serde_yaml::Value>>(&c)
-                        .ok()
-                })
-                .and_then(|doc| {
-                    doc.get("command")
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                })
-                .unwrap_or_else(|| "?".to_string());
+            // Resolve channel info from manifest (fall back to generic_file defaults).
+            let (channel_str, inject_mode_str, live_str) =
+                if let Some(fw) = all_frameworks.get(&name) {
+                    let caps = ta_runtime::channels::build_channel(
+                        &fw.channel_type,
+                        std::path::PathBuf::from("."),
+                        &fw.context_file,
+                    )
+                    .capabilities();
+                    (
+                        format!("{}", fw.channel_type),
+                        format!("{:?}", fw.context_inject),
+                        caps.live_label().to_string(),
+                    )
+                } else {
+                    (
+                        "GenericFile".to_string(),
+                        "Prepend".to_string(),
+                        "Queued".to_string(),
+                    )
+                };
 
-            println!("  {} (command: {})", name, cmd);
+            println!(
+                "  {:<20} {:<14} {:<12} {}",
+                name, channel_str, inject_mode_str, live_str
+            );
         }
 
         if !found {
-            println!("  (none configured)");
+            println!("  (none configured — use `ta agent new` to create one)");
         }
     } else {
-        println!("  (none configured)");
+        println!("  (none configured — use `ta agent new` to create one)");
     }
 
     println!();
@@ -378,6 +408,9 @@ fn list_agents(config: &GatewayConfig) -> anyhow::Result<()> {
     println!();
     println!("Browse templates:");
     println!("  ta agent list --templates");
+    println!();
+    println!("Show framework channel details:");
+    println!("  ta agent list --frameworks");
 
     Ok(())
 }
@@ -708,21 +741,37 @@ fn list_frameworks(project_root: &std::path::Path) -> anyhow::Result<()> {
     let builtins = AgentFrameworkManifest::builtins();
     let custom = AgentFrameworkManifest::discover(project_root);
 
-    println!("Built-in agent frameworks:");
-    println!("  {:<20} DESCRIPTION", "NAME");
-    println!("  {}", "-".repeat(70));
-    for f in &builtins {
-        println!("  {:<20} {}", f.name, truncate_desc(&f.description, 50));
+    fn print_frameworks(frameworks: &[AgentFrameworkManifest]) {
+        println!(
+            "  {:<20} {:<14} {:<12} {:<8} DESCRIPTION",
+            "NAME", "CHANNEL", "INJECT_MODE", "LIVE"
+        );
+        println!("  {}", "-".repeat(80));
+        for f in frameworks {
+            let caps = ta_runtime::channels::build_channel(
+                &f.channel_type,
+                std::path::PathBuf::from("."),
+                &f.context_file,
+            )
+            .capabilities();
+            println!(
+                "  {:<20} {:<14} {:<12} {:<8} {}",
+                f.name,
+                format!("{}", f.channel_type),
+                format!("{:?}", f.context_inject),
+                caps.live_label(),
+                truncate_desc(&f.description, 30),
+            );
+        }
     }
+
+    println!("Built-in agent frameworks:");
+    print_frameworks(&builtins);
 
     if !custom.is_empty() {
         println!();
         println!("Custom frameworks (project/user):");
-        println!("  {:<20} DESCRIPTION", "NAME");
-        println!("  {}", "-".repeat(70));
-        for f in &custom {
-            println!("  {:<20} {}", f.name, truncate_desc(&f.description, 50));
-        }
+        print_frameworks(&custom);
     }
 
     println!();
@@ -749,6 +798,14 @@ fn framework_info(name: &str, project_root: &std::path::Path) -> anyhow::Result<
         println!("Context file: {}", f.context_file);
         println!("Context mode: {:?}", f.context_inject);
         println!("Memory mode:  {:?}", f.memory.inject);
+        let caps = ta_runtime::channels::build_channel(
+            &f.channel_type,
+            std::path::PathBuf::from("."),
+            &f.context_file,
+        )
+        .capabilities();
+        println!("Channel:      {}", f.channel_type);
+        println!("Live inject:  {}", caps.live_label());
     } else {
         eprintln!("Unknown framework: {}", name);
         eprintln!("Run `ta agent frameworks` to see available frameworks.");

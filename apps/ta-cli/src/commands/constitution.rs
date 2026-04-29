@@ -680,14 +680,8 @@ impl ProjectConstitutionConfig {
             "injection_cleanup".to_string(),
             ConstitutionRule {
                 description: None,
-                inject_fns: vec![
-                    "inject_claude_md".to_string(),
-                    "inject_credentials".to_string(),
-                ],
-                restore_fns: vec![
-                    "restore_claude_md".to_string(),
-                    "restore_credentials".to_string(),
-                ],
+                inject_fns: vec!["inject_credentials".to_string()],
+                restore_fns: vec!["restore_credentials".to_string()],
                 patterns: vec![],
                 severity: "high".to_string(),
                 allowed_in: vec![],
@@ -749,25 +743,38 @@ impl ProjectConstitutionConfig {
                 allowed_in: vec![],
             },
         );
-        // Context-channel enforcement rule (v0.15.28): agent context must go through
+        // Context-channel enforcement rule (v0.15.28/v0.15.30): agent context must go through
         // AgentContextChannel::inject_initial(), not direct CLAUDE.md file writes.
+        // Escalated from warn to block in v0.15.30.
         rules.insert(
             "no-direct-claude-md".to_string(),
             ConstitutionRule {
                 description: Some(
                     "All agent context injection must go through AgentContextChannel::inject_initial(), \
-                     not direct CLAUDE.md file writes. String literal \"CLAUDE.md\" must not appear \
-                     outside of crates/ta-runtime/src/channels/ and crates/ta-runtime/src/framework.rs. \
-                     This ensures every agent type (Codex, Ollama, custom) gets context correctly. \
-                     Enforced by scanning for the pattern '\"CLAUDE.md\"' in source files outside the \
-                     allowed paths. Introduced in v0.15.28."
+                     not direct CLAUDE.md file writes. The string literal \"CLAUDE.md\" is only permitted \
+                     in the channel implementation, framework manifest, and files with legitimate \
+                     non-injection uses (init, release, draft apply, constitution analysis). \
+                     Enforced by scanning for the pattern '\"CLAUDE.md\"' outside the allowed paths. \
+                     Introduced in v0.15.28; escalated to block in v0.15.30."
                         .to_string(),
                 ),
                 inject_fns: vec![],
                 restore_fns: vec![],
                 patterns: vec!["\"CLAUDE.md\"".to_string()],
-                severity: "high".to_string(),
-                allowed_in: vec![],
+                severity: "block".to_string(),
+                allowed_in: vec![
+                    "crates/ta-runtime/src/channels/claude_code.rs".to_string(),
+                    "crates/ta-runtime/src/framework.rs".to_string(),
+                    "apps/ta-cli/src/commands/run.rs".to_string(),
+                    "apps/ta-cli/src/commands/draft.rs".to_string(),
+                    "apps/ta-cli/src/commands/release.rs".to_string(),
+                    "apps/ta-cli/src/commands/init.rs".to_string(),
+                    "apps/ta-cli/src/commands/constitution.rs".to_string(),
+                    "apps/ta-cli/src/commands/advisor.rs".to_string(),
+                    "apps/ta-cli/src/commands/goal.rs".to_string(),
+                    "apps/ta-cli/src/commands/agent.rs".to_string(),
+                    "crates/ta-daemon/src/api/advisor.rs".to_string(),
+                ],
             },
         );
         // VCS adapter enforcement rule (v0.15.29.1): direct git subprocess calls must go
@@ -2553,8 +2560,16 @@ mod tests {
         assert!(config.rules.contains_key("error_paths"));
         let rule = config.rules.get("injection_cleanup").unwrap();
         assert_eq!(rule.severity, "high");
-        assert!(rule.inject_fns.contains(&"inject_claude_md".to_string()));
-        assert!(rule.restore_fns.contains(&"restore_claude_md".to_string()));
+        // inject_claude_md removed in v0.15.30 (shim deleted, replaced by channel)
+        assert!(!rule.inject_fns.contains(&"inject_claude_md".to_string()));
+        assert!(rule.inject_fns.contains(&"inject_credentials".to_string()));
+        assert!(rule
+            .restore_fns
+            .contains(&"restore_credentials".to_string()));
+        // no-direct-claude-md rule must be present and block-severity
+        let no_direct = config.rules.get("no-direct-claude-md").unwrap();
+        assert_eq!(no_direct.severity, "block");
+        assert!(!no_direct.allowed_in.is_empty());
     }
 
     #[test]

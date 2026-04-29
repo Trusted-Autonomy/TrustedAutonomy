@@ -7341,7 +7341,7 @@ pub enum NoteDelivery {
 
 **Depends on**: v0.15.28 (AgentContextChannel trait + four adapters + shim)
 
-1. [ ] **Remove `inject_claude_md()` shim**: Delete the deprecated function from `run.rs`. Verify all call sites now use `channel.inject_initial()`. Update tests that referenced the old function name.
+1. [x] **Remove `inject_claude_md()` shim**: Deleted from `run.rs`. Replaced with `build_context_content()` (returns `String`) and `inject_via_channel_for_test()` test helper. Production call site uses `ta_runtime::build_channel()` with channel type from `resolved_framework`. `restore_claude_md()` delegates to `ClaudeCodeChannel::restore()`. All 15 test call sites updated.
 
 2. [ ] **Audit remaining `"CLAUDE.md"` literals**: Run the `no-direct-claude-md` constitution rule in `--report` mode against the full workspace. Fix each remaining hit (likely in test fixtures, USAGE.md examples, and any doc comments that reference the file by name). Test fixture references are allowed only inside `channels/claude_code.rs` and `framework.rs`.
 
