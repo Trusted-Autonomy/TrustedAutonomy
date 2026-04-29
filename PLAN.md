@@ -7354,6 +7354,26 @@ pub enum NoteDelivery {
 #### Version: `0.15.30-alpha`
 
 ---
+### v0.15.30.1 — Agent Framework: Secondary Injection Paths & run.rs Exemption Cleanup
+<!-- status: pending -->
+
+**Goal**: Route the three remaining direct CLAUDE.md writes in `run.rs` through the `AgentContextChannel` abstraction, and replace the blanket file-level `allowed_in` exemption for `run.rs` with function-level or line-range exemptions.
+
+**Why**: The v0.15.30 reviewer found that three secondary injection paths still write CLAUDE.md directly — persona injection (run.rs:1643), work-plan injection (run.rs:5630), and failure-context re-injection (run.rs:2491). Additionally, `run.rs` was added wholesale to the `no-direct-claude-md` `allowed_in` list, which exempts the entire file from the block rule. This is the file most likely to accumulate new injection paths, so blanket exemption undermines the enforcement the phase was meant to activate.
+
+**Depends on**: v0.15.30 (channel abstraction + constitution rule)
+
+1. [ ] **Route persona injection through channel**: `run.rs:1643` persona-context write → `channel.inject_note()` or a new `inject_persona()` method on `AgentContextChannel`. Add to `ClaudeCodeChannel` and `CodexChannel` implementations.
+
+2. [ ] **Route work-plan injection through channel**: `run.rs:5630` work-plan write → `channel.inject_work_plan()` (or `inject_note()` with a `NoteKind::WorkPlan` variant). Implement in both channel types.
+
+3. [ ] **Route failure-context re-injection through channel**: `run.rs:2491` failure-context write → `channel.inject_note()` with `NoteKind::FailureContext`. Implement in both channel types.
+
+4. [ ] **Replace blanket run.rs exemption**: Remove `run.rs` from `no-direct-claude-md` `allowed_in`. After routing items 1-3, `run.rs` should have zero remaining `CLAUDE.md` literal references. Verify with `ta constitution check`.
+
+#### Version: `0.15.30-alpha.1`
+
+---
 
 ## v0.16 — IDE Integration & Developer Experience
 
