@@ -7375,7 +7375,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.30.2 — Release Pipeline: Complete, Clean, and Studio-Runnable
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: `ta release run` is the single, complete release process for any TA project. A non-engineer can run a full stable or pre-release from TA Studio (with approval gates). The pipeline automatically manages all release metadata (`stable_release_tag`, `last_release_tag`, `.release.toml`) with no manual steps or leftover uncommitted files.
 
