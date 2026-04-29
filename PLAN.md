@@ -7363,13 +7363,13 @@ pub enum NoteDelivery {
 
 **Depends on**: v0.15.30 (channel abstraction + constitution rule)
 
-1. [ ] **Route persona injection through channel**: `run.rs:1643` persona-context write → `channel.inject_note()` or a new `inject_persona()` method on `AgentContextChannel`. Add to `ClaudeCodeChannel` and `CodexChannel` implementations.
+1. [x] **Route persona injection through channel**: `run.rs:1643` persona-context write → `channel.inject_note()` or a new `inject_persona()` method on `AgentContextChannel`. Add to `ClaudeCodeChannel` and `CodexChannel` implementations.
 
-2. [ ] **Route work-plan injection through channel**: `run.rs:5630` work-plan write → `channel.inject_work_plan()` (or `inject_note()` with a `NoteKind::WorkPlan` variant). Implement in both channel types.
+2. [x] **Route work-plan injection through channel**: `run.rs:5630` work-plan write → `channel.inject_work_plan()` (or `inject_note()` with a `NoteKind::WorkPlan` variant). Implement in both channel types.
 
-3. [ ] **Route failure-context re-injection through channel**: `run.rs:2491` failure-context write → `channel.inject_note()` with `NoteKind::FailureContext`. Implement in both channel types.
+3. [x] **Route failure-context re-injection through channel**: `run.rs:2491` failure-context write → `channel.inject_note()` with `NoteKind::FailureContext`. Implement in both channel types.
 
-4. [ ] **Replace blanket run.rs exemption**: Remove `run.rs` from `no-direct-claude-md` `allowed_in`. After routing items 1-3, `run.rs` should have zero remaining `CLAUDE.md` literal references. Verify with `ta constitution check`.
+4. [x] **Replace blanket run.rs exemption**: Remove `run.rs` from `no-direct-claude-md` `allowed_in`. After routing items 1-3, `run.rs` should have zero remaining `CLAUDE.md` literal references. Verify with `ta constitution check`.
 
 #### Version: `0.15.30-alpha.1`
 
@@ -7396,6 +7396,8 @@ pub enum NoteDelivery {
 5. [ ] **Release adapter interface**: Define a `ReleaseAdapter` trait with: `bump_version()`, `commit_and_tag()`, `push()`, `create_release_draft()`, `publish_release()`, `dispatch_workflow()`. The git implementation is the default. Perforce and SVN adapters return `Err(Unsupported)` with actionable messages. Custom adapters can be provided via `.ta/release.yaml` `adapter:` key.
 
 6. [ ] **`ta release validate` pre-flight covers `.release.toml` staleness**: Warn if `last_release_tag` is more than N releases behind HEAD (configurable, default 5 tags). Warn if `stable_release_tag` does not match the last non-prerelease run. These are advisory — pipeline proceeds — but they surface configuration drift early.
+
+7. [ ] **Fix `ta plan repair` to handle numbered list items**: `plan repair` and the post-merge validator's unchecked-item regex currently only match `- [ ]` (dash list). PLAN.md uses `1. [ ]` (numbered list) for all phase items — the regex at `plan.rs:2919` and `plan_validation.rs` must also match `^\s*\d+\.\s+\[ \]`. This is why items in done phases keep appearing unchecked after merge.
 
 #### Version: `0.15.30-alpha.2`
 
