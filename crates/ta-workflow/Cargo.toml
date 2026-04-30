@@ -20,7 +20,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
-ta-changeset = { path = "../ta-changeset", version = "0.15.30-alpha" }
+ta-changeset = { path = "../ta-changeset", version = "0.15.30-alpha.2" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
