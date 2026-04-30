@@ -7450,24 +7450,28 @@ pub enum NoteDelivery {
 #### Version: `0.15.30-alpha.4`
 
 ---
-### v0.15.30.5 — Release Pipeline: Agent Timeout Resilience & Step Resume
+### v0.15.30.5 — Release Pipeline: Background Agent, Timeout Resilience & Step Resume
 <!-- status: pending -->
 
-**Goal**: The release pipeline's agent-driven steps (release notes generation, press release) must be resilient to API stream timeouts. A timeout mid-step must not require restarting the full pipeline — the user resumes from the failed step via `--from-step`, and the agent retries with context preserved.
+**Goal**: `ta release run --interactive` must run the release agent as a **background TA goal** (detached from TTY), surfacing all human touchpoints via `ta_ask_human` in Studio or `ta shell`. The agent must be resilient to API stream timeouts with automatic retry, partial result preservation, and a `ta_ask_human` prompt offering Retry / Fail / Discuss on timeout.
 
-**Why**: `ta release run --interactive` uses a Claude agent for release notes generation. Long commit ranges (437 commits since v0.15.15.1.1) cause "Stream idle timeout — partial response received" errors. The pipeline has no retry logic, no partial-result preservation, and no user-facing guidance on how to resume. The user is left inside a hung agent session with no clear exit path.
+**Root cause**: `run_interactive_release()` (`release.rs:2117`) calls `Command::new(&ta_bin).args(&args).status()` — this inherits the parent process's TTY, so `ta run` launches Claude as a foreground interactive session instead of a background goal. The fix is to launch via `ta goal start --detach` (or equivalent async spawn) so the agent runs in the background and all human interaction routes through `ta_ask_human` notifications.
+
+**Why**: The user observed: (1) `--interactive` launched Claude in foreground terminal mode instead of as a background goal; (2) API stream timeouts on large commit ranges leave the user inside a hung agent with no recovery path; (3) the only timeout handling is a manual "please retry" user prompt. The pipeline should handle all of this automatically.
 
 **Depends on**: v0.15.30.4 (approval gate TTY policy)
 
-1. [ ] **Automatic retry with backoff on stream timeout**: Agent-driven pipeline steps (`agent:` step type) catch `ApiError::StreamIdleTimeout` and retry up to 3 times with exponential backoff (5s, 15s, 45s). Log each retry: `[release] stream timeout on step N — retrying (attempt 2/3)`. On third failure, exit cleanly with `--from-step` resume instructions.
+1. [ ] **Fix `run_interactive_release()` to launch as detached background goal**: Replace `Command::new(&ta_bin).args(&args).status()` with async goal spawn (`ta goal start --detach` or `GoalRunner::spawn_detached()`). The release agent runs as a background TA goal; the CLI prints the goal ID and returns immediately. Human touchpoints (`ta_ask_human`) surface as notifications in Studio and `ta shell`.
 
-2. [ ] **Partial result preservation**: If an agent step produces partial output before timeout (e.g., partial release notes), save to `.ta/release-draft.md`. On retry or `--from-step` resume, inject the partial result as context: `"You previously generated these partial notes: <content>. Please complete them."` Prevents starting from scratch on each retry.
+2. [ ] **`ta_ask_human` timeout recovery prompt**: On `ApiError::StreamIdleTimeout`, instead of exiting, the agent calls `ta_ask_human("Release notes generation timed out. [R]etry / [F]ail / [D]iscuss — enter message to send to agent")`. Discuss sends the user's message back to the agent as context, allowing guided recovery without restarting.
 
-3. [ ] **Clear timeout exit message**: On unrecoverable timeout, print: `"Release notes generation timed out after 3 attempts.\nPartial output saved to .ta/release-draft.md\nResume with: ta release run <version> --from-step 8 --interactive"`. Never leave the user inside a hung agent session.
+3. [ ] **Automatic retry with backoff before prompting human**: Before reaching the `ta_ask_human` timeout prompt, retry up to 2 times automatically with exponential backoff (10s, 30s). Only prompt the human on the third failure. Log each retry: `[release] stream timeout — retrying (attempt 2/3)`.
 
-4. [ ] **Chunked generation for large commit ranges**: When `--from-tag` spans >100 commits, split notes generation into chunks (by date or service area) and merge. Prevents single large requests that exceed idle timeout windows.
+4. [ ] **Partial result preservation**: Save partial agent output to `.ta/release-draft.md` before any retry or human prompt. On retry, inject as context: `"Partial notes from previous attempt: <content>. Please complete."` On `--from-step` resume, pre-load this file if present.
 
-5. [ ] **`ta release show` includes step numbers**: `ta release show <version>` output includes the step index alongside the step name so `--from-step N` is self-documenting. Currently requires counting manually.
+5. [ ] **Chunked generation for large commit ranges**: When the commit range spans >100 commits, split generation into chunks (by month or service area) and merge. Prevents single requests that exceed idle timeout windows regardless of retry count.
+
+6. [ ] **`ta release show` includes step numbers**: Output step index alongside name so `--from-step N` is self-documenting without manual counting.
 
 #### Version: `0.15.30-alpha.5`
 
