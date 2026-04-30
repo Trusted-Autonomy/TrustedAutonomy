@@ -7402,6 +7402,18 @@ pub enum NoteDelivery {
 #### Version: `0.15.30-alpha.2`
 
 ---
+### v0.15.30.2.1 — Windows: Delay-load ProjectedFSLib.dll to fix startup crash
+<!-- status: done -->
+
+**Goal**: Fix the Windows binary crashing on startup with "projectedfs.dll not found" on machines without the `Client-ProjFS` optional Windows feature.
+
+**Why**: The `windows` crate's `Win32_Storage_ProjectedFileSystem` feature adds `ProjectedFSLib.dll` to the binary's static import table. The OS loader rejects the binary at startup on machines where `Client-ProjFS` is not installed — before `is_projfs_available()` can run its graceful fallback. The release was demoted from Latest and rolled back to `public-alpha-v0.15.15.1.1` pending this fix.
+
+1. [x] **Add `build.rs` with `/DELAYLOAD:ProjectedFSLib.dll`**: On Windows MSVC targets, emit `cargo:rustc-link-arg=/DELAYLOAD:ProjectedFSLib.dll` and `cargo:rustc-link-lib=delayimp`. Delay-loading shifts DLL resolution from process startup to first call site — combined with the `is_projfs_available()` check, the DLL is never needed on machines without ProjFS.
+
+#### Version: `0.15.30-alpha.2.1`
+
+---
 ### v0.15.30.3 — `ta init` Template: Pragma Game Services Backend (Kotlin/BMAD)
 <!-- status: pending -->
 
