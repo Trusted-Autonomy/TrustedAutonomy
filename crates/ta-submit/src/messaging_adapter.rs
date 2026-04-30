@@ -398,10 +398,35 @@ impl ExternalMessagingAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| MessagingPluginError::SpawnFailed {
-            command: self.command.clone(),
-            reason: e.to_string(),
-        })?;
+        // Retry on ETXTBSY (os error 26) — the kernel marks an inode busy while a write fd
+        // is open; the condition is always transient and clears within a few milliseconds.
+        // Seen on GitHub Actions Ubuntu runners even when using /dev/shm.
+        let mut child = {
+            let mut last_err = None;
+            let mut spawned = None;
+            for attempt in 0u8..4 {
+                match cmd.spawn() {
+                    Ok(c) => {
+                        spawned = Some(c);
+                        break;
+                    }
+                    Err(ref e) if e.raw_os_error() == Some(26) => {
+                        last_err = Some(e.to_string());
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            10u64 * (1 << attempt),
+                        ));
+                    }
+                    Err(e) => {
+                        last_err = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            spawned.ok_or_else(|| MessagingPluginError::SpawnFailed {
+                command: self.command.clone(),
+                reason: last_err.unwrap_or_default(),
+            })?
+        };
 
         // Write request to stdin.
         if let Some(mut stdin) = child.stdin.take() {
