@@ -1,4 +1,20 @@
-## TA v0.15.30-alpha.2 — Agent Framework Enforcement, Full Workflow Automation & Studio
+## TA v0.15.30-alpha.2.1 — Windows Startup Crash Fix
+
+**Patch release on top of v0.15.30-alpha.2.**
+
+### What's fixed in this patch
+
+- **Windows startup crash without Client-ProjFS** — `ta` no longer crashes on launch when
+  the Windows Projected File System optional feature is not installed. `ProjectedFSLib.dll`
+  is now delay-loaded; the binary starts normally and only activates ProjFS staging when
+  the feature is present. (v0.15.30.2.1)
+
+Users on Windows who were unable to launch `ta` without first enabling Client-ProjFS
+should upgrade to this release.
+
+---
+
+## v0.15.30-alpha.2 — Agent Framework Enforcement, Full Workflow Automation & Studio
 
 This is a large milestone release covering 164 completed plan phases since v0.13.17-alpha.7.
 The headline work is the completion of the agent framework abstraction layer, a full-featured
