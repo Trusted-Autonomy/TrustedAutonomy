@@ -3118,7 +3118,46 @@ steps:
       git pull --rebase origin main
       git push origin main
       git push origin "${TAG}"
-      echo "Pushed ${TAG}. GitHub Actions will build the release."
+      echo "Pushed ${TAG}."
+
+      # ── Trigger and verify release workflow ──────────────────────────────
+      # Tags matching v* auto-trigger the Release workflow. Other tag formats
+      # (e.g. public-alpha-*) need an explicit workflow_dispatch. In both cases
+      # we wait up to 60s to confirm the run appears before continuing.
+      REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || \
+             git remote get-url origin | sed 's|.*github\.com[:/]||; s|\.git$$||')
+      IS_PRERELEASE="false"
+      echo "${VERSION}" | grep -qE '[a-zA-Z]' && IS_PRERELEASE="true"
+
+      if echo "${TAG}" | grep -qE '^v[0-9]'; then
+        echo "Tag '${TAG}' matches v* — release workflow will auto-trigger via push event."
+      else
+        echo "Tag '${TAG}' does not match v* — dispatching release workflow explicitly."
+        gh workflow run release.yml \
+          --repo "${REPO}" \
+          --field tag="${TAG}" \
+          --field prerelease="${IS_PRERELEASE}"
+        echo "Workflow dispatch sent."
+      fi
+
+      # Wait for the run to appear (auto-triggered or dispatched).
+      echo "Verifying release workflow started..."
+      for i in $(seq 1 12); do
+        sleep 5
+        STATUS=$(gh run list --workflow=release.yml --repo "${REPO}" --limit 1 \
+                   --json status --jq '.[0].status' 2>/dev/null || true)
+        RUN_URL=$(gh run list --workflow=release.yml --repo "${REPO}" --limit 1 \
+                    --json url --jq '.[0].url' 2>/dev/null || true)
+        if [ "${STATUS}" = "in_progress" ] || [ "${STATUS}" = "queued" ]; then
+          echo "Release workflow is ${STATUS}: ${RUN_URL}"
+          break
+        fi
+        echo "  Attempt ${i}/12: status='${STATUS}' — waiting..."
+        if [ "${i}" = "12" ]; then
+          echo "Warning: release workflow not detected within 60s."
+          echo "  Check manually: gh run list --workflow=release.yml --repo ${REPO}"
+        fi
+      done
 
   # Update .release.toml: set last_release_tag to the newly pushed tag,
   # commit the change, and push it to the remote.
