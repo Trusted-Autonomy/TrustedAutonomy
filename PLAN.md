@@ -7678,6 +7678,26 @@ Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 
 3. [ ] **USAGE.md**: Windows sandbox section — what each containment level restricts, how to enable, elevation requirement for AppContainer, `ta doctor` sandbox check.
 
 > **Focus**: Tier 2 managed-paths filesystem governance (SHA journal, Postgres/MySQL staging), followed by the unified `ta release` command system. Governance infrastructure comes first so the release pipeline itself can run under full governance.
+
+---
+### v0.16.4.1 — Windows ProjFS: MSI Checkbox + `ta onboard` Step
+<!-- status: pending -->
+
+**Goal**: Make `Client-ProjFS` (the Windows Projected File System optional feature) a one-click install for all Windows users. Game and large-project users require ProjFS for true VFS staging — the full-copy and smart-copy fallbacks are not viable at Unreal/game scale. Currently USAGE.md documents the `Dism.exe` command but nothing in the installer surface offers to enable it.
+
+**Why**: A user installing TA for a game project will hit the `strategy = "projfs"` setting in their Unreal template `.ta/workflow.toml` and see a tracing log saying ProjFS is unavailable. They have to find USAGE.md, read the Dism command, and run it in an elevated shell. This should be handled by the installer.
+
+**Depends on**: v0.16.4 (Windows pipeline established), v0.13.11 (MSI + WiX in place), v0.15.11 (`ta onboard` wizard structure)
+
+1. [ ] **MSI checkbox** (WiX): Add a "Platform Features" page to the WiX installer wizard with a single checkbox: "Enable fast virtual workspace (Windows 10 1809+ required)". Default: checked. When checked, the MSI custom action runs `Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart` with `Execute="deferred" Impersonate="no"` (runs as SYSTEM, no UAC prompt needed during MSI install which already runs elevated). Checkbox is hidden/greyed on Windows versions below 1809.
+
+2. [ ] **`ta onboard` Step 4 — Windows platform features**: On Windows, after the Optional Components step, add a "Windows Features" screen. Call `is_projfs_available()`; if false, show: "Fast virtual workspace (ProjFS) is not enabled. Enable it now? [recommended for game and large projects]". If user selects Yes, shell `Dism.exe` with UAC elevation (`runas`). Report success/failure. On failure, print the manual command.
+
+3. [ ] **`ta doctor` auto-fix offer**: When `ta doctor` reports ProjFS unavailable, offer: "Run `ta doctor fix projfs` to enable it now (requires elevation)?". `ta doctor fix projfs` runs the Dism command via `runas` or prints instructions if UAC elevation unavailable.
+
+#### Version: `0.16.4.1-alpha`
+
+---
 ### v0.17.0 — Managed Paths: SHA Filesystem + URI Journal
 <!-- status: pending -->
 
