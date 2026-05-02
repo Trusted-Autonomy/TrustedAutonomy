@@ -15,6 +15,16 @@
 use std::process::Command;
 
 fn main() {
+    // Delay-load ProjectedFSLib.dll so ta.exe starts on machines without the
+    // Windows "Client-ProjFS" optional feature. The /DELAYLOAD flag must be on
+    // the final binary's link step — cargo:rustc-link-arg is NOT propagated
+    // from dependency (ta-workspace) build scripts to reverse dependents.
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    {
+        println!("cargo:rustc-link-arg=/DELAYLOAD:ProjectedFSLib.dll");
+        println!("cargo:rustc-link-lib=delayimp");
+    }
+
     // Windows icon embedding (v0.10.18.7).
     #[cfg(windows)]
     {
