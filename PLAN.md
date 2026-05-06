@@ -7415,7 +7415,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.30.3 — `ta init` Template: Pragma Game Services Backend (Kotlin/BMAD)
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Add a first-party `ta init` template for [Pragma Engine](https://pragma.gg/docs/2026.1.0) projects — the batteries-included multiplayer game services backend. When initialized, TA understands the Pragma architecture (player management, matchmaking, commerce, social, game data, operations) and sets up a BMAD-methodology planner agent that can analyze an existing Pragma deployment, map the current game's architecture, and help plan the next development milestone.
 
