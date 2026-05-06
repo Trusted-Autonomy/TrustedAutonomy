@@ -72,6 +72,10 @@ pub enum PlanCommands {
         /// Write the schema without prompting for confirmation.
         #[arg(long)]
         yes: bool,
+        /// Run Pragma architecture discovery: scans Pragma config files, interviews
+        /// the user about active services, and produces a structured preamble in PLAN.md.
+        #[arg(long)]
+        pragma: bool,
     },
     /// Generate a new plan document from a template.
     Create {
@@ -329,6 +333,26 @@ pub enum PlanCommands {
         #[arg(long, default_value_t = 99)]
         max_phases: u32,
     },
+    /// Run the Pragma BMAD planner interactively for Pragma Engine Kotlin projects.
+    ///
+    /// Re-scans Pragma config files and Gradle modules, shows architectural drift
+    /// from the last snapshot, and offers to update the plan. Use after Pragma
+    /// version upgrades or when adding new services.
+    ///
+    /// On the first run in a project, performs full architecture discovery:
+    ///   - Scans pragma-core, pragma-ext-service, pragma-plugin-common directories
+    ///   - Interviews the user about which services are active
+    ///   - Produces a structured preamble in PLAN.md
+    ///   - Proposes the next development milestone
+    ///
+    /// Examples:
+    ///   ta plan pragma
+    ///   ta plan pragma --no-scan     (skip re-scan, use cached snapshot)
+    Pragma {
+        /// Skip architecture re-scan and use the cached snapshot from `.ta/memory/`.
+        #[arg(long)]
+        no_scan: bool,
+    },
     /// Generate a PLAN.md from a description or document using an agent goal.
     ///
     /// The agent reads the input, proposes a phased plan, and outputs a PLAN.md
@@ -442,7 +466,17 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
         PlanCommands::Next { filter } => show_next(config, filter.as_deref()),
         PlanCommands::History => show_history(config),
         PlanCommands::Validate { phase } => validate_phase(config, phase),
-        PlanCommands::Init { source, yes } => plan_init(config, source, *yes),
+        PlanCommands::Init {
+            source,
+            yes,
+            pragma,
+        } => {
+            if *pragma {
+                plan_init_pragma(config)
+            } else {
+                plan_init(config, source, *yes)
+            }
+        }
         PlanCommands::Create {
             output,
             template,
@@ -523,6 +557,7 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             filter,
             max_phases,
         } => plan_build(config, *auto, filter.as_deref(), *max_phases),
+        PlanCommands::Pragma { no_scan } => plan_pragma(config, *no_scan),
     }
 }
 
@@ -4932,6 +4967,565 @@ fn plan_build(
     }
 
     Ok(())
+}
+
+// ── Pragma planner (item 3, 4, 6) ────────────────────────────────────────────
+
+/// Run architecture discovery for a Pragma Engine project (`ta plan init --pragma`).
+///
+/// Scans for Pragma config files and Gradle modules, prompts for active services,
+/// and writes a structured preamble into PLAN.md.
+fn plan_init_pragma(config: &GatewayConfig) -> anyhow::Result<()> {
+    let project_root = &config.workspace_root;
+
+    // Verify this is a Pragma project (or at least a Gradle project).
+    let has_pragma_dirs = project_root.join("pragma-core").is_dir()
+        || project_root.join("pragma-ext-service").is_dir()
+        || project_root.join("pragma-plugin-common").is_dir();
+    let has_gradle = project_root.join("settings.gradle.kts").exists()
+        || project_root.join("settings.gradle").exists();
+
+    if !has_pragma_dirs && !has_gradle {
+        println!("Warning: no Pragma-specific directories detected in this project.");
+        println!("Expected pragma-core/, pragma-ext-service/, or settings.gradle.kts");
+        println!("Proceeding with discovery based on user input only.");
+        println!();
+    }
+
+    println!("=== Pragma Architecture Discovery ===");
+    println!();
+
+    // Scan Pragma config files.
+    let scan_results = scan_pragma_configs(project_root);
+    if !scan_results.is_empty() {
+        println!("Detected Pragma config files:");
+        for path in &scan_results {
+            println!("  {}", path);
+        }
+        println!();
+    }
+
+    // Scan Gradle modules.
+    let gradle_modules = scan_gradle_modules(project_root);
+    if !gradle_modules.is_empty() {
+        println!("Detected Gradle modules:");
+        for m in &gradle_modules {
+            println!("  {}", m);
+        }
+        println!();
+    }
+
+    // Read recent git commits for context (item 5).
+    let recent_commits = read_recent_git_commits(project_root);
+    if !recent_commits.is_empty() {
+        println!("Recent git activity ({} commits):", recent_commits.len());
+        for commit in recent_commits.iter().take(5) {
+            println!("  {}", commit);
+        }
+        if recent_commits.len() > 5 {
+            println!("  ... and {} more", recent_commits.len() - 5);
+        }
+        println!();
+    }
+
+    // Interview the user about active services.
+    use std::io::Write as _;
+    let pragma_services = [
+        "player",
+        "matchmaking",
+        "commerce",
+        "social",
+        "game-data",
+        "ops",
+        "portal",
+    ];
+
+    println!("=== Service Interview ===");
+    println!("Answer which Pragma services are active in this deployment.");
+    println!();
+
+    let mut active_services: Vec<String> = Vec::new();
+    let mut custom_plugins: Vec<String> = Vec::new();
+
+    for service in &pragma_services {
+        print!("Is {} service deployed? [y/N] ", service);
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if input.trim().to_lowercase().starts_with('y') {
+            active_services.push(service.to_string());
+
+            print!(
+                "  Does {} have a custom plugin implementation? [y/N] ",
+                service
+            );
+            std::io::stdout().flush().ok();
+            let mut plugin_input = String::new();
+            std::io::stdin().read_line(&mut plugin_input).ok();
+            if plugin_input.trim().to_lowercase().starts_with('y') {
+                custom_plugins.push(service.to_string());
+            }
+        }
+    }
+
+    println!();
+    print!("SDK integrations (comma-separated: unreal,unity,web, or leave blank): ");
+    std::io::stdout().flush().ok();
+    let mut sdk_input = String::new();
+    std::io::stdin().read_line(&mut sdk_input).ok();
+    let sdk_integrations: Vec<String> = sdk_input
+        .trim()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    print!("Current Pragma server version (e.g., 2026.1.0, or leave blank): ");
+    std::io::stdout().flush().ok();
+    let mut version_input = String::new();
+    std::io::stdin().read_line(&mut version_input).ok();
+    let pragma_version = version_input.trim().to_string();
+    let pragma_version = if pragma_version.is_empty() {
+        "2026.1.0 (unverified)".to_string()
+    } else {
+        pragma_version
+    };
+
+    print!("Top tech debt or known issues (optional, one line): ");
+    std::io::stdout().flush().ok();
+    let mut debt_input = String::new();
+    std::io::stdin().read_line(&mut debt_input).ok();
+    let tech_debt = debt_input.trim().to_string();
+
+    // Build and write the architecture summary preamble.
+    let preamble = build_pragma_preamble(
+        &pragma_version,
+        &active_services,
+        &custom_plugins,
+        &sdk_integrations,
+        &tech_debt,
+        &scan_results,
+        &gradle_modules,
+    );
+
+    // Write to .ta/memory/ for the planner to use later.
+    let memory_dir = project_root.join(".ta/memory");
+    std::fs::create_dir_all(&memory_dir)?;
+    let snapshot_path = memory_dir.join("pragma-architecture-snapshot.json");
+    let snapshot = serde_json::json!({
+        "pragma_version": pragma_version,
+        "active_services": active_services,
+        "custom_plugins": custom_plugins,
+        "sdk_integrations": sdk_integrations,
+        "tech_debt": tech_debt,
+        "gradle_modules": gradle_modules,
+        "config_files": scan_results,
+        "captured_at": chrono_now_iso(),
+    });
+    std::fs::write(&snapshot_path, serde_json::to_string_pretty(&snapshot)?)?;
+    println!("  Wrote architecture snapshot to .ta/memory/pragma-architecture-snapshot.json");
+
+    // Inject preamble into PLAN.md if it exists.
+    let plan_path = project_root.join("PLAN.md");
+    if plan_path.exists() {
+        inject_pragma_preamble_into_plan(&plan_path, &preamble)?;
+        println!("  Updated PLAN.md with architecture preamble");
+    } else {
+        println!("  No PLAN.md found. Run `ta init run --template pragma` to create one.");
+        println!("  Architecture summary:");
+        println!("{}", preamble);
+    }
+
+    println!();
+    println!("Architecture discovery complete.");
+    println!("Next: run `ta plan pragma` to generate a milestone proposal.");
+    Ok(())
+}
+
+/// `ta plan pragma` — interactive Pragma planner (item 6).
+///
+/// Re-scans architecture, shows drift from last snapshot, and offers to update the plan.
+fn plan_pragma(config: &GatewayConfig, no_scan: bool) -> anyhow::Result<()> {
+    let project_root = &config.workspace_root;
+
+    println!("=== Pragma BMAD Planner ===");
+    println!();
+
+    // Load cached snapshot.
+    let snapshot_path = project_root.join(".ta/memory/pragma-architecture-snapshot.json");
+    let has_snapshot = snapshot_path.exists();
+
+    if !has_snapshot {
+        println!("No architecture snapshot found.");
+        println!("Run `ta plan init --pragma` first to perform discovery.");
+        println!();
+        println!("To run discovery now: ta plan init --pragma");
+        return Ok(());
+    }
+
+    let snapshot_raw = std::fs::read_to_string(&snapshot_path)?;
+    let snapshot: serde_json::Value = serde_json::from_str(&snapshot_raw).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse architecture snapshot at '{}': {e}\n\
+             Run `ta plan init --pragma` to regenerate it.",
+            snapshot_path.display()
+        )
+    })?;
+
+    let captured_at = snapshot["captured_at"].as_str().unwrap_or("unknown");
+    let pragma_version = snapshot["pragma_version"].as_str().unwrap_or("unknown");
+    let active_services: Vec<&str> = snapshot["active_services"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    println!("Cached snapshot from: {}", captured_at);
+    println!("Pragma version:        {}", pragma_version);
+    println!(
+        "Active services:       {}",
+        if active_services.is_empty() {
+            "(none recorded)".to_string()
+        } else {
+            active_services.join(", ")
+        }
+    );
+    println!();
+
+    // Detect drift unless --no-scan.
+    if !no_scan {
+        let current_configs = scan_pragma_configs(project_root);
+        let current_modules = scan_gradle_modules(project_root);
+        let cached_configs: Vec<String> = snapshot["config_files"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cached_modules: Vec<String> = snapshot["gradle_modules"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let new_configs: Vec<&String> = current_configs
+            .iter()
+            .filter(|c| !cached_configs.contains(c))
+            .collect();
+        let new_modules: Vec<&String> = current_modules
+            .iter()
+            .filter(|m| !cached_modules.contains(m))
+            .collect();
+        let removed_modules: Vec<&String> = cached_modules
+            .iter()
+            .filter(|m| !current_modules.contains(m))
+            .collect();
+
+        if !new_configs.is_empty() || !new_modules.is_empty() || !removed_modules.is_empty() {
+            println!("=== Architecture Drift Detected ===");
+            if !new_configs.is_empty() {
+                println!("New config files:");
+                for c in &new_configs {
+                    println!("  + {}", c);
+                }
+            }
+            if !new_modules.is_empty() {
+                println!("New Gradle modules:");
+                for m in &new_modules {
+                    println!("  + {}", m);
+                }
+            }
+            if !removed_modules.is_empty() {
+                println!("Removed Gradle modules:");
+                for m in &removed_modules {
+                    println!("  - {}", m);
+                }
+            }
+            println!();
+            print!("Update the architecture snapshot? [Y/n] ");
+            use std::io::Write as _;
+            std::io::stdout().flush().ok();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).ok();
+            if input.trim().to_lowercase() != "n" {
+                println!("Run `ta plan init --pragma` to update the snapshot interactively.");
+                return Ok(());
+            }
+        } else {
+            println!("Architecture scan: no drift detected.");
+            println!();
+        }
+    }
+
+    // Generate next-milestone proposal from active services and plan state.
+    let plan_path = project_root.join("PLAN.md");
+    if plan_path.exists() {
+        let plan_content = std::fs::read_to_string(&plan_path)?;
+        let phases = parse_plan(&plan_content);
+        let next_pending = phases.iter().find(|p| p.status == PlanStatus::Pending);
+
+        println!("=== Plan State ===");
+        let done_count = phases
+            .iter()
+            .filter(|p| p.status == PlanStatus::Done)
+            .count();
+        let pending_count = phases
+            .iter()
+            .filter(|p| p.status == PlanStatus::Pending)
+            .count();
+        println!("  Done: {}   Pending: {}", done_count, pending_count);
+        println!();
+
+        if let Some(phase) = next_pending {
+            println!("=== Next Milestone Proposal ===");
+            println!("Phase:    {} — {}", phase.id, phase.title);
+            println!("Services: {}", active_services.join(", "));
+            println!();
+            println!("This phase targets your current Pragma service configuration.");
+            println!("Acceptance criteria should cover:");
+            for svc in &active_services {
+                println!("  - {} service: end-to-end happy-path test", svc);
+            }
+            println!();
+            print!("Start a goal for phase {}? [Y/n] ", phase.id);
+            use std::io::Write as _;
+            std::io::stdout().flush().ok();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).ok();
+            if !input.trim().to_lowercase().starts_with('n') {
+                let goal_title = format!("implement {} — {}", phase.id, phase.title);
+                super::run::execute(
+                    config,
+                    Some(&goal_title),
+                    "pragma-planner",
+                    None,
+                    &goal_title,
+                    Some(&phase.id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    true,
+                    false,
+                    None,
+                    false,
+                    false,
+                    false,
+                    None,
+                    None,
+                    None,
+                )?;
+            }
+        } else {
+            println!("All plan phases are complete. Run `ta plan add` to add new milestones.");
+        }
+    } else {
+        println!("No PLAN.md found.");
+        println!("Run `ta init run --template pragma` to scaffold a Pragma project plan.");
+    }
+
+    Ok(())
+}
+
+// ── Pragma helper utilities ───────────────────────────────────────────────────
+
+/// Scan for Pragma config files in the project (YAML configs in pragma service dirs).
+fn scan_pragma_configs(project_root: &std::path::Path) -> Vec<String> {
+    let mut results = Vec::new();
+    let patterns = [
+        "pragma-core/src/main/resources",
+        "pragma-ext-service/src/main/resources",
+    ];
+    for pattern in &patterns {
+        let dir = project_root.join(pattern);
+        if dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension()
+                        .map(|e| e == "yaml" || e == "yml")
+                        .unwrap_or(false)
+                    {
+                        if let Ok(rel) = p.strip_prefix(project_root) {
+                            results.push(rel.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    results
+}
+
+/// Scan for Gradle submodule names from settings.gradle.kts or settings.gradle.
+fn scan_gradle_modules(project_root: &std::path::Path) -> Vec<String> {
+    let mut modules = Vec::new();
+    let settings_files = ["settings.gradle.kts", "settings.gradle"];
+    for settings_file in &settings_files {
+        let path = project_root.join(settings_file);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                // Match: include(":module-name") or include ':module-name'
+                if trimmed.starts_with("include(")
+                    || trimmed.starts_with("include '")
+                    || trimmed.starts_with("include \"")
+                {
+                    let name = trimmed
+                        .trim_start_matches("include(")
+                        .trim_end_matches(')')
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .trim_start_matches(':')
+                        .to_string();
+                    if !name.is_empty() && !name.contains("//") {
+                        modules.push(name);
+                    }
+                }
+            }
+            if !modules.is_empty() {
+                break;
+            }
+        }
+    }
+    modules
+}
+
+/// Read recent git commits (up to 20) from the project root.
+fn read_recent_git_commits(project_root: &std::path::Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["log", "--oneline", "-20"])
+        .current_dir(project_root)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Build the Pragma architecture preamble text for PLAN.md injection.
+fn build_pragma_preamble(
+    pragma_version: &str,
+    active_services: &[String],
+    custom_plugins: &[String],
+    sdk_integrations: &[String],
+    tech_debt: &str,
+    config_files: &[String],
+    gradle_modules: &[String],
+) -> String {
+    let services_str = if active_services.is_empty() {
+        "_none recorded_".to_string()
+    } else {
+        active_services.join(", ")
+    };
+    let plugins_str = if custom_plugins.is_empty() {
+        "_none_".to_string()
+    } else {
+        custom_plugins.join(", ")
+    };
+    let sdks_str = if sdk_integrations.is_empty() {
+        "_none_".to_string()
+    } else {
+        sdk_integrations.join(", ")
+    };
+    let debt_str = if tech_debt.is_empty() {
+        "_none recorded_".to_string()
+    } else {
+        tech_debt.to_string()
+    };
+    let configs_str = if config_files.is_empty() {
+        "_none detected_".to_string()
+    } else {
+        config_files.join(", ")
+    };
+    let modules_str = if gradle_modules.is_empty() {
+        "_none detected_".to_string()
+    } else {
+        gradle_modules.join(", ")
+    };
+
+    format!(
+        "## Service Architecture Preamble\n\
+         <!-- Updated by `ta plan init --pragma` -->\n\
+         \n\
+         **Pragma version**: {pragma_version}\n\
+         \n\
+         **Active services**: {services_str}\n\
+         \n\
+         **Custom plugins**: {plugins_str}\n\
+         \n\
+         **SDK integrations**: {sdks_str}\n\
+         \n\
+         **Gradle modules**: {modules_str}\n\
+         \n\
+         **Pragma config files**: {configs_str}\n\
+         \n\
+         **Current tech debt**: {debt_str}\n",
+        pragma_version = pragma_version,
+        services_str = services_str,
+        plugins_str = plugins_str,
+        sdks_str = sdks_str,
+        modules_str = modules_str,
+        configs_str = configs_str,
+        debt_str = debt_str,
+    )
+}
+
+/// Inject or replace the architecture preamble section in PLAN.md.
+///
+/// Finds the existing "## Service Architecture Preamble" section and replaces it,
+/// or inserts it after the first `---` separator if not present.
+fn inject_pragma_preamble_into_plan(
+    plan_path: &std::path::Path,
+    preamble: &str,
+) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(plan_path)?;
+    let sentinel = "## Service Architecture Preamble";
+
+    let updated = if let Some(start) = content.find(sentinel) {
+        // Replace existing preamble: from sentinel to the next `---` or `## ` heading.
+        let after_start = &content[start..];
+        let end_offset = after_start[sentinel.len()..]
+            .find("\n---\n")
+            .or_else(|| after_start[sentinel.len()..].find("\n## "))
+            .map(|o| start + sentinel.len() + o)
+            .unwrap_or(content.len());
+        format!(
+            "{}{}{}",
+            &content[..start],
+            preamble,
+            &content[end_offset..]
+        )
+    } else {
+        // Insert after first `---` separator.
+        if let Some(pos) = content.find("\n---\n") {
+            let insert_at = pos + 5; // after "\n---\n"
+            format!(
+                "{}\n{}\n---\n{}",
+                &content[..pos],
+                preamble,
+                &content[insert_at..]
+            )
+        } else {
+            // Append at end.
+            format!("{}\n---\n\n{}", content.trim_end(), preamble)
+        }
+    };
+
+    std::fs::write(plan_path, updated).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to write updated PLAN.md at '{}': {e}",
+            plan_path.display()
+        )
+    })
 }
 
 /// Return the current UTC timestamp as an ISO 8601 string.

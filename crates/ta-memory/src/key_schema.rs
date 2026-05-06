@@ -24,6 +24,8 @@ pub enum ProjectType {
     UnrealCpp,
     /// Unity C# project (`Assets/` directory + `*.sln`).
     UnityCsharp,
+    /// Pragma Engine Kotlin backend (`pragma-core`/`pragma-ext-service` modules, Gradle build).
+    PragmaKotlin,
     /// Fallback for unrecognized projects.
     Generic,
 }
@@ -37,6 +39,7 @@ impl std::fmt::Display for ProjectType {
             Self::Go => write!(f, "go"),
             Self::UnrealCpp => write!(f, "unreal-cpp"),
             Self::UnityCsharp => write!(f, "unity-csharp"),
+            Self::PragmaKotlin => write!(f, "pragma-kotlin"),
             Self::Generic => write!(f, "generic"),
         }
     }
@@ -97,6 +100,12 @@ impl KeyDomainMap {
                 module: "assembly".into(),
                 type_system: "monobehaviour".into(),
                 build_tool: "msbuild".into(),
+            },
+            ProjectType::PragmaKotlin => Self {
+                module_map: "service-map".into(),
+                module: "service".into(),
+                type_system: "pragma-plugin".into(),
+                build_tool: "gradle".into(),
             },
             ProjectType::Generic => Self {
                 module_map: "component-map".into(),
@@ -296,6 +305,7 @@ fn detect_project_type_with_config(project_root: &Path, config: &MemoryConfig) -
                 "go" => ProjectType::Go,
                 "unreal-cpp" => ProjectType::UnrealCpp,
                 "unity-csharp" => ProjectType::UnityCsharp,
+                "pragma-kotlin" | "pragma" => ProjectType::PragmaKotlin,
                 _ => ProjectType::Generic,
             };
         }
@@ -333,6 +343,31 @@ fn detect_project_type_with_config(project_root: &Path, config: &MemoryConfig) -
             if let Some(ext) = entry.path().extension() {
                 if ext == "uproject" {
                     return ProjectType::UnrealCpp;
+                }
+            }
+        }
+    }
+
+    // Pragma Engine: pragma-core or pragma-ext-service directory, or settings.gradle.kts
+    // referencing pragma modules.
+    if project_root.join("pragma-core").is_dir()
+        || project_root.join("pragma-ext-service").is_dir()
+        || project_root.join("pragma-plugin-common").is_dir()
+    {
+        return ProjectType::PragmaKotlin;
+    }
+    if project_root.join("settings.gradle.kts").exists()
+        || project_root.join("settings.gradle").exists()
+    {
+        // Check if any Gradle settings file references pragma.
+        let settings_files = ["settings.gradle.kts", "settings.gradle"];
+        for settings_file in &settings_files {
+            if let Ok(content) = std::fs::read_to_string(project_root.join(settings_file)) {
+                if content.contains("pragma")
+                    || content.contains("pragma-core")
+                    || content.contains("pragma-ext-service")
+                {
+                    return ProjectType::PragmaKotlin;
                 }
             }
         }

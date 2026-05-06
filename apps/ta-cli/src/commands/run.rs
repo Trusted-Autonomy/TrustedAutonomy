@@ -5554,6 +5554,7 @@ fn build_solutions_section_for_inject(config: &GatewayConfig) -> String {
         ta_memory::ProjectType::Go => Some("go"),
         ta_memory::ProjectType::UnrealCpp => Some("cpp"),
         ta_memory::ProjectType::UnityCsharp => Some("csharp"),
+        ta_memory::ProjectType::PragmaKotlin => Some("kotlin"),
         ta_memory::ProjectType::Generic => None,
     };
 
