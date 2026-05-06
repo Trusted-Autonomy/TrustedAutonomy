@@ -563,6 +563,7 @@ fn export_solutions(
         ta_memory::ProjectType::Go => Some("go".to_string()),
         ta_memory::ProjectType::UnrealCpp => Some("cpp".to_string()),
         ta_memory::ProjectType::UnityCsharp => Some("csharp".to_string()),
+        ta_memory::ProjectType::PragmaKotlin => Some("kotlin".to_string()),
         ta_memory::ProjectType::Generic => None,
     };
 

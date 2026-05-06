@@ -88,6 +88,10 @@ const TEMPLATES: &[(&str, &str)] = &[
         "unity-csharp",
         "Unity C# project (requires BMAD + Claude Flow)",
     ),
+    (
+        "pragma",
+        "Pragma Engine Kotlin game services backend (requires BMAD + Claude Flow)",
+    ),
     ("generic", "Generic project with minimal defaults"),
 ];
 
@@ -100,10 +104,14 @@ fn list_templates() -> anyhow::Result<()> {
     println!("Usage: ta init run --template <name>");
     println!("       ta init run --detect      (auto-detect project type)");
     println!();
-    println!("Game engine templates require prerequisites:");
+    println!("Game engine / game-services templates require prerequisites:");
     println!("  claude     — Claude Code CLI (claude.ai/code)");
     println!("  claude-flow — npm install -g @ruvnet/claude-flow");
     println!("  BMAD        — git clone https://github.com/bmad-code-org/BMAD-METHOD ~/.bmad");
+    println!();
+    println!("Pragma template additionally requires:");
+    println!("  JDK 17+    — for Kotlin/Gradle builds");
+    println!("  ktlint     — brew install ktlint  (or via Gradle plugin)");
     Ok(())
 }
 
@@ -204,7 +212,7 @@ fn run_init(
         parse_template_name(tmpl)?
     } else if interactive {
         let type_str = prompt(
-            "Template (rust-workspace/typescript-monorepo/python-ml/go-service/generic)",
+            "Template (rust-workspace/typescript-monorepo/python-ml/go-service/pragma/generic)",
             &detected_type.to_string(),
         );
         match type_str.as_str() {
@@ -214,6 +222,7 @@ fn run_init(
             "go-service" | "go" => ProjectType::Go,
             "unreal-cpp" | "unreal" => ProjectType::UnrealCpp,
             "unity-csharp" | "unity" => ProjectType::UnityCsharp,
+            "pragma" | "pragma-kotlin" => ProjectType::PragmaKotlin,
             _ => detected_type,
         }
     } else {
@@ -317,16 +326,27 @@ fn run_init(
         );
     }
 
-    // Game engine templates: additional files.
+    // Game engine / game-services templates: additional files.
     let is_game_engine = matches!(
         project_type,
-        ProjectType::UnrealCpp | ProjectType::UnityCsharp
+        ProjectType::UnrealCpp | ProjectType::UnityCsharp | ProjectType::PragmaKotlin
     );
     if is_game_engine {
         generate_bmad_toml(&ta_dir)?;
         generate_bmad_agent_configs(&ta_dir)?;
         generate_mcp_json(project_root)?;
         generate_onboarding_goal(&ta_dir, &project_type, name)?;
+    }
+
+    // Pragma-specific: planner agent, Kotlin constitution, architecture PLAN.md stub.
+    if matches!(project_type, ProjectType::PragmaKotlin) {
+        generate_pragma_planner_agent(&ta_dir)?;
+        generate_pragma_constitution(&ta_dir)?;
+        generate_pragma_plan_stub(project_root, name)?;
+        // Detect git and capture recent commits for planner context (item 5).
+        if project_root.join(".git").exists() {
+            capture_git_context_for_pragma(&ta_dir, project_root);
+        }
     }
 
     // Run VCS setup automatically.
@@ -362,6 +382,11 @@ fn run_init(
         println!("  .ta/agents/bmad-*.toml — BMAD role agent configs");
         println!("  .mcp.json              — Claude Flow MCP server config");
         println!("  .ta/onboarding-goal.md — First-run discovery goal");
+    }
+    if matches!(project_type, ProjectType::PragmaKotlin) {
+        println!("  .ta/agents/pragma-planner.toml — Pragma BMAD planner agent");
+        println!("  .ta/constitutions/kotlin.yaml  — Kotlin code constitution");
+        println!("  PLAN.md                        — Pragma service phase stub");
     }
 
     // GitHub remote creation.
@@ -412,7 +437,22 @@ fn run_init(
 
     println!();
     println!("Next steps:");
-    if is_game_engine {
+    if matches!(project_type, ProjectType::PragmaKotlin) {
+        println!("  Ensure prerequisites are installed:");
+        println!("    claude      — Claude Code CLI");
+        println!("    claude-flow — npm install -g @ruvnet/claude-flow");
+        println!(
+            "    BMAD        — git clone https://github.com/bmad-code-org/BMAD-METHOD ~/.bmad"
+        );
+        println!("    JDK 17+    — for Kotlin/Gradle");
+        println!("    ktlint     — brew install ktlint  (or via Gradle plugin)");
+        println!();
+        println!("  Run the architecture discovery goal:");
+        println!("  ta run --objective-file .ta/onboarding-goal.md");
+        println!();
+        println!("  Or run the Pragma planner interactively at any time:");
+        println!("  ta plan pragma");
+    } else if is_game_engine {
         println!("  Ensure prerequisites are installed:");
         println!("    claude     — Claude Code CLI");
         println!("    claude-flow — npm install -g @ruvnet/claude-flow");
@@ -443,6 +483,7 @@ fn parse_template_name(tmpl: &str) -> anyhow::Result<ProjectType> {
         "go-service" | "go" => Ok(ProjectType::Go),
         "unreal-cpp" | "unreal" => Ok(ProjectType::UnrealCpp),
         "unity-csharp" | "unity" => Ok(ProjectType::UnityCsharp),
+        "pragma" | "pragma-kotlin" => Ok(ProjectType::PragmaKotlin),
         "generic" => Ok(ProjectType::Generic),
         _ => anyhow::bail!(
             "Unknown template: '{}'. Run `ta init templates` for available options.",
@@ -486,6 +527,11 @@ pub fn generate_claude_md(project_name: &str, project_type: &ProjectType) -> Str
             "# Open the project in Unity Editor to build",
             "# See .ta/workflow.toml for verify commands",
             "- Keep ProjectSettings/ under version control",
+        ),
+        ProjectType::PragmaKotlin => (
+            "./gradlew assemble",
+            "./gradlew ktlintCheck\n./gradlew test",
+            "- Never edit generated files in pragma-core/build/ directly\n- Pragma plugins implement interfaces in pragma-plugin-common; check extension points before adding new ones\n- Run `./gradlew ktlintFormat` to auto-fix style issues before committing",
         ),
         ProjectType::Generic => (
             "# TODO: add build command",
@@ -655,6 +701,37 @@ branch_prefix = "feature/"
 auto_review = true
 "#
         }
+        ProjectType::PragmaKotlin => {
+            r#"
+# Pre-draft verification gate
+# Pragma Engine projects use Gradle + ktlint for Kotlin style enforcement.
+[verify]
+commands = [
+    "./gradlew ktlintCheck",
+    "./gradlew test",
+]
+on_failure = "block"
+timeout = 600
+
+# Static analysis configuration (v0.15.14.3)
+# ktlint enforces Kotlin coding conventions for Pragma plugin code.
+[analysis.kotlin]
+tool = "ktlint"
+args = []
+on_failure = "agent"
+max_iterations = 3
+
+# VCS adapter — detect existing git repo (item 5)
+[adapter]
+type = "git"
+branch_prefix = "feature/"
+auto_review = true
+
+[submit.git]
+branch_prefix = "feature/"
+auto_review = true
+"#
+        }
         _ => {
             r#"
 # Pre-draft verification gate (v0.10.8)
@@ -777,6 +854,9 @@ fn generate_policy_yaml(ta_dir: &Path, project_type: &ProjectType) -> anyhow::Re
         ProjectType::UnityCsharp => {
             "\nprotected_paths:\n  - \"ProjectSettings/**\"\n  - \"**/*.asmdef\"\n"
         }
+        ProjectType::PragmaKotlin => {
+            "\nprotected_paths:\n  - \"pragma-core/src/main/resources/**\"\n  - \"**/pragma-ext-service/**/*.yaml\"\n  - \"settings.gradle.kts\"\n  - \"settings.gradle\"\n"
+        }
         _ => "",
     };
 
@@ -830,6 +910,9 @@ fn generate_taignore(project_root: &Path, project_type: &ProjectType) -> anyhow:
             "# Unreal Engine\nBinaries/\nIntermediate/\nSaved/\nDerivedDataCache/\n*.generated.h\n"
         }
         ProjectType::UnityCsharp => "# Unity\nLibrary/\nTemp/\nobj/\n*.csproj.user\n",
+        ProjectType::PragmaKotlin => {
+            "# Pragma Engine / Gradle\nbuild/\n.gradle/\n**/build/\n**/.gradle/\n*.class\n.idea/\n*.iml\n"
+        }
         ProjectType::Generic => "",
     };
 
@@ -1072,6 +1155,38 @@ fn seed_memory_entries(
                 }),
             ));
         }
+        ProjectType::PragmaKotlin => {
+            seeds.push((
+                "arch:pragma-service-catalog".into(),
+                serde_json::json!({
+                    "services": [
+                        "player",
+                        "matchmaking",
+                        "commerce",
+                        "social",
+                        "game-data",
+                        "ops",
+                        "portal"
+                    ],
+                    "description": "Pragma 2026.1.0 core service modules",
+                    "source": "Pragma Engine 2026.1.0 architecture docs"
+                }),
+            ));
+            seeds.push((
+                "conv:pragma-plugin-extension-model".into(),
+                serde_json::json!({
+                    "convention": "Pragma plugins implement interfaces in pragma-plugin-common. Each service exposes ext points via abstract classes (e.g., MatchmakingPlugin, CommercePlugin). Override only the methods you need; super() calls must be preserved unless the Pragma docs say otherwise.",
+                    "source": "Pragma Engine plugin development guide"
+                }),
+            ));
+            seeds.push((
+                "conv:pragma-kotlin-async".into(),
+                serde_json::json!({
+                    "convention": "Pragma server code is single-threaded Kotlin coroutines (kotlinx.coroutines). Use suspend functions and structured concurrency. Avoid blocking calls on the main dispatcher — offload to Dispatchers.IO when doing filesystem or network I/O.",
+                    "source": "Pragma Engine Kotlin conventions"
+                }),
+            ));
+        }
         _ => {}
     }
 
@@ -1224,6 +1339,7 @@ fn generate_onboarding_goal(
     let (engine, lang, source_ext) = match project_type {
         ProjectType::UnrealCpp => ("Unreal Engine", "C++", "*.cpp / *.h"),
         ProjectType::UnityCsharp => ("Unity", "C#", "*.cs"),
+        ProjectType::PragmaKotlin => ("Pragma Engine", "Kotlin", "*.kt / *.kts"),
         _ => ("Game Engine", "code", "*"),
     };
 
@@ -1329,6 +1445,291 @@ fn extract_workspace_members(content: &str) -> Vec<String> {
     }
 
     members
+}
+
+/// Generate `.ta/agents/pragma-planner.toml` — BMAD planner manifest pre-loaded
+/// with Pragma 2026.1.0 architecture context.
+///
+/// The agent knows the service catalog, plugin extension model, and BMAD milestone
+/// decomposition methodology. On first run it reads the project's Pragma config
+/// files to build an architecture snapshot.
+fn generate_pragma_planner_agent(ta_dir: &Path) -> anyhow::Result<()> {
+    let agents_dir = ta_dir.join("agents");
+    std::fs::create_dir_all(&agents_dir)?;
+    let path = agents_dir.join("pragma-planner.toml");
+    if path.exists() {
+        return Ok(());
+    }
+
+    let content = r#"# Pragma BMAD Planner Agent
+# Generated by `ta init --template pragma`
+#
+# This agent is pre-loaded with Pragma Engine 2026.1.0 architecture context
+# and BMAD milestone decomposition methodology.
+#
+# Run: ta run "Pragma architecture discovery" --agent pragma-planner
+# Or:  ta plan pragma
+
+name = "pragma-planner"
+role = "Pragma BMAD Planner"
+persona_file = "${bmad_home}/agents/architect.md"
+
+# Claude Code is the underlying runtime.
+command = "claude"
+injects_context_file = true
+injects_settings = true
+
+# Architecture context injected into every session.
+[context]
+pragma_version = "2026.1.0"
+docs_url = "https://pragma.gg/docs/2026.1.0"
+
+# Pragma service catalog (2026.1.0).
+[context.service_catalog]
+player      = "Account management, identity, entitlements, and player data lifecycle"
+matchmaking = "Lobby creation, ticket flow, matchmaking algorithms, and game instance launch"
+commerce    = "Virtual currency, catalog items, purchase flow, and receipt validation"
+social      = "Friends list, party system, chat, and presence"
+game_data   = "Game config, flags, in-game item definitions, and live-ops data"
+ops         = "Operator portal hooks, game operations tooling, and internal dashboards"
+portal      = "Operator-facing web portal backend (REST APIs consumed by Pragma Portal UI)"
+
+# Plugin extension points (implement interfaces in pragma-plugin-common).
+[context.extension_points]
+matchmaking_plugin    = "MatchmakingPlugin — override ticket scoring, capacity management"
+commerce_plugin       = "CommercePlugin   — custom purchase validation, currency rules"
+player_data_plugin    = "PlayerDataPlugin — custom player record fields and lifecycle hooks"
+game_instance_plugin  = "GameInstancePlugin — launch params, server selection logic"
+
+# BMAD methodology configuration.
+[context.bmad]
+method = "milestone-decomposition"
+roles  = ["pm", "architect", "dev", "qa"]
+phases = ["discovery", "prd", "sprint-stories"]
+
+# Discovery step: scanned on `ta plan pragma` or first run.
+[discovery]
+scan_patterns = [
+    "pragma-core/src/main/resources/**/*.yaml",
+    "pragma-ext-service/src/**/*.kt",
+    "pragma-plugin-common/src/**/*.kt",
+    "**/settings.gradle.kts",
+    "**/settings.gradle",
+    "**/build.gradle.kts",
+]
+interview_topics = [
+    "Which Pragma services are deployed (player/matchmaking/commerce/social/game-data/ops/portal)?",
+    "Which services have custom plugins implemented?",
+    "What SDK integrations are active (Unreal Engine / Unity / Web)?",
+    "What is the current Pragma server version?",
+    "What are the top 3 active development priorities?",
+]
+"#;
+    std::fs::write(&path, content)?;
+    println!("  Created .ta/agents/pragma-planner.toml");
+    Ok(())
+}
+
+/// Generate `.ta/constitutions/kotlin.yaml` — Kotlin-appropriate behavioral rules.
+fn generate_pragma_constitution(ta_dir: &Path) -> anyhow::Result<()> {
+    let const_dir = ta_dir.join("constitutions");
+    std::fs::create_dir_all(&const_dir)?;
+    let path = const_dir.join("kotlin.yaml");
+    if path.exists() {
+        return Ok(());
+    }
+
+    let content = r#"# Kotlin / Pragma Engine Constitution
+# Generated by `ta init --template pragma`
+# Enforces Kotlin coding standards and Pragma plugin conventions.
+
+name: kotlin
+description: "Kotlin and Pragma Engine development constitution"
+
+rules:
+  - "All Kotlin code must pass `./gradlew ktlintCheck` before committing"
+  - "Pragma plugin implementations must not call deprecated extension-point APIs"
+  - "Never modify generated files in build/ or .gradle/ directories"
+  - "Suspend functions must use structured concurrency — avoid GlobalScope"
+  - "Pragma config files in pragma-core/src/main/resources/ require explicit review before modification"
+  - "Do not introduce new external dependencies without justifying in the PR description"
+  - "Pragma plugin interfaces from pragma-plugin-common must be implemented fully — no no-op stubs in production code"
+  - "All new Kotlin files must have a package declaration matching the Gradle module structure"
+"#;
+    std::fs::write(&path, content)?;
+    println!("  Created .ta/constitutions/kotlin.yaml");
+    Ok(())
+}
+
+/// Generate a `PLAN.md` stub with Pragma service categories as phase groups.
+///
+/// Produces a minimal skeleton that developers fill in with their actual milestones.
+/// Only created when PLAN.md does not already exist.
+fn generate_pragma_plan_stub(project_root: &Path, project_name: &str) -> anyhow::Result<()> {
+    let path = project_root.join("PLAN.md");
+    if path.exists() {
+        println!("  PLAN.md already exists — skipping Pragma stub");
+        return Ok(());
+    }
+
+    let content = format!(
+        r#"# {project} — Development Plan
+<!-- Generated by `ta init --template pragma` -->
+
+## Versioning
+
+Versions follow `MAJOR.MINOR.PATCH` semver. Each phase maps to a version increment.
+
+---
+
+## Service Architecture Preamble
+<!-- ta plan pragma populates this section after discovery -->
+
+**Pragma version**: _TBD — run `ta plan pragma` to detect_
+
+**Active services**: _TBD_
+
+**Custom plugins**: _TBD_
+
+**SDK integrations**: _TBD_
+
+**Current tech debt**: _TBD_
+
+---
+
+## v0.1 — Player Service Foundation
+
+### v0.1.0 — Player Account & Identity
+<!-- status: pending -->
+
+**Goal**: Implement or configure the player account lifecycle: registration, login, entitlement loading, and player data schema.
+
+1. [ ] Configure `PlayerDataPlugin` with initial player record schema
+2. [ ] Implement login flow and entitlement hydration
+3. [ ] Add unit tests for account lifecycle edge cases
+
+#### Version: `0.1.0`
+
+---
+
+## v0.2 — Matchmaking Pipeline
+
+### v0.2.0 — Lobby & Ticket Flow
+<!-- status: pending -->
+
+**Goal**: End-to-end matchmaking: lobby creation → ticket → match → game instance launch.
+
+1. [ ] Implement `MatchmakingPlugin` ticket scoring logic
+2. [ ] Configure capacity management rules
+3. [ ] Wire `GameInstancePlugin` launch params to your game server
+
+#### Version: `0.2.0`
+
+---
+
+## v0.3 — Commerce & Economy
+
+### v0.3.0 — Currency & Catalog
+<!-- status: pending -->
+
+**Goal**: Virtual currency setup, item catalog, and purchase validation.
+
+1. [ ] Define virtual currency types in game-data config
+2. [ ] Implement `CommercePlugin` purchase validation
+3. [ ] Test receipt validation end-to-end
+
+#### Version: `0.3.0`
+
+---
+
+## v0.4 — Social & Presence
+
+### v0.4.0 — Friends & Party System
+<!-- status: pending -->
+
+**Goal**: Friends list, party creation, and presence/status broadcast.
+
+1. [ ] Configure social service for friend request flow
+2. [ ] Implement party capacity rules
+3. [ ] Test cross-platform presence synchronization
+
+#### Version: `0.4.0`
+
+---
+
+## v0.5 — Live-Ops & Game Data
+
+### v0.5.0 — Flags & Config Pipeline
+<!-- status: pending -->
+
+**Goal**: Game flags, live-ops config, and in-game item definitions pipeline.
+
+1. [ ] Define feature flags schema in game-data service
+2. [ ] Wire game client SDK to flag evaluation endpoint
+3. [ ] Implement config versioning and rollback
+
+#### Version: `0.5.0`
+
+---
+
+## Roadmap
+
+| Version | Description                            | Status  |
+|---------|----------------------------------------|---------|
+| v0.1.0  | Player Account & Identity              | pending |
+| v0.2.0  | Lobby & Ticket Flow                    | pending |
+| v0.3.0  | Currency & Catalog                     | pending |
+| v0.4.0  | Friends & Party System                 | pending |
+| v0.5.0  | Flags & Config Pipeline                | pending |
+"#,
+        project = project_name,
+    );
+    std::fs::write(&path, content)?;
+    println!("  Created PLAN.md (Pragma service phase stub)");
+    Ok(())
+}
+
+/// Capture recent git commits into `.ta/memory/pragma-git-context.json` so the
+/// planner agent has commit history context for its architecture snapshot (item 5).
+///
+/// Best-effort: logs a warning on failure but does not abort init.
+fn capture_git_context_for_pragma(ta_dir: &Path, project_root: &Path) {
+    let output = std::process::Command::new("git")
+        .args(["log", "--oneline", "-20"])
+        .current_dir(project_root)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let log = String::from_utf8_lossy(&out.stdout).to_string();
+            let lines: Vec<&str> = log.lines().collect();
+            let memory_dir = ta_dir.join("memory");
+            let _ = std::fs::create_dir_all(&memory_dir);
+            let entry = serde_json::json!({
+                "key": "vcs:recent-commits",
+                "value": {
+                    "commits": lines,
+                    "count": lines.len(),
+                    "adapter": "git",
+                },
+                "tags": ["vcs", "git", "init-seed"],
+                "source": "ta-init pragma",
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            });
+            let path = memory_dir.join("vcs_recent_commits.json");
+            if let Ok(json) = serde_json::to_string_pretty(&entry) {
+                if std::fs::write(&path, json).is_ok() {
+                    println!(
+                        "  Captured {} recent git commits for planner context",
+                        lines.len()
+                    );
+                }
+            }
+        }
+        _ => {
+            println!("  Note: could not read git log — run `git init` if this is a new repo");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1850,5 +2251,173 @@ members = [
             "go template should include [analysis.go]"
         );
         assert!(content.contains("golangci-lint"));
+    }
+
+    // ── Pragma template tests (v0.15.30.3) ───────────────────────────────────
+
+    #[test]
+    fn init_pragma_template() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        run_init(
+            &config,
+            Some("pragma"),
+            Some("MyPragmaGame"),
+            None,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+
+        let ta_dir = dir.path().join(".ta");
+        assert!(ta_dir.join("workflow.toml").exists());
+        assert!(ta_dir.join("memory.toml").exists());
+        assert!(ta_dir.join("policy.yaml").exists());
+        assert!(ta_dir.join("bmad.toml").exists());
+        assert!(ta_dir.join("agents").join("bmad-pm.toml").exists());
+        assert!(ta_dir.join("agents").join("pragma-planner.toml").exists());
+        assert!(ta_dir.join("constitutions").join("kotlin.yaml").exists());
+        assert!(dir.path().join(".mcp.json").exists());
+        assert!(ta_dir.join("onboarding-goal.md").exists());
+        assert!(dir.path().join("PLAN.md").exists());
+
+        let workflow = std::fs::read_to_string(ta_dir.join("workflow.toml")).unwrap();
+        assert!(workflow.contains("ktlintCheck"));
+        assert!(workflow.contains("[analysis.kotlin]"));
+
+        let taignore = std::fs::read_to_string(dir.path().join(".taignore")).unwrap();
+        assert!(taignore.contains(".gradle/"));
+        assert!(taignore.contains("build/"));
+
+        let policy = std::fs::read_to_string(ta_dir.join("policy.yaml")).unwrap();
+        assert!(policy.contains("pragma-core"));
+        assert!(policy.contains("settings.gradle.kts"));
+
+        let memory = std::fs::read_to_string(ta_dir.join("memory.toml")).unwrap();
+        assert!(memory.contains("pragma-kotlin"));
+        assert!(memory.contains("service-map"));
+
+        let plan = std::fs::read_to_string(dir.path().join("PLAN.md")).unwrap();
+        assert!(plan.contains("MyPragmaGame"));
+        assert!(plan.contains("Player Service Foundation"));
+        assert!(plan.contains("Matchmaking Pipeline"));
+    }
+
+    #[test]
+    fn pragma_planner_agent_created() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        generate_pragma_planner_agent(&ta_dir).unwrap();
+        let content =
+            std::fs::read_to_string(ta_dir.join("agents").join("pragma-planner.toml")).unwrap();
+        assert!(content.contains("pragma-planner"));
+        assert!(content.contains("2026.1.0"));
+        assert!(content.contains("matchmaking"));
+        assert!(content.contains("commerce"));
+        assert!(content.contains("MatchmakingPlugin"));
+        assert!(content.contains("scan_patterns"));
+    }
+
+    #[test]
+    fn pragma_constitution_created() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        generate_pragma_constitution(&ta_dir).unwrap();
+        let content =
+            std::fs::read_to_string(ta_dir.join("constitutions").join("kotlin.yaml")).unwrap();
+        assert!(content.contains("ktlintCheck"));
+        assert!(content.contains("Suspend functions"));
+        assert!(content.contains("pragma-plugin-common"));
+    }
+
+    #[test]
+    fn pragma_plan_stub_created() {
+        let dir = TempDir::new().unwrap();
+        generate_pragma_plan_stub(dir.path(), "MyGameBackend").unwrap();
+        let content = std::fs::read_to_string(dir.path().join("PLAN.md")).unwrap();
+        assert!(content.contains("MyGameBackend"));
+        assert!(content.contains("Player Service Foundation"));
+        assert!(content.contains("Matchmaking Pipeline"));
+        assert!(content.contains("Commerce & Economy"));
+    }
+
+    #[test]
+    fn pragma_plan_stub_skips_if_exists() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("PLAN.md"), "# existing plan\n").unwrap();
+        generate_pragma_plan_stub(dir.path(), "MyGame").unwrap();
+        let content = std::fs::read_to_string(dir.path().join("PLAN.md")).unwrap();
+        assert_eq!(content, "# existing plan\n");
+    }
+
+    #[test]
+    fn pragma_workflow_has_gradle_verify() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        generate_workflow_toml(&ta_dir, &ProjectType::PragmaKotlin, "low").unwrap();
+        let content = std::fs::read_to_string(ta_dir.join("workflow.toml")).unwrap();
+        assert!(
+            content.contains("ktlintCheck"),
+            "should include ktlintCheck"
+        );
+        assert!(
+            content.contains("./gradlew test"),
+            "should include gradle test"
+        );
+        assert!(
+            content.contains("[analysis.kotlin]"),
+            "should have kotlin analysis section"
+        );
+        assert!(
+            content.contains("on_failure = \"block\""),
+            "verify failure should block"
+        );
+    }
+
+    #[test]
+    fn pragma_claude_md_has_kotlin_verify() {
+        let content = generate_claude_md("PragmaProj", &ProjectType::PragmaKotlin);
+        assert!(content.contains("# PragmaProj"));
+        assert!(content.contains("./gradlew assemble"));
+        assert!(content.contains("ktlintCheck"));
+        assert!(content.contains("./gradlew test"));
+        assert!(content.contains("ktlintFormat"));
+    }
+
+    #[test]
+    fn pragma_taignore_has_gradle_artifacts() {
+        let dir = TempDir::new().unwrap();
+        generate_taignore(dir.path(), &ProjectType::PragmaKotlin).unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".taignore")).unwrap();
+        assert!(content.contains(".gradle/"));
+        assert!(content.contains("build/"));
+    }
+
+    #[test]
+    fn pragma_onboarding_goal_has_kotlin_content() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        generate_onboarding_goal(&ta_dir, &ProjectType::PragmaKotlin, "PragmaRPG").unwrap();
+        let content = std::fs::read_to_string(ta_dir.join("onboarding-goal.md")).unwrap();
+        assert!(content.contains("PragmaRPG"));
+        assert!(content.contains("Pragma Engine"));
+        assert!(content.contains("*.kt / *.kts"));
+    }
+
+    #[test]
+    fn parse_template_name_pragma() {
+        assert!(matches!(
+            parse_template_name("pragma").unwrap(),
+            ProjectType::PragmaKotlin
+        ));
+        assert!(matches!(
+            parse_template_name("pragma-kotlin").unwrap(),
+            ProjectType::PragmaKotlin
+        ));
     }
 }
