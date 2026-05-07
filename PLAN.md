@@ -7427,17 +7427,17 @@ pub enum NoteDelivery {
 
 **Depends on**: v0.12.x (agent framework), v0.15.30 (AgentContextChannel)
 
-1. [ ] **`ta init --template pragma` project template**: Scaffolds `.ta/workflow.toml` (Kotlin verify: `./gradlew ktlintCheck test`), `.ta/agents/planner.toml` (BMAD planner manifest, Pragma docs URL injected as context), `.ta/constitution.toml` (Kotlin-appropriate rules), and a `PLAN.md` stub with Pragma service categories as phase groups.
+1. [x] **`ta init --template pragma` project template**: Scaffolds `.ta/workflow.toml` (Kotlin verify: `./gradlew ktlintCheck test`), `.ta/agents/planner.toml` (BMAD planner manifest, Pragma docs URL injected as context), `.ta/constitution.toml` (Kotlin-appropriate rules), and a `PLAN.md` stub with Pragma service categories as phase groups.
 
-2. [ ] **BMAD planner agent manifest** (`.ta/agents/pragma-planner.toml`): Agent pre-loaded with Pragma 2026.1.0 architecture context — service catalog (player, matchmaking, commerce, social, game-data, ops, portal), Pragma's plugin extension model, and BMAD milestone decomposition methodology. On first run, the agent reads the project's Pragma config files and existing service implementations to build an architecture snapshot.
+2. [x] **BMAD planner agent manifest** (`.ta/agents/pragma-planner.toml`): Agent pre-loaded with Pragma 2026.1.0 architecture context — service catalog (player, matchmaking, commerce, social, game-data, ops, portal), Pragma's plugin extension model, and BMAD milestone decomposition methodology. On first run, the agent reads the project's Pragma config files and existing service implementations to build an architecture snapshot.
 
-3. [ ] **Architecture discovery step**: On `ta plan init --pragma`, the planner agent scans for Pragma config files (`pragma-ext-service`, `pragma-core`, Gradle modules), interviews the user about which services are active, and produces a structured architecture summary in PLAN.md preamble: services deployed, custom plugins, SDK integrations (Unreal/Unity), and current tech debt.
+3. [x] **Architecture discovery step**: On `ta plan init --pragma`, the planner agent scans for Pragma config files (`pragma-ext-service`, `pragma-core`, Gradle modules), interviews the user about which services are active, and produces a structured architecture summary in PLAN.md preamble: services deployed, custom plugins, SDK integrations (Unreal/Unity), and current tech debt.
 
-4. [ ] **Milestone planning from architecture**: After discovery, the planner produces a concrete next-milestone proposal: goal title, acceptance criteria, affected Pragma services, estimated complexity, and a draft PLAN.md phase entry. User approves or iterates via `ta_ask_human` before the phase is committed.
+4. [x] **Milestone planning from architecture**: After discovery, the planner produces a concrete next-milestone proposal: goal title, acceptance criteria, affected Pragma services, estimated complexity, and a draft PLAN.md phase entry. User approves or iterates via `ta_ask_human` before the phase is committed.
 
-5. [ ] **Git VCS auto-detection**: `ta init` on a Pragma project detects the existing git repo (no re-init), sets `adapter = "git"` in `workflow.toml`, and reads `git log --oneline -20` to give the planner recent commit context for the architecture snapshot.
+5. [x] **Git VCS auto-detection**: `ta init` on a Pragma project detects the existing git repo (no re-init), sets `adapter = "git"` in `workflow.toml`, and reads `git log --oneline -20` to give the planner recent commit context for the architecture snapshot.
 
-6. [ ] **`ta plan --pragma` command alias**: Shortcut to run the Pragma planner interactively at any time: re-scans architecture, shows drift from last snapshot, and offers to update the plan. Useful after Pragma version upgrades or new service additions.
+6. [x] **`ta plan --pragma` command alias**: Shortcut to run the Pragma planner interactively at any time: re-scans architecture, shows drift from last snapshot, and offers to update the plan. Useful after Pragma version upgrades or new service additions.
 
 #### Version: `0.15.30-alpha.3`
 

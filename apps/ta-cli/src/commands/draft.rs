@@ -7075,6 +7075,42 @@ fn apply_package(
 
             std::fs::write(&plan_path, &content)?;
 
+            // v0.15.30.6: Auto-correct unchecked items in done phases AFTER status update.
+            // update_phase_status runs before auto_correct_done_phase_items in the 3-way merge
+            // block, so the merge may have left a phase as in_progress (skipped by auto_correct)
+            // before update_phase_status promotes it to done. Re-running here guarantees items
+            // are checked regardless of merge order.
+            {
+                use ta_changeset::plan_merge::auto_correct_done_phase_items;
+                let current = std::fs::read_to_string(&plan_path)?;
+                let (corrected, corrections) = auto_correct_done_phase_items(&current);
+                if !corrections.is_empty() {
+                    for (phase_id, item_num) in &corrections {
+                        eprintln!(
+                            "[plan] auto-checked item {} in {} (done phase had unchecked item after status update)",
+                            item_num, phase_id
+                        );
+                    }
+                    std::fs::write(&plan_path, corrected.as_bytes())?;
+                }
+
+                // Hard validation: fail apply if any done phase still has unchecked items.
+                use ta_changeset::plan_merge::check_done_phase_item_consistency;
+                let final_content = std::fs::read_to_string(&plan_path)?;
+                let issues = check_done_phase_item_consistency(&final_content);
+                if !issues.is_empty() {
+                    for issue in &issues {
+                        eprintln!("[plan] ERROR: [{}] {}", issue.section_id, issue.description);
+                    }
+                    anyhow::bail!(
+                        "PLAN.md apply aborted: {} done phase(s) have unchecked items after auto-correct.\n\
+                         This indicates a merge corruption that auto-correct could not fix.\n\
+                         Run `ta plan fix-markers --apply` to repair, or mark items [x] manually.",
+                        issues.len()
+                    );
+                }
+            }
+
             // Auto-bump workspace version to match the completed phase.
             // Agents should NOT set the version — this is the single authority.
             if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
@@ -7386,6 +7422,47 @@ fn apply_package(
                         }
 
                         std::fs::write(&plan_path, &content)?;
+
+                        // v0.15.30.6: Auto-correct unchecked items in done phases AFTER status
+                        // update (VCS path). Mirrors the non-VCS fix — same root cause.
+                        {
+                            use ta_changeset::plan_merge::auto_correct_done_phase_items;
+                            let current = std::fs::read_to_string(&plan_path)?;
+                            let (corrected, corrections) = auto_correct_done_phase_items(&current);
+                            if !corrections.is_empty() {
+                                for (phase_id, item_num) in &corrections {
+                                    eprintln!(
+                                        "[plan] auto-checked item {} in {} (done phase had unchecked item after status update)",
+                                        item_num, phase_id
+                                    );
+                                }
+                                std::fs::write(&plan_path, corrected.as_bytes())?;
+                                // Stage the corrected PLAN.md so adapter.commit() includes it.
+                                let _ = std::process::Command::new("git")
+                                    .args(["add", "PLAN.md"])
+                                    .current_dir(&target_dir)
+                                    .output();
+                            }
+
+                            // Hard validation: fail apply if any done phase still has unchecked items.
+                            use ta_changeset::plan_merge::check_done_phase_item_consistency;
+                            let final_content = std::fs::read_to_string(&plan_path)?;
+                            let issues = check_done_phase_item_consistency(&final_content);
+                            if !issues.is_empty() {
+                                for issue in &issues {
+                                    eprintln!(
+                                        "[plan] ERROR: [{}] {}",
+                                        issue.section_id, issue.description
+                                    );
+                                }
+                                anyhow::bail!(
+                                    "PLAN.md apply aborted: {} done phase(s) have unchecked items after auto-correct.\n\
+                                     This indicates a merge corruption that auto-correct could not fix.\n\
+                                     Run `ta plan fix-markers --apply` to repair, or mark items [x] manually.",
+                                    issues.len()
+                                );
+                            }
+                        }
 
                         // Auto-bump workspace version to match the completed phase.
                         if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
