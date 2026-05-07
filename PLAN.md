@@ -7443,7 +7443,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.30.4 — Approval Gate TTY Policy: ta_ask_human or Fail
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Any TA command or pipeline step that requires human approval must use `ta_ask_human` when not in a TTY. If `ta_ask_human` is unavailable and the context is non-interactive (daemon, CI, background process), the command must fail with a clear error — never block on stdin reads that can never be answered.
 
