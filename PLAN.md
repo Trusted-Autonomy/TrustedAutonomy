@@ -7417,6 +7417,8 @@ pub enum NoteDelivery {
 ### v0.15.30.3 — `ta init` Template: Pragma Game Services Backend (Kotlin/BMAD)
 <!-- status: done -->
 
+> **Architectural note — hardcoded first pass**: The Pragma template is implemented directly in Rust code (match arm on template name). This is intentional for the first template — the abstraction is not worth the cost with only one instance. When a second template is added, v0.16.5 will refactor to a data-driven template engine (TOML template files + trait-based `Feature` components). Do not add a second hardcoded template; wait for v0.16.5.
+
 **Goal**: Add a first-party `ta init` template for [Pragma Engine](https://pragma.gg/docs/2026.1.0) projects — the batteries-included multiplayer game services backend. When initialized, TA understands the Pragma architecture (player management, matchmaking, commerce, social, game data, operations) and sets up a BMAD-methodology planner agent that can analyze an existing Pragma deployment, map the current game's architecture, and help plan the next development milestone.
 
 **Why**: Pragma is a complex, modular platform. A developer joining or evolving a Pragma-backed game needs to quickly understand what services are deployed, how they're configured, and what the next increment should look like. TA's planner agent — loaded with Pragma domain knowledge and BMAD's structured milestone decomposition — replaces hours of doc-reading with an interactive architectural briefing and a concrete plan.
@@ -7696,6 +7698,30 @@ Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 
 3. [ ] **`ta doctor` auto-fix offer**: When `ta doctor` reports ProjFS unavailable, offer: "Run `ta doctor fix projfs` to enable it now (requires elevation)?". `ta doctor fix projfs` runs the Dism command via `runas` or prints instructions if UAC elevation unavailable.
 
 #### Version: `0.16.4.1-alpha`
+
+---
+### v0.16.5 — Template Engine: Data-driven `ta init` with Feature Components
+<!-- status: pending -->
+
+**Goal**: Refactor `ta init` from hardcoded Rust match arms to a data-driven template engine. Templates become TOML files (bundled or user-installed) that compose named feature components implemented as Rust trait objects. Enables community templates without code changes to TA itself.
+
+**Why**: v0.15.30.3 implemented the Pragma template directly in code — correct for a first pass with one template, but the wrong long-term architecture. Adding a second template (UE5-native, Unity, generic game project) without this refactor means duplicating the hardcoded pattern. The forcing function is the second template; implement the engine at that point.
+
+**Depends on**: v0.15.30.3 (Pragma template as reference implementation to migrate)
+
+1. [ ] **`Feature` trait** (`crates/ta-init/src/feature.rs`): `trait Feature { fn name(&str) -> &str; fn apply(&self, ctx: &TemplateContext) -> Result<()>; }`. Implementations: `KotlinVerifyFeature`, `BmadPlannerFeature`, `GitAdapterFeature`, `PerforceAdapterFeature`, `PragmaContextFeature`, `Ue5ContextFeature`. Each is a small, focused struct with no cross-feature dependencies.
+
+2. [ ] **Template TOML format** (`templates/<name>.toml`): `[template]` header with `name`, `description`, `version`; `features = [...]` list of feature names; `[vars]` section with user-promptable variables (name, type, default, prompt string); `[scaffold]` listing source template files and destination paths (Tera template rendering with var substitution).
+
+3. [ ] **Scaffold file rendering**: Template files in `templates/<name>/` use Tera syntax (`{{ project_name }}`, `{% if ue_sdk %}`). Rendered at init time with collected vars. Destination paths relative to project root.
+
+4. [ ] **`ta template list`**: Lists available templates (bundled + user-installed from `~/.config/ta/templates/`). Shows name, description, version, feature list.
+
+5. [ ] **`ta template install <url>`**: Fetches a template TOML from a URL, validates schema, checks SHA-256 if provided, writes to `~/.config/ta/templates/<name>.toml`. Fetches scaffold files into `~/.config/ta/templates/<name>/`. No code execution on install — templates are pure data.
+
+6. [ ] **Migrate Pragma template**: Rewrite v0.15.30.3's hardcoded Pragma init as `templates/pragma.toml` + `templates/pragma/` scaffold files + `PragmaContextFeature` impl. User-visible behaviour unchanged.
+
+#### Version: `0.16.5-alpha`
 
 ---
 ### v0.17.0 — Managed Paths: SHA Filesystem + URI Journal
