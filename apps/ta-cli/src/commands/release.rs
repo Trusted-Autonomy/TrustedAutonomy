@@ -54,12 +54,21 @@ pub enum ReleaseCommands {
 
         /// Use the interactive release agent (releaser) with ta_ask_human
         /// for human-in-the-loop review checkpoints.
+        ///
+        /// Required when running from a daemon, Studio, or any non-TTY context
+        /// that has approval gates. Routes all human prompts through ta_ask_human
+        /// so the Studio shell or `ta shell` can present them interactively.
         #[arg(long)]
         interactive: bool,
 
         /// Auto-approve all approval gates and skip the constitution check.
-        /// Use in CI or when approval is not needed. Without this flag,
-        /// non-TTY contexts (daemon) will prompt via TUI interaction.
+        /// Use in CI or scripted contexts where no human approval is needed.
+        ///
+        /// Without this flag and without --interactive, running in a non-TTY
+        /// context (daemon, Studio, CI pipeline) will fail immediately at any
+        /// approval gate with: "approval gate requires --interactive or
+        /// --auto-approve in non-TTY context".
+        ///
         /// Equivalent to --yes.
         #[arg(long)]
         auto_approve: bool,
@@ -200,6 +209,7 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
                     *from_step,
                     pipeline.as_deref(),
                     from_tag.as_deref(),
+                    false,
                 );
                 match pipeline_result {
                     Err(e) if e.to_string() == "__pipeline_aborted__" => return Ok(()),
@@ -800,6 +810,7 @@ impl Drop for ReleaseLockGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_pipeline(
     config: &GatewayConfig,
     version: &str,
@@ -808,6 +819,7 @@ fn run_pipeline(
     from_step: Option<usize>,
     pipeline_path: Option<&Path>,
     from_tag: Option<&str>,
+    interactive: bool,
 ) -> anyhow::Result<()> {
     // Acquire a release lockfile so `ta gc` knows not to delete staging dirs mid-pipeline.
     let _lock = if !dry_run {
@@ -869,6 +881,29 @@ fn run_pipeline(
     let total = pipeline.steps.len();
     let start_idx = from_step.map(|s| s.saturating_sub(1)).unwrap_or(0);
 
+    // Fail fast if any step requires approval and we cannot answer it.
+    // This check runs before any steps execute so there is no partial execution
+    // followed by a hang.
+    if !skip_approvals && !dry_run && !interactive {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            let needs_gate = pipeline
+                .steps
+                .iter()
+                .skip(start_idx)
+                .any(|s| s.requires_approval || s.constitution_check);
+            if needs_gate {
+                anyhow::bail!(
+                    "approval gate requires human input but stdin is not a TTY. \
+                     Run with --interactive (routes approvals via ta_ask_human for \
+                     daemon/Studio use) or --auto-approve to skip all gates. \
+                     Example: ta release run {} --auto-approve",
+                    version
+                );
+            }
+        }
+    }
+
     println!("Release pipeline: {}", pipeline.name);
     println!("Target version:   v{}", version);
     println!(
@@ -895,7 +930,7 @@ fn run_pipeline(
         // Approval gate.
         if step.requires_approval && !skip_approvals && !dry_run {
             println!("[{}/{}] {} — requires approval", i + 1, total, step.name);
-            if !prompt_approval_default(&step.name, step.default_approve)? {
+            if !prompt_approval_default(&step.name, step.default_approve, interactive)? {
                 println!("Aborted at step {}.", i + 1);
                 anyhow::bail!("__pipeline_aborted__");
             }
@@ -946,6 +981,7 @@ fn run_pipeline(
                     && !prompt_approval_default(
                         &format!("Proceed with '{}' (verdict: {})?", step.name, verdict),
                         default_approve,
+                        interactive,
                     )?
                 {
                     println!("Aborted at step {}.", i + 1);
@@ -1698,7 +1734,18 @@ fn print_step_dry_run(step: &PipelineStep, version: &str, commits: &str, last_ta
 ///
 /// When `default_yes = true`, displays `[Y/n]` and treats Enter as yes.
 /// When `default_yes = false`, displays `[y/N]` and requires explicit `y`.
-fn prompt_approval_default(step_name: &str, default_yes: bool) -> anyhow::Result<bool> {
+///
+/// Routing policy (TTY policy: no-raw-stdin-at-approval-gates):
+/// - TTY context: prompt directly on stdin/stdout.
+/// - Non-TTY + interactive: route via ta_ask_human file-based protocol
+///   (Studio and `ta shell` surface it as an interaction).
+/// - Non-TTY + not interactive: fail immediately — never block on stdin
+///   that can never be answered.
+fn prompt_approval_default(
+    step_name: &str,
+    default_yes: bool,
+    interactive: bool,
+) -> anyhow::Result<bool> {
     use std::io::{self, IsTerminal, Write};
 
     // TTY context: prompt directly.
@@ -1715,8 +1762,19 @@ fn prompt_approval_default(step_name: &str, default_yes: bool) -> anyhow::Result
         return Ok(answer == "y" || answer == "yes");
     }
 
-    // Non-TTY context (daemon subprocess): use file-based interaction
-    // so the TUI shell can present the question via SSE (v0.10.14).
+    // Non-TTY + not interactive: fail immediately — never block on a stdin
+    // read that can never be answered (daemon, CI, background process).
+    if !interactive {
+        anyhow::bail!(
+            "approval gate '{}' requires human input but stdin is not a TTY. \
+             Run with --interactive (routes approvals via ta_ask_human for \
+             daemon/Studio use) or --auto-approve to skip all gates.",
+            step_name
+        );
+    }
+
+    // Non-TTY + interactive: route via ta_ask_human file-based protocol.
+    // Studio and `ta shell` surface the pending question as an interaction.
     let interaction_id = uuid::Uuid::new_v4();
     let ta_dir = std::env::current_dir().unwrap_or_default().join(".ta");
     let pending_dir = ta_dir.join("interactions/pending");
@@ -1740,24 +1798,31 @@ fn prompt_approval_default(step_name: &str, default_yes: bool) -> anyhow::Result
     tracing::info!(
         interaction_id = %interaction_id,
         step = step_name,
-        "Release approval gate waiting for human response via TUI"
+        "release approval gate waiting for human response via ta_ask_human"
     );
     println!(
-        "Waiting for approval via TUI shell (interaction {})...",
+        "Waiting for approval via ta_ask_human (interaction {})...",
         &interaction_id.to_string()[..8]
     );
 
-    // Poll for answer (same pattern as ta_ask_human).
+    // Poll for answer file written by the daemon's interaction endpoint.
     let answer_path = answers_dir.join(format!("{}.json", interaction_id));
-    let timeout = std::time::Duration::from_secs(600); // 10 minute timeout
+    let timeout = std::time::Duration::from_secs(600);
     let start = std::time::Instant::now();
 
     loop {
         if start.elapsed() > timeout {
-            // Clean up pending question.
             let _ = std::fs::remove_file(&question_path);
+            tracing::warn!(
+                interaction_id = %interaction_id,
+                step = step_name,
+                timeout_secs = 600,
+                "release approval gate timed out waiting for ta_ask_human response"
+            );
             println!(
-                "Release approval timed out after {}s for step '{}'. Aborting.",
+                "Release approval timed out after {}s for step '{}'. \
+                 Check that Studio or `ta shell` is running to answer pending interactions. \
+                 Aborting.",
                 timeout.as_secs(),
                 step_name
             );
@@ -1766,7 +1831,6 @@ fn prompt_approval_default(step_name: &str, default_yes: bool) -> anyhow::Result
 
         if answer_path.exists() {
             let content = std::fs::read_to_string(&answer_path)?;
-            // Clean up files.
             let _ = std::fs::remove_file(&question_path);
             let _ = std::fs::remove_file(&answer_path);
 
@@ -1778,7 +1842,7 @@ fn prompt_approval_default(step_name: &str, default_yes: bool) -> anyhow::Result
                     .to_lowercase();
                 let approved = response == "y" || response == "yes";
                 println!(
-                    "Proceed with '{}'? [y/N] {} (from TUI)",
+                    "Proceed with '{}'? [y/N] {} (via ta_ask_human)",
                     step_name,
                     if approved { "y" } else { "n" }
                 );
@@ -1796,7 +1860,7 @@ fn prompt_approval_with_auto(step_name: &str, auto_approve: bool) -> anyhow::Res
         println!("Proceed with '{}'? [y/N] y (auto-approved)", step_name);
         return Ok(true);
     }
-    prompt_approval_default(step_name, false)
+    prompt_approval_default(step_name, false, false)
 }
 
 // ── Show pipeline ───────────────────────────────────────────────
@@ -2784,7 +2848,20 @@ fn dispatch_release(
                         cv, tag_semver
                     );
                 } else {
-                    // Prompt user to bump inline.
+                    // Non-TTY: cannot prompt, so fail with actionable message.
+                    use std::io::IsTerminal;
+                    if !std::io::stdin().is_terminal() {
+                        anyhow::bail!(
+                            "Version drift detected: Cargo.toml is at {} but tag {} implies {}. \
+                             Cannot prompt for version bump in non-TTY context. \
+                             Fix manually with: ./scripts/bump-version.sh {}",
+                            cv,
+                            tag,
+                            tag_semver,
+                            tag_semver
+                        );
+                    }
+                    // TTY: prompt user to bump inline.
                     eprint!(
                         "Bump Cargo.toml (and CLAUDE.md) from {} to {} automatically? [Y/n] ",
                         cv, tag_semver
@@ -3427,7 +3504,7 @@ steps:
         .unwrap();
 
         // Dry run should succeed even though the step would fail.
-        run_pipeline(&config, "1.0.0", true, true, None, None, None).unwrap();
+        run_pipeline(&config, "1.0.0", true, true, None, None, None, false).unwrap();
     }
 
     #[test]
@@ -3799,7 +3876,7 @@ steps:
         .unwrap();
 
         // Run with --yes to skip approvals.
-        run_pipeline(&config, "1.0.0", true, false, None, None, None).unwrap();
+        run_pipeline(&config, "1.0.0", true, false, None, None, None, false).unwrap();
 
         // Verify the marker file was created.
         let marker = temp.path().join("release-marker.txt");
@@ -4202,7 +4279,7 @@ steps:
         .unwrap();
 
         // Dry run should succeed even with failing steps and approval gates.
-        run_pipeline(&config, "1.0.0", false, true, None, None, None).unwrap();
+        run_pipeline(&config, "1.0.0", false, true, None, None, None, false).unwrap();
 
         // Nothing should have been executed — no files created.
         assert!(!temp.path().join("release-marker.txt").exists());
@@ -4214,29 +4291,53 @@ steps:
     }
 
     #[test]
-    fn tui_interaction_question_written() {
-        // Verify that non-TTY mode writes an interaction question file.
-        // We can't fully test the polling loop, but we can test the question format.
+    fn non_tty_non_interactive_fails_with_actionable_error() {
+        // When stdin is not a TTY and --interactive is not set, prompt_approval_default
+        // must fail immediately rather than blocking on a stdin read that can never
+        // be answered (daemon, CI, background process).
+        // In tests, stdin is never a TTY, so this exercises the fast-fail path.
+        let err = prompt_approval_default("publish", false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--interactive") && err.contains("--auto-approve"),
+            "expected actionable error with --interactive and --auto-approve hints, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn non_tty_pipeline_with_gate_fails_before_any_step() {
+        // A pipeline with a gated step must fail at startup (not mid-pipeline) when
+        // stdin is not a TTY and neither --interactive nor --auto-approve is set.
         let temp = tempfile::tempdir().unwrap();
-        let pending_dir = temp.path().join(".ta/interactions/pending");
-        std::fs::create_dir_all(&pending_dir).unwrap();
+        git_init_with_commit(temp.path());
+        let config = GatewayConfig::for_project(temp.path());
 
-        let interaction_id = uuid::Uuid::new_v4();
-        let question = serde_json::json!({
-            "interaction_id": interaction_id.to_string(),
-            "goal_id": "release",
-            "question": "Release gate: proceed with 'publish'?",
-            "choices": ["y", "n"],
-            "response_hint": "y or n",
-            "turn": 0
-        });
-        let path = pending_dir.join(format!("{}.json", interaction_id));
-        std::fs::write(&path, serde_json::to_string_pretty(&question).unwrap()).unwrap();
+        let ta_dir = temp.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("release.yaml"),
+            r#"name: gated-test
+steps:
+  - name: setup
+    run: echo "setup"
+  - name: gated
+    requires_approval: true
+    run: echo "approved"
+"#,
+        )
+        .unwrap();
 
-        let content: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["goal_id"], "release");
-        assert!(content["question"].as_str().unwrap().contains("publish"));
-        assert_eq!(content["choices"][0], "y");
+        // skip_approvals=false, dry_run=false, interactive=false → must fail before
+        // executing any steps (stdin is non-TTY in tests).
+        let err = run_pipeline(&config, "1.0.0", false, false, None, None, None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--interactive") || err.contains("--auto-approve"),
+            "expected early-exit error with flag hints, got: {}",
+            err
+        );
     }
 }
