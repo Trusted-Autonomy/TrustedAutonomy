@@ -8,7 +8,7 @@
 // configurable timeouts, and enhanced timeout error messages.
 
 use std::cmp::Reverse;
-use std::io::BufRead;
+use std::io::{BufRead, IsTerminal};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -221,6 +221,12 @@ fn run_single_command(
                 let _ = stdout_handle.join();
                 let _ = stderr_handle.join();
 
+                // Clear the in-place spinner line before printing final status.
+                if std::io::stdout().is_terminal() {
+                    print!("\r{}\r", " ".repeat(80));
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+
                 let elapsed = start.elapsed();
                 let combined = output_lines.lock().unwrap().join("\n");
 
@@ -274,15 +280,28 @@ fn run_single_command(
                     ));
                 }
 
-                // Heartbeat: emit every heartbeat_interval seconds.
+                // Heartbeat: emit an in-place spinner line (overwrites previous) so
+                // the terminal doesn't flood with repeated "still running" messages.
                 if last_heartbeat.elapsed() >= heartbeat_interval {
                     let line_count = output_lines.lock().unwrap().len();
-                    println!(
-                        "        [{}] still running... ({}s elapsed, {} lines captured)",
-                        label,
-                        elapsed.as_secs(),
-                        line_count
-                    );
+                    // \r returns to start of line; trailing spaces wipe leftover chars.
+                    // Falls back to a newline if stdout is not a TTY (e.g. CI logs).
+                    if std::io::stdout().is_terminal() {
+                        print!(
+                            "\r        [{}] still running... {}s elapsed, {} lines captured    ",
+                            label,
+                            elapsed.as_secs(),
+                            line_count
+                        );
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    } else {
+                        println!(
+                            "        [{}] still running... ({}s elapsed, {} lines captured)",
+                            label,
+                            elapsed.as_secs(),
+                            line_count
+                        );
+                    }
                     last_heartbeat = Instant::now();
                 }
 

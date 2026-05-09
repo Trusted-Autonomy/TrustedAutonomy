@@ -4599,6 +4599,13 @@ fn deny_artifact(
 
     println!("Denied artifact {}: {}", uri, reason);
     println!();
+
+    // Skip the interactive interrogation in non-TTY contexts (daemon, CI).
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+
     print!("Ask the agent why it made this choice? [y/N] ");
     use std::io::Write;
     std::io::stdout().flush()?;
@@ -5911,23 +5918,89 @@ fn apply_package(
                     // Interactive: print conflicts and prompt.
                     let rendered = render_review_report(&report, false);
                     eprintln!("{}", rendered);
-                    eprintln!("Conflicts detected in PLAN.md. How would you like to proceed?");
-                    eprintln!("  [C]ontinue (take source for all conflicts)");
-                    eprintln!("  [D]eny this draft");
-                    eprint!("Choice [C/D]: ");
 
-                    let mut input = String::new();
-                    let _ = std::io::stdin().read_line(&mut input);
-                    match input.trim().to_uppercase().as_str() {
-                        "D" => {
-                            anyhow::bail!(
-                                "Apply denied by user due to PLAN.md conflicts. \
-                                 Run `ta draft deny {}` to formally deny the draft.",
-                                &package_id.to_string()[..8]
-                            );
+                    use std::io::IsTerminal;
+                    if !std::io::stdin().is_terminal() {
+                        // Non-TTY (piped, CI, daemon-launched): cannot prompt.
+                        // Auto-take source for all conflicts and log them.
+                        eprintln!(
+                            "[review] stdin is not a TTY — auto-taking source for {} PLAN.md conflict(s).",
+                            report.conflicts.len()
+                        );
+                        eprintln!(
+                            "[review] To resolve interactively, run: ta draft apply {} --conflict-resolution merge",
+                            &package_id.to_string()[..8]
+                        );
+                        for conflict in &report.conflicts {
+                            eprintln!("[conflict-resolved: took source] {}", conflict.description);
                         }
-                        _ => {
-                            eprintln!("[review] Continuing: taking source for all conflicts.");
+                    } else {
+                        // TTY path: show a clear prompt with 60s timeout.
+                        eprintln!();
+                        eprintln!("╔══════════════════════════════════════════════════╗");
+                        eprintln!("║  PLAN.md CONFLICTS DETECTED — action required    ║");
+                        eprintln!("╚══════════════════════════════════════════════════╝");
+                        eprintln!();
+                        eprintln!("  [C] Continue — take source version for all conflicts");
+                        eprintln!(
+                            "  [D] Deny    — abort apply (run `ta draft deny {}` to record)",
+                            &package_id.to_string()[..8]
+                        );
+                        eprintln!();
+
+                        let prompt_result = {
+                            use std::io::Write;
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(60);
+                            let mut result = String::from("C"); // default: continue
+                            loop {
+                                let remaining =
+                                    deadline.saturating_duration_since(std::time::Instant::now());
+                                if remaining.is_zero() {
+                                    eprintln!();
+                                    eprintln!("[review] Timed out after 60s — defaulting to [C] Continue.");
+                                    break;
+                                }
+                                eprint!("\rChoice [C/D] ({}s): ", remaining.as_secs());
+                                let _ = Write::flush(&mut std::io::stderr());
+
+                                // Channel-based read: spawns a thread to block on stdin while
+                                // the main loop polls with 1s timeout to update the countdown.
+                                use std::io::BufRead;
+                                let (tx, rx) = std::sync::mpsc::channel::<String>();
+                                let _reader = std::thread::spawn(move || {
+                                    let mut buf = String::new();
+                                    let _ = std::io::stdin().lock().read_line(&mut buf);
+                                    let _ = tx.send(buf);
+                                });
+                                match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                                    Ok(s) => {
+                                        result = s.trim().to_uppercase();
+                                    }
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        break;
+                                    }
+                                }
+                                eprintln!(); // newline after input
+                                break;
+                            }
+                            result
+                        };
+
+                        match prompt_result.as_str() {
+                            "D" => {
+                                anyhow::bail!(
+                                    "Apply denied by user due to PLAN.md conflicts. \
+                                     Run `ta draft deny {}` to formally deny the draft.",
+                                    &package_id.to_string()[..8]
+                                );
+                            }
+                            _ => {
+                                eprintln!("[review] Continuing: taking source for all conflicts.");
+                            }
                         }
                     }
                 }
@@ -9117,6 +9190,14 @@ fn close_stale_drafts(
     println!();
 
     if !skip_confirm {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "stdin is not a TTY — cannot confirm closing {} draft(s) interactively. \
+                 Re-run with --yes to skip confirmation.",
+                stale.len()
+            );
+        }
         use std::io::Write;
         print!("Close {} draft(s)? [y/N] ", stale.len());
         std::io::stdout().flush().ok();

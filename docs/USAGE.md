@@ -5932,11 +5932,26 @@ ta shell> release v0.10.6
 
 The `--interactive` flag uses the `releaser` agent with `ta_ask_human` for review checkpoints. The human stays in `ta shell` throughout — the agent asks for release notes approval and publish confirmation interactively.
 
-When running release commands from `ta shell` (non-TTY context), approval gates are presented as interactive questions in the TUI via the same file-based interaction mechanism used by `ta_ask_human`. Use `--auto-approve` to skip all gates in CI/non-interactive environments.
+**Approval gate TTY policy**: `ta release run` enforces a strict TTY policy at every approval gate:
+
+| Context | Flag | Behavior |
+|---|---|---|
+| TTY (terminal) | none | Direct `[y/N]` prompt on stdin |
+| Any context | `--auto-approve` / `--yes` | Skip all gates (CI mode) |
+| non-TTY | `--interactive` | Agent uses `ta_ask_human`; Studio/`ta shell` surfaces questions |
+| non-TTY | none | **Fails immediately** with actionable error before any steps execute |
+
+When running from a daemon, Studio, or any non-TTY context **without** `--interactive` or `--auto-approve`, the command will exit with:
+```
+approval gate requires human input but stdin is not a TTY.
+Run with --interactive (routes approvals via ta_ask_human for daemon/Studio use)
+or --auto-approve to skip all gates.
+```
+This prevents the pipeline from hanging indefinitely on a stdin read that can never be answered.
 
 **Approval gate behavior**: Most approval gates default to `[y/N]` (must type `y` to proceed). The "Review release notes" gate defaults to `[Y/n]` — pressing Enter proceeds, `n` aborts. This reduces friction for the common case where the notes look correct.
 
-**`--yes` / `--auto-approve`**: Both flags skip all approval gates and the constitution compliance check entirely. Use in CI pipelines or scripted releases. Without these flags, a non-TTY context (daemon) prompts via the TUI shell.
+**`--yes` / `--auto-approve`**: Both flags skip all approval gates and the constitution compliance check entirely. Use in CI pipelines or scripted releases.
 
 **Constitution compliance check**: The default pipeline includes a programmatic constitution check step that runs `scan_for_violations()` (static rule scan) and the supervisor agent against the release diff. The verdict is displayed:
 - `[PASS]` or `[WARN]`: gate defaults Y (Enter proceeds)
