@@ -7465,7 +7465,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.30.5 — Release Pipeline: Background Agent, Timeout Resilience & Step Resume
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: `ta release run --interactive` must run the release agent as a **background TA goal** (detached from TTY), surfacing all human touchpoints via `ta_ask_human` in Studio or `ta shell`. The agent must be resilient to API stream timeouts with automatic retry, partial result preservation, and a `ta_ask_human` prompt offering Retry / Fail / Discuss on timeout.
 
