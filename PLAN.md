@@ -7491,6 +7491,46 @@ pub enum NoteDelivery {
 
 ---
 
+### v0.15.30.5.1 — Apply UX: Closing Summary, Verify Progress Header & Spinner
+<!-- status: pending -->
+
+**Goal**: `ta draft apply` must clearly communicate what it is doing at every stage and summarize the outcome when it finishes. Three gaps identified from v0.15.30.4/5 apply sessions:
+
+1. **No closing summary**: The success path (`Ok(())` at `draft.rs:8010`) returns silently after `restore_state()`. The PR URL, branch, and merge status are printed during the VCS step but scroll past, and the final state is never recapped.
+2. **No verify progress header**: When `[verify]` commands run at apply time, the user sees only heartbeat "still running" lines with no indication of which command is running, how many commands remain, or how long the timeout is. A 40-minute `cargo test` run looks identical to a hang.
+3. **Spinner not installed yet**: The `verify.rs` in-place spinner fix (PR #446) is in the codebase but the user hasn't rebuilt since. This is a reminder to rebuild after this phase merges.
+
+**Why**: Multiple apply sessions looked stalled or broken when they were actually running normally. Users killed applies that would have succeeded. The underlying problem is silent progress — no header, no summary, no recap.
+
+1. [ ] **Apply closing summary**: After `adapter.restore_state()` on the success path, print a recap:
+   ```
+   ✓ Applied draft <short-id> — <goal title>
+     Branch:  feature/<slug>
+     PR:      https://github.com/.../pull/NNN
+     CI:      auto-merge enabled — will merge when checks pass
+   ```
+   If no PR was created (no `auto_review`), omit the PR line. If `auto_merge = false`, say "Merge with: `gh pr merge NNN --squash`".
+
+2. [ ] **Verify progress header**: At the start of `run_verification()` (verify.rs), print:
+   ```
+   [apply] Running verification (3 commands, timeout 2400s):
+     1/3  cargo fmt --all -- --check
+     2/3  cargo clippy --workspace --all-targets -- -D warnings
+     3/3  cargo test --workspace -- --test-threads=4
+   ```
+   Update the current command with `\r` prefix when it starts so the user always sees which step is active.
+
+3. [ ] **Pass command index to heartbeat**: The in-place spinner should include the step number: `[2/3 cargo clippy] still running... 47s`. Currently the label is just the command name with no position context.
+
+4. [ ] **Deadlocked test detection**: The `cargo test` stall (14 threads parked, 5s CPU over 40+ minutes) was not diagnosed by the apply. Add a heuristic: if elapsed > 0.8 × timeout AND CPU consumption of the subprocess is <1% for >5 minutes, emit a warning:
+   ```
+   [warn] Verification command appears stalled (low CPU for 5+ min). Press Ctrl-C to cancel and re-run with --skip-verify.
+   ```
+
+#### Version: `0.15.30-alpha.5.1`
+
+---
+
 ## v0.16 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
