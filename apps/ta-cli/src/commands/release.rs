@@ -4782,8 +4782,8 @@ steps:
         // In tests stdin is not a TTY and interactive=false → immediate Fail.
         let temp = TempDir::new().unwrap();
         let config = GatewayConfig::for_project(temp.path());
-        let decision = ask_human_on_step_failure(&config, "Generate notes", "timed out", false)
-            .unwrap();
+        let decision =
+            ask_human_on_step_failure(&config, "Generate notes", "timed out", false).unwrap();
         assert!(matches!(decision, HumanStepDecision::Fail));
     }
 }
