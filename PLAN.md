@@ -7465,7 +7465,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.30.5 — Release Pipeline: Background Agent, Timeout Resilience & Step Resume
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: `ta release run --interactive` must run the release agent as a **background TA goal** (detached from TTY), surfacing all human touchpoints via `ta_ask_human` in Studio or `ta shell`. The agent must be resilient to API stream timeouts with automatic retry, partial result preservation, and a `ta_ask_human` prompt offering Retry / Fail / Discuss on timeout.
 
@@ -7475,17 +7475,17 @@ pub enum NoteDelivery {
 
 **Depends on**: v0.15.30.4 (approval gate TTY policy)
 
-1. [ ] **Fix `run_interactive_release()` to launch as detached background goal**: Replace `Command::new(&ta_bin).args(&args).status()` with async goal spawn (`ta goal start --detach` or `GoalRunner::spawn_detached()`). The release agent runs as a background TA goal; the CLI prints the goal ID and returns immediately. Human touchpoints (`ta_ask_human`) surface as notifications in Studio and `ta shell`.
+1. [x] **Fix `run_interactive_release()` to launch as detached background goal**: Replace `Command::new(&ta_bin).args(&args).status()` with async goal spawn (`ta goal start --detach` or `GoalRunner::spawn_detached()`). The release agent runs as a background TA goal; the CLI prints the goal ID and returns immediately. Human touchpoints (`ta_ask_human`) surface as notifications in Studio and `ta shell`.
 
-2. [ ] **`ta_ask_human` timeout recovery prompt**: On `ApiError::StreamIdleTimeout`, instead of exiting, the agent calls `ta_ask_human("Release notes generation timed out. [R]etry / [F]ail / [D]iscuss — enter message to send to agent")`. Discuss sends the user's message back to the agent as context, allowing guided recovery without restarting.
+2. [x] **`ta_ask_human` timeout recovery prompt**: On `ApiError::StreamIdleTimeout`, instead of exiting, the agent calls `ta_ask_human("Release notes generation timed out. [R]etry / [F]ail / [D]iscuss — enter message to send to agent")`. Discuss sends the user's message back to the agent as context, allowing guided recovery without restarting.
 
-3. [ ] **Automatic retry with backoff before prompting human**: Before reaching the `ta_ask_human` timeout prompt, retry up to 2 times automatically with exponential backoff (10s, 30s). Only prompt the human on the third failure. Log each retry: `[release] stream timeout — retrying (attempt 2/3)`.
+3. [x] **Automatic retry with backoff before prompting human**: Before reaching the `ta_ask_human` timeout prompt, retry up to 2 times automatically with exponential backoff (10s, 30s). Only prompt the human on the third failure. Log each retry: `[release] stream timeout — retrying (attempt 2/3)`.
 
-4. [ ] **Partial result preservation**: Save partial agent output to `.ta/release-draft.md` before any retry or human prompt. On retry, inject as context: `"Partial notes from previous attempt: <content>. Please complete."` On `--from-step` resume, pre-load this file if present.
+4. [x] **Partial result preservation**: Save partial agent output to `.ta/release-draft.md` before any retry or human prompt. On retry, inject as context: `"Partial notes from previous attempt: <content>. Please complete."` On `--from-step` resume, pre-load this file if present.
 
-5. [ ] **Chunked generation for large commit ranges**: When the commit range spans >100 commits, split generation into chunks (by month or service area) and merge. Prevents single requests that exceed idle timeout windows regardless of retry count.
+5. [x] **Chunked generation for large commit ranges**: When the commit range spans >100 commits, split generation into chunks (by month or service area) and merge. Prevents single requests that exceed idle timeout windows regardless of retry count.
 
-6. [ ] **`ta release show` includes step numbers**: Output step index alongside name so `--from-step N` is self-documenting without manual counting.
+6. [x] **`ta release show` includes step numbers**: Output step index alongside name so `--from-step N` is self-documenting without manual counting.
 
 #### Version: `0.15.30-alpha.5`
 
