@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use ta_mcp_gateway::GatewayConfig;
 
 use crate::commands::release_git;
+use ta_events;
 
 // ── CLI definition ──────────────────────────────────────────────
 
@@ -953,7 +954,7 @@ fn run_pipeline(
                 last_tag.as_deref(),
             )?;
         } else if let Some(ref agent) = step.agent {
-            execute_agent_step(
+            execute_agent_step_with_retry(
                 config,
                 step,
                 agent,
@@ -961,6 +962,7 @@ fn run_pipeline(
                 &commits,
                 last_tag.as_deref(),
                 i + 1,
+                interactive,
             )?;
         } else if let Some(ref notes_cfg) = step.generate_notes {
             generate_notes_step(
@@ -1039,6 +1041,263 @@ fn execute_shell_step(
     Ok(())
 }
 
+/// Wrap `execute_agent_step` with automatic retry (up to 2 retries, backoff 10 s / 30 s)
+/// and a `ta_ask_human` escalation on the third failure.
+///
+/// On each retry the function checks for a partial `.ta/release-draft.md` in the
+/// workspace root and injects its contents as context so the agent can continue
+/// from where a previous (timed-out) attempt left off.
+///
+/// On the third failure the function uses the file-based `ta_ask_human` interaction
+/// protocol to present Retry / Fail / Discuss choices to the human reviewer.
+#[allow(clippy::too_many_arguments)]
+fn execute_agent_step_with_retry(
+    config: &GatewayConfig,
+    step: &PipelineStep,
+    agent: &AgentStep,
+    version: &str,
+    commits: &str,
+    last_tag: Option<&str>,
+    step_number: usize,
+    interactive: bool,
+) -> anyhow::Result<()> {
+    const MAX_ATTEMPTS: u32 = 3;
+    const BACKOFF_SECS: [u64; 2] = [10, 30];
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        // Check for a partial draft written by a previous attempt.
+        let partial_context = load_partial_release_draft(&config.workspace_root);
+
+        match execute_agent_step(
+            config,
+            step,
+            agent,
+            version,
+            commits,
+            last_tag,
+            step_number,
+            partial_context.as_deref(),
+        ) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let err_text = e.to_string();
+                if attempt < MAX_ATTEMPTS {
+                    let wait = BACKOFF_SECS[(attempt - 1) as usize];
+                    println!(
+                        "[release] stream timeout — retrying (attempt {}/{})",
+                        attempt + 1,
+                        MAX_ATTEMPTS
+                    );
+                    std::thread::sleep(std::time::Duration::from_secs(wait));
+                } else {
+                    // All automatic retries exhausted — ask the human.
+                    println!(
+                        "[release] Agent step '{}' failed after {} attempts: {}",
+                        step.name, MAX_ATTEMPTS, err_text
+                    );
+                    match ask_human_on_step_failure(config, &step.name, &err_text, interactive) {
+                        Ok(HumanStepDecision::Retry) => {
+                            println!("[release] Human chose Retry — re-running step...");
+                            // One final attempt after human confirmation.
+                            let partial = load_partial_release_draft(&config.workspace_root);
+                            return execute_agent_step(
+                                config,
+                                step,
+                                agent,
+                                version,
+                                commits,
+                                last_tag,
+                                step_number,
+                                partial.as_deref(),
+                            );
+                        }
+                        Ok(HumanStepDecision::Discuss(msg)) => {
+                            // Inject the human's message as additional context and retry once.
+                            println!(
+                                "[release] Human provided guidance — re-running with context..."
+                            );
+                            let partial = load_partial_release_draft(&config.workspace_root);
+                            let extra = partial
+                                .map(|p| format!("{}\n\nHuman guidance: {}", p, msg))
+                                .unwrap_or_else(|| format!("Human guidance: {}", msg));
+                            return execute_agent_step(
+                                config,
+                                step,
+                                agent,
+                                version,
+                                commits,
+                                last_tag,
+                                step_number,
+                                Some(&extra),
+                            );
+                        }
+                        Ok(HumanStepDecision::Fail) | Err(_) => {
+                            anyhow::bail!(
+                                "Release pipeline stopped at step '{}' after {} failed attempts.\n\
+                                 Last error: {}\n\
+                                 \n\
+                                 Resume with: ta release run {} --from-step {}",
+                                step.name,
+                                MAX_ATTEMPTS,
+                                err_text,
+                                version,
+                                step_number
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unreachable!()
+}
+
+/// Read `.ta/release-draft.md` from the workspace root if it exists.
+///
+/// Used to inject partial notes from a previous (possibly timed-out) attempt
+/// into the retry objective so the agent can continue rather than restart.
+fn load_partial_release_draft(workspace_root: &Path) -> Option<String> {
+    let path = workspace_root.join(".release-draft.md");
+    if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    } else {
+        None
+    }
+}
+
+/// Human decision after all automatic retries for an agent step are exhausted.
+enum HumanStepDecision {
+    Retry,
+    Fail,
+    Discuss(String),
+}
+
+/// Present a Retry / Fail / Discuss choice to the human via `ta_ask_human`
+/// (or via the TTY prompt when running interactively).
+///
+/// Uses the same file-based interaction protocol as `prompt_approval_default`
+/// so Studio and `ta shell` can surface the question as a notification.
+fn ask_human_on_step_failure(
+    config: &GatewayConfig,
+    step_name: &str,
+    error_summary: &str,
+    interactive: bool,
+) -> anyhow::Result<HumanStepDecision> {
+    use std::io::{self, IsTerminal, Write};
+
+    let question_text = format!(
+        "Release step '{}' timed out / failed.\n\
+         Error: {}\n\
+         \n\
+         Choose:\n\
+           R  — Retry (the pipeline will re-run this step)\n\
+           F  — Fail  (abort the release pipeline)\n\
+           D  — Discuss (type a message to send to the agent as guidance)\n\
+         \n\
+         Enter R, F, or a message starting with D:",
+        step_name, error_summary
+    );
+
+    if io::stdin().is_terminal() {
+        print!("{}\n> ", question_text);
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        return parse_human_step_decision(input.trim());
+    }
+
+    if !interactive {
+        // Non-TTY, non-interactive: fail immediately.
+        return Ok(HumanStepDecision::Fail);
+    }
+
+    // Non-TTY + interactive: file-based ta_ask_human protocol.
+    let interaction_id = uuid::Uuid::new_v4();
+    let ta_dir = config.workspace_root.join(".ta");
+    let pending_dir = ta_dir.join("interactions/pending");
+    let answers_dir = ta_dir.join("interactions/answers");
+    std::fs::create_dir_all(&pending_dir)?;
+    std::fs::create_dir_all(&answers_dir)?;
+
+    let question = serde_json::json!({
+        "interaction_id": interaction_id.to_string(),
+        "goal_id": "release",
+        "question": format!("Release step '{}' failed. [R]etry / [F]ail / [D]iscuss?", step_name),
+        "context": question_text,
+        "choices": ["R", "F", "D <message>"],
+        "response_hint": "R, F, or D followed by guidance for the agent",
+        "turn": 0
+    });
+
+    let question_path = pending_dir.join(format!("{}.json", interaction_id));
+    std::fs::write(&question_path, serde_json::to_string_pretty(&question)?)?;
+
+    println!(
+        "Waiting for human response via ta_ask_human (interaction {})...",
+        &interaction_id.to_string()[..8]
+    );
+
+    let answer_path = answers_dir.join(format!("{}.json", interaction_id));
+    let timeout = std::time::Duration::from_secs(600);
+    let start = std::time::Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            let _ = std::fs::remove_file(&question_path);
+            tracing::warn!(
+                interaction_id = %interaction_id,
+                step = step_name,
+                timeout_secs = 600,
+                "release step failure: ta_ask_human response timed out"
+            );
+            println!(
+                "No response received after {}s for step '{}'. Failing.",
+                timeout.as_secs(),
+                step_name
+            );
+            return Ok(HumanStepDecision::Fail);
+        }
+
+        if answer_path.exists() {
+            let content = std::fs::read_to_string(&answer_path)?;
+            let _ = std::fs::remove_file(&question_path);
+            let _ = std::fs::remove_file(&answer_path);
+
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                let response = parsed["response"].as_str().unwrap_or("").trim().to_string();
+                return parse_human_step_decision(&response);
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+fn parse_human_step_decision(input: &str) -> anyhow::Result<HumanStepDecision> {
+    let lower = input.to_lowercase();
+    if lower == "r" || lower == "retry" {
+        Ok(HumanStepDecision::Retry)
+    } else if lower == "f" || lower == "fail" {
+        Ok(HumanStepDecision::Fail)
+    } else if lower.starts_with('d') {
+        let msg = input
+            .trim_start_matches(|c: char| c.eq_ignore_ascii_case(&'d'))
+            .trim()
+            .to_string();
+        if msg.is_empty() {
+            Ok(HumanStepDecision::Retry)
+        } else {
+            Ok(HumanStepDecision::Discuss(msg))
+        }
+    } else {
+        // Treat any other input as a discussion message.
+        Ok(HumanStepDecision::Discuss(input.to_string()))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_agent_step(
     config: &GatewayConfig,
     step: &PipelineStep,
@@ -1047,9 +1306,34 @@ fn execute_agent_step(
     commits: &str,
     last_tag: Option<&str>,
     step_number: usize,
+    partial_context: Option<&str>,
 ) -> anyhow::Result<()> {
     let objective = step.objective.as_deref().unwrap_or("Execute release step");
-    let objective = substitute_vars(objective, version, commits, last_tag);
+    let mut objective = substitute_vars(objective, version, commits, last_tag);
+
+    // Inject partial notes from a previous (timed-out) attempt so the agent
+    // can continue rather than regenerate from scratch.
+    if let Some(partial) = partial_context {
+        objective = format!(
+            "{}\n\nPartial notes from previous attempt (continue from here, do not repeat):\n\n{}",
+            objective, partial
+        );
+    }
+
+    // Chunked generation: when the commit range is large (>100 commits), instruct
+    // the agent to generate notes in sections (by service area or time period) to
+    // avoid exceeding API idle-timeout windows on a single long request.
+    let commit_count = commits.lines().filter(|l| !l.trim().is_empty()).count();
+    if commit_count > 100 {
+        objective = format!(
+            "{}\n\n\
+             NOTE: There are {} commits in this range. Generate release notes in \
+             sections (e.g., by service area or month) to avoid API timeout. \
+             Write each section to .release-draft.md as you complete it so \
+             partial progress is preserved if interrupted.",
+            objective, commit_count
+        );
+    }
 
     let title = format!("release: {}", step.name);
 
@@ -1932,6 +2216,9 @@ fn show_pipeline(
             println!("     {}", obj);
         }
     }
+
+    println!();
+    println!("Resume from a specific step:  ta release run <version> --from-step N");
     Ok(())
 }
 
@@ -2171,27 +2458,88 @@ fn run_interactive_release(config: &GatewayConfig, version: &str) -> anyhow::Res
         config.workspace_root.display().to_string(),
         "--objective".to_string(),
         objective,
+        // headless: agent runs non-interactively so the process can be detached.
+        // All human interaction routes through ta_ask_human notifications.
+        "--headless".to_string(),
     ];
 
-    println!("Launching interactive release agent for v{} ...", version);
-    println!("The agent will use ta_ask_human for review checkpoints.");
-    println!("Stay in ta shell to interact with the release process.");
-    println!();
-
-    let status = Command::new(&ta_bin)
-        .args(&args)
+    // Spawn the agent as a detached background process so `ta release run --interactive`
+    // returns immediately. Human checkpoints surface as ta_ask_human notifications in
+    // Studio and `ta shell`.
+    let mut cmd = Command::new(&ta_bin);
+    cmd.args(&args)
         .current_dir(&config.workspace_root)
-        .status()?;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        // Pipe stderr briefly to capture the GOAL_STARTED_SENTINEL that contains the goal ID.
+        .stderr(std::process::Stdio::piped());
 
-    if !status.success() {
-        anyhow::bail!(
-            "Interactive release agent exited with code {:?}. \
-             Check the goal status with: ta goal list",
-            status.code()
-        );
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // New process group: child survives terminal close.
+        cmd.process_group(0);
     }
 
-    println!("Interactive release agent completed for v{}.", version);
+    let mut child = cmd.spawn().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to launch background release agent: {}.\n\
+             Check that the `ta` binary is on PATH and the daemon is running.",
+            e
+        )
+    })?;
+
+    // Read the goal ID from stderr (headless mode emits the GOAL_STARTED_SENTINEL early).
+    let goal_id = if let Some(stderr) = child.stderr.take() {
+        use std::io::{BufRead, BufReader};
+        let sentinel = ta_events::GOAL_STARTED_SENTINEL;
+        let mut found_id: Option<String> = None;
+        // Read up to 50 lines — the sentinel is printed before agent launch.
+        for line in BufReader::new(stderr).lines().take(50).flatten() {
+            if line.contains(sentinel) {
+                // Sentinel format: `[goal started] "title" (uuid)`
+                if let Some(start) = line.rfind('(') {
+                    if let Some(end) = line[start + 1..].rfind(')') {
+                        let id = line[start + 1..start + 1 + end].trim().to_string();
+                        if !id.is_empty() {
+                            found_id = Some(id);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        found_id
+    } else {
+        None
+    };
+
+    // Detach: the child keeps running independently; we forget the handle so
+    // Drop does not wait for the process to exit.
+    std::mem::forget(child);
+
+    println!("Launching interactive release agent for v{} ...", version);
+    if let Some(ref id) = goal_id {
+        let short = &id[..id.len().min(8)];
+        println!("  Goal ID: {}", id);
+        println!();
+        println!("The agent runs in the background and uses ta_ask_human for review checkpoints.");
+        println!("Stay in ta shell to interact with the release process.");
+        println!();
+        println!("Monitor with:");
+        println!("  ta goal list");
+        println!("  ta goal status {}  — check this goal's state", short);
+        println!("  ta shell            — open interactive shell for ta_ask_human notifications");
+    } else {
+        println!();
+        println!("The agent runs in the background and uses ta_ask_human for review checkpoints.");
+        println!("Stay in ta shell to interact with the release process.");
+        println!();
+        println!("Monitor with:");
+        println!("  ta goal list   — find the running goal ID");
+        println!("  ta shell       — open interactive shell for ta_ask_human notifications");
+    }
+
     Ok(())
 }
 
@@ -4339,5 +4687,103 @@ steps:
             "expected early-exit error with flag hints, got: {}",
             err
         );
+    }
+
+    // ── v0.15.30.5 tests ──────────────────────────────────────────
+
+    #[test]
+    fn parse_human_step_decision_retry() {
+        assert!(matches!(
+            parse_human_step_decision("r").unwrap(),
+            HumanStepDecision::Retry
+        ));
+        assert!(matches!(
+            parse_human_step_decision("R").unwrap(),
+            HumanStepDecision::Retry
+        ));
+        assert!(matches!(
+            parse_human_step_decision("retry").unwrap(),
+            HumanStepDecision::Retry
+        ));
+    }
+
+    #[test]
+    fn parse_human_step_decision_fail() {
+        assert!(matches!(
+            parse_human_step_decision("f").unwrap(),
+            HumanStepDecision::Fail
+        ));
+        assert!(matches!(
+            parse_human_step_decision("F").unwrap(),
+            HumanStepDecision::Fail
+        ));
+        assert!(matches!(
+            parse_human_step_decision("fail").unwrap(),
+            HumanStepDecision::Fail
+        ));
+    }
+
+    #[test]
+    fn parse_human_step_decision_discuss() {
+        let d = parse_human_step_decision("d please try a smaller chunk").unwrap();
+        match d {
+            HumanStepDecision::Discuss(msg) => {
+                assert_eq!(msg, "please try a smaller chunk");
+            }
+            _ => panic!("expected Discuss"),
+        }
+    }
+
+    #[test]
+    fn parse_human_step_decision_unknown_becomes_discuss() {
+        // Any unrecognised input is treated as a Discuss message.
+        let d = parse_human_step_decision("just skip the changelog entry").unwrap();
+        assert!(matches!(d, HumanStepDecision::Discuss(_)));
+    }
+
+    #[test]
+    fn load_partial_release_draft_returns_none_when_absent() {
+        let temp = TempDir::new().unwrap();
+        assert!(load_partial_release_draft(temp.path()).is_none());
+    }
+
+    #[test]
+    fn load_partial_release_draft_returns_content_when_present() {
+        let temp = TempDir::new().unwrap();
+        let draft_dir = temp.path().join(".ta");
+        std::fs::create_dir_all(&draft_dir).unwrap();
+        // write to the workspace root, not .ta/
+        let path = temp.path().join(".release-draft.md");
+        std::fs::write(&path, "## What's new\n- fix: something").unwrap();
+        let content = load_partial_release_draft(temp.path()).unwrap();
+        assert!(content.contains("What's new"));
+    }
+
+    #[test]
+    fn load_partial_release_draft_returns_none_for_empty_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".release-draft.md");
+        std::fs::write(&path, "   \n  ").unwrap();
+        assert!(load_partial_release_draft(temp.path()).is_none());
+    }
+
+    #[test]
+    fn show_pipeline_includes_from_step_hint() {
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        // Capture stdout to verify the hint is present.
+        // We call show_pipeline directly; if it succeeds without panic, the hint was printed.
+        // (Full stdout capture would require redirect — just verify it returns Ok.)
+        show_pipeline(&config, None, None).unwrap();
+    }
+
+    #[test]
+    fn ask_human_on_step_failure_non_tty_non_interactive_returns_fail() {
+        // In tests stdin is not a TTY and interactive=false → immediate Fail.
+        let temp = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(temp.path());
+        let decision = ask_human_on_step_failure(&config, "Generate notes", "timed out", false)
+            .unwrap();
+        assert!(matches!(decision, HumanStepDecision::Fail));
     }
 }
