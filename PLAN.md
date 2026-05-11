@@ -7531,6 +7531,41 @@ pub enum NoteDelivery {
 
 ---
 
+### v0.15.30.6 — System Health Notifications: CLI + Studio Ambient Alerts
+<!-- status: pending -->
+
+**Goal**: Surface operational health issues proactively — in `ta status`, `ta run`, `ta draft view`, and as a live ambient panel in Studio — so users see actionable warnings before they cause problems. No new commands required; health information appears alongside normal output.
+
+**Why**: Several issues in this session were only discovered after hours of confusion: stale Discord listener blocking the daemon (3,680 crash-loop entries before being noticed), 79GB of staging dirs causing disk pressure, `cargo test` deadlocking silently inside `ta draft apply`. These should have been visible immediately.
+
+**Signals to monitor** (daemon collects, CLI/Studio render):
+- **Plugin crash loops**: channel plugin restarting >10 times in 10 minutes → `[warn] Discord listener restarting repeatedly (3680x) — check .ta/daemon.log`
+- **Disk pressure**: `.ta/staging/` or `target/` over configurable thresholds (default: staging >20GB, overall disk >90% used) → `[warn] Disk pressure: .ta/staging/ is 79GB — run \`ta gc\` to reclaim`
+- **Stale staging dirs**: goals in `failed`/`closed` state with staging dir still present >24h → counts and total size
+- **Stale drafts**: approved/pending drafts not applied for >3 days → existing hint promoted to structured warning
+- **Subprocess stall**: verify command child process has <1% CPU for >5min while still running → `[warn] cargo test appears stalled — press Ctrl-C and re-run with --skip-verify`
+- **Daemon log error rate**: >N `ERROR` or `WARN` lines per minute in daemon.log → surface top error
+
+1. [ ] **`ta status` health section**: Add a `Health` block between the project summary and the active goals list. Shows only non-empty signals — if everything is clean, omits the block entirely. Each signal has a severity (`info`/`warn`/`crit`) and a one-line recommended action.
+
+2. [ ] **`ta run` pre-flight banner**: Before launching the agent, print any `warn`/`crit` signals so the user can address them first. `info` signals suppressed. Example:
+   ```
+   [warn] Disk pressure: .ta/staging/ 79GB — run `ta gc` before starting a new goal
+   [crit] Disk usage 94% — agent may fail mid-run
+   ```
+
+3. [ ] **`ta draft view` footer**: Append health signals to the bottom of draft view output when severity is `warn`/`crit`. Keeps the draft content uncluttered but ensures the user sees issues before applying.
+
+4. [ ] **Daemon health collector** (`ta-daemon`): Periodic background task (every 60s) that computes the signal set and stores it in a lightweight in-memory struct accessible via a new `/health/signals` API endpoint. Signals are cached; no repeated filesystem scans during a single `ta status` call.
+
+5. [ ] **Studio ambient alert bar**: A dismissible banner at the top of Studio that polls `/health/signals` every 30s. Shows the highest-severity active signal with a "Details" expand. Dismissed signals are suppressed for 1h (stored in sessionStorage). Critical signals cannot be dismissed.
+
+6. [ ] **`ta doctor` integration**: `ta doctor` already surfaces some issues; wire the new signal collector into it so `ta doctor` and the ambient alerts use the same source of truth.
+
+#### Version: `0.15.30-alpha.6`
+
+---
+
 ## v0.16 — IDE Integration & Developer Experience
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
