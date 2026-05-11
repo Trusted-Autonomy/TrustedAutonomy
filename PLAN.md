@@ -7534,15 +7534,25 @@ pub enum NoteDelivery {
 ### v0.15.30.6 — System Health Notifications: CLI + Studio Ambient Alerts
 <!-- status: pending -->
 
-**Goal**: Surface operational health issues proactively — in `ta status`, `ta run`, `ta draft view`, and as a live ambient panel in Studio — so users see actionable warnings before they cause problems. No new commands required; health information appears alongside normal output.
+**Goal**: Surface operational health issues proactively — in `ta status`, `ta run`, `ta draft view`, and as a live ambient panel in Studio — so users see actionable warnings before they cause problems. Unify `ta doctor` (diagnose) and `ta gc` (clean) under a single `ta doctor --fix` flow so users don't need to know to run both separately.
 
-**Why**: Several issues in this session were only discovered after hours of confusion: stale Discord listener blocking the daemon (3,680 crash-loop entries before being noticed), 79GB of staging dirs causing disk pressure, `cargo test` deadlocking silently inside `ta draft apply`. These should have been visible immediately.
+**Why**: Several issues in this session were only discovered after hours of confusion: stale Discord listener blocking the daemon (3,680 crash-loop entries before being noticed), 79GB of staging dirs causing disk pressure, `cargo test` deadlocking silently inside `ta draft apply`. These should have been visible immediately. Additionally, `ta gc` and `ta doctor` are separate commands that both discover the same class of problems (stale goals, disk pressure) but one only reports and one only cleans — forcing the user to know to run both.
+
+**Design: `ta doctor` absorbs `ta gc`**
+
+`ta doctor` becomes the unified health command. `ta gc` is kept as a silent scriptable alias for automation (cron, CI):
+- `ta doctor` — diagnose and report actionable findings, no changes made
+- `ta doctor --fix` — diagnose + interactively offer to clean up each finding
+- `ta gc` — non-interactive cleanup (equivalent to `ta doctor --fix --yes`), kept for scripts/cron
+
+Studio "Health" page gains a **"Run cleanup"** button that calls `ta doctor --fix --yes` and streams output into a log panel.
 
 **Signals to monitor** (daemon collects, CLI/Studio render):
 - **Plugin crash loops**: channel plugin restarting >10 times in 10 minutes → `[warn] Discord listener restarting repeatedly (3680x) — check .ta/daemon.log`
-- **Disk pressure**: `.ta/staging/` or `target/` over configurable thresholds (default: staging >20GB, overall disk >90% used) → `[warn] Disk pressure: .ta/staging/ is 79GB — run \`ta gc\` to reclaim`
-- **Stale staging dirs**: goals in `failed`/`closed` state with staging dir still present >24h → counts and total size
-- **Stale drafts**: approved/pending drafts not applied for >3 days → existing hint promoted to structured warning
+- **Disk pressure**: `.ta/staging/` or `target/` over configurable thresholds (default: staging >20GB, overall disk >90% used) → `[warn] Disk pressure: .ta/staging/ is 79GB — run \`ta doctor --fix\` to reclaim`
+- **Stale goals**: goals in `failed`/`closed`/`pr_ready` state >24h with no user action → counts and sizes; `--fix` offers to purge
+- **Stale staging dirs**: staging dirs with no associated active goal >24h → sizes; `--fix` removes them
+- **Stale drafts**: approved/pending drafts not applied for >3 days → existing hint promoted to structured warning; `--fix` prompts to apply or close
 - **Subprocess stall**: verify command child process has <1% CPU for >5min while still running → `[warn] cargo test appears stalled — press Ctrl-C and re-run with --skip-verify`
 - **Daemon log error rate**: >N `ERROR` or `WARN` lines per minute in daemon.log → surface top error
 
@@ -7550,7 +7560,7 @@ pub enum NoteDelivery {
 
 2. [ ] **`ta run` pre-flight banner**: Before launching the agent, print any `warn`/`crit` signals so the user can address them first. `info` signals suppressed. Example:
    ```
-   [warn] Disk pressure: .ta/staging/ 79GB — run `ta gc` before starting a new goal
+   [warn] Disk pressure: .ta/staging/ 79GB — run `ta doctor --fix` before starting a new goal
    [crit] Disk usage 94% — agent may fail mid-run
    ```
 
@@ -7558,9 +7568,9 @@ pub enum NoteDelivery {
 
 4. [ ] **Daemon health collector** (`ta-daemon`): Periodic background task (every 60s) that computes the signal set and stores it in a lightweight in-memory struct accessible via a new `/health/signals` API endpoint. Signals are cached; no repeated filesystem scans during a single `ta status` call.
 
-5. [ ] **Studio ambient alert bar**: A dismissible banner at the top of Studio that polls `/health/signals` every 30s. Shows the highest-severity active signal with a "Details" expand. Dismissed signals are suppressed for 1h (stored in sessionStorage). Critical signals cannot be dismissed.
+5. [ ] **Studio ambient alert bar + "Run cleanup" button**: A dismissible banner at the top of Studio that polls `/health/signals` every 30s. Shows the highest-severity active signal with a "Details" expand. Dismissed signals are suppressed for 1h (stored in sessionStorage). Critical signals cannot be dismissed. The Studio Health page has a **"Run cleanup"** button that calls `ta doctor --fix --yes` and streams output into a log panel.
 
-6. [ ] **`ta doctor` integration**: `ta doctor` already surfaces some issues; wire the new signal collector into it so `ta doctor` and the ambient alerts use the same source of truth.
+6. [ ] **`ta doctor --fix`**: Extend `ta doctor` to accept `--fix` (interactive) and `--fix --yes` (non-interactive) flags. For each finding, prompt the user before taking action. Actions: purge stale goals (`ta goal purge`), delete orphaned staging dirs, close stale drafts, restart crashed plugins. `ta gc` becomes an alias for `ta doctor --fix --yes`. Document the unification in USAGE.md.
 
 #### Version: `0.15.30-alpha.6`
 
