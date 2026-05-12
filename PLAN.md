@@ -7531,6 +7531,45 @@ pub enum NoteDelivery {
 
 ---
 
+### v0.15.30.5.2 — Phase Resolution: Full Version Parsing & Smart Matching
+<!-- status: pending -->
+
+**Goal**: `ta run` phase auto-detection must parse the full version string from a goal title without truncation, unify the `--phase` flag path and the title-extraction path through the same resolution logic, and interactively disambiguate when no exact match is found.
+
+**Root cause of the v0.15.30.5.1 incident**: `ta run "v0.15.30.5.1 — ..."` extracted `v0.15.30.5` (stopped at the fourth numeric component) and attempted to claim an already-done phase. The regex or parser was not handling four-level version numbers (`vMAJOR.MINOR.PATCH.SUB.SUB2`). The `--phase` flag and title-extraction went through different code paths with different parsers, so the explicit flag would have succeeded while title-extraction failed.
+
+**Design**:
+
+All phase resolution — whether from `--phase <arg>` or extracted from the goal title — flows through a single `resolve_phase()` function. The function:
+
+1. **Full-string extraction**: Parse the longest version token that matches `v\d+(\.\d+)*` without a fixed depth cap. `v0.15.30.5.1` must parse as five components, not truncate to four.
+2. **Exact match**: Look up the parsed version in the plan phase index. If found and claimable, return it.
+3. **Prefix / nearest-pending match**: If not found exactly, find all pending phases whose ID starts with the parsed prefix. If exactly one, claim it with a note `[resolved v0.15.30.5 → v0.15.30.5.1]`. If zero or more than one, fall through to disambiguation.
+4. **Name fuzzy match**: Score all pending phases by title similarity (simple word-overlap or Levenshtein). Collect candidates above a threshold.
+5. **Interactive disambiguation**: When more than one candidate exists (or no exact version match), print:
+   ```
+   Could not uniquely resolve phase from "v0.15.30.5.1 — Apply UX ...".
+   Did you mean:
+     [1] v0.15.30.5.1 — Apply UX: Closing Summary, Verify Progress Header & Spinner  (pending)
+     [2] v0.15.30.5   — Release Pipeline: Background Agent, Timeout Resilience ...    (done)
+   Enter number to select, or specify with --phase <id>:
+   ```
+   If stdin is not a TTY (CI / scripted use), fail with a structured error listing the candidates so the caller can retry with `--phase`.
+
+1. [ ] **Unified `resolve_phase()` in `ta-plan`**: Single entry point used by `ta run`, `ta goal start`, and any other command that accepts a phase. Takes an `Option<&str>` (explicit flag) and an `Option<&str>` (title string), returns `ResolvedPhase { id, source: Explicit | TitleExtracted | FuzzyMatch }`.
+
+2. [ ] **Fix version token parser**: Extend the regex/parser to capture `v\d+(\.\d+)*` greedily — no hard depth limit. Add unit tests covering: `v0.15.30.5.1`, `v0.15.30.5.1.2`, `v1.0`, `v0.15.30.5` (already done), and titles with multiple version-like tokens (take the first).
+
+3. [ ] **Prefix expansion for single-match case**: After exact lookup fails, collect all plan phases whose string ID has the parsed version as a prefix. Single match → auto-select and log the resolution. Zero or multiple matches → disambiguation.
+
+4. [ ] **Interactive disambiguation prompt**: Print ranked candidates with status badges. Accept numeric input or `--phase` reminder. On non-TTY stdin, emit a structured error (`phase_ambiguous: [list]`) and exit non-zero.
+
+5. [ ] **Regression test**: Add an integration test that calls `resolve_phase()` with the title `"v0.15.30.5.1 — Apply UX"` against a plan containing both `v0.15.30.5` (done) and `v0.15.30.5.1` (pending), and asserts the result is `v0.15.30.5.1`.
+
+#### Version: `0.15.30-alpha.5.2`
+
+---
+
 ### v0.15.30.6 — System Health Notifications: CLI + Studio Ambient Alerts
 <!-- status: pending -->
 
