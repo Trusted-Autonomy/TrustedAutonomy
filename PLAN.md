@@ -7492,7 +7492,7 @@ pub enum NoteDelivery {
 ---
 
 ### v0.15.30.5.1 — Apply UX: Closing Summary, Verify Progress Header & Spinner
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: `ta draft apply` must clearly communicate what it is doing at every stage and summarize the outcome when it finishes. Three gaps identified from v0.15.30.4/5 apply sessions:
 
