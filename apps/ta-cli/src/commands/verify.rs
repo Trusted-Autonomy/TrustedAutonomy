@@ -39,11 +39,30 @@ pub fn run_verification(config: &VerifyConfig, staging_dir: &Path) -> Verificati
         };
     }
 
+    let total = config.commands.len();
+    let total_timeout_secs: u64 = config
+        .commands
+        .iter()
+        .map(|c| config.command_timeout(c))
+        .sum();
+
     println!();
     println!(
-        "Running pre-draft verification ({} commands)...",
-        config.commands.len()
+        "[apply] Running verification ({} command{}, timeout {}s):",
+        total,
+        if total == 1 { "" } else { "s" },
+        total_timeout_secs
     );
+    for (i, cmd) in config.commands.iter().enumerate() {
+        println!(
+            "  {}/{}  {}  ({}s)",
+            i + 1,
+            total,
+            cmd.run,
+            config.command_timeout(cmd)
+        );
+    }
+    println!();
 
     let mut warnings = Vec::new();
     let mut all_passed = true;
@@ -53,22 +72,34 @@ pub fn run_verification(config: &VerifyConfig, staging_dir: &Path) -> Verificati
         let timeout = Duration::from_secs(timeout_secs);
         let heartbeat = Duration::from_secs(config.heartbeat_interval_secs);
 
-        println!(
-            "  [{}/{}] {} (timeout: {}s)",
-            i + 1,
-            config.commands.len(),
-            cmd.run,
-            timeout_secs
-        );
+        // Overwrite the previous spinner line (or blank line) to highlight the active step.
+        if std::io::stdout().is_terminal() {
+            let indicator = format!("▶ {}/{}  {}", i + 1, total, cmd.run);
+            print!(
+                "\r{}{}\r",
+                indicator,
+                " ".repeat(80_usize.saturating_sub(indicator.len()))
+            );
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
 
-        match run_single_command(&cmd.run, staging_dir, timeout, heartbeat) {
+        match run_single_command(&cmd.run, staging_dir, timeout, heartbeat, (i + 1, total)) {
             Ok(output) => {
                 if output.success {
-                    println!("        PASS ({:.1}s)", output.elapsed.as_secs_f64());
+                    println!(
+                        "  [{}/{}] PASS  {} ({:.1}s)",
+                        i + 1,
+                        total,
+                        cmd.run,
+                        output.elapsed.as_secs_f64()
+                    );
                 } else {
                     all_passed = false;
                     println!(
-                        "        FAIL (exit code: {}, {:.1}s)",
+                        "  [{}/{}] FAIL  {} (exit code: {}, {:.1}s)",
+                        i + 1,
+                        total,
+                        cmd.run,
                         output.exit_code.unwrap_or(-1),
                         output.elapsed.as_secs_f64()
                     );
@@ -93,7 +124,7 @@ pub fn run_verification(config: &VerifyConfig, staging_dir: &Path) -> Verificati
             }
             Err(e) => {
                 all_passed = false;
-                println!("        ERROR: {}", e);
+                println!("  [{}/{}] ERROR  {} — {}", i + 1, total, cmd.run, e);
                 warnings.push(VerificationWarning {
                     command: cmd.run.clone(),
                     exit_code: None,
@@ -147,11 +178,13 @@ fn command_label(cmd: &str) -> String {
 /// - Stdout and stderr are streamed line-by-line with a `[label]` prefix.
 /// - A heartbeat line is emitted every `heartbeat_interval` while running.
 /// - On timeout, the error includes the last 20 lines of output.
+/// - `position` is (1-based index, total) used in heartbeat labels.
 fn run_single_command(
     cmd: &str,
     working_dir: &Path,
     timeout: Duration,
     heartbeat_interval: Duration,
+    position: (usize, usize),
 ) -> anyhow::Result<CommandOutput> {
     use std::process::{Command, Stdio};
 
@@ -214,6 +247,12 @@ fn run_single_command(
     let start = Instant::now();
     let mut last_heartbeat = start;
 
+    // Stall detection: warn if output stops long before the timeout (item 4).
+    let stall_threshold = Duration::from_secs(300); // 5 minutes of silence
+    let mut last_output_len: usize = 0;
+    let mut last_progress_at = start;
+    let mut stall_warned = false;
+
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -239,6 +278,13 @@ fn run_single_command(
             }
             Ok(None) => {
                 let elapsed = start.elapsed();
+
+                // Track output progress for stall detection.
+                let current_len = output_lines.lock().unwrap().len();
+                if current_len > last_output_len {
+                    last_output_len = current_len;
+                    last_progress_at = Instant::now();
+                }
 
                 // Check timeout.
                 if elapsed > timeout {
@@ -280,16 +326,34 @@ fn run_single_command(
                     ));
                 }
 
+                // Stall warning: emit once when >80% of timeout elapsed with no output.
+                if !stall_warned
+                    && elapsed.as_secs_f64() > timeout.as_secs_f64() * 0.8
+                    && last_progress_at.elapsed() >= stall_threshold
+                {
+                    stall_warned = true;
+                    if std::io::stdout().is_terminal() {
+                        print!("\r{}\r", " ".repeat(80));
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
+                    println!(
+                        "\n[warn] Verification command appears stalled (no output for {}s). \
+                         Press Ctrl-C to cancel and re-run with --skip-verify.",
+                        last_progress_at.elapsed().as_secs()
+                    );
+                }
+
                 // Heartbeat: emit an in-place spinner line (overwrites previous) so
                 // the terminal doesn't flood with repeated "still running" messages.
                 if last_heartbeat.elapsed() >= heartbeat_interval {
                     let line_count = output_lines.lock().unwrap().len();
+                    let position_label = format!("{}/{} {}", position.0, position.1, label);
                     // \r returns to start of line; trailing spaces wipe leftover chars.
                     // Falls back to a newline if stdout is not a TTY (e.g. CI logs).
                     if std::io::stdout().is_terminal() {
                         print!(
-                            "\r        [{}] still running... {}s elapsed, {} lines captured    ",
-                            label,
+                            "\r        [{}] still running... {}s, {} lines    ",
+                            position_label,
                             elapsed.as_secs(),
                             line_count
                         );
@@ -297,7 +361,7 @@ fn run_single_command(
                     } else {
                         println!(
                             "        [{}] still running... ({}s elapsed, {} lines captured)",
-                            label,
+                            position_label,
                             elapsed.as_secs(),
                             line_count
                         );
@@ -520,6 +584,7 @@ mod tests {
             dir.path(),
             Duration::from_secs(30),
             Duration::from_secs(30),
+            (1, 1),
         )
         .unwrap();
         assert!(output.success);
@@ -543,6 +608,7 @@ mod tests {
             dir.path(),
             Duration::from_secs(5),
             Duration::from_secs(30),
+            (1, 2),
         );
         assert!(fast.is_ok());
         assert!(fast.unwrap().success);
@@ -553,6 +619,7 @@ mod tests {
             dir.path(),
             Duration::from_secs(1),
             Duration::from_secs(30),
+            (2, 2),
         );
         assert!(slow.is_err());
         let err_msg = slow.unwrap_err().to_string();
@@ -586,6 +653,7 @@ mod tests {
             dir.path(),
             Duration::from_secs(30),
             Duration::from_secs(1),
+            (1, 1),
         )
         .unwrap();
         assert!(output.success);
@@ -613,6 +681,7 @@ mod tests {
             dir.path(),
             Duration::from_secs(2),
             Duration::from_secs(30),
+            (1, 1),
         );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();

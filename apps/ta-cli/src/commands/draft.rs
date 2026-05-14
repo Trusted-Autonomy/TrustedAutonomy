@@ -8343,56 +8343,6 @@ fn apply_package(
         }
     }
 
-    // Post-apply guidance: show branch + PR URL prominently at the very end.
-    // This block must always be the last output so the URL is never scrolled away.
-    if !dry_run && git_commit {
-        // Reload the package to get the VCS tracking info saved during apply.
-        if let Ok(final_pkg) = load_package(config, package_id) {
-            if let Some(ref vcs) = final_pkg.vcs_status {
-                let short_id = &package_id.to_string()[..8];
-                // Check auto_merge directly from workflow config — this is always current.
-                let auto_merge = {
-                    use ta_submit::WorkflowConfig;
-                    let wf = WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
-                    wf.submit.git.auto_merge
-                };
-
-                println!();
-                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                println!("  VCS APPLY SUMMARY");
-                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                println!("  Branch:  {}", vcs.branch);
-                if let Some(ref sha) = vcs.commit_sha {
-                    println!("  Commit:  {}", sha);
-                }
-                if let Some(ref url) = vcs.review_url {
-                    println!("  PR:      {}", url);
-                    if auto_merge {
-                        println!(
-                            "  [!] AUTO-MERGE is enabled — this PR will merge without review."
-                        );
-                        println!("      Disable: set auto_merge = false in .ta/workflow.toml");
-                    } else {
-                        println!("  ACTION:  Review and merge the PR above before continuing.");
-                    }
-                } else if !vcs.branch.is_empty() && vcs.branch != "unknown" {
-                    println!(
-                        "  PR:      not created (run `ta draft reopen-review {}` to retry)",
-                        short_id
-                    );
-                }
-                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                println!("  ta draft pr-status {}    — check PR/CI status", short_id);
-                if !auto_merge {
-                    println!(
-                        "  ta draft watch {}        — poll until merged + auto-sync",
-                        short_id
-                    );
-                }
-            }
-        }
-    }
-
     // Post-apply version validation (embedded-patch / staging-unavailable fallback).
     // The pre-copy gate (above) already caught mismatches when staging was present.
     // `staging_was_present` was captured BEFORE auto_clean ran (v0.15.19.4 bug-1 fix).
@@ -8441,6 +8391,55 @@ fn apply_package(
                 let actual = read_cargo_version(&target_dir);
                 if actual.as_deref() == Some(expected_ver.as_str()) {
                     println!("  Version: {} ✓", expected_ver);
+                }
+            }
+        }
+    }
+
+    // Closing summary: always the last output so it is never scrolled past.
+    // Shows what was applied with branch, PR URL, and CI/merge status.
+    if !dry_run {
+        let short_id = &package_id.to_string()[..8];
+        println!();
+        println!("✓ Applied draft {} — {}", short_id, goal.title);
+
+        if git_commit {
+            if let Ok(final_pkg) = load_package(config, package_id) {
+                if let Some(ref vcs) = final_pkg.vcs_status {
+                    let auto_merge = {
+                        use ta_submit::WorkflowConfig;
+                        let wf =
+                            WorkflowConfig::load_or_default(&target_dir.join(".ta/workflow.toml"));
+                        wf.submit.git.auto_merge
+                    };
+                    if !vcs.branch.is_empty() && vcs.branch != "unknown" {
+                        println!("  Branch:  {}", vcs.branch);
+                    }
+                    if let Some(ref sha) = vcs.commit_sha {
+                        println!("  Commit:  {}", sha);
+                    }
+                    if let Some(ref url) = vcs.review_url {
+                        println!("  PR:      {}", url);
+                        if auto_merge {
+                            println!("  CI:      auto-merge enabled — will merge when checks pass");
+                        } else {
+                            let pr_num = url.rsplit('/').next().unwrap_or("NNN");
+                            println!("  Merge with:  gh pr merge {} --squash", pr_num);
+                        }
+                    } else if !vcs.branch.is_empty() && vcs.branch != "unknown" {
+                        println!(
+                            "  PR:      not created — run `ta draft reopen-review {}` to retry",
+                            short_id
+                        );
+                    }
+                    println!();
+                    println!("  ta draft pr-status {}    — check PR/CI status", short_id);
+                    if vcs.review_url.is_some() && !auto_merge {
+                        println!(
+                            "  ta draft watch {}        — poll until merged + auto-sync",
+                            short_id
+                        );
+                    }
                 }
             }
         }
