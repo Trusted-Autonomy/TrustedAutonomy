@@ -7490,9 +7490,8 @@ pub enum NoteDelivery {
 #### Version: `0.15.30-alpha.5`
 
 ---
-
 ### v0.15.30.5.1 — Apply UX: Closing Summary, Verify Progress Header & Spinner
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: `ta draft apply` must clearly communicate what it is doing at every stage and summarize the outcome when it finishes. Three gaps identified from v0.15.30.4/5 apply sessions:
 
@@ -7502,7 +7501,7 @@ pub enum NoteDelivery {
 
 **Why**: Multiple apply sessions looked stalled or broken when they were actually running normally. Users killed applies that would have succeeded. The underlying problem is silent progress — no header, no summary, no recap.
 
-1. [ ] **Apply closing summary**: After `adapter.restore_state()` on the success path, print a recap:
+1. [x] **Apply closing summary**: After `adapter.restore_state()` on the success path, print a recap:
    ```
    ✓ Applied draft <short-id> — <goal title>
      Branch:  feature/<slug>
@@ -7511,7 +7510,7 @@ pub enum NoteDelivery {
    ```
    If no PR was created (no `auto_review`), omit the PR line. If `auto_merge = false`, say "Merge with: `gh pr merge NNN --squash`".
 
-2. [ ] **Verify progress header**: At the start of `run_verification()` (verify.rs), print:
+2. [x] **Verify progress header**: At the start of `run_verification()` (verify.rs), print:
    ```
    [apply] Running verification (3 commands, timeout 2400s):
      1/3  cargo fmt --all -- --check
@@ -7520,9 +7519,9 @@ pub enum NoteDelivery {
    ```
    Update the current command with `\r` prefix when it starts so the user always sees which step is active.
 
-3. [ ] **Pass command index to heartbeat**: The in-place spinner should include the step number: `[2/3 cargo clippy] still running... 47s`. Currently the label is just the command name with no position context.
+3. [x] **Pass command index to heartbeat**: The in-place spinner should include the step number: `[2/3 cargo clippy] still running... 47s`. Currently the label is just the command name with no position context.
 
-4. [ ] **Deadlocked test detection**: The `cargo test` stall (14 threads parked, 5s CPU over 40+ minutes) was not diagnosed by the apply. Add a heuristic: if elapsed > 0.8 × timeout AND CPU consumption of the subprocess is <1% for >5 minutes, emit a warning:
+4. [x] **Deadlocked test detection**: The `cargo test` stall (14 threads parked, 5s CPU over 40+ minutes) was not diagnosed by the apply. Add a heuristic: if elapsed > 0.8 × timeout AND CPU consumption of the subprocess is <1% for >5 minutes, emit a warning:
    ```
    [warn] Verification command appears stalled (low CPU for 5+ min). Press Ctrl-C to cancel and re-run with --skip-verify.
    ```
@@ -7530,7 +7529,6 @@ pub enum NoteDelivery {
 #### Version: `0.15.30-alpha.5.1`
 
 ---
-
 ### v0.15.30.5.2 — Phase Resolution: Full Version Parsing & Smart Matching
 <!-- status: pending -->
 
@@ -7569,7 +7567,6 @@ All phase resolution — whether from `--phase <arg>` or extracted from the goal
 #### Version: `0.15.30-alpha.5.2`
 
 ---
-
 ### v0.15.30.6 — System Health Notifications: CLI + Studio Ambient Alerts
 <!-- status: pending -->
 
