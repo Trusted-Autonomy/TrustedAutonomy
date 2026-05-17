@@ -18,6 +18,18 @@ use ta_mcp_gateway::GatewayConfig;
 use crate::commands::release_git;
 use ta_events;
 
+// In tests stdin is always treated as non-TTY so the fast-fail paths are
+// exercised regardless of whether the test runner is attached to a terminal.
+#[cfg(not(test))]
+fn stdin_is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+#[cfg(test)]
+fn stdin_is_tty() -> bool {
+    false
+}
+
 // ── CLI definition ──────────────────────────────────────────────
 
 #[derive(Subcommand, Debug)]
@@ -885,23 +897,20 @@ fn run_pipeline(
     // Fail fast if any step requires approval and we cannot answer it.
     // This check runs before any steps execute so there is no partial execution
     // followed by a hang.
-    if !skip_approvals && !dry_run && !interactive {
-        use std::io::IsTerminal;
-        if !std::io::stdin().is_terminal() {
-            let needs_gate = pipeline
-                .steps
-                .iter()
-                .skip(start_idx)
-                .any(|s| s.requires_approval || s.constitution_check);
-            if needs_gate {
-                anyhow::bail!(
-                    "approval gate requires human input but stdin is not a TTY. \
-                     Run with --interactive (routes approvals via ta_ask_human for \
-                     daemon/Studio use) or --auto-approve to skip all gates. \
-                     Example: ta release run {} --auto-approve",
-                    version
-                );
-            }
+    if !skip_approvals && !dry_run && !interactive && !stdin_is_tty() {
+        let needs_gate = pipeline
+            .steps
+            .iter()
+            .skip(start_idx)
+            .any(|s| s.requires_approval || s.constitution_check);
+        if needs_gate {
+            anyhow::bail!(
+                "approval gate requires human input but stdin is not a TTY. \
+                 Run with --interactive (routes approvals via ta_ask_human for \
+                 daemon/Studio use) or --auto-approve to skip all gates. \
+                 Example: ta release run {} --auto-approve",
+                version
+            );
         }
     }
 
@@ -1185,7 +1194,7 @@ fn ask_human_on_step_failure(
     error_summary: &str,
     interactive: bool,
 ) -> anyhow::Result<HumanStepDecision> {
-    use std::io::{self, IsTerminal, Write};
+    use std::io::{self, Write};
 
     let question_text = format!(
         "Release step '{}' timed out / failed.\n\
@@ -1200,7 +1209,7 @@ fn ask_human_on_step_failure(
         step_name, error_summary
     );
 
-    if io::stdin().is_terminal() {
+    if stdin_is_tty() {
         print!("{}\n> ", question_text);
         io::stdout().flush()?;
         let mut input = String::new();
@@ -2030,10 +2039,10 @@ fn prompt_approval_default(
     default_yes: bool,
     interactive: bool,
 ) -> anyhow::Result<bool> {
-    use std::io::{self, IsTerminal, Write};
+    use std::io::{self, Write};
 
     // TTY context: prompt directly.
-    if io::stdin().is_terminal() {
+    if stdin_is_tty() {
         let prompt_hint = if default_yes { "[Y/n]" } else { "[y/N]" };
         print!("Proceed with '{}'? {} ", step_name, prompt_hint);
         io::stdout().flush()?;
@@ -3197,8 +3206,7 @@ fn dispatch_release(
                     );
                 } else {
                     // Non-TTY: cannot prompt, so fail with actionable message.
-                    use std::io::IsTerminal;
-                    if !std::io::stdin().is_terminal() {
+                    if !stdin_is_tty() {
                         anyhow::bail!(
                             "Version drift detected: Cargo.toml is at {} but tag {} implies {}. \
                              Cannot prompt for version bump in non-TTY context. \
