@@ -7530,7 +7530,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.30.5.2 — Phase Resolution: Full Version Parsing & Smart Matching
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: `ta run` phase auto-detection must parse the full version string from a goal title without truncation, unify the `--phase` flag path and the title-extraction path through the same resolution logic, and interactively disambiguate when no exact match is found.
 
