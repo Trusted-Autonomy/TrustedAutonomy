@@ -1040,25 +1040,42 @@ pub fn execute(
     let title = title.as_deref();
     let follow_up = follow_up.as_ref();
 
-    // ── Phase auto-detection (v0.15.15.2) ──────────────────────────
+    // ── Phase resolution (v0.15.30.5.2) ────────────────────────────
     //
-    // When --phase is not explicitly provided, try to resolve a phase automatically:
-    // 1. --phase explicit (already resolved above via smart follow-up)
-    // 2. Semver in goal title ("v0.15.15.2 — Fix auth" → v0.15.15.2)
-    // 3. Exactly one in_progress phase in PLAN.md → use it
-    // 4. None → generate gap semver and insert ad-hoc stub into PLAN.md
-    //
-    // Only runs when PLAN.md exists and phase is still None.
-    let auto_detected_phase: Option<String> = if phase.is_none() {
+    // All phase resolution — whether from `--phase` flag or extracted from
+    // the goal title — flows through a single `resolve_phase()` call that:
+    //   1. Parses the longest v\d+(\.\d+)* token (no depth cap)
+    //   2. Exact match in plan → return it
+    //   3. Prefix match → auto-expand to single pending phase
+    //   4. Multiple candidates → interactive disambiguation (or structured
+    //      error on non-TTY stdin so the caller can retry with --phase)
+    //   5. No version token → auto-detect single in_progress phase
+    //   6. No in_progress → insert gap phase stub into PLAN.md
+    let phase_owned: Option<String> = {
         let source_root = source
             .map(|p| p.to_owned())
             .unwrap_or_else(|| config.workspace_root.clone());
-        title.and_then(|t| plan::auto_detect_phase(&source_root, t, quiet))
-    } else {
-        None
+        let plan_path = source_root.join("PLAN.md");
+        if plan_path.exists() {
+            let phases = plan::load_plan(&source_root).unwrap_or_default();
+            match plan::resolve_phase(phase.as_deref(), title, &phases, quiet)? {
+                Some(resolved) => {
+                    if !quiet {
+                        if let plan::ResolveSource::PrefixMatch { ref from } = resolved.source {
+                            println!("[phase] {} expanded to {}", from, resolved.id);
+                        }
+                    }
+                    Some(resolved.id)
+                }
+                None => {
+                    // No version found and no in_progress phase → gap insertion.
+                    title.and_then(|t| plan::auto_detect_phase(&source_root, t, true))
+                }
+            }
+        } else {
+            phase.clone()
+        }
     };
-    // Merge: explicit phase (from flag or smart follow-up) takes priority.
-    let phase_owned: Option<String> = phase.or(auto_detected_phase);
     let phase: Option<&str> = phase_owned.as_deref();
 
     // ── Phase-order guard (v0.14.3) ──────────────────────────────
