@@ -7569,7 +7569,7 @@ All phase resolution — whether from `--phase <arg>` or extracted from the goal
 ---
 
 ### v0.15.30.5.3 — Release Pipeline: Self-Contained Version Bump
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: `ta release run <version>` must be the single command to publish a release — no manual pre-steps. Version bumping must happen inside the pipeline, be fully configurable for any project, and commit the result before tagging.
 
