@@ -3667,10 +3667,14 @@ pub fn pending_human_review_count(project_root: &Path) -> usize {
 /// a space. Returns the first match, or None if the title has no embedded phase ID.
 ///
 /// Examples:
-///   "v0.15.15.2 — Fix auth"  → Some("v0.15.15.2")
-///   "fix auth bug"           → None
+///   "v0.15.15.2 — Fix auth"    → Some("v0.15.15.2")
+///   "v0.15.30.5.1 — Apply UX" → Some("v0.15.30.5.1")
+///   "fix auth bug"             → None
+///
+/// Captures the longest `v\d+(\.\d+)*` token without a hard depth cap,
+/// so five-component versions like `v0.15.30.5.1` are parsed correctly.
 pub fn extract_semver_from_title(title: &str) -> Option<String> {
-    let re = Regex::new(r"(?:^|\s)(v\d+\.\d+\.\d+(?:\.\d+)?)").ok()?;
+    let re = Regex::new(r"(?:^|\s)(v\d+(?:\.\d+)*)").ok()?;
     re.captures(title)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
@@ -3871,6 +3875,268 @@ pub fn auto_detect_phase(project_root: &Path, title: &str, quiet: bool) -> Optio
     }
     let _ = insert_adhoc_phase(project_root, &gap_id, title);
     Some(gap_id)
+}
+
+// ── v0.15.30.5.2: Unified Phase Resolution ──────────────────────────────────
+
+/// How a phase ID was resolved from the user's input.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolveSource {
+    /// Provided via `--phase` flag and matched exactly.
+    Explicit,
+    /// Extracted from the goal title and matched exactly.
+    TitleExtracted,
+    /// Extracted token was a prefix; expanded to a single pending match.
+    PrefixMatch {
+        /// The raw token extracted from the input (e.g., `"v0.15.30.5"`).
+        from: String,
+    },
+    /// Chosen interactively or auto-selected via title-word fuzzy match.
+    FuzzyMatch,
+    /// No version found; the single in-progress phase was used.
+    AutoInProgress,
+}
+
+/// The result of `resolve_phase()`.
+#[derive(Debug, Clone)]
+pub struct ResolvedPhase {
+    pub id: String,
+    pub source: ResolveSource,
+}
+
+/// Unified phase resolution: single entry point used by `ta run`, `ta goal start`,
+/// and any other command that accepts a `--phase` argument.
+///
+/// Resolution order (first match wins):
+/// 1. **Exact match**: parse `v\d+(\.\d+)*` from `explicit_phase` (if provided) or `title`.
+///    If the parsed ID matches a plan phase exactly, return it.
+/// 2. **Prefix expansion**: if no exact match, find all *pending* phases whose ID starts
+///    with the parsed token. Single pending match → auto-select and log. Zero or multiple
+///    → disambiguation.
+/// 3. **Title-word fuzzy match**: score pending phases by word overlap with the title.
+///    Collect candidates above the threshold and merge into the disambiguation list.
+/// 4. **Interactive disambiguation**: when more than one candidate exists, print a numbered
+///    menu and read a selection. Non-TTY stdin → fail with a structured error listing
+///    candidates so the caller can retry with `--phase`.
+/// 5. **Auto in-progress**: if no version token was found anywhere, fall back to the single
+///    in-progress phase (if exactly one exists). Otherwise return `None` so the caller can
+///    insert a gap phase.
+///
+/// Returns `Ok(Some(ResolvedPhase))` on success, `Ok(None)` when no plan phase could be
+/// determined (caller should handle gap insertion), and `Err` on disambiguation failure.
+pub fn resolve_phase(
+    explicit_phase: Option<&str>,
+    title: Option<&str>,
+    phases: &[PlanPhase],
+    quiet: bool,
+) -> anyhow::Result<Option<ResolvedPhase>> {
+    // Determine the version token to look up and whether it came from an explicit flag.
+    let (version_token, is_explicit) = if let Some(ep) = explicit_phase {
+        // The explicit flag may itself be a plain version string or a short label like "4b".
+        let token = extract_semver_from_title(ep).unwrap_or_else(|| ep.to_string());
+        (Some(token), true)
+    } else {
+        let token = title.and_then(extract_semver_from_title);
+        (token, false)
+    };
+
+    if let Some(ref token) = version_token {
+        // Step 1: exact match.
+        //
+        // For an explicit --phase flag: match any phase (the user knows what they want).
+        // For title-extracted: only match claimable (Pending or InProgress) phases so that
+        // a done parent phase doesn't shadow its pending sub-phases.
+        let exact_match = if is_explicit {
+            phases.iter().find(|p| phase_ids_match(&p.id, token))
+        } else {
+            phases.iter().find(|p| {
+                phase_ids_match(&p.id, token)
+                    && matches!(p.status, PlanStatus::Pending | PlanStatus::InProgress)
+            })
+        };
+        if let Some(phase) = exact_match {
+            let source = if is_explicit {
+                ResolveSource::Explicit
+            } else {
+                ResolveSource::TitleExtracted
+            };
+            if !quiet && source == ResolveSource::TitleExtracted {
+                println!("Auto-linked phase from title: {}", phase.id);
+            }
+            return Ok(Some(ResolvedPhase {
+                id: phase.id.clone(),
+                source,
+            }));
+        }
+
+        // Step 2: prefix expansion — only among pending phases.
+        let token_norm = token.trim_start_matches('v');
+        let prefix_matches: Vec<&PlanPhase> = phases
+            .iter()
+            .filter(|p| {
+                if p.status != PlanStatus::Pending {
+                    return false;
+                }
+                let id_norm = p.id.trim_start_matches('v');
+                // Require a dot separator after the prefix so "v0.15.30.5" doesn't
+                // accidentally match "v0.15.30.50".
+                id_norm == token_norm || id_norm.starts_with(&format!("{}.", token_norm))
+            })
+            .collect();
+
+        if prefix_matches.len() == 1 {
+            let matched = prefix_matches[0];
+            if !quiet {
+                println!(
+                    "Phase resolved: {} → {} (prefix expansion)",
+                    token, matched.id
+                );
+            }
+            return Ok(Some(ResolvedPhase {
+                id: matched.id.clone(),
+                source: ResolveSource::PrefixMatch {
+                    from: token.clone(),
+                },
+            }));
+        }
+
+        // Build a candidate list for disambiguation from prefix matches (if >1).
+        let mut candidates: Vec<&PlanPhase> = prefix_matches;
+
+        // Step 3: title-word fuzzy match — merge into candidates.
+        if let Some(t) = title {
+            let words: Vec<&str> = t
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.len() >= 3)
+                .collect();
+            if !words.is_empty() {
+                for phase in phases.iter().filter(|p| p.status == PlanStatus::Pending) {
+                    if candidates.iter().any(|c| c.id == phase.id) {
+                        continue;
+                    }
+                    let overlap = words.iter().filter(|&&w| phase.title.contains(w)).count();
+                    let score = overlap as f32 / words.len() as f32;
+                    if score >= 0.3 {
+                        candidates.push(phase);
+                    }
+                }
+            }
+        }
+
+        // Step 4: disambiguation.
+        if !candidates.is_empty() {
+            return disambiguate_phase(&candidates, title.unwrap_or(token), token);
+        }
+
+        // No candidates at all — if explicit, pass through as-is (unknown phase).
+        if is_explicit {
+            return Ok(Some(ResolvedPhase {
+                id: token.clone(),
+                source: ResolveSource::Explicit,
+            }));
+        }
+
+        // Title-extracted token with zero matches — fall through to None.
+        if !quiet {
+            println!(
+                "Phase ID extracted from title: {} (not yet in PLAN.md)",
+                token
+            );
+        }
+        return Ok(Some(ResolvedPhase {
+            id: token.clone(),
+            source: ResolveSource::TitleExtracted,
+        }));
+    }
+
+    // Step 5: no version token found anywhere — try single in-progress.
+    if let Some(phase_id) = find_single_in_progress(phases) {
+        if !quiet {
+            println!("Auto-linked phase: {} (currently in_progress)", phase_id);
+        }
+        return Ok(Some(ResolvedPhase {
+            id: phase_id,
+            source: ResolveSource::AutoInProgress,
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Print a numbered disambiguation menu and read a selection from stdin.
+///
+/// On non-TTY stdin, emits a structured error listing candidates so the
+/// caller can retry with an explicit `--phase <id>`.
+fn disambiguate_phase(
+    candidates: &[&PlanPhase],
+    input_label: &str,
+    token: &str,
+) -> anyhow::Result<Option<ResolvedPhase>> {
+    use std::io::IsTerminal as _;
+
+    eprintln!(
+        "\nCould not uniquely resolve phase from \"{}\".",
+        input_label
+    );
+    eprintln!("Did you mean:");
+    for (i, phase) in candidates.iter().enumerate() {
+        let status_badge = match phase.status {
+            PlanStatus::Pending => "pending",
+            PlanStatus::InProgress => "in_progress",
+            PlanStatus::Done => "done",
+            PlanStatus::Deferred => "deferred",
+        };
+        eprintln!(
+            "  [{}] {} — {}  ({})",
+            i + 1,
+            phase.id,
+            phase.title,
+            status_badge
+        );
+    }
+
+    if !std::io::stdin().is_terminal() {
+        let candidate_ids: Vec<String> = candidates.iter().map(|p| p.id.clone()).collect();
+        anyhow::bail!(
+            "phase_ambiguous: could not resolve \"{}\" to a unique phase.\n\
+             Candidates: {}\n\
+             Re-run with --phase <id> to select one explicitly.",
+            token,
+            candidate_ids.join(", ")
+        );
+    }
+
+    eprint!("Enter number to select, or specify with --phase <id>: ");
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("q") {
+        anyhow::bail!("Phase selection cancelled.");
+    }
+
+    let selection: usize = trimmed.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid selection '{}'. Enter a number 1-{} or specify --phase <id>.",
+            trimmed,
+            candidates.len()
+        )
+    })?;
+
+    if selection == 0 || selection > candidates.len() {
+        anyhow::bail!(
+            "Selection {} out of range. Enter a number 1-{}.",
+            selection,
+            candidates.len()
+        );
+    }
+
+    let chosen = candidates[selection - 1];
+    Ok(Some(ResolvedPhase {
+        id: chosen.id.clone(),
+        source: ResolveSource::FuzzyMatch,
+    }))
 }
 
 // ── v0.15.24.3: PLAN.md Compaction ─────────────────────────────────────────
@@ -7353,6 +7619,161 @@ Build it.
         assert_eq!(
             extract_semver_from_title(title),
             Some("v0.15.15.2".to_string())
+        );
+    }
+
+    // ── v0.15.30.5.2: extract_semver_from_title depth tests ──────────────────
+
+    #[test]
+    fn extract_semver_five_components() {
+        assert_eq!(
+            extract_semver_from_title("v0.15.30.5.1 — Apply UX"),
+            Some("v0.15.30.5.1".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_semver_six_components() {
+        assert_eq!(
+            extract_semver_from_title("v0.15.30.5.1.2 — Deep sub-phase"),
+            Some("v0.15.30.5.1.2".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_semver_two_components() {
+        assert_eq!(
+            extract_semver_from_title("v1.0 — Initial"),
+            Some("v1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_semver_four_components_unchanged() {
+        assert_eq!(
+            extract_semver_from_title("v0.15.30.5 — Release Pipeline"),
+            Some("v0.15.30.5".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_semver_takes_first_token_when_multiple() {
+        // Only the first version-like token should be returned.
+        assert_eq!(
+            extract_semver_from_title("v0.15.30.5.1 and v0.15.30.5.2 conflict"),
+            Some("v0.15.30.5.1".to_string())
+        );
+    }
+
+    // ── v0.15.30.5.2: resolve_phase() unit tests ─────────────────────────────
+
+    fn make_named_phase(id: &str, title: &str, status: PlanStatus) -> PlanPhase {
+        PlanPhase {
+            id: id.to_string(),
+            title: title.to_string(),
+            status,
+            depends_on: vec![],
+            human_review_items: vec![],
+        }
+    }
+
+    #[test]
+    fn resolve_phase_exact_match_from_title() {
+        let phases = vec![
+            make_named_phase("v0.15.30.5", "Release Pipeline", PlanStatus::Done),
+            make_named_phase("v0.15.30.5.1", "Apply UX", PlanStatus::Pending),
+        ];
+        let result = resolve_phase(None, Some("v0.15.30.5.1 — Apply UX"), &phases, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.id, "v0.15.30.5.1");
+        assert_eq!(result.source, ResolveSource::TitleExtracted);
+    }
+
+    #[test]
+    fn resolve_phase_regression_five_component_not_truncated() {
+        // The v0.15.30.5.1 incident: title "v0.15.30.5.1 — Apply UX" was
+        // previously truncated to "v0.15.30.5" and claimed the wrong phase.
+        let phases = vec![
+            make_named_phase("v0.15.30.5", "Release Pipeline", PlanStatus::Done),
+            make_named_phase("v0.15.30.5.1", "Apply UX", PlanStatus::Pending),
+        ];
+        let result = resolve_phase(
+            None,
+            Some("v0.15.30.5.1 — Apply UX: Closing Summary"),
+            &phases,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            result.id, "v0.15.30.5.1",
+            "must not truncate to parent phase"
+        );
+    }
+
+    #[test]
+    fn resolve_phase_prefix_expansion_single_pending() {
+        // "v0.15.30.5" is done; "v0.15.30.5.1" is the only pending sub-phase.
+        // A title carrying only "v0.15.30.5" should expand to "v0.15.30.5.1".
+        let phases = vec![
+            make_named_phase("v0.15.30.5", "Release Pipeline", PlanStatus::Done),
+            make_named_phase("v0.15.30.5.1", "Apply UX", PlanStatus::Pending),
+        ];
+        let result = resolve_phase(None, Some("v0.15.30.5 — something"), &phases, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.id, "v0.15.30.5.1");
+        assert!(
+            matches!(result.source, ResolveSource::PrefixMatch { .. }),
+            "expected PrefixMatch, got {:?}",
+            result.source
+        );
+    }
+
+    #[test]
+    fn resolve_phase_explicit_takes_priority() {
+        let phases = vec![
+            make_named_phase("v0.15.30.5.1", "Apply UX", PlanStatus::Pending),
+            make_named_phase("v0.15.30.5.2", "Smart Matching", PlanStatus::Pending),
+        ];
+        // Even though title says v0.15.30.5.1, explicit flag wins.
+        let result = resolve_phase(
+            Some("v0.15.30.5.2"),
+            Some("v0.15.30.5.1 — something"),
+            &phases,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.id, "v0.15.30.5.2");
+        assert_eq!(result.source, ResolveSource::Explicit);
+    }
+
+    #[test]
+    fn resolve_phase_auto_in_progress_when_no_version() {
+        let phases = vec![
+            make_named_phase("v0.1.0", "Done", PlanStatus::Done),
+            make_named_phase("v0.2.0", "Running", PlanStatus::InProgress),
+            make_named_phase("v0.3.0", "Pending", PlanStatus::Pending),
+        ];
+        let result = resolve_phase(None, Some("fix auth bug"), &phases, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.id, "v0.2.0");
+        assert_eq!(result.source, ResolveSource::AutoInProgress);
+    }
+
+    #[test]
+    fn resolve_phase_returns_none_when_no_version_and_no_in_progress() {
+        let phases = vec![
+            make_named_phase("v0.1.0", "Done", PlanStatus::Done),
+            make_named_phase("v0.2.0", "Pending", PlanStatus::Pending),
+        ];
+        let result = resolve_phase(None, Some("fix auth bug"), &phases, true).unwrap();
+        assert!(
+            result.is_none(),
+            "should return None so caller inserts gap phase"
         );
     }
 

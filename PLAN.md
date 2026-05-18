@@ -7530,7 +7530,7 @@ pub enum NoteDelivery {
 
 ---
 ### v0.15.30.5.2 — Phase Resolution: Full Version Parsing & Smart Matching
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: `ta run` phase auto-detection must parse the full version string from a goal title without truncation, unify the `--phase` flag path and the title-extraction path through the same resolution logic, and interactively disambiguate when no exact match is found.
 
@@ -7554,15 +7554,15 @@ All phase resolution — whether from `--phase <arg>` or extracted from the goal
    ```
    If stdin is not a TTY (CI / scripted use), fail with a structured error listing the candidates so the caller can retry with `--phase`.
 
-1. [ ] **Unified `resolve_phase()` in `ta-plan`**: Single entry point used by `ta run`, `ta goal start`, and any other command that accepts a phase. Takes an `Option<&str>` (explicit flag) and an `Option<&str>` (title string), returns `ResolvedPhase { id, source: Explicit | TitleExtracted | FuzzyMatch }`.
+1. [x] **Unified `resolve_phase()` in `ta-plan`**: Single entry point used by `ta run`, `ta goal start`, and any other command that accepts a phase. Takes an `Option<&str>` (explicit flag) and an `Option<&str>` (title string), returns `ResolvedPhase { id, source: Explicit | TitleExtracted | FuzzyMatch }`.
 
-2. [ ] **Fix version token parser**: Extend the regex/parser to capture `v\d+(\.\d+)*` greedily — no hard depth limit. Add unit tests covering: `v0.15.30.5.1`, `v0.15.30.5.1.2`, `v1.0`, `v0.15.30.5` (already done), and titles with multiple version-like tokens (take the first).
+2. [x] **Fix version token parser**: Extend the regex/parser to capture `v\d+(\.\d+)*` greedily — no hard depth limit. Add unit tests covering: `v0.15.30.5.1`, `v0.15.30.5.1.2`, `v1.0`, `v0.15.30.5` (already done), and titles with multiple version-like tokens (take the first).
 
-3. [ ] **Prefix expansion for single-match case**: After exact lookup fails, collect all plan phases whose string ID has the parsed version as a prefix. Single match → auto-select and log the resolution. Zero or multiple matches → disambiguation.
+3. [x] **Prefix expansion for single-match case**: After exact lookup fails, collect all plan phases whose string ID has the parsed version as a prefix. Single match → auto-select and log the resolution. Zero or multiple matches → disambiguation.
 
-4. [ ] **Interactive disambiguation prompt**: Print ranked candidates with status badges. Accept numeric input or `--phase` reminder. On non-TTY stdin, emit a structured error (`phase_ambiguous: [list]`) and exit non-zero.
+4. [x] **Interactive disambiguation prompt**: Print ranked candidates with status badges. Accept numeric input or `--phase` reminder. On non-TTY stdin, emit a structured error (`phase_ambiguous: [list]`) and exit non-zero.
 
-5. [ ] **Regression test**: Add an integration test that calls `resolve_phase()` with the title `"v0.15.30.5.1 — Apply UX"` against a plan containing both `v0.15.30.5` (done) and `v0.15.30.5.1` (pending), and asserts the result is `v0.15.30.5.1`.
+5. [x] **Regression test**: Add an integration test that calls `resolve_phase()` with the title `"v0.15.30.5.1 — Apply UX"` against a plan containing both `v0.15.30.5` (done) and `v0.15.30.5.1` (pending), and asserts the result is `v0.15.30.5.1`.
 
 #### Version: `0.15.30-alpha.5.2`
 
