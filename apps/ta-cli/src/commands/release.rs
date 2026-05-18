@@ -3437,11 +3437,18 @@ steps:
   - name: Version bump
     run: |
       set -e
-      # Bump all Cargo.toml versions
-      for f in Cargo.toml crates/*/Cargo.toml apps/*/Cargo.toml; do
-        [ -f "$f" ] && sed -i.bak '/^\[package\]/,/^\[/s/^version = ".*"/version = "'"${VERSION}"'"/' "$f" && rm -f "${f}.bak"
-      done
-      echo "Versions bumped to ${VERSION}."
+      # Use project bump script if present (updates Cargo.toml workspace pin,
+      # all crate version references, CLAUDE.md, and .release.toml atomically).
+      # Falls back to a plain sed pass for projects without the script.
+      # Override entirely by setting version_bump_command in .ta/release.yaml.
+      if [ -f ./scripts/bump-version.sh ]; then
+        ./scripts/bump-version.sh "${VERSION}" --last-tag "${LAST_TAG}"
+      else
+        for f in Cargo.toml crates/*/Cargo.toml apps/*/Cargo.toml; do
+          [ -f "$f" ] && sed -i.bak '/^\[package\]/,/^\[/s/^version = ".*"/version = "'"${VERSION}"'"/' "$f" && rm -f "${f}.bak"
+        done
+      fi
+      echo "Version bumped to ${VERSION}."
 
   - name: Build & verify
     run: |
