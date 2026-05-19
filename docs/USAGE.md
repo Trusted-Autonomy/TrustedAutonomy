@@ -6001,6 +6001,46 @@ Examples for other projects:
 - **Beta channel**: set `prerelease_suffix: "beta"`
 - **RC numbering**: set `four_segment: "{0}.{1}.{2}-rc.{3}"`
 
+#### Configuring version bumps
+
+The built-in "Version bump" step has three tiers of behavior, from least to most configuration:
+
+**Tier 1 — no config (default)**: The step auto-detects `./scripts/bump-version.sh`. If present, it calls it with `${VERSION}` and `--last-tag ${LAST_TAG}`. If absent, it runs a `sed` pass over `Cargo.toml`, `crates/*/Cargo.toml`, and `apps/*/Cargo.toml`.
+
+**Tier 2 — `./scripts/bump-version.sh` present**: If your project has this script, it is called automatically. No additional config needed.
+
+**Tier 3 — `version_bump_command` (fully custom)**: Set a top-level field in `.ta/release.yaml` to replace the built-in heuristic entirely. After the command runs, TA auto-stages all files it modified. Any project — npm, Python, Go, Rust — can wire in its own bump tool:
+
+```yaml
+# .ta/release.yaml
+version_bump_command: "./scripts/bump-version.sh {version} --last-tag {last_tag}"
+steps:
+  - name: Version bump
+    run: echo "replaced by version_bump_command"
+  # ... other steps ...
+```
+
+Placeholders:
+- `{version}` — the target semver string (e.g., `0.15.30-alpha.5`)
+- `{last_tag}` — the previous git tag (empty string if none)
+
+Both `{version}` / `{last_tag}` and `${VERSION}` / `${LAST_TAG}` shell-style forms are accepted.
+
+Examples for other ecosystems:
+
+```yaml
+# npm
+version_bump_command: "npm version {version} --no-git-tag-version"
+
+# Python / bump2version
+version_bump_command: "bump2version --new-version {version} patch"
+
+# Go / custom script
+version_bump_command: "./scripts/set-version.sh {version}"
+```
+
+`ta release run` is fully self-contained once `version_bump_command` is set — no manual pre-steps needed.
+
 #### Pre-Release Checklist
 
 Before publishing a public release, run the full verification suite including integration and E2E tests:

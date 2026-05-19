@@ -7567,9 +7567,8 @@ All phase resolution — whether from `--phase <arg>` or extracted from the goal
 #### Version: `0.15.30-alpha.5.2`
 
 ---
-
 ### v0.15.30.5.3 — Release Pipeline: Self-Contained Version Bump
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: `ta release run <version>` must be the single command to publish a release — no manual pre-steps. Version bumping must happen inside the pipeline, be fully configurable for any project, and commit the result before tagging.
 
@@ -7579,22 +7578,21 @@ All phase resolution — whether from `--phase <arg>` or extracted from the goal
 
 **Remaining work** (this phase):
 
-1. [ ] **`version_bump_command` config in `.ta/release.yaml`**: Add an optional top-level field to the pipeline YAML:
+1. [x] **`version_bump_command` config in `.ta/release.yaml`**: Add an optional top-level field to the pipeline YAML:
    ```yaml
    version_bump_command: ./scripts/bump-version.sh {version} --last-tag {last_tag}
    ```
    When set, the built-in step 4 runs this command instead of the default heuristic. `{version}` and `{last_tag}` are substituted from the pipeline context. Any project — npm, Python, Rust, Go — can wire in its own bump tool.
 
-2. [ ] **Auto-stage bump output**: After the `version_bump_command` runs, auto-stage all files modified by it (via `git diff --name-only`) so the "Commit and tag" step picks them up without needing `git add -A`.
+2. [x] **Auto-stage bump output**: After the `version_bump_command` runs, auto-stage all files modified by it (via `git diff --name-only`) so the "Commit and tag" step picks them up without needing `git add -A`.
 
-3. [ ] **Document in USAGE.md**: Add a "Configuring version bumps" section showing the three tiers: (a) no config — uses built-in heuristic, (b) `./scripts/bump-version.sh` present — auto-detected, (c) `version_bump_command` set — fully custom.
+3. [x] **Document in USAGE.md**: Add a "Configuring version bumps" section showing the three tiers: (a) no config — uses built-in heuristic, (b) `./scripts/bump-version.sh` present — auto-detected, (c) `version_bump_command` set — fully custom.
 
-4. [ ] **Smoke test**: Add a pipeline integration test that runs step 4 against a temp workspace, asserts the version changed in all expected files, and verifies the modified files are staged.
+4. [x] **Smoke test**: Add a pipeline integration test that runs step 4 against a temp workspace, asserts the version changed in all expected files, and verifies the modified files are staged.
 
 #### Version: `0.15.30-alpha.5.3`
 
 ---
-
 ### v0.15.30.6 — System Health Notifications: CLI + Studio Ambient Alerts
 <!-- status: pending -->
 
