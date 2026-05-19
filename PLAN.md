@@ -7669,7 +7669,7 @@ Studio "Health" page gains a **"Run cleanup"** button that calls `ta doctor --fi
 
 > **Focus**: First-class IDE integration for VS Code, JetBrains (PyCharm, WebStorm, IntelliJ), and Neovim. TA transitions from a pure CLI tool to an embedded development workflow component with sidebar panels, inline draft review, and one-click goal approval.
 ### v0.16.0 — VS Code Extension
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: A VS Code extension that surfaces TA's core workflow directly in the editor: start goals from the command palette, view draft diffs in the native diff viewer, approve/deny artifacts inline, and see live goal status in the sidebar. Python, TypeScript, and Node.js users (the primary audience) should be able to use TA without leaving VS Code.
 

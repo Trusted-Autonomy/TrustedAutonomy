@@ -329,3 +329,4 @@
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.15.30.6","timestamp":"2026-05-19T02:14:57.529054+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.30.7","source":"daemon_claim","timestamp":"2026-05-19T05:41:43.895435+00:00"}
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.15.30.7","timestamp":"2026-05-19T06:34:57.099613+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.16.0","source":"daemon_claim","timestamp":"2026-05-19T23:00:09.669756+00:00"}
