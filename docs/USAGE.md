@@ -3111,6 +3111,35 @@ ta doctor
 
 Reports each check as ok/warning/failed with actionable suggestions.
 
+**Diagnosing and fixing health issues:** Use `ta doctor --fix` to interactively step through detected operational issues and apply fixes one at a time:
+
+```bash
+ta doctor --fix
+# Found 2 issue(s):
+#
+# [warn] Disk pressure: .ta/staging/ is 79.3 GB (threshold: 20 GB)
+#   Fix: run `ta doctor --fix` to reclaim space
+#   Apply fix? [y/N]: y
+#   ✓ Ran gc to reclaim staging space
+#
+# [warn] 3 draft(s) approved/pending but not applied for 3+ days
+#   Fix: run `ta draft list --stale` to review
+#   Apply fix? [y/N]: n
+#   Skipped.
+#
+# 1 fix(es) applied, 1 skipped.
+```
+
+Use `--fix --yes` (equivalent to `ta gc`) for non-interactive cleanup in scripts or cron jobs:
+
+```bash
+ta doctor --fix --yes   # same as ta gc — auto-applies all fixes
+```
+
+**Health signals in Studio:** The Studio web UI shows an ambient alert bar at the top that polls for health issues every 30 seconds. The Health tab lists all current signals and has a **"Run cleanup"** button that applies all fixes automatically.
+
+**Health signals in CLI output:** `ta status` shows a Health block with any active signals. `ta run` prints warn/crit signals as a pre-flight banner before launching an agent. `ta draft view` appends warn/crit signals as a footer so you see issues before applying a draft.
+
 ### Intelligent Status Dashboard
 
 Running `ta` with no arguments (or `ta status`) shows the unified project dashboard. Items are prioritized: urgent issues first, then active work, then recent completions, then suggested next actions.

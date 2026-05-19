@@ -288,9 +288,15 @@ enum Commands {
     /// configured agent framework. Auth checking is agent-agnostic — it reads the framework
     /// manifest and validates whichever auth method applies (API key, session, local service).
     ///
+    /// Use `--fix` to interactively clean up detected health issues (disk pressure, stale
+    /// goals, orphaned staging dirs, stale drafts). Use `--fix --yes` for non-interactive
+    /// cleanup (same as `ta gc`).
+    ///
     /// Examples:
     ///   ta doctor              # human-readable output
     ///   ta doctor --json       # machine-readable JSON for CI
+    ///   ta doctor --fix        # diagnose + interactively offer to clean each finding
+    ///   ta doctor --fix --yes  # diagnose + auto-fix all (non-interactive, same as ta gc)
     ///   ta doctor --fix-denied # interactively clean up pr_ready goals with denied drafts
     Doctor {
         /// Output results as a JSON array (for CI / scripted use).
@@ -301,6 +307,17 @@ enum Commands {
         /// For each such goal, prompts to delete staging + mark closed, or skip.
         #[arg(long)]
         fix_denied: bool,
+        /// Diagnose + offer to fix each health issue interactively (v0.15.30.6).
+        ///
+        /// For each signal, prints the issue and proposed action, then prompts before acting.
+        /// Combine with --yes for non-interactive mode (equivalent to `ta gc`).
+        #[arg(long)]
+        fix: bool,
+        /// Apply all fixes automatically without prompting (use with --fix, v0.15.30.6).
+        ///
+        /// `ta doctor --fix --yes` is equivalent to `ta gc` but with richer output.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Upgrade project-level TA configuration to the current binary version (v0.15.18).
@@ -1069,9 +1086,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Sync => commands::sync::execute(&config),
         Commands::Verify { goal_id } => commands::verify::execute(&config, goal_id.as_deref()),
         Commands::Analysis { command } => commands::analysis::execute(command, &config),
-        Commands::Doctor { json, fix_denied } => {
-            commands::doctor::execute(&config, *json, *fix_denied)
-        }
+        Commands::Doctor {
+            json,
+            fix_denied,
+            fix,
+            yes,
+        } => commands::doctor::execute(&config, *json, *fix_denied, *fix, *yes),
         Commands::Upgrade(args) => commands::upgrade::execute(&config, args),
         Commands::Conversation { goal_id, json } => {
             commands::conversation::execute(&config, goal_id, *json)

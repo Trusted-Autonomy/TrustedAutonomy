@@ -7594,7 +7594,7 @@ All phase resolution — whether from `--phase <arg>` or extracted from the goal
 
 ---
 ### v0.15.30.6 — System Health Notifications: CLI + Studio Ambient Alerts
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Surface operational health issues proactively — in `ta status`, `ta run`, `ta draft view`, and as a live ambient panel in Studio — so users see actionable warnings before they cause problems. Unify `ta doctor` (diagnose) and `ta gc` (clean) under a single `ta doctor --fix` flow so users don't need to know to run both separately.
 
@@ -7618,21 +7618,21 @@ Studio "Health" page gains a **"Run cleanup"** button that calls `ta doctor --fi
 - **Subprocess stall**: verify command child process has <1% CPU for >5min while still running → `[warn] cargo test appears stalled — press Ctrl-C and re-run with --skip-verify`
 - **Daemon log error rate**: >N `ERROR` or `WARN` lines per minute in daemon.log → surface top error
 
-1. [ ] **`ta status` health section**: Add a `Health` block between the project summary and the active goals list. Shows only non-empty signals — if everything is clean, omits the block entirely. Each signal has a severity (`info`/`warn`/`crit`) and a one-line recommended action.
+1. [x] **`ta status` health section**: Add a `Health` block between the project summary and the active goals list. Shows only non-empty signals — if everything is clean, omits the block entirely. Each signal has a severity (`info`/`warn`/`crit`) and a one-line recommended action.
 
-2. [ ] **`ta run` pre-flight banner**: Before launching the agent, print any `warn`/`crit` signals so the user can address them first. `info` signals suppressed. Example:
+2. [x] **`ta run` pre-flight banner**: Before launching the agent, print any `warn`/`crit` signals so the user can address them first. `info` signals suppressed. Example:
    ```
    [warn] Disk pressure: .ta/staging/ 79GB — run `ta doctor --fix` before starting a new goal
    [crit] Disk usage 94% — agent may fail mid-run
    ```
 
-3. [ ] **`ta draft view` footer**: Append health signals to the bottom of draft view output when severity is `warn`/`crit`. Keeps the draft content uncluttered but ensures the user sees issues before applying.
+3. [x] **`ta draft view` footer**: Append health signals to the bottom of draft view output when severity is `warn`/`crit`. Keeps the draft content uncluttered but ensures the user sees issues before applying.
 
-4. [ ] **Daemon health collector** (`ta-daemon`): Periodic background task (every 60s) that computes the signal set and stores it in a lightweight in-memory struct accessible via a new `/health/signals` API endpoint. Signals are cached; no repeated filesystem scans during a single `ta status` call.
+4. [x] **Daemon health collector** (`ta-daemon`): Periodic background task (every 60s) that computes the signal set and stores it in a lightweight in-memory struct accessible via a new `/health/signals` API endpoint. Signals are cached; no repeated filesystem scans during a single `ta status` call.
 
-5. [ ] **Studio ambient alert bar + "Run cleanup" button**: A dismissible banner at the top of Studio that polls `/health/signals` every 30s. Shows the highest-severity active signal with a "Details" expand. Dismissed signals are suppressed for 1h (stored in sessionStorage). Critical signals cannot be dismissed. The Studio Health page has a **"Run cleanup"** button that calls `ta doctor --fix --yes` and streams output into a log panel.
+5. [x] **Studio ambient alert bar + "Run cleanup" button**: A dismissible banner at the top of Studio that polls `/health/signals` every 30s. Shows the highest-severity active signal with a "Details" expand. Dismissed signals are suppressed for 1h (stored in sessionStorage). Critical signals cannot be dismissed. The Studio Health page has a **"Run cleanup"** button that calls `ta doctor --fix --yes` and streams output into a log panel.
 
-6. [ ] **`ta doctor --fix`**: Extend `ta doctor` to accept `--fix` (interactive) and `--fix --yes` (non-interactive) flags. For each finding, prompt the user before taking action. Actions: purge stale goals (`ta goal purge`), delete orphaned staging dirs, close stale drafts, restart crashed plugins. `ta gc` becomes an alias for `ta doctor --fix --yes`. Document the unification in USAGE.md.
+6. [x] **`ta doctor --fix`**: Extend `ta doctor` to accept `--fix` (interactive) and `--fix --yes` (non-interactive) flags. For each finding, prompt the user before taking action. Actions: purge stale goals (`ta goal purge`), delete orphaned staging dirs, close stale drafts, restart crashed plugins. `ta gc` becomes an alias for `ta doctor --fix --yes`. Document the unification in USAGE.md.
 
 #### Version: `0.15.30-alpha.6`
 
