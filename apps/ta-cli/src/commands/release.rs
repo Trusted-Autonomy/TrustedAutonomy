@@ -312,6 +312,13 @@ pub struct ReleasePipeline {
     /// How plan phase IDs (e.g., "0.4.1.2") are converted to semver versions.
     #[serde(default)]
     pub version_policy: VersionPolicy,
+    /// Optional custom version bump command. When set, overrides the built-in
+    /// heuristic in the "Version bump" step and auto-stages modified files.
+    /// Placeholders: `{version}` (target semver) and `{last_tag}` (previous git tag).
+    /// Also accepts `${VERSION}` / `${LAST_TAG}` shell-style forms directly.
+    /// Example: `./scripts/bump-version.sh {version} --last-tag {last_tag}`
+    #[serde(default)]
+    pub version_bump_command: Option<String>,
     /// Ordered list of pipeline steps.
     pub steps: Vec<PipelineStep>,
 }
@@ -561,6 +568,49 @@ impl PipelineStep {
 
 // ── Pipeline resolution ─────────────────────────────────────────
 
+/// If `version_bump_command` is set, find the "Version bump" step and replace
+/// its `run` script with the custom command plus auto-staging of modified files.
+///
+/// Placeholders `{version}` and `{last_tag}` in the command are converted to
+/// `${VERSION}` / `${LAST_TAG}` shell variable references, which `substitute_vars`
+/// expands at execution time.
+fn apply_version_bump_command(pipeline: &mut ReleasePipeline) {
+    let Some(ref cmd_template) = pipeline.version_bump_command.clone() else {
+        return;
+    };
+
+    // Convert user-facing {version}/{last_tag} to shell var refs.
+    let cmd = cmd_template
+        .replace("{version}", "${VERSION}")
+        .replace("{last_tag}", "${LAST_TAG}");
+
+    let new_run = format!(
+        "set -e\n\
+         # Custom version bump command (version_bump_command from .ta/release.yaml).\n\
+         {cmd}\n\
+         # Auto-stage files modified by the version bump.\n\
+         _BUMP_MODIFIED=$(git diff --name-only)\n\
+         if [ -n \"$_BUMP_MODIFIED\" ]; then\n\
+           echo \"$_BUMP_MODIFIED\" | xargs git add --\n\
+           echo \"Staged: $_BUMP_MODIFIED\"\n\
+         fi\n\
+         echo \"Version bumped to ${{VERSION}}.\"\n",
+    );
+
+    for step in &mut pipeline.steps {
+        if step.name.to_lowercase().contains("version bump") {
+            step.run = Some(new_run);
+            return;
+        }
+    }
+
+    eprintln!(
+        "[release] warning: version_bump_command is set but no 'Version bump' step found \
+         in the pipeline — the command will not run. Add a step named 'Version bump' or \
+         rename the existing version bump step."
+    );
+}
+
 /// Load the release pipeline, checking for a user override first.
 fn load_pipeline(
     config: &GatewayConfig,
@@ -571,7 +621,8 @@ fn load_pipeline(
         let contents = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!("Cannot read pipeline file '{}': {}", path.display(), e)
         })?;
-        let pipeline: ReleasePipeline = serde_yaml::from_str(&contents)?;
+        let mut pipeline: ReleasePipeline = serde_yaml::from_str(&contents)?;
+        apply_version_bump_command(&mut pipeline);
         validate_pipeline(&pipeline)?;
         return Ok(pipeline);
     }
@@ -580,7 +631,8 @@ fn load_pipeline(
     let project_yaml = config.workspace_root.join(".ta").join("release.yaml");
     if project_yaml.exists() {
         let contents = std::fs::read_to_string(&project_yaml)?;
-        let pipeline: ReleasePipeline = serde_yaml::from_str(&contents)?;
+        let mut pipeline: ReleasePipeline = serde_yaml::from_str(&contents)?;
+        apply_version_bump_command(&mut pipeline);
         validate_pipeline(&pipeline)?;
         return Ok(pipeline);
     }
@@ -603,6 +655,7 @@ fn load_pipeline(
         }
     }
 
+    apply_version_bump_command(&mut pipeline);
     validate_pipeline(&pipeline)?;
     Ok(pipeline)
 }
@@ -1033,6 +1086,14 @@ fn execute_shell_step(
 
     let mut command = Command::new("sh");
     command.arg("-c").arg(&cmd).current_dir(&work_dir);
+
+    // Clear TA agent VCS isolation env vars so git commands in pipeline steps
+    // (e.g., `git diff --name-only` in the version bump step) operate on the
+    // project workspace determined by `work_dir`, not the staging overlay.
+    command
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CEILING_DIRECTORIES");
 
     // Inject step-level env vars with substitution.
     for (k, v) in &step.env {
@@ -3437,10 +3498,9 @@ steps:
   - name: Version bump
     run: |
       set -e
-      # Use project bump script if present (updates Cargo.toml workspace pin,
-      # all crate version references, CLAUDE.md, and .release.toml atomically).
-      # Falls back to a plain sed pass for projects without the script.
-      # Override entirely by setting version_bump_command in .ta/release.yaml.
+      # Tier 1 (no config): auto-detect ./scripts/bump-version.sh; fall back to sed.
+      # Tier 2: ./scripts/bump-version.sh present — called automatically with ${VERSION} and --last-tag ${LAST_TAG}.
+      # Tier 3 (fully custom): set version_bump_command in .ta/release.yaml — replaces this step entirely.
       if [ -f ./scripts/bump-version.sh ]; then
         ./scripts/bump-version.sh "${VERSION}" --last-tag "${LAST_TAG}"
       else
@@ -3820,6 +3880,7 @@ steps:
         let pipeline = ReleasePipeline {
             name: "empty".to_string(),
             version_policy: VersionPolicy::default(),
+            version_bump_command: None,
             steps: vec![],
         };
         assert!(validate_pipeline(&pipeline).is_err());
@@ -4800,5 +4861,156 @@ steps:
         let decision =
             ask_human_on_step_failure(&config, "Generate notes", "timed out", false).unwrap();
         assert!(matches!(decision, HumanStepDecision::Fail));
+    }
+
+    // ── v0.15.30.5.3 tests ──────────────────────────────────────────
+
+    #[test]
+    fn version_bump_command_replaces_version_bump_step() {
+        let yaml = r#"
+name: test
+version_bump_command: "./my-bump.sh {version} --last-tag {last_tag}"
+steps:
+  - name: Version bump
+    run: echo "built-in placeholder"
+"#;
+        let mut pipeline: ReleasePipeline = serde_yaml::from_str(yaml).unwrap();
+        assert!(pipeline.version_bump_command.is_some());
+
+        apply_version_bump_command(&mut pipeline);
+
+        let run = pipeline.steps[0].run.as_deref().unwrap();
+        // Custom command present with shell variable refs (not user-facing placeholders).
+        assert!(
+            run.contains("./my-bump.sh ${VERSION} --last-tag ${LAST_TAG}"),
+            "custom command should use ${{VERSION}}/${{LAST_TAG}}, got: {}",
+            run
+        );
+        // Auto-staging logic included.
+        assert!(
+            run.contains("git diff --name-only"),
+            "auto-staging logic should be present, got: {}",
+            run
+        );
+        assert!(
+            run.contains("xargs git add --"),
+            "xargs git add should be present, got: {}",
+            run
+        );
+        // Original placeholder text gone.
+        assert!(
+            !run.contains("built-in placeholder"),
+            "original run should be replaced, got: {}",
+            run
+        );
+    }
+
+    #[test]
+    fn version_bump_command_no_step_emits_warning() {
+        // When no "Version bump" step exists, the command is a no-op (warning only).
+        let yaml = r#"
+name: test
+version_bump_command: "./my-bump.sh {version}"
+steps:
+  - name: some other step
+    run: echo "ok"
+"#;
+        let mut pipeline: ReleasePipeline = serde_yaml::from_str(yaml).unwrap();
+        // Should not panic — just emit a warning.
+        apply_version_bump_command(&mut pipeline);
+        // The other step is untouched.
+        assert_eq!(pipeline.steps[0].run.as_deref(), Some("echo \"ok\""));
+    }
+
+    #[test]
+    fn version_bump_command_roundtrips_through_serde() {
+        let yaml = r#"
+name: test
+version_bump_command: "./scripts/bump.sh {version} --last-tag {last_tag}"
+steps:
+  - name: Version bump
+    run: echo "placeholder"
+"#;
+        let pipeline: ReleasePipeline = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            pipeline.version_bump_command.as_deref(),
+            Some("./scripts/bump.sh {version} --last-tag {last_tag}")
+        );
+    }
+
+    #[test]
+    fn version_bump_command_smoke_runs_and_stages() {
+        // Integration test: pipeline with version_bump_command runs the command,
+        // the target file is updated, and modified files are auto-staged.
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+
+        let run_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_CEILING_DIRECTORIES")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        run_git(&["init"]);
+        run_git(&["config", "user.email", "test@test.com"]);
+        run_git(&["config", "user.name", "Test"]);
+        // Create and track a version file.
+        std::fs::write(dir.join("version.txt"), "0.0.0\n").unwrap();
+        run_git(&["add", "version.txt"]);
+        run_git(&["commit", "-m", "init"]);
+
+        let config = GatewayConfig::for_project(dir);
+        let ta_dir = dir.join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        // Pipeline: one step "Version bump" that gets replaced by version_bump_command.
+        std::fs::write(
+            ta_dir.join("release.yaml"),
+            r#"name: bump-smoke
+version_bump_command: "printf '%s\n' {version} > version.txt"
+steps:
+  - name: Version bump
+    run: echo "placeholder"
+"#,
+        )
+        .unwrap();
+
+        // Use a version with a hyphen so it passes through normalization unchanged.
+        run_pipeline(&config, "1.2.3-dev", true, false, None, None, None, false).unwrap();
+
+        // The version file should have been updated with the exact version passed in.
+        let content = std::fs::read_to_string(dir.join("version.txt")).unwrap();
+        assert_eq!(
+            content.trim(),
+            "1.2.3-dev",
+            "version.txt should contain '1.2.3-dev', got: {:?}",
+            content.trim()
+        );
+
+        // The file should be staged (auto-staged by the version bump step).
+        let out = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .output()
+            .unwrap();
+        let staged = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            staged.contains("version.txt"),
+            "version.txt should be staged after version bump, got: {:?}",
+            staged
+        );
     }
 }
