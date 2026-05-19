@@ -7639,7 +7639,7 @@ Studio "Health" page gains a **"Run cleanup"** button that calls `ta doctor --fi
 ---
 
 ### v0.15.30.7 — `ta run --context <path>`: File-Based Goal Context
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: `ta run` must accept a `--context <path>` flag so users can pass a file of context — compiler errors, build logs, test output, stack traces — directly to a goal without pasting into the terminal or Studio text field.
 
