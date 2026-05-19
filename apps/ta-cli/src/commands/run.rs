@@ -1378,6 +1378,13 @@ pub fn execute(
     // This runs before the goal is created so we don't start work we can't store.
     super::gc::enforce_staging_cap(config);
 
+    // Health pre-flight banner (v0.15.30.6): print warn/crit signals so the user
+    // can address issues before a long agent run starts.
+    if !quiet {
+        let signals = super::health_signals::compute_health_signals(config);
+        super::health_signals::print_preflight_banner(&signals);
+    }
+
     // v0.15.22.1: Auto-commit .ta/ audit trail jsonl files if dirty.
     // These files are updated by TA itself and should not pollute the staging copy
     // with uncommitted state. Committing them here prevents the working-tree warning.

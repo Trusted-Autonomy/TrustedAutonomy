@@ -198,6 +198,25 @@
                    border: 1px solid var(--border); color: var(--text); }
   .advise-result.ok { border-color: var(--green); color: var(--green); }
   .advise-result.err { border-color: var(--red); color: var(--red); }
+  /* Health Alert Bar (v0.15.30.6) */
+  .health-bar { display: flex; align-items: center; gap: 0.75rem; border-radius: 6px;
+               padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; font-size: 0.85rem;
+               border: 1px solid; }
+  .health-bar.warn { background: rgba(251,191,36,0.08); border-color: var(--yellow); color: var(--yellow); }
+  .health-bar.crit { background: rgba(248,113,113,0.12); border-color: var(--red); color: var(--red); }
+  .health-bar .hb-msg { flex: 1; }
+  .health-bar .hb-action { font-size: 0.75rem; color: var(--muted); font-family: monospace; }
+  .health-bar .hb-dismiss { cursor: pointer; font-size: 0.8rem; color: var(--muted); padding: 0 0.25rem; }
+  .health-bar .hb-dismiss:hover { color: var(--text); }
+  .health-bar-expand { font-size: 0.75rem; cursor: pointer; color: var(--muted); }
+  .health-bar-expand:hover { color: var(--accent); }
+  .health-cleanup-btn { background: var(--yellow); color: #000; border: none; border-radius: 4px;
+                        padding: 0.3rem 0.7rem; font-size: 0.78rem; font-weight: 600;
+                        cursor: pointer; transition: opacity 0.15s; white-space: nowrap; }
+  .health-cleanup-btn:hover { opacity: 0.85; }
+  .health-log { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+               padding: 0.75rem; font-family: monospace; font-size: 0.8rem; white-space: pre-wrap;
+               max-height: 200px; overflow-y: auto; margin-top: 0.5rem; }
 </style>
 </head>
 <body>
@@ -224,6 +243,8 @@
     </div>
     <div id="advise-result" style="display:none" class="advise-result"></div>
   </div>
+  <!-- Health Alert Bar (v0.15.30.6): ambient signals banner -->
+  <div id="health-alert-container"></div>
   <div class="tabs">
     <div class="tab active" onclick="switchTab('dashboard')">Dashboard</div>
     <div class="tab" onclick="switchTab('plan')">Plan</div>
@@ -235,6 +256,7 @@
     <div class="tab" onclick="switchTab('release')">Release</div>
     <div class="tab" onclick="switchTab('personas')">Personas</div>
     <div class="tab" onclick="switchTab('advisor')">Advisor</div>
+    <div class="tab" onclick="switchTab('health')" id="tab-health">Health</div>
     <div class="tab" onclick="switchTab('settings')">Settings</div>
   </div>
   <div id="app"><div class="loading">Loading...</div></div>
@@ -309,6 +331,7 @@ function switchTab(tab) {
   else if (tab === 'release') loadRelease();
   else if (tab === 'personas') loadPersonas();
   else if (tab === 'advisor') loadAdvisor();
+  else if (tab === 'health') loadHealthPage();
   else if (tab === 'settings') loadSettings();
 }
 
@@ -2565,9 +2588,132 @@ async function respondReleaseGate(id, idx, answer) {
   }
 }
 
+// ── Health Signals (v0.15.30.6) ───────────────────────────────
+// Polls /health/signals every 30s and renders an ambient alert bar.
+// Dismissed warn signals are suppressed for 1h (sessionStorage).
+// Crit signals cannot be dismissed.
+
+let _healthSignals = [];
+let _healthCleanupLog = '';
+
+function _dismissedKey(kind) { return 'health_dismissed_' + kind; }
+function _isDismissed(kind) {
+  const v = sessionStorage.getItem(_dismissedKey(kind));
+  if (!v) return false;
+  return Date.now() < parseInt(v, 10);
+}
+function _dismiss(kind) {
+  sessionStorage.setItem(_dismissedKey(kind), String(Date.now() + 3600000));
+  renderHealthBar();
+}
+
+async function pollHealthSignals() {
+  try {
+    const r = await fetch('/health/signals');
+    if (!r.ok) return;
+    const data = await r.json();
+    _healthSignals = data.signals || [];
+    renderHealthBar();
+    // Update the Health tab badge if there are crit/warn signals.
+    const tabEl = document.getElementById('tab-health');
+    if (tabEl) {
+      const urgent = _healthSignals.filter(s => s.severity === 'warn' || s.severity === 'crit').length;
+      tabEl.textContent = urgent > 0 ? `Health (${urgent})` : 'Health';
+    }
+    if (currentTab === 'health') renderHealthPageContent();
+  } catch (_) {}
+}
+
+function renderHealthBar() {
+  const container = document.getElementById('health-alert-container');
+  if (!container) return;
+  const visible = _healthSignals.filter(s =>
+    (s.severity === 'warn' || s.severity === 'crit') && !_isDismissed(s.kind)
+  );
+  if (visible.length === 0) { container.innerHTML = ''; return; }
+  // Show only the highest-severity signal in the bar.
+  const top = visible[0];
+  const isCrit = top.severity === 'crit';
+  const dismissBtn = isCrit ? '' :
+    `<span class="hb-dismiss" title="Dismiss for 1h" onclick="_dismiss('${esc(top.kind)}')">✕</span>`;
+  const moreCount = visible.length - 1;
+  const moreHint = moreCount > 0
+    ? `<span class="health-bar-expand" onclick="switchTab('health')"> +${moreCount} more</span>`
+    : '';
+  container.innerHTML = `<div class="health-bar ${esc(top.severity)}">
+    <span class="hb-msg">${esc(top.message)}</span>
+    <span class="hb-action">${esc(top.action)}</span>
+    ${moreHint}
+    ${dismissBtn}
+  </div>`;
+}
+
+async function runCleanup() {
+  const logEl = document.getElementById('health-cleanup-log');
+  const btnEl = document.getElementById('health-cleanup-btn');
+  if (btnEl) btnEl.disabled = true;
+  if (logEl) { logEl.style.display = 'block'; logEl.textContent = 'Running ta doctor --fix --yes ...\n'; }
+  try {
+    const r = await fetch('/api/cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'ta doctor --fix --yes' })
+    });
+    const text = await r.text();
+    if (logEl) logEl.textContent += text + '\nDone.';
+    await pollHealthSignals();
+  } catch (e) {
+    if (logEl) logEl.textContent += 'Error: ' + e.message;
+  } finally {
+    if (btnEl) btnEl.disabled = false;
+  }
+}
+
+function renderHealthPageContent() {
+  const app = document.getElementById('app');
+  if (currentTab !== 'health') return;
+  const signals = _healthSignals;
+  if (signals.length === 0) {
+    app.innerHTML = `<div class="card"><div class="card-header"><span class="card-title">System Health</span></div>
+      <p style="color:var(--green);margin-top:0.75rem">All systems healthy — no issues detected.</p>
+      <button class="btn btn-ghost btn-sm" style="margin-top:0.75rem" onclick="pollHealthSignals()">Refresh</button>
+    </div>`;
+    return;
+  }
+  const rows = signals.map(s => `<div class="health-bar ${esc(s.severity)}" style="margin-bottom:0.4rem">
+    <span class="hb-msg"><strong>[${esc(s.severity)}]</strong> ${esc(s.message)}</span>
+    <span class="hb-action">${esc(s.action)}</span>
+  </div>`).join('');
+  app.innerHTML = `<div class="card">
+    <div class="card-header">
+      <span class="card-title">System Health</span>
+      <div style="display:flex;gap:0.5rem;align-items:center">
+        <button class="btn btn-ghost btn-sm" onclick="pollHealthSignals()">Refresh</button>
+        <button class="health-cleanup-btn" id="health-cleanup-btn" onclick="runCleanup()">Run cleanup</button>
+      </div>
+    </div>
+    <p style="color:var(--muted);font-size:0.8rem;margin:0.5rem 0">
+      ${signals.length} signal(s) detected. Run cleanup to fix automatically.
+    </p>
+    <div style="margin-top:0.75rem">${rows}</div>
+    <div id="health-cleanup-log" class="health-log" style="display:none"></div>
+  </div>`;
+}
+
+async function loadHealthPage() {
+  const app = document.getElementById('app');
+  app.innerHTML = '<div class="loading">Checking system health...</div>';
+  await pollHealthSignals();
+  renderHealthPageContent();
+}
+
+// Start polling health signals every 30s.
+setInterval(pollHealthSignals, 30000);
+
 // ── Boot ──────────────────────────────────────────────────────
 loadDashboard();
 checkWizard();
+pollHealthSignals();
 </script>
 </body>
 </html>

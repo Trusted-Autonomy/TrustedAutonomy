@@ -65,10 +65,19 @@ impl CheckResult {
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-/// Execute `ta doctor [--json] [--fix-denied]`.
-pub fn execute(config: &GatewayConfig, json: bool, fix_denied: bool) -> anyhow::Result<()> {
+/// Execute `ta doctor [--json] [--fix-denied] [--fix] [--yes]`.
+pub fn execute(
+    config: &GatewayConfig,
+    json: bool,
+    fix_denied: bool,
+    fix: bool,
+    yes: bool,
+) -> anyhow::Result<()> {
     if fix_denied {
         return execute_fix_denied(config);
+    }
+    if fix {
+        return execute_fix(config, yes);
     }
     let checks = run_all_checks(config);
     let fail_count = checks
@@ -814,6 +823,147 @@ fn execute_fix_denied(config: &GatewayConfig) -> anyhow::Result<()> {
         println!("No pr_ready goals with denied drafts found.");
     }
     Ok(())
+}
+
+// ── --fix handler (v0.15.30.6) ───────────────────────────────────────────────
+
+/// `ta doctor --fix [--yes]`
+///
+/// For each health signal, describe the issue and proposed fix, then:
+/// - Interactive mode (`--fix` only): prompt "fix? [y/N]" before taking action.
+/// - Non-interactive mode (`--fix --yes`): apply all fixes automatically (used by `ta gc` alias).
+fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
+    use std::io::{self, Write};
+
+    let signals = super::health_signals::compute_health_signals(config);
+
+    if signals.is_empty() {
+        println!("No health issues detected — nothing to fix.");
+        return Ok(());
+    }
+
+    println!("TA Doctor — Fix Mode");
+    println!();
+    println!("Found {} issue(s):", signals.len());
+    println!();
+
+    let mut fixed = 0usize;
+    let mut skipped = 0usize;
+
+    for signal in &signals {
+        let label = match signal.severity {
+            super::health_signals::SignalSeverity::Crit => "[crit]",
+            super::health_signals::SignalSeverity::Warn => "[warn]",
+            super::health_signals::SignalSeverity::Info => "[info]",
+        };
+        println!("{} {}", label, signal.message);
+        println!("  Fix: {}", signal.action);
+
+        let should_fix = if yes {
+            println!("  → Applying (--yes)");
+            true
+        } else {
+            print!("  Apply fix? [y/N]: ");
+            io::stdout().flush().ok();
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).ok();
+            input.trim().eq_ignore_ascii_case("y")
+        };
+
+        if should_fix {
+            match apply_fix(config, signal) {
+                Ok(msg) => {
+                    println!("  ✓ {}", msg);
+                    fixed += 1;
+                }
+                Err(e) => {
+                    println!("  ✗ Failed: {}", e);
+                }
+            }
+        } else {
+            println!("  Skipped.");
+            skipped += 1;
+        }
+        println!();
+    }
+
+    println!("{} fix(es) applied, {} skipped.", fixed, skipped);
+    Ok(())
+}
+
+/// Apply the fix for a given health signal.
+/// Returns a short description of what was done.
+fn apply_fix(
+    config: &GatewayConfig,
+    signal: &super::health_signals::HealthSignal,
+) -> anyhow::Result<String> {
+    match signal.kind.as_str() {
+        "disk_staging" | "orphan_staging" => {
+            // Run GC to reclaim staging space.
+            super::gc::execute(
+                config, false, // dry_run
+                7,     // threshold_days
+                false, // all
+                false, // archive
+                false, // include_events
+                false, // compact
+                30,    // compact_after_days
+                false, // force
+                false, // status
+                true,  // delete_stale
+            )?;
+            Ok("Ran gc to reclaim staging space".to_string())
+        }
+        "stale_drafts" => {
+            // Use existing draft close-stale logic via CLI passthrough.
+            println!("  Run `ta draft close --stale` to close stale drafts.");
+            Ok("See: ta draft close --stale".to_string())
+        }
+        "stale_failed_goals" | "stale_pr_ready" => {
+            // Run GC for stale goals.
+            super::gc::execute(
+                config, false, // dry_run
+                1,     // threshold_days (aggressive for stale goals)
+                false, // all
+                false, // archive
+                false, // include_events
+                false, // compact
+                30,    // compact_after_days
+                false, // force
+                false, // status
+                true,  // delete_stale
+            )?;
+            Ok("Ran gc to clean up stale goals".to_string())
+        }
+        "plugin_crash_loop" => {
+            println!("  To restart the daemon: run `ta daemon restart`");
+            Ok("Manual action needed: ta daemon restart".to_string())
+        }
+        "daemon_error_rate" => {
+            println!("  Run `ta daemon log` to inspect errors.");
+            Ok("Manual action needed: ta daemon log".to_string())
+        }
+        "disk_free" => {
+            // Run comprehensive GC.
+            super::gc::execute(
+                config, false, // dry_run
+                7,     // threshold_days
+                false, // all
+                false, // archive
+                false, // include_events
+                true,  // compact
+                30,    // compact_after_days
+                false, // force
+                false, // status
+                true,  // delete_stale
+            )?;
+            Ok("Ran gc with compaction to free disk space".to_string())
+        }
+        _ => Ok(format!(
+            "No automated fix available — manual action: {}",
+            signal.action
+        )),
+    }
 }
 
 // ── Config helpers ───────────────────────────────────────────────────────────

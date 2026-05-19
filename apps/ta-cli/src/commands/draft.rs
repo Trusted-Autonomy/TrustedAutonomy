@@ -4193,6 +4193,13 @@ fn view_package(
         }
     }
 
+    // Health footer (v0.15.30.6): show warn/crit signals so the user sees issues
+    // before applying the draft.
+    {
+        let signals = super::health_signals::compute_health_signals(config);
+        super::health_signals::print_footer(&signals);
+    }
+
     Ok(())
 }
 

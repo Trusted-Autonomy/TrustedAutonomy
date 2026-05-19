@@ -17,6 +17,7 @@ pub mod cmd;
 pub mod events;
 pub mod goal_output;
 pub mod health;
+pub mod health_signals;
 pub mod input;
 pub mod interactions;
 pub mod notifications;
@@ -68,6 +69,8 @@ pub struct AppState {
     pub active_project_root: Arc<std::sync::RwLock<PathBuf>>,
     /// Atomic in-memory claim registry for plan phases (v0.15.24.2).
     pub phase_claims: Arc<PhaseClaims>,
+    /// Cached health signals for `/health/signals` endpoint (v0.15.30.6).
+    pub signals_cache: Arc<health_signals::SignalsCache>,
 }
 
 impl AppState {
@@ -98,6 +101,7 @@ impl AppState {
             persistent_qa,
             active_project_root: Arc::new(std::sync::RwLock::new(project_root.clone())),
             phase_claims: Arc::new(PhaseClaims::new()),
+            signals_cache: Arc::new(health_signals::SignalsCache::default()),
             project_root,
             daemon_config,
         }
@@ -291,10 +295,11 @@ async fn shutdown_daemon(
 
 /// Build the full API router with auth middleware.
 pub fn build_api_router(state: Arc<AppState>) -> Router {
-    // Health endpoint is auth-free (load balancers, readiness probes).
+    // Health endpoint is auth-free (load balancers, readiness probes, Studio ambient bar).
     let health_routes = Router::new()
         .route("/health", get(health::health))
         .route("/metrics", get(health::metrics))
+        .route("/health/signals", get(health_signals::health_signals))
         .with_state(state.clone());
 
     // Webhook endpoints use their own HMAC-based authentication — no Bearer token required.

@@ -162,6 +162,14 @@ pub fn execute(config: &GatewayConfig, deep: bool) -> anyhow::Result<()> {
         || !pending_ops.is_empty()
         || hr_pending > 0;
 
+    // ── HEALTH SIGNALS (v0.15.30.6) ───────────────────────────────────────
+    {
+        let signals = super::health_signals::compute_health_signals(config);
+        if super::health_signals::print_status_block(&signals) {
+            println!("│");
+        }
+    }
+
     // ── URGENT ───────────────────────────────────────────────────────────
     if has_urgent {
         println!("│  ⚠ URGENT");
