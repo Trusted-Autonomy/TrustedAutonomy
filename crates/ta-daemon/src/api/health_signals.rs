@@ -177,7 +177,7 @@ fn compute_signals(
     check_daemon_log_error_rate(project_root, &mut signals);
     check_orphan_staging(project_root, goals_dir, &mut signals);
 
-    signals.sort_by(|a, b| b.severity.cmp(&a.severity));
+    signals.sort_by_key(|s| std::cmp::Reverse(s.severity));
     signals
 }
 

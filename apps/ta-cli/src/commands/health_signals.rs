@@ -84,7 +84,7 @@ pub fn compute_health_signals(config: &GatewayConfig) -> Vec<HealthSignal> {
     check_daemon_log_error_rate(config, &mut signals);
 
     // Sort crit → warn → info.
-    signals.sort_by(|a, b| b.severity.cmp(&a.severity));
+    signals.sort_by_key(|s| std::cmp::Reverse(s.severity));
     signals
 }
 
@@ -654,7 +654,7 @@ mod tests {
             HealthSignal::new("c", SignalSeverity::Warn, "c", "c"),
         ]
         .into();
-        signals.sort_by(|a, b| b.severity.cmp(&a.severity));
+        signals.sort_by_key(|s| std::cmp::Reverse(s.severity));
         assert_eq!(signals[0].severity, SignalSeverity::Crit);
         assert_eq!(signals[1].severity, SignalSeverity::Warn);
         assert_eq!(signals[2].severity, SignalSeverity::Info);
