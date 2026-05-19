@@ -678,6 +678,25 @@ ta draft approve <draft-id>
 ta draft apply <draft-id>
 ```
 
+### Attaching context to a goal (`--context`)
+
+Pass build logs, test failures, stack traces, or any text file directly to the agent with `--context`:
+
+```bash
+# From a file
+ta run "fix failing tests" --context /tmp/test-output.txt
+
+# From stdin — pipe compiler errors directly
+cargo build 2>&1 | ta run "fix the build" --context -
+
+# From test output
+cargo test 2>&1 | ta run "all tests should pass" --context -
+```
+
+The file contents appear in the agent's context under `## User-Provided Context`, right alongside the plan phase and memory sections. The agent sees exactly what you pasted — no copy-paste required.
+
+**In TA Studio (web shell):** click the `+ ctx` button in the input bar, select a file, then type your `run` command and press Enter. The file is uploaded automatically and `--context` is appended to the command.
+
 **What just happened:**
 
 1. **Staging**: TA copied your project into `.ta/staging/`. The agent worked there, not in your real files.

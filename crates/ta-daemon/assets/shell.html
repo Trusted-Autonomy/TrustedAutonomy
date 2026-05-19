@@ -117,6 +117,9 @@ body {
 <div id="input-bar">
   <span id="prompt">ta&gt;</span>
   <input id="input" type="text" autocomplete="off" autofocus placeholder="Type a command or message...">
+  <button id="context-attach-btn" title="Attach context file (--context)" style="background:none;border:1px solid var(--border);color:var(--fg-dim);cursor:pointer;padding:2px 6px;border-radius:3px;font-family:inherit;font-size:12px;" onclick="document.getElementById('context-file-input').click()">+ ctx</button>
+  <input id="context-file-input" type="file" style="display:none" accept=".txt,.log,.md,.json,.rs,.py,.ts,.js,.go,.rb,.java,.cs,.cpp,.c,.h">
+  <span id="context-file-label" style="font-size:11px;color:var(--fg-dim);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:none"></span>
 </div>
 <div id="status-bar">
   <span id="conn-status" class="disconnected">connecting...</span>
@@ -155,6 +158,52 @@ body {
   let sseGoals = {};  // Map of goalId -> { sse: EventSource, label: string, progressGroupId: string }
   let statusPoll = null;
   let pendingRequests = 0;
+
+  // ── Context file attachment (v0.15.30.7) ─────────────────────
+  // Holds the selected file for the next `run` command.
+  let pendingContextFile = null;
+
+  const contextFileInput = document.getElementById('context-file-input');
+  const contextFileLabel = document.getElementById('context-file-label');
+
+  contextFileInput.addEventListener('change', () => {
+    const file = contextFileInput.files[0];
+    if (file) {
+      pendingContextFile = file;
+      contextFileLabel.textContent = '📎 ' + file.name;
+      contextFileLabel.style.display = 'inline';
+    } else {
+      pendingContextFile = null;
+      contextFileLabel.style.display = 'none';
+    }
+    contextFileInput.value = '';
+  });
+
+  // Upload the pending context file and return the server path, or null.
+  async function uploadContextFile(file) {
+    try {
+      const text = await file.text();
+      const resp = await fetch(BASE + '/api/context/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: text,
+      });
+      if (!resp.ok) {
+        appendLine('[context upload failed: ' + resp.status + ']', 'stderr');
+        return null;
+      }
+      const data = await resp.json();
+      return data.path || null;
+    } catch (err) {
+      appendLine('[context upload error: ' + err.message + ']', 'stderr');
+      return null;
+    }
+  }
+
+  function clearContextFile() {
+    pendingContextFile = null;
+    contextFileLabel.style.display = 'none';
+  }
 
   // ── Parallel sessions (v0.11.5 items 13-16) ──────────────────
   // Map of tag -> { session_id, label, created_at, last_active }
@@ -663,7 +712,7 @@ body {
 
   // ── Input ───────────────────────────────────────────────────
 
-  input.addEventListener('keydown', (e) => {
+  input.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       const text = input.value.trim();
@@ -702,7 +751,21 @@ body {
         parallelSessions[activeParallelTag].last_active = new Date();
       }
 
-      sendInput(text, sessionId);
+      // v0.15.30.7: If a context file is attached and the command is a `run`/`dev`
+      // command, upload the file and append `--context <path>` before dispatching.
+      let dispatchText = text;
+      if (pendingContextFile && /^(run|dev)\b/.test(text) && !text.includes('--context')) {
+        const ctxPath = await uploadContextFile(pendingContextFile);
+        if (ctxPath) {
+          dispatchText = text + ' --context ' + JSON.stringify(ctxPath);
+          appendLine('[context attached: ' + pendingContextFile.name + ']', 'info');
+        }
+        clearContextFile();
+      } else if (pendingContextFile) {
+        clearContextFile();
+      }
+
+      sendInput(dispatchText, sessionId);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (historyIdx === -1) {

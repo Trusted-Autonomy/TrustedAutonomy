@@ -7637,9 +7637,8 @@ Studio "Health" page gains a **"Run cleanup"** button that calls `ta doctor --fi
 #### Version: `0.15.30-alpha.6`
 
 ---
-
 ### v0.15.30.7 — `ta run --context <path>`: File-Based Goal Context
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: `ta run` must accept a `--context <path>` flag so users can pass a file of context — compiler errors, build logs, test output, stack traces — directly to a goal without pasting into the terminal or Studio text field.
 
@@ -7652,15 +7651,15 @@ Studio "Health" page gains a **"Run cleanup"** button that calls `ta doctor --fi
 - No size cap enforced by the CLI; oversized files that exceed model context are the user's responsibility
 - Studio: UI shows a file picker / drag-and-drop that writes a temp file and passes `--context <tmpfile>` under the hood
 
-1. [ ] **`--context <path>` flag on `ta run`**: Add to `RunArgs`. Read file contents at goal-start time, inject into the CLAUDE.md context block after the plan phase section under `## User-Provided Context`. Include the source filename as a subheading so the agent knows where the content came from.
+1. [x] **`--context <path>` flag on `ta run`**: Add to `RunArgs`. Read file contents at goal-start time, inject into the CLAUDE.md context block after the plan phase section under `## User-Provided Context`. Include the source filename as a subheading so the agent knows where the content came from.
 
-2. [ ] **Fail fast on missing/unreadable file**: If `--context <path>` is given but the file doesn't exist or isn't readable, print a clear error (`context file not found: <path>`) and exit before creating the goal or staging directory.
+2. [x] **Fail fast on missing/unreadable file**: If `--context <path>` is given but the file doesn't exist or isn't readable, print a clear error (`context file not found: <path>`) and exit before creating the goal or staging directory.
 
-3. [ ] **Stdin shorthand `--context -`**: When path is `-`, read from stdin. Enables: `cargo test 2>&1 | ta run "fix failing tests" --context -`. Check `stdin_is_tty()` and error if stdin is a TTY with no data.
+3. [x] **Stdin shorthand `--context -`**: When path is `-`, read from stdin. Enables: `cargo test 2>&1 | ta run "fix failing tests" --context -`. Check `stdin_is_tty()` and error if stdin is a TTY with no data.
 
-4. [ ] **Studio file input**: In the "New goal" dialog, add a collapsible "Attach context file" section with a file picker. On submit, write the file to a temp path and append `--context <tmpfile>` to the CLI invocation.
+4. [x] **Studio file input**: In the "New goal" dialog, add a collapsible "Attach context file" section with a file picker. On submit, write the file to a temp path and append `--context <tmpfile>` to the CLI invocation.
 
-5. [ ] **Document in USAGE.md**: Add examples under "Starting goals" showing the three patterns: inline title only, `--context <file>`, and `--context -` from stdin.
+5. [x] **Document in USAGE.md**: Add examples under "Starting goals" showing the three patterns: inline title only, `--context <file>`, and `--context -` from stdin.
 
 #### Version: `0.15.30-alpha.7`
 

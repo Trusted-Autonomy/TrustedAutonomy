@@ -237,6 +237,7 @@ fn run_init(
         None,             // existing_goal_id
         None,             // workflow = default (single-agent)
         None,             // persona_name = None
+        None,             // context_path = None
     )?;
 
     println!();

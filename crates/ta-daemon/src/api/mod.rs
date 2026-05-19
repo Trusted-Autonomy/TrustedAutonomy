@@ -14,6 +14,7 @@ pub mod advisor;
 pub mod agent;
 pub mod auth;
 pub mod cmd;
+pub mod context_upload;
 pub mod events;
 pub mod goal_output;
 pub mod health;
@@ -411,6 +412,8 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/advisor/tools", get(advisor::get_tools))
         .route("/api/advisor/config", get(advisor::get_config))
         .route("/api/advisor/inject", post(advisor::handle_inject))
+        // Context file upload for Studio --context flag (v0.15.30.7).
+        .route("/api/context/upload", post(context_upload::upload_context))
         // Daemon lifecycle routes (v0.10.10).
         .route("/api/shutdown", post(shutdown_daemon))
         // Auth middleware on all API routes.
