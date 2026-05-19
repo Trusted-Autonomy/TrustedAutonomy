@@ -7594,7 +7594,7 @@ All phase resolution — whether from `--phase <arg>` or extracted from the goal
 
 ---
 ### v0.15.30.6 — System Health Notifications: CLI + Studio Ambient Alerts
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Surface operational health issues proactively — in `ta status`, `ta run`, `ta draft view`, and as a live ambient panel in Studio — so users see actionable warnings before they cause problems. Unify `ta doctor` (diagnose) and `ta gc` (clean) under a single `ta doctor --fix` flow so users don't need to know to run both separately.
 
