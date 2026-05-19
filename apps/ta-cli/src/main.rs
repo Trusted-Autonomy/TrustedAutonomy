@@ -49,6 +49,7 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     // ── DASHBOARD ───────────────────────────────────────────────────────────
@@ -179,6 +180,13 @@ enum Commands {
         /// `ta onboard`. Pass this flag to bypass that check in CI or automation.
         #[arg(long)]
         skip_onboard_check: bool,
+        /// Attach a file of context to the goal (compiler errors, build logs, stack traces, etc.).
+        ///
+        /// Contents are prepended to the agent's CLAUDE.md context block under
+        /// "## User-Provided Context". Use `-` to read from stdin:
+        ///   cargo test 2>&1 | ta run "fix failing tests" --context -
+        #[arg(long, value_name = "PATH")]
+        context: Option<PathBuf>,
     },
     /// Review and manage draft packages.
     Draft {
@@ -921,6 +929,7 @@ fn main() -> anyhow::Result<()> {
             sub_goals,
             integrate,
             skip_onboard_check,
+            context,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
@@ -972,6 +981,7 @@ fn main() -> anyhow::Result<()> {
                 goal_id.as_deref(),
                 workflow.as_deref(),
                 persona.as_deref(),
+                context.as_deref(),
             )
         }
         Commands::Events { command } => commands::events::execute(command, &config),

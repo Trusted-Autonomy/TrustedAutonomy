@@ -8856,6 +8856,7 @@ fn fix_package(
         None,  // no existing goal id
         None,  // workflow = default (single-agent)
         None,  // persona_name = None
+        None,  // context_path = None
     )?;
 
     if no_launch {

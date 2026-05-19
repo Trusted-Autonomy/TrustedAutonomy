@@ -193,6 +193,7 @@ pub fn execute(cmd: &SessionCommands, config: &GatewayConfig) -> anyhow::Result<
                 None,  // no existing goal id
                 None,  // workflow = default (single-agent)
                 None,  // persona_name = None
+                None,  // context_path = None
             )
         }
         SessionCommands::Pause { id } => pause_session(config, id),

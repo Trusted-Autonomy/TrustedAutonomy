@@ -1011,6 +1011,7 @@ pub fn execute(
     existing_goal_id: Option<&str>,
     workflow: Option<&str>,
     persona_name: Option<&str>,
+    context_path: Option<&Path>,
 ) -> anyhow::Result<()> {
     // ── Resume an existing session ──────────────────────────────
     if let Some(session_id_prefix) = resume {
@@ -1024,6 +1025,11 @@ pub fn execute(
             anyhow::bail!("Session resume requires PTY support (not available on Windows)");
         }
     }
+
+    // ── User-provided context file (--context <path> or --context -) ───
+    //
+    // Read early so we fail fast before creating any staging state.
+    let user_context: Option<String> = read_context_input(context_path)?;
 
     // ── Smart Follow-Up Resolution (v0.10.9) ────────────────────
     //
@@ -1646,6 +1652,7 @@ pub fn execute(
             done_window,
             pending_window,
             &context_mode,
+            user_context.as_deref(),
         )?;
         let ctx = ta_runtime::channels::AgentContext {
             goal_id: goal_id.clone(),
@@ -4789,6 +4796,7 @@ fn build_context_content(
     done_window: usize,
     pending_window: usize,
     context_mode: &ta_submit::config::ContextMode,
+    user_context: Option<&str>,
 ) -> anyhow::Result<String> {
     // Build plan context section if PLAN.md exists in source (windowed, v0.14.3.1).
     // v0.14.3.2: Skip plan injection when context_mode is "mcp" or "hybrid".
@@ -4845,6 +4853,14 @@ fn build_context_content(
         "\n# Context tools: ta_plan_status, community_search, community_get — call these when you need plan or community context.\n".to_string()
     } else {
         String::new()
+    };
+
+    // v0.15.30.7: User-provided context from --context <path> or --context -.
+    let user_context_section = match user_context {
+        Some(ctx) if !ctx.is_empty() => {
+            format!("\n## User-Provided Context\n\n{}\n", ctx.trim_end())
+        }
+        _ => String::new(),
     };
 
     // v0.14.3.1: Enforce context budget. Trim in priority order when over limit.
@@ -4919,7 +4935,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 **Goal:** {}
 **Goal ID:** {}
-{}{}{}{}{}{}{}{}
+{}{}{}{}{}{}{}{}{}
 ## How this works
 
 - This directory is a copy of the original project
@@ -5044,6 +5060,7 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
         solutions_section,
         community_section,
         context_tools_hint,
+        user_context_section,
     );
 
     // Replace placeholder in progress journal section with the actual goal ID.
@@ -5090,6 +5107,7 @@ fn inject_via_channel_for_test(
         done_window,
         pending_window,
         context_mode,
+        None,
     )?;
     let channel = ta_runtime::channels::ClaudeCodeChannel::new(staging_path.to_path_buf());
     let ctx = ta_runtime::channels::AgentContext {
@@ -5099,6 +5117,47 @@ fn inject_via_channel_for_test(
         staging_path: staging_path.to_path_buf(),
     };
     channel.inject_initial(&ctx)
+}
+
+/// Read user-provided context from a file path or stdin (v0.15.30.7).
+///
+/// - `None`  → no --context flag, returns Ok(None)
+/// - `Some("-")` → read from stdin; error if stdin is a TTY with no data
+/// - `Some(path)` → read file; error if not found or not readable
+fn read_context_input(context_path: Option<&Path>) -> anyhow::Result<Option<String>> {
+    use std::io::Read;
+
+    let path = match context_path {
+        None => return Ok(None),
+        Some(p) => p,
+    };
+
+    if path == Path::new("-") {
+        if std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "context file is '-' (stdin) but stdin is a terminal — no data to read.\n\
+                 Pipe data into ta run: cargo test 2>&1 | ta run \"title\" --context -"
+            );
+        }
+        let mut buf = String::new();
+        std::io::stdin()
+            .lock()
+            .read_to_string(&mut buf)
+            .map_err(|e| anyhow::anyhow!("failed to read context from stdin: {}", e))?;
+        return Ok(Some(buf));
+    }
+
+    if !path.exists() {
+        anyhow::bail!(
+            "context file not found: {}\n\
+             Check the path and try again.",
+            path.display()
+        );
+    }
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("context file not readable: {}: {}", path.display(), e))?;
+    Ok(Some(content))
 }
 
 /// Write a generic context file for non-Claude agents (v0.12.5).
@@ -6445,6 +6504,7 @@ mod tests {
             None,  // no existing goal id
             None,  // workflow = default (single-agent)
             None,  // persona_name = None
+            None,  // context_path = None
         )
         .unwrap();
 
@@ -8213,6 +8273,108 @@ plan_pending_window = 7
         assert!(
             committed_files.contains("plan_history.jsonl"),
             "plan_history.jsonl should be in the commit"
+        );
+    }
+
+    // ── read_context_input tests (v0.15.30.7) ────────────────────────────────
+
+    #[test]
+    fn read_context_input_none_returns_none() {
+        let result = read_context_input(None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_context_input_reads_file() {
+        let dir = TempDir::new().unwrap();
+        let ctx_path = dir.path().join("ctx.txt");
+        std::fs::write(
+            &ctx_path,
+            "error: failed to compile\n  --> src/main.rs:1:1\n",
+        )
+        .unwrap();
+        let result = read_context_input(Some(&ctx_path)).unwrap();
+        assert_eq!(
+            result.unwrap(),
+            "error: failed to compile\n  --> src/main.rs:1:1\n"
+        );
+    }
+
+    #[test]
+    fn read_context_input_missing_file_errors() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("does_not_exist.txt");
+        let err = read_context_input(Some(&missing)).unwrap_err();
+        assert!(
+            err.to_string().contains("context file not found"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn user_context_section_included_in_build_context_content() {
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        let content = build_context_content(
+            "Fix build errors",
+            "goal-abc",
+            None,
+            None,
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            0,
+            5,
+            5,
+            &ta_submit::config::ContextMode::default(),
+            Some("error[E0308]: mismatched types\n  --> src/lib.rs:42:5"),
+        )
+        .unwrap();
+
+        assert!(
+            content.contains("## User-Provided Context"),
+            "missing User-Provided Context section"
+        );
+        assert!(
+            content.contains("error[E0308]: mismatched types"),
+            "missing user context body"
+        );
+    }
+
+    #[test]
+    fn user_context_section_absent_when_none() {
+        let staging = TempDir::new().unwrap();
+        let config = GatewayConfig::for_project(staging.path());
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        let content = build_context_content(
+            "Some goal",
+            "goal-xyz",
+            None,
+            None,
+            None,
+            &goal_store,
+            &config,
+            false,
+            false,
+            None,
+            0,
+            5,
+            5,
+            &ta_submit::config::ContextMode::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            !content.contains("## User-Provided Context"),
+            "User-Provided Context should not appear when user_context is None"
         );
     }
 }

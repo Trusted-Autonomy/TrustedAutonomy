@@ -2468,6 +2468,7 @@ fn plan_add(
         None,  // existing_goal_id = None
         None,  // workflow = default (single-agent)
         None,  // persona_name = None
+        None,  // context_path = None
     )
 }
 
@@ -2720,6 +2721,7 @@ fn plan_from(
         None,  // existing_goal_id = None
         None,  // workflow = default (single-agent)
         None,  // persona_name = None
+        None,  // context_path = None
     )
 }
 
@@ -2830,6 +2832,7 @@ fn plan_new(
         None,  // existing_goal_id
         None,  // workflow
         None,  // persona_name
+        None,  // context_path = None
     )
 }
 
@@ -5219,6 +5222,7 @@ fn plan_build(
             None,  // existing_goal_id
             None,  // workflow
             None,  // persona_name
+            None,  // context_path = None
         )?;
 
         phases_built += 1;
@@ -5585,6 +5589,7 @@ fn plan_pragma(config: &GatewayConfig, no_scan: bool) -> anyhow::Result<()> {
                     None,
                     None,
                     None,
+                    None, // context_path = None
                 )?;
             }
         } else {

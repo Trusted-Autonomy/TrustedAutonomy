@@ -812,6 +812,7 @@ const RUN_FLAGS: &[&str] = &[
     "--resume",
     "--headless",
     "--goal-id",
+    "--context",
 ];
 
 /// Flags that take a value (the next word is consumed as the value, not title text).
@@ -824,6 +825,7 @@ const RUN_VALUE_FLAGS: &[&str] = &[
     "--objective-file",
     "--resume",
     "--goal-id",
+    "--context",
 ];
 
 const DEV_FLAGS: &[&str] = &["--agent", "--unrestricted"];
