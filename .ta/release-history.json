@@ -22,5 +22,11 @@
     "tag": "v0.13.17-alpha.7",
     "commit": "4cbef6f21b82de496338e509abdf6009acb5befc",
     "released_at": "2026-03-24T15:12:56Z"
+  },
+  {
+    "version": "0.15.30-alpha.7",
+    "tag": "v0.15.30-alpha.7",
+    "commit": "707830e963de70b92936e1c69aa46394d90634da",
+    "released_at": "2026-05-19T08:02:33Z"
   }
 ]
