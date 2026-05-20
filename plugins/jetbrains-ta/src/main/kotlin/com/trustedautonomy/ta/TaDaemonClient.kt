@@ -138,7 +138,7 @@ class TaDaemonClient(
             .GET()
             .build()
 
-        @Volatile var stopped = false
+        val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
 
         val thread = Thread {
             try {
@@ -147,7 +147,7 @@ class TaDaemonClient(
                     var eventType = "message"
                     var data = ""
                     reader.forEachLine { line ->
-                        if (stopped) return@forEachLine
+                        if (stopped.get()) return@forEachLine
                         when {
                             line.startsWith("event:") -> eventType = line.removePrefix("event:").trim()
                             line.startsWith("data:") -> data = line.removePrefix("data:").trim()
@@ -160,7 +160,7 @@ class TaDaemonClient(
                     }
                 }
             } catch (e: Exception) {
-                if (!stopped) onError(e)
+                if (!stopped.get()) onError(e)
             }
         }.apply {
             isDaemon = true
@@ -169,7 +169,7 @@ class TaDaemonClient(
         }
 
         return Closeable {
-            stopped = true
+            stopped.set(true)
             thread.interrupt()
         }
     }
