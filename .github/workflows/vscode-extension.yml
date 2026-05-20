@@ -1,0 +1,123 @@
+# VS Code Extension — Build, test, and publish to the VS Code Marketplace.
+#
+# Triggered on:
+#   - Pull requests touching plugins/vscode-ta/ (build + lint only)
+#   - Tags matching `vscode-v*` (full publish to Marketplace)
+#   - Workflow dispatch for manual publish (e.g., re-trigger after a failed publish)
+#
+# Required secrets:
+#   VSCE_PAT — Personal Access Token with "Marketplace (Publish)" scope
+#              Create at https://dev.azure.com/<org>/_usersSettings/tokens
+
+name: VS Code Extension
+
+on:
+  push:
+    tags:
+      - 'vscode-v*'
+    paths:
+      - 'plugins/vscode-ta/**'
+  pull_request:
+    paths:
+      - 'plugins/vscode-ta/**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. vscode-v0.16.0)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/vscode-ta
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: plugins/vscode-ta/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Package VSIX
+        run: npx vsce package --no-git-tag-version --out ta-extension.vsix
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ta-extension-vsix
+          path: plugins/vscode-ta/ta-extension.vsix
+          retention-days: 30
+
+  publish:
+    name: Publish to Marketplace
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/vscode-v') || github.event_name == 'workflow_dispatch'
+    defaults:
+      run:
+        working-directory: plugins/vscode-ta
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: plugins/vscode-ta/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#vscode-v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing version ${VERSION}"
+
+      - name: Set version in package.json
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
+
+      - name: Publish to VS Code Marketplace
+        run: npx vsce publish --pat "${{ secrets.VSCE_PAT }}"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Package VSIX for GitHub release asset
+        run: npx vsce package --out "ta-vscode-${{ steps.version.outputs.version }}.vsix"
+
+      - name: Upload VSIX to GitHub release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/vscode-v')
+        with:
+          files: plugins/vscode-ta/ta-vscode-${{ steps.version.outputs.version }}.vsix
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
