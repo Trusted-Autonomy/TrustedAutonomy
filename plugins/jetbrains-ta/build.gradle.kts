@@ -1,3 +1,5 @@
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
+
 plugins {
     id("java")
     kotlin("jvm") version "1.9.22"
@@ -53,7 +55,7 @@ intellijPlatform {
 
     pluginVerification {
         ides {
-            recommended()
+            ide(IntelliJPlatformType.IntellijIdeaCommunity, providers.gradleProperty("platformVersion").get())
         }
     }
 }
