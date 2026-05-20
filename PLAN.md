@@ -7742,7 +7742,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1.1 — Studio Sub-Phase Display & Plan Heading Fixes
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Fix Studio dashboard display issues that survived v0.16.0.1: plan phases with missing headings (specifically v0.15.9 whose `### v0.15.9` heading was dropped by staging drift) show as perpetually in-progress, and sub-phases (e.g. `v0.16.0.1`, `v0.16.1.1`) are not surfaced correctly in the plan tab hierarchy. Also clean up any remaining stale `plan_history` entries that reference phases with no matching heading.
 
