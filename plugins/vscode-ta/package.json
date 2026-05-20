@@ -1,0 +1,257 @@
+{
+  "name": "ta",
+  "displayName": "Trusted Autonomy",
+  "description": "AI-assisted development with human-in-the-loop review — start goals, review diffs, and approve changes without leaving VS Code.",
+  "publisher": "trusted-autonomy",
+  "version": "0.16.0",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trustedautonomy/ta"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "autonomy",
+    "code-review",
+    "trusted-autonomy"
+  ],
+  "icon": "images/ta-icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ta.startGoal",
+        "title": "Start New Goal",
+        "category": "TA"
+      },
+      {
+        "command": "ta.listDrafts",
+        "title": "List Drafts",
+        "category": "TA"
+      },
+      {
+        "command": "ta.approveDraft",
+        "title": "Approve Draft",
+        "category": "TA",
+        "icon": "$(check)"
+      },
+      {
+        "command": "ta.denyDraft",
+        "title": "Deny Draft",
+        "category": "TA",
+        "icon": "$(x)"
+      },
+      {
+        "command": "ta.viewDiff",
+        "title": "View Diff",
+        "category": "TA",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "ta.openShell",
+        "title": "Open Shell",
+        "category": "TA",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "ta.refreshGoals",
+        "title": "Refresh Goals",
+        "category": "TA",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ta.refreshDrafts",
+        "title": "Refresh Drafts",
+        "category": "TA",
+        "icon": "$(refresh)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ta-sidebar",
+          "title": "Trusted Autonomy",
+          "icon": "images/ta-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ta-sidebar": [
+        {
+          "id": "taGoals",
+          "name": "TA Goals",
+          "icon": "$(rocket)",
+          "contextualTitle": "TA Goals"
+        },
+        {
+          "id": "taDrafts",
+          "name": "TA Drafts",
+          "icon": "$(git-pull-request)",
+          "contextualTitle": "TA Drafts"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "ta.startGoal",
+          "when": "view == taGoals",
+          "group": "navigation"
+        },
+        {
+          "command": "ta.refreshGoals",
+          "when": "view == taGoals",
+          "group": "navigation"
+        },
+        {
+          "command": "ta.refreshDrafts",
+          "when": "view == taDrafts",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "ta.viewDiff",
+          "when": "view == taDrafts && viewItem == draft",
+          "group": "inline"
+        },
+        {
+          "command": "ta.approveDraft",
+          "when": "view == taDrafts && viewItem == draft",
+          "group": "inline"
+        },
+        {
+          "command": "ta.denyDraft",
+          "when": "view == taDrafts && viewItem == draft",
+          "group": "inline"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ta.startGoal"
+        },
+        {
+          "command": "ta.listDrafts"
+        },
+        {
+          "command": "ta.openShell"
+        },
+        {
+          "command": "ta.approveDraft",
+          "when": "false"
+        },
+        {
+          "command": "ta.denyDraft",
+          "when": "false"
+        },
+        {
+          "command": "ta.viewDiff",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Trusted Autonomy",
+      "properties": {
+        "ta.daemonUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:7700",
+          "description": "URL of the TA daemon HTTP API.",
+          "order": 1
+        },
+        "ta.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for TA daemon authentication. Leave empty if your daemon has no auth configured.",
+          "order": 2
+        },
+        "ta.pollIntervalSeconds": {
+          "type": "number",
+          "default": 10,
+          "minimum": 5,
+          "maximum": 60,
+          "description": "How often to refresh the Goals and Drafts panels (seconds).",
+          "order": 3
+        }
+      }
+    },
+    "walkthroughs": [
+      {
+        "id": "ta.getStarted",
+        "title": "Get Started with Trusted Autonomy",
+        "description": "Set up AI-assisted development with human-in-the-loop review. Start goals, review proposed changes, and approve or deny them — all without leaving VS Code.",
+        "steps": [
+          {
+            "id": "ta.getStarted.installDaemon",
+            "title": "Install the TA daemon",
+            "description": "Download and install the TA daemon binary. The extension connects to the daemon at `http://127.0.0.1:7700` by default.\n\n```bash\nbash <(curl -fsSL https://github.com/trustedautonomy/ta/releases/latest/download/install.sh)\n```\n\nThen start the daemon in your project:\n```bash\ncd your-project && ta start\n```\n[Open Settings](command:workbench.action.openSettings?%22ta.daemonUrl%22)",
+            "media": {
+              "markdown": "walkthrough/install.md"
+            },
+            "completionEvents": [
+              "onSettingChanged:ta.daemonUrl"
+            ]
+          },
+          {
+            "id": "ta.getStarted.configureWorkflow",
+            "title": "Configure your workflow",
+            "description": "Add a `workflow.toml` to your project to tell TA how your project works. Here's a minimal config for a Python project:\n\n```toml\n[project]\nname = \"my-project\"\nlanguage = \"python\"\nagent = \"claude-code\"\n\n[verify]\ncommand = \"python -m pytest\"\n```\n\nFor TypeScript/Node.js:\n```toml\n[project]\nname = \"my-project\"\nlanguage = \"typescript\"\nagent = \"claude-code\"\n\n[verify]\ncommand = \"npm test\"\n```",
+            "media": {
+              "markdown": "walkthrough/configure.md"
+            }
+          },
+          {
+            "id": "ta.getStarted.startFirstGoal",
+            "title": "Start your first goal",
+            "description": "Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run **TA: Start New Goal**. Describe what you want to accomplish, for example:\n\n- `Add input validation to the login form`\n- `Fix the pagination bug in the users list`\n- `Refactor the database connection to use connection pooling`\n\nThe TA agent will work autonomously and notify you when changes are ready to review.",
+            "media": {
+              "markdown": "walkthrough/first-goal.md"
+            },
+            "completionEvents": [
+              "onCommand:ta.startGoal"
+            ]
+          },
+          {
+            "id": "ta.getStarted.reviewFirstDraft",
+            "title": "Review and approve your first draft",
+            "description": "When the agent finishes, a notification will appear and the **TA Drafts** panel will show the pending draft. Click a draft to:\n\n- **View Diff** — see every file changed in VS Code's native diff editor\n- **Approve** — apply the changes to your project\n- **Deny** — reject the changes with a reason\n\nThe agent only modifies your project once you explicitly approve.",
+            "media": {
+              "markdown": "walkthrough/review.md"
+            },
+            "completionEvents": [
+              "onCommand:ta.approveDraft",
+              "onCommand:ta.denyDraft"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}
