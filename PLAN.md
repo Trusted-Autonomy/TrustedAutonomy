@@ -7723,8 +7723,9 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 ### v0.16.1 — JetBrains IDE Plugin (PyCharm, WebStorm, IntelliJ)
 <!-- status: pending -->
 
-
 **Why**: JetBrains IDEs are the primary environment for Java, Kotlin, Python (PyCharm), and JavaScript/TypeScript (WebStorm) developers. Same rationale as the VS Code extension — reduces context-switching friction for non-Rust developers.
+
+**Community extensibility**: The TA daemon exposes a stable HTTP API (`http://127.0.0.1:7700`). Any IDE plugin only needs to implement the same REST calls the VS Code extension uses — no Rust required. This phase also ships a community plugin guide so any IDE (Zed, Emacs, Eclipse, etc.) can be integrated without changes to TA core.
 
 1. [ ] **Plugin scaffold**: Kotlin plugin using the IntelliJ Platform SDK. Published to JetBrains Marketplace as `com.trusted-autonomy.ta`. Supports PyCharm 2024.1+, WebStorm 2024.1+, IntelliJ IDEA 2024.1+.
 
@@ -7732,28 +7733,13 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 3. [ ] **Marketplace publishing**: CI workflow to build and publish to JetBrains Marketplace on `v*` tags.
 
+4. [ ] **Community IDE plugin guide** (`docs/community-ide-plugin.md`): Step-by-step guide for building a TA integration in any IDE. Covers: daemon REST API reference, SSE event stream for live goal state, authentication (none for localhost), recommended command palette actions, and a minimal working example in TypeScript (reusable for Zed, Cursor, etc.). Linked from USAGE.md.
+
 #### Version: `0.16.1-alpha`
 
 ---
-### v0.16.2 — Neovim Plugin
+### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
 <!-- status: pending -->
-
-
-
-**Why**: Neovim users are a significant portion of the Rust/systems developer audience and strongly prefer terminal-native tools. A Lua plugin bridges TA with their existing workflow without requiring a browser or separate UI.
-
-1. [ ] **Diff view**: Opens staging diff in a split buffer using `vim.diff()` or `diffview.nvim`.
-2. [ ] **Floating window**: `:TA status` shows daemon health and active goal in a floating window.
-3. [ ] **Commands**: `:TA start`, `:TA approve <id>`, `:TA deny <id>`, `:TA shell`.
-4. [ ] **luarocks / GitHub Releases packaging**: Distribute via `luarocks` and GitHub Releases.
-
-#### Version: `0.16.2-alpha`
-
----
-### v0.16.3 — Ollama Agent Framework Plugin (Extract & Standalone)
-<!-- status: pending -->
-
-```bash
 
 **Why extract**: Ollama support has its own dependency surface (Ollama binary, model management, thinking-mode tokens), release cadence (tracks Ollama API changes independently of TA core), and user audience (local-model users who may not need TA's full feature set). Keeping it in-tree makes the core binary heavier and couples TA releases to Ollama API changes.
 
@@ -7761,54 +7747,32 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 #### Design
 
-```bash
-
+```
 ta agent install ollama
-
 ta plugin install github:trusted-autonomy/ta-agent-ollama
 ```
 
-The plugin's own `README.md` covers everything Ollama-specific: prerequisites, model selection, thinking-mode, hardware sizing, `ta agent install qwen3.5` workflow, troubleshooting. TA's USAGE.md "Local Models" section becomes:
-
-```markdown
-## Local Models
-
-
-  ta agent install ollama      # install the plugin
-
-See the [ta-agent-ollama README] for model selection, hardware requirements,
-
-```
-
+The plugin's own `README.md` covers everything Ollama-specific: prerequisites, model selection, thinking-mode, hardware sizing, `ta agent install qwen3.5` workflow, troubleshooting. TA's USAGE.md "Local Models" section becomes a short pointer to the plugin README.
 
 1. [ ] **Create `ta-agent-ollama` repository**: New public repo under the Trusted Autonomy GitHub org. Scaffold: `Cargo.toml`, `src/lib.rs`, `README.md`, `USAGE.md`, `agents/` (Qwen3.5 profiles), `tests/`. CI: build + test on push. Publish to `crates.io` as `ta-agent-ollama`.
 
 2. [ ] **Plugin manifest**: `ta-agent-ollama` ships a `plugin.toml` declaring its capabilities, supported agent frameworks, min TA version, and install instructions. TA's plugin registry resolves it at `ta agent install ollama`.
 
-   ```
-
-3. [ ] **`ta plugin` command** (if not already present): `ta plugin install <source>`, `ta plugin list`, `ta plugin remove <name>`. Source formats: `github:<org>/<repo>`, `crates:<crate-name>`, local path. Used to install community agent plugins beyond the first-party set.
+3. [ ] **`ta plugin` command**: `ta plugin install <source>`, `ta plugin list`, `ta plugin remove <name>`. Source formats: `github:<org>/<repo>`, `crates:<crate-name>`, local path. Used to install community agent plugins beyond the first-party set.
 
 4. [ ] **Migration guide**: For existing users who have `ta-agent-ollama` configured via the monorepo build, provide a one-command migration: `ta agent migrate ollama` — detects existing config, installs the standalone plugin, updates profile paths, verifies connectivity.
 
 5. [ ] **Tests**: Plugin discovery finds `ta-agent-ollama` after `ta agent install ollama`. Agent profile round-trip through the plugin manifest. `ta plugin list` shows the installed plugin with version. Migration command preserves existing model config.
 
-#### Version: `0.16.3-alpha`
+#### Version: `0.16.2-alpha`
 
 ---
-### v0.16.3.1 — Gemma 4 Agent Profiles (ta-agent-ollama plugin)
+### v0.16.2.1 — Gemma 4 Agent Profiles (ta-agent-ollama plugin)
 <!-- status: pending -->
 
+**Depends on**: v0.16.2 (ta-agent-ollama extracted to standalone plugin)
 
-**Items**:
-
-**Depends on**: v0.16.3 (ta-agent-ollama extracted to standalone plugin)
-
-**Why Gemma 4**: Google's Gemma 4 family (released April 2025) has strong coding and reasoning
-performance in the sub-14B tier, making it the best choice for M1/M2 Macs and mid-range
-Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 8GB VRAM
-
-**Items**:
+**Why Gemma 4**: Google's Gemma 4 family (released April 2025) has strong coding and reasoning performance in the sub-14B tier, making it the best choice for M1/M2 Macs and mid-range Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 8GB VRAM.
 
 #### Hardware sizing
 
@@ -7817,51 +7781,69 @@ Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 
 | `gemma4-4b` | `gemma4:4b` | 8 GB VRAM / 16 GB unified | M1 Mac (base), RTX 3060, most mid-range cards |
 | `gemma4-12b` | `gemma4:12b` | 16 GB VRAM / 24 GB unified | M1 Pro/Max, RTX 4080, RTX 5080 |
 
+1. [ ] **`agents/gemma4-4b.toml`** in `ta-agent-ollama` plugin repo with model, max_turns, and hardware sizing fields.
 
-1. [ ] **`agents/gemma4-4b.toml`** in `ta-agent-ollama` plugin repo:
-   ```toml
+2. [ ] **`ta agent install gemma4`** shorthand: detects available VRAM/unified memory and auto-selects the largest profile that fits.
 
-   description = "Gemma 4 4B via Ollama — fast local agent for 8 GB VRAM / M1 Macs"
+3. [ ] **`ta doctor` Gemma 4 check**: If `gemma4:*` is pulled in Ollama but no matching profile is installed, emit a warning with install command.
 
-   [framework.options]
-   model       = "gemma4:4b"
+4. [ ] **Tests**: Profile TOML round-trips. `ta doctor` hardware detection selects correct tier. `ta agent install gemma4` on a simulated 8 GB system installs `gemma4-4b` not `gemma4-12b`.
 
-   max_turns   = 40
+#### Version: `0.16.2-alpha.1`
 
-   [hardware]
-   min_vram_gb     = 8
-   min_unified_gb  = 16
-   ```
+---
+### v0.16.3 — Skill Plugin System
+<!-- status: pending -->
 
-2. [ ] **`ta agent install gemma4`** shorthand: When user runs `ta agent install gemma4`, `ta doctor` detects available VRAM/unified memory and auto-selects the largest profile that fits. Prints:
-   ```
+**Goal**: A drop-in skill system that extends agent behavior via markdown files — no code changes to TA required. Supports two complementary discovery paths so skills can be declared from either direction.
 
-   Installing: gemma4-4b (best fit for your hardware)
+**Why**: The bundled slash-command skills (`/loop`, `/ultrareview`) are hardcoded. Users and teams want project-specific or agent-specific skills (e.g. `/visual-explainer` for a media team, `/superpowers` for power users) without forking TA. The skill file format already exists (bundled skills are markdown with frontmatter) — this phase makes it user-extensible.
 
-   ```
+#### Two discovery paths (both supported)
 
-3. [ ] **`ta doctor` Gemma 4 check**: If `gemma4:*` is pulled in Ollama but no matching profile is installed, emit:
-   ```
-   [warn] Gemma 4 model detected in Ollama but no ta-agent-ollama profile installed.
+**Path A — Skill declares its agents** (frontmatter-driven):
+```markdown
+---
+name: visual-explainer
+description: Generates a visual explanation of a code section
+agents: [analyst, code-reviewer]   # "*" = all agents
+triggers: [/explain]
+---
+<skill instructions>
+```
+Skill files are dropped in `~/.config/ta/skills/` (personal) or `.ta/skills/` (project-scoped). The loader scans both dirs at startup and builds an index keyed by agent name.
 
-   ```
+**Path B — Agent config bundles skills** (agent-manifest-driven):
+```toml
+# .ta/agents/my-analyst.toml
+[skills]
+include = ["visual-explainer", "superpowers"]
+```
+Skills are resolved from the same drop-in directories. The agent definition is the explicit authority for its capabilities.
 
-4. [ ] **Tests**: Profile TOML round-trips. `ta doctor` hardware detection selects correct tier. `ta agent install gemma4` on a simulated 8 GB system installs `gemma4-4b` not `gemma4-27b`.
+Both paths are active simultaneously — a skill activates if it is listed in the agent's manifest OR if its own frontmatter includes the agent.
 
+#### Items
 
-**Depends on**: v0.15.16 (Windows EV signing — establishes working Windows CI pipeline)
+1. [ ] **Skill file format**: Frontmatter fields: `name`, `description`, `agents` (list or `"*"`), `triggers` (slash command names), `version`. Body: markdown instructions injected into agent system prompt when skill activates.
 
-**Design**:
+2. [ ] **Skill loader** (`crates/ta-daemon/src/skills.rs`): Scans `~/.config/ta/skills/` and `.ta/skills/` at daemon start and on SIGHUP. Builds `SkillIndex` — map from agent name to Vec of matching skills. Hot-reload without daemon restart.
 
-- **AppContainer**: For high-security mode, create an AppContainer (`CreateAppContainerProfile`) and launch the agent in it. AppContainers restrict filesystem access to the staging workspace path and named capabilities. Network access restricted to `[sandbox.allow_network]` hosts via a network filter driver hook.
+3. [ ] **Agent manifest `[skills]` field**: `include = ["name"]` in agent TOML profiles. Resolved against the `SkillIndex` at goal start.
 
-**Items**:
-5. [ ] **Job Object wrapper** (`crates/ta-runtime/src/sandbox_windows.rs`): `SandboxProvider::WindowsJobObject` variant. `CreateJobObject`, `AssignProcessToJobObject`, `SetInformationJobObject` with `JOBOBJECT_BASIC_LIMIT_INFORMATION` and `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`. Process tree torn down on TA exit. Kills zombie agent processes.
+4. [ ] **Skill injection at goal start**: When `ta run` (or `ta goal start`) fires, matching skills from both paths are appended to the injected CLAUDE.md context block. Skills are clearly delimited so they can be stripped at diff time.
 
-6. [ ] **CI test** (Windows runner): Spawn a sandboxed agent subprocess, attempt to write outside the staging path, assert it is denied. Assert process tree is torn down when Job Object handle closes.
-7. [ ] **USAGE.md**: Windows sandbox section — what each containment level restricts, how to enable, elevation requirement for AppContainer, `ta doctor` sandbox check.
+5. [ ] **`ta skill list`**: Lists installed skills with name, description, agents, source path. `--agent <name>` filters to skills active for a specific agent.
 
-> **Focus**: Tier 2 managed-paths filesystem governance (SHA journal, Postgres/MySQL staging), followed by the unified `ta release` command system. Governance infrastructure comes first so the release pipeline itself can run under full governance.
+6. [ ] **`ta skill install <source>`**: Installs a skill file from a URL or GitHub path to `~/.config/ta/skills/`. `ta skill remove <name>` uninstalls.
+
+7. [ ] **Tests**: Skill loader discovers files from both dirs. Path A activates skill for declared agents only. Path B activates skill for agents that list it. Both paths simultaneously active don't duplicate injection. `ta skill list` shows correct output. Hot-reload picks up new files.
+
+8. [ ] **USAGE.md**: "Skill Plugins" section — how to write a skill file, both discovery paths, project-scoped vs personal skills, `ta skill` commands.
+
+#### Version: `0.16.3-alpha`
+
+---
 ### v0.16.4 — Windows Sandbox (AppContainer + Job Objects)
 <!-- status: pending -->
 
@@ -7918,6 +7900,23 @@ Windows machines that can't run Qwen3.5-27B. The 4B variant runs comfortably on 
 6. [ ] **Migrate Pragma template**: Rewrite v0.15.30.3's hardcoded Pragma init as `templates/pragma.toml` + `templates/pragma/` scaffold files + `PragmaContextFeature` impl. User-visible behaviour unchanged.
 
 #### Version: `0.16.5-alpha`
+
+---
+### v0.16.6 — Neovim Plugin
+<!-- status: pending -->
+
+> Deferred from v0.16.2 — Ollama, skills, and Windows sandbox are higher priority for the v0.16 cohort. Neovim targets the Rust/systems developer audience already comfortable with the CLI; the web Studio and VS Code extension serve the broader audience first.
+
+**Why**: Neovim users are a significant portion of the Rust/systems developer audience and strongly prefer terminal-native tools. A Lua plugin bridges TA with their existing workflow without requiring a browser or separate UI.
+
+**Depends on**: v0.16.1 (community IDE plugin guide, REST API contract documented — the Neovim plugin is implemented as a community-style integration using the same guide)
+
+1. [ ] **Diff view**: Opens staging diff in a split buffer using `vim.diff()` or `diffview.nvim`.
+2. [ ] **Floating window**: `:TA status` shows daemon health and active goal in a floating window.
+3. [ ] **Commands**: `:TA start`, `:TA approve <id>`, `:TA deny <id>`, `:TA shell`.
+4. [ ] **luarocks / GitHub Releases packaging**: Distribute via `luarocks` and GitHub Releases.
+
+#### Version: `0.16.6-alpha`
 
 ---
 ### v0.17.0 — Managed Paths: SHA Filesystem + URI Journal
