@@ -213,14 +213,17 @@ fn active_phases(goals_dir: &std::path::Path) -> std::collections::HashSet<Strin
         let Some(phase_id) = val.get("plan_phase").and_then(|v| v.as_str()) else {
             continue;
         };
+        // GoalRunState serializes as {"state": "running"} (internally-tagged enum),
+        // so we must read the nested "state" key, not the top-level field directly.
         let state = val
             .get("state")
+            .and_then(|v| v.get("state").or(Some(v)))
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        // Active states: created, configured, running, awaiting_input, finalizing.
+        // Active states: created, configured, running, awaiting_input, finalizing, pr_ready.
         let is_active = matches!(
             state,
-            "created" | "configured" | "running" | "awaiting_input" | "finalizing"
+            "created" | "configured" | "running" | "awaiting_input" | "finalizing" | "pr_ready"
         );
         if is_active {
             active.insert(phase_id.to_string());

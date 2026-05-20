@@ -307,11 +307,22 @@ function timeAgo(iso) {
 }
 
 function badgeClass(status) {
-  const s = (status || '').toLowerCase();
+  const s = draftStatus({status}).toLowerCase();
   if (s.includes('approved')) return 'badge-approved';
   if (s.includes('denied')) return 'badge-denied';
   if (s.includes('pending')) return 'badge-pending';
+  if (s.includes('applied')) return 'badge-approved';
   return 'badge-draft';
+}
+
+// DraftStatus serializes from the detail endpoint as an internally-tagged object
+// e.g. {"status":"applied","applied_at":"..."} or the string "PendingReview" from list.
+function draftStatus(d) {
+  const raw = d && d.status;
+  if (!raw) return 'unknown';
+  if (typeof raw === 'string') return raw.toLowerCase().replace(/_/g, '_');
+  if (typeof raw === 'object' && typeof raw.status === 'string') return raw.status;
+  return 'unknown';
 }
 
 // ── Tab navigation ─────────────────────────────────────────────
@@ -947,6 +958,10 @@ function togglePlanQueue() {
 }
 
 function renderPhaseCard(ph) {
+  const isActive = ph.running || ph.status === 'in_progress';
+  const statusBadge = ph.status === 'in_progress'
+    ? '<span class="badge badge-pending" style="margin-left:0.5rem">In Progress</span>'
+    : '';
   const runningBadge = ph.running
     ? '<span class="badge badge-active" style="margin-left:0.5rem">Running</span>'
     : '';
@@ -955,15 +970,14 @@ function renderPhaseCard(ph) {
       <div style="display:flex;align-items:center;gap:0.5rem;flex:1;min-width:0">
         <span style="color:var(--muted);font-family:monospace;font-size:0.8rem;flex-shrink:0">${esc(ph.id)}</span>
         <span class="card-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ph.title)}</span>
-        ${runningBadge}
+        ${statusBadge}${runningBadge}
       </div>
       <div style="display:flex;gap:0.5rem;flex-shrink:0">
         <button class="btn btn-sm btn-ghost" onclick="togglePhaseExpand('${esc(ph.id)}')">Details</button>
-        <button class="btn btn-sm btn-primary" id="run-btn-${esc(ph.id)}"
-          onclick="runPhase('${esc(ph.id)}')"
-          ${ph.running ? 'disabled title="A goal for this phase is already running"' : ''}>
-          Run
-        </button>
+        ${isActive
+          ? `<button class="btn btn-sm btn-ghost" onclick="alert('Run \`ta goal list\` to see active goals, or \`ta draft list\` to review the draft.')" title="A goal for this phase is already active">Active &#9654;</button>`
+          : `<button class="btn btn-sm btn-primary" id="run-btn-${esc(ph.id)}" onclick="runPhase('${esc(ph.id)}')">Run</button>`
+        }
       </div>
     </div>
     <div class="card-meta" id="phase-desc-${esc(ph.id)}" style="margin-top:0.35rem">
@@ -1111,21 +1125,38 @@ async function loadDrafts() {
   }
 }
 
+let draftShowAll = false;
+// Normalize to no-underscore lowercase for comparison.
+const DRAFT_ACTIVE_STATUSES = new Set(['draft', 'pendingreview', 'approved']);
+
+function draftIsActive(d) {
+  return DRAFT_ACTIVE_STATUSES.has(draftStatus(d).toLowerCase().replace(/[_]/g, ''));
+}
+
 function renderDraftList() {
   if (!drafts || drafts.length === 0) {
     app.innerHTML = '<div class="empty">No drafts yet. Start a goal from the <strong>Plan</strong> tab.</div>';
     return;
   }
+  const visible = draftShowAll ? drafts : drafts.filter(draftIsActive);
+  const hiddenCount = drafts.length - visible.length;
   app.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
-      <span style="color:var(--muted);font-size:0.85rem">${drafts.length} draft${drafts.length !== 1 ? 's' : ''}</span>
-      <button class="btn btn-sm btn-ghost" onclick="loadDrafts()">Refresh</button>
+      <span style="color:var(--muted);font-size:0.85rem">${visible.length} draft${visible.length !== 1 ? 's' : ''}${hiddenCount > 0 ? ' <span style="color:var(--muted)">(+' + hiddenCount + ' closed/applied)</span>' : ''}</span>
+      <div style="display:flex;gap:0.5rem">
+        <button class="btn btn-sm btn-ghost" title="${draftShowAll ? 'Hide closed/applied' : 'Show all drafts'}" onclick="draftShowAll=!draftShowAll;renderDraftList()">
+          ${draftShowAll ? '&#9632; Active only' : '&#9636; Show all'}
+        </button>
+        <button class="btn btn-sm btn-ghost" onclick="loadDrafts()">&#8635; Refresh</button>
+      </div>
     </div>
-  ` + drafts.map(d => `
+  ` + (visible.length === 0
+    ? '<div class="empty">No active drafts. <button class="btn btn-sm btn-ghost" onclick="draftShowAll=true;renderDraftList()">Show all</button></div>'
+    : visible.map(d => `
     <div class="card clickable" onclick="showDraftDetail('${d.package_id}')">
       <div class="card-header">
         <span class="card-title">${esc(d.title)}</span>
-        <span class="badge ${badgeClass(d.status)}">${esc(d.status)}</span>
+        <span class="badge ${badgeClass(d.status)}">${esc(draftStatus(d))}</span>
       </div>
       <div class="card-meta">
         ${d.artifact_count} artifact${d.artifact_count !== 1 ? 's' : ''} &middot;
@@ -1133,7 +1164,7 @@ function renderDraftList() {
         <code style="font-size:0.75rem">${d.package_id.slice(0, 8)}</code>
       </div>
     </div>
-  `).join('');
+  `).join(''));
 }
 
 async function showDraftDetail(id) {
@@ -1149,19 +1180,28 @@ async function showDraftDetail(id) {
 function renderDraftDetail(d) {
   const artifacts = (d.changes && d.changes.artifacts) || [];
   const actions = (d.changes && d.changes.pending_actions) || [];
-  const isReviewable = d.status && d.status.toLowerCase().includes('pending');
+  const status = draftStatus(d);
+  const isReviewable = status.includes('pending');
+  const isApproved = status.includes('approved');
+
+  // Build summary text from whichever summary fields exist.
+  let summaryHtml = '';
+  if (d.summary) {
+    const text = d.summary.description || d.summary.what_changed || d.summary.why || '';
+    if (text) summaryHtml = `<div class="section"><h3>Summary</h3><p>${esc(text)}</p></div>`;
+  }
 
   app.innerHTML = `
     <span class="back" onclick="loadDrafts()">&larr; Back to drafts</span>
     <div class="detail">
       <div class="card-header">
         <span class="card-title">${esc(d.goal && d.goal.title || 'Draft')}</span>
-        <span class="badge ${badgeClass(d.status)}">${esc(d.status)}</span>
+        <span class="badge ${badgeClass(d.status)}">${esc(status)}</span>
       </div>
       <div class="card-meta">
         <code>${d.package_id}</code> &middot; ${new Date(d.created_at).toLocaleString()}
       </div>
-      ${d.summary ? `<div class="section"><h3>Summary</h3><p>${esc(d.summary.description || '')}</p></div>` : ''}
+      ${summaryHtml}
       <div class="section">
         <h3>Changed Files (${artifacts.length})</h3>
         ${artifacts.length === 0
@@ -1169,7 +1209,8 @@ function renderDraftDetail(d) {
           : artifacts.map(a => `
             <div class="artifact">
               <span class="artifact-uri">${esc(a.resource_uri)}</span>
-              ${a.disposition ? ' &middot; <span style="color:var(--muted)">' + esc(a.disposition) + '</span>' : ''}
+              <span style="color:var(--muted);margin-left:0.4rem">${esc(a.change_type || a.disposition || '')}</span>
+              ${a.explanation_tiers && a.explanation_tiers.summary ? '<br><span style="font-size:0.8rem;color:var(--muted)">' + esc(a.explanation_tiers.summary) + '</span>' : ''}
             </div>
           `).join('')}
       </div>
@@ -1184,22 +1225,32 @@ function renderDraftDetail(d) {
           `).join('')}
         </div>
       ` : ''}
-      ${isReviewable ? `
-        <div class="actions">
+      <div class="actions">
+        ${isReviewable ? `
           <button class="btn btn-approve" onclick="doDraftAction('${d.package_id}','approve')">Approve</button>
+          <button class="btn btn-primary" onclick="doDraftAction('${d.package_id}','apply')" title="Approve and apply to source">Apply</button>
           <button class="btn btn-deny" onclick="doDraftAction('${d.package_id}','deny')">Deny</button>
-        </div>
-      ` : `
-        <div class="actions">
+        ` : isApproved ? `
+          <button class="btn btn-primary" onclick="doDraftAction('${d.package_id}','apply')" title="Apply approved draft to source">Apply</button>
+          <button class="btn btn-deny" onclick="doDraftAction('${d.package_id}','deny')">Deny</button>
+        ` : `
           <button class="btn btn-ghost" onclick="loadDrafts()">&larr; Back</button>
-        </div>
-      `}
+        `}
+      </div>
     </div>
   `;
 }
 
 async function doDraftAction(id, action) {
   const btn = event && event.target;
+  if (action === 'apply') {
+    const cmd = 'ta draft apply ' + id.slice(0, 8) + ' --git-commit';
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(cmd).catch(() => {});
+    }
+    alert('Run in your terminal (copied to clipboard):\n\n' + cmd);
+    return;
+  }
   if (btn) btn.disabled = true;
   try {
     const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
