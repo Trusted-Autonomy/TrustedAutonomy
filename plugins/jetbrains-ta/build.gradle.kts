@@ -26,7 +26,6 @@ dependencies {
         create("IC", providers.gradleProperty("platformVersion").get())
         pluginVerifier()
         zipSigner()
-        instrumentationTools()
     }
 }
 
@@ -50,5 +49,11 @@ intellijPlatform {
 
     publishing {
         token = providers.environmentVariable("JETBRAINS_MARKETPLACE_TOKEN")
+    }
+
+    pluginVerification {
+        ides {
+            recommended()
+        }
     }
 }
