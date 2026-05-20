@@ -1,0 +1,73 @@
+<idea-plugin>
+    <id>com.trusted-autonomy.ta</id>
+    <name>Trusted Autonomy</name>
+    <vendor url="https://github.com/trustedautonomy/ta">Trusted Autonomy</vendor>
+    <description><![CDATA[
+        AI-assisted development with human-in-the-loop review. Start goals, review proposed
+        changes, and approve or deny agent diffs — all without leaving your IDE.<br><br>
+        The plugin connects to the TA daemon running on <code>http://127.0.0.1:7700</code>.
+        Start the daemon first with <code>ta start</code> in your project directory.
+    ]]></description>
+
+    <!-- Works in all JetBrains IDEs: PyCharm, WebStorm, IntelliJ IDEA, etc. -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Application-scoped settings (daemon URL, token, poll interval) -->
+        <applicationService
+            serviceImplementation="com.trustedautonomy.ta.TaSettings"/>
+
+        <!-- Project-scoped SSE listener + notification dispatcher -->
+        <projectService
+            serviceImplementation="com.trustedautonomy.ta.TaNotificationService"/>
+
+        <!-- Tool window: Goals + Drafts tabs -->
+        <toolWindow
+            id="TrustedAutonomy"
+            displayName="Trusted Autonomy"
+            anchor="right"
+            factoryClass="com.trustedautonomy.ta.TaToolWindowFactory"
+            icon="/icons/ta.svg"/>
+
+        <!-- Status bar widget showing daemon health -->
+        <statusBarWidgetFactory
+            id="com.trusted-autonomy.ta.statusBar"
+            implementation="com.trustedautonomy.ta.TaStatusBarWidgetFactory"
+            order="last"/>
+
+        <!-- Notification group for goal/draft events -->
+        <notificationGroup
+            id="Trusted Autonomy"
+            displayType="BALLOON"/>
+
+        <!-- Startup: connect to daemon and start SSE listener -->
+        <postStartupActivity
+            implementation="com.trustedautonomy.ta.TaStartupActivity"/>
+    </extensions>
+
+    <actions>
+        <group id="TaActionGroup" text="Trusted Autonomy" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+
+            <action id="ta.startGoal"
+                    class="com.trustedautonomy.ta.StartGoalAction"
+                    text="Start New Goal..."
+                    description="Start a new TA goal — describe what you want the agent to do"/>
+
+            <action id="ta.approveDraft"
+                    class="com.trustedautonomy.ta.ApproveDraftAction"
+                    text="Approve Draft..."
+                    description="Approve a pending draft and apply the changes"/>
+
+            <action id="ta.denyDraft"
+                    class="com.trustedautonomy.ta.DenyDraftAction"
+                    text="Deny Draft..."
+                    description="Deny a pending draft with a reason"/>
+
+            <action id="ta.openShell"
+                    class="com.trustedautonomy.ta.OpenShellAction"
+                    text="Open TA Shell"
+                    description="Open the TA web shell in the system browser"/>
+        </group>
+    </actions>
+</idea-plugin>

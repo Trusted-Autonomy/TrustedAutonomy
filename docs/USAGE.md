@@ -67,6 +67,7 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Credential Management](#credential-management)
    - [Context Memory](#context-memory)
    - [VS Code Extension](#vs-code-extension)
+   - [JetBrains Plugin (PyCharm, WebStorm, IntelliJ IDEA)](#jetbrains-plugin-pycharm-webstorm-intellij-idea)
    - [Web Review UI](#web-review-ui)
    - [Daemon API](#daemon-api)
    - [Interactive Shell (ta shell)](#interactive-shell)
@@ -7114,6 +7115,72 @@ Help → Get Started → Get Started with Trusted Autonomy
 #### Publishing
 
 The extension is built and published by the `.github/workflows/vscode-extension.yml` CI workflow. Push a tag `vscode-v<version>` (e.g., `vscode-v0.16.0`) to trigger a Marketplace publish. Requires the `VSCE_PAT` secret configured in the repository.
+
+---
+
+### JetBrains Plugin (PyCharm, WebStorm, IntelliJ IDEA)
+
+Install the **Trusted Autonomy** plugin from JetBrains Marketplace to start goals, review diffs, and approve or deny changes without leaving your JetBrains IDE.
+
+#### Installation
+
+Search for **Trusted Autonomy** in **Settings → Plugins → Marketplace**, or install from disk:
+
+1. Download the plugin ZIP from [GitHub Releases](https://github.com/trustedautonomy/ta/releases)
+2. Go to **Settings → Plugins → ⚙ → Install Plugin from Disk**
+3. Select the downloaded ZIP
+
+The plugin works in PyCharm, WebStorm, and IntelliJ IDEA 2024.1 and later.
+
+#### Setup
+
+Start the TA daemon in your project directory before using the plugin:
+
+```bash
+ta start  # or: ta daemon start
+```
+
+The plugin connects to `http://127.0.0.1:7700` by default (configurable in Settings).
+
+#### Features
+
+**Goals panel** — The **Trusted Autonomy** tool window (right sidebar) shows a **Goals** tab with all active agents and their current state (running, pr_ready, applied, failed).
+
+**Drafts panel** — The **Drafts** tab shows pending drafts. Select a draft and click **Approve** or **Deny** to act on it.
+
+**Status bar** — The bottom status bar shows daemon health and active goal count:
+- `TA: 2 running` — goals in progress
+- `TA: ready` — daemon connected, no active goals
+- `TA: offline` — daemon not running
+
+**IDE notifications** — Balloon notifications appear when a draft is ready to review or a goal fails.
+
+**Tools menu** — All actions are available under **Tools → Trusted Autonomy**:
+
+| Action | Description |
+|---|---|
+| Start New Goal... | Describe a goal and launch the agent |
+| Approve Draft... | Pick and approve a pending draft |
+| Deny Draft... | Pick and deny a draft with a reason |
+| Open TA Shell | Open the web shell in your browser |
+
+#### Configuration
+
+Go to **Settings → Trusted Autonomy** to configure:
+
+| Setting | Default | Description |
+|---|---|---|
+| Daemon URL | `http://127.0.0.1:7700` | TA daemon address |
+| API Token | *(empty)* | Bearer token if your daemon has auth enabled |
+| Poll Interval | `15` | Seconds between Goals/Drafts panel refreshes |
+
+#### Publishing
+
+The plugin is built and published by `.github/workflows/jetbrains-plugin.yml`. Push a tag `jetbrains-v<version>` (e.g., `jetbrains-v0.16.1`) to trigger signing and Marketplace upload. Requires the `JETBRAINS_MARKETPLACE_TOKEN`, `JETBRAINS_CERTIFICATE_CHAIN`, `JETBRAINS_PRIVATE_KEY`, and `JETBRAINS_PRIVATE_KEY_PASSWORD` secrets.
+
+#### Community IDE integrations
+
+Want to integrate TA with Zed, Emacs, Helix, Eclipse, or another editor? See [`docs/community-ide-plugin.md`](community-ide-plugin.md) for the full REST API reference, SSE event stream documentation, and a working TypeScript example you can adapt to any IDE.
 
 ---
 
