@@ -193,7 +193,15 @@ pub fn parse_plan_phases(content: &str) -> Vec<ApiPlanPhase> {
 ///
 /// Scans `.ta/goals/*.json` for goal files whose `plan_phase` matches one of
 /// the supplied phase IDs and whose `state` is an active (non-terminal) state.
-fn active_phases(goals_dir: &std::path::Path) -> std::collections::HashSet<String> {
+///
+/// `known_ids` is the set of phase IDs found in the parsed plan. Any goal whose
+/// `plan_phase` has no matching entry in `known_ids` is skipped — this suppresses
+/// ghost "running" badges for stale goals linked to phases that no longer exist
+/// (or whose heading was removed by staging drift).
+fn active_phases(
+    goals_dir: &std::path::Path,
+    known_ids: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
     let mut active = std::collections::HashSet::new();
     let dir = match std::fs::read_dir(goals_dir) {
         Ok(d) => d,
@@ -213,6 +221,11 @@ fn active_phases(goals_dir: &std::path::Path) -> std::collections::HashSet<Strin
         let Some(phase_id) = val.get("plan_phase").and_then(|v| v.as_str()) else {
             continue;
         };
+        // Skip goals whose phase_id has no matching heading in the parsed plan.
+        // This prevents ghost badges for stale goals linked to removed/renamed phases.
+        if !known_ids.is_empty() && !phase_id_in_known(phase_id, known_ids) {
+            continue;
+        }
         // GoalRunState serializes as {"state": "running"} (internally-tagged enum),
         // so we must read the nested "state" key, not the top-level field directly.
         let state = val
@@ -230,6 +243,16 @@ fn active_phases(goals_dir: &std::path::Path) -> std::collections::HashSet<Strin
         }
     }
     active
+}
+
+/// Check whether `phase_id` matches any entry in `known_ids`, normalising the
+/// optional `v` prefix on both sides.
+fn phase_id_in_known(phase_id: &str, known_ids: &std::collections::HashSet<String>) -> bool {
+    let stripped = phase_id.strip_prefix('v').unwrap_or(phase_id);
+    known_ids.iter().any(|k| {
+        let k_stripped = k.strip_prefix('v').unwrap_or(k.as_str());
+        k_stripped == stripped
+    })
 }
 
 // ── Handlers ───────────────────────────────────────────────────
@@ -256,9 +279,13 @@ pub async fn get_plan_phases(State(state): State<Arc<AppState>>) -> impl IntoRes
 
     let mut phases = parse_plan_phases(&content);
 
-    // Annotate phases that have an active goal.
+    // Build the set of known phase IDs for orphan suppression.
+    let known_ids: std::collections::HashSet<String> =
+        phases.iter().map(|p| p.id.clone()).collect();
+
+    // Annotate phases that have an active goal (orphaned phase IDs are suppressed).
     let goals_dir = project_root.join(".ta").join("goals");
-    let active = active_phases(&goals_dir);
+    let active = active_phases(&goals_dir, &known_ids);
     for ph in &mut phases {
         ph.running = active.contains(&ph.id)
             || active.contains(&format!("v{}", ph.id))
@@ -1093,5 +1120,103 @@ Future work.
         };
         let framework = req.framework.as_deref().unwrap_or("default");
         assert_eq!(framework, "default");
+    }
+
+    // ── v0.16.1.1: v0.15.9 heading, orphan suppression, phase_id_in_known ──
+
+    const PLAN_WITH_V0_15_9: &str = r#"### v0.15.8 — Foo
+<!-- status: done -->
+
+Some content.
+
+### v0.15.9 — Messaging Adapter Plugin Architecture
+<!-- status: done -->
+
+1. [x] Implement plugin protocol
+2. [x] Write tests
+
+#### Version: `0.15.9-alpha`
+
+### v0.15.10 — Email Assistant
+<!-- status: pending -->
+
+Future work.
+"#;
+
+    #[test]
+    fn parse_plan_phases_finds_v0_15_9_with_heading() {
+        let phases = parse_plan_phases(PLAN_WITH_V0_15_9);
+        let phase = phases.iter().find(|p| p.id == "v0.15.9");
+        assert!(
+            phase.is_some(),
+            "v0.15.9 should be found when heading exists"
+        );
+        let phase = phase.unwrap();
+        assert_eq!(phase.status, "done");
+        assert_eq!(phase.title, "Messaging Adapter Plugin Architecture");
+        assert_eq!(phase.items.len(), 2);
+        assert!(phase.items[0].done);
+        assert!(phase.items[1].done);
+    }
+
+    #[test]
+    fn phase_id_in_known_matches_with_and_without_v_prefix() {
+        let known: std::collections::HashSet<String> = ["v0.15.9", "v0.15.10", "v0.16.0"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(phase_id_in_known("v0.15.9", &known));
+        assert!(phase_id_in_known("0.15.9", &known)); // no v-prefix
+        assert!(!phase_id_in_known("v0.15.11", &known));
+        assert!(!phase_id_in_known("v0.99.0", &known));
+    }
+
+    #[test]
+    fn active_phases_suppresses_orphaned_phase_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        // Write a goal JSON whose plan_phase is NOT in the known set.
+        let orphan = serde_json::json!({
+            "plan_phase": "v0.99.0",
+            "state": "running",
+        });
+        std::fs::write(goals_dir.join("orphan.json"), orphan.to_string()).unwrap();
+
+        // Write a goal JSON whose plan_phase IS in the known set.
+        let valid = serde_json::json!({
+            "plan_phase": "v0.15.9",
+            "state": "running",
+        });
+        std::fs::write(goals_dir.join("valid.json"), valid.to_string()).unwrap();
+
+        let known: std::collections::HashSet<String> =
+            ["v0.15.9"].iter().map(|s| s.to_string()).collect();
+
+        let active = active_phases(&goals_dir, &known);
+        assert!(active.contains("v0.15.9"), "known phase should be active");
+        assert!(
+            !active.contains("v0.99.0"),
+            "orphaned phase should be suppressed"
+        );
+    }
+
+    #[test]
+    fn active_phases_allows_all_when_known_ids_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        let goal = serde_json::json!({
+            "plan_phase": "v0.15.9",
+            "state": "running",
+        });
+        std::fs::write(goals_dir.join("g.json"), goal.to_string()).unwrap();
+
+        // Empty known_ids — should not suppress anything.
+        let known: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let active = active_phases(&goals_dir, &known);
+        assert!(active.contains("v0.15.9"));
     }
 }
