@@ -7698,6 +7698,28 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 #### Version: `0.16.0-alpha`
 
 ---
+### v0.16.0.1 — Studio UX Reliability
+<!-- status: done -->
+
+**Goal**: Make the Studio dashboard reliably reflect actual system state — active goals shown, in-progress plan phases blocked from re-run, draft detail panel working, and stale closed/applied drafts hidden by default.
+
+**Why this phase exists**: PR #456 (v0.16.0) revealed several Studio UX regressions: the draft detail panel crashed on any draft from the `/api/drafts/{id}` endpoint (Rust `DraftStatus` tagged-enum serialized as an object, not a string — `d.status.toLowerCase()` threw TypeError), plan phases never showed as "running" (same issue: `GoalRunState` tagged-enum serialization), the Run button remained enabled on in-progress phases, and closed/applied drafts cluttered the drafts list. All issues fixed in this phase.
+
+#### Changes
+
+1. [x] **`draftStatus()` normalizer** (`assets/index.html`): Handles both string (`"pending_review"`) and object (`{"status":"pending_review"}`) forms of `DraftStatus` from the API. Used everywhere `d.status` was accessed — eliminates the `toLowerCase()` crash on the detail endpoint.
+
+2. [x] **Active-only draft filter** (`assets/index.html`): Drafts list defaults to showing only active statuses (`draft`, `pending_review`, `approved`). A toggle button ("Show all / Active only") reveals closed/applied drafts with a count badge. Reduces noise for the common case.
+
+3. [x] **Draft detail Apply button** (`assets/index.html`): Detail panel shows the `ta draft apply <id> --git-commit` CLI command and copies it to clipboard. Workaround for the lack of a `/api/drafts/{id}/apply` REST route.
+
+4. [x] **Plan phase In Progress badge + Run guard** (`assets/index.html`): `renderPhaseCard()` shows an "In Progress" badge when `ph.status === 'in_progress'` and a "Running" badge when `ph.running === true`. The Run button is replaced with an "Active ▶" button (disabled, shows guidance) when either condition is true.
+
+5. [x] **`active_phases()` tagged-enum fix** (`crates/ta-daemon/src/api/plan.rs`): `GoalRunState` uses `#[serde(tag = "state")]` — `val.get("state")` returns `{"state":"running"}` (an object), not a string. Fixed to read the nested `.get("state")` key. Also added `pr_ready` as an active state so goals awaiting review still mark their phase as running.
+
+#### Version: `0.16.0-alpha.1`
+
+---
 ### v0.16.1 — JetBrains IDE Plugin (PyCharm, WebStorm, IntelliJ)
 <!-- status: pending -->
 
