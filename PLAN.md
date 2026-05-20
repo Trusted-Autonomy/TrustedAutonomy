@@ -5061,6 +5061,9 @@ The reviewer goal never marks `failed` because staging was absent — it marks `
 
 12. [x] **USAGE.md**: "Messaging Adapters" section — plugin protocol, how to set up each built-in provider, `create_draft` vs `send` design rationale, how to write a community plugin.
 
+### v0.15.9 — Messaging Adapter Plugin Architecture
+<!-- status: done -->
+
 #### Version: `0.15.9-alpha`
 
 ---
@@ -7736,6 +7739,26 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 4. [x] **Community IDE plugin guide** (`docs/community-ide-plugin.md`): Step-by-step guide for building a TA integration in any IDE. Covers: daemon REST API reference, SSE event stream for live goal state, authentication (none for localhost), recommended command palette actions, and a minimal working example in TypeScript (reusable for Zed, Cursor, etc.). Linked from USAGE.md.
 
 #### Version: `0.16.1-alpha`
+
+---
+### v0.16.1.1 — Studio Sub-Phase Display & Plan Heading Fixes
+<!-- status: pending -->
+
+**Goal**: Fix Studio dashboard display issues that survived v0.16.0.1: plan phases with missing headings (specifically v0.15.9 whose `### v0.15.9` heading was dropped by staging drift) show as perpetually in-progress, and sub-phases (e.g. `v0.16.0.1`, `v0.16.1.1`) are not surfaced correctly in the plan tab hierarchy. Also clean up any remaining stale `plan_history` entries that reference phases with no matching heading.
+
+**Why this phase exists**: v0.16.0.1 fixed the JS crash and active-goals display but didn't address the plan parser itself. The `### v0.15.9` heading is absent from PLAN.md (historical staging drift) — the parser never matches it, so `plan_history` entries for that phase show as unresolved in the dashboard. Additionally, the plan tab renders phases as a flat list; sub-phases (`v0.X.Y.Z`) have no visual nesting or hierarchy to indicate they are incremental improvements within a parent phase.
+
+1. [ ] **Add missing `### v0.15.9` heading** (PLAN.md): Insert heading + `<!-- status: done -->` before the existing `#### Version: 0.15.9-alpha` marker so the plan parser can find and resolve the phase. (Already done as part of this PLAN.md commit.)
+
+2. [ ] **Sub-phase nesting in Studio plan tab** (`assets/index.html`): Detect `vX.Y.Z.N` phase IDs and render them indented under their parent (`vX.Y.Z`) with a connecting visual (left border or tree line). Parent phases show a chevron to expand/collapse sub-phases. Sub-phases that are `done` show as a green check inside the parent row rather than a full card.
+
+3. [ ] **Stale plan_history orphan suppression** (`crates/ta-daemon/src/api/plan.rs`): When `active_phases()` processes `plan_history` entries, skip any phase ID that has no matching heading in the parsed plan. Prevents ghost "in-progress" badges for phases the parser can't resolve.
+
+4. [ ] **`ta plan status` sub-phase tree output** (`apps/ta-cli/src/commands/plan.rs`): CLI plan status output should indent sub-phases under their parent with a `  └─` prefix, matching the Studio visual hierarchy.
+
+5. [ ] **Tests**: Plan parser correctly finds v0.15.9 after heading insertion. Orphaned plan_history IDs are suppressed. Sub-phase nesting renders correctly in unit tests for the plan formatter.
+
+#### Version: `0.16.1-alpha.1`
 
 ---
 ### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
