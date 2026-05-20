@@ -165,6 +165,20 @@
   .advisor-option.opt-deny .opt-num { background: var(--red); }
   .advisor-option.opt-auto .opt-num { background: var(--yellow); color: #000; }
   .advisor-close { margin-top: 1rem; text-align: right; }
+  /* Sub-phase nesting (v0.16.1.1) */
+  .subphase-list { margin-top: 0.75rem; border-left: 2px solid var(--border); padding-left: 1rem; }
+  .subphase-item-done { display: flex; align-items: center; gap: 0.5rem; padding: 0.2rem 0;
+                        font-size: 0.82rem; color: var(--muted); }
+  .subphase-item-done .sub-check { color: var(--green); flex-shrink: 0; }
+  .subphase-card { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+                   padding: 0.75rem 1rem; margin-top: 0.5rem; }
+  .subphase-card.active { border-color: var(--accent); }
+  .subphase-header { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+  .subphase-id { color: var(--muted); font-family: monospace; font-size: 0.75rem; flex-shrink: 0; }
+  .subphase-title { font-size: 0.88rem; font-weight: 600;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chevron { cursor: pointer; color: var(--muted); font-size: 0.8rem; padding: 0 0.25rem;
+             transition: transform 0.15s; flex-shrink: 0; }
   /* Advisor tab chat panel */
   .advisor-chat { display: flex; flex-direction: column; gap: 0.75rem; }
   .advisor-msg { padding: 0.75rem; border-radius: 8px; font-size: 0.9rem; line-height: 1.5; }
@@ -845,6 +859,34 @@ function renderDashboard(allDrafts, questions, status) {
 // ── Plan Tab (v0.14.19) ────────────────────────────────────────
 
 let planPhases = [];
+// Tracks which parent phase sub-phase lists are expanded.
+const subPhaseExpanded = {};
+
+// Returns true if id has 4+ numeric components (e.g. v0.16.0.1).
+function isSubPhase(id) {
+  if (!id || !id.startsWith('v')) return false;
+  return id.slice(1).split('.').length >= 4;
+}
+
+// Returns the 3-component parent ID for a sub-phase (v0.16.0.1 → v0.16.0).
+function parentPhaseId(id) {
+  if (!isSubPhase(id)) return null;
+  const parts = id.slice(1).split('.');
+  return 'v' + parts.slice(0, 3).join('.');
+}
+
+// Build a map of parentId → [sub-phase objects] from the full phase list.
+function buildSubPhaseMap(phases) {
+  const map = {};
+  for (const ph of phases) {
+    if (isSubPhase(ph.id)) {
+      const parent = parentPhaseId(ph.id);
+      if (!map[parent]) map[parent] = [];
+      map[parent].push(ph);
+    }
+  }
+  return map;
+}
 
 async function loadPlan() {
   app.innerHTML = '<div class="loading">Loading plan...</div>';
@@ -859,9 +901,24 @@ async function loadPlan() {
 }
 
 let planQueueExpanded = false;
+// Top-level pending items (excluding sub-phases whose parent exists). Cached for togglePlanQueue.
+let planQueueItems = [];
 
 function renderPlan() {
-  const pending = planPhases.filter(p => p.status === 'pending' || p.status === 'in_progress');
+  const subMap = buildSubPhaseMap(planPhases);
+  // Only top-level phases (non-sub-phases, OR sub-phases whose parent isn't in the plan) qualify
+  // as root items in the queue. Sub-phases whose parent exists are rendered inside the parent card.
+  const parentIds = new Set(planPhases.map(p => p.id));
+  function isOrphanSubPhase(ph) {
+    if (!isSubPhase(ph.id)) return false;
+    const pid = parentPhaseId(ph.id);
+    return !parentIds.has(pid);
+  }
+  planQueueItems = planPhases.filter(p =>
+    (p.status === 'pending' || p.status === 'in_progress') &&
+    (!isSubPhase(p.id) || isOrphanSubPhase(p))
+  );
+  const pending = planQueueItems;
   let html = '';
 
   // ── Next Up — show only the first pending phase; rest collapsible ───
@@ -879,7 +936,7 @@ function renderPlan() {
     const next = pending[0];
     const rest = pending.slice(1);
     html += `<div class="dash-section-title">Next Up${rest.length > 0 ? ' <span style="color:var(--muted);font-size:0.8rem;font-weight:normal">(+' + rest.length + ' queued)</span>' : ''}</div>`;
-    html += renderPhaseCard(next);
+    html += renderPhaseCard(next, subMap);
 
     if (rest.length > 0) {
       html += `<div style="margin-top:0.5rem">
@@ -888,7 +945,7 @@ function renderPlan() {
         </button>
       </div>`;
       html += `<div id="plan-queue-list" style="display:${planQueueExpanded ? 'block' : 'none'};margin-top:0.5rem">`;
-      rest.forEach(ph => { html += renderPhaseCard(ph); });
+      rest.forEach(ph => { html += renderPhaseCard(ph, subMap); });
       html += '</div>';
     }
   }
@@ -952,12 +1009,12 @@ function togglePlanQueue() {
   const btn = document.getElementById('plan-queue-toggle');
   if (list) list.style.display = planQueueExpanded ? 'block' : 'none';
   if (btn) {
-    const rest = planPhases.filter(p => p.status === 'pending' || p.status === 'in_progress').slice(1);
+    const rest = planQueueItems.slice(1);
     btn.textContent = planQueueExpanded ? '▲ Hide queue' : '▼ Show ' + rest.length + ' more phase' + (rest.length !== 1 ? 's' : '');
   }
 }
 
-function renderPhaseCard(ph) {
+function renderPhaseCard(ph, subMap) {
   const isActive = ph.running || ph.status === 'in_progress';
   const statusBadge = ph.status === 'in_progress'
     ? '<span class="badge badge-pending" style="margin-left:0.5rem">In Progress</span>'
@@ -965,9 +1022,17 @@ function renderPhaseCard(ph) {
   const runningBadge = ph.running
     ? '<span class="badge badge-active" style="margin-left:0.5rem">Running</span>'
     : '';
+  const subs = (subMap && subMap[ph.id]) || [];
+  const hasSubs = subs.length > 0;
+  const expanded = subPhaseExpanded[ph.id] !== false; // default expanded
+  const subSection = hasSubs ? renderSubPhases(ph.id, subs, expanded) : '';
+  const chevron = hasSubs
+    ? `<span class="chevron" onclick="toggleSubPhases('${esc(ph.id)}')" id="chevron-${esc(ph.id)}">${expanded ? '▼' : '▶'}</span>`
+    : '';
   return `<div class="card" id="phase-card-${esc(ph.id)}">
     <div class="card-header">
       <div style="display:flex;align-items:center;gap:0.5rem;flex:1;min-width:0">
+        ${chevron}
         <span style="color:var(--muted);font-family:monospace;font-size:0.8rem;flex-shrink:0">${esc(ph.id)}</span>
         <span class="card-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ph.title)}</span>
         ${statusBadge}${runningBadge}
@@ -986,7 +1051,61 @@ function renderPhaseCard(ph) {
     <div id="phase-expand-${esc(ph.id)}" style="display:none;margin-top:0.75rem">
       ${renderPhaseDetails(ph)}
     </div>
+    <div id="subphases-${esc(ph.id)}" style="display:${expanded ? 'block' : 'none'}">
+      ${subSection}
+    </div>
   </div>`;
+}
+
+// Render the sub-phase section inside a parent card.
+function renderSubPhases(parentId, subs, expanded) {
+  if (!subs || subs.length === 0) return '';
+  let html = '<div class="subphase-list">';
+  for (const sub of subs) {
+    if (sub.status === 'done') {
+      html += `<div class="subphase-item-done">
+        <span class="sub-check">✓</span>
+        <span style="font-family:monospace;font-size:0.75rem">${esc(sub.id)}</span>
+        <span style="text-decoration:line-through">${esc(sub.title)}</span>
+      </div>`;
+    } else {
+      const subActive = sub.running || sub.status === 'in_progress';
+      const subBadge = sub.status === 'in_progress'
+        ? '<span class="badge badge-pending" style="margin-left:0.4rem;font-size:0.7rem">In Progress</span>'
+        : '';
+      const subRunBadge = sub.running
+        ? '<span class="badge badge-active" style="margin-left:0.4rem;font-size:0.7rem">Running</span>'
+        : '';
+      html += `<div class="subphase-card${subActive ? ' active' : ''}">
+        <div class="subphase-header">
+          <div style="display:flex;align-items:center;gap:0.4rem;flex:1;min-width:0">
+            <span class="subphase-id">${esc(sub.id)}</span>
+            <span class="subphase-title">${esc(sub.title)}</span>
+            ${subBadge}${subRunBadge}
+          </div>
+          <div style="display:flex;gap:0.4rem;flex-shrink:0">
+            ${subActive
+              ? `<button class="btn btn-sm btn-ghost" onclick="alert('Run \`ta goal list\` to see active goals.')">Active &#9654;</button>`
+              : `<button class="btn btn-sm btn-primary" id="run-btn-${esc(sub.id)}" onclick="runPhase('${esc(sub.id)}')">Run</button>`
+            }
+          </div>
+        </div>
+        ${sub.description ? `<div style="font-size:0.8rem;color:var(--muted);margin-top:0.35rem">${esc(sub.description)}</div>` : ''}
+      </div>`;
+    }
+  }
+  html += '</div>';
+  return html;
+}
+
+function toggleSubPhases(parentId) {
+  const el = document.getElementById('subphases-' + parentId);
+  const chevron = document.getElementById('chevron-' + parentId);
+  if (!el) return;
+  const nowExpanded = el.style.display === 'none';
+  el.style.display = nowExpanded ? 'block' : 'none';
+  subPhaseExpanded[parentId] = nowExpanded;
+  if (chevron) chevron.textContent = nowExpanded ? '▼' : '▶';
 }
 
 function renderPhaseDetails(ph) {

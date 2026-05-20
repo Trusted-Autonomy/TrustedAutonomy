@@ -1444,7 +1444,7 @@ fn list_phases(config: &GatewayConfig) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("{:<12} {:<40} {:<14}", "PHASE", "TITLE", "STATUS");
+    println!("{:<14} {:<38} {:<14}", "PHASE", "TITLE", "STATUS");
     println!("{}", "-".repeat(66));
 
     for phase in &phases {
@@ -1454,12 +1454,22 @@ fn list_phases(config: &GatewayConfig) -> anyhow::Result<()> {
             PlanStatus::Pending => "pending",
             PlanStatus::Deferred => "deferred",
         };
-        println!(
-            "{:<12} {:<40} {:<14}",
-            phase.id,
-            truncate(&phase.title, 38),
-            status_display,
-        );
+        if is_sub_phase(&phase.id) {
+            // Indent sub-phases under their parent with a tree connector.
+            println!(
+                "  {:<12} {:<38} {:<14}",
+                format!("└─ {}", phase.id),
+                truncate(&phase.title, 36),
+                status_display,
+            );
+        } else {
+            println!(
+                "{:<14} {:<38} {:<14}",
+                phase.id,
+                truncate(&phase.title, 38),
+                status_display,
+            );
+        }
     }
 
     Ok(())
@@ -1538,12 +1548,34 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
     }
 
     if let Some(current) = phases.iter().find(|p| p.status == PlanStatus::InProgress) {
-        println!("\nCurrent: Phase {} — {}", current.id, current.title);
+        if is_sub_phase(&current.id) {
+            if let Some(parent_id) = parent_phase_id(&current.id) {
+                if let Some(parent) = phases.iter().find(|p| phase_ids_match(&p.id, &parent_id)) {
+                    println!("\nCurrent: Phase {} — {}", parent.id, parent.title);
+                    println!("         └─ {} — {}", current.id, current.title);
+                } else {
+                    println!("\nCurrent: └─ Phase {} — {}", current.id, current.title);
+                }
+            }
+        } else {
+            println!("\nCurrent: Phase {} — {}", current.id, current.title);
+        }
     }
 
     // Use find_next_pending to skip deferred phases.
     if let Some(next) = find_next_pending(&phases, None) {
-        println!("Next:    Phase {} — {}", next.id, next.title);
+        if is_sub_phase(&next.id) {
+            if let Some(parent_id) = parent_phase_id(&next.id) {
+                if let Some(parent) = phases.iter().find(|p| phase_ids_match(&p.id, &parent_id)) {
+                    println!("Next:    Phase {} — {}", parent.id, parent.title);
+                    println!("         └─ {} — {}", next.id, next.title);
+                } else {
+                    println!("Next:    └─ Phase {} — {}", next.id, next.title);
+                }
+            }
+        } else {
+            println!("Next:    Phase {} — {}", next.id, next.title);
+        }
     }
 
     // Show done phases with pending human review items.
@@ -1623,6 +1655,31 @@ pub fn collect_dependency_warnings(phases: &[PlanPhase]) -> Vec<String> {
 /// Returns the binary version string at compile time.
 pub fn binary_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Returns true if the phase ID is a sub-phase (has 4 or more numeric components).
+///
+/// A sub-phase has the form `vX.Y.Z.N` (or deeper like `vX.Y.Z.N.M`), as opposed
+/// to a top-level phase `vX.Y.Z`. Non-semver IDs like "4b" or "Phase 0" are never
+/// considered sub-phases.
+pub fn is_sub_phase(id: &str) -> bool {
+    let stripped = match id.strip_prefix('v') {
+        Some(s) if s.starts_with(|c: char| c.is_ascii_digit()) => s,
+        _ => return false,
+    };
+    stripped.split('.').count() >= 4
+}
+
+/// Returns the parent phase ID for a sub-phase, or `None` if the ID is not a sub-phase.
+///
+/// `v0.16.0.1` → `Some("v0.16.0")`, `v0.15.30.5.1` → `Some("v0.15.30")`.
+pub fn parent_phase_id(id: &str) -> Option<String> {
+    if !is_sub_phase(id) {
+        return None;
+    }
+    let stripped = id.strip_prefix('v').unwrap_or(id);
+    let parts: Vec<&str> = stripped.split('.').collect();
+    Some(format!("v{}", parts[..3].join(".")))
 }
 
 /// Parse a semver-style phase ID like "v0.14.3" or "v0.13.17.1" into a comparable tuple of u32s.
@@ -8185,5 +8242,58 @@ More content here that is part of a second paragraph.
         assert_eq!(ts.len(), 20, "Expected 20 chars, got {:?}", ts);
         assert!(ts.ends_with('Z'), "Expected Z suffix, got {:?}", ts);
         assert!(ts.contains('T'), "Expected T separator, got {:?}", ts);
+    }
+
+    // ── v0.16.1.1: sub-phase helpers ──────────────────────────────────────────
+
+    #[test]
+    fn is_sub_phase_detects_four_component_ids() {
+        assert!(is_sub_phase("v0.16.0.1"), "4-component ID is a sub-phase");
+        assert!(is_sub_phase("v0.15.30.5"), "4-component ID is a sub-phase");
+        assert!(
+            is_sub_phase("v0.15.30.5.1"),
+            "5-component ID is a sub-phase"
+        );
+        assert!(
+            !is_sub_phase("v0.16.0"),
+            "3-component ID is not a sub-phase"
+        );
+        assert!(
+            !is_sub_phase("v0.16.1"),
+            "3-component ID is not a sub-phase"
+        );
+        assert!(!is_sub_phase("4b"), "non-semver ID is not a sub-phase");
+        assert!(!is_sub_phase("0"), "single-component is not a sub-phase");
+        assert!(!is_sub_phase(""), "empty string is not a sub-phase");
+    }
+
+    #[test]
+    fn parent_phase_id_extracts_three_component_parent() {
+        assert_eq!(parent_phase_id("v0.16.0.1"), Some("v0.16.0".to_string()));
+        assert_eq!(parent_phase_id("v0.15.30.5"), Some("v0.15.30".to_string()));
+        assert_eq!(
+            parent_phase_id("v0.15.30.5.1"),
+            Some("v0.15.30".to_string())
+        );
+        assert_eq!(
+            parent_phase_id("v0.16.0"),
+            None,
+            "top-level phase has no parent"
+        );
+        assert_eq!(parent_phase_id("4b"), None, "non-semver has no parent");
+    }
+
+    #[test]
+    fn list_phases_sub_phase_indentation() {
+        // Verify that is_sub_phase correctly identifies which IDs get the └─ prefix.
+        // This covers the branching logic in list_phases() without needing stdout capture.
+        let sub_ids = ["v0.16.0.1", "v0.15.30.5", "v0.16.1.1"];
+        let top_ids = ["v0.16.0", "v0.15.30", "4b", "0"];
+        for id in sub_ids {
+            assert!(is_sub_phase(id), "{id} should be indented");
+        }
+        for id in top_ids {
+            assert!(!is_sub_phase(id), "{id} should not be indented");
+        }
     }
 }
