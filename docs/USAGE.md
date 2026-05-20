@@ -66,6 +66,7 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Decision Observability](#decision-observability)
    - [Credential Management](#credential-management)
    - [Context Memory](#context-memory)
+   - [VS Code Extension](#vs-code-extension)
    - [Web Review UI](#web-review-ui)
    - [Daemon API](#daemon-api)
    - [Interactive Shell (ta shell)](#interactive-shell)
@@ -7049,6 +7050,72 @@ Duplicate entries (matching by problem text) are automatically skipped.
 #### Injection at runtime
 
 When `ta run` launches an agent, solution entries matching the project type are included in the CLAUDE.md context injection under a "Known Solutions" section. Agents benefit from past solutions without rediscovering them.
+
+### VS Code Extension
+
+Install the **Trusted Autonomy** extension from the VS Code Marketplace to start goals, review diffs, and approve or deny changes without leaving VS Code.
+
+#### Installation
+
+Search for **Trusted Autonomy** in the VS Code Extensions panel, or install via the Command Palette:
+
+```
+ext install trusted-autonomy.ta
+```
+
+The extension connects to the TA daemon at `http://127.0.0.1:7700` by default. Start the daemon first:
+
+```bash
+ta start  # or: ta daemon start
+```
+
+#### Features
+
+**TA Goals panel** — The sidebar shows all active goals with their current state (running, pr_ready, applied, failed). Icons update in real-time as goals progress.
+
+**TA Drafts panel** — Pending drafts appear here as soon as the agent finishes. Click the inline buttons to approve, deny, or view the diff.
+
+**Native diff viewer** — Click **View Diff** on any draft to open the changed files in VS Code's built-in diff editor. The left side shows the original; the right side shows the agent's proposed change.
+
+**Desktop notifications** — VS Code shows a notification when a draft is ready to review, so you can stay focused on other work while the agent runs.
+
+**Command Palette** — All commands are available via `Ctrl+Shift+P` / `Cmd+Shift+P`:
+
+| Command | Description |
+|---|---|
+| `TA: Start New Goal` | Prompt for a goal description and launch the agent |
+| `TA: List Drafts` | Refresh the TA Drafts panel |
+| `TA: Approve Draft` | Approve the selected draft (applies changes) |
+| `TA: Deny Draft` | Deny the selected draft with a reason |
+| `TA: View Diff` | Open changed files in the native diff editor |
+| `TA: Open Shell` | Open the TA web shell in your browser |
+
+#### Configuration
+
+Open **Settings → Trusted Autonomy** or add these to your VS Code `settings.json`:
+
+```json
+{
+  "ta.daemonUrl": "http://127.0.0.1:7700",
+  "ta.apiToken": "",
+  "ta.pollIntervalSeconds": 10
+}
+```
+
+Set `ta.apiToken` if your daemon has bearer token authentication enabled.
+
+#### Get Started walkthrough
+
+The extension includes an onboarding walkthrough. Open it via:
+```
+Help → Get Started → Get Started with Trusted Autonomy
+```
+
+#### Publishing
+
+The extension is built and published by the `.github/workflows/vscode-extension.yml` CI workflow. Push a tag `vscode-v<version>` (e.g., `vscode-v0.16.0`) to trigger a Marketplace publish. Requires the `VSCE_PAT` secret configured in the repository.
+
+---
 
 ### Web Review UI
 
