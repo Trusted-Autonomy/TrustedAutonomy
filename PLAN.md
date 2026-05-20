@@ -7721,19 +7721,19 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1 — JetBrains IDE Plugin (PyCharm, WebStorm, IntelliJ)
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Why**: JetBrains IDEs are the primary environment for Java, Kotlin, Python (PyCharm), and JavaScript/TypeScript (WebStorm) developers. Same rationale as the VS Code extension — reduces context-switching friction for non-Rust developers.
 
 **Community extensibility**: The TA daemon exposes a stable HTTP API (`http://127.0.0.1:7700`). Any IDE plugin only needs to implement the same REST calls the VS Code extension uses — no Rust required. This phase also ships a community plugin guide so any IDE (Zed, Emacs, Eclipse, etc.) can be integrated without changes to TA core.
 
-1. [ ] **Plugin scaffold**: Kotlin plugin using the IntelliJ Platform SDK. Published to JetBrains Marketplace as `com.trusted-autonomy.ta`. Supports PyCharm 2024.1+, WebStorm 2024.1+, IntelliJ IDEA 2024.1+.
+1. [x] **Plugin scaffold**: Kotlin plugin using the IntelliJ Platform SDK. Published to JetBrains Marketplace as `com.trusted-autonomy.ta`. Supports PyCharm 2024.1+, WebStorm 2024.1+, IntelliJ IDEA 2024.1+.
 
-2. [ ] **Daemon connectivity**: HTTP client connecting to `http://127.0.0.1:7700`. Health check on IDE startup.
+2. [x] **Daemon connectivity**: HTTP client connecting to `http://127.0.0.1:7700`. Health check on IDE startup.
 
-3. [ ] **Marketplace publishing**: CI workflow to build and publish to JetBrains Marketplace on `v*` tags.
+3. [x] **Marketplace publishing**: CI workflow to build and publish to JetBrains Marketplace on `v*` tags.
 
-4. [ ] **Community IDE plugin guide** (`docs/community-ide-plugin.md`): Step-by-step guide for building a TA integration in any IDE. Covers: daemon REST API reference, SSE event stream for live goal state, authentication (none for localhost), recommended command palette actions, and a minimal working example in TypeScript (reusable for Zed, Cursor, etc.). Linked from USAGE.md.
+4. [x] **Community IDE plugin guide** (`docs/community-ide-plugin.md`): Step-by-step guide for building a TA integration in any IDE. Covers: daemon REST API reference, SSE event stream for live goal state, authentication (none for localhost), recommended command palette actions, and a minimal working example in TypeScript (reusable for Zed, Cursor, etc.). Linked from USAGE.md.
 
 #### Version: `0.16.1-alpha`
 
@@ -7803,12 +7803,10 @@ The plugin's own `README.md` covers everything Ollama-specific: prerequisites, m
 
 **Path A — Skill declares its agents** (frontmatter-driven):
 ```markdown
----
 name: visual-explainer
 description: Generates a visual explanation of a code section
 agents: [analyst, code-reviewer]   # "*" = all agents
 triggers: [/explain]
----
 <skill instructions>
 ```
 Skill files are dropped in `~/.config/ta/skills/` (personal) or `.ta/skills/` (project-scoped). The loader scans both dirs at startup and builds an index keyed by agent name.
