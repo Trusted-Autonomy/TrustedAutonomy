@@ -7721,7 +7721,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1 — JetBrains IDE Plugin (PyCharm, WebStorm, IntelliJ)
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Why**: JetBrains IDEs are the primary environment for Java, Kotlin, Python (PyCharm), and JavaScript/TypeScript (WebStorm) developers. Same rationale as the VS Code extension — reduces context-switching friction for non-Rust developers.
 
