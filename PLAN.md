@@ -7846,7 +7846,7 @@ The plugin's own `README.md` covers everything Ollama-specific: prerequisites, m
 
 ---
 ### v0.16.2.1 — Gemma 4 Agent Profiles (ta-agent-ollama plugin)
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.16.2 (ta-agent-ollama extracted to standalone plugin)
 
