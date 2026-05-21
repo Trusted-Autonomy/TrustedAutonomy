@@ -23,5 +23,5 @@ crates_io = "ta-agent-ollama"
 #   ta run "Fix the authentication bug" --agent qwen3.5-9b
 
 [agents]
-profiles = ["agents/qwen3.5-4b.toml", "agents/qwen3.5-9b.toml", "agents/qwen3.5-27b.toml"]
+profiles = ["agents/qwen3.5-4b.toml", "agents/qwen3.5-9b.toml", "agents/qwen3.5-27b.toml", "agents/gemma4-4b.toml", "agents/gemma4-12b.toml"]
 install_dir = "~/.config/ta/agents"

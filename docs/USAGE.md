@@ -1356,10 +1356,30 @@ ta agent doctor qwen3.5-9b
 
 `ta agent install-qwen` checks that Ollama is installed and running, runs `ollama pull` to download the model, and writes a ready-to-use agent profile to `~/.config/ta/agents/`.
 
+### Install a Gemma 4 agent
+
+Gemma 4 (released April 2025) offers strong coding and reasoning in the sub-14B tier, making it a great choice for M1/M2 Macs and mid-range Windows machines.
+
+```bash
+# Auto-detects your hardware and installs the largest profile that fits
+ta agent install gemma4
+
+# Check prerequisites after install
+ta agent doctor gemma4-4b    # or gemma4-12b depending on what was installed
+```
+
+`ta agent install gemma4` detects your available VRAM or unified memory and selects:
+
+| Profile | Model | Selected when |
+|---|---|---|
+| `gemma4-4b` | `gemma4:4b` | < 16 GB VRAM (discrete) or < 24 GB unified (Apple Silicon) |
+| `gemma4-12b` | `gemma4:12b` | ≥ 16 GB VRAM (discrete) or ≥ 24 GB unified (Apple Silicon) |
+
 ### Run a goal with a local model
 
 ```bash
 ta run "Fix the authentication bug" --agent qwen3.5-9b
+ta run "Fix the authentication bug" --agent gemma4-4b
 ```
 
 ### Automatic model selection
