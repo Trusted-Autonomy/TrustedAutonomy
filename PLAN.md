@@ -7870,6 +7870,34 @@ The plugin's own `README.md` covers everything Ollama-specific: prerequisites, m
 #### Version: `0.16.2-alpha.1`
 
 ---
+### v0.16.2.2 — Studio Cleanup & Agent Plugin UX
+<!-- status: pending -->
+
+**Why**: v0.16.2.1 implemented Gemma 4 agent profiles at the CLI level but did not add any Studio UI for discovering, installing, or monitoring agent plugins. The Studio dashboard still shows formatting issues (ghost phase badges, missing version), and users have no way to manage Ollama/agent profiles without dropping to the terminal.
+
+**Goal**: Close the Studio gaps that should have shipped with v0.16.2 and v0.16.2.1, and surface agent plugin health in the Studio dashboard.
+
+#### Items
+
+1. [ ] **Studio dashboard: version in header** — pull from `/health` response; show `v0.16.2-alpha` in top-right, refresh every 60s. Clicking links to Plan tab. (Was v0.16.1.2 item 2 — landing here because it requires daemon restart to verify.)
+
+2. [ ] **Ghost badge fix: active_phases orphan suppression** — verify the v0.16.1.1 fix (known-IDs filter in `active_phases()`) correctly suppresses the v0.15.9 ghost on the current binary. If regression exists, re-apply fix. Add integration test: start a goal with a `plan_phase` that has no matching PLAN.md heading, assert it does not appear in `active_phases()` response.
+
+3. [ ] **Studio Plan tab: run any phase** (`assets/index.html`) — each pending phase in the Plan tab gets a "Run" button that calls `POST /api/goals/start` with the phase ID pre-filled. Active/done phases show their status without a Run button. Out-of-order guard (v0.16.1.2 item 8) triggers here.
+
+4. [ ] **Studio Agents panel** (new tab or section in Dashboard): List installed agent plugins from `GET /api/agents/profiles` (added in v0.16.3 but stub the endpoint here as empty). When Ollama is reachable, show connected indicator + model list. When unreachable, show warning with "Check `ta doctor`" link. Shows "No agent plugins installed" when list is empty.
+
+5. [ ] **`ta agent list`** (CLI): Alias for `ta plugin list --agents`. Short command for the common case of checking what agent profiles are loaded.
+
+6. [ ] **Studio goal card: pr_ready badge** — goals in `pr_ready` state show amber "Review Ready" badge (not the blue "Running" badge). Clicking opens the Draft Review panel for that goal's draft.
+
+7. [ ] **Replace `alert()` dialogs with real modals** (`assets/index.html`): The confirm/deny/re-order dialogs added in v0.16.1 use `alert()` and `confirm()` placeholders that are non-interactive in some browsers. Replace with the in-page `<dialog>` element pattern already used by approve/deny buttons.
+
+8. [ ] **Tests**: Agent profiles endpoint returns empty list gracefully when no profiles installed. Ghost badge suppression regression test. `ta agent list` output matches `ta plugin list --agents`.
+
+#### Version: `0.16.2-alpha.2`
+
+---
 ### v0.16.3 — Skill Plugin System
 <!-- status: pending -->
 
@@ -7916,6 +7944,20 @@ Both paths are active simultaneously — a skill activates if it is listed in th
 7. [ ] **Tests**: Skill loader discovers files from both dirs. Path A activates skill for declared agents only. Path B activates skill for agents that list it. Both paths simultaneously active don't duplicate injection. `ta skill list` shows correct output. Hot-reload picks up new files.
 
 8. [ ] **USAGE.md**: "Skill Plugins" section — how to write a skill file, both discovery paths, project-scoped vs personal skills, `ta skill` commands.
+
+#### Agent manifest & health items
+
+9. [ ] **`ta plugin list --agents`** (`apps/ta-cli/src/commands/plugins.rs`): Extend `ta plugin list` with an `--agents` flag (or default to including agent framework plugins). Enumerate all registered agent plugins (`ta-agent-ollama`, `ta-agent-claude`, future plugins) with: plugin name, version, binary path, loaded profile count, currently active model. Separate section from channel plugins. `ta plugin list` with no flags shows both agent and channel plugins.
+
+10. [ ] **Agent TOML profile inventory**: At daemon start, scan `~/.config/ta/agents/` and `.ta/agents/` for `*.toml` agent profile files. Index: profile name → `{ agent_plugin, model, version, last_used }`. Expose via `GET /api/agents/profiles` and surface in `ta plugin list --agents`.
+
+11. [ ] **`ta doctor` Ollama probe** (`crates/ta-daemon/src/health.rs`): When `ta-agent-ollama` is registered, probe `GET http://localhost:11434/api/tags` (or configured `ollama_url`). Check: (a) Ollama is reachable, (b) each model referenced in installed agent profiles is pulled (present in `/api/tags` response). Emit `WARN` for unreachable Ollama; `WARN` for missing model with suggested fix: `ollama pull <model>`. `ta doctor --fix` runs `ollama pull <model>` for each missing model.
+
+12. [ ] **Workflow → agent usage index** (`crates/ta-daemon/src/workflow_index.rs`): On daemon start, scan `.ta/workflows/*.toml` for `agent =` fields. Build a map of `agent_name → [workflow_names]`. Expose via `GET /api/agents/usage`. Surface in `ta plugin list --agents` as a "used by" column. Flag agent profiles that are installed but not referenced in any workflow as "unused".
+
+13. [ ] **`ta plugin status <name>`** (CLI): Per-agent detail view — binary path, version, all installed profiles with model name and availability status, workflows referencing this agent, last-used timestamp. Works for both channel plugins and agent framework plugins.
+
+14. [ ] **Tests**: `ta plugin list --agents` shows all registered agent plugins. Ollama probe correctly reports reachable/unreachable. Missing model surfaces as `ta doctor` warning. Workflow usage index correctly maps agents to workflows. Unused agent detection works when no workflow references a profile.
 
 #### Version: `0.16.3-alpha`
 
