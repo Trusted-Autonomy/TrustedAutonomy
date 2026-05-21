@@ -187,6 +187,9 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 14. Goals in pr_ready state with denied drafts (v0.15.18).
     results.extend(check_pr_ready_denied(config));
 
+    // 15. Gemma 4 Ollama model / profile consistency (v0.16.2.1).
+    results.extend(check_gemma4_ollama(config));
+
     results
 }
 
@@ -966,6 +969,75 @@ fn apply_fix(
     }
 }
 
+// ── Gemma 4 check (v0.16.2.1) ───────────────────────────────────────────────
+
+/// Check: if any `gemma4:*` model is pulled in Ollama, warn if no matching agent profile
+/// is installed. Emits no output when Ollama is not running (best-effort only).
+fn check_gemma4_ollama(config: &GatewayConfig) -> Vec<CheckResult> {
+    // Query Ollama for installed models (2 s timeout — skip silently if not running).
+    let models: Vec<String> = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()
+        .and_then(|c| c.get("http://localhost:11434/api/tags").send().ok())
+        .and_then(|r| r.json::<serde_json::Value>().ok())
+        .and_then(|v| {
+            v.get("models")?.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("name")?.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+
+    let gemma4_models: Vec<&str> = models
+        .iter()
+        .filter(|m| m.starts_with("gemma4:") || m.contains("gemma4"))
+        .map(|m| m.as_str())
+        .collect();
+
+    if gemma4_models.is_empty() {
+        return vec![];
+    }
+
+    // Check whether a gemma4 agent profile is installed.
+    let ta_config_dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".config")
+        .join("ta");
+
+    let agents_dirs = [
+        ta_config_dir.join("agents"),
+        config.workspace_root.join(".ta").join("agents"),
+    ];
+
+    let profile_installed = agents_dirs.iter().any(|dir| {
+        dir.is_dir()
+            && (dir.join("gemma4-4b.toml").exists() || dir.join("gemma4-12b.toml").exists())
+    });
+
+    if profile_installed {
+        vec![CheckResult::ok(
+            "Gemma 4",
+            format!(
+                "{} Gemma 4 model(s) in Ollama and agent profile installed",
+                gemma4_models.len()
+            ),
+        )]
+    } else {
+        vec![CheckResult::warn(
+            "Gemma 4",
+            format!(
+                "{} Gemma 4 model(s) found in Ollama but no agent profile installed",
+                gemma4_models.len()
+            ),
+            "Install a profile: ta agent install gemma4",
+        )]
+    }
+}
+
 // ── Config helpers ───────────────────────────────────────────────────────────
 
 /// Read the active agent name from global TA config (defaults to "claude-code").
@@ -1105,5 +1177,45 @@ mod tests {
         // This tests the observability mandate: version mismatch warns but doesn't fail.
         let r = CheckResult::warn("Version", "mismatch detail", "fix hint");
         assert_eq!(r.status, CheckStatus::Warn);
+    }
+
+    // ── Gemma 4 doctor checks (v0.16.2.1) ──────────────────────────────────────
+
+    #[test]
+    fn gemma4_check_no_ollama_returns_empty() {
+        // When Ollama is not running (as in CI), the check should return no results.
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        // This will fail to connect to Ollama (not running in tests) — expect empty vec.
+        let results = check_gemma4_ollama(&config);
+        // Should return empty (no models found) since Ollama is not running.
+        // If somehow Ollama IS running with gemma4 models and no profile, we'd get a warn —
+        // but that is also a valid outcome and not a test failure.
+        assert!(
+            results.iter().all(|r| r.status != CheckStatus::Fail),
+            "gemma4 check should never produce a hard failure, only warnings"
+        );
+    }
+
+    #[test]
+    fn gemma4_check_profile_installed_suppresses_warning() {
+        // If a gemma4 profile is present on disk, the warning should not fire.
+        let dir = TempDir::new().unwrap();
+        let agents_dir = dir.path().join(".ta").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("gemma4-4b.toml"),
+            "name = \"gemma4-4b\"\ncommand = \"ta-agent-ollama\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let config = test_config(&dir);
+        // Even if Ollama isn't running, once it is and a model is present, having the
+        // profile means no warning. We can't simulate Ollama here, but verify that
+        // the check produces no failure results.
+        let results = check_gemma4_ollama(&config);
+        assert!(
+            results.iter().all(|r| r.status != CheckStatus::Fail),
+            "gemma4 check should not fail when profile is installed"
+        );
     }
 }

@@ -1,0 +1,24 @@
+# Gemma 4 4B — compact local model, great for mid-range hardware.
+# Best for: quick edits, simple scripts, fast iteration on M1/RTX 3060 class machines.
+# Hardware: 8 GB VRAM (discrete) / 16 GB unified memory (Apple Silicon)
+# Install: ta agent install gemma4
+
+name        = "gemma4-4b"
+version     = "1.0.0"
+description = "Gemma 4 4B via Ollama — fast local agent, ~4 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "gemma4:4b", "--base-url", "http://localhost:11434", "--max-turns", "40", "--temperature", "0.1"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 10
+recency_days = 7
+
+[hardware]
+min_vram_gb    = 8
+min_unified_gb = 16
+min_ram_gb     = 16
+target         = "M1 Mac (base), RTX 3060 (8 GB), most mid-range discrete GPUs"

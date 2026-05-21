@@ -1247,6 +1247,11 @@ fn framework_install(
     global: bool,
     project_root: &std::path::Path,
 ) -> anyhow::Result<()> {
+    // "gemma4" is a built-in shorthand: auto-detects VRAM and installs locally.
+    if name == "gemma4" {
+        return install_gemma4(global);
+    }
+
     let registry_base = std::env::var("TA_AGENT_REGISTRY_URL")
         .unwrap_or_else(|_| "https://registry.trustedautonomy.dev/agents".to_string());
 
@@ -1618,6 +1623,269 @@ fn install_qwen(size: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Gemma 4 bundled profile constants (v0.16.2.1) ─────────────────────────────
+
+const GEMMA4_4B_PROFILE: &str = r#"# Gemma 4 4B — compact local model, great for mid-range hardware.
+# Best for: quick edits, simple scripts, fast iteration on M1/RTX 3060 class machines.
+# Thinking mode: not required (4B performs well with direct responses)
+
+name        = "gemma4-4b"
+version     = "1.0.0"
+description = "Gemma 4 4B via Ollama — fast local agent, ~4 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "gemma4:4b", "--base-url", "http://localhost:11434", "--max-turns", "40", "--temperature", "0.1"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 10
+recency_days = 7
+"#;
+
+const GEMMA4_12B_PROFILE: &str = r#"# Gemma 4 12B — mid-size local model with strong coding and reasoning.
+# Best for: complex tasks, multi-file refactors, most software development work.
+
+name        = "gemma4-12b"
+version     = "1.0.0"
+description = "Gemma 4 12B via Ollama — balanced local agent, ~10 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "gemma4:12b", "--base-url", "http://localhost:11434", "--max-turns", "50", "--temperature", "0.1"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 15
+recency_days = 7
+"#;
+
+/// Returns the bundled TOML content for a gemma4 profile by size.
+fn bundled_gemma4_profile(size: &str) -> &'static str {
+    match size {
+        "4b" => GEMMA4_4B_PROFILE,
+        "12b" => GEMMA4_12B_PROFILE,
+        _ => "",
+    }
+}
+
+/// Select the largest Gemma 4 profile that fits the available memory.
+///
+/// - `is_unified`: true for Apple Silicon (unified memory); false for discrete GPU (VRAM).
+/// - Discrete GPU threshold: 16 GB VRAM → 12b; otherwise 4b.
+/// - Unified memory threshold: 24 GB unified → 12b; otherwise 4b.
+pub fn select_gemma4_size(mem_gb: u64, is_unified: bool) -> &'static str {
+    let threshold = if is_unified { 24 } else { 16 };
+    if mem_gb >= threshold {
+        "12b"
+    } else {
+        "4b"
+    }
+}
+
+/// Detect available GPU/unified memory and whether it is Apple Silicon unified memory.
+/// Returns (memory_gb, is_unified).
+fn detect_vram_gb() -> (u64, bool) {
+    // macOS: check for Apple Silicon (arm64) — all memory is unified.
+    #[cfg(target_os = "macos")]
+    {
+        let is_arm = std::process::Command::new("uname")
+            .arg("-m")
+            .output()
+            .ok()
+            .map(|o| o.stdout.starts_with(b"arm64"))
+            .unwrap_or(false);
+        if is_arm {
+            let ram_gb = sysctl_memsize_gb();
+            return (ram_gb, true);
+        }
+    }
+    // Try nvidia-smi for discrete GPU VRAM (cross-platform).
+    if let Some(vram) = nvidia_smi_vram_gb() {
+        return (vram, false);
+    }
+    // Fallback: use half of total system RAM as a conservative estimate.
+    (total_ram_gb() / 2, false)
+}
+
+fn sysctl_memsize_gb() -> u64 {
+    std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|bytes| bytes / (1 << 30))
+        .unwrap_or(8)
+}
+
+fn nvidia_smi_vram_gb() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let total_mib: u64 = String::from_utf8(out.stdout)
+        .ok()?
+        .lines()
+        .filter_map(|l| l.trim().parse::<u64>().ok())
+        .sum();
+    if total_mib == 0 {
+        None
+    } else {
+        Some(total_mib / 1024)
+    }
+}
+
+fn total_ram_gb() -> u64 {
+    // macOS/BSD sysctl
+    if let Ok(out) = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+    {
+        if let Ok(s) = String::from_utf8(out.stdout) {
+            if let Ok(bytes) = s.trim().parse::<u64>() {
+                return bytes / (1 << 30);
+            }
+        }
+    }
+    // Linux /proc/meminfo
+    if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                if let Some(kb_str) = rest.split_whitespace().next() {
+                    if let Ok(kb) = kb_str.parse::<u64>() {
+                        return kb / (1024 * 1024);
+                    }
+                }
+            }
+        }
+    }
+    16 // conservative fallback
+}
+
+/// Install a Gemma 4 model via Ollama, auto-selecting the largest profile that fits.
+fn install_gemma4(global: bool) -> anyhow::Result<()> {
+    // 1. Check Ollama is installed.
+    if which::which("ollama").is_err() {
+        println!("Ollama is not installed.");
+        println!("  Install: https://ollama.ai");
+        println!("  macOS:   brew install ollama");
+        println!("  Linux:   curl -fsSL https://ollama.ai/install.sh | sh");
+        anyhow::bail!(
+            "Ollama is required to use Gemma 4 local agents.\n\
+             Install from https://ollama.ai then re-run this command."
+        );
+    }
+
+    // 2. Check Ollama is running.
+    let ollama_running = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()
+        .and_then(|c| c.get("http://localhost:11434/api/tags").send().ok())
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    if !ollama_running {
+        println!("Ollama is not running at http://localhost:11434.");
+        println!("  Start it: ollama serve");
+        println!("  macOS:    Run the Ollama app from your Applications folder");
+        anyhow::bail!(
+            "Ollama must be running before pulling models.\n\
+             Start with: ollama serve"
+        );
+    }
+
+    // 3. Detect available VRAM / unified memory and select the best profile.
+    let (mem_gb, is_unified) = detect_vram_gb();
+    let mem_label = if is_unified {
+        format!("{} GB unified memory (Apple Silicon)", mem_gb)
+    } else {
+        format!("{} GB VRAM", mem_gb)
+    };
+    println!("Detected hardware: {}", mem_label);
+
+    let size = select_gemma4_size(mem_gb, is_unified);
+    println!(
+        "Selected profile: gemma4-{} (largest that fits your hardware)",
+        size
+    );
+
+    let model_tag = format!("gemma4:{}", size);
+    let profile_name = format!("gemma4-{}", size);
+
+    // 4. Pull the model.
+    println!("Pulling {}...", model_tag);
+    let status = std::process::Command::new("ollama")
+        .args(["pull", &model_tag])
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run `ollama pull {}`: {}", model_tag, e))?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "`ollama pull {}` failed (exit {}). Check your network connection and that the model name is correct.",
+            model_tag,
+            status.code().unwrap_or(-1)
+        );
+    }
+
+    // 5. Install bundled profile to ~/.config/ta/agents/
+    let profile_toml = bundled_gemma4_profile(size);
+    let agents_dir = ta_config_dir().join("agents");
+    let _ = global; // profile is always installed to the user config dir
+    std::fs::create_dir_all(&agents_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create agents dir {}: {}",
+            agents_dir.display(),
+            e
+        )
+    })?;
+    let profile_path = agents_dir.join(format!("{}.toml", profile_name));
+    std::fs::write(&profile_path, profile_toml).map_err(|e| {
+        anyhow::anyhow!("Failed to write profile {}: {}", profile_path.display(), e)
+    })?;
+
+    println!(
+        "{} installed — profile at {}",
+        model_tag,
+        profile_path.display()
+    );
+    println!("  Run: ta run \"your goal\" --agent {}", profile_name);
+
+    // 6. Verify ta-agent-ollama binary.
+    let ollama_agent_found = which::which("ta-agent-ollama").is_ok() || {
+        let sibling = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("ta-agent-ollama")));
+        #[cfg(windows)]
+        let sibling = sibling.map(|p| p.with_extension("exe"));
+        sibling.map(|p| p.exists()).unwrap_or(false)
+    };
+    if !ollama_agent_found {
+        println!();
+        println!(
+            "WARNING: ta-agent-ollama binary not found — update your TA installation \
+             to v0.15.15.2 or later."
+        );
+        println!(
+            "  Without it, `ta run --agent {}` will fail at launch time.",
+            profile_name
+        );
+        println!(
+            "  Fix: reinstall TA from https://github.com/Trusted-Autonomy/TrustedAutonomy/releases"
+        );
+    }
+
+    println!();
+    println!("To check prerequisites: ta agent doctor {}", profile_name);
+    Ok(())
+}
+
 /// Migrate an existing agent framework configuration to its standalone plugin.
 fn migrate_agent_framework(framework: &str, config: &GatewayConfig) -> anyhow::Result<()> {
     match framework {
@@ -1812,6 +2080,8 @@ fn list_local_agents(config: &GatewayConfig) -> anyhow::Result<()> {
         // Estimate VRAM from model tag.
         let vram = if model_tag.contains("27b") {
             "~20 GB"
+        } else if model_tag.contains("12b") {
+            "~10 GB"
         } else if model_tag.contains("9b") {
             "~8 GB"
         } else if model_tag.contains("4b") {
@@ -1845,7 +2115,8 @@ fn list_local_agents(config: &GatewayConfig) -> anyhow::Result<()> {
     if !ollama_running {
         println!("Ollama not running. Start with: ollama serve");
     } else {
-        println!("Install more: ta agent install-qwen --size <4b|9b|27b|all>");
+        println!("Install more Qwen3.5:  ta agent install-qwen --size <4b|9b|27b|all>");
+        println!("Install Gemma 4:       ta agent install gemma4   (auto-selects 4b or 12b)");
     }
 
     Ok(())
@@ -2162,5 +2433,92 @@ description = "Test framework"
         let config = test_config(&dir);
         let result = migrate_agent_framework("ollama", &config);
         assert!(result.is_ok(), "migrate should succeed: {:?}", result);
+    }
+
+    // ── Gemma 4 profile tests (v0.16.2.1) ────────────────────────────────────
+
+    #[test]
+    fn gemma4_profile_4b_is_valid_toml() {
+        let content = bundled_gemma4_profile("4b");
+        assert!(!content.is_empty(), "4b profile should not be empty");
+        let manifest: AgentFrameworkManifest =
+            toml::from_str(content).expect("gemma4-4b profile should be valid TOML");
+        assert_eq!(manifest.name, "gemma4-4b");
+        assert!(
+            manifest.args.contains(&"gemma4:4b".to_string()),
+            "args should contain model tag gemma4:4b"
+        );
+        assert_eq!(manifest.command, "ta-agent-ollama");
+    }
+
+    #[test]
+    fn gemma4_profile_12b_is_valid_toml() {
+        let content = bundled_gemma4_profile("12b");
+        assert!(!content.is_empty(), "12b profile should not be empty");
+        let manifest: AgentFrameworkManifest =
+            toml::from_str(content).expect("gemma4-12b profile should be valid TOML");
+        assert_eq!(manifest.name, "gemma4-12b");
+        assert!(
+            manifest.args.contains(&"gemma4:12b".to_string()),
+            "args should contain model tag gemma4:12b"
+        );
+        assert_eq!(manifest.command, "ta-agent-ollama");
+    }
+
+    #[test]
+    fn gemma4_profile_unknown_returns_empty() {
+        let content = bundled_gemma4_profile("99b");
+        assert!(
+            content.is_empty(),
+            "unknown size should return empty string"
+        );
+    }
+
+    #[test]
+    fn select_gemma4_size_8gb_discrete_returns_4b() {
+        assert_eq!(
+            select_gemma4_size(8, false),
+            "4b",
+            "8 GB VRAM should select gemma4-4b"
+        );
+    }
+
+    #[test]
+    fn select_gemma4_size_16gb_discrete_returns_12b() {
+        assert_eq!(
+            select_gemma4_size(16, false),
+            "12b",
+            "16 GB VRAM should select gemma4-12b"
+        );
+    }
+
+    #[test]
+    fn select_gemma4_size_16gb_unified_returns_4b() {
+        assert_eq!(
+            select_gemma4_size(16, true),
+            "4b",
+            "16 GB unified (M1 base) should select gemma4-4b (12b needs 24 GB unified)"
+        );
+    }
+
+    #[test]
+    fn select_gemma4_size_24gb_unified_returns_12b() {
+        assert_eq!(
+            select_gemma4_size(24, true),
+            "12b",
+            "24 GB unified (M1 Pro/Max) should select gemma4-12b"
+        );
+    }
+
+    #[test]
+    fn select_gemma4_size_boundary_discrete() {
+        assert_eq!(select_gemma4_size(15, false), "4b");
+        assert_eq!(select_gemma4_size(16, false), "12b");
+    }
+
+    #[test]
+    fn select_gemma4_size_boundary_unified() {
+        assert_eq!(select_gemma4_size(23, true), "4b");
+        assert_eq!(select_gemma4_size(24, true), "12b");
     }
 }

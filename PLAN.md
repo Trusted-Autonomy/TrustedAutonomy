@@ -7846,7 +7846,7 @@ The plugin's own `README.md` covers everything Ollama-specific: prerequisites, m
 
 ---
 ### v0.16.2.1 — Gemma 4 Agent Profiles (ta-agent-ollama plugin)
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.16.2 (ta-agent-ollama extracted to standalone plugin)
 
@@ -7859,13 +7859,13 @@ The plugin's own `README.md` covers everything Ollama-specific: prerequisites, m
 | `gemma4-4b` | `gemma4:4b` | 8 GB VRAM / 16 GB unified | M1 Mac (base), RTX 3060, most mid-range cards |
 | `gemma4-12b` | `gemma4:12b` | 16 GB VRAM / 24 GB unified | M1 Pro/Max, RTX 4080, RTX 5080 |
 
-1. [ ] **`agents/gemma4-4b.toml`** in `ta-agent-ollama` plugin repo with model, max_turns, and hardware sizing fields.
+1. [x] **`agents/gemma4-4b.toml`** in `ta-agent-ollama` plugin repo with model, max_turns, and hardware sizing fields.
 
-2. [ ] **`ta agent install gemma4`** shorthand: detects available VRAM/unified memory and auto-selects the largest profile that fits.
+2. [x] **`ta agent install gemma4`** shorthand: detects available VRAM/unified memory and auto-selects the largest profile that fits.
 
-3. [ ] **`ta doctor` Gemma 4 check**: If `gemma4:*` is pulled in Ollama but no matching profile is installed, emit a warning with install command.
+3. [x] **`ta doctor` Gemma 4 check**: If `gemma4:*` is pulled in Ollama but no matching profile is installed, emit a warning with install command.
 
-4. [ ] **Tests**: Profile TOML round-trips. `ta doctor` hardware detection selects correct tier. `ta agent install gemma4` on a simulated 8 GB system installs `gemma4-4b` not `gemma4-12b`.
+4. [x] **Tests**: Profile TOML round-trips. `ta doctor` hardware detection selects correct tier. `ta agent install gemma4` on a simulated 8 GB system installs `gemma4-4b` not `gemma4-12b`.
 
 #### Version: `0.16.2-alpha.1`
 
