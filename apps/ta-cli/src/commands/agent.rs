@@ -1710,6 +1710,7 @@ fn detect_vram_gb() -> (u64, bool) {
     (total_ram_gb() / 2, false)
 }
 
+#[cfg(target_os = "macos")]
 fn sysctl_memsize_gb() -> u64 {
     std::process::Command::new("sysctl")
         .args(["-n", "hw.memsize"])
