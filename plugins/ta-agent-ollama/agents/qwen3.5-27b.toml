@@ -1,0 +1,23 @@
+# Qwen3.5 27B — large local model, best reasoning.
+# Best for: complex multi-file refactors, planning, research, hard problems.
+# Hardware: 24 GB VRAM / 32 GB unified memory
+# Install: ta plugin install github:trustedautonomy/ta-agent-ollama
+
+name        = "qwen3.5-27b"
+version     = "1.0.0"
+description = "Qwen3.5 27B via Ollama — most capable local agent, ~20 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "qwen3.5:27b", "--base-url", "http://localhost:11434", "--max-turns", "60", "--temperature", "0.1", "--thinking-mode", "true"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 20
+recency_days = 14
+
+[hardware]
+min_vram_gb = 20
+min_ram_gb  = 32
+target      = "M2 Max/Ultra, RTX 4090 (24 GB), RTX 5090, multi-GPU setups"

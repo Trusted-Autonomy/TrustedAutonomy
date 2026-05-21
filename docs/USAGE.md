@@ -1305,7 +1305,27 @@ TA is written in Rust. This is a deliberate choice worth understanding if you ar
 
 ## Local Models (Ollama)
 
-TA supports running goals against local models via [Ollama](https://ollama.ai), with no cloud API key required. The `ta-agent-ollama` binary implements a full tool-use loop against any OpenAI-compatible endpoint.
+TA supports running goals against local models via [Ollama](https://ollama.ai), with no cloud API key required. The `ta-agent-ollama` plugin implements a full tool-use loop against any OpenAI-compatible endpoint.
+
+> For full details — prerequisites, model selection, thinking-mode, hardware sizing, and troubleshooting — see the [ta-agent-ollama plugin README](../plugins/ta-agent-ollama/README.md).
+
+### Install the plugin
+
+```bash
+# Install agent profiles for Qwen3.5 models (recommended)
+ta agent install-qwen --size 9b
+
+# Or install the plugin manifest from GitHub
+ta plugin install github:trustedautonomy/ta-agent-ollama
+```
+
+### Migrate from a previous installation
+
+If you have existing Ollama agent profiles from an older TA installation:
+
+```bash
+ta agent migrate ollama
+```
 
 ### Prerequisites
 

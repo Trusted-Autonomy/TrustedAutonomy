@@ -1,0 +1,23 @@
+# Qwen3.5 9B — mid-size local model, balanced performance.
+# Best for: mid-complexity tasks, most coding work.
+# Hardware: 16 GB VRAM / 16 GB unified memory
+# Install: ta plugin install github:trustedautonomy/ta-agent-ollama
+
+name        = "qwen3.5-9b"
+version     = "1.0.0"
+description = "Qwen3.5 9B via Ollama — balanced local agent, ~8 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "qwen3.5:9b", "--base-url", "http://localhost:11434", "--max-turns", "50", "--temperature", "0.1", "--thinking-mode", "true"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 15
+recency_days = 7
+
+[hardware]
+min_vram_gb = 8
+min_ram_gb  = 16
+target      = "M1 Pro/Max, RTX 3080 (10 GB), RTX 4070"

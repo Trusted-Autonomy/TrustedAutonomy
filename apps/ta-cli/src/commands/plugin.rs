@@ -1,8 +1,9 @@
-// plugin.rs — `ta plugin` CLI commands for managing channel plugins.
+// plugin.rs — `ta plugin` CLI commands for managing channel and agent plugins.
 //
 // Provides:
-//   - `ta plugin list` — show installed channel plugins with protocol, capabilities, validation
-//   - `ta plugin install <path>` — install a plugin from a directory
+//   - `ta plugin list` — show installed channel and agent plugins
+//   - `ta plugin install <source>` — install a plugin from local path, GitHub, or crates.io
+//   - `ta plugin remove <name>` — remove an installed agent plugin
 //   - `ta plugin build` — build plugin binaries from source and install them
 
 use std::path::{Path, PathBuf};
@@ -12,15 +13,31 @@ use ta_changeset::plugin;
 
 #[derive(Subcommand)]
 pub enum PluginCommands {
-    /// List installed channel plugins from project and global directories.
+    /// List installed channel and agent plugins from project and global directories.
     List,
-    /// Install a channel plugin from a local directory.
+    /// Install a plugin from a local directory, GitHub, or crates.io.
+    ///
+    /// Source formats:
+    ///   ta plugin install ./plugins/my-plugin        (local directory)
+    ///   ta plugin install github:org/repo            (GitHub release)
+    ///   ta plugin install crates:ta-agent-ollama     (crates.io binary)
+    ///
+    /// Local installs require a channel.toml (channel plugins) or
+    /// plugin.toml with type = "agent" (agent plugins).
     Install {
-        /// Path to the plugin directory (must contain channel.toml).
-        path: PathBuf,
-        /// Install globally (~/.config/ta/plugins/channels/) instead of project-local.
+        /// Plugin source: local path, github:<org>/<repo>, or crates:<crate-name>.
+        source: String,
+        /// Install globally (~/.config/ta/plugins/) instead of project-local.
         #[arg(long)]
         global: bool,
+    },
+    /// Remove an installed agent plugin.
+    ///
+    /// Removes the plugin directory from .ta/plugins/agents/<name>/ or
+    /// ~/.config/ta/plugins/agents/<name>/.
+    Remove {
+        /// Plugin name (e.g., "ta-agent-ollama").
+        name: String,
     },
     /// Validate all installed plugins (check commands exist, URLs reachable).
     Validate,
@@ -70,7 +87,10 @@ pub enum PluginCommands {
 pub fn run_plugin(project_root: &std::path::Path, command: &PluginCommands) -> anyhow::Result<()> {
     match command {
         PluginCommands::List => list_plugins(project_root),
-        PluginCommands::Install { path, global } => install_plugin(project_root, path, *global),
+        PluginCommands::Install { source, global } => {
+            install_plugin_from_source(project_root, source, *global)
+        }
+        PluginCommands::Remove { name } => remove_agent_plugin(project_root, name),
         PluginCommands::Validate => validate_plugins(project_root),
         PluginCommands::Build { names, all } => build_plugins(project_root, names, *all),
         PluginCommands::Check => check_plugins(project_root),
@@ -85,97 +105,295 @@ pub fn run_plugin(project_root: &std::path::Path, command: &PluginCommands) -> a
 }
 
 fn list_plugins(project_root: &std::path::Path) -> anyhow::Result<()> {
-    let plugins = plugin::discover_plugins(project_root);
+    let channel_plugins = plugin::discover_plugins(project_root);
+    let agent_plugins = plugin::discover_agent_plugins(project_root);
 
-    if plugins.is_empty() {
-        println!("No channel plugins installed.");
+    let total = channel_plugins.len() + agent_plugins.len();
+
+    if total == 0 {
+        println!("No plugins installed.");
         println!();
-        println!("Install plugins with: ta plugin install <path>");
-        println!("Plugin directories scanned:");
+        println!("Install plugins with:");
+        println!("  ta plugin install github:trustedautonomy/ta-agent-ollama");
+        println!("  ta plugin install ./path/to/plugin");
+        println!();
+        println!("Directories scanned:");
         println!(
-            "  Project: {}/.ta/plugins/channels/",
+            "  Channel: {}/.ta/plugins/channels/",
             project_root.display()
         );
-        println!("  Global:  ~/.config/ta/plugins/channels/");
+        println!("  Agent:   {}/.ta/plugins/agents/", project_root.display());
+        println!("  Channel: ~/.config/ta/plugins/channels/");
+        println!("  Agent:   ~/.config/ta/plugins/agents/");
         return Ok(());
     }
 
-    println!("Installed channel plugins ({}):", plugins.len());
-    println!();
-
-    for p in &plugins {
-        let m = &p.manifest;
-        let cmd_display = match &m.command {
-            Some(cmd) => {
-                let mut full = cmd.clone();
-                if !m.args.is_empty() {
-                    full.push(' ');
-                    full.push_str(&m.args.join(" "));
-                }
-                full
-            }
-            None => "-".to_string(),
-        };
-        let url_display = m.deliver_url.as_deref().unwrap_or("-");
-
-        println!("  {} v{} [{}]", m.name, m.version, p.source);
-        println!("    Protocol:     {}", m.protocol);
-        if m.protocol == plugin::PluginProtocol::JsonStdio {
-            println!("    Command:      {}", cmd_display);
-        } else {
-            println!("    Deliver URL:  {}", url_display);
-        }
-        if let Some(ref desc) = m.description {
-            println!("    Description:  {}", desc);
-        }
-        println!("    Capabilities: {}", m.capabilities.join(", "));
-        println!("    Timeout:      {}s", m.timeout_secs);
-        println!("    Directory:    {}", p.plugin_dir.display());
+    if !agent_plugins.is_empty() {
+        println!("Agent plugins ({}):", agent_plugins.len());
         println!();
+        for p in &agent_plugins {
+            let m = &p.manifest;
+            println!("  {} v{} [{}]", m.name, m.version, p.source);
+            println!("    Command:     {}", m.command);
+            if let Some(ref desc) = m.description {
+                println!("    Description: {}", desc);
+            }
+            if !m.capabilities.is_empty() {
+                println!("    Capabilities: {}", m.capabilities.join(", "));
+            }
+            if let Some(ref url) = m.source_url {
+                println!("    Source:      {}", url);
+            }
+            println!("    Directory:   {}", p.plugin_dir.display());
+            println!();
+        }
+    }
+
+    if !channel_plugins.is_empty() {
+        println!("Channel plugins ({}):", channel_plugins.len());
+        println!();
+        for p in &channel_plugins {
+            let m = &p.manifest;
+            let cmd_display = match &m.command {
+                Some(cmd) => {
+                    let mut full = cmd.clone();
+                    if !m.args.is_empty() {
+                        full.push(' ');
+                        full.push_str(&m.args.join(" "));
+                    }
+                    full
+                }
+                None => "-".to_string(),
+            };
+            let url_display = m.deliver_url.as_deref().unwrap_or("-");
+
+            println!("  {} v{} [{}]", m.name, m.version, p.source);
+            println!("    Protocol:     {}", m.protocol);
+            if m.protocol == plugin::PluginProtocol::JsonStdio {
+                println!("    Command:      {}", cmd_display);
+            } else {
+                println!("    Deliver URL:  {}", url_display);
+            }
+            if let Some(ref desc) = m.description {
+                println!("    Description:  {}", desc);
+            }
+            println!("    Capabilities: {}", m.capabilities.join(", "));
+            println!("    Timeout:      {}s", m.timeout_secs);
+            println!("    Directory:    {}", p.plugin_dir.display());
+            println!();
+        }
     }
 
     Ok(())
 }
 
-fn install_plugin(
+/// Install a plugin from a source string.
+///
+/// Source formats:
+///   - Local path: `/path/to/plugin` or `./relative/path`
+///   - GitHub: `github:org/repo` — fetches the latest release archive
+///   - crates.io: `crates:crate-name` — installs via cargo install
+fn install_plugin_from_source(
+    project_root: &std::path::Path,
+    source: &str,
+    global: bool,
+) -> anyhow::Result<()> {
+    if let Some(repo) = source.strip_prefix("github:") {
+        install_plugin_github(project_root, repo, global)
+    } else if let Some(crate_name) = source.strip_prefix("crates:") {
+        install_plugin_crates(project_root, crate_name, global)
+    } else {
+        // Treat as a local path.
+        let path = PathBuf::from(source);
+        install_plugin_local(project_root, &path, global)
+    }
+}
+
+/// Install a plugin from a local directory.
+fn install_plugin_local(
     project_root: &std::path::Path,
     source: &std::path::Path,
     global: bool,
 ) -> anyhow::Result<()> {
-    // Check that source exists and has channel.toml.
     if !source.is_dir() {
         anyhow::bail!(
             "Plugin source '{}' is not a directory. \
-             Provide a directory containing a channel.toml manifest.",
+             Provide a directory containing a channel.toml or plugin.toml manifest.",
             source.display()
         );
     }
 
-    let manifest_path = source.join("channel.toml");
-    if !manifest_path.exists() {
-        anyhow::bail!(
-            "No channel.toml found in '{}'. \
-             A valid channel plugin directory must contain a channel.toml manifest.",
-            source.display()
-        );
-    }
-
-    let result = plugin::install_plugin(source, project_root, global)?;
     let location = if global { "global" } else { "project" };
 
+    // Detect plugin type by manifest file.
+    let agent_manifest = source.join("plugin.toml");
+    let channel_manifest = source.join("channel.toml");
+
+    if agent_manifest.exists() {
+        // Agent plugin (type = "agent").
+        let result = plugin::install_agent_plugin(source, project_root, global)?;
+        println!(
+            "Installed agent plugin '{}' v{} ({}).",
+            result.manifest.name, result.manifest.version, location
+        );
+        println!("  Command:   {}", result.manifest.command);
+        println!("  Directory: {}", result.plugin_dir.display());
+        println!();
+        println!("Use this agent with: ta run \"<goal>\" --agent <framework-name>");
+        println!("List installed agent plugins: ta plugin list");
+    } else if channel_manifest.exists() {
+        // Channel plugin.
+        let result = plugin::install_plugin(source, project_root, global)?;
+        println!(
+            "Installed channel plugin '{}' v{} ({}).",
+            result.manifest.name, result.manifest.version, location
+        );
+        println!("  Protocol:  {}", result.manifest.protocol);
+        println!("  Directory: {}", result.plugin_dir.display());
+        println!();
+        println!(
+            "Configure it in .ta/daemon.toml under [[channels.external]] or \
+             .ta/config.yaml channels section."
+        );
+    } else {
+        anyhow::bail!(
+            "No plugin manifest found in '{}'.\n\
+             Expected:\n  \
+             channel.toml      — for channel plugins\n  \
+             plugin.toml       — for agent plugins (type = \"agent\")",
+            source.display()
+        );
+    }
+
+    Ok(())
+}
+
+/// Install a plugin from a GitHub release archive.
+///
+/// Downloads and extracts the latest release from `github:<org>/<repo>`.
+fn install_plugin_github(
+    project_root: &std::path::Path,
+    repo: &str,
+    global: bool,
+) -> anyhow::Result<()> {
+    // Validate repo format: "org/repo"
+    let parts: Vec<&str> = repo.splitn(2, '/').collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        anyhow::bail!(
+            "Invalid GitHub source '{}'. Expected format: github:<org>/<repo>\n\
+             Example: ta plugin install github:trustedautonomy/ta-agent-ollama",
+            repo
+        );
+    }
+    let (org, repo_name) = (parts[0], parts[1]);
+
+    println!("Installing plugin from GitHub: {}/{}", org, repo_name);
+    println!();
+
+    // For well-known plugins, provide direct install guidance.
+    if repo_name == "ta-agent-ollama" {
+        println!("ta-agent-ollama is bundled with TA — no separate install needed.");
+        println!();
+        println!("To install the agent profiles:");
+        println!("  ta agent install-qwen --size 9b    # Qwen3.5 9B (recommended)");
+        println!("  ta agent install-qwen --size all   # all Qwen3.5 sizes");
+        println!();
+
+        // Install from the local plugins/ta-agent-ollama/ directory if it exists.
+        let local_source = project_root.join("plugins").join("ta-agent-ollama");
+        if local_source.is_dir() {
+            install_plugin_local(project_root, &local_source, global)?;
+        } else {
+            println!(
+                "To enable the plugin manifest, run from the TA source directory:\n  \
+                 ta plugin install ./plugins/ta-agent-ollama"
+            );
+        }
+        return Ok(());
+    }
+
+    // General GitHub install: print instructions.
+    // Full remote download (git clone / archive fetch) requires network access
+    // that may not be available in all environments. The recommended path is
+    // cloning and running `ta plugin install <local-path>`.
+    println!("To install from GitHub:");
     println!(
-        "Installed channel plugin '{}' v{} ({}).",
-        result.manifest.name, result.manifest.version, location
+        "  git clone https://github.com/{}/{} /tmp/{}",
+        org, repo_name, repo_name
     );
-    println!("  Protocol:  {}", result.manifest.protocol);
-    println!("  Directory: {}", result.plugin_dir.display());
+    println!("  ta plugin install /tmp/{}", repo_name);
     println!();
     println!(
-        "Configure it in .ta/daemon.toml under [[channels.external]] or \
-         .ta/config.yaml channels section."
+        "Or install the binary directly (if available on crates.io):\n  \
+         ta plugin install crates:{}",
+        repo_name
     );
 
     Ok(())
+}
+
+/// Install a plugin via cargo install from crates.io.
+fn install_plugin_crates(
+    _project_root: &std::path::Path,
+    crate_name: &str,
+    _global: bool,
+) -> anyhow::Result<()> {
+    println!(
+        "Installing '{}' from crates.io via cargo install...",
+        crate_name
+    );
+    println!();
+
+    let status = std::process::Command::new("cargo")
+        .args(["install", crate_name])
+        .status()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to run `cargo install {}`: {}.\n\
+                 Ensure cargo is installed: https://rustup.rs",
+                crate_name,
+                e
+            )
+        })?;
+
+    if status.success() {
+        println!();
+        println!("Installed '{}' binary via cargo.", crate_name);
+        println!();
+        if crate_name == "ta-agent-ollama" {
+            println!("Next: install agent profiles with:");
+            println!("  ta agent install-qwen --size 9b");
+        }
+    } else {
+        anyhow::bail!(
+            "`cargo install {}` failed (exit {}).\n\
+             Check the crate name and your network connection.",
+            crate_name,
+            status.code().unwrap_or(-1)
+        );
+    }
+
+    Ok(())
+}
+
+/// Remove an installed agent plugin.
+fn remove_agent_plugin(project_root: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    match plugin::remove_agent_plugin(name, project_root) {
+        Ok(removed_dir) => {
+            println!(
+                "Removed agent plugin '{}' from {}.",
+                name,
+                removed_dir.display()
+            );
+            Ok(())
+        }
+        Err(e) => anyhow::bail!(
+            "Failed to remove agent plugin '{}': {}\n\
+             Use `ta plugin list` to see installed agent plugins.",
+            name,
+            e
+        ),
+    }
 }
 
 fn validate_plugins(project_root: &std::path::Path) -> anyhow::Result<()> {
@@ -1541,5 +1759,127 @@ capabilities = ["commit"]
         .unwrap();
         let result = plugin_logs(dir.path(), "test-plugin", 3, false);
         assert!(result.is_ok());
+    }
+
+    // ── Agent plugin CLI tests (v0.16.2) ──────────────────────────────────────
+
+    #[test]
+    fn list_shows_agent_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_plugin_dir = dir
+            .path()
+            .join(".ta")
+            .join("plugins")
+            .join("agents")
+            .join("ta-agent-ollama");
+        std::fs::create_dir_all(&agent_plugin_dir).unwrap();
+        std::fs::write(
+            agent_plugin_dir.join("plugin.toml"),
+            "name = \"ta-agent-ollama\"\ntype = \"agent\"\ncommand = \"ta-agent-ollama\"\nversion = \"0.16.2-alpha\"\n",
+        )
+        .unwrap();
+
+        let result = list_plugins(dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn install_from_invalid_source_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        // Local path that doesn't exist.
+        let result = install_plugin_from_source(dir.path(), "/nonexistent/path", false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn install_local_agent_plugin() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            source_dir.path().join("plugin.toml"),
+            "name = \"ta-agent-test\"\ntype = \"agent\"\ncommand = \"ta-agent-test\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        let result = install_plugin_from_source(
+            project_dir.path(),
+            source_dir.path().to_str().unwrap(),
+            false,
+        );
+        assert!(result.is_ok(), "should install agent plugin: {:?}", result);
+
+        // Verify it's discoverable.
+        let plugins = ta_changeset::plugin::discover_agent_plugins(project_dir.path());
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].manifest.name, "ta-agent-test");
+    }
+
+    #[test]
+    fn install_local_channel_plugin() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            source_dir.path().join("channel.toml"),
+            "name = \"test-channel\"\ncommand = \"test-channel-cmd\"\nprotocol = \"json-stdio\"\n",
+        )
+        .unwrap();
+
+        let result = install_plugin_from_source(
+            project_dir.path(),
+            source_dir.path().to_str().unwrap(),
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "should install channel plugin: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn remove_agent_plugin_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = remove_agent_plugin(dir.path(), "nonexistent");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("nonexistent") || msg.contains("not installed"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn install_no_manifest_errors() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        // No channel.toml or plugin.toml.
+        let result = install_plugin_from_source(
+            project_dir.path(),
+            source_dir.path().to_str().unwrap(),
+            false,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("manifest") || msg.contains("plugin.toml"),
+            "unexpected: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn github_source_invalid_format_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = install_plugin_from_source(dir.path(), "github:badformat", false);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Invalid GitHub source") || msg.contains("format"),
+            "unexpected: {}",
+            msg
+        );
     }
 }

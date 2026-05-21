@@ -1,0 +1,23 @@
+# Qwen3.5 4B — smallest local model, fast iteration.
+# Best for: quick edits, simple scripts, fast feedback loops.
+# Hardware: 8 GB VRAM / 16 GB unified memory
+# Install: ta plugin install github:trustedautonomy/ta-agent-ollama
+
+name        = "qwen3.5-4b"
+version     = "1.0.0"
+description = "Qwen3.5 4B via Ollama — fastest local agent, ~4 GB VRAM"
+command     = "ta-agent-ollama"
+args        = ["--model", "qwen3.5:4b", "--base-url", "http://localhost:11434", "--max-turns", "40", "--temperature", "0.1", "--thinking-mode", "false"]
+sentinel    = "[goal started]"
+context_file = "CLAUDE.md"
+context_inject = "env"
+
+[memory]
+inject       = "env"
+max_entries  = 10
+recency_days = 7
+
+[hardware]
+min_vram_gb = 4
+min_ram_gb  = 16
+target      = "M1 Mac (base), RTX 3060 (8 GB), integrated graphics with large RAM"

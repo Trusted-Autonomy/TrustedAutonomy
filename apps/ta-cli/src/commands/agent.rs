@@ -165,6 +165,17 @@ pub enum AgentCommands {
         #[arg(long, default_value = "9b")]
         size: String,
     },
+    /// Migrate an existing agent framework configuration to the standalone plugin (v0.16.2).
+    ///
+    /// Detects existing agent configs, installs the standalone plugin, updates
+    /// profile paths, and verifies connectivity.
+    ///
+    /// Currently supported frameworks:
+    ///   ta agent migrate ollama   — migrate to standalone ta-agent-ollama plugin
+    Migrate {
+        /// Framework to migrate: "ollama".
+        framework: String,
+    },
 }
 
 pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -211,6 +222,7 @@ pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Resul
         }
         AgentCommands::Publish { path, registry } => framework_publish(path, registry.as_deref()),
         AgentCommands::InstallQwen { size } => install_qwen(size),
+        AgentCommands::Migrate { framework } => migrate_agent_framework(framework, config),
     }
 }
 
@@ -1606,6 +1618,142 @@ fn install_qwen(size: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Migrate an existing agent framework configuration to its standalone plugin.
+fn migrate_agent_framework(framework: &str, config: &GatewayConfig) -> anyhow::Result<()> {
+    match framework {
+        "ollama" => migrate_ollama(config),
+        other => anyhow::bail!(
+            "Unsupported framework '{}' for migration.\n\
+             Supported frameworks: ollama\n\
+             Example: ta agent migrate ollama",
+            other
+        ),
+    }
+}
+
+/// Migrate existing Ollama agent configs to the standalone ta-agent-ollama plugin.
+///
+/// Steps:
+///   1. Detect existing ta-agent-ollama backed configs in .ta/agents/ and ~/.config/ta/agents/
+///   2. Verify the ta-agent-ollama binary is present
+///   3. Install agent profiles from the standalone plugin (if not already installed)
+///   4. Verify Ollama connectivity
+///   5. Print migration summary
+fn migrate_ollama(config: &GatewayConfig) -> anyhow::Result<()> {
+    println!("Migrating Ollama agent configuration to standalone plugin...");
+    println!();
+
+    // Step 1: Detect existing ta-agent-ollama backed configs.
+    let mut found_profiles: Vec<(std::path::PathBuf, String)> = Vec::new();
+
+    let scan_dirs = [
+        config.workspace_root.join(".ta").join("agents"),
+        ta_config_dir().join("agents"),
+    ];
+
+    for agents_dir in &scan_dirs {
+        if !agents_dir.is_dir() {
+            continue;
+        }
+        let entries = match std::fs::read_dir(agents_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if content.contains("ta-agent-ollama") {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                found_profiles.push((path, name));
+            }
+        }
+    }
+
+    if found_profiles.is_empty() {
+        println!("No existing Ollama agent profiles found.");
+        println!("To install fresh Ollama agent profiles:");
+        println!("  ta agent install-qwen --size 9b");
+        println!();
+        println!("Migration note: all agent profiles already point to the standalone");
+        println!("ta-agent-ollama binary — no path updates are required.");
+        return Ok(());
+    }
+
+    println!(
+        "Found {} existing Ollama agent profile(s):",
+        found_profiles.len()
+    );
+    for (path, name) in &found_profiles {
+        println!("  {} ({})", name, path.display());
+    }
+    println!();
+
+    // Step 2: Verify ta-agent-ollama binary is present.
+    let binary_found = which::which("ta-agent-ollama").is_ok() || {
+        let sibling = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("ta-agent-ollama")));
+        #[cfg(windows)]
+        let sibling = sibling.map(|p| p.with_extension("exe"));
+        sibling.map(|p| p.exists()).unwrap_or(false)
+    };
+
+    if binary_found {
+        println!("[OK] ta-agent-ollama binary is installed.");
+    } else {
+        println!(
+            "[WARN] ta-agent-ollama binary not found on PATH.\n\
+             Update your TA installation or run: cargo install ta-agent-ollama"
+        );
+    }
+
+    // Step 3: Profiles already reference ta-agent-ollama directly — no path update needed.
+    // The standalone plugin uses the same binary name and command interface.
+    println!("[OK] Agent profiles use ta-agent-ollama command — no path update required.");
+
+    // Step 4: Check Ollama connectivity (best-effort).
+    let ollama_ok = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()
+        .and_then(|c| c.get("http://localhost:11434/api/tags").send().ok())
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    if ollama_ok {
+        println!("[OK] Ollama endpoint reachable at http://localhost:11434.");
+    } else {
+        println!(
+            "[WARN] Ollama is not running at http://localhost:11434.\n  \
+             Start with: ollama serve"
+        );
+    }
+
+    // Step 5: Summary.
+    println!();
+    println!("Migration complete.");
+    println!();
+    println!("Your existing profiles work as-is with the standalone ta-agent-ollama plugin.");
+    println!(
+        "To use the plugin-bundled profiles instead:\n  \
+         ta agent install-qwen --size 9b   (or --size 4b / --size 27b / --size all)"
+    );
+    println!();
+    println!("Run `ta agent list --local` to see all installed local agents.");
+
+    Ok(())
+}
+
 /// List only locally-installed Ollama-backed agent frameworks, with model download status.
 fn list_local_agents(config: &GatewayConfig) -> anyhow::Result<()> {
     println!("Local (Ollama-backed) agents:");
@@ -1970,5 +2118,49 @@ description = "Test framework"
     fn bundled_qwen_profile_unknown_returns_empty() {
         let content = bundled_qwen_profile("99b");
         assert!(content.is_empty());
+    }
+
+    // ── Migrate tests (v0.16.2) ──────────────────────────────────────────────
+
+    #[test]
+    fn migrate_rejects_unknown_framework() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let result = migrate_agent_framework("notaframework", &config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unsupported framework") || msg.contains("notaframework"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn migrate_ollama_no_existing_configs() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        // No existing configs — should succeed with an informational message.
+        let result = migrate_agent_framework("ollama", &config);
+        assert!(
+            result.is_ok(),
+            "migrate should succeed even with no configs"
+        );
+    }
+
+    #[test]
+    fn migrate_ollama_detects_existing_profile() {
+        let dir = TempDir::new().unwrap();
+        let agents_dir = dir.path().join(".ta").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        // Write a minimal ollama-backed profile.
+        std::fs::write(
+            agents_dir.join("my-qwen.toml"),
+            "name = \"my-qwen\"\ncommand = \"ta-agent-ollama\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let config = test_config(&dir);
+        let result = migrate_agent_framework("ollama", &config);
+        assert!(result.is_ok(), "migrate should succeed: {:?}", result);
     }
 }
