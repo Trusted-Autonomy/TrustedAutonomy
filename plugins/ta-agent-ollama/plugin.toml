@@ -1,0 +1,27 @@
+name = "ta-agent-ollama"
+version = "0.16.2-alpha"
+type = "agent"
+command = "ta-agent-ollama"
+capabilities = ["tool_use", "function_calling", "thinking_mode", "auto_model_select", "cot_fallback"]
+supported_frameworks = ["ollama", "llama-cpp", "vllm", "lm-studio", "openai-compat"]
+min_ta_version = "0.14.9"
+description = "Trusted Autonomy local-model agent — tool-use loop for any OpenAI-compatible endpoint (Ollama, llama.cpp, vLLM, LM Studio)"
+source_url = "https://github.com/trustedautonomy/ta-agent-ollama"
+crates_io = "ta-agent-ollama"
+
+# Install instructions:
+#   ta plugin install github:trustedautonomy/ta-agent-ollama
+#   ta plugin install crates:ta-agent-ollama
+#   ta agent install ollama
+#
+# Prerequisites:
+#   - Ollama running at http://localhost:11434 (or another OpenAI-compat endpoint)
+#   - At least one model pulled: ollama pull qwen3.5:9b
+#
+# After install, pull a model and run a goal:
+#   ta agent install-qwen --size 9b
+#   ta run "Fix the authentication bug" --agent qwen3.5-9b
+
+[agents]
+profiles = ["agents/qwen3.5-4b.toml", "agents/qwen3.5-9b.toml", "agents/qwen3.5-27b.toml"]
+install_dir = "~/.config/ta/agents"

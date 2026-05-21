@@ -439,6 +439,246 @@ fn dirs_config_dir() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".config"))
 }
 
+// ── Agent plugin support ──────────────────────────────────────────────────────
+//
+// Agent plugins are standalone packages (e.g., ta-agent-ollama) that provide
+// an agent backend for TA. They ship a `plugin.toml` with `type = "agent"`.
+//
+// Installed in:
+//   .ta/plugins/agents/<name>/          (project-local)
+//   ~/.config/ta/plugins/agents/<name>/ (user-global)
+
+/// Manifest for a `type = "agent"` plugin.
+///
+/// Agent plugins provide an agent backend — a binary that drives local or
+/// remote LLMs via a tool-use loop. They bundle agent profiles (TOML files)
+/// that users install with `ta agent install-qwen` or similar commands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPluginManifest {
+    /// Plugin name (e.g., "ta-agent-ollama").
+    pub name: String,
+
+    /// Plugin version (semver).
+    #[serde(default = "default_agent_version")]
+    pub version: String,
+
+    /// Type discriminator — must be "agent".
+    #[serde(rename = "type")]
+    pub plugin_type: String,
+
+    /// Binary name for the agent (spawned by TA when running goals).
+    pub command: String,
+
+    /// Capabilities provided by this plugin (e.g., "tool_use", "thinking_mode").
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+
+    /// Agent frameworks this plugin is compatible with.
+    #[serde(default)]
+    pub supported_frameworks: Vec<String>,
+
+    /// Minimum TA version required.
+    #[serde(default)]
+    pub min_ta_version: Option<String>,
+
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// Source URL for the standalone repository.
+    #[serde(default)]
+    pub source_url: Option<String>,
+
+    /// crates.io package name (used by `ta plugin install crates:<name>`).
+    #[serde(default)]
+    pub crates_io: Option<String>,
+}
+
+fn default_agent_version() -> String {
+    "0.1.0".to_string()
+}
+
+/// A discovered agent plugin with its manifest and source path.
+#[derive(Debug, Clone)]
+pub struct DiscoveredAgentPlugin {
+    pub manifest: AgentPluginManifest,
+    pub plugin_dir: PathBuf,
+    pub source: PluginSource,
+}
+
+/// Discover agent plugins from standard directories.
+pub fn discover_agent_plugins(project_root: &Path) -> Vec<DiscoveredAgentPlugin> {
+    let mut plugins = Vec::new();
+
+    let project_dir = project_root.join(".ta").join("plugins").join("agents");
+    scan_agent_plugin_dir(&project_dir, PluginSource::ProjectLocal, &mut plugins);
+
+    if let Some(config_dir) = dirs_config_dir() {
+        let global_dir = config_dir.join("ta").join("plugins").join("agents");
+        scan_agent_plugin_dir(&global_dir, PluginSource::UserGlobal, &mut plugins);
+    }
+
+    plugins
+}
+
+fn scan_agent_plugin_dir(
+    dir: &Path,
+    source: PluginSource,
+    plugins: &mut Vec<DiscoveredAgentPlugin>,
+) {
+    if !dir.is_dir() {
+        return;
+    }
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %e,
+                "Failed to read agent plugin directory"
+            );
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let manifest_path = path.join("plugin.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+
+        match load_agent_plugin_manifest(&manifest_path) {
+            Ok(manifest) => {
+                tracing::debug!(
+                    plugin = %manifest.name,
+                    source = %source,
+                    "Discovered agent plugin"
+                );
+                plugins.push(DiscoveredAgentPlugin {
+                    manifest,
+                    plugin_dir: path,
+                    source: source.clone(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %manifest_path.display(),
+                    error = %e,
+                    "Skipping invalid agent plugin"
+                );
+            }
+        }
+    }
+}
+
+/// Load and validate an agent plugin manifest from a `plugin.toml` file.
+pub fn load_agent_plugin_manifest(path: &Path) -> Result<AgentPluginManifest, PluginError> {
+    if !path.exists() {
+        return Err(PluginError::ManifestNotFound {
+            path: path.to_path_buf(),
+        });
+    }
+    let content = std::fs::read_to_string(path)?;
+    let manifest: AgentPluginManifest =
+        toml::from_str(&content).map_err(|e| PluginError::InvalidManifest {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+
+    if manifest.plugin_type != "agent" {
+        return Err(PluginError::InvalidManifest {
+            path: path.to_path_buf(),
+            reason: format!(
+                "expected type = \"agent\", got \"{}\"",
+                manifest.plugin_type
+            ),
+        });
+    }
+
+    Ok(manifest)
+}
+
+/// Install an agent plugin from a local source directory.
+///
+/// Copies the plugin directory to `.ta/plugins/agents/<name>/` (project-local)
+/// or `~/.config/ta/plugins/agents/<name>/` (global).
+pub fn install_agent_plugin(
+    source: &Path,
+    project_root: &Path,
+    global: bool,
+) -> Result<DiscoveredAgentPlugin, PluginError> {
+    let manifest_path = source.join("plugin.toml");
+    let manifest = load_agent_plugin_manifest(&manifest_path)?;
+
+    let target_base = if global {
+        dirs_config_dir()
+            .ok_or_else(|| {
+                PluginError::InstallFailed("cannot determine user config directory".into())
+            })?
+            .join("ta")
+            .join("plugins")
+            .join("agents")
+    } else {
+        project_root.join(".ta").join("plugins").join("agents")
+    };
+
+    let target_dir = target_base.join(&manifest.name);
+    std::fs::create_dir_all(&target_dir)?;
+    copy_dir_contents(source, &target_dir)?;
+
+    #[cfg(target_os = "macos")]
+    codesign_plugin_binaries(&target_dir);
+
+    let plugin_source = if global {
+        PluginSource::UserGlobal
+    } else {
+        PluginSource::ProjectLocal
+    };
+
+    Ok(DiscoveredAgentPlugin {
+        manifest,
+        plugin_dir: target_dir,
+        source: plugin_source,
+    })
+}
+
+/// Remove an installed agent plugin by name.
+///
+/// Searches project-local and global directories; removes the first match found.
+pub fn remove_agent_plugin(name: &str, project_root: &Path) -> Result<PathBuf, PluginError> {
+    let candidates = [
+        project_root
+            .join(".ta")
+            .join("plugins")
+            .join("agents")
+            .join(name),
+        dirs_config_dir()
+            .map(|c| c.join("ta").join("plugins").join("agents").join(name))
+            .unwrap_or_default(),
+    ];
+
+    for candidate in &candidates {
+        if candidate.is_dir() {
+            let manifest_path = candidate.join("plugin.toml");
+            if manifest_path.exists() {
+                std::fs::remove_dir_all(candidate)?;
+                return Ok(candidate.clone());
+            }
+        }
+    }
+
+    Err(PluginError::InstallFailed(format!(
+        "agent plugin '{}' is not installed in .ta/plugins/agents/ or ~/.config/ta/plugins/agents/",
+        name
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,5 +958,147 @@ protocol = "json-stdio"
             second: "global".into(),
         };
         assert!(err.to_string().contains("dup"));
+    }
+
+    // ── Agent plugin tests (v0.16.2) ──────────────────────────────────────────
+
+    #[test]
+    fn parse_agent_plugin_manifest() {
+        let toml_str = r#"
+name = "ta-agent-ollama"
+version = "0.16.2-alpha"
+type = "agent"
+command = "ta-agent-ollama"
+capabilities = ["tool_use", "function_calling", "thinking_mode"]
+supported_frameworks = ["ollama", "llama-cpp"]
+min_ta_version = "0.14.9"
+description = "Local-model agent for Trusted Autonomy"
+source_url = "https://github.com/trustedautonomy/ta-agent-ollama"
+crates_io = "ta-agent-ollama"
+"#;
+        let manifest: AgentPluginManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.name, "ta-agent-ollama");
+        assert_eq!(manifest.version, "0.16.2-alpha");
+        assert_eq!(manifest.plugin_type, "agent");
+        assert_eq!(manifest.command, "ta-agent-ollama");
+        assert!(manifest.capabilities.contains(&"tool_use".to_string()));
+        assert!(manifest.capabilities.contains(&"thinking_mode".to_string()));
+        assert_eq!(manifest.min_ta_version.as_deref(), Some("0.14.9"));
+        assert_eq!(manifest.crates_io.as_deref(), Some("ta-agent-ollama"));
+    }
+
+    #[test]
+    fn load_agent_plugin_manifest_requires_agent_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("plugin.toml");
+        // type = "vcs" should be rejected
+        std::fs::write(
+            &manifest_path,
+            "name = \"test\"\ntype = \"vcs\"\ncommand = \"test-cmd\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let result = load_agent_plugin_manifest(&manifest_path);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("agent") || msg.contains("vcs"),
+            "unexpected: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn load_agent_plugin_manifest_accepts_agent_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("plugin.toml");
+        std::fs::write(
+            &manifest_path,
+            "name = \"ta-agent-ollama\"\ntype = \"agent\"\ncommand = \"ta-agent-ollama\"\nversion = \"0.16.2-alpha\"\n",
+        )
+        .unwrap();
+        let manifest = load_agent_plugin_manifest(&manifest_path).unwrap();
+        assert_eq!(manifest.name, "ta-agent-ollama");
+        assert_eq!(manifest.command, "ta-agent-ollama");
+    }
+
+    #[test]
+    fn discover_agent_plugins_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = discover_agent_plugins(dir.path());
+        assert!(plugins.is_empty());
+    }
+
+    #[test]
+    fn discover_agent_plugins_finds_installed_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir
+            .path()
+            .join(".ta")
+            .join("plugins")
+            .join("agents")
+            .join("ta-agent-ollama");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            "name = \"ta-agent-ollama\"\ntype = \"agent\"\ncommand = \"ta-agent-ollama\"\nversion = \"0.16.2-alpha\"\n",
+        )
+        .unwrap();
+
+        let plugins = discover_agent_plugins(dir.path());
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].manifest.name, "ta-agent-ollama");
+        assert_eq!(plugins[0].manifest.version, "0.16.2-alpha");
+        assert_eq!(plugins[0].source, PluginSource::ProjectLocal);
+    }
+
+    #[test]
+    fn install_and_remove_agent_plugin() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+
+        // Write a valid plugin.toml in the source.
+        std::fs::write(
+            source_dir.path().join("plugin.toml"),
+            "name = \"ta-agent-ollama\"\ntype = \"agent\"\ncommand = \"ta-agent-ollama\"\nversion = \"0.16.2-alpha\"\n",
+        )
+        .unwrap();
+
+        // Install project-local.
+        let installed = install_agent_plugin(source_dir.path(), project_dir.path(), false).unwrap();
+        assert_eq!(installed.manifest.name, "ta-agent-ollama");
+        assert!(installed.plugin_dir.exists());
+
+        // Discover it.
+        let plugins = discover_agent_plugins(project_dir.path());
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].manifest.name, "ta-agent-ollama");
+
+        // Remove it.
+        let removed = remove_agent_plugin("ta-agent-ollama", project_dir.path()).unwrap();
+        assert!(!removed.exists());
+
+        // Should be gone.
+        let plugins_after = discover_agent_plugins(project_dir.path());
+        assert!(plugins_after.is_empty());
+    }
+
+    #[test]
+    fn remove_agent_plugin_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = remove_agent_plugin("nonexistent", dir.path());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("nonexistent") || msg.contains("not installed"),
+            "unexpected: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn agent_plugin_manifest_default_version() {
+        let toml_str = "name = \"minimal\"\ntype = \"agent\"\ncommand = \"ta-agent-minimal\"\n";
+        let manifest: AgentPluginManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.version, "0.1.0");
     }
 }
