@@ -7761,7 +7761,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Why extract**: Ollama support has its own dependency surface (Ollama binary, model management, thinking-mode tokens), release cadence (tracks Ollama API changes independently of TA core), and user audience (local-model users who may not need TA's full feature set). Keeping it in-tree makes the core binary heavier and couples TA releases to Ollama API changes.
 
