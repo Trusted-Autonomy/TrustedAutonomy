@@ -7769,7 +7769,13 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 #### Immediate bug fixes (carry-forward from v0.16.0.1 / v0.16.1.1)
 
-1. [ ] **`pr_ready` state badge** (`assets/index.html`): Goals in `pr_ready` state currently show "Running" in the dashboard. Add a distinct "Ready for Review" badge (amber) and link directly to the draft in the Drafts tab. The Run button guard (from v0.16.0.1) should also cover `pr_ready`.
+1. [ ] **"Next phase" includes sub-phases** (`assets/index.html` + `crates/ta-daemon/src/api/plan.rs`): The current next-phase selector only considers 3-part IDs (`vX.Y.Z`) and skips 4-part sub-phases (`vX.Y.Z.N`). Result: after v0.16.2 (done), Studio shows v0.16.3 as next, skipping pending v0.16.1.1 and v0.16.1.2. Fix: evaluate all pending phases in PLAN.md document order regardless of depth. The first pending phase in document order is always "next", whether it is a top-level phase or a sub-phase.
+
+2. [ ] **Version displayed in Studio header** (`assets/index.html`): The daemon `/health` response includes the version string but Studio never shows it. Add the version (e.g. `v0.16.2-alpha`) to the top-right of the Studio header bar, fetched on load and refreshed every 60s. Clicking it links to the plan tab.
+
+3. [ ] **Run/dialog action buttons are non-functional** (`assets/index.html`): The "Active ▶" button placed in v0.16.0.1 as a guard for in-progress phases calls `alert()` — a browser modal with no selectable actions. Replace with a proper inline toast/modal component that renders actionable buttons (e.g. "View active goal", "View draft") with working click handlers. Same fix applies anywhere `alert()` or `confirm()` is used for user-facing decisions in Studio.
+
+4. [ ] **`pr_ready` state badge** (`assets/index.html`): Goals in `pr_ready` state currently show "Running" in the dashboard. Add a distinct "Ready for Review" badge (amber) and link directly to the draft in the Drafts tab. The Run button guard (from v0.16.0.1) should also cover `pr_ready`.
 
 2. [ ] **Draft detail: collapsible sections with expansion carets** (`assets/index.html`): The draft detail panel shows changed files but omits the supervisor review verdict, agent decision log, and constitution check. Add collapsible `<details>`-style sections with carets for: Summary, Supervisor Analysis (verdict + score), Agent Decision Log (each decision with confidence + rationale), Changed Files (current file list), and Constitution Check. All sections default to collapsed except Summary and Changed Files. Pulls from `/api/drafts/{id}` response (`validation_log`, `supervisor_review`, `decision_log` fields).
 
