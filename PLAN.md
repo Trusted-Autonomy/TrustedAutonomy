@@ -7760,6 +7760,54 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 #### Version: `0.16.1-alpha.1`
 
 ---
+### v0.16.1.2 — Studio Advisor & QoL Pass
+<!-- status: pending -->
+
+**Goal**: Transform Studio from a passive dashboard into a cohesive, self-contained environment where a user can accomplish everything TA offers — without ever touching the CLI. The central surface is a persistent **Advisor panel**: a conversational discourse thread where the user types intent in natural language and the advisor interprets, clarifies, and acts. Every other tab is a specialized view, but the advisor can reach all of them.
+
+**Why this phase exists**: Current Studio requires parallel CLI usage for applying drafts, starting goals, asking questions about running work, and reviewing plan progress. The UX is fragmented — each tab is a read-only view with no action path. Users who onboard through the Studio never discover the full power of TA. This phase makes Studio the primary surface; the CLI becomes an optional power-user shortcut.
+
+#### Immediate bug fixes (carry-forward from v0.16.0.1 / v0.16.1.1)
+
+1. [ ] **`pr_ready` state badge** (`assets/index.html`): Goals in `pr_ready` state currently show "Running" in the dashboard. Add a distinct "Ready for Review" badge (amber) and link directly to the draft in the Drafts tab. The Run button guard (from v0.16.0.1) should also cover `pr_ready`.
+
+2. [ ] **Draft detail: show supervisor analysis** (`assets/index.html`): The draft detail panel shows changed files but omits the supervisor review verdict, agent decision log, and constitution check. Pull these from the `/api/drafts/{id}` response (`validation_log`, `supervisor_review`, `decision_log` fields) and render them above the file list. This is the equivalent of `ta draft view` output, in-browser.
+
+3. [ ] **Draft apply from Studio** (`assets/index.html` + `crates/ta-daemon/src/web.rs`): Add `POST /api/drafts/{id}/apply` endpoint to the daemon. Studio "Apply" button calls it directly — no CLI required. Response streams apply progress (build output, test results, git commit SHA). Show a progress panel in the draft detail view during apply. On success, show the commit SHA and PR URL.
+
+4. [ ] **v0.15.9 display cleanup**: Verify the heading fix from v0.16.1.1 resolved the dashboard display after daemon restart. If the status marker position causes the parser to still misread it, adjust marker placement.
+
+#### Advisor panel
+
+5. [ ] **Advisor tab** (`assets/index.html`): A persistent chat thread between the user and a TA-connected Claude agent. Input field at the bottom, discourse history above. Every session persists in daemon memory (`/api/advisor/history`). The advisor has read access to: current goals, plan phases, active drafts, system health, recent events.
+
+6. [ ] **Intent routing** (`crates/ta-daemon/src/api/advisor.rs`): When the user sends a message, the advisor classifies intent into one of: `ask_question`, `start_goal`, `run_workflow`, `review_draft`, `update_plan`, `check_status`, `clarify`. For `start_goal` and `run_workflow` it confirms before acting: "Did you want to run the next plan phase (v0.16.2 — Ollama plugin, which will do X, Y, Z)? Or was that a general question?" User confirms or redirects. For ambiguous input, the advisor asks one clarifying question.
+
+7. [ ] **Context-sensitive suggestions**: When the advisor detects project context (e.g., `workflow.toml` with `project_type = "unreal"`, or a goal mentioning "game project"), it surfaces relevant workflow templates proactively: "I see this is an Unreal project — would you like to initialize the TA Unreal workflow template?" Suggestions appear as tappable chips above the input field.
+
+8. [ ] **Goal interrogation from advisor**: User can ask "what is the current goal doing?" or "why did the last draft fail?" — the advisor fetches live goal state, agent log tail, and draft validation errors and summarises them in the thread.
+
+9. [ ] **Workflow template catalog** (Workflows tab + advisor): A grid of available workflow templates (from `~/.config/ta/workflows/` and built-ins). Each card shows name, description, required config params. Clicking "Run" opens a config form then fires `ta run`. The advisor can also surface these: "I can run the `release` workflow for you — it needs a version number. What version?"
+
+#### Dashboard upgrades
+
+10. [ ] **Project health panel**: Dashboard gains a "Project Health" section: plan completion % (done phases / total phases), recent velocity (goals per week from velocity-history), last successful build timestamp, open drafts count, and a `ta doctor` summary (green/amber/red per check). Refreshes every 30 seconds.
+
+11. [ ] **Active goal detail on click**: Clicking a running goal card on the dashboard opens an inline panel showing: current agent log tail (last 20 lines, auto-scrolling via SSE), elapsed time, phase linked, estimated completion (based on velocity P50). "Ask advisor about this goal" button drops a pre-filled message into the advisor thread.
+
+12. [ ] **Notification feed**: A bell icon in the header opens a slide-in panel with the last 20 system events (goal started/completed, draft ready, apply succeeded, CI status). Events link to the relevant draft or goal detail.
+
+#### Full CLI parity surface
+
+13. [ ] **Plan tab: run any phase**: Every pending plan phase card has a "Run" button that fires `ta run` for that phase via the advisor (shows confirmation + config). Done phases show their apply timestamp and commit SHA (from `plan_history`).
+
+14. [ ] **Settings tab**: Daemon URL, API key (masked), `workflow.toml` viewer/editor, notification channel config. `ta doctor` output with "Fix" buttons for auto-fixable issues.
+
+15. [ ] **USAGE.md**: "Using TA Studio" section — advisor panel walkthrough, workflow catalog, applying drafts in-browser, project health dashboard, notification feed. Replaces the current "Web Shell" section which is legacy.
+
+#### Version: `0.16.1-alpha.2`
+
+---
 ### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
 <!-- status: in_progress -->
 
