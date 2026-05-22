@@ -36,8 +36,10 @@ pub struct ApiPlanPhase {
     pub description: String,
     pub items: Vec<PlanItem>,
     pub depends_on: Vec<String>,
-    /// True if a goal referencing this phase is currently running.
+    /// True if a goal referencing this phase is actively running (not pr_ready).
     pub running: bool,
+    /// True if a goal referencing this phase has reached pr_ready state (draft ready for review).
+    pub pr_ready: bool,
 }
 
 // ── Parsing ────────────────────────────────────────────────────
@@ -182,14 +184,15 @@ pub fn parse_plan_phases(content: &str) -> Vec<ApiPlanPhase> {
             description,
             items,
             depends_on,
-            running: false, // populated separately
+            running: false,  // populated separately
+            pr_ready: false, // populated separately
         });
     }
 
     phases
 }
 
-/// Check which phase IDs have a currently active goal.
+/// Check which phase IDs have a currently active goal, and what state they are in.
 ///
 /// Scans `.ta/goals/*.json` for goal files whose `plan_phase` matches one of
 /// the supplied phase IDs and whose `state` is an active (non-terminal) state.
@@ -198,14 +201,17 @@ pub fn parse_plan_phases(content: &str) -> Vec<ApiPlanPhase> {
 /// `plan_phase` has no matching entry in `known_ids` is skipped — this suppresses
 /// ghost "running" badges for stale goals linked to phases that no longer exist
 /// (or whose heading was removed by staging drift).
-fn active_phases(
+///
+/// Returns a map of phase_id → state string. When multiple goals reference the
+/// same phase, the higher-priority state wins: `running` > `pr_ready` > others.
+pub fn active_phase_states(
     goals_dir: &std::path::Path,
     known_ids: &std::collections::HashSet<String>,
-) -> std::collections::HashSet<String> {
-    let mut active = std::collections::HashSet::new();
+) -> std::collections::HashMap<String, String> {
+    let mut states: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let dir = match std::fs::read_dir(goals_dir) {
         Ok(d) => d,
-        Err(_) => return active,
+        Err(_) => return states,
     };
     for entry in dir.flatten() {
         let path = entry.path();
@@ -239,10 +245,33 @@ fn active_phases(
             "created" | "configured" | "running" | "awaiting_input" | "finalizing" | "pr_ready"
         );
         if is_active {
-            active.insert(phase_id.to_string());
+            // When multiple goals map to the same phase, prefer running > pr_ready > others.
+            let existing = states.get(phase_id).map(|s| s.as_str());
+            let should_insert = match existing {
+                None => true,
+                Some("running") => false,
+                Some("pr_ready") => state == "running",
+                Some(_) => state == "running" || state == "pr_ready",
+            };
+            if should_insert {
+                states.insert(phase_id.to_string(), state.to_string());
+            }
         }
     }
-    active
+    states
+}
+
+/// Returns the set of phase IDs that have at least one active goal.
+/// Convenience wrapper around `active_phase_states` for callers that only
+/// need presence (not the specific state).
+#[allow(dead_code)]
+fn active_phases(
+    goals_dir: &std::path::Path,
+    known_ids: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    active_phase_states(goals_dir, known_ids)
+        .into_keys()
+        .collect()
 }
 
 /// Check whether `phase_id` matches any entry in `known_ids`, normalising the
@@ -283,13 +312,23 @@ pub async fn get_plan_phases(State(state): State<Arc<AppState>>) -> impl IntoRes
     let known_ids: std::collections::HashSet<String> =
         phases.iter().map(|p| p.id.clone()).collect();
 
-    // Annotate phases that have an active goal (orphaned phase IDs are suppressed).
+    // Annotate phases with their active goal state (orphaned phase IDs are suppressed).
     let goals_dir = project_root.join(".ta").join("goals");
-    let active = active_phases(&goals_dir, &known_ids);
+    let active_states = active_phase_states(&goals_dir, &known_ids);
     for ph in &mut phases {
-        ph.running = active.contains(&ph.id)
-            || active.contains(&format!("v{}", ph.id))
-            || active.iter().any(|a| ids_match(a, &ph.id));
+        let state = active_states
+            .get(&ph.id)
+            .or_else(|| active_states.get(&format!("v{}", ph.id)))
+            .or_else(|| {
+                active_states
+                    .iter()
+                    .find(|(a, _)| ids_match(a, &ph.id))
+                    .map(|(_, s)| s)
+            });
+        if let Some(s) = state {
+            ph.pr_ready = s == "pr_ready";
+            ph.running = !ph.pr_ready; // running = active but not pr_ready
+        }
     }
 
     Json(phases).into_response()
@@ -1218,5 +1257,70 @@ Future work.
         let known: std::collections::HashSet<String> = std::collections::HashSet::new();
         let active = active_phases(&goals_dir, &known);
         assert!(active.contains("v0.15.9"));
+    }
+
+    // ── v0.16.1.2: pr_ready state tracking ────────────────────────────────────
+
+    #[test]
+    fn active_phase_states_tracks_pr_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        let goal = serde_json::json!({
+            "plan_phase": "v0.16.0",
+            "state": "pr_ready",
+        });
+        std::fs::write(goals_dir.join("g.json"), goal.to_string()).unwrap();
+
+        let known: std::collections::HashSet<String> =
+            ["v0.16.0"].iter().map(|s| s.to_string()).collect();
+        let states = active_phase_states(&goals_dir, &known);
+        assert_eq!(
+            states.get("v0.16.0").map(|s| s.as_str()),
+            Some("pr_ready"),
+            "pr_ready goal should be tracked with state 'pr_ready'"
+        );
+    }
+
+    #[test]
+    fn active_phase_states_running_beats_pr_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        // Two goals for the same phase: one running, one pr_ready.
+        let g1 = serde_json::json!({ "plan_phase": "v0.16.0", "state": "pr_ready" });
+        let g2 = serde_json::json!({ "plan_phase": "v0.16.0", "state": "running" });
+        std::fs::write(goals_dir.join("g1.json"), g1.to_string()).unwrap();
+        std::fs::write(goals_dir.join("g2.json"), g2.to_string()).unwrap();
+
+        let known: std::collections::HashSet<String> =
+            ["v0.16.0"].iter().map(|s| s.to_string()).collect();
+        let states = active_phase_states(&goals_dir, &known);
+        assert_eq!(
+            states.get("v0.16.0").map(|s| s.as_str()),
+            Some("running"),
+            "running state should take precedence over pr_ready"
+        );
+    }
+
+    #[test]
+    fn active_phases_orphan_regression_no_ghost_badge() {
+        // A goal whose plan_phase is not in the known set must not produce a badge.
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        let orphan = serde_json::json!({ "plan_phase": "v0.99.99", "state": "running" });
+        std::fs::write(goals_dir.join("orphan.json"), orphan.to_string()).unwrap();
+
+        let known: std::collections::HashSet<String> =
+            ["v0.16.0"].iter().map(|s| s.to_string()).collect();
+        let states = active_phase_states(&goals_dir, &known);
+        assert!(
+            states.is_empty(),
+            "orphaned phase_id must not produce an active state entry"
+        );
     }
 }

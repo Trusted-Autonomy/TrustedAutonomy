@@ -212,6 +212,27 @@
                    border: 1px solid var(--border); color: var(--text); }
   .advise-result.ok { border-color: var(--green); color: var(--green); }
   .advise-result.err { border-color: var(--red); color: var(--red); }
+  /* Native modal dialog (v0.16.1.2) */
+  dialog { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+           padding: 1.5rem; max-width: 480px; width: 92%; color: var(--text); box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+  dialog::backdrop { background: rgba(0,0,0,0.65); }
+  dialog p { margin-bottom: 0.75rem; line-height: 1.5; }
+  .dialog-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; }
+  /* pr_ready badge */
+  .badge-pr-ready { background: var(--yellow); color: #000; }
+  /* Collapsible draft sections */
+  details summary { cursor: pointer; user-select: none; font-size: 0.95rem; color: var(--muted);
+                    text-transform: uppercase; letter-spacing: 0.05em; padding: 0.3rem 0;
+                    list-style: none; display: flex; align-items: center; gap: 0.4rem; }
+  details summary::before { content: '▶'; font-size: 0.65rem; transition: transform 0.15s; }
+  details[open] summary::before { transform: rotate(90deg); }
+  details summary::-webkit-details-marker { display: none; }
+  details .detail-body { margin-top: 0.5rem; }
+  /* Version badge in header */
+  #version-badge { font-size: 0.72rem; color: var(--muted); font-family: monospace;
+                   cursor: pointer; padding: 0.1rem 0.4rem; border: 1px solid var(--border);
+                   border-radius: 4px; margin-left: 0.5rem; }
+  #version-badge:hover { color: var(--accent); border-color: var(--accent); }
   /* Health Alert Bar (v0.15.30.6) */
   .health-bar { display: flex; align-items: center; gap: 0.75rem; border-radius: 6px;
                padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; font-size: 0.85rem;
@@ -235,7 +256,10 @@
 </head>
 <body>
 <div class="container">
-  <h1>Trusted Autonomy</h1>
+  <div style="display:flex;align-items:baseline;gap:0.5rem">
+    <h1>Trusted Autonomy</h1>
+    <span id="version-badge" onclick="switchTab('plan')" title="Click to open Plan tab"></span>
+  </div>
   <p class="subtitle" id="subtitle">Loading...</p>
   <!-- Global Intent Bar (v0.15.26): Cmd+K to focus, routes to advisor from any tab -->
   <div class="intent-bar" id="intent-bar">
@@ -285,6 +309,11 @@
       </div>
     </div>
   </div>
+  <!-- Native dialog modal (v0.16.1.2) -->
+  <dialog id="ta-dialog">
+    <div id="ta-dialog-body"></div>
+    <div class="dialog-actions" id="ta-dialog-actions"></div>
+  </dialog>
   <!-- Setup Wizard Overlay -->
   <div id="wizard-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:1000;overflow-y:auto;">
     <div style="max-width:620px;margin:3rem auto;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:2rem;">
@@ -338,6 +367,85 @@ function draftStatus(d) {
   if (typeof raw === 'object' && typeof raw.status === 'string') return raw.status;
   return 'unknown';
 }
+
+// ── Modal dialogs (v0.16.1.2) ─────────────────────────────────
+// Replace browser alert/confirm/prompt with in-page <dialog> modals.
+
+function _getDialog() { return document.getElementById('ta-dialog'); }
+
+function showAlert(msg) {
+  const dlg = _getDialog();
+  if (!dlg) { return; }
+  document.getElementById('ta-dialog-body').textContent = String(msg);
+  const actions = document.getElementById('ta-dialog-actions');
+  actions.innerHTML = '';
+  const ok = document.createElement('button');
+  ok.className = 'btn btn-primary btn-sm';
+  ok.textContent = 'OK';
+  ok.onclick = () => dlg.close();
+  actions.appendChild(ok);
+  dlg.showModal();
+}
+
+function showConfirm(msg, onConfirm, onCancel) {
+  const dlg = _getDialog();
+  if (!dlg) { if (window._nativeConfirm(msg)) onConfirm && onConfirm(); else onCancel && onCancel(); return; }
+  document.getElementById('ta-dialog-body').textContent = String(msg);
+  const actions = document.getElementById('ta-dialog-actions');
+  actions.innerHTML = '';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn btn-ghost btn-sm';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = () => { dlg.close(); if (onCancel) onCancel(); };
+  const confirm = document.createElement('button');
+  confirm.className = 'btn btn-primary btn-sm';
+  confirm.textContent = 'Confirm';
+  confirm.onclick = () => { dlg.close(); if (onConfirm) onConfirm(); };
+  actions.appendChild(cancel);
+  actions.appendChild(confirm);
+  dlg.showModal();
+}
+
+function showPrompt(msg, defaultVal, onResult) {
+  const dlg = _getDialog();
+  if (!dlg) {
+    const v = window._nativePrompt(String(msg), String(defaultVal || ''));
+    onResult && onResult(v);
+    return;
+  }
+  const body = document.getElementById('ta-dialog-body');
+  body.innerHTML = `<p>${esc(msg)}</p><input id="ta-dlg-inp" type="text" value="${esc(defaultVal||'')}" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;color:var(--text);font-size:0.9rem">`;
+  const actions = document.getElementById('ta-dialog-actions');
+  actions.innerHTML = '';
+  let _confirmed = false;
+  const cancel = document.createElement('button');
+  cancel.className = 'btn btn-ghost btn-sm';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = () => dlg.close();
+  const ok = document.createElement('button');
+  ok.className = 'btn btn-primary btn-sm';
+  ok.textContent = 'OK';
+  ok.onclick = () => { _confirmed = true; dlg.close(); };
+  actions.appendChild(cancel);
+  actions.appendChild(ok);
+  dlg.onclose = () => {
+    const val = _confirmed ? (document.getElementById('ta-dlg-inp')?.value ?? '') : null;
+    dlg.onclose = null;
+    if (onResult) onResult(val);
+  };
+  const inp = body.querySelector('input');
+  if (inp) inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { _confirmed = true; dlg.close(); }
+    if (e.key === 'Escape') dlg.close();
+  });
+  dlg.showModal();
+  setTimeout(() => { const i = body.querySelector('input'); if (i) { i.focus(); i.select(); } }, 30);
+}
+
+// Preserve native implementations for fallback, then override globals.
+window._nativeConfirm = window.confirm.bind(window);
+window._nativePrompt  = window.prompt.bind(window);
+window.alert   = (msg) => showAlert(String(msg || ''));
 
 // ── Tab navigation ─────────────────────────────────────────────
 function switchTab(tab) {
@@ -574,7 +682,7 @@ async function handleAdvisorOption(num, optJson, dataJson) {
       // Copy command to clipboard and show confirmation.
       if (opt.command) {
         try { await navigator.clipboard.writeText(opt.command); } catch(_) {}
-        alert('Copied to clipboard:\n' + opt.command);
+        showAlert('Copied to clipboard:\n' + opt.command);
       }
       closeAdvisorOverlayDirect();
       break;
@@ -592,12 +700,12 @@ async function applyLatestDraft() {
     const resp = await fetch('/api/drafts');
     const all = resp.ok ? await resp.json() : [];
     const pending = all.filter(d => (d.status || '').toLowerCase().includes('pending'));
-    if (pending.length === 0) { alert('No pending drafts to apply.'); return; }
+    if (pending.length === 0) { showAlert('No pending drafts to apply.'); return; }
     const latest = pending[0];
     const r = await fetch('/api/drafts/' + latest.package_id + '/apply', { method: 'POST' });
-    if (r.ok) { alert('Draft applied.'); loadDashboard(); }
-    else { alert('Apply failed: ' + r.status); }
-  } catch(e) { alert('Network error: ' + e.message); }
+    if (r.ok) { showAlert('Draft applied.'); loadDashboard(); }
+    else { showAlert('Apply failed: ' + r.status); }
+  } catch(e) { showAlert('Network error: ' + e.message); }
 }
 
 async function denyLatestDraft() {
@@ -605,18 +713,18 @@ async function denyLatestDraft() {
     const resp = await fetch('/api/drafts');
     const all = resp.ok ? await resp.json() : [];
     const pending = all.filter(d => (d.status || '').toLowerCase().includes('pending'));
-    if (pending.length === 0) { alert('No pending drafts to deny.'); return; }
+    if (pending.length === 0) { showAlert('No pending drafts to deny.'); return; }
     const latest = pending[0];
     const r = await fetch('/api/drafts/' + latest.package_id + '/deny', { method: 'POST' });
-    if (r.ok) { alert('Draft denied.'); loadDashboard(); }
-    else { alert('Deny failed: ' + r.status); }
-  } catch(e) { alert('Network error: ' + e.message); }
+    if (r.ok) { showAlert('Draft denied.'); loadDashboard(); }
+    else { showAlert('Deny failed: ' + r.status); }
+  } catch(e) { showAlert('Network error: ' + e.message); }
 }
 
 async function fireGoalCommand(command) {
   // Extract goal title from `ta run "..."` command.
   const match = command.match(/ta run "([^"]+)"/);
-  if (!match) { alert('Cannot parse goal command: ' + command); return; }
+  if (!match) { showAlert('Cannot parse goal command: ' + command); return; }
   const title = match[1];
   try {
     const r = await fetch('/api/goal/start', {
@@ -626,12 +734,12 @@ async function fireGoalCommand(command) {
     });
     if (r.ok) {
       const d = await r.json();
-      alert('Goal started: ' + (d.goal_id || title));
+      showAlert('Goal started: ' + (d.goal_id || title));
       switchTab('dashboard');
     } else {
-      alert('Start goal failed: ' + r.status + '. Run manually:\n' + command);
+      showAlert('Start goal failed: ' + r.status + '. Run manually:\n' + command);
     }
-  } catch(e) { alert('Network error. Run manually:\n' + command); }
+  } catch(e) { showAlert('Network error. Run manually:\n' + command); }
 }
 
 // ── Advisor Tab (v0.15.26) ────────────────────────────────────
@@ -906,13 +1014,16 @@ let planQueueItems = [];
 
 function renderPlan() {
   const subMap = buildSubPhaseMap(planPhases);
-  // Only top-level phases (non-sub-phases, OR sub-phases whose parent isn't in the plan) qualify
-  // as root items in the queue. Sub-phases whose parent exists are rendered inside the parent card.
-  const parentIds = new Set(planPhases.map(p => p.id));
+  // A sub-phase is treated as a top-level queue item when its parent either:
+  //   (a) doesn't exist in the plan, or
+  //   (b) exists but is already done.
+  // This ensures pending sub-phases are never hidden behind a done parent card.
+  const parentMap = new Map(planPhases.map(p => [p.id, p]));
   function isOrphanSubPhase(ph) {
     if (!isSubPhase(ph.id)) return false;
     const pid = parentPhaseId(ph.id);
-    return !parentIds.has(pid);
+    const parent = parentMap.get(pid);
+    return !parent || parent.status === 'done';
   }
   planQueueItems = planPhases.filter(p =>
     (p.status === 'pending' || p.status === 'in_progress') &&
@@ -1016,11 +1127,15 @@ function togglePlanQueue() {
 
 function renderPhaseCard(ph, subMap) {
   const isActive = ph.running || ph.status === 'in_progress';
-  const statusBadge = ph.status === 'in_progress'
+  const isPrReady = ph.pr_ready;
+  const statusBadge = ph.status === 'in_progress' && !isPrReady
     ? '<span class="badge badge-pending" style="margin-left:0.5rem">In Progress</span>'
     : '';
-  const runningBadge = ph.running
+  const runningBadge = ph.running && !isPrReady
     ? '<span class="badge badge-active" style="margin-left:0.5rem">Running</span>'
+    : '';
+  const prReadyBadge = isPrReady
+    ? '<span class="badge badge-pr-ready" style="margin-left:0.5rem">Ready for Review</span>'
     : '';
   const subs = (subMap && subMap[ph.id]) || [];
   const hasSubs = subs.length > 0;
@@ -1029,18 +1144,22 @@ function renderPhaseCard(ph, subMap) {
   const chevron = hasSubs
     ? `<span class="chevron" onclick="toggleSubPhases('${esc(ph.id)}')" id="chevron-${esc(ph.id)}">${expanded ? '▼' : '▶'}</span>`
     : '';
+  // Active button: pr_ready → link to Drafts; running → info
+  const activeBtn = isPrReady
+    ? `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="switchTab('drafts')" title="Draft ready — click to review">Review Draft</button>`
+    : `<button class="btn btn-sm btn-ghost" onclick="showAlert('A goal for this phase is already running. Use the Dashboard to monitor progress, or the Drafts tab to review the output.')" title="A goal for this phase is already active">Active &#9654;</button>`;
   return `<div class="card" id="phase-card-${esc(ph.id)}">
     <div class="card-header">
       <div style="display:flex;align-items:center;gap:0.5rem;flex:1;min-width:0">
         ${chevron}
         <span style="color:var(--muted);font-family:monospace;font-size:0.8rem;flex-shrink:0">${esc(ph.id)}</span>
         <span class="card-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ph.title)}</span>
-        ${statusBadge}${runningBadge}
+        ${statusBadge}${runningBadge}${prReadyBadge}
       </div>
       <div style="display:flex;gap:0.5rem;flex-shrink:0">
         <button class="btn btn-sm btn-ghost" onclick="togglePhaseExpand('${esc(ph.id)}')">Details</button>
-        ${isActive
-          ? `<button class="btn btn-sm btn-ghost" onclick="alert('Run \`ta goal list\` to see active goals, or \`ta draft list\` to review the draft.')" title="A goal for this phase is already active">Active &#9654;</button>`
+        ${(isActive || isPrReady)
+          ? activeBtn
           : `<button class="btn btn-sm btn-primary" id="run-btn-${esc(ph.id)}" onclick="runPhase('${esc(ph.id)}')">Run</button>`
         }
       </div>
@@ -1085,7 +1204,7 @@ function renderSubPhases(parentId, subs, expanded) {
           </div>
           <div style="display:flex;gap:0.4rem;flex-shrink:0">
             ${subActive
-              ? `<button class="btn btn-sm btn-ghost" onclick="alert('Run \`ta goal list\` to see active goals.')">Active &#9654;</button>`
+              ? `<button class="btn btn-sm btn-ghost" onclick="showAlert('A goal for this phase is already running. Run \`ta goal list\` to see active goals.')">Active &#9654;</button>`
               : `<button class="btn btn-sm btn-primary" id="run-btn-${esc(sub.id)}" onclick="runPhase('${esc(sub.id)}')">Run</button>`
             }
           </div>
@@ -1137,6 +1256,28 @@ function togglePhaseExpand(id) {
 }
 
 async function runPhase(phaseId) {
+  // Check for out-of-order execution: warn if earlier pending phases exist.
+  const pendingBefore = planPhases.filter(p => {
+    if (p.status === 'done' || p.status === 'in_progress') return false;
+    const idx = planPhases.indexOf(p);
+    const targetIdx = planPhases.findIndex(p2 => p2.id === phaseId || 'v' + p2.id === phaseId);
+    return idx < targetIdx;
+  });
+  if (pendingBefore.length > 0) {
+    const firstName = pendingBefore[0].id + ' — ' + pendingBefore[0].title;
+    showConfirm(
+      'Warning: Running out of order\n\n' +
+      'There are ' + pendingBefore.length + ' earlier pending phase(s), starting with:\n' +
+      firstName + '\n\nProceed anyway?',
+      () => _doRunPhase(phaseId),
+      null
+    );
+    return;
+  }
+  _doRunPhase(phaseId);
+}
+
+async function _doRunPhase(phaseId) {
   const btn = document.getElementById('run-btn-' + phaseId);
   if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
   try {
@@ -1151,11 +1292,11 @@ async function runPhase(phaseId) {
     } else {
       const text = await resp.text();
       if (btn) { btn.disabled = false; btn.textContent = 'Run'; }
-      alert('Failed to start goal: ' + text);
+      showAlert('Failed to start goal: ' + text);
     }
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = 'Run'; }
-    alert('Network error: ' + e.message);
+    showAlert('Network error: ' + e.message);
   }
 }
 
@@ -1298,17 +1439,78 @@ async function showDraftDetail(id) {
 
 function renderDraftDetail(d) {
   const artifacts = (d.changes && d.changes.artifacts) || [];
-  const actions = (d.changes && d.changes.pending_actions) || [];
+  const pendingActions = (d.changes && d.changes.pending_actions) || [];
   const status = draftStatus(d);
   const isReviewable = status.includes('pending');
   const isApproved = status.includes('approved');
 
-  // Build summary text from whichever summary fields exist.
-  let summaryHtml = '';
+  // Summary section (open by default).
+  let summaryBody = '';
   if (d.summary) {
     const text = d.summary.description || d.summary.what_changed || d.summary.why || '';
-    if (text) summaryHtml = `<div class="section"><h3>Summary</h3><p>${esc(text)}</p></div>`;
+    if (text) summaryBody = `<p>${esc(text)}</p>`;
   }
+  const summarySection = `<details open class="section"><summary>Summary</summary><div class="detail-body">${summaryBody || '<p style="color:var(--muted)">No summary.</p>'}</div></details>`;
+
+  // Supervisor Analysis section.
+  let supervisorBody = '';
+  if (d.supervisor_review) {
+    const sv = d.supervisor_review;
+    const verdict = sv.verdict || sv.result || '';
+    const findings = Array.isArray(sv.findings) ? sv.findings : (sv.notes ? [sv.notes] : []);
+    supervisorBody = (verdict ? `<p><strong>Verdict:</strong> ${esc(verdict)}</p>` : '') +
+      findings.map(f => `<p style="font-size:0.85rem;color:var(--muted)">${esc(typeof f === 'string' ? f : JSON.stringify(f))}</p>`).join('');
+  }
+  const supervisorSection = supervisorBody ? `<details class="section"><summary>Supervisor Analysis</summary><div class="detail-body">${supervisorBody}</div></details>` : '';
+
+  // Agent Decision Log section.
+  let decisionBody = '';
+  if (Array.isArray(d.decision_log) && d.decision_log.length > 0) {
+    decisionBody = d.decision_log.map(entry => {
+      const dec = entry.decision || entry.title || '';
+      const rat = entry.rationale || entry.reason || '';
+      const conf = typeof entry.confidence === 'number' ? Math.round(entry.confidence * 100) + '%' : '';
+      return `<div class="artifact" style="margin-bottom:0.5rem">
+        <div style="font-weight:600;font-size:0.9rem">${esc(dec)}</div>
+        ${rat ? `<div style="font-size:0.82rem;color:var(--muted);margin-top:0.25rem">${esc(rat)}</div>` : ''}
+        ${conf ? `<div style="font-size:0.78rem;color:var(--muted);margin-top:0.15rem">Confidence: ${conf}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+  const decisionSection = decisionBody ? `<details class="section"><summary>Agent Decision Log</summary><div class="detail-body">${decisionBody}</div></details>` : '';
+
+  // Changed Files section (open by default).
+  const filesBody = artifacts.length === 0
+    ? '<p style="color:var(--muted)">No artifacts</p>'
+    : artifacts.map(a => `
+        <div class="artifact">
+          <span class="artifact-uri">${esc(a.resource_uri)}</span>
+          <span style="color:var(--muted);margin-left:0.4rem">${esc(a.change_type || a.disposition || '')}</span>
+          ${a.explanation_tiers && a.explanation_tiers.summary ? '<br><span style="font-size:0.8rem;color:var(--muted)">' + esc(a.explanation_tiers.summary) + '</span>' : ''}
+        </div>`).join('');
+  const filesSection = `<details open class="section"><summary>Changed Files (${artifacts.length})</summary><div class="detail-body">${filesBody}</div></details>`;
+
+  // Constitution Check section.
+  let constitutionBody = '';
+  if (Array.isArray(d.validation_log) && d.validation_log.length > 0) {
+    constitutionBody = d.validation_log.map(entry => {
+      const rule = entry.rule || entry.check || entry.name || '';
+      const result = entry.result || entry.status || entry.outcome || '';
+      const color = (result + '').toLowerCase().includes('pass') ? 'var(--green)' : (result + '').toLowerCase().includes('fail') ? 'var(--red)' : 'var(--muted)';
+      return `<div style="display:flex;gap:0.5rem;padding:0.2rem 0;font-size:0.85rem"><span style="color:${color};flex-shrink:0">${esc(result || '·')}</span><span>${esc(rule)}</span></div>`;
+    }).join('');
+  }
+  const constitutionSection = constitutionBody ? `<details class="section"><summary>Constitution Check</summary><div class="detail-body">${constitutionBody}</div></details>` : '';
+
+  // Pending actions.
+  const pendingSection = pendingActions.length > 0 ? `
+    <details class="section"><summary>Pending Actions (${pendingActions.length})</summary><div class="detail-body">
+      ${pendingActions.map(a => `
+        <div class="artifact">
+          <span class="artifact-uri">${esc(a.tool_name)}</span>
+          &middot; ${esc(a.kind)} &middot; ${esc(a.description)}
+        </div>`).join('')}
+    </div></details>` : '';
 
   app.innerHTML = `
     <span class="back" onclick="loadDrafts()">&larr; Back to drafts</span>
@@ -1320,37 +1522,19 @@ function renderDraftDetail(d) {
       <div class="card-meta">
         <code>${d.package_id}</code> &middot; ${new Date(d.created_at).toLocaleString()}
       </div>
-      ${summaryHtml}
-      <div class="section">
-        <h3>Changed Files (${artifacts.length})</h3>
-        ${artifacts.length === 0
-          ? '<p style="color:var(--muted)">No artifacts</p>'
-          : artifacts.map(a => `
-            <div class="artifact">
-              <span class="artifact-uri">${esc(a.resource_uri)}</span>
-              <span style="color:var(--muted);margin-left:0.4rem">${esc(a.change_type || a.disposition || '')}</span>
-              ${a.explanation_tiers && a.explanation_tiers.summary ? '<br><span style="font-size:0.8rem;color:var(--muted)">' + esc(a.explanation_tiers.summary) + '</span>' : ''}
-            </div>
-          `).join('')}
-      </div>
-      ${actions.length > 0 ? `
-        <div class="section">
-          <h3>Pending Actions (${actions.length})</h3>
-          ${actions.map(a => `
-            <div class="artifact">
-              <span class="artifact-uri">${esc(a.tool_name)}</span>
-              &middot; ${esc(a.kind)} &middot; ${esc(a.description)}
-            </div>
-          `).join('')}
-        </div>
-      ` : ''}
+      ${summarySection}
+      ${supervisorSection}
+      ${decisionSection}
+      ${filesSection}
+      ${constitutionSection}
+      ${pendingSection}
       <div class="actions">
         ${isReviewable ? `
           <button class="btn btn-approve" onclick="doDraftAction('${d.package_id}','approve')">Approve</button>
-          <button class="btn btn-primary" onclick="doDraftAction('${d.package_id}','apply')" title="Approve and apply to source">Apply</button>
+          <button class="btn btn-primary" onclick="doDraftAction('${d.package_id}','apply')" title="Apply draft to workspace (no CLI required)">Apply</button>
           <button class="btn btn-deny" onclick="doDraftAction('${d.package_id}','deny')">Deny</button>
         ` : isApproved ? `
-          <button class="btn btn-primary" onclick="doDraftAction('${d.package_id}','apply')" title="Apply approved draft to source">Apply</button>
+          <button class="btn btn-primary" onclick="doDraftAction('${d.package_id}','apply')" title="Apply approved draft to workspace">Apply</button>
           <button class="btn btn-deny" onclick="doDraftAction('${d.package_id}','deny')">Deny</button>
         ` : `
           <button class="btn btn-ghost" onclick="loadDrafts()">&larr; Back</button>
@@ -1362,31 +1546,76 @@ function renderDraftDetail(d) {
 
 async function doDraftAction(id, action) {
   const btn = event && event.target;
+
   if (action === 'apply') {
-    const cmd = 'ta draft apply ' + id.slice(0, 8) + ' --git-commit';
-    if (navigator.clipboard) {
-      await navigator.clipboard.writeText(cmd).catch(() => {});
+    // Call the daemon apply endpoint (v0.16.1.2).
+    if (btn) btn.disabled = true;
+    const statusEl = document.createElement('div');
+    statusEl.style.cssText = 'margin-top:0.75rem;font-size:0.85rem;color:var(--accent)';
+    statusEl.textContent = 'Applying draft — this may take a minute…';
+    if (btn && btn.parentElement) btn.parentElement.appendChild(statusEl);
+    try {
+      const r = await fetch('/api/drafts/' + id + '/apply', { method: 'POST' });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        const sha = data.commit_sha ? ' — commit: ' + data.commit_sha : '';
+        statusEl.style.color = 'var(--green)';
+        statusEl.textContent = 'Applied successfully' + sha + '.';
+        setTimeout(() => loadDrafts(), 2000);
+      } else {
+        // Fall back to clipboard so the user can still apply manually.
+        const cmd = 'ta draft apply ' + id.slice(0, 8) + ' --git-commit';
+        if (navigator.clipboard) await navigator.clipboard.writeText(cmd).catch(() => {});
+        statusEl.style.color = 'var(--red)';
+        statusEl.textContent = 'Apply failed: ' + (data.error || r.status) + '. CLI command copied to clipboard.';
+        if (btn) btn.disabled = false;
+      }
+    } catch (e) {
+      statusEl.style.color = 'var(--red)';
+      statusEl.textContent = 'Network error: ' + e.message;
+      if (btn) btn.disabled = false;
     }
-    alert('Run in your terminal (copied to clipboard):\n\n' + cmd);
     return;
   }
+
+  if (action === 'deny') {
+    showPrompt('Reason for denial:', 'Needs revision', async (reason) => {
+      if (reason === null) return;
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await fetch('/api/drafts/' + id + '/deny', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: reason || 'denied via web UI' })
+        });
+        if (resp.ok) {
+          await loadDrafts();
+        } else {
+          showAlert('Deny failed: ' + await resp.text());
+          if (btn) btn.disabled = false;
+        }
+      } catch (e) {
+        showAlert('Network error');
+        if (btn) btn.disabled = false;
+      }
+    });
+    return;
+  }
+
   if (btn) btn.disabled = true;
   try {
-    const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
-    if (action === 'deny') {
-      const reason = prompt('Reason for denial:', 'Needs revision');
-      if (reason === null) { if (btn) btn.disabled = false; return; }
-      opts.body = JSON.stringify({ reason });
-    }
-    const resp = await fetch('/api/drafts/' + id + '/' + action, opts);
+    const resp = await fetch('/api/drafts/' + id + '/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
     if (resp.ok) {
       await loadDrafts();
     } else {
-      alert('Action failed: ' + await resp.text());
+      showAlert('Action failed: ' + await resp.text());
       if (btn) btn.disabled = false;
     }
   } catch (e) {
-    alert('Network error');
+    showAlert('Network error');
     if (btn) btn.disabled = false;
   }
 }
@@ -1462,11 +1691,11 @@ async function submitAnswer(id, idx) {
       setTimeout(loadQuestions, 800);
     } else {
       const text = await resp.text();
-      alert('Failed to send answer: ' + text);
+      showAlert('Failed to send answer: ' + text);
       input.disabled = false;
     }
   } catch (e) {
-    alert('Network error');
+    showAlert('Network error');
     input.disabled = false;
   }
 }
@@ -1543,12 +1772,13 @@ async function searchMemory() {
   } catch (e) { /* ignore */ }
 }
 
-async function deleteMemory(key) {
-  if (!confirm('Delete memory entry "' + key + '"?')) return;
-  try {
-    await fetch('/api/memory/' + encodeURIComponent(key), { method: 'DELETE' });
-    loadMemory();
-  } catch (e) { alert('Failed to delete'); }
+function deleteMemory(key) {
+  showConfirm('Delete memory entry "' + key + '"?', async () => {
+    try {
+      await fetch('/api/memory/' + encodeURIComponent(key), { method: 'DELETE' });
+      loadMemory();
+    } catch (e) { showAlert('Failed to delete'); }
+  });
 }
 
 function showCreateForm() {
@@ -1589,7 +1819,7 @@ function showCreateForm() {
 
 async function createMemory() {
   const key = document.getElementById('newKey').value.trim();
-  if (!key) { alert('Key is required'); return; }
+  if (!key) { showAlert('Key is required'); return; }
   const val = document.getElementById('newValue').value.trim() || key;
   const cat = document.getElementById('newCategory').value || undefined;
   const tags = document.getElementById('newTags').value.split(',').map(s => s.trim()).filter(Boolean);
@@ -1602,8 +1832,8 @@ async function createMemory() {
       body: JSON.stringify({ key, value, tags, category: cat })
     });
     if (resp.ok) loadMemory();
-    else alert('Failed: ' + await resp.text());
-  } catch (e) { alert('Network error'); }
+    else showAlert('Failed: ' + await resp.text());
+  } catch (e) { showAlert('Network error'); }
 }
 
 // ── Setup Wizard ──────────────────────────────────────────────
@@ -1965,7 +2195,7 @@ function renderSettingsForm(section, data) {
   } else if (section === 'memory') {
     html += select('scope', 'Scope', [['project','Project'],['global','Global']], data.scope || 'project');
     html += field('retention_days', 'Retention (days)', 'number', data.retention_days, '90');
-    html += `<div class="actions"><button class="btn btn-deny btn-sm" onclick="if(confirm('Clear local memory?'))clearMemoryStore()">Clear Local Memory</button></div>`;
+    html += `<div class="actions"><button class="btn btn-deny btn-sm" onclick="showConfirm('Clear all local memory entries? This cannot be undone.', clearMemoryStore)">Clear Local Memory</button></div>`;
   }
 
   html += `<div class="actions" style="margin-top:1.5rem">
@@ -2042,13 +2272,13 @@ async function testNotification(channel) {
 async function clearMemoryStore() {
   try {
     await fetch('/api/memory', { method: 'DELETE' });
-    alert('Local memory cleared.');
-  } catch (e) { alert('Could not clear memory: ' + e); }
+    showAlert('Local memory cleared.');
+  } catch (e) { showAlert('Could not clear memory: ' + e); }
 }
 
 async function saveRawConfig() {
   const content = document.getElementById('raw-daemon')?.value || '';
-  alert('Raw config save is not yet implemented. Edit .ta/daemon.toml directly and restart the daemon.');
+  showAlert('Raw config save is not yet implemented. Edit .ta/daemon.toml directly and restart the daemon.');
 }
 
 // ── Projects (v0.14.18) ───────────────────────────────────────
@@ -2170,10 +2400,10 @@ async function openProject(path) {
     if (result.ok) {
       switchTab('dashboard');
     } else {
-      alert('Failed to open project: ' + (result.error || 'Unknown error'));
+      showAlert('Failed to open project: ' + (result.error || 'Unknown error'));
     }
   } catch (e) {
-    alert('Error opening project: ' + e.message);
+    showAlert('Error opening project: ' + e.message);
   }
 }
 
@@ -2282,7 +2512,7 @@ function renderWorkflows(workflows) {
 async function generateWorkflow() {
   const input = document.getElementById('wf-desc-input');
   const desc = input ? input.value.trim() : '';
-  if (!desc) { alert('Please enter a description.'); return; }
+  if (!desc) { showAlert('Please enter a description.'); return; }
   try {
     const resp = await fetch('/api/workflow/generate', {
       method: 'POST',
@@ -2295,7 +2525,7 @@ async function generateWorkflow() {
     if (editor) editor.value = result.toml || '';
     if (generated) generated.style.display = 'block';
   } catch (e) {
-    alert('Error generating workflow: ' + e.message);
+    showAlert('Error generating workflow: ' + e.message);
   }
 }
 
@@ -2880,10 +3110,26 @@ async function loadHealthPage() {
 // Start polling health signals every 30s.
 setInterval(pollHealthSignals, 30000);
 
+// ── Version display (v0.16.1.2) ───────────────────────────────
+async function loadVersion() {
+  try {
+    const r = await fetch('/health');
+    if (!r.ok) return;
+    const data = await r.json();
+    const badge = document.getElementById('version-badge');
+    if (badge && data.version) {
+      badge.textContent = 'v' + data.version;
+      badge.title = 'Version v' + data.version + ' — click to open Plan tab';
+    }
+  } catch(_) {}
+}
+
 // ── Boot ──────────────────────────────────────────────────────
 loadDashboard();
 checkWizard();
 pollHealthSignals();
+loadVersion();
+setInterval(loadVersion, 60000);
 </script>
 </body>
 </html>
