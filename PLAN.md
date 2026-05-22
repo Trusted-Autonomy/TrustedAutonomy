@@ -7760,60 +7760,66 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 #### Version: `0.16.1-alpha.1`
 
 ---
-### v0.16.1.2 — Studio Advisor & QoL Pass
+### v0.16.1.2 — Studio Bug Fixes & Fundamentals
 <!-- status: pending -->
 
-**Goal**: Transform Studio from a passive dashboard into a cohesive, self-contained environment where a user can accomplish everything TA offers — without ever touching the CLI. The central surface is a persistent **Advisor panel**: a conversational discourse thread where the user types intent in natural language and the advisor interprets, clarifies, and acts. Every other tab is a specialized view, but the advisor can reach all of them.
+**Goal**: Fix the known Studio regressions and close the CLI-dependency gap for the core workflows — applying drafts, running phases, and reviewing work. After this phase, Studio is fully functional without the CLI for the daily driver tasks. The advisor engine (conversational AI panel) ships in v0.16.1.3.
 
-**Why this phase exists**: Current Studio requires parallel CLI usage for applying drafts, starting goals, asking questions about running work, and reviewing plan progress. The UX is fragmented — each tab is a read-only view with no action path. Users who onboard through the Studio never discover the full power of TA. This phase makes Studio the primary surface; the CLI becomes an optional power-user shortcut.
+**Scope**: Bug fixes carried forward from v0.16.0.1/v0.16.1.1 + the three features that make Studio self-sufficient (draft apply in-browser, plan run button, draft detail visibility).
 
-#### Immediate bug fixes (carry-forward from v0.16.0.1 / v0.16.1.1)
+1. [ ] **"Next phase" includes sub-phases** (`assets/index.html` + `crates/ta-daemon/src/api/plan.rs`): The next-phase selector only considers 3-part IDs and skips 4-part sub-phases (`vX.Y.Z.N`). Fix: evaluate all pending phases in PLAN.md document order regardless of depth. First pending phase in document order is always "next".
 
-1. [ ] **"Next phase" includes sub-phases** (`assets/index.html` + `crates/ta-daemon/src/api/plan.rs`): The current next-phase selector only considers 3-part IDs (`vX.Y.Z`) and skips 4-part sub-phases (`vX.Y.Z.N`). Result: after v0.16.2 (done), Studio shows v0.16.3 as next, skipping pending v0.16.1.1 and v0.16.1.2. Fix: evaluate all pending phases in PLAN.md document order regardless of depth. The first pending phase in document order is always "next", whether it is a top-level phase or a sub-phase.
+2. [ ] **Version displayed in Studio header** (`assets/index.html`): Fetch version from `/health` response, show in top-right header bar, refresh every 60s. Clicking links to the plan tab.
 
-2. [ ] **Version displayed in Studio header** (`assets/index.html`): The daemon `/health` response includes the version string but Studio never shows it. Add the version (e.g. `v0.16.2-alpha`) to the top-right of the Studio header bar, fetched on load and refreshed every 60s. Clicking it links to the plan tab.
+3. [ ] **Replace `alert()`/`confirm()` with real modals** (`assets/index.html`): Every `alert()` and `confirm()` call in Studio replaced with an in-page `<dialog>` element with working action buttons. Applies to run guards, deny prompts, and any other decision dialogs.
 
-3. [ ] **Run/dialog action buttons are non-functional** (`assets/index.html`): The "Active ▶" button placed in v0.16.0.1 as a guard for in-progress phases calls `alert()` — a browser modal with no selectable actions. Replace with a proper inline toast/modal component that renders actionable buttons (e.g. "View active goal", "View draft") with working click handlers. Same fix applies anywhere `alert()` or `confirm()` is used for user-facing decisions in Studio.
+4. [ ] **`pr_ready` state badge** (`assets/index.html`): Goals in `pr_ready` state show "Ready for Review" amber badge (not "Running"). Clicking links to the draft in the Drafts tab.
 
-4. [ ] **`pr_ready` state badge** (`assets/index.html`): Goals in `pr_ready` state currently show "Running" in the dashboard. Add a distinct "Ready for Review" badge (amber) and link directly to the draft in the Drafts tab. The Run button guard (from v0.16.0.1) should also cover `pr_ready`.
+5. [ ] **Draft detail: collapsible sections** (`assets/index.html`): Draft detail panel gains `<details>`-style collapsible sections with carets — Summary (open), Supervisor Analysis, Agent Decision Log, Changed Files (open), Constitution Check. Pulls `validation_log`, `supervisor_review`, `decision_log` from `/api/drafts/{id}`.
 
-2. [ ] **Draft detail: collapsible sections with expansion carets** (`assets/index.html`): The draft detail panel shows changed files but omits the supervisor review verdict, agent decision log, and constitution check. Add collapsible `<details>`-style sections with carets for: Summary, Supervisor Analysis (verdict + score), Agent Decision Log (each decision with confidence + rationale), Changed Files (current file list), and Constitution Check. All sections default to collapsed except Summary and Changed Files. Pulls from `/api/drafts/{id}` response (`validation_log`, `supervisor_review`, `decision_log` fields).
+6. [ ] **Draft apply from Studio** (`assets/index.html` + `crates/ta-daemon/src/web.rs`): Add `POST /api/drafts/{id}/apply` daemon endpoint. Studio "Apply" button calls it — no CLI required. Streams apply progress (build output, test results, commit SHA). Shows commit SHA and PR URL on success.
 
-3. [ ] **Draft apply from Studio** (`assets/index.html` + `crates/ta-daemon/src/web.rs`): Add `POST /api/drafts/{id}/apply` endpoint to the daemon. Studio "Apply" button calls it directly — no CLI required. Response streams apply progress (build output, test results, git commit SHA). Show a progress panel in the draft detail view during apply. On success, show the commit SHA and PR URL.
+7. [ ] **v0.15.9 display cleanup**: Verify the v0.16.1.1 heading fix resolved the dashboard ghost after daemon restart. Add regression test: a goal whose `plan_phase` has no matching PLAN.md heading must not appear in `active_phases()`.
 
-4. [ ] **v0.15.9 display cleanup**: Verify the heading fix from v0.16.1.1 resolved the dashboard display after daemon restart. If the status marker position causes the parser to still misread it, adjust marker placement.
+8. [ ] **Plan tab: run any phase** (`assets/index.html`): Every pending phase card has a "Run" button that calls `POST /api/goals/start` with the phase ID. Active/done phases show status only. Out-of-order warning dialog (item 3's modal pattern) triggers when applicable.
 
-#### Advisor panel
-
-5. [ ] **Advisor tab** (`assets/index.html`): A persistent chat thread between the user and a TA-connected Claude agent. Input field at the bottom, discourse history above. Every session persists in daemon memory (`/api/advisor/history`). The advisor has read access to: current goals, plan phases, active drafts, system health, recent events.
-
-6. [ ] **Intent routing and capability model** (`crates/ta-daemon/src/api/advisor.rs`): The advisor has two execution modes — it never modifies state directly; it routes to the TA daemon for all mutations. Read-only operations (check goal state, read log tail, parse plan, fetch draft status, query velocity, `ta doctor` output) the advisor does directly via daemon API calls. Mutations (start goal, apply draft, cancel goal, restart daemon, install plugin, update PLAN.md) always route through the daemon and require a confirmation step. Intent categories: `ask_question` → advisor answers inline; `check_status` → advisor queries and summarises; `start_goal` / `run_workflow` / `apply_draft` / `cancel_goal` → daemon route with confirm dialog; `update_plan` → advisor drafts the change and shows diff before writing; `clarify` → advisor asks one focused question. Confirmation prompt always states what will happen: "This will start goal v0.16.3 via `ta run`. The agent will implement the Ollama plugin extraction (~30 min, ~$0.50). Proceed?"
-
-7. [ ] **Out-of-order phase run guard** (`assets/index.html`): When a user runs a plan phase that has pending phases before it, show a notification dialog: "Phase v0.16.3 has unfinished dependencies: v0.16.1.2 is still pending. Running out of order may cause conflicts." Two options: "Re-order — run v0.16.1.2 first" (queues the dependency) or "Run anyway" (proceeds with explicit acknowledgement logged). Mirrors the `ta run` phase ordering warning but surfaced as a first-class UI decision.
-
-8. [ ] **Context-sensitive suggestions**: When the advisor detects project context (e.g., `workflow.toml` with `project_type = "unreal"`, or a goal mentioning "game project"), it surfaces relevant workflow templates proactively: "I see this is an Unreal project — would you like to initialize the TA Unreal workflow template?" Suggestions appear as tappable chips above the input field.
-
-9. [ ] **Goal interrogation with disambiguation** (`assets/index.html`): User can ask "what is the current goal doing?" or "add context to the running goal" — the advisor fetches live goal state, agent log tail, and draft validation errors and summarises them in the thread. When multiple goals are running and the advisor's confidence about which goal is intended is below ~80% (ambiguous pronoun, no phase/title match), the advisor presents a disambiguation chip list: "Which goal? → [v0.16.1.2 — Studio QoL (12m)] [v0.16.3 — Ollama (4m)]" before acting. Only skips disambiguation when a specific goal title, ID, or phase is named in the message, or only one goal is active.
-
-10. [ ] **Workflow template catalog** (Workflows tab + advisor): A grid of available workflow templates (from `~/.config/ta/workflows/` and built-ins). Each card shows name, description, required config params. Clicking "Run" opens a config form then fires `ta run` via the daemon route with confirm dialog. The advisor can also surface these: "I can run the `release` workflow for you — it needs a version number. What version?"
-
-#### Dashboard upgrades
-
-11. [ ] **Project health panel**: Dashboard gains a "Project Health" section: plan completion % (done phases / total phases), recent velocity (goals per week from velocity-history), last successful build timestamp, open drafts count, and a `ta doctor` summary (green/amber/red per check). Refreshes every 30 seconds.
-
-12. [ ] **Active goal detail on click**: Clicking a running goal card on the dashboard opens an inline panel showing: current agent log tail (last 20 lines, auto-scrolling via SSE), elapsed time, phase linked, estimated completion (based on velocity P50). "Ask advisor about this goal" button drops a pre-filled message into the advisor thread.
-
-13. [ ] **Notification feed**: A bell icon in the header opens a slide-in panel with the last 20 system events (goal started/completed, draft ready, apply succeeded, CI status). Events link to the relevant draft or goal detail.
-
-#### Full CLI parity surface
-
-14. [ ] **Plan tab: run any phase**: Every pending plan phase card has a "Run" button that fires `ta run` via the daemon route with confirm dialog. Done phases show their apply timestamp and commit SHA (from `plan_history`).
-
-15. [ ] **Settings tab**: Daemon URL, API key (masked), `workflow.toml` viewer/editor, notification channel config. `ta doctor` output with "Fix" buttons for auto-fixable issues.
-
-16. [ ] **USAGE.md**: "Using TA Studio" section — advisor panel walkthrough, workflow catalog, applying drafts in-browser, project health dashboard, notification feed. Replaces the current "Web Shell" section which is legacy.
+9. [ ] **Tests**: Modal component renders and dismisses correctly. Draft apply endpoint streams and returns commit SHA. Plan tab Run button fires correct API call. `active_phases()` regression test for orphaned plan_phase.
 
 #### Version: `0.16.1-alpha.2`
+
+---
+### v0.16.1.3 — Studio Advisor Engine
+<!-- status: pending -->
+
+**Depends on**: v0.16.1.2 (Studio fundamentals — modals, apply endpoint, plan run button must exist before advisor can invoke them)
+
+**Goal**: Transform Studio into a cohesive environment where the user accomplishes everything through a persistent conversational advisor. The advisor interprets natural language intent, routes to the daemon for mutations (with confirmation), and answers questions directly for read-only queries. Every other tab becomes a specialized view; the advisor is the universal entry point.
+
+**Why separate from v0.16.1.2**: The advisor requires a new daemon API surface (`/api/advisor/*`), persistent session memory, a Claude API integration, and a substantial frontend component. Bundling it with bug fixes meant neither could ship independently. v0.16.1.2 ships first and unblocks daily use; this phase builds the intelligence layer on top.
+
+1. [ ] **Advisor tab** (`assets/index.html`): Persistent chat thread — input field at bottom, discourse history above, scrollable. Session history persists in daemon memory (`/api/advisor/history`). Advisor has read access to: current goals, plan phases, active drafts, system health, recent events.
+
+2. [ ] **Intent routing and capability model** (`crates/ta-daemon/src/api/advisor.rs`): Two execution modes. Read-only (check goal state, log tail, plan parse, draft status, velocity, `ta doctor` output) executes directly via daemon API. Mutations (start goal, apply draft, cancel goal, restart daemon, update PLAN.md) route through the daemon with a confirm dialog showing exactly what will happen. Intent categories: `ask_question` → inline answer; `check_status` → query + summarise; `start_goal`/`apply_draft`/`cancel_goal` → daemon route + confirm; `update_plan` → show diff before writing; `clarify` → one focused question back to user.
+
+3. [ ] **Out-of-order phase run guard** (`assets/index.html`): When the advisor or Plan tab triggers a phase run that has pending predecessors, show a dialog: "v0.16.3 has unfinished predecessors: v0.16.1.3 is pending." Options: "Re-order — run v0.16.1.3 first" or "Run anyway" (logs acknowledgement).
+
+4. [ ] **Context-sensitive suggestions**: Advisor detects project context (`workflow.toml` `project_type`, goal history, active plan phases) and surfaces relevant workflow templates as tappable chips above the input. Example: Unreal project → "Would you like to initialize the TA Unreal workflow template?"
+
+5. [ ] **Goal interrogation with disambiguation** (`assets/index.html`): User can ask about a running goal — advisor fetches live state, log tail, draft validation errors and summarises. When multiple goals are running and intent confidence is below ~80% (ambiguous pronoun, no phase/title match), advisor shows a disambiguation chip list before acting.
+
+6. [ ] **Workflow template catalog** (Workflows tab + advisor): Grid of available workflow templates from `~/.config/ta/workflows/` and built-ins. Each card shows name, description, required params. "Run" opens a config form then fires via daemon route with confirm dialog. Advisor can surface these inline.
+
+7. [ ] **Project health panel** (Dashboard): Plan completion %, recent velocity (goals/week from velocity-history), last successful build timestamp, open drafts count, `ta doctor` summary (green/amber/red). Refreshes every 30s.
+
+8. [ ] **Active goal detail on click** (Dashboard): Running goal card expands to show agent log tail (last 20 lines, auto-scrolling via SSE), elapsed time, linked phase, velocity-based P50 completion estimate. "Ask advisor about this goal" pre-fills advisor input.
+
+9. [ ] **Notification feed**: Bell icon in header opens slide-in panel with last 20 system events (goal started/completed, draft ready, apply succeeded, CI status). Events link to relevant draft or goal detail.
+
+10. [ ] **Settings tab**: Daemon URL, API key (masked), `workflow.toml` viewer/editor, notification channel config. `ta doctor` output with "Fix" buttons for auto-fixable issues.
+
+11. [ ] **USAGE.md**: "Using TA Studio" section — advisor walkthrough, workflow catalog, applying drafts in-browser, project health panel, notification feed. Replaces the legacy "Web Shell" section.
+
+#### Version: `0.16.1-alpha.3`
 
 ---
 ### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
@@ -7868,34 +7874,6 @@ The plugin's own `README.md` covers everything Ollama-specific: prerequisites, m
 4. [x] **Tests**: Profile TOML round-trips. `ta doctor` hardware detection selects correct tier. `ta agent install gemma4` on a simulated 8 GB system installs `gemma4-4b` not `gemma4-12b`.
 
 #### Version: `0.16.2-alpha.1`
-
----
-### v0.16.2.2 — Studio Cleanup & Agent Plugin UX
-<!-- status: pending -->
-
-**Why**: v0.16.2.1 implemented Gemma 4 agent profiles at the CLI level but did not add any Studio UI for discovering, installing, or monitoring agent plugins. The Studio dashboard still shows formatting issues (ghost phase badges, missing version), and users have no way to manage Ollama/agent profiles without dropping to the terminal.
-
-**Goal**: Close the Studio gaps that should have shipped with v0.16.2 and v0.16.2.1, and surface agent plugin health in the Studio dashboard.
-
-#### Items
-
-1. [ ] **Studio dashboard: version in header** — pull from `/health` response; show `v0.16.2-alpha` in top-right, refresh every 60s. Clicking links to Plan tab. (Was v0.16.1.2 item 2 — landing here because it requires daemon restart to verify.)
-
-2. [ ] **Ghost badge fix: active_phases orphan suppression** — verify the v0.16.1.1 fix (known-IDs filter in `active_phases()`) correctly suppresses the v0.15.9 ghost on the current binary. If regression exists, re-apply fix. Add integration test: start a goal with a `plan_phase` that has no matching PLAN.md heading, assert it does not appear in `active_phases()` response.
-
-3. [ ] **Studio Plan tab: run any phase** (`assets/index.html`) — each pending phase in the Plan tab gets a "Run" button that calls `POST /api/goals/start` with the phase ID pre-filled. Active/done phases show their status without a Run button. Out-of-order guard (v0.16.1.2 item 8) triggers here.
-
-4. [ ] **Studio Agents panel** (new tab or section in Dashboard): List installed agent plugins from `GET /api/agents/profiles` (added in v0.16.3 but stub the endpoint here as empty). When Ollama is reachable, show connected indicator + model list. When unreachable, show warning with "Check `ta doctor`" link. Shows "No agent plugins installed" when list is empty.
-
-5. [ ] **`ta agent list`** (CLI): Alias for `ta plugin list --agents`. Short command for the common case of checking what agent profiles are loaded.
-
-6. [ ] **Studio goal card: pr_ready badge** — goals in `pr_ready` state show amber "Review Ready" badge (not the blue "Running" badge). Clicking opens the Draft Review panel for that goal's draft.
-
-7. [ ] **Replace `alert()` dialogs with real modals** (`assets/index.html`): The confirm/deny/re-order dialogs added in v0.16.1 use `alert()` and `confirm()` placeholders that are non-interactive in some browsers. Replace with the in-page `<dialog>` element pattern already used by approve/deny buttons.
-
-8. [ ] **Tests**: Agent profiles endpoint returns empty list gracefully when no profiles installed. Ghost badge suppression regression test. `ta agent list` output matches `ta plugin list --agents`.
-
-#### Version: `0.16.2-alpha.2`
 
 ---
 ### v0.16.3 — Skill Plugin System
@@ -7957,7 +7935,11 @@ Both paths are active simultaneously — a skill activates if it is listed in th
 
 13. [ ] **`ta plugin status <name>`** (CLI): Per-agent detail view — binary path, version, all installed profiles with model name and availability status, workflows referencing this agent, last-used timestamp. Works for both channel plugins and agent framework plugins.
 
-14. [ ] **Tests**: `ta plugin list --agents` shows all registered agent plugins. Ollama probe correctly reports reachable/unreachable. Missing model surfaces as `ta doctor` warning. Workflow usage index correctly maps agents to workflows. Unused agent detection works when no workflow references a profile.
+14. [ ] **`ta agent list`** (CLI): Short alias for `ta plugin list --agents`. Common-case command for checking what agent profiles are loaded without the full `plugin` subcommand.
+
+15. [ ] **Studio Agents panel** (`assets/index.html`): Section in Dashboard showing installed agent plugins from `GET /api/agents/profiles`. When Ollama is reachable, shows connected indicator and available model list. When unreachable, shows warning with "Check `ta doctor`" link. Shows "No agent plugins installed" placeholder when list is empty. Depends on item 10 (`/api/agents/profiles` endpoint).
+
+16. [ ] **Tests**: `ta plugin list --agents` shows all registered agent plugins. Ollama probe correctly reports reachable/unreachable. Missing model surfaces as `ta doctor` warning. Workflow usage index correctly maps agents to workflows. Unused agent detection works when no workflow references a profile. `ta agent list` output matches `ta plugin list --agents`.
 
 #### Version: `0.16.3-alpha`
 
