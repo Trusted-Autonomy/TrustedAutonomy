@@ -7761,7 +7761,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1.2 — Studio Bug Fixes & Fundamentals
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Fix the known Studio regressions and close the CLI-dependency gap for the core workflows — applying drafts, running phases, and reviewing work. After this phase, Studio is fully functional without the CLI for the daily driver tasks. The advisor engine (conversational AI panel) ships in v0.16.1.3.
 
