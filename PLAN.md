@@ -7871,7 +7871,7 @@ The plugin's own `README.md` covers everything Ollama-specific: prerequisites, m
 
 ---
 ### v0.16.2.2 — Studio Cleanup & Agent Plugin UX
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Why**: v0.16.2.1 implemented Gemma 4 agent profiles at the CLI level but did not add any Studio UI for discovering, installing, or monitoring agent plugins. The Studio dashboard still shows formatting issues (ghost phase badges, missing version), and users have no way to manage Ollama/agent profiles without dropping to the terminal.
 
