@@ -7823,7 +7823,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1.4 — VCS Initialization Correctness
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Problem**: `LOCAL_TA_PATHS` in `partitioning.rs` (the source written to `.gitignore` by `ta setup vcs`) has 14 entries while the main project's `.gitignore` has 30+ TA-specific entries grown manually over time. New projects get an incomplete gitignore block — `pr_packages/`, `review/`, `backups/`, `*.log`, `*.pid`, and ~15 other TA-produced paths are not ignored, causing `git status` noise and risk of committing machine-local state.
 
