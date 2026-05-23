@@ -3222,7 +3222,7 @@ fn check_plan_constitution(config: &GatewayConfig, phases: &[PlanPhase]) -> anyh
 /// Prints which .ta/ files should be committed to VCS (shared with the team)
 /// and which are local runtime state that should be ignored.
 fn plan_shared(config: &GatewayConfig) -> anyhow::Result<()> {
-    use ta_workspace::partitioning::{git_is_ignored, VcsBackend, LOCAL_TA_PATHS, SHARED_TA_PATHS};
+    use ta_workspace::partitioning::{VcsBackend, LOCAL_TA_PATHS, SHARED_TA_PATHS};
 
     let project_root = &config.workspace_root;
     let ta_dir = project_root.join(".ta");
@@ -3248,8 +3248,14 @@ fn plan_shared(config: &GatewayConfig) -> anyhow::Result<()> {
     for path in LOCAL_TA_PATHS {
         let full = ta_dir.join(path.trim_end_matches('/'));
         let exists = full.exists();
-        let ignored_status = if vcs == VcsBackend::Git {
-            match git_is_ignored(project_root, path) {
+        let ignored_status = if vcs == VcsBackend::None {
+            if exists {
+                "present"
+            } else {
+                "absent"
+            }
+        } else {
+            match vcs.is_path_ignored(project_root, path) {
                 Ok(true) => "ignored ✓",
                 Ok(false) if exists => {
                     warn_count += 1;
@@ -3258,19 +3264,13 @@ fn plan_shared(config: &GatewayConfig) -> anyhow::Result<()> {
                 Ok(false) => "not present",
                 Err(_) => "unknown",
             }
-        } else {
-            if exists {
-                "present"
-            } else {
-                "absent"
-            }
         };
         println!("  .ta/{:<28} [{}]", path, ignored_status);
     }
     println!();
     if warn_count > 0 {
         println!("  {} path(s) are present but not ignored.", warn_count);
-        println!("  Run `ta setup vcs` to add the TA block to .gitignore.");
+        println!("  Run `ta setup vcs --force` to update the ignore block.");
         println!("  Run `ta doctor` for a full VCS health report.");
     } else {
         println!("  All local paths are either absent or properly ignored.");

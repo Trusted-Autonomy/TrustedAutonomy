@@ -14,33 +14,59 @@ pub const SHARED_TA_PATHS: &[&str] = &[
     "constitution.toml",
     "memory.toml",
     "bmad.toml",
+    "config.toml",
     "agents/",
     "constitutions/",
-    "memory/",
+    "project-memory/", // VCS-committed shared knowledge (was incorrectly "memory/")
+    "personas/",
     "templates/",
     "plan_history.jsonl",   // append-only audit trail of plan phase completions
     "release-history.json", // append-only project release changelog
     "velocity-history.jsonl", // append-only committed velocity log (multi-machine)
+    "goal-audit.jsonl",     // append-only goal lifecycle audit — auto-staged on apply
+    "pr-template.md",
 ];
 
 /// Paths inside `.ta/` that are local runtime state and must NOT be committed.
 /// Committing these by accident causes clutter, credential leaks, and merge conflicts.
 pub const LOCAL_TA_PATHS: &[&str] = &[
+    // Config overrides (machine-local)
     "daemon.toml",
     "daemon.local.toml",
     "workflow.local.toml",
     "local.workflow.toml", // deprecated name — kept so existing files stay gitignored
     "memory.rvf",
+    // Runtime directories
     "staging/",
     "store/",
     "goals/",
     "events/",
     "sessions/",
-    "release.lock",
+    "interactions/",
+    "pr_packages/",
+    "review/",
+    "backups/",
+    "heartbeats/",
+    "workflow-runs/",
+    "advisor-notes/",
+    "draft-build-ctx/",
+    "memory/", // local memory cache (project-memory/ is the VCS-committed counterpart)
+    // Runtime files
     "velocity-stats.jsonl",
     "audit-ledger.jsonl",
+    "audit.jsonl",
+    "goal-history.jsonl",
+    "operations.jsonl",
+    "events.jsonl",
+    "change_summary.json",
+    "consent.json",
+    "mcp_json_original",
+    "setup-progress.json",
     "taignore",
-    "interactions/",
+    // Glob patterns — gitignore prefixes these with .ta/ so they match .ta/*.log etc.
+    "*.log",
+    "*.pid",
+    "*.lock", // replaces the specific release.lock entry
 ];
 
 /// VCS backend detected or configured for the project.
@@ -102,6 +128,29 @@ impl VcsBackend {
             Self::None => "none",
         }
     }
+
+    /// Check whether a `.ta/`-relative path is ignored by this project's VCS.
+    ///
+    /// Returns `Ok(true)` if the VCS is configured to ignore the path,
+    /// `Ok(false)` if it is not (warrants a `ta setup vcs` nudge),
+    /// or `Err(String)` if the VCS check itself failed.
+    ///
+    /// Dispatches to the per-VCS free function so callers (`ta doctor`,
+    /// `ta plan shared`, `ta goal`) do not need VCS-specific branches.
+    ///
+    /// `VcsBackend::None` always returns `Ok(true)` — no VCS means nothing
+    /// will ever be committed, so all paths are effectively "safe".
+    pub fn is_path_ignored(
+        &self,
+        project_root: &std::path::Path,
+        ta_rel_path: &str,
+    ) -> Result<bool, String> {
+        match self {
+            Self::Git => git_is_ignored(project_root, ta_rel_path),
+            Self::Perforce => p4_is_ignored(project_root, ta_rel_path),
+            Self::None => Ok(true),
+        }
+    }
 }
 
 /// Check whether a given `.ta/` relative path is currently ignored by Git.
@@ -126,6 +175,34 @@ pub fn git_is_ignored(project_root: &std::path::Path, ta_rel_path: &str) -> Resu
             output.status.code()
         ))
     }
+}
+
+/// Check whether a `.ta/`-relative path is excluded by Perforce's P4IGNORE rules.
+///
+/// Returns `Ok(true)` if the path is excluded, `Ok(false)` if it is not.
+/// Returns `Err` if the command itself failed.
+///
+/// Requires `P4IGNORE` to be set in the environment and `p4` on `$PATH`.
+/// When `P4IGNORE` is not set, Perforce has no ignore rules in effect, so
+/// the path is not protected — returns `Ok(false)`.
+///
+/// Uses `p4 ignores -i <path>` (Helix Core 2018.2+). Output contains
+/// "is excluded by" when the path is excluded.
+pub fn p4_is_ignored(project_root: &std::path::Path, ta_rel_path: &str) -> Result<bool, String> {
+    // Without P4IGNORE, no ignore rules are active.
+    if std::env::var("P4IGNORE").is_err() {
+        return Ok(false);
+    }
+    let path = format!(".ta/{}", ta_rel_path);
+    let output = std::process::Command::new("p4")
+        .args(["ignores", "-i", &path])
+        .current_dir(project_root)
+        .output()
+        .map_err(|e| format!("p4 ignores failed: {}", e))?;
+    // "p4 ignores -i <path>" prints "<path> is excluded by: ..." when ignored,
+    // or "<path> is not excluded" when not.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.contains("is excluded by"))
 }
 
 /// The marker line used in .gitignore to identify the TA-managed block.
@@ -340,5 +417,53 @@ mod tests {
                 shared
             );
         }
+    }
+
+    #[test]
+    fn project_memory_in_shared_not_memory() {
+        assert!(
+            SHARED_TA_PATHS.contains(&"project-memory/"),
+            "SHARED_TA_PATHS must contain 'project-memory/' (the VCS-committed knowledge dir)"
+        );
+        assert!(
+            !SHARED_TA_PATHS.contains(&"memory/"),
+            "SHARED_TA_PATHS must not contain 'memory/' — that is the local cache dir"
+        );
+    }
+
+    #[test]
+    fn goal_audit_in_shared_paths() {
+        assert!(
+            SHARED_TA_PATHS.contains(&"goal-audit.jsonl"),
+            "goal-audit.jsonl must be in SHARED_TA_PATHS (auto-staged on apply)"
+        );
+    }
+
+    #[test]
+    fn local_paths_include_all_required_dirs_and_globs() {
+        for required in &[
+            "pr_packages/",
+            "review/",
+            "backups/",
+            "heartbeats/",
+            "workflow-runs/",
+            "advisor-notes/",
+            "draft-build-ctx/",
+            "memory/",
+            "*.log",
+            "*.pid",
+            "*.lock",
+        ] {
+            assert!(
+                LOCAL_TA_PATHS.contains(required),
+                "LOCAL_TA_PATHS missing required entry: {}",
+                required
+            );
+        }
+        // release.lock must not exist as a specific entry — replaced by *.lock glob.
+        assert!(
+            !LOCAL_TA_PATHS.contains(&"release.lock"),
+            "release.lock must not be a specific entry — use *.lock glob instead"
+        );
     }
 }

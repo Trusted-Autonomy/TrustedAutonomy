@@ -414,6 +414,27 @@ pub trait SourceAdapter: Send + Sync {
     fn head_rev_id(&self, _repo_root: &Path) -> Option<String> {
         None
     }
+
+    /// Check whether a `.ta/`-relative path is excluded by this project's VCS ignore rules.
+    ///
+    /// Returns `Ok(true)` if the VCS is configured to ignore the path (safe — will not
+    /// be committed accidentally), `Ok(false)` if it is not (warrants a `ta setup vcs` nudge),
+    /// or `Err` if the VCS check itself could not be performed.
+    ///
+    /// The default returns `Ok(false)` — conservative, so the doctor check surfaces the gap.
+    ///
+    /// Called by `ta doctor` and `ta plan shared` for all VCS types without
+    /// needing VCS-specific branches in the caller.
+    ///
+    /// Git: `git check-ignore -q .ta/<path>`
+    /// Perforce: `p4 ignores -i .ta/<path>` (requires `P4IGNORE` to be set)
+    /// SVN: `svn status --no-ignore .ta/<path>` (checks for `I` status)
+    /// None: always `Ok(true)` — no VCS, nothing will be committed
+    /// External plugin: calls the plugin's `is_path_ignored` method when the
+    ///   `"is_path_ignored"` capability is declared; falls back to `Ok(false)`.
+    fn is_path_ignored(&self, _project_root: &Path, _ta_rel_path: &str) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Result of merging a review (PR, shelved CL, etc.) into the target branch.

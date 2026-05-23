@@ -37,9 +37,10 @@ use crate::vcs_plugin_manifest::VcsPluginManifest;
 use crate::vcs_plugin_protocol::{
     CheckReviewParams, CheckReviewResult, CommitParams, CommitResult as PluginCommitResult,
     DetectParams, DetectResult, ExcludePatternsResult, HandshakeParams, HandshakeResult,
-    MergeReviewParams, MergeReviewResult, OpenReviewParams, OpenReviewResult, PrepareParams,
-    ProtectedTargetsResult, PushParams, PushResult as PluginPushResult, RestoreStateParams,
-    SaveStateResult, SyncUpstreamResult, VcsPluginRequest, VcsPluginResponse, PROTOCOL_VERSION,
+    IsPathIgnoredParams, IsPathIgnoredResult, MergeReviewParams, MergeReviewResult,
+    OpenReviewParams, OpenReviewResult, PrepareParams, ProtectedTargetsResult, PushParams,
+    PushResult as PluginPushResult, RestoreStateParams, SaveStateResult, SyncUpstreamResult,
+    VcsPluginRequest, VcsPluginResponse, PROTOCOL_VERSION,
 };
 
 /// In-process representation of saved state from an external plugin.
@@ -513,6 +514,22 @@ impl SourceAdapter for ExternalVcsAdapter {
                 || "VCS plugin verify_target returned ok=false".to_string(),
             )))
         }
+    }
+
+    fn is_path_ignored(&self, project_root: &Path, ta_rel_path: &str) -> Result<bool> {
+        if !self.has_capability("is_path_ignored") {
+            // Plugin doesn't implement this capability — assume not ignored (safe/conservative).
+            return Ok(false);
+        }
+        let params = IsPathIgnoredParams {
+            project_root: project_root.to_string_lossy().into_owned(),
+            ta_rel_path: ta_rel_path.to_string(),
+        };
+        let result: IsPathIgnoredResult = self.call(
+            "is_path_ignored",
+            serde_json::to_value(params).unwrap_or_default(),
+        )?;
+        Ok(result.ignored)
     }
 
     fn stage_env(

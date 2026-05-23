@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use ta_workspace::partitioning::{LOCAL_TA_PATHS, SHARED_TA_PATHS};
 
 /// Top-level workflow configuration from .ta/workflow.toml
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -365,21 +366,7 @@ impl Default for TaProjectPaths {
 }
 
 fn default_project_include_paths() -> Vec<String> {
-    // Mirror of ta-workspace::partitioning::SHARED_TA_PATHS — kept in sync manually.
-    // These are `.ta/` paths committed to VCS and shared with the team.
-    vec![
-        "workflow.toml".to_string(),
-        "policy.yaml".to_string(),
-        "constitution.toml".to_string(),
-        "memory.toml".to_string(),
-        "bmad.toml".to_string(),
-        "agents/".to_string(),
-        "constitutions/".to_string(),
-        "memory/".to_string(),
-        "templates/".to_string(),
-        "plan_history.jsonl".to_string(),
-        "release-history.json".to_string(),
-    ]
+    SHARED_TA_PATHS.iter().map(|s| s.to_string()).collect()
 }
 
 /// Local-scoped `.ta/` paths (gitignored, never shared).
@@ -399,25 +386,7 @@ impl Default for TaLocalPaths {
 }
 
 fn default_local_exclude_paths() -> Vec<String> {
-    // Mirror of ta-workspace::partitioning::LOCAL_TA_PATHS — kept in sync manually.
-    // These are `.ta/` paths that are machine-local only (gitignored, never shared).
-    vec![
-        "daemon.toml".to_string(),
-        "daemon.local.toml".to_string(),
-        "workflow.local.toml".to_string(),
-        "local.workflow.toml".to_string(), // deprecated name — kept so existing files stay gitignored
-        "memory.rvf".to_string(),
-        "staging/".to_string(),
-        "store/".to_string(),
-        "goals/".to_string(),
-        "events/".to_string(),
-        "sessions/".to_string(),
-        "release.lock".to_string(),
-        "velocity-stats.jsonl".to_string(),
-        "audit-ledger.jsonl".to_string(),
-        "taignore".to_string(),
-        "interactions/".to_string(),
-    ]
+    LOCAL_TA_PATHS.iter().map(|s| s.to_string()).collect()
 }
 
 /// Constitution / compliance checker configuration.
@@ -2749,6 +2718,21 @@ on_max_iterations = "fail"
         assert_eq!(
             ts.on_max_iterations,
             ta_goal::analysis::OnMaxIterations::Fail
+        );
+    }
+
+    #[test]
+    fn config_rs_exclude_paths_matches_partitioning() {
+        let mut config_paths = default_local_exclude_paths();
+        let mut canonical: Vec<String> = ta_workspace::partitioning::LOCAL_TA_PATHS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        config_paths.sort();
+        canonical.sort();
+        assert_eq!(
+            config_paths, canonical,
+            "default_local_exclude_paths must exactly match LOCAL_TA_PATHS — prevent drift"
         );
     }
 }

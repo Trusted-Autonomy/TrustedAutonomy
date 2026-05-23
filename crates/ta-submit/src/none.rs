@@ -72,6 +72,11 @@ impl SourceAdapter for NoneAdapter {
     fn name(&self) -> &str {
         "none"
     }
+
+    fn is_path_ignored(&self, _project_root: &std::path::Path, _ta_rel_path: &str) -> Result<bool> {
+        // No VCS — nothing will ever be committed, so every path is effectively safe.
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

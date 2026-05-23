@@ -164,6 +164,19 @@ impl SourceAdapter for SvnAdapter {
         vec![".svn/".to_string()]
     }
 
+    fn is_path_ignored(&self, project_root: &Path, ta_rel_path: &str) -> Result<bool> {
+        // SVN has no VcsBackend variant in ta-workspace; check inline via `svn status --no-ignore`.
+        // A line starting with 'I' means the path is ignored by svn:ignore properties.
+        let path = format!(".ta/{}", ta_rel_path);
+        let out = Command::new("svn")
+            .args(["status", "--no-ignore", &path])
+            .current_dir(project_root)
+            .output()
+            .map_err(|e| SubmitError::VcsError(format!("svn status failed: {}", e)))?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Ok(stdout.lines().any(|l| l.starts_with('I')))
+    }
+
     fn commit_diff(&self) -> Option<String> {
         match self.svn_cmd(&["diff", "-c", "HEAD"]) {
             Ok(diff) => Some(diff),
