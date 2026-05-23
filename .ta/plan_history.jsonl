@@ -271,10 +271,7 @@
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.22.1","timestamp":"2026-04-20T05:52:33.479102+00:00"}
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.15.22.1","timestamp":"2026-04-20T06:17:15.989161+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.23","timestamp":"2026-04-20T14:52:20.968753+00:00"}
-<<<<<<< HEAD
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.15.23","timestamp":"2026-04-20T15:39:48.819798+00:00"}
-=======
->>>>>>> ea4733ced1 (chore: auto-commit workflow audit trail (pre-apply))
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.24","timestamp":"2026-04-20T23:47:26.710484+00:00"}
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.15.24","timestamp":"2026-04-21T00:04:58.314573+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.15.24.1","timestamp":"2026-04-21T05:51:25.119125+00:00"}
@@ -349,3 +346,7 @@
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.16.1.4","source":"daemon_claim","timestamp":"2026-05-23T05:47:45.055802+00:00"}
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.16.1.4","timestamp":"2026-05-23T15:19:03.321422+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.0.0.1","source":"daemon_claim","timestamp":"2026-05-23T15:20:05.028629+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.4.6","source":"daemon_claim","timestamp":"2026-05-23T15:29:29.368166+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.4.8","source":"daemon_claim","timestamp":"2026-05-23T15:58:42.057119+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.3.5","source":"daemon_claim","timestamp":"2026-05-23T16:00:48.752951+00:00"}
+{"new_status":"in_progress","old_status":"pending","phase_id":"v0.3.6","source":"daemon_claim","timestamp":"2026-05-23T16:19:59.267362+00:00"}
