@@ -3344,29 +3344,29 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
         }
     }
 
-    // ── VCS checks (v0.13.13) ────────────────────────────────────
+    // ── VCS checks (v0.13.13, VCS-agnostic v0.16.1.4) ───────────
     {
-        use ta_workspace::partitioning::{git_is_ignored, VcsBackend, LOCAL_TA_PATHS};
+        use ta_workspace::partitioning::{VcsBackend, LOCAL_TA_PATHS};
         let vcs = VcsBackend::detect(&config.workspace_root);
         print!("  VCS... ");
         match &vcs {
-            VcsBackend::Git => {
-                // Verify git status works.
-                // git-only: no adapter equivalent (VCS health check runs before adapter is constructed)
-                let git_ok = std::process::Command::new("git")
-                    .args(["status", "--porcelain"])
-                    .current_dir(&config.workspace_root)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if git_ok {
-                    println!("git (ok)");
-                    pass += 1;
-                } else {
-                    println!("git (git status failed — check git installation)");
+            VcsBackend::None => {
+                println!("none detected (ok — skipping VCS checks)");
+                pass += 1;
+            }
+            _ => {
+                println!("{} (ok)", vcs.as_str());
+                pass += 1;
+
+                // Warn if Perforce ignore file is not configured.
+                if vcs == VcsBackend::Perforce && std::env::var("P4IGNORE").is_err() {
+                    println!("  [warn] P4IGNORE env var is not set.");
+                    println!("    TA local paths may be submitted accidentally.");
+                    println!("    Fix: export P4IGNORE=.p4ignore  (and re-run `ta setup vcs`)");
                     warn += 1;
                 }
-                // Check that local-only .ta/ paths are in .gitignore.
+
+                // Check that local-only .ta/ paths are excluded by the VCS ignore rules.
                 let mut unignored: Vec<&str> = Vec::new();
                 for path in LOCAL_TA_PATHS {
                     let full = config
@@ -3374,49 +3374,23 @@ fn _old_doctor_impl(config: &GatewayConfig) -> anyhow::Result<()> {
                         .join(".ta")
                         .join(path.trim_end_matches('/'));
                     if full.exists() {
-                        if let Ok(false) = git_is_ignored(&config.workspace_root, path) {
+                        if let Ok(false) = vcs.is_path_ignored(&config.workspace_root, path) {
                             unignored.push(path);
                         }
                     }
                 }
                 if !unignored.is_empty() {
                     println!(
-                        "  [warn] {} local .ta/ path(s) are not in .gitignore:",
-                        unignored.len()
+                        "  [warn] {} local .ta/ path(s) are not ignored by {}:",
+                        unignored.len(),
+                        vcs.as_str()
                     );
                     for p in &unignored {
                         println!("    .ta/{}", p);
                     }
-                    println!("    Fix: ta setup vcs");
+                    println!("    Fix: ta setup vcs --force");
                     warn += 1;
                 }
-            }
-            VcsBackend::Perforce => {
-                // Verify p4 info responds.
-                let p4_ok = std::process::Command::new("p4")
-                    .arg("info")
-                    .current_dir(&config.workspace_root)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if p4_ok {
-                    println!("perforce (ok)");
-                    pass += 1;
-                } else {
-                    println!("perforce (p4 info failed — check P4PORT/P4CLIENT)");
-                    warn += 1;
-                }
-                // Warn if P4IGNORE is not set.
-                if std::env::var("P4IGNORE").is_err() {
-                    println!("  [warn] P4IGNORE env var is not set.");
-                    println!("    TA local paths may be submitted accidentally.");
-                    println!("    Fix: export P4IGNORE=.p4ignore  (and re-run `ta setup vcs`)");
-                    warn += 1;
-                }
-            }
-            VcsBackend::None => {
-                println!("none detected (ok — skipping VCS checks)");
-                pass += 1;
             }
         }
 

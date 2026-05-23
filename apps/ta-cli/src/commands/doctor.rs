@@ -439,68 +439,20 @@ fn check_plan_state(config: &GatewayConfig) -> CheckResult {
 }
 
 fn check_vcs(config: &GatewayConfig) -> Vec<CheckResult> {
-    use ta_workspace::partitioning::{git_is_ignored, VcsBackend, LOCAL_TA_PATHS};
+    use ta_workspace::partitioning::{VcsBackend, LOCAL_TA_PATHS};
 
     let mut results = Vec::new();
     let vcs = VcsBackend::detect(&config.workspace_root);
 
     match &vcs {
-        VcsBackend::Git => {
-            // git-only: no adapter equivalent (VCS health check runs before adapter is constructed)
-            let git_ok = std::process::Command::new("git")
-                .args(["status", "--porcelain"])
-                .current_dir(&config.workspace_root)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if git_ok {
-                results.push(CheckResult::ok("VCS", "git".to_string()));
-            } else {
-                results.push(CheckResult::warn(
-                    "VCS",
-                    "git status failed".to_string(),
-                    "Check git installation and repository state",
-                ));
-                return results;
-            }
-            // Check gitignore coverage for .ta/ paths.
-            let mut unignored: Vec<&str> = Vec::new();
-            for path in LOCAL_TA_PATHS {
-                let full = config
-                    .workspace_root
-                    .join(".ta")
-                    .join(path.trim_end_matches('/'));
-                if full.exists() {
-                    if let Ok(false) = git_is_ignored(&config.workspace_root, path) {
-                        unignored.push(path);
-                    }
-                }
-            }
-            if !unignored.is_empty() {
-                let paths = unignored.join(", .ta/");
-                results.push(CheckResult::warn(
-                    "VCS .gitignore",
-                    format!("{} .ta/ path(s) not in .gitignore", unignored.len()),
-                    format!(".ta/{} should be ignored — run: ta setup vcs", paths),
-                ));
-            }
+        VcsBackend::None => {
+            results.push(CheckResult::ok(
+                "VCS",
+                "none (skipping VCS checks)".to_string(),
+            ));
+            return results;
         }
         VcsBackend::Perforce => {
-            let p4_ok = std::process::Command::new("p4")
-                .arg("info")
-                .current_dir(&config.workspace_root)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if p4_ok {
-                results.push(CheckResult::ok("VCS", "perforce".to_string()));
-            } else {
-                results.push(CheckResult::warn(
-                    "VCS",
-                    "p4 info failed".to_string(),
-                    "Check P4PORT/P4CLIENT configuration",
-                ));
-            }
             if std::env::var("P4IGNORE").is_err() {
                 results.push(CheckResult::warn(
                     "VCS P4IGNORE",
@@ -509,13 +461,28 @@ fn check_vcs(config: &GatewayConfig) -> Vec<CheckResult> {
                 ));
             }
         }
-        VcsBackend::None => {
-            results.push(CheckResult::ok(
-                "VCS",
-                "none (skipping VCS checks)".to_string(),
-            ));
+        VcsBackend::Git => {}
+    }
+
+    results.push(CheckResult::ok("VCS", vcs.as_str().to_string()));
+
+    // Check VCS ignore coverage for .ta/ paths that exist on disk (VCS-agnostic).
+    for path in LOCAL_TA_PATHS {
+        let full = config
+            .workspace_root
+            .join(".ta")
+            .join(path.trim_end_matches('/'));
+        if full.exists() {
+            if let Ok(false) = vcs.is_path_ignored(&config.workspace_root, path) {
+                results.push(CheckResult::warn(
+                    "VCS ignore",
+                    format!(".ta/{} exists but is not ignored by {}", path, vcs.as_str()),
+                    "run: ta setup vcs --force",
+                ));
+            }
         }
     }
+
     results
 }
 
@@ -839,15 +806,17 @@ fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
     use std::io::{self, Write};
 
     let signals = super::health_signals::compute_health_signals(config);
+    let vcs_gaps = vcs_gitignore_gaps(config);
+    let total = signals.len() + usize::from(!vcs_gaps.is_empty());
 
-    if signals.is_empty() {
+    if total == 0 {
         println!("No health issues detected — nothing to fix.");
         return Ok(());
     }
 
     println!("TA Doctor — Fix Mode");
     println!();
-    println!("Found {} issue(s):", signals.len());
+    println!("Found {} issue(s):", total);
     println!();
 
     let mut fixed = 0usize;
@@ -890,8 +859,73 @@ fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
         println!();
     }
 
+    // VCS gitignore fix — runs ta setup vcs --force.
+    if !vcs_gaps.is_empty() {
+        println!(
+            "[warn] {} .ta/ path(s) exist but are not gitignored",
+            vcs_gaps.len()
+        );
+        for gap in &vcs_gaps {
+            println!("       .ta/{}", gap);
+        }
+        println!("  Fix: ta setup vcs --force (rewrites the TA gitignore block)");
+
+        let should_fix = if yes {
+            println!("  → Applying (--yes)");
+            true
+        } else {
+            print!("  Apply fix? [y/N]: ");
+            io::stdout().flush().ok();
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).ok();
+            input.trim().eq_ignore_ascii_case("y")
+        };
+
+        if should_fix {
+            match super::setup::run_vcs_setup(config, true, false, None, None) {
+                Ok(_) => {
+                    println!("  ✓ Ran ta setup vcs --force — gitignore block updated");
+                    fixed += 1;
+                }
+                Err(e) => {
+                    println!("  ✗ Failed: {}", e);
+                }
+            }
+        } else {
+            println!("  Skipped.");
+            skipped += 1;
+        }
+        println!();
+    }
+
     println!("{} fix(es) applied, {} skipped.", fixed, skipped);
     Ok(())
+}
+
+/// Returns LOCAL_TA_PATHS entries that exist on disk but are not ignored by the project's VCS.
+///
+/// Returns empty vec if the project has no VCS (`VcsBackend::None`).
+fn vcs_gitignore_gaps(config: &GatewayConfig) -> Vec<&'static str> {
+    use ta_workspace::partitioning::{VcsBackend, LOCAL_TA_PATHS};
+
+    let vcs = VcsBackend::detect(&config.workspace_root);
+    if vcs == VcsBackend::None {
+        return vec![];
+    }
+
+    let mut gaps = Vec::new();
+    for path in LOCAL_TA_PATHS {
+        let full = config
+            .workspace_root
+            .join(".ta")
+            .join(path.trim_end_matches('/'));
+        if full.exists() {
+            if let Ok(false) = vcs.is_path_ignored(&config.workspace_root, path) {
+                gaps.push(*path);
+            }
+        }
+    }
+    gaps
 }
 
 /// Apply the fix for a given health signal.

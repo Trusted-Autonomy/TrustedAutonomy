@@ -304,6 +304,31 @@ pub struct ProtectedTargetsResult {
 // On violation it returns `ok: false` with a descriptive error.
 
 // ---------------------------------------------------------------------------
+// is_path_ignored
+// ---------------------------------------------------------------------------
+
+/// Parameters for the `is_path_ignored` method.
+///
+/// Checks whether a `.ta/`-relative path is excluded by the VCS's ignore rules.
+/// For Git this is `.gitignore`; for Perforce it's the P4IGNORE file; for SVN
+/// it's `svn:ignore` properties; etc. Plugins that don't implement this capability
+/// should omit it from their `capabilities` list — TA will fall back to `Ok(false)`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IsPathIgnoredParams {
+    /// Absolute path to the project root.
+    pub project_root: String,
+    /// Path relative to `.ta/` to check (e.g., `"staging/"`, `"events.jsonl"`).
+    pub ta_rel_path: String,
+}
+
+/// Result from the `is_path_ignored` method.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IsPathIgnoredResult {
+    /// `true` if the path is excluded by the VCS ignore rules, `false` if not.
+    pub ignored: bool,
+}
+
+// ---------------------------------------------------------------------------
 // sync_upstream
 // ---------------------------------------------------------------------------
 

@@ -1344,6 +1344,11 @@ impl SourceAdapter for GitAdapter {
             None
         }
     }
+
+    fn is_path_ignored(&self, project_root: &Path, ta_rel_path: &str) -> Result<bool> {
+        ta_workspace::partitioning::git_is_ignored(project_root, ta_rel_path)
+            .map_err(SubmitError::VcsError)
+    }
 }
 
 impl GitAdapter {

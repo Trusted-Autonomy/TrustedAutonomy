@@ -7823,26 +7823,26 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1.4 — VCS Initialization Correctness
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Problem**: `LOCAL_TA_PATHS` in `partitioning.rs` (the source written to `.gitignore` by `ta setup vcs`) has 14 entries while the main project's `.gitignore` has 30+ TA-specific entries grown manually over time. New projects get an incomplete gitignore block — `pr_packages/`, `review/`, `backups/`, `*.log`, `*.pid`, and ~15 other TA-produced paths are not ignored, causing `git status` noise and risk of committing machine-local state.
 
 **Also**: `SHARED_TA_PATHS` has `"memory/"` where it should have `"project-memory/"` (inverted), and `goal-audit.jsonl` — already auto-staged on apply — is absent from the shared list. `config.rs` contains a manual mirror of `LOCAL_TA_PATHS` with the same gaps.
 
-1. [ ] **`LOCAL_TA_PATHS` — 19 missing entries** (`crates/ta-workspace/src/partitioning.rs`):
+1. [x] **`LOCAL_TA_PATHS` — 19 missing entries** (`crates/ta-workspace/src/partitioning.rs`):
    - Dirs: `pr_packages/`, `review/`, `backups/`, `heartbeats/`, `workflow-runs/`, `advisor-notes/`, `draft-build-ctx/`, `memory/`
    - Files: `audit.jsonl`, `goal-history.jsonl`, `operations.jsonl`, `events.jsonl`, `change_summary.json`, `consent.json`, `mcp_json_original`, `setup-progress.json`
    - Globs: `*.log`, `*.pid`, `*.lock` (replace the specific `release.lock` entry — `gitignore_block()` prefixes `.ta/` so these generate `.ta/*.log` etc., which gitignore glob-matches correctly)
 
-2. [ ] **`SHARED_TA_PATHS` corrections** (`partitioning.rs`): Rename `"memory/"` → `"project-memory/"`. Add `"goal-audit.jsonl"`, `"config.toml"`, `"pr-template.md"`, `"personas/"` to document what is already committed.
+2. [x] **`SHARED_TA_PATHS` corrections** (`partitioning.rs`): Rename `"memory/"` → `"project-memory/"`. Add `"goal-audit.jsonl"`, `"config.toml"`, `"pr-template.md"`, `"personas/"` to document what is already committed.
 
-3. [ ] **Eliminate the manual mirror** (`crates/ta-submit/src/config.rs`): `default_local_exclude_paths()` is described as "kept in sync manually" and is already out of date. Replace the vec literal with a direct reference to `ta_workspace::partitioning::LOCAL_TA_PATHS` — one source of truth, impossible to drift.
+3. [x] **Eliminate the manual mirror** (`crates/ta-submit/src/config.rs`): `default_local_exclude_paths()` is described as "kept in sync manually" and is already out of date. Replace the vec literal with a direct reference to `ta_workspace::partitioning::LOCAL_TA_PATHS` — one source of truth, impossible to drift.
 
-4. [ ] **`ta doctor` VCS check gap** (`crates/ta-daemon/src/health.rs`): For every entry in `LOCAL_TA_PATHS` that exists on disk in `.ta/`, verify it is ignored by the project VCS. Emit `WARN: .ta/<path> exists but is not gitignored — run: ta setup vcs --force` for each gap. `ta doctor --fix` runs `ta setup vcs --force`.
+4. [x] **`ta doctor` VCS check gap** (`crates/ta-daemon/src/health.rs`): For every entry in `LOCAL_TA_PATHS` that exists on disk in `.ta/`, verify it is ignored by the project VCS. Emit `WARN: .ta/<path> exists but is not gitignored — run: ta setup vcs --force` for each gap. `ta doctor --fix` runs `ta setup vcs --force`.
 
-5. [ ] **`ta setup vcs --force` re-generates stale blocks**: Confirm the `--force` flag in `update_gitignore` fully replaces the old TA block so existing projects can repair incomplete blocks without manual editing. Add the same flag path for `.p4ignore`.
+5. [x] **`ta setup vcs --force` re-generates stale blocks**: Confirm the `--force` flag in `update_gitignore` fully replaces the old TA block so existing projects can repair incomplete blocks without manual editing. Add the same flag path for `.p4ignore`.
 
-6. [ ] **Tests**: `gitignore_block_contains_all_local_paths` (existing) will catch future omissions automatically once `LOCAL_TA_PATHS` is complete. Add: `project_memory_in_shared_not_memory`, `goal_audit_in_shared_paths`, `config_rs_exclude_paths_matches_partitioning` (assert both lists are identical after dedup — prevents future drift).
+6. [x] **Tests**: `gitignore_block_contains_all_local_paths` (existing) will catch future omissions automatically once `LOCAL_TA_PATHS` is complete. Add: `project_memory_in_shared_not_memory`, `goal_audit_in_shared_paths`, `config_rs_exclude_paths_matches_partitioning` (assert both lists are identical after dedup — prevents future drift).
 
 #### Version: `0.16.1-alpha.4`
 
@@ -7864,7 +7864,6 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 #### `.ta/project-manifest.md` format
 
 ```markdown
----
 name: cinepipe-core
 type: service          # service | library | cli | plugin | game | app
 language: python

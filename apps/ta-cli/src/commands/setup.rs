@@ -97,7 +97,7 @@ pub fn execute(command: &SetupCommands, config: &GatewayConfig) -> anyhow::Resul
 }
 
 /// VCS setup: detect VCS backend, write ignore files, update workflow.toml.
-fn run_vcs_setup(
+pub fn run_vcs_setup(
     config: &GatewayConfig,
     force: bool,
     dry_run: bool,

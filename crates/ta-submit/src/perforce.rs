@@ -211,6 +211,11 @@ impl SourceAdapter for PerforceAdapter {
         vec![".p4config".to_string(), ".p4ignore".to_string()]
     }
 
+    fn is_path_ignored(&self, project_root: &Path, ta_rel_path: &str) -> Result<bool> {
+        ta_workspace::partitioning::p4_is_ignored(project_root, ta_rel_path)
+            .map_err(SubmitError::VcsError)
+    }
+
     fn commit_diff(&self) -> Option<String> {
         // Get the most recent submitted changelist number.
         let cl = match self.p4_cmd(&["changes", "-s", "submitted", "-m", "1"]) {
