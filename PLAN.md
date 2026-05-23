@@ -7949,66 +7949,87 @@ inject = true
 #### Version: `0.16.1-alpha.5`
 
 ---
-### v0.16.1.6 — `ta plan init --discover`: Agent-Assisted Codebase Discovery
+### v0.16.1.6 — `ta plan init` Interview UX: Per-Question Agent Lookup + `--discover` Batch Mode
 <!-- status: pending -->
 
-**Problem**: `ta plan init --pragma` interviews the user with a series of y/N prompts like "Is player service deployed?" and "Does player have a custom plugin implementation?" — questions that require reading the Kotlin class hierarchy, Gradle dependency graph, and service config files to answer confidently. Users who didn't write the codebase or who inherited a project cannot answer accurately. The data is in the code; the current static scan (Gradle modules, Pragma config files, git log) doesn't go deep enough to surface it.
+**Problem**: `ta plan init --pragma` interviews the user with y/N prompts like "Is player service deployed?" and "Does player have a custom plugin implementation?" — questions that require reading Kotlin class hierarchies and Gradle dependency graphs to answer confidently. Users who inherited a codebase or aren't familiar with its internals are blocked. The data is in the code; the user shouldn't have to be the lookup layer.
 
-**Solution**: A `--discover` flag that replaces the interactive interview with a short-lived BMAD agent session. Static scanning runs first; the agent only covers fields the scan cannot determine with confidence. Findings are shown as a confirmation summary before writing the snapshot — the human stays in the loop without being blocked on trivia.
+**Two complementary solutions**:
 
-**Scope**: `apps/ta-cli/src/commands/plan.rs` (Pragma discovery path). No new crates; the agent invocation reuses the existing headless Claude launch path used elsewhere in TA.
+1. **`?` / "don't know" option on every prompt** (primary UX improvement): User answers the questions they know and types `?` for the rest. The agent looks up just that field immediately and returns an answer with its evidence. The interview continues — user stays in control, agent fills gaps on demand.
 
-#### Discovery signal map (what the agent looks for)
+2. **`--discover` flag** (batch mode): Skips the interview entirely. Static scan runs first; agent resolves all uncertain fields in one session. Findings are shown as a confirmation summary before writing the snapshot. For users who want to hand the whole thing off.
 
-| Question | Code signals |
-|---|---|
-| Is `<service>` deployed? | Service directory exists under `pragma-ext-service/`; entry in `settings.gradle.kts` includes; service config YAML present |
-| Custom plugin implementation? | Kotlin classes extending `Pragma<Service>Plugin` or `Pragma<Service>Handler` in `src/main/kotlin/`; non-empty plugin registration in `plugin.yml` |
-| SDK integrations? | `build.gradle` / `build.gradle.kts` dependencies for `pragma-sdk-unreal`, `pragma-sdk-unity`, `pragma-sdk-web`; UE plugin descriptor `.uplugin` files; Unity `Packages/manifest.json` |
-| Pragma version | `gradle.properties` `pragmaVersion=`, `libs.versions.toml` pragma pin, release tag in README |
-| Tech debt | Top-3 TODO/FIXME comments by recency (git blame); open items in README "Known Issues"; agent summarises to one line |
+**Scope**: `apps/ta-cli/src/commands/plan.rs` (Pragma discovery path). No new crates.
 
-#### Flow
+#### Per-question `?` flow
+
+```
+Is player service deployed? [y/N/?] ?
+  → agent looks up: pragma-ext-service/player/ directory, settings.gradle.kts includes
+  → Found: pragma-ext-service/player/ exists, included in settings.gradle.kts
+  → player: yes (high confidence)
+Is player service deployed? [y/N/?] y    ← user confirms or overrides
+
+  Does player have a custom plugin implementation? [y/N/?] ?
+  → agent looks up: Kotlin classes extending PragmaPlayerPlugin in src/main/kotlin/
+  → Found: com.example.PlayerPlugin extends PragmaPlayerPlugin (2 files)
+  → player custom plugin: yes (high confidence)
+  Does player have a custom plugin implementation? [y/N/?] y
+```
+
+The `?` lookup is fast (5–10 seconds, scoped to the relevant directory/pattern for that field) and prints its evidence so the user can verify before confirming.
+
+#### `--discover` batch flow
 
 ```
 ta plan init --pragma --discover
   → static scan (gradle modules, config files, git log)     [existing]
-  → build discovery task list: fields still uncertain       [new]
-  → launch BMAD agent with codebase read access             [new]
+  → launch BMAD agent for all unresolved fields             [new]
   → agent returns JSON matching snapshot schema             [new]
-  → show confirmation diff to user (accept / edit)         [new]
+  → show confirmation summary (accept / edit / abort)      [new]
   → write snapshot + inject PLAN.md preamble                [existing]
 ```
 
-Without `--discover`, the existing interactive interview runs unchanged.
+#### Discovery signal map (what the agent looks for)
+
+| Field | Code signals |
+|---|---|
+| Is `<service>` deployed? | `pragma-ext-service/<service>/` exists; entry in `settings.gradle.kts`; service config YAML present |
+| Custom plugin implementation? | Kotlin class extending `Pragma<Service>Plugin` or `Pragma<Service>Handler` in `src/main/kotlin/`; non-empty plugin registration in `plugin.yml` |
+| SDK integrations? | `build.gradle.kts` deps for `pragma-sdk-unreal/unity/web`; `.uplugin` files; Unity `Packages/manifest.json` |
+| Pragma version | `gradle.properties` `pragmaVersion=`, `libs.versions.toml` pin, README badge |
+| Tech debt | Top-3 TODO/FIXME by recency (git blame); README "Known Issues"; one-line summary |
 
 #### Items
 
-1. [ ] **`--discover` flag** (`plan.rs`): Add `discover: bool` field to the `PlanInit` CLI struct. When set with `--pragma`, call `plan_init_pragma_discover()` instead of `plan_init_pragma()`. For non-Pragma `ta plan init --discover`, call the generic discovery path (item 6).
+1. [ ] **`?` option on every interview prompt** (`plan.rs`): Change each `[y/N]` prompt to `[y/N/?]`. When `?` is entered, call `lookup_field_with_agent(field_name, project_root)` for just that field. Print the agent's finding + evidence source. Re-display the same prompt so the user can confirm the agent's answer or override it. No flag required — `?` is always available.
 
-2. [ ] **`discover_pragma_fields()`** (`plan.rs`): Runs existing static scan, then inspects which snapshot fields remain unresolved (services list empty, no SDK deps found, etc.). Returns a `DiscoveryTask` list: structured instructions for the agent, one per uncertain field. Tasks include the file patterns to search and what a positive/negative signal looks like.
+2. [ ] **`lookup_field_with_agent()`** (`plan.rs`): Minimal scoped agent call for a single field. Constructs a one-sentence task ("Find whether the player service has a custom Pragma plugin implementation in src/main/kotlin/") and a file-read scope (the relevant subdirectory only). Returns `DiscoveryFinding { value: String, confidence: Confidence, evidence: String }`. Caps at 5 tool calls / 30 seconds.
 
-3. [ ] **Agent prompt template** (`apps/ta-cli/src/templates/pragma-discover.md`): Markdown prompt given to the BMAD agent. Includes: project root, pre-scan findings, the discovery task list, and a JSON schema the agent must fill in (`active_services`, `custom_plugins`, `sdk_integrations`, `pragma_version`, `tech_debt_summary`). Agent is told to read — not modify — files, and to express uncertainty with a `confidence` field per answer (`high` / `medium` / `low`).
+3. [ ] **`--discover` flag** (`plan.rs`): Batch mode — calls `discover_pragma_all_fields()` which runs static scan then launches one agent session for all unresolved fields. Returns a complete `PragmaSnapshot`. Confirmation UI (item 4) is shown before writing.
 
-4. [ ] **Agent invocation** (`plan.rs`): Launch headless Claude agent via the existing `run_headless_agent()` path (same mechanism used by `ta plan pragma` for BMAD planning). Pass the discovery prompt + codebase read access scoped to the project root. Parse the JSON response into `PragmaSnapshot`. Cap the agent session at 3 minutes / 20 tool calls — this is a read-only reconnaissance, not a full planning session.
+4. [ ] **`discover_pragma_all_fields()`** (`plan.rs`): Runs existing static scan, identifies unresolved fields, builds a single agent prompt with all discovery tasks. Agent returns JSON matching `PragmaSnapshot` schema with per-field `confidence`. Agent is scoped to read-only access, capped at 20 tool calls / 3 minutes.
 
-5. [ ] **Confirmation UI** (`plan.rs`): Print a structured summary before writing:
+5. [ ] **Agent prompt templates** (`apps/ta-cli/src/templates/`): `pragma-discover-field.md` (single-field lookup, used by `?`); `pragma-discover-all.md` (batch discovery, used by `--discover`). Both instruct the agent to express confidence and cite the file + line as evidence.
+
+6. [ ] **Confirmation UI for `--discover`** (`plan.rs`):
    ```
-   Discovered (confidence shown where uncertain):
-     Services:  player ✓  matchmaking ✓  commerce ✗  social ? (medium)
+   Discovered:
+     Services:  player ✓  matchmaking ✓  commerce ✗  social ? (medium — no config found)
      Plugins:   player: custom  matchmaking: built-in
      SDK:       unreal (pragma-sdk-unreal 2026.1.0 in build.gradle.kts)
-     Version:   2026.1.0 (from gradle.properties)
-     Tech debt: "Portal service has 14 open TODO items around auth token refresh"
+     Version:   2026.1.0 (gradle.properties:3)
+     Tech debt: "14 TODO items in portal service around auth token refresh"
    Accept? [Y/edit/abort]
    ```
-   `edit` opens `$EDITOR` on a TOML/JSON representation of the findings. `abort` exits cleanly.
+   `edit` opens `$EDITOR` on a JSON representation of the findings.
 
-6. [ ] **Generic `--discover` path** (non-Pragma): When `ta plan init --discover` is run without `--pragma`, the agent receives a general prompt: "Examine this codebase and describe its primary components, external dependencies, and entry points." Output is written as a freeform `discovery-notes.md` in `.ta/memory/` for use by later planning commands. No structured schema required.
+7. [ ] **Generic `--discover` (non-Pragma)**: `ta plan init --discover` without `--pragma` launches an agent with a general "describe this codebase" prompt. Output written as `discovery-notes.md` in `.ta/memory/`. No structured schema required.
 
-7. [ ] **Tests**: `discover_fields_uses_agent_when_services_empty`, `discovery_prompt_includes_static_scan_results`, `confirmation_ui_formats_confidence_correctly`, `discover_skips_agent_when_static_scan_fully_resolves`. Agent invocation is stubbed in tests — no real Claude calls.
+8. [ ] **Tests**: `interview_question_mark_invokes_lookup`, `lookup_field_returns_finding_with_evidence`, `discover_all_fields_batch_agent_call`, `confirmation_ui_formats_low_confidence_fields`, `discover_skips_agent_for_fields_resolved_by_static_scan`. Agent calls stubbed in tests.
 
-8. [ ] **USAGE.md**: Update "ta plan init" section — add `--discover` flag, when to use it vs interactive mode, what the agent looks for, how to interpret the confirmation summary.
+9. [ ] **USAGE.md**: Update "ta plan init" section — document `?` option at prompts, `--discover` batch mode, what the agent searches for, how to read the confidence indicators.
 
 #### Version: `0.16.1-alpha.6`
 
