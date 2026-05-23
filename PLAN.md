@@ -7789,7 +7789,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1.3 — Studio Advisor Engine
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.16.1.2 (Studio fundamentals — modals, apply endpoint, plan run button must exist before advisor can invoke them)
 
