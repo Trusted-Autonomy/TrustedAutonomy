@@ -7761,29 +7761,29 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1.2 — Studio Bug Fixes & Fundamentals
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Fix the known Studio regressions and close the CLI-dependency gap for the core workflows — applying drafts, running phases, and reviewing work. After this phase, Studio is fully functional without the CLI for the daily driver tasks. The advisor engine (conversational AI panel) ships in v0.16.1.3.
 
 **Scope**: Bug fixes carried forward from v0.16.0.1/v0.16.1.1 + the three features that make Studio self-sufficient (draft apply in-browser, plan run button, draft detail visibility).
 
-1. [ ] **"Next phase" includes sub-phases** (`assets/index.html` + `crates/ta-daemon/src/api/plan.rs`): The next-phase selector only considers 3-part IDs and skips 4-part sub-phases (`vX.Y.Z.N`). Fix: evaluate all pending phases in PLAN.md document order regardless of depth. First pending phase in document order is always "next".
+1. [x] **"Next phase" includes sub-phases** (`assets/index.html` + `crates/ta-daemon/src/api/plan.rs`): The next-phase selector only considers 3-part IDs and skips 4-part sub-phases (`vX.Y.Z.N`). Fix: evaluate all pending phases in PLAN.md document order regardless of depth. First pending phase in document order is always "next".
 
-2. [ ] **Version displayed in Studio header** (`assets/index.html`): Fetch version from `/health` response, show in top-right header bar, refresh every 60s. Clicking links to the plan tab.
+2. [x] **Version displayed in Studio header** (`assets/index.html`): Fetch version from `/health` response, show in top-right header bar, refresh every 60s. Clicking links to the plan tab.
 
-3. [ ] **Replace `alert()`/`confirm()` with real modals** (`assets/index.html`): Every `alert()` and `confirm()` call in Studio replaced with an in-page `<dialog>` element with working action buttons. Applies to run guards, deny prompts, and any other decision dialogs.
+3. [x] **Replace `alert()`/`confirm()` with real modals** (`assets/index.html`): Every `alert()` and `confirm()` call in Studio replaced with an in-page `<dialog>` element with working action buttons. Applies to run guards, deny prompts, and any other decision dialogs.
 
-4. [ ] **`pr_ready` state badge** (`assets/index.html`): Goals in `pr_ready` state show "Ready for Review" amber badge (not "Running"). Clicking links to the draft in the Drafts tab.
+4. [x] **`pr_ready` state badge** (`assets/index.html`): Goals in `pr_ready` state show "Ready for Review" amber badge (not "Running"). Clicking links to the draft in the Drafts tab.
 
-5. [ ] **Draft detail: collapsible sections** (`assets/index.html`): Draft detail panel gains `<details>`-style collapsible sections with carets — Summary (open), Supervisor Analysis, Agent Decision Log, Changed Files (open), Constitution Check. Pulls `validation_log`, `supervisor_review`, `decision_log` from `/api/drafts/{id}`.
+5. [x] **Draft detail: collapsible sections** (`assets/index.html`): Draft detail panel gains `<details>`-style collapsible sections with carets — Summary (open), Supervisor Analysis, Agent Decision Log, Changed Files (open), Constitution Check. Pulls `validation_log`, `supervisor_review`, `decision_log` from `/api/drafts/{id}`.
 
-6. [ ] **Draft apply from Studio** (`assets/index.html` + `crates/ta-daemon/src/web.rs`): Add `POST /api/drafts/{id}/apply` daemon endpoint. Studio "Apply" button calls it — no CLI required. Streams apply progress (build output, test results, commit SHA). Shows commit SHA and PR URL on success.
+6. [x] **Draft apply from Studio** (`assets/index.html` + `crates/ta-daemon/src/web.rs`): Add `POST /api/drafts/{id}/apply` daemon endpoint. Studio "Apply" button calls it — no CLI required. Streams apply progress (build output, test results, commit SHA). Shows commit SHA and PR URL on success.
 
-7. [ ] **v0.15.9 display cleanup**: Verify the v0.16.1.1 heading fix resolved the dashboard ghost after daemon restart. Add regression test: a goal whose `plan_phase` has no matching PLAN.md heading must not appear in `active_phases()`.
+7. [x] **v0.15.9 display cleanup**: Verify the v0.16.1.1 heading fix resolved the dashboard ghost after daemon restart. Add regression test: a goal whose `plan_phase` has no matching PLAN.md heading must not appear in `active_phases()`.
 
-8. [ ] **Plan tab: run any phase** (`assets/index.html`): Every pending phase card has a "Run" button that calls `POST /api/goals/start` with the phase ID. Active/done phases show status only. Out-of-order warning dialog (item 3's modal pattern) triggers when applicable.
+8. [x] **Plan tab: run any phase** (`assets/index.html`): Every pending phase card has a "Run" button that calls `POST /api/goals/start` with the phase ID. Active/done phases show status only. Out-of-order warning dialog (item 3's modal pattern) triggers when applicable.
 
-9. [ ] **Tests**: Modal component renders and dismisses correctly. Draft apply endpoint streams and returns commit SHA. Plan tab Run button fires correct API call. `active_phases()` regression test for orphaned plan_phase.
+9. [x] **Tests**: Modal component renders and dismisses correctly. Draft apply endpoint streams and returns commit SHA. Plan tab Run button fires correct API call. `active_phases()` regression test for orphaned plan_phase.
 
 #### Version: `0.16.1-alpha.2`
 

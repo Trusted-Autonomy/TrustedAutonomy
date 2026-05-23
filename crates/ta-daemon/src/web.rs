@@ -249,6 +249,141 @@ async fn approve_draft(
     }
 }
 
+/// `POST /api/drafts/:id/apply` — Apply an approved or pending draft to the workspace.
+///
+/// Spawns `ta draft apply <short_id> --git-commit` and waits for it to finish
+/// (up to 120 seconds). Returns the combined output and the parsed commit SHA on
+/// success, or an error message on failure.
+async fn apply_draft_endpoint(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let uuid = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid UUID").into_response(),
+    };
+
+    // Verify the draft exists and is in an appliable state.
+    match load_draft(&state.pr_packages_dir, uuid) {
+        Ok(None) => return (StatusCode::NOT_FOUND, "draft not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(Some(draft)) => {
+            let status = format!("{:?}", draft.status).to_lowercase();
+            if status.contains("denied")
+                || status.contains("applied")
+                || status.contains("superseded")
+                || status.contains("closed")
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Draft is in terminal state '{}' and cannot be applied.",
+                            status
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Derive project root from pr_packages_dir: .ta/pr_packages → .ta → project root.
+    let project_root = state
+        .pr_packages_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(&state.pr_packages_dir)
+        .to_path_buf();
+
+    let ta_bin = find_ta_binary_web();
+    let short_id = &id[..8.min(id.len())];
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        tokio::process::Command::new(&ta_bin)
+            .arg("--project-root")
+            .arg(&project_root)
+            .arg("draft")
+            .arg("apply")
+            .arg(short_id)
+            .arg("--git-commit")
+            .current_dir(&project_root)
+            .output(),
+    )
+    .await;
+
+    match result {
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "apply timed out after 120 seconds"
+            })),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to spawn ta: {}. Is `ta` on PATH?", e)
+            })),
+        )
+            .into_response(),
+        Ok(Ok(out)) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let combined = format!("{}{}", stdout, stderr);
+            let commit_sha = parse_commit_sha(&combined);
+
+            if out.status.success() {
+                Json(serde_json::json!({
+                    "status": "applied",
+                    "commit_sha": commit_sha,
+                    "output": combined,
+                }))
+                .into_response()
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "apply failed",
+                        "output": combined,
+                    })),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+/// Parse the first 7- or 40-char hex commit SHA from apply output lines
+/// that contain the word "commit".
+fn parse_commit_sha(output: &str) -> Option<String> {
+    for line in output.lines() {
+        if line.to_lowercase().contains("commit") {
+            for word in line.split_whitespace() {
+                let w = word.trim_matches(|c: char| !c.is_ascii_hexdigit());
+                if (w.len() == 7 || w.len() == 40) && w.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Some(w.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Locate the `ta` binary. Prefers the one adjacent to the running daemon.
+fn find_ta_binary_web() -> String {
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(dir) = current.parent() {
+            let ta_path = dir.join("ta");
+            if ta_path.exists() {
+                return ta_path.to_string_lossy().to_string();
+            }
+        }
+    }
+    "ta".to_string()
+}
+
 async fn deny_draft(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
@@ -443,6 +578,7 @@ fn build_web_routes(state: Arc<WebState>) -> Router {
         .route("/api/drafts/{id}", get(get_draft))
         .route("/api/drafts/{id}/approve", post(approve_draft))
         .route("/api/drafts/{id}/deny", post(deny_draft))
+        .route("/api/drafts/{id}/apply", post(apply_draft_endpoint))
         // Memory routes (v0.5.7)
         .route("/api/memory", get(list_memory).post(create_memory))
         .route("/api/memory/search", get(search_memory))
@@ -912,6 +1048,36 @@ mod tests {
             .unwrap();
         // PNG magic bytes
         assert_eq!(&body[..4], b"\x89PNG");
+    }
+
+    #[tokio::test]
+    async fn apply_draft_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_router(dir.path().to_path_buf());
+        let fake_id = Uuid::new_v4();
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/drafts/{}/apply", fake_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn parse_commit_sha_finds_sha_in_commit_line() {
+        let output = "Applying draft...\nApplied — commit abc1234 to feature/test\nDone.\n";
+        let sha = super::parse_commit_sha(output);
+        assert_eq!(sha.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn parse_commit_sha_returns_none_when_absent() {
+        let output = "Build succeeded.\nTests passed.\n";
+        let sha = super::parse_commit_sha(output);
+        assert!(sha.is_none());
     }
 
     #[tokio::test]

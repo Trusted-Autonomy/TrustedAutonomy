@@ -316,9 +316,13 @@ mod tests {
     fn test_detect_adapter_git() {
         let dir = tempdir().unwrap();
         // Initialize a git repo
-        clear_git_env(Command::new("git").args(["init"]).current_dir(dir.path()))
-            .output()
-            .unwrap();
+        clear_git_env(
+            Command::new("git")
+                .args(["-c", "safe.directory=*", "init"])
+                .current_dir(dir.path()),
+        )
+        .output()
+        .unwrap();
 
         let adapter = detect_adapter(dir.path());
         assert_eq!(adapter.name(), "git");
@@ -356,9 +360,13 @@ mod tests {
     fn test_detect_adapter_git_takes_priority_over_svn() {
         let dir = tempdir().unwrap();
         // Both .git and .svn present — Git should win
-        clear_git_env(Command::new("git").args(["init"]).current_dir(dir.path()))
-            .output()
-            .unwrap();
+        clear_git_env(
+            Command::new("git")
+                .args(["-c", "safe.directory=*", "init"])
+                .current_dir(dir.path()),
+        )
+        .output()
+        .unwrap();
         std::fs::create_dir(dir.path().join(".svn")).unwrap();
 
         let adapter = detect_adapter(dir.path());
@@ -402,9 +410,13 @@ mod tests {
     fn test_select_adapter_none_auto_detects() {
         let dir = tempdir().unwrap();
         // Initialize git repo with default "none" config — should auto-detect to git
-        clear_git_env(Command::new("git").args(["init"]).current_dir(dir.path()))
-            .output()
-            .unwrap();
+        clear_git_env(
+            Command::new("git")
+                .args(["-c", "safe.directory=*", "init"])
+                .current_dir(dir.path()),
+        )
+        .output()
+        .unwrap();
 
         let config = SubmitConfig::default(); // adapter = "none"
         let adapter = select_adapter(dir.path(), &config);

@@ -306,7 +306,7 @@ impl GitAdapter {
             Ok(out) => std::str::from_utf8(&out.stdout)
                 .unwrap_or("")
                 .lines()
-                .map(|l| l.trim().to_string())
+                .map(|l| l.trim().replace('\\', "/"))
                 .filter(|l| !l.is_empty())
                 .collect(),
             Err(_) => {
@@ -1111,7 +1111,7 @@ impl SourceAdapter for GitAdapter {
                     // Init the repo — try with -b main first, fall back without it
                     // for older git versions.
                     let init_output = std::process::Command::new("git")
-                        .args(["init", "-b", "main"])
+                        .args(["-c", "safe.directory=*", "init", "-b", "main"])
                         .current_dir(staging_dir)
                         .env_remove("GIT_DIR")
                         .env_remove("GIT_WORK_TREE")
@@ -1120,7 +1120,7 @@ impl SourceAdapter for GitAdapter {
                         .map_err(|e| SubmitError::VcsError(format!("git init failed: {}", e)))?;
                     if !init_output.status.success() {
                         let init2 = std::process::Command::new("git")
-                            .args(["init"])
+                            .args(["-c", "safe.directory=*", "init"])
                             .current_dir(staging_dir)
                             .env_remove("GIT_DIR")
                             .env_remove("GIT_WORK_TREE")
@@ -1493,9 +1493,17 @@ mod tests {
         };
 
         let mut cmd = Command::new("git");
-        cmd.args(["init"]).current_dir(dir);
+        cmd.args(["-c", "safe.directory=*", "init"])
+            .current_dir(dir);
         clear_git_env(&mut cmd);
-        cmd.output()?;
+        let out = cmd.output()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(SubmitError::VcsError(format!(
+                "git init failed in test helper: {}",
+                stderr
+            )));
+        }
 
         let mut cmd = Command::new("git");
         cmd.args(["config", "user.name", "Test User"])
