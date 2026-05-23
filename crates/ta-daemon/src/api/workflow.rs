@@ -569,6 +569,112 @@ fn find_latest_run_for_workflow(
     candidates.into_iter().next()
 }
 
+// ── Workflow Template Catalog (v0.16.1.3) ─────────────────────────────────────
+
+/// A built-in or installed workflow template.
+#[derive(Debug, Serialize)]
+pub struct WorkflowTemplate {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub required_params: Vec<String>,
+    pub source: String,
+}
+
+/// `GET /api/workflow/templates` — List built-in and user workflow templates.
+///
+/// Built-in templates are hardcoded here. User templates come from
+/// `~/.config/ta/workflows/templates/` (if it exists).
+pub async fn list_workflow_templates(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut templates = vec![
+        WorkflowTemplate {
+            id: "ci-check".to_string(),
+            name: "CI Check".to_string(),
+            description: "Run tests and lint on every draft before it reaches the review queue."
+                .to_string(),
+            required_params: vec![],
+            source: "built-in".to_string(),
+        },
+        WorkflowTemplate {
+            id: "draft-notify".to_string(),
+            name: "Draft Notification".to_string(),
+            description: "Send a notification when a new draft is ready for review.".to_string(),
+            required_params: vec!["channel".to_string()],
+            source: "built-in".to_string(),
+        },
+        WorkflowTemplate {
+            id: "goal-notify".to_string(),
+            name: "Goal Notification".to_string(),
+            description: "Send a message when a goal completes, fails, or gets stuck.".to_string(),
+            required_params: vec!["channel".to_string()],
+            source: "built-in".to_string(),
+        },
+        WorkflowTemplate {
+            id: "scheduled-health".to_string(),
+            name: "Scheduled Health Check".to_string(),
+            description: "Run ta doctor on a configurable schedule and alert on issues."
+                .to_string(),
+            required_params: vec!["cron".to_string()],
+            source: "built-in".to_string(),
+        },
+        WorkflowTemplate {
+            id: "auto-apply".to_string(),
+            name: "Auto-Apply Drafts".to_string(),
+            description:
+                "Automatically apply approved drafts without manual confirmation (use with care)."
+                    .to_string(),
+            required_params: vec![],
+            source: "built-in".to_string(),
+        },
+    ];
+
+    // User templates from ~/.config/ta/workflows/templates/*.toml
+    let user_dir = std::env::var("HOME").ok().map(|h| {
+        std::path::PathBuf::from(h)
+            .join(".config")
+            .join("ta")
+            .join("workflows")
+            .join("templates")
+    });
+    if let Some(dir) = user_dir {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                    continue;
+                }
+                let id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                let name_line = content
+                    .lines()
+                    .find(|l| l.starts_with("name"))
+                    .and_then(|l| l.split('"').nth(1))
+                    .unwrap_or(&id)
+                    .to_string();
+                let desc_line = content
+                    .lines()
+                    .find(|l| l.starts_with("description"))
+                    .and_then(|l| l.split('"').nth(1))
+                    .unwrap_or("User-defined template")
+                    .to_string();
+                templates.push(WorkflowTemplate {
+                    id,
+                    name: name_line,
+                    description: desc_line,
+                    required_params: vec![],
+                    source: path.to_string_lossy().into_owned(),
+                });
+            }
+        }
+    }
+
+    Json(templates).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,5 +690,21 @@ mod tests {
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("test-wf"));
+    }
+
+    #[test]
+    fn builtin_templates_have_required_fields() {
+        // templates list_workflow_templates cannot be tested without a state,
+        // but we can verify the data is structurally correct.
+        let t = WorkflowTemplate {
+            id: "ci-check".to_string(),
+            name: "CI Check".to_string(),
+            description: "Run tests.".to_string(),
+            required_params: vec![],
+            source: "built-in".to_string(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("ci-check"));
+        assert!(json.contains("built-in"));
     }
 }

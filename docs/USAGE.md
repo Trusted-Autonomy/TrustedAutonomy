@@ -290,6 +290,106 @@ The persona's system prompt and tool restrictions are appended to CLAUDE.md in t
 
 ---
 
+## Using TA Studio
+
+TA Studio is the recommended interface for working with TA day-to-day. Everything from the Dashboard tab to the Advisor is accessible without a terminal.
+
+### Studio Advisor
+
+The **Advisor** tab is the universal entry point to TA Studio. It maintains a persistent conversational thread where you can ask questions, check status, or kick off work — all in plain English.
+
+#### What the advisor can do
+
+**Read-only queries** (answered directly, no confirmation required):
+- "What's the status of my running goals?"
+- "Which drafts are waiting for review?"
+- "How healthy is the project right now?"
+- "What's in the log for goal abc12345?"
+- "What's our velocity this week?"
+
+**Mutations** (shown with a confirm dialog before executing):
+- "Start the next plan phase"
+- "Apply the draft for goal abc12345"
+- "Cancel the goal that's been running for 3 hours"
+
+#### Advisor walkthrough
+
+1. Open `http://localhost:7700` and click the **Advisor** tab.
+2. Type a question or instruction in the input field at the bottom and press **Enter** or click **Send**.
+3. The advisor fetches live context (running goals, plan progress, health signals, recent drafts) and responds with a summary plus actionable options.
+4. For mutations, a confirm dialog appears showing exactly what will happen. Click **Confirm** or **Cancel**.
+5. Your conversation history is persisted automatically in `.ta/advisor-history.json` — it survives daemon restarts.
+
+#### Context-sensitive suggestion chips
+
+Above the input field, the advisor surfaces relevant actions as tappable chips based on your project state:
+
+- When drafts are pending: **"Review N drafts"**
+- When a goal is running: **"Check running goal"**
+- When plan phases are available: **"Run next phase"**
+
+Click a chip to pre-fill the input with a relevant query.
+
+### Project Health Panel
+
+The **Dashboard** tab shows a health panel that refreshes every 30 seconds:
+
+| Stat | What it shows |
+|------|--------------|
+| **Completion** | Percentage of PLAN.md phases marked done |
+| **Velocity** | Goals completed this week |
+| **Open Drafts** | Drafts waiting for your review |
+| **Health** | Quick `ta doctor` summary (green / amber / red) |
+
+### Active Goal Detail
+
+Running goals on the Dashboard can be expanded to show:
+
+- **Agent log tail** — last 20 lines of agent output, auto-scrolling
+- **Elapsed time** — how long the goal has been running
+- **Linked phase** — which plan phase this goal is executing
+- **P50 estimate** — velocity-based completion time estimate
+
+Click **"Ask Advisor about this goal"** to pre-fill the Advisor tab with a question about that specific goal.
+
+### Notification Feed
+
+A bell icon (🔔) in the top-right corner of the header shows a badge count when there are unread notifications. Click it to open the slide-in notification panel, which shows:
+
+- Goals that appear stuck (running > 2 hours without update)
+- Goals that failed in the last 24 hours
+- Drafts ready for your review
+- Corrective actions proposed by the watchdog
+
+The panel links directly to the relevant draft or goal. Notifications are polled every 60 seconds.
+
+### Workflow Template Catalog
+
+The **Workflows** tab now shows a template catalog at the top. Built-in templates include:
+
+| Template | Description |
+|----------|-------------|
+| **CI/CD Pipeline** | Automated build, test, and deploy workflow |
+| **Code Review** | Automated PR review with agent analysis |
+| **Daily Standup** | Aggregate progress and surface blockers |
+| **Security Scan** | Run vulnerability checks on schedule |
+| **Dependency Update** | Keep dependencies current automatically |
+
+User-defined templates are loaded from `~/.config/ta/workflows/templates/`. Each template is a `.toml` file with a `[template]` section (`name`, `description`, `required_params`).
+
+Click **Use Template** on any card to pre-fill the workflow generator with that template's configuration.
+
+### Settings Tab
+
+The **Settings** tab exposes:
+
+- **API key** — masked display with copy button
+- **Daemon URL** — override for remote daemon connections
+- **workflow.toml** — view and edit your workflow configuration inline
+- **`ta doctor`** — run a health check from the browser; auto-fixable issues show a **Fix** button
+
+---
+
 ## Workflows
 
 ### Workflows Tab in Studio

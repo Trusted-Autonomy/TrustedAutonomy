@@ -1,13 +1,17 @@
-// api/advisor.rs — Studio Advisor API (v0.15.26).
+// api/advisor.rs — Studio Advisor API (v0.15.26 + v0.16.1.3).
 //
 // Provides the advisor endpoint for the global intent bar and advisor panel.
 // Classifies intent on each message and returns context-aware numbered options.
 //
 // Endpoints:
-//   POST /api/advisor/message  — classify intent and return action + numbered options
-//   GET  /api/advisor/tools    — list available tools by security level
-//   GET  /api/advisor/config   — return current advisor config
-//   POST /api/advisor/inject   — inject a mid-run note to the active goal's agent (v0.15.28)
+//   POST /api/advisor/message     — classify intent and return action + numbered options
+//   GET  /api/advisor/tools       — list available tools by security level
+//   GET  /api/advisor/config      — return current advisor config
+//   POST /api/advisor/inject      — inject a mid-run note to the active goal's agent (v0.15.28)
+//   GET  /api/advisor/history     — return persistent conversation history (v0.16.1.3)
+//   POST /api/advisor/history     — append messages to conversation history (v0.16.1.3)
+//   GET  /api/advisor/suggestions — context-sensitive suggestion chips (v0.16.1.3)
+//   GET  /api/advisor/context     — live project context for read-only queries (v0.16.1.3)
 
 use std::sync::Arc;
 
@@ -15,6 +19,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -508,6 +513,295 @@ fn resolve_inject_goal(
                     .to_string()
             })
     }
+}
+
+// ── History API (v0.16.1.3) ──────────────────────────────────────────────────
+
+/// A single persisted conversation entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub role: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<AdvisorOption>>,
+    pub timestamp: String,
+}
+
+/// Response from `GET /api/advisor/history`.
+#[derive(Debug, Serialize)]
+pub struct HistoryResponse {
+    pub entries: Vec<HistoryEntry>,
+    pub total: usize,
+}
+
+/// Request body for `POST /api/advisor/history`.
+#[derive(Debug, Deserialize)]
+pub struct AppendHistoryRequest {
+    pub entries: Vec<HistoryEntry>,
+}
+
+fn advisor_history_path(state: &AppState) -> std::path::PathBuf {
+    state.project_root.join(".ta").join("advisor-history.json")
+}
+
+fn load_history(state: &AppState) -> Vec<HistoryEntry> {
+    let path = advisor_history_path(state);
+    if !path.exists() {
+        return Vec::new();
+    }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<HistoryEntry>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_history(state: &AppState, entries: &[HistoryEntry]) -> std::io::Result<()> {
+    let path = advisor_history_path(state);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(entries)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&path, json)
+}
+
+/// `GET /api/advisor/history` — Return the last 100 persisted conversation entries.
+pub async fn get_history(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut entries = load_history(&state);
+    // Return at most 100 entries.
+    if entries.len() > 100 {
+        entries = entries[entries.len() - 100..].to_vec();
+    }
+    let total = entries.len();
+    Json(HistoryResponse { entries, total }).into_response()
+}
+
+/// `POST /api/advisor/history` — Append new entries to the persistent history.
+///
+/// The store is trimmed to 200 entries to cap disk usage.
+pub async fn append_history(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AppendHistoryRequest>,
+) -> impl IntoResponse {
+    if body.entries.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "entries must not be empty"})),
+        )
+            .into_response();
+    }
+
+    let mut existing = load_history(&state);
+    existing.extend(body.entries);
+    // Trim to 200 entries.
+    if existing.len() > 200 {
+        existing = existing[existing.len() - 200..].to_vec();
+    }
+
+    if let Err(e) = save_history(&state, &existing) {
+        tracing::warn!(path = ?advisor_history_path(&state), err = %e, "Failed to persist advisor history");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to persist history: {}", e)})),
+        )
+            .into_response();
+    }
+
+    Json(json!({"saved": existing.len()})).into_response()
+}
+
+// ── Suggestions API (v0.16.1.3) ──────────────────────────────────────────────
+
+/// A single context-sensitive suggestion chip.
+#[derive(Debug, Serialize)]
+pub struct SuggestionChip {
+    pub id: String,
+    pub text: String,
+    pub action_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// `GET /api/advisor/suggestions` — Context-sensitive suggestion chips.
+///
+/// Reads project context (project_type, pending phases, open drafts) and surfaces
+/// relevant suggestion chips above the advisor input.
+pub async fn get_suggestions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut chips: Vec<SuggestionChip> = Vec::new();
+
+    // Check for pending drafts.
+    let draft_count = crate::api::notifications::count_pending_drafts_pub(&state.pr_packages_dir);
+    if draft_count > 0 {
+        chips.push(SuggestionChip {
+            id: "review_drafts".to_string(),
+            text: format!(
+                "Review {} pending draft{}",
+                draft_count,
+                if draft_count == 1 { "" } else { "s" }
+            ),
+            action_type: "switch_tab".to_string(),
+            command: Some("drafts".to_string()),
+        });
+    }
+
+    // Check for running goals.
+    if let Ok(store) = GoalRunStore::new(&state.goals_dir) {
+        if let Ok(goals) = store.list() {
+            let running: Vec<_> = goals
+                .iter()
+                .filter(|g| g.state == GoalRunState::Running)
+                .collect();
+            if !running.is_empty() {
+                let title = &running[0].title;
+                chips.push(SuggestionChip {
+                    id: "check_running_goal".to_string(),
+                    text: format!(
+                        "Check progress on \"{}\"",
+                        title.chars().take(40).collect::<String>()
+                    ),
+                    action_type: "ask_question".to_string(),
+                    command: Some(format!(
+                        "What is the status of the running goal \"{}\"?",
+                        title
+                    )),
+                });
+            }
+        }
+    }
+
+    // Check project type from workflow.toml.
+    let workflow_path = state.project_root.join(".ta").join("workflow.toml");
+    if let Ok(content) = std::fs::read_to_string(&workflow_path) {
+        if content.contains("project_type") {
+            if content.contains("unreal") || content.contains("ue5") || content.contains("ue4") {
+                chips.push(SuggestionChip {
+                    id: "unreal_workflow".to_string(),
+                    text: "Initialize Unreal workflow template".to_string(),
+                    action_type: "switch_tab".to_string(),
+                    command: Some("workflows".to_string()),
+                });
+            }
+            if content.contains("unity") {
+                chips.push(SuggestionChip {
+                    id: "unity_workflow".to_string(),
+                    text: "Initialize Unity workflow template".to_string(),
+                    action_type: "switch_tab".to_string(),
+                    command: Some("workflows".to_string()),
+                });
+            }
+        }
+    }
+
+    // Default: suggest starting a goal if everything is quiet.
+    if chips.is_empty() {
+        chips.push(SuggestionChip {
+            id: "plan_next".to_string(),
+            text: "What should I work on next?".to_string(),
+            action_type: "ask_question".to_string(),
+            command: Some("What is the next phase I should implement?".to_string()),
+        });
+        chips.push(SuggestionChip {
+            id: "check_health".to_string(),
+            text: "System health check".to_string(),
+            action_type: "ask_question".to_string(),
+            command: Some("What is the current system health status?".to_string()),
+        });
+    }
+
+    Json(chips).into_response()
+}
+
+// ── Context API (v0.16.1.3) ──────────────────────────────────────────────────
+
+/// Aggregated live project context for advisor read-only queries.
+#[derive(Debug, Serialize)]
+pub struct AdvisorLiveContext {
+    pub active_goals: Vec<GoalSummary>,
+    pub pending_drafts: usize,
+    pub plan_pending_count: usize,
+    pub plan_done_count: usize,
+    pub health_signals_count: usize,
+    pub generated_at: String,
+}
+
+/// Summary of a running goal for advisor context.
+#[derive(Debug, Serialize)]
+pub struct GoalSummary {
+    pub goal_id: String,
+    pub title: String,
+    pub state: String,
+    pub elapsed_secs: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+}
+
+/// `GET /api/advisor/context` — Live project context for advisor read-only queries.
+///
+/// Aggregates goals, drafts, plan phases, and health signals into a single context
+/// object the advisor frontend uses to answer check_status and question intents.
+pub async fn get_context(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let now = Utc::now();
+
+    let active_goals: Vec<GoalSummary> = GoalRunStore::new(&state.goals_dir)
+        .ok()
+        .and_then(|store| store.list().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|g| matches!(g.state, GoalRunState::Running | GoalRunState::Configured))
+        .map(|g| {
+            let elapsed = (now - g.updated_at).num_seconds();
+            GoalSummary {
+                goal_id: g.goal_run_id.to_string(),
+                title: g.title.clone(),
+                state: format!("{:?}", g.state).to_lowercase(),
+                elapsed_secs: elapsed,
+                phase: g.plan_phase.clone(),
+            }
+        })
+        .collect();
+
+    let pending_drafts =
+        crate::api::notifications::count_pending_drafts_pub(&state.pr_packages_dir);
+
+    // Parse PLAN.md for phase counts.
+    let plan_path = state.project_root.join("PLAN.md");
+    let (plan_pending_count, plan_done_count) = std::fs::read_to_string(&plan_path)
+        .map(|content| {
+            let phases = crate::api::plan::parse_plan_phases(&content);
+            let pending = phases
+                .iter()
+                .filter(|p| p.status == "pending" || p.status == "in_progress")
+                .count();
+            let done = phases.iter().filter(|p| p.status == "done").count();
+            (pending, done)
+        })
+        .unwrap_or((0, 0));
+
+    // Count health signals (use cached value if available; else 0 to avoid a compute on every context call).
+    let health_signals_count = state
+        .signals_cache
+        .last_computed_at()
+        .map(|_| {
+            state
+                .signals_cache
+                .get_or_compute(
+                    &state.project_root,
+                    &state.goals_dir,
+                    &state.pr_packages_dir,
+                )
+                .len()
+        })
+        .unwrap_or(0);
+
+    Json(AdvisorLiveContext {
+        active_goals,
+        pending_drafts,
+        plan_pending_count,
+        plan_done_count,
+        health_signals_count,
+        generated_at: now.to_rfc3339(),
+    })
+    .into_response()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
