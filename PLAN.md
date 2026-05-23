@@ -7822,6 +7822,134 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 #### Version: `0.16.1-alpha.3`
 
 ---
+### v0.16.1.4 — VCS Initialization Correctness
+<!-- status: pending -->
+
+**Problem**: `LOCAL_TA_PATHS` in `partitioning.rs` (the source written to `.gitignore` by `ta setup vcs`) has 14 entries while the main project's `.gitignore` has 30+ TA-specific entries grown manually over time. New projects get an incomplete gitignore block — `pr_packages/`, `review/`, `backups/`, `*.log`, `*.pid`, and ~15 other TA-produced paths are not ignored, causing `git status` noise and risk of committing machine-local state.
+
+**Also**: `SHARED_TA_PATHS` has `"memory/"` where it should have `"project-memory/"` (inverted), and `goal-audit.jsonl` — already auto-staged on apply — is absent from the shared list. `config.rs` contains a manual mirror of `LOCAL_TA_PATHS` with the same gaps.
+
+1. [ ] **`LOCAL_TA_PATHS` — 19 missing entries** (`crates/ta-workspace/src/partitioning.rs`):
+   - Dirs: `pr_packages/`, `review/`, `backups/`, `heartbeats/`, `workflow-runs/`, `advisor-notes/`, `draft-build-ctx/`, `memory/`
+   - Files: `audit.jsonl`, `goal-history.jsonl`, `operations.jsonl`, `events.jsonl`, `change_summary.json`, `consent.json`, `mcp_json_original`, `setup-progress.json`
+   - Globs: `*.log`, `*.pid`, `*.lock` (replace the specific `release.lock` entry — `gitignore_block()` prefixes `.ta/` so these generate `.ta/*.log` etc., which gitignore glob-matches correctly)
+
+2. [ ] **`SHARED_TA_PATHS` corrections** (`partitioning.rs`): Rename `"memory/"` → `"project-memory/"`. Add `"goal-audit.jsonl"`, `"config.toml"`, `"pr-template.md"`, `"personas/"` to document what is already committed.
+
+3. [ ] **Eliminate the manual mirror** (`crates/ta-submit/src/config.rs`): `default_local_exclude_paths()` is described as "kept in sync manually" and is already out of date. Replace the vec literal with a direct reference to `ta_workspace::partitioning::LOCAL_TA_PATHS` — one source of truth, impossible to drift.
+
+4. [ ] **`ta doctor` VCS check gap** (`crates/ta-daemon/src/health.rs`): For every entry in `LOCAL_TA_PATHS` that exists on disk in `.ta/`, verify it is ignored by the project VCS. Emit `WARN: .ta/<path> exists but is not gitignored — run: ta setup vcs --force` for each gap. `ta doctor --fix` runs `ta setup vcs --force`.
+
+5. [ ] **`ta setup vcs --force` re-generates stale blocks**: Confirm the `--force` flag in `update_gitignore` fully replaces the old TA block so existing projects can repair incomplete blocks without manual editing. Add the same flag path for `.p4ignore`.
+
+6. [ ] **Tests**: `gitignore_block_contains_all_local_paths` (existing) will catch future omissions automatically once `LOCAL_TA_PATHS` is complete. Add: `project_memory_in_shared_not_memory`, `goal_audit_in_shared_paths`, `config_rs_exclude_paths_matches_partitioning` (assert both lists are identical after dedup — prevents future drift).
+
+#### Version: `0.16.1-alpha.4`
+
+---
+### v0.16.1.5 — Cross-Project TA Links
+<!-- status: pending -->
+
+**Problem**: Related projects (e.g. cinepipe's 5 sub-projects, PRagma + a game engine on a different machine) cannot share architectural context with each other. When an agent works on `cinepipe-light`, it has no visibility into the API contract `cinepipe-core` exposes, the training data format `cinepipe-train` produces, or how they relate. Today the only option is copy-pasting docs into CLAUDE.md — duplicated, stale, and context-window-heavy.
+
+**Design**: Each project maintains a `.ta/project-manifest.md` — a concise committed document describing its public interface, architecture, and integration notes. Projects declare relationships to other projects in `.ta/links.toml`. At goal start, TA resolves local links, reads their manifests, and injects a summarized cross-project context block into CLAUDE.md. Remote projects (different machine, GitHub repo) are fetched once and cached locally with a TTL.
+
+**Key properties**:
+- **No duplication**: each project owns exactly one manifest; links are pointers
+- **Works offline**: local links (relative or absolute paths) need no network; remote manifests are cached in `.ta/link-cache/` (gitignored)
+- **Graceful degradation**: unreachable links (other machine, network down) are skipped with a debug log — never a hard failure
+- **Context-efficient**: manifests are 1–2 pages max; TA summarizes before injecting so linked context costs ~500–800 tokens regardless of project size
+- **Relationship-aware**: relationship type is injected as framing so the agent knows whether to treat a linked project as an API it calls, a consumer it must not break, or a sibling sharing conventions
+
+#### `.ta/project-manifest.md` format
+
+```markdown
+---
+name: cinepipe-core
+type: service          # service | library | cli | plugin | game | app
+language: python
+version: 0.3.0
+api_base: http://localhost:8080   # optional
+---
+
+## Purpose
+
+One paragraph on what this project does and who it serves.
+
+## Architecture
+
+Key components and how they fit together. 3–5 sentences.
+
+## Public API / Interface
+
+What external callers depend on. For a service: endpoints + payloads.
+For a library: key types and functions. For a CLI: commands + flags.
+
+## Integration Notes
+
+What callers need to know: auth, data formats, error conventions,
+versioning guarantees, known quirks.
+```
+
+#### `.ta/links.toml` format
+
+```toml
+[[link]]
+name = "cinepipe-train"
+path = "../cinepipe-train"        # relative to this project's root
+relationship = "workspace-member" # dependency | consumer | sibling | workspace-member | reference
+description = "Training pipeline — produces LoRA weights consumed at inference"
+inject = true                     # inject manifest into agent context at goal start
+
+[[link]]
+name = "pragma"
+repo = "github:org/pragma"        # remote: fetched via gh API, cached 24h
+relationship = "dependency"
+description = "Procedural graphics framework used by the game engine"
+inject = true
+```
+
+**Relationship types and their injection framing**:
+- `dependency` — "This project calls into `<name>`. Do not break its API contract."
+- `consumer` — "`<name>` depends on this project's interface. Changes here may break it."
+- `workspace-member` — "Co-developed sibling. Coordinate types, naming, and protocols."
+- `sibling` — "Parallel development. Shared conventions but no direct API coupling."
+- `reference` — "Architecturally related but no code-level coupling. Background context only."
+
+#### Items
+
+1. [ ] **`.ta/project-manifest.md` format** (`docs/`): Formal spec for the manifest format — required frontmatter fields (`name`, `type`, `language`), optional fields (`api_base`, `version`, `repo`), and the four required markdown sections (Purpose, Architecture, Public API, Integration Notes). Maximum 600 lines. TA validates structure on `ta manifest validate`.
+
+2. [ ] **`ta manifest` commands** (`apps/ta-cli/src/commands/manifest.rs`):
+   - `ta manifest init` — scaffolds `.ta/project-manifest.md` from project metadata (language detected from Cargo.toml / package.json / go.mod; name from dir; fills in section stubs)
+   - `ta manifest validate` — checks structure, required fields, max length
+   - `ta manifest show` — pretty-prints this project's manifest
+   - `ta manifest show <link-name>` — pretty-prints a linked project's manifest (resolved + cached)
+
+3. [ ] **`.ta/links.toml` parser** (`crates/ta-workspace/src/links.rs`): `Link` struct with `name`, `path` (optional local), `repo` (optional GitHub `org/repo` string), `relationship`, `description`, `inject`. `ProjectLinks::load(project_root)` reads `.ta/links.toml`, returns `Vec<Link>`. Invalid paths are logged as warnings, not errors.
+
+4. [ ] **`ta link` commands** (`apps/ta-cli/src/commands/link.rs`):
+   - `ta link add <path-or-github-url>` — adds an entry to `.ta/links.toml` (prompts for relationship type and description)
+   - `ta link list` — table: name, relationship, path/repo, manifest present (✓/✗), last refreshed
+   - `ta link status` — checks reachability of all linked projects, shows manifest age
+   - `ta link refresh [<name>]` — re-reads local manifests; re-fetches remote manifests into `.ta/link-cache/`
+   - `ta link remove <name>` — removes the entry from `.ta/links.toml`
+
+5. [ ] **Context injection at goal start** (`apps/ta-cli/src/commands/run.rs`): In `inject_claude_md()`, after the plan context block, resolve links from `.ta/links.toml`. For each link with `inject = true`, read manifest from `<path>/.ta/project-manifest.md` (local) or `<link-cache>/<name>.md` (remote cache). Inject under `## Cross-Project Context` with relationship framing. Cap each injected manifest at 800 tokens (truncate with "… see .ta/project-manifest.md for full details"). Skip missing manifests silently.
+
+6. [ ] **Remote manifest caching** (`crates/ta-workspace/src/link_cache.rs`): For `repo = "github:org/repo"` links, fetch `.ta/project-manifest.md` via the GitHub raw content API (unauthenticated for public repos; `gh auth token` for private). Cache to `.ta/link-cache/<name>.md`. Refresh if older than 24h or on `ta link refresh`. Cache directory is gitignored (add `link-cache/` to `LOCAL_TA_PATHS` in v0.16.1.4 or here).
+
+7. [ ] **`ta doctor` link health** (`crates/ta-daemon/src/health.rs`): If `.ta/links.toml` exists, check that each local-path link is reachable and has a manifest. Warn for missing manifests with `ta manifest init` suggestion. Skip remote links that are cached. Skip links where the path is on an unmounted volume (ENOENT → debug, not warn).
+
+8. [ ] **Studio Links panel** (`crates/ta-daemon/assets/index.html`): In Dashboard, below the project health panel — "Linked Projects" section. Cards show: name, relationship badge, manifest excerpt (first paragraph of Purpose), reachability indicator (green dot = manifest found, grey = not found, orange = stale cache). Clicking a card shows the full manifest in a modal. Add `GET /api/links` daemon endpoint backed by the links resolver.
+
+9. [ ] **Tests**: `links_load_valid_toml`, `links_load_missing_file_returns_empty`, `manifest_init_creates_valid_scaffold`, `manifest_validate_rejects_missing_sections`, `injection_includes_linked_manifests`, `injection_skips_unreachable_links`, `remote_cache_refreshes_after_ttl`, `link_status_reports_missing_manifest`. Add `link-cache/` to `LOCAL_TA_PATHS` (v0.16.1.4) or here.
+
+10. [ ] **USAGE.md**: "Cross-Project TA Links" section — when to use it, setting up a workspace (cinepipe example), cross-machine links (PRagma + game engine example), manifest format, relationship types, what agents see.
+
+#### Version: `0.16.1-alpha.5`
+
+---
 ### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
 <!-- status: done -->
 
