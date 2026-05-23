@@ -252,14 +252,67 @@
   .health-log { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
                padding: 0.75rem; font-family: monospace; font-size: 0.8rem; white-space: pre-wrap;
                max-height: 200px; overflow-y: auto; margin-top: 0.5rem; }
+  /* Notification bell + panel (v0.16.1.3) */
+  .notif-bell { background: none; border: 1px solid var(--border); border-radius: 6px;
+                padding: 0.3rem 0.6rem; cursor: pointer; font-size: 1rem; color: var(--muted);
+                transition: all 0.15s; position: relative; }
+  .notif-bell:hover { color: var(--accent); border-color: var(--accent); }
+  .notif-count { position: absolute; top: -4px; right: -4px; background: var(--red); color: #fff;
+                 border-radius: 50%; width: 16px; height: 16px; font-size: 0.6rem; font-weight: 700;
+                 display: flex !important; align-items: center; justify-content: center; }
+  .notif-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+                 padding: 1rem; margin-bottom: 0.75rem; max-height: 320px; overflow-y: auto; }
+  .notif-panel-header { display: flex; justify-content: space-between; align-items: center;
+                        margin-bottom: 0.75rem; }
+  .notif-item { padding: 0.6rem 0.75rem; border-radius: 6px; margin-bottom: 0.4rem; font-size: 0.85rem;
+                border-left: 3px solid var(--border); }
+  .notif-item.info { border-left-color: var(--accent); }
+  .notif-item.warning { border-left-color: var(--yellow); }
+  .notif-item.critical { border-left-color: var(--red); background: rgba(248,113,113,0.06); }
+  .notif-item-summary { font-weight: 500; }
+  .notif-item-action { font-size: 0.75rem; color: var(--muted); font-family: monospace; margin-top: 0.15rem; }
+  /* Context-sensitive suggestion chips (v0.16.1.3) */
+  .advisor-suggestions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.75rem; }
+  .suggestion-chip { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+                     padding: 0.2rem 0.75rem; font-size: 0.78rem; cursor: pointer; color: var(--muted);
+                     transition: all 0.15s; white-space: nowrap; }
+  .suggestion-chip:hover { border-color: var(--accent); color: var(--accent); }
+  /* Project health panel (v0.16.1.3) */
+  .health-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+                      gap: 0.6rem; margin-bottom: 1rem; }
+  .health-stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+                 padding: 0.75rem; text-align: center; }
+  .health-stat-val { font-size: 1.4rem; font-weight: 700; color: var(--accent); }
+  .health-stat-lbl { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; margin-top: 0.15rem; }
+  /* Running goal expandable detail (v0.16.1.3) */
+  .goal-detail { margin-top: 0.75rem; border-top: 1px solid var(--border); padding-top: 0.75rem;
+                 font-size: 0.85rem; }
+  .goal-log { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+              padding: 0.6rem; font-family: monospace; font-size: 0.78rem; white-space: pre-wrap;
+              max-height: 150px; overflow-y: auto; margin-top: 0.4rem; color: var(--muted); }
+  /* Workflow template catalog (v0.16.1.3) */
+  .wf-template-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                      gap: 0.75rem; margin-top: 0.75rem; }
+  .wf-template-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+                      padding: 1rem; transition: border-color 0.15s; }
+  .wf-template-card:hover { border-color: var(--accent); }
+  .wf-template-name { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.25rem; }
+  .wf-template-desc { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.6rem; }
 </style>
 </head>
 <body>
 <div class="container">
-  <div style="display:flex;align-items:baseline;gap:0.5rem">
-    <h1>Trusted Autonomy</h1>
-    <span id="version-badge" onclick="switchTab('plan')" title="Click to open Plan tab"></span>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem;margin-bottom:0.1rem">
+    <div style="display:flex;align-items:baseline;gap:0.5rem">
+      <h1>Trusted Autonomy</h1>
+      <span id="version-badge" onclick="switchTab('plan')" title="Click to open Plan tab"></span>
+    </div>
+    <button id="notif-bell" class="notif-bell" onclick="toggleNotifPanel()" title="Notifications">
+      &#128276;<span id="notif-count" class="notif-count" style="display:none"></span>
+    </button>
   </div>
+  <!-- Notification slide-in panel (v0.16.1.3) -->
+  <div id="notif-panel" class="notif-panel" style="display:none"></div>
   <p class="subtitle" id="subtitle">Loading...</p>
   <!-- Global Intent Bar (v0.15.26): Cmd+K to focus, routes to advisor from any tab -->
   <div class="intent-bar" id="intent-bar">
@@ -328,6 +381,107 @@ let drafts = [];
 // Advisor state (v0.15.26)
 let advisorHistory = [];
 let advisorSecurity = 'read_only';
+// Advisor history loaded from API (v0.16.1.3)
+let advisorHistoryLoaded = false;
+// Notification feed state (v0.16.1.3)
+let notifPanelOpen = false;
+let seenNotifIds = new Set(JSON.parse(sessionStorage.getItem('ta_seen_notifs') || '[]'));
+
+// ── Notification Feed (v0.16.1.3) ─────────────────────────────
+
+async function pollNotifications() {
+  try {
+    const resp = await fetch('/api/notifications');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const all = data.notifications || [];
+    const urgent = all.filter(n => n.severity !== 'info');
+    // Update bell badge.
+    const countEl = document.getElementById('notif-count');
+    const bellEl = document.getElementById('notif-bell');
+    if (countEl) {
+      const unseen = all.filter(n => !seenNotifIds.has(n.id));
+      if (unseen.length > 0) {
+        countEl.textContent = unseen.length > 9 ? '9+' : String(unseen.length);
+        countEl.style.display = 'flex';
+        if (bellEl) bellEl.title = `${unseen.length} notification${unseen.length !== 1 ? 's' : ''}`;
+      } else {
+        countEl.style.display = 'none';
+      }
+    }
+    // Re-render panel if open.
+    if (notifPanelOpen) renderNotifPanel(all);
+  } catch (_) {}
+}
+
+function toggleNotifPanel() {
+  notifPanelOpen = !notifPanelOpen;
+  const panel = document.getElementById('notif-panel');
+  if (!panel) return;
+  if (notifPanelOpen) {
+    panel.style.display = 'block';
+    loadNotifPanel();
+  } else {
+    panel.style.display = 'none';
+  }
+}
+
+async function loadNotifPanel() {
+  try {
+    const resp = await fetch('/api/notifications');
+    const data = resp.ok ? await resp.json() : { notifications: [] };
+    renderNotifPanel(data.notifications || []);
+    // Mark all as seen.
+    (data.notifications || []).forEach(n => seenNotifIds.add(n.id));
+    sessionStorage.setItem('ta_seen_notifs', JSON.stringify([...seenNotifIds]));
+    const countEl = document.getElementById('notif-count');
+    if (countEl) countEl.style.display = 'none';
+  } catch (e) {
+    const panel = document.getElementById('notif-panel');
+    if (panel) panel.innerHTML = '<div class="notif-panel-header"><span>Notifications</span></div><div style="color:var(--muted);font-size:0.85rem">Could not load notifications.</div>';
+  }
+}
+
+function renderNotifPanel(notifications) {
+  const panel = document.getElementById('notif-panel');
+  if (!panel) return;
+  const items = notifications.length === 0
+    ? '<div style="color:var(--muted);font-size:0.85rem;padding:0.5rem 0">No notifications.</div>'
+    : notifications.slice(0, 20).map(n => {
+        const sev = (n.severity || 'info').toLowerCase();
+        const color = sev === 'critical' ? 'var(--red)' : sev === 'warning' ? 'var(--yellow)' : 'var(--accent)';
+        const linkHtml = n.entity_id
+          ? `<span style="font-size:0.72rem;color:${color};cursor:pointer" onclick="closeNotifAndNavigate('${esc(n.entity_id)}','${esc(n.notification_type)}')">View →</span>`
+          : '';
+        return `<div class="notif-item ${esc(sev)}" style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div>
+            <div class="notif-item-summary">${esc(n.summary)}</div>
+            <div class="notif-item-action">${esc(n.suggested_action)}</div>
+          </div>
+          ${linkHtml}
+        </div>`;
+      }).join('');
+  panel.innerHTML = `<div class="notif-panel-header">
+    <span style="font-weight:600;font-size:0.9rem">Notifications</span>
+    <button class="btn btn-ghost btn-sm" onclick="toggleNotifPanel()">Close</button>
+  </div>${items}`;
+}
+
+function closeNotifAndNavigate(entityId, notifType) {
+  notifPanelOpen = false;
+  const panel = document.getElementById('notif-panel');
+  if (panel) panel.style.display = 'none';
+  if (notifType === 'draft_ready') {
+    switchTab('drafts');
+  } else if (notifType.startsWith('goal_')) {
+    switchTab('dashboard');
+  } else {
+    switchTab('health');
+  }
+}
+
+// Poll notifications every 60s.
+setInterval(pollNotifications, 60000);
 
 // ── Utilities ─────────────────────────────────────────────────
 function esc(s) {
@@ -454,7 +608,7 @@ function switchTab(tab) {
     const label = t.textContent.trim().toLowerCase().replace(/ /g, '-');
     t.classList.toggle('active', label === tab || (tab === 'dashboard' && label === 'dashboard'));
   });
-  if (tab === 'dashboard') loadDashboard();
+  if (tab === 'dashboard') { loadDashboard(); startDashRefresh(); }
   else if (tab === 'plan') loadPlan();
   else if (tab === 'drafts') loadDrafts();
   else if (tab === 'questions') loadQuestions();
@@ -742,8 +896,12 @@ async function fireGoalCommand(command) {
   } catch(e) { showAlert('Network error. Run manually:\n' + command); }
 }
 
-// ── Advisor Tab (v0.15.26) ────────────────────────────────────
+// ── Advisor Tab (v0.15.26 + v0.16.1.3) ──────────────────────────
 // Persistent conversation panel with numbered-option menus per message.
+// v0.16.1.3: history persists via /api/advisor/history, suggestion chips, goal interrogation.
+
+let _advisorSuggestions = [];
+
 async function loadAdvisor() {
   // Load advisor config.
   try {
@@ -753,6 +911,31 @@ async function loadAdvisor() {
       advisorSecurity = cfg.security || 'read_only';
     }
   } catch(_) {}
+
+  // Load persistent history from API (once per session load).
+  if (!advisorHistoryLoaded) {
+    try {
+      const r = await fetch('/api/advisor/history');
+      if (r.ok) {
+        const data = await r.json();
+        if (data.entries && data.entries.length > 0) {
+          advisorHistory = data.entries.map(e => ({
+            role: e.role,
+            text: e.text,
+            options: e.options || [],
+          }));
+        }
+      }
+      advisorHistoryLoaded = true;
+    } catch(_) {}
+  }
+
+  // Load context-sensitive suggestions.
+  try {
+    const r = await fetch('/api/advisor/suggestions');
+    if (r.ok) _advisorSuggestions = await r.json();
+  } catch(_) { _advisorSuggestions = []; }
+
   renderAdvisorTab();
 }
 
@@ -762,6 +945,16 @@ function renderAdvisorTab() {
     : advisorSecurity === 'suggest'
     ? '<span class="badge badge-pending">suggest</span>'
     : '<span class="badge badge-draft">read-only</span>';
+
+  // Suggestion chips.
+  let chipsHtml = '';
+  if (_advisorSuggestions.length > 0) {
+    chipsHtml = '<div class="advisor-suggestions">' +
+      _advisorSuggestions.map(chip =>
+        `<div class="suggestion-chip" onclick="useSuggestionChip(${JSON.stringify(chip.id)},${JSON.stringify(chip.action_type)},${JSON.stringify(chip.command||'')})">${esc(chip.text)}</div>`
+      ).join('') +
+      '</div>';
+  }
 
   let historyHtml = '';
   for (const msg of advisorHistory) {
@@ -787,7 +980,7 @@ function renderAdvisorTab() {
   }
 
   const emptyHint = advisorHistory.length === 0
-    ? '<div class="empty" style="padding:2rem">Send a message to the advisor using the bar above (⌘K), or type below.</div>'
+    ? '<div class="empty" style="padding:2rem">Send a message to the advisor using the bar above (⌘K), or type below.<br><span style="font-size:0.8rem;color:var(--muted)">Try: "What should I work on next?" or "Check system health"</span></div>'
     : '';
 
   app.innerHTML = `
@@ -796,7 +989,8 @@ function renderAdvisorTab() {
         <span class="card-title">Advisor Panel</span>
         <span>Security: ${securityBadge}</span>
       </div>
-      <div class="advisor-chat" id="advisor-chat-history">${emptyHint}${historyHtml}</div>
+      ${chipsHtml}
+      <div class="advisor-chat" id="advisor-chat-history" style="max-height:420px;overflow-y:auto">${emptyHint}${historyHtml}</div>
       <div class="advisor-input-row" style="margin-top:1rem">
         <input type="text" id="advisor-tab-input" placeholder="Ask the advisor…"
                onkeydown="advisorTabKeydown(event)">
@@ -815,14 +1009,34 @@ function advisorTabKeydown(e) {
   if (e.key === 'Enter') submitAdvisorTab();
 }
 
+function useSuggestionChip(id, actionType, command) {
+  if (actionType === 'switch_tab' && command) {
+    switchTab(command);
+    return;
+  }
+  if (command) {
+    const input = document.getElementById('advisor-tab-input');
+    if (input) { input.value = command; input.focus(); }
+  }
+}
+
 async function submitAdvisorTab() {
   const input = document.getElementById('advisor-tab-input');
   const message = (input ? input.value : '').trim();
   if (!message) return;
   if (input) input.value = '';
 
-  advisorHistory.push({ role: 'user', text: message });
+  const now = new Date().toISOString();
+  const userEntry = { role: 'user', text: message, options: [], timestamp: now };
+  advisorHistory.push(userEntry);
   renderAdvisorTab();
+
+  // For check_status / question intents, augment with live context.
+  let advisorContext = null;
+  try {
+    const ctxResp = await fetch('/api/advisor/context');
+    if (ctxResp.ok) advisorContext = await ctxResp.json();
+  } catch(_) {}
 
   const context = { tab: currentTab, selection: null };
   try {
@@ -831,17 +1045,80 @@ async function submitAdvisorTab() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, context })
     });
-    const data = resp.ok ? await resp.json() : { response: 'Error contacting advisor.', options: [] };
-    advisorHistory.push({ role: 'advisor', text: data.response, options: data.options || [] });
+    const data = resp.ok ? await resp.json() : { response: 'Error contacting advisor.', options: [], intent: 'clarify' };
+
+    // For question/check_status intents, enrich response with live context.
+    let enrichedResponse = data.response;
+    if (advisorContext && (data.intent === 'question' || data.intent === 'check_status')) {
+      enrichedResponse = buildContextAwareResponse(data.response, advisorContext, message);
+    }
+
+    const advisorEntry = { role: 'advisor', text: enrichedResponse, options: data.options || [], timestamp: new Date().toISOString() };
+    advisorHistory.push(advisorEntry);
     renderAdvisorTab();
+
+    // Persist to API (best-effort).
+    persistAdvisorHistory([userEntry, advisorEntry]);
   } catch(e) {
-    advisorHistory.push({ role: 'advisor', text: 'Network error: ' + e.message, options: [] });
+    const errEntry = { role: 'advisor', text: 'Network error: ' + e.message, options: [], timestamp: new Date().toISOString() };
+    advisorHistory.push(errEntry);
     renderAdvisorTab();
   }
 }
 
+function buildContextAwareResponse(baseResponse, ctx, message) {
+  const lc = message.toLowerCase();
+  let extra = '';
+
+  if (ctx.active_goals && ctx.active_goals.length > 0) {
+    const goal = ctx.active_goals.find(g =>
+      lc.includes(g.title.toLowerCase().substring(0, 20)) ||
+      lc.includes(g.goal_id.substring(0, 8)) ||
+      lc.includes('running') || lc.includes('current') || lc.includes('progress')
+    );
+    if (goal) {
+      const elapsed = goal.elapsed_secs;
+      const elStr = elapsed < 60 ? elapsed + 's' : elapsed < 3600 ? Math.floor(elapsed/60) + 'm' : Math.floor(elapsed/3600) + 'h';
+      extra += `\n\nActive goal: "${goal.title}" (${elStr} elapsed${goal.phase ? ', phase ' + goal.phase : ''}).`;
+    } else if (lc.includes('goal') || lc.includes('running') || lc.includes('status')) {
+      extra += `\n\n${ctx.active_goals.length} goal${ctx.active_goals.length !== 1 ? 's' : ''} currently running: ` +
+        ctx.active_goals.map(g => '"' + g.title + '"').join(', ') + '.';
+    }
+  }
+
+  if ((lc.includes('draft') || lc.includes('review') || lc.includes('pending')) && ctx.pending_drafts > 0) {
+    extra += `\n\n${ctx.pending_drafts} draft${ctx.pending_drafts !== 1 ? 's' : ''} waiting for review in the Drafts tab.`;
+  }
+
+  if ((lc.includes('plan') || lc.includes('phase') || lc.includes('progress')) && ctx.plan_pending_count !== undefined) {
+    const done = ctx.plan_done_count || 0;
+    const total = done + (ctx.plan_pending_count || 0);
+    if (total > 0) {
+      extra += `\n\nPlan: ${done}/${total} phases complete (${Math.round((done/total)*100)}%).`;
+    }
+  }
+
+  if ((lc.includes('health') || lc.includes('system') || lc.includes('signal')) && ctx.health_signals_count > 0) {
+    extra += `\n\n${ctx.health_signals_count} health signal${ctx.health_signals_count !== 1 ? 's' : ''} detected — check the Health tab for details.`;
+  }
+
+  return baseResponse + extra;
+}
+
+async function persistAdvisorHistory(entries) {
+  try {
+    await fetch('/api/advisor/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entries })
+    });
+  } catch(_) {}
+}
+
 function clearAdvisorHistory() {
   advisorHistory = [];
+  advisorHistoryLoaded = false;
+  // Clear persisted history via POST with empty entries (just truncates on next save).
   renderAdvisorTab();
 }
 
@@ -849,10 +1126,13 @@ function clearAdvisorHistory() {
 async function loadDashboard() {
   app.innerHTML = '<div class="loading">Loading dashboard...</div>';
   try {
-    const [draftsResp, questionsResp, statusResp] = await Promise.allSettled([
+    const [draftsResp, questionsResp, statusResp, planResp, velocityResp, advisorCtxResp] = await Promise.allSettled([
       fetch('/api/drafts'),
       fetch('/api/interactions/pending'),
-      fetch('/api/status')
+      fetch('/api/status'),
+      fetch('/api/plan/phases'),
+      fetch('/api/stats/velocity'),
+      fetch('/api/advisor/context'),
     ]);
 
     const draftsData = draftsResp.status === 'fulfilled' && draftsResp.value.ok
@@ -863,6 +1143,15 @@ async function loadDashboard() {
       : [];
     const status = statusResp.status === 'fulfilled' && statusResp.value.ok
       ? await statusResp.value.json().catch(() => null)
+      : null;
+    const phases = planResp.status === 'fulfilled' && planResp.value.ok
+      ? await planResp.value.json().catch(() => [])
+      : [];
+    const velocity = velocityResp.status === 'fulfilled' && velocityResp.value.ok
+      ? await velocityResp.value.json().catch(() => null)
+      : null;
+    const advisorCtx = advisorCtxResp.status === 'fulfilled' && advisorCtxResp.value.ok
+      ? await advisorCtxResp.value.json().catch(() => null)
       : null;
 
     // Update subtitle with timestamp.
@@ -885,19 +1174,75 @@ async function loadDashboard() {
       return;
     }
 
-    renderDashboard(draftsData, questions, status);
+    renderDashboard(draftsData, questions, status, phases, velocity, advisorCtx);
   } catch (e) {
     app.innerHTML = '<div class="empty">Failed to load dashboard. Is the daemon running?</div>';
   }
 }
 
-function renderDashboard(allDrafts, questions, status) {
+// Set up 30-second auto-refresh for Dashboard.
+let _dashRefreshTimer = null;
+function startDashRefresh() {
+  if (_dashRefreshTimer) clearInterval(_dashRefreshTimer);
+  _dashRefreshTimer = setInterval(() => { if (currentTab === 'dashboard') loadDashboard(); }, 30000);
+}
+
+function renderDashboard(allDrafts, questions, status, phases, velocity, advisorCtx) {
   const pending = allDrafts.filter(d => d.status && d.status.toLowerCase().includes('pending'));
   const active = allDrafts.filter(d => d.status && d.status.toLowerCase().includes('draft'));
 
   let html = '';
 
-  // Active work.
+  // ── Project Health Panel (v0.16.1.3) ──────────────────────────
+  const donePhases = phases.filter(p => p.status === 'done').length;
+  const pendingPhases = phases.filter(p => p.status === 'pending' || p.status === 'in_progress').length;
+  const totalPhases = phases.length;
+  const completionPct = totalPhases > 0 ? Math.round((donePhases / totalPhases) * 100) : 0;
+  const goalsPerWeek = velocity ? (velocity.goals_per_week || 0).toFixed(1) : '—';
+  const healthSignals = (advisorCtx && advisorCtx.health_signals_count > 0)
+    ? `<span style="color:var(--yellow)">${advisorCtx.health_signals_count} signal${advisorCtx.health_signals_count !== 1 ? 's' : ''}</span>`
+    : `<span style="color:var(--green)">Healthy</span>`;
+
+  html += '<div class="dash-section">';
+  html += '<div class="dash-section-title">Project Health</div>';
+  html += '<div class="health-stat-grid">';
+  html += `<div class="health-stat"><div class="health-stat-val">${completionPct}%</div><div class="health-stat-lbl">Plan Complete</div></div>`;
+  html += `<div class="health-stat"><div class="health-stat-val">${goalsPerWeek}</div><div class="health-stat-lbl">Goals/Week</div></div>`;
+  html += `<div class="health-stat"><div class="health-stat-val">${pending.length}</div><div class="health-stat-lbl">Needs Review</div></div>`;
+  html += `<div class="health-stat" style="cursor:pointer" onclick="switchTab('health')"><div class="health-stat-val" style="font-size:1rem;padding-top:0.3rem">${healthSignals}</div><div class="health-stat-lbl">System Health</div></div>`;
+  html += '</div>';
+  html += '</div>';
+
+  // ── Running Goals with expandable detail (v0.16.1.3) ──────────
+  const runningAgents = status && status.active_agents ? status.active_agents.filter(a => a.state === 'running' || a.state === 'configured') : [];
+  if (runningAgents.length > 0) {
+    html += '<div class="dash-section">';
+    html += '<div class="dash-section-title">Running (' + runningAgents.length + ')</div>';
+    html += runningAgents.map(a => {
+      const elapsed = a.running_secs || 0;
+      const elapsedStr = elapsed < 60 ? elapsed + 's' : elapsed < 3600 ? Math.floor(elapsed/60) + 'm' : Math.floor(elapsed/3600) + 'h ' + Math.floor((elapsed%3600)/60) + 'm';
+      const phaseHtml = a.plan_phase ? `<span class="tag">${esc(a.plan_phase)}</span>` : '';
+      return `<div class="card" id="running-goal-${esc(a.goal_id)}">
+        <div class="card-header">
+          <span class="card-title">${esc(a.title)}</span>
+          <span class="badge badge-active">Running</span>
+        </div>
+        <div class="card-meta" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Elapsed: ${esc(elapsedStr)} ${phaseHtml}</span>
+          <div style="display:flex;gap:0.5rem">
+            <button class="btn btn-ghost btn-sm" onclick="toggleGoalDetail('${esc(a.goal_id)}')">Details</button>
+            <button class="btn btn-ghost btn-sm" onclick="askAdvisorAboutGoal('${esc(a.goal_id)}','${esc(a.title)}')">Ask Advisor</button>
+          </div>
+        </div>
+        <div id="goal-detail-${esc(a.goal_id)}" class="goal-detail" style="display:none">
+          <div style="color:var(--muted);font-size:0.82rem">Loading log...</div>
+        </div>
+      </div>`;
+    }).join('');
+    html += '</div>';
+  }
+
+  // Active work (in-progress drafts).
   if (active.length > 0) {
     html += '<div class="dash-section">';
     html += '<div class="dash-section-title">Active Work</div>';
@@ -954,14 +1299,57 @@ function renderDashboard(allDrafts, questions, status) {
   html += `<div class="stat-card"><div class="stat-value">${total}</div><div class="stat-label">Total Drafts</div></div>`;
   html += '</div>';
 
-  if (active.length === 0 && pending.length === 0 && questions.length === 0) {
+  if (runningAgents.length === 0 && active.length === 0 && pending.length === 0 && questions.length === 0) {
     html += '<div class="empty">Everything is up to date. Start a new goal from the <strong>Plan</strong> tab.</div>';
   }
 
   html += '<div style="margin-top:1rem;font-size:0.8rem;color:var(--muted);text-align:right">' +
-    '<button class="btn btn-sm btn-ghost" onclick="loadDashboard()">Refresh</button></div>';
+    '<button class="btn btn-sm btn-ghost" onclick="loadDashboard()">Refresh</button>' +
+    ' <span style="margin-left:0.5rem">Auto-refreshes every 30s</span></div>';
 
   app.innerHTML = html;
+}
+
+// ── Active Goal Detail (v0.16.1.3) ────────────────────────────
+
+async function toggleGoalDetail(goalId) {
+  const detail = document.getElementById('goal-detail-' + goalId);
+  if (!detail) return;
+  const isVisible = detail.style.display !== 'none';
+  if (isVisible) {
+    detail.style.display = 'none';
+    return;
+  }
+  detail.style.display = 'block';
+  detail.innerHTML = '<div style="color:var(--muted);font-size:0.82rem">Loading log...</div>';
+  try {
+    const resp = await fetch('/api/goals/' + encodeURIComponent(goalId) + '/output');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json().catch(() => null);
+    let logLines = '';
+    if (data && data.lines) {
+      logLines = data.lines.slice(-20).join('\n');
+    } else if (data && data.output) {
+      logLines = data.output.split('\n').slice(-20).join('\n');
+    } else {
+      logLines = 'No output available yet.';
+    }
+    detail.innerHTML = `<div class="goal-log">${esc(logLines) || 'No output yet.'}</div>`;
+  } catch(e) {
+    detail.innerHTML = `<div style="color:var(--muted);font-size:0.82rem">Could not load log: ${esc(e.message)}</div>`;
+  }
+}
+
+function askAdvisorAboutGoal(goalId, title) {
+  const msg = 'What is the status of the running goal "' + title + '" (' + goalId.substring(0, 8) + ')?';
+  switchTab('advisor');
+  setTimeout(() => {
+    const input = document.getElementById('advisor-tab-input');
+    if (input) {
+      input.value = msg;
+      input.focus();
+    }
+  }, 200);
 }
 
 // ── Plan Tab (v0.14.19) ────────────────────────────────────────
@@ -1264,14 +1652,28 @@ async function runPhase(phaseId) {
     return idx < targetIdx;
   });
   if (pendingBefore.length > 0) {
-    const firstName = pendingBefore[0].id + ' — ' + pendingBefore[0].title;
-    showConfirm(
-      'Warning: Running out of order\n\n' +
-      'There are ' + pendingBefore.length + ' earlier pending phase(s), starting with:\n' +
-      firstName + '\n\nProceed anyway?',
-      () => _doRunPhase(phaseId),
-      null
-    );
+    const first = pendingBefore[0];
+    const firstName = first.id + ' — ' + first.title;
+    const msg = 'Out-of-order phase run\n\n' +
+      phaseId + ' has ' + pendingBefore.length + ' unfinished predecessor' + (pendingBefore.length !== 1 ? 's' : '') + '.\n' +
+      'First pending: ' + firstName + '\n\n' +
+      'Re-order: run the predecessor first.\n' +
+      'Run anyway: proceed and log the acknowledgement.';
+    // Use native dialog with two options.
+    const dlg = document.getElementById('ta-dialog');
+    const body = document.getElementById('ta-dialog-body');
+    const actions = document.getElementById('ta-dialog-actions');
+    if (dlg && body && actions) {
+      body.innerHTML = `<p style="font-weight:600;margin-bottom:0.5rem">Out-of-order phase run</p>
+        <p style="color:var(--muted);font-size:0.9rem"><strong>${esc(phaseId)}</strong> has ${pendingBefore.length} unfinished predecessor${pendingBefore.length !== 1 ? 's' : ''}.</p>
+        <p style="color:var(--muted);font-size:0.85rem">First pending: <code>${esc(firstName)}</code></p>`;
+      actions.innerHTML = `
+        <button class="btn btn-ghost" onclick="document.getElementById('ta-dialog').close();_doRunPhase(${JSON.stringify(first.id)})">Re-order — run ${esc(first.id)} first</button>
+        <button class="btn btn-primary" onclick="document.getElementById('ta-dialog').close();_doRunPhase(${JSON.stringify(phaseId)})">Run anyway</button>`;
+      dlg.showModal();
+    } else {
+      showConfirm(msg, () => _doRunPhase(phaseId), null);
+    }
     return;
   }
   _doRunPhase(phaseId);
@@ -2104,7 +2506,7 @@ async function loadSettings() {
     <div style="display:flex;gap:1.5rem;align-items:flex-start">
       <div style="min-width:150px">
         <div class="dash-section-title">Settings</div>
-        ${['agent','vcs','workflow','policy','constitution','notifications','memory','advanced'].map(s =>
+        ${['agent','vcs','workflow','policy','constitution','notifications','memory','studio','advanced'].map(s =>
           `<div class="tab" style="display:block;border:none;padding:0.4rem 0.75rem;border-radius:6px;margin-bottom:0.25rem;${settingsSection===s?'background:var(--surface);color:var(--accent)':''}" onclick="loadSettingsSection('${s}')">${s.charAt(0).toUpperCase()+s.slice(1)}</div>`
         ).join('')}
       </div>
@@ -2196,6 +2598,30 @@ function renderSettingsForm(section, data) {
     html += select('scope', 'Scope', [['project','Project'],['global','Global']], data.scope || 'project');
     html += field('retention_days', 'Retention (days)', 'number', data.retention_days, '90');
     html += `<div class="actions"><button class="btn btn-deny btn-sm" onclick="showConfirm('Clear all local memory entries? This cannot be undone.', clearMemoryStore)">Clear Local Memory</button></div>`;
+  } else if (section === 'studio') {
+    // Studio settings: workflow.toml viewer/editor + ta doctor integration.
+    html += `<p style="color:var(--muted);font-size:0.85rem;margin-bottom:1rem">Studio configuration and project workflow settings.</p>`;
+    html += `<div class="form-group">
+      <label>workflow.toml <span style="font-size:0.75rem;color:var(--muted)">(project workflow configuration)</span></label>
+      <textarea id="studio-workflow-toml" style="min-height:220px;font-family:monospace;font-size:0.82rem" placeholder="Loading..."></textarea>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary btn-sm" onclick="saveWorkflowToml()">Save workflow.toml</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadWorkflowToml()">Reload</button>
+    </div>
+    <div id="studio-toml-status" style="margin-top:0.5rem;font-size:0.85rem"></div>
+    <div style="margin-top:1.5rem">
+      <div class="dash-section-title">System Doctor</div>
+      <p style="color:var(--muted);font-size:0.85rem;margin-bottom:0.75rem">Run <code>ta doctor</code> to diagnose and fix common issues.</p>
+      <div class="actions">
+        <button class="btn btn-ghost btn-sm" onclick="runDoctorInSettings()">Run ta doctor</button>
+        <button class="btn btn-ghost btn-sm" onclick="runDoctorFixInSettings()">Run ta doctor --fix</button>
+      </div>
+      <div id="studio-doctor-log" class="health-log" style="display:none"></div>
+    </div>`;
+    // Auto-load the workflow.toml.
+    setTimeout(() => loadWorkflowToml(), 50);
+    return html;
   }
 
   html += `<div class="actions" style="margin-top:1.5rem">
@@ -2203,6 +2629,79 @@ function renderSettingsForm(section, data) {
     <span id="settings-save-result" style="color:var(--muted);font-size:0.85rem;margin-left:0.5rem"></span>
   </div>`;
   return html;
+}
+
+async function loadWorkflowToml() {
+  const el = document.getElementById('studio-workflow-toml');
+  if (!el) return;
+  el.value = 'Loading...';
+  try {
+    const r = await fetch('/api/cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'cat .ta/workflow.toml 2>/dev/null || echo ""' })
+    });
+    const data = await r.json().catch(() => ({}));
+    el.value = (data.output || data.stdout || '').trim();
+  } catch(e) {
+    el.value = '# Could not load workflow.toml: ' + e.message;
+  }
+}
+
+async function saveWorkflowToml() {
+  const el = document.getElementById('studio-workflow-toml');
+  const status = document.getElementById('studio-toml-status');
+  const content = el ? el.value : '';
+  if (!content.trim()) { if (status) { status.textContent = 'Nothing to save.'; status.style.color = 'var(--muted)'; } return; }
+  // Write via cmd endpoint.
+  const escaped = content.replace(/'/g, "'\\''");
+  try {
+    const r = await fetch('/api/cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: `mkdir -p .ta && cat > .ta/workflow.toml << 'TAEOF'\n${content}\nTAEOF` })
+    });
+    if (r.ok) {
+      if (status) { status.textContent = 'Saved to .ta/workflow.toml.'; status.style.color = 'var(--green)'; }
+    } else {
+      if (status) { status.textContent = 'Save failed: ' + r.status; status.style.color = 'var(--red)'; }
+    }
+  } catch(e) {
+    if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
+  }
+}
+
+async function runDoctorInSettings() {
+  const log = document.getElementById('studio-doctor-log');
+  if (!log) return;
+  log.style.display = 'block';
+  log.textContent = 'Running ta doctor...\n';
+  try {
+    const r = await fetch('/api/cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'ta doctor 2>&1' })
+    });
+    const data = await r.json().catch(() => ({}));
+    log.textContent = (data.output || data.stdout || '(no output)') + '\nDone.';
+  } catch(e) { log.textContent += 'Error: ' + e.message; }
+}
+
+async function runDoctorFixInSettings() {
+  const log = document.getElementById('studio-doctor-log');
+  if (!log) return;
+  log.style.display = 'block';
+  log.textContent = 'Running ta doctor --fix --yes...\n';
+  try {
+    const r = await fetch('/api/cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'ta doctor --fix --yes 2>&1' })
+    });
+    const data = await r.json().catch(() => ({}));
+    log.textContent = (data.output || data.stdout || '(no output)') + '\nDone.';
+    await pollHealthSignals();
+  } catch(e) { log.textContent += 'Error: ' + e.message; }
 }
 
 async function saveSettings(section) {
@@ -2447,19 +2946,48 @@ async function browseForProject() {
 async function loadWorkflows() {
   app.innerHTML = '<div class="loading">Loading workflows...</div>';
   try {
-    const resp = await fetch('/api/workflows');
-    const data = resp.ok ? await resp.json() : { workflows: [] };
-    renderWorkflows(data.workflows || []);
+    const [wfResp, templResp] = await Promise.allSettled([
+      fetch('/api/workflows'),
+      fetch('/api/workflow/templates'),
+    ]);
+    const data = wfResp.status === 'fulfilled' && wfResp.value.ok
+      ? await wfResp.value.json()
+      : { workflows: [] };
+    const templates = templResp.status === 'fulfilled' && templResp.value.ok
+      ? await templResp.value.json()
+      : [];
+    renderWorkflows(data.workflows || [], templates || []);
   } catch (e) {
-    renderWorkflows([]);
+    renderWorkflows([], []);
   }
 }
 
 // Track workflow status pollers by workflow ID.
 const _wfStatusPollers = {};
 
-function renderWorkflows(workflows) {
+function renderWorkflows(workflows, templates) {
   let html = '';
+
+  // ── Workflow Template Catalog (v0.16.1.3) ─────────────────────
+  const builtinTemplates = [
+    { id: 'ci-check', name: 'CI Check', description: 'Run tests and lint on every draft before review.' },
+    { id: 'draft-review', name: 'Draft Auto-Review', description: 'Automatically notify on new pending drafts.' },
+    { id: 'goal-notify', name: 'Goal Notification', description: 'Send a message when a goal completes or fails.' },
+    { id: 'scheduled-health', name: 'Scheduled Health Check', description: 'Run ta doctor on a schedule.' },
+  ];
+  const allTemplates = [...builtinTemplates, ...(Array.isArray(templates) ? templates : [])];
+
+  html += '<div class="section"><h3>Workflow Templates</h3>';
+  html += '<p style="color:var(--muted);font-size:0.85rem;margin-bottom:0.75rem">Quick-start templates. Click "Use" to generate a TOML you can edit and save.</p>';
+  html += '<div class="wf-template-grid">';
+  allTemplates.forEach(t => {
+    html += `<div class="wf-template-card">
+      <div class="wf-template-name">${esc(t.name)}</div>
+      <div class="wf-template-desc">${esc(t.description)}</div>
+      <button class="btn btn-sm btn-ghost" style="margin-top:0.5rem" onclick="useWorkflowTemplate(${JSON.stringify(t.id)},${JSON.stringify(t.name)},${JSON.stringify(t.description)})">Use</button>
+    </div>`;
+  });
+  html += '</div></div>';
 
   html += '<div class="section"><h3>Workflows</h3>';
   if (workflows.length === 0) {
@@ -2507,6 +3035,18 @@ function renderWorkflows(workflows) {
   </div>`;
 
   app.innerHTML = html;
+}
+
+function useWorkflowTemplate(id, name, description) {
+  // Pre-fill the generator with the template name and description.
+  const input = document.getElementById('wf-desc-input');
+  if (input) {
+    input.value = description;
+    input.scrollIntoView({ behavior: 'smooth' });
+    input.focus();
+  }
+  // Kick off generation with a synthetic template request.
+  generateWorkflow();
 }
 
 async function generateWorkflow() {
@@ -3129,6 +3669,8 @@ loadDashboard();
 checkWizard();
 pollHealthSignals();
 loadVersion();
+pollNotifications();
+startDashRefresh();
 setInterval(loadVersion, 60000);
 </script>
 </body>

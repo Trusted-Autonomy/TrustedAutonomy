@@ -243,6 +243,10 @@ pub async fn get_notifications(State(state): State<Arc<AppState>>) -> impl IntoR
     .into_response()
 }
 
+pub fn count_pending_drafts_pub(pr_packages_dir: &std::path::Path) -> usize {
+    count_pending_drafts(pr_packages_dir)
+}
+
 fn count_pending_drafts(pr_packages_dir: &std::path::Path) -> usize {
     if !pr_packages_dir.exists() {
         return 0;

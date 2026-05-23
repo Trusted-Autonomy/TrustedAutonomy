@@ -7789,7 +7789,7 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 ---
 ### v0.16.1.3 — Studio Advisor Engine
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.16.1.2 (Studio fundamentals — modals, apply endpoint, plan run button must exist before advisor can invoke them)
 
@@ -7797,27 +7797,27 @@ The extension communicates with the TA daemon over the existing HTTP API (localh
 
 **Why separate from v0.16.1.2**: The advisor requires a new daemon API surface (`/api/advisor/*`), persistent session memory, a Claude API integration, and a substantial frontend component. Bundling it with bug fixes meant neither could ship independently. v0.16.1.2 ships first and unblocks daily use; this phase builds the intelligence layer on top.
 
-1. [ ] **Advisor tab** (`assets/index.html`): Persistent chat thread — input field at bottom, discourse history above, scrollable. Session history persists in daemon memory (`/api/advisor/history`). Advisor has read access to: current goals, plan phases, active drafts, system health, recent events.
+1. [x] **Advisor tab** (`assets/index.html`): Persistent chat thread — input field at bottom, discourse history above, scrollable. Session history persists in daemon memory (`/api/advisor/history`). Advisor has read access to: current goals, plan phases, active drafts, system health, recent events.
 
-2. [ ] **Intent routing and capability model** (`crates/ta-daemon/src/api/advisor.rs`): Two execution modes. Read-only (check goal state, log tail, plan parse, draft status, velocity, `ta doctor` output) executes directly via daemon API. Mutations (start goal, apply draft, cancel goal, restart daemon, update PLAN.md) route through the daemon with a confirm dialog showing exactly what will happen. Intent categories: `ask_question` → inline answer; `check_status` → query + summarise; `start_goal`/`apply_draft`/`cancel_goal` → daemon route + confirm; `update_plan` → show diff before writing; `clarify` → one focused question back to user.
+2. [x] **Intent routing and capability model** (`crates/ta-daemon/src/api/advisor.rs`): Two execution modes. Read-only (check goal state, log tail, plan parse, draft status, velocity, `ta doctor` output) executes directly via daemon API. Mutations (start goal, apply draft, cancel goal, restart daemon, update PLAN.md) route through the daemon with a confirm dialog showing exactly what will happen. Intent categories: `ask_question` → inline answer; `check_status` → query + summarise; `start_goal`/`apply_draft`/`cancel_goal` → daemon route + confirm; `update_plan` → show diff before writing; `clarify` → one focused question back to user.
 
-3. [ ] **Out-of-order phase run guard** (`assets/index.html`): When the advisor or Plan tab triggers a phase run that has pending predecessors, show a dialog: "v0.16.3 has unfinished predecessors: v0.16.1.3 is pending." Options: "Re-order — run v0.16.1.3 first" or "Run anyway" (logs acknowledgement).
+3. [x] **Out-of-order phase run guard** (`assets/index.html`): When the advisor or Plan tab triggers a phase run that has pending predecessors, show a dialog: "v0.16.3 has unfinished predecessors: v0.16.1.3 is pending." Options: "Re-order — run v0.16.1.3 first" or "Run anyway" (logs acknowledgement).
 
-4. [ ] **Context-sensitive suggestions**: Advisor detects project context (`workflow.toml` `project_type`, goal history, active plan phases) and surfaces relevant workflow templates as tappable chips above the input. Example: Unreal project → "Would you like to initialize the TA Unreal workflow template?"
+4. [x] **Context-sensitive suggestions**: Advisor detects project context (`workflow.toml` `project_type`, goal history, active plan phases) and surfaces relevant workflow templates as tappable chips above the input. Example: Unreal project → "Would you like to initialize the TA Unreal workflow template?"
 
-5. [ ] **Goal interrogation with disambiguation** (`assets/index.html`): User can ask about a running goal — advisor fetches live state, log tail, draft validation errors and summarises. When multiple goals are running and intent confidence is below ~80% (ambiguous pronoun, no phase/title match), advisor shows a disambiguation chip list before acting.
+5. [x] **Goal interrogation with disambiguation** (`assets/index.html`): User can ask about a running goal — advisor fetches live state, log tail, draft validation errors and summarises. When multiple goals are running and intent confidence is below ~80% (ambiguous pronoun, no phase/title match), advisor shows a disambiguation chip list before acting.
 
-6. [ ] **Workflow template catalog** (Workflows tab + advisor): Grid of available workflow templates from `~/.config/ta/workflows/` and built-ins. Each card shows name, description, required params. "Run" opens a config form then fires via daemon route with confirm dialog. Advisor can surface these inline.
+6. [x] **Workflow template catalog** (Workflows tab + advisor): Grid of available workflow templates from `~/.config/ta/workflows/` and built-ins. Each card shows name, description, required params. "Run" opens a config form then fires via daemon route with confirm dialog. Advisor can surface these inline.
 
-7. [ ] **Project health panel** (Dashboard): Plan completion %, recent velocity (goals/week from velocity-history), last successful build timestamp, open drafts count, `ta doctor` summary (green/amber/red). Refreshes every 30s.
+7. [x] **Project health panel** (Dashboard): Plan completion %, recent velocity (goals/week from velocity-history), last successful build timestamp, open drafts count, `ta doctor` summary (green/amber/red). Refreshes every 30s.
 
-8. [ ] **Active goal detail on click** (Dashboard): Running goal card expands to show agent log tail (last 20 lines, auto-scrolling via SSE), elapsed time, linked phase, velocity-based P50 completion estimate. "Ask advisor about this goal" pre-fills advisor input.
+8. [x] **Active goal detail on click** (Dashboard): Running goal card expands to show agent log tail (last 20 lines, auto-scrolling via SSE), elapsed time, linked phase, velocity-based P50 completion estimate. "Ask advisor about this goal" pre-fills advisor input.
 
-9. [ ] **Notification feed**: Bell icon in header opens slide-in panel with last 20 system events (goal started/completed, draft ready, apply succeeded, CI status). Events link to relevant draft or goal detail.
+9. [x] **Notification feed**: Bell icon in header opens slide-in panel with last 20 system events (goal started/completed, draft ready, apply succeeded, CI status). Events link to relevant draft or goal detail.
 
-10. [ ] **Settings tab**: Daemon URL, API key (masked), `workflow.toml` viewer/editor, notification channel config. `ta doctor` output with "Fix" buttons for auto-fixable issues.
+10. [x] **Settings tab**: Daemon URL, API key (masked), `workflow.toml` viewer/editor, notification channel config. `ta doctor` output with "Fix" buttons for auto-fixable issues.
 
-11. [ ] **USAGE.md**: "Using TA Studio" section — advisor walkthrough, workflow catalog, applying drafts in-browser, project health panel, notification feed. Replaces the legacy "Web Shell" section.
+11. [x] **USAGE.md**: "Using TA Studio" section — advisor walkthrough, workflow catalog, applying drafts in-browser, project health panel, notification feed. Replaces the legacy "Web Shell" section.
 
 #### Version: `0.16.1-alpha.3`
 

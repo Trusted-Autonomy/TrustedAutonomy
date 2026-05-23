@@ -379,6 +379,11 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         // Workflow generate/save (v0.14.20).
         .route("/api/workflow/generate", post(workflow::generate_workflow))
         .route("/api/workflow/save", post(workflow::save_workflow))
+        // Workflow template catalog (v0.16.1.3).
+        .route(
+            "/api/workflow/templates",
+            get(workflow::list_workflow_templates),
+        )
         // Workflow run/stop/status from Studio (v0.15.14.1).
         .route("/api/workflow/{id}/run", post(workflow::run_workflow))
         .route("/api/workflow/{id}", delete(workflow::stop_workflow))
@@ -407,11 +412,17 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         // Velocity stats API (v0.15.14.2).
         .route("/api/stats/velocity", get(stats::velocity_aggregate))
         .route("/api/stats/velocity-detail", get(stats::velocity_detail))
-        // Studio Advisor API (v0.15.21 + v0.15.28).
+        // Studio Advisor API (v0.15.21 + v0.15.28 + v0.16.1.3).
         .route("/api/advisor/message", post(advisor::handle_message))
         .route("/api/advisor/tools", get(advisor::get_tools))
         .route("/api/advisor/config", get(advisor::get_config))
         .route("/api/advisor/inject", post(advisor::handle_inject))
+        .route(
+            "/api/advisor/history",
+            get(advisor::get_history).post(advisor::append_history),
+        )
+        .route("/api/advisor/suggestions", get(advisor::get_suggestions))
+        .route("/api/advisor/context", get(advisor::get_context))
         // Context file upload for Studio --context flag (v0.15.30.7).
         .route("/api/context/upload", post(context_upload::upload_context))
         // Daemon lifecycle routes (v0.10.10).
