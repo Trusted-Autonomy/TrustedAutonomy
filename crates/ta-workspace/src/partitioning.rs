@@ -50,7 +50,8 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "workflow-runs/",
     "advisor-notes/",
     "draft-build-ctx/",
-    "memory/", // local memory cache (project-memory/ is the VCS-committed counterpart)
+    "memory/",     // local memory cache (project-memory/ is the VCS-committed counterpart)
+    "link-cache/", // cached remote project manifests (v0.16.1.5)
     // Runtime files
     "velocity-stats.jsonl",
     "audit-ledger.jsonl",
@@ -464,6 +465,14 @@ mod tests {
         assert!(
             !LOCAL_TA_PATHS.contains(&"release.lock"),
             "release.lock must not be a specific entry — use *.lock glob instead"
+        );
+    }
+
+    #[test]
+    fn link_cache_in_local_ta_paths() {
+        assert!(
+            LOCAL_TA_PATHS.contains(&"link-cache/"),
+            "link-cache/ must be in LOCAL_TA_PATHS so remote manifests are not committed"
         );
     }
 }

@@ -25,6 +25,8 @@ pub mod governed_workflow;
 pub mod health_signals;
 pub mod init;
 pub mod install;
+pub mod link;
+pub mod manifest;
 pub mod memory;
 pub mod new;
 pub mod notify;
