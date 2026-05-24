@@ -590,6 +590,37 @@ enum Commands {
         #[command(subcommand)]
         command: commands::community::CommunityCommands,
     },
+    /// Manage this project's manifest (`.ta/project-manifest.md`).
+    ///
+    /// The manifest is a 1–2 page document describing this project's public
+    /// interface. Other projects can link to it so agents automatically get
+    /// cross-project context at goal start.
+    ///
+    /// Examples:
+    ///   ta manifest init
+    ///   ta manifest validate
+    ///   ta manifest show
+    ///   ta manifest show cinepipe-train
+    Manifest {
+        #[command(subcommand)]
+        command: commands::manifest::ManifestCommands,
+    },
+    /// Manage cross-project links (`.ta/links.toml`).
+    ///
+    /// Linked projects' manifests are injected into agent context at goal start,
+    /// giving agents cross-project awareness without copy-pasting documentation.
+    ///
+    /// Examples:
+    ///   ta link add ../cinepipe-train --relationship workspace-member
+    ///   ta link add github:myorg/pragma --relationship dependency
+    ///   ta link list
+    ///   ta link status
+    ///   ta link refresh
+    ///   ta link remove cinepipe-train
+    Link {
+        #[command(subcommand)]
+        command: commands::link::LinkCommands,
+    },
     /// Manage policy configuration and auto-approval.
     Policy {
         #[command(subcommand)]
@@ -1055,6 +1086,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Workflow { command } => commands::workflow::execute(command, &config),
         Commands::Stats { command } => commands::stats::execute(command, &config),
         Commands::Community { command } => commands::community::execute(command, &config),
+        Commands::Manifest { command } => commands::manifest::execute(command, &config),
+        Commands::Link { command } => commands::link::execute(command, &config),
         Commands::Policy { command } => commands::policy::execute(command, &config),
         Commands::Config { command } => commands::config::execute(command, &config),
         Commands::Gc {

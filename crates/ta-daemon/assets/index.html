@@ -284,6 +284,34 @@
                  padding: 0.75rem; text-align: center; }
   .health-stat-val { font-size: 1.4rem; font-weight: 700; color: var(--accent); }
   .health-stat-lbl { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; margin-top: 0.15rem; }
+  /* Cross-project links panel (v0.16.1.5) */
+  .link-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+               padding: 0.85rem 1rem; display: flex; flex-direction: column; gap: 0.35rem;
+               transition: border-color 0.15s; cursor: pointer; }
+  .link-card:hover { border-color: var(--accent); }
+  .link-card-header { display: flex; align-items: center; gap: 0.5rem; }
+  .link-card-name { font-weight: 600; font-size: 0.9rem; flex: 1; }
+  .link-rel-badge { font-size: 0.7rem; padding: 0.1rem 0.45rem; border-radius: 10px;
+                    background: rgba(99,102,241,0.15); color: var(--accent); font-weight: 600; }
+  .link-status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .link-status-dot.ok { background: var(--green); }
+  .link-status-dot.missing { background: var(--red); }
+  .link-status-dot.stale { background: var(--yellow); }
+  .link-status-dot.unreachable { background: var(--muted); }
+  .link-excerpt { font-size: 0.78rem; color: var(--muted); line-height: 1.4; }
+  .link-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+               gap: 0.6rem; margin-top: 0.5rem; }
+  /* Manifest modal */
+  .link-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+                         z-index: 200; display: flex; align-items: center; justify-content: center; }
+  .link-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+                padding: 1.5rem; max-width: 680px; width: 90%; max-height: 80vh;
+                overflow-y: auto; position: relative; }
+  .link-modal-close { position: absolute; top: 0.75rem; right: 0.75rem; cursor: pointer;
+                       font-size: 1.2rem; color: var(--muted); background: none; border: none; }
+  .link-modal pre { white-space: pre-wrap; font-size: 0.82rem; color: var(--text);
+                    font-family: monospace; background: var(--bg); border-radius: 6px;
+                    padding: 0.75rem; border: 1px solid var(--border); }
   /* Running goal expandable detail (v0.16.1.3) */
   .goal-detail { margin-top: 0.75rem; border-top: 1px solid var(--border); padding-top: 0.75rem;
                  font-size: 0.85rem; }
@@ -336,6 +364,13 @@
   </div>
   <!-- Health Alert Bar (v0.15.30.6): ambient signals banner -->
   <div id="health-alert-container"></div>
+  <!-- Link Manifest Modal (v0.16.1.5) -->
+  <div id="link-modal-overlay" class="link-modal-overlay" style="display:none" onclick="closeLinkModal(event)">
+    <div class="link-modal" id="link-modal-content">
+      <button class="link-modal-close" onclick="closeLinkModal()">&#10005;</button>
+      <div id="link-modal-body"></div>
+    </div>
+  </div>
   <div class="tabs">
     <div class="tab active" onclick="switchTab('dashboard')">Dashboard</div>
     <div class="tab" onclick="switchTab('plan')">Plan</div>
@@ -1126,13 +1161,14 @@ function clearAdvisorHistory() {
 async function loadDashboard() {
   app.innerHTML = '<div class="loading">Loading dashboard...</div>';
   try {
-    const [draftsResp, questionsResp, statusResp, planResp, velocityResp, advisorCtxResp] = await Promise.allSettled([
+    const [draftsResp, questionsResp, statusResp, planResp, velocityResp, advisorCtxResp, linksResp] = await Promise.allSettled([
       fetch('/api/drafts'),
       fetch('/api/interactions/pending'),
       fetch('/api/status'),
       fetch('/api/plan/phases'),
       fetch('/api/stats/velocity'),
       fetch('/api/advisor/context'),
+      fetch('/api/links'),
     ]);
 
     const draftsData = draftsResp.status === 'fulfilled' && draftsResp.value.ok
@@ -1153,6 +1189,9 @@ async function loadDashboard() {
     const advisorCtx = advisorCtxResp.status === 'fulfilled' && advisorCtxResp.value.ok
       ? await advisorCtxResp.value.json().catch(() => null)
       : null;
+    window._taLinks = linksResp.status === 'fulfilled' && linksResp.value.ok
+      ? await linksResp.value.json().catch(() => [])
+      : [];
 
     // Update subtitle with timestamp.
     document.getElementById('subtitle').textContent =
@@ -1212,6 +1251,27 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
   html += `<div class="health-stat" style="cursor:pointer" onclick="switchTab('health')"><div class="health-stat-val" style="font-size:1rem;padding-top:0.3rem">${healthSignals}</div><div class="health-stat-lbl">System Health</div></div>`;
   html += '</div>';
   html += '</div>';
+
+  // ── Linked Projects panel (v0.16.1.5) ─────────────────────────
+  if (window._taLinks && window._taLinks.length > 0) {
+    html += '<div class="dash-section">';
+    html += '<div class="dash-section-title">Linked Projects</div>';
+    html += '<div class="link-grid">';
+    for (const lnk of window._taLinks) {
+      const dotClass = lnk.status === 'ok' ? (lnk.cached ? 'stale' : 'ok') : lnk.status === 'unreachable' ? 'unreachable' : 'missing';
+      const excerpt = lnk.manifest_excerpt ? `<div class="link-excerpt">${esc(lnk.manifest_excerpt)}</div>` : '';
+      html += `<div class="link-card" onclick="showLinkModal(${JSON.stringify(lnk)})">
+        <div class="link-card-header">
+          <span class="link-status-dot ${dotClass}" title="${esc(lnk.status)}"></span>
+          <span class="link-card-name">${esc(lnk.name)}</span>
+          <span class="link-rel-badge">${esc(lnk.relationship)}</span>
+        </div>
+        ${excerpt}
+      </div>`;
+    }
+    html += '</div>';
+    html += '</div>';
+  }
 
   // ── Running Goals with expandable detail (v0.16.1.3) ──────────
   const runningAgents = status && status.active_agents ? status.active_agents.filter(a => a.state === 'running' || a.state === 'configured') : [];
@@ -3662,6 +3722,32 @@ async function loadVersion() {
       badge.title = 'Version v' + data.version + ' — click to open Plan tab';
     }
   } catch(_) {}
+}
+
+// ── Linked Projects modal (v0.16.1.5) ────────────────────────
+function showLinkModal(lnk) {
+  const overlay = document.getElementById('link-modal-overlay');
+  const body = document.getElementById('link-modal-body');
+  const statusLabel = lnk.status === 'ok' ? (lnk.cached ? '~ cached' : '✓ manifest found') : lnk.status === 'missing_manifest' ? '✗ manifest missing' : '— unreachable';
+  const location = lnk.path || lnk.repo || '';
+  body.innerHTML = `
+    <div style="margin-bottom:1rem">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem">
+        <strong style="font-size:1rem">${esc(lnk.name)}</strong>
+        <span class="link-rel-badge">${esc(lnk.relationship)}</span>
+        <span style="font-size:0.75rem;color:var(--muted)">${esc(statusLabel)}</span>
+      </div>
+      ${lnk.description ? `<p style="font-size:0.85rem;color:var(--muted);margin:0">${esc(lnk.description)}</p>` : ''}
+      ${location ? `<p style="font-size:0.75rem;color:var(--muted);margin:0.3rem 0 0;font-family:monospace">${esc(location)}</p>` : ''}
+    </div>
+    ${lnk.manifest ? `<pre>${esc(lnk.manifest)}</pre>` : `<p style="color:var(--muted);font-size:0.85rem">No manifest available. Run <code>ta manifest init</code> in the linked project to create one.</p>`}
+  `;
+  overlay.style.display = 'flex';
+}
+function closeLinkModal(e) {
+  if (!e || e.target === document.getElementById('link-modal-overlay') || !e.target) {
+    document.getElementById('link-modal-overlay').style.display = 'none';
+  }
 }
 
 // ── Boot ──────────────────────────────────────────────────────

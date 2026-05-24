@@ -4477,6 +4477,71 @@ fn build_plan_section(
     )
 }
 
+/// Build the cross-project context section from `.ta/links.toml` (v0.16.1.5).
+///
+/// For each link with `inject = true`, reads the manifest from the local path
+/// or link cache. Truncates each manifest to 800 tokens (~3200 chars) so the
+/// section stays within context budget regardless of project count.
+pub(crate) fn build_cross_project_section(source_dir: &Path) -> String {
+    let links = ta_workspace::links::load(source_dir);
+    if links.is_empty() {
+        return String::new();
+    }
+
+    let injectable: Vec<_> = links.iter().filter(|l| l.inject).collect();
+    if injectable.is_empty() {
+        return String::new();
+    }
+
+    let cache_dir = source_dir.join(".ta").join("link-cache");
+    let mut sections: Vec<String> = Vec::new();
+
+    for link in injectable {
+        let manifest = match link.read_manifest(source_dir, &cache_dir) {
+            Some(m) => m,
+            None => {
+                tracing::debug!(name = %link.name, "skipping unresolvable link in context injection");
+                continue;
+            }
+        };
+
+        // Cap each manifest at ~3200 chars (~800 tokens).
+        const MAX_CHARS: usize = 3_200;
+        let trimmed = if manifest.len() > MAX_CHARS {
+            format!(
+                "{}\n… see .ta/project-manifest.md for full details",
+                &manifest[..MAX_CHARS]
+            )
+        } else {
+            manifest
+        };
+
+        let framing = link.relationship.framing(&link.name);
+        let desc_line = if link.description.is_empty() {
+            String::new()
+        } else {
+            format!("\n_{}_\n", link.description)
+        };
+
+        sections.push(format!(
+            "### `{}`\n\n{}{}\n\n{}\n",
+            link.name,
+            framing,
+            desc_line,
+            trimmed.trim()
+        ));
+    }
+
+    if sections.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "\n## Cross-Project Context\n\nThe following linked projects are relevant to this goal. Use their manifests to understand API contracts, shared conventions, and integration points.\n\n{}\n",
+        sections.join("\n---\n\n")
+    )
+}
+
 /// Named section sizes for context budget accounting (v0.14.3.1).
 #[derive(Debug)]
 pub(crate) struct ContextSectionSizes {
@@ -4485,6 +4550,7 @@ pub(crate) struct ContextSectionSizes {
     pub memory: usize,
     pub solutions: usize,
     pub community: usize,
+    pub cross_project: usize,
     pub parent: usize,
     pub original_claude_md: usize,
 }
@@ -4496,6 +4562,7 @@ impl ContextSectionSizes {
             + self.memory
             + self.solutions
             + self.community
+            + self.cross_project
             + self.parent
             + self.original_claude_md
     }
@@ -4518,6 +4585,11 @@ pub(crate) fn compute_context_section_sizes(
     let solutions_section = build_solutions_section_for_inject(config);
     let community_section = if let Some(src) = source_dir {
         community::build_community_context_section(src)
+    } else {
+        String::new()
+    };
+    let cross_project_section = if let Some(src) = source_dir {
+        build_cross_project_section(src)
     } else {
         String::new()
     };
@@ -4548,6 +4620,7 @@ pub(crate) fn compute_context_section_sizes(
         memory: memory_section.len(),
         solutions: solutions_section.len(),
         community: community_section.len(),
+        cross_project: cross_project_section.len(),
         parent: 0, // parent context is goal-specific; omit from static estimate
         original_claude_md,
     }
@@ -4848,6 +4921,18 @@ fn build_context_content(
         String::new()
     };
 
+    // Build cross-project context from .ta/links.toml (v0.16.1.5).
+    // Injected when context_mode is inject. Skipped for mcp/hybrid (agent uses ta_context tool).
+    let cross_project_section = if use_inject_mode {
+        if let Some(src) = source_dir {
+            build_cross_project_section(src)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     // v0.14.3.2: For hybrid/mcp modes, add a one-line hint about available context tools.
     let context_tools_hint = if !use_inject_mode {
         "\n# Context tools: ta_plan_status, community_search, community_get — call these when you need plan or community context.\n".to_string()
@@ -4867,6 +4952,7 @@ fn build_context_content(
     if context_budget_chars > 0 {
         let fixed_size = plan_section.len()
             + community_section.len()
+            + cross_project_section.len()
             + macro_section.len()
             + interactive_section.len();
         let mut variable_total =
@@ -4935,7 +5021,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 **Goal:** {}
 **Goal ID:** {}
-{}{}{}{}{}{}{}{}{}
+{}{}{}{}{}{}{}{}{}{}
 ## How this works
 
 - This directory is a copy of the original project
@@ -5059,6 +5145,7 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
         memory_section,
         solutions_section,
         community_section,
+        cross_project_section,
         context_tools_hint,
         user_context_section,
     );
@@ -8375,6 +8462,97 @@ plan_pending_window = 7
         assert!(
             !content.contains("## User-Provided Context"),
             "User-Provided Context should not appear when user_context is None"
+        );
+    }
+
+    // ── Cross-project context injection tests (v0.16.1.5) ────────────────────
+
+    #[test]
+    fn injection_includes_linked_manifests() {
+        let source = TempDir::new().unwrap();
+        // Create a local linked project with a manifest.
+        let linked = TempDir::new().unwrap();
+        let linked_ta = linked.path().join(".ta");
+        std::fs::create_dir_all(&linked_ta).unwrap();
+        std::fs::write(
+            linked_ta.join("project-manifest.md"),
+            "name: cinepipe-train\ntype: service\nlanguage: python\n---\n\n## Purpose\n\nTraining pipeline.\n\n## Architecture\n\nSingle-node.\n\n## Public API / Interface\n\nREST.\n\n## Integration Notes\n\nUse bearer token.\n",
+        ).unwrap();
+
+        // Create links.toml in the source project.
+        let source_ta = source.path().join(".ta");
+        std::fs::create_dir_all(&source_ta).unwrap();
+        std::fs::write(
+            source_ta.join("links.toml"),
+            format!(
+                "[[link]]\nname = \"cinepipe-train\"\npath = {:?}\nrelationship = \"workspace-member\"\ninject = true\n",
+                linked.path().to_str().unwrap()
+            ),
+        ).unwrap();
+
+        let section = build_cross_project_section(source.path());
+        assert!(
+            section.contains("## Cross-Project Context"),
+            "should have header"
+        );
+        assert!(
+            section.contains("cinepipe-train"),
+            "should name the linked project"
+        );
+        assert!(
+            section.contains("Training pipeline"),
+            "should include manifest content"
+        );
+        assert!(
+            section.contains("Coordinate types"),
+            "should include relationship framing"
+        );
+    }
+
+    #[test]
+    fn injection_skips_unreachable_links() {
+        let source = TempDir::new().unwrap();
+        let source_ta = source.path().join(".ta");
+        std::fs::create_dir_all(&source_ta).unwrap();
+        // Point to a non-existent path.
+        std::fs::write(
+            source_ta.join("links.toml"),
+            "[[link]]\nname = \"ghost\"\npath = \"/tmp/does-not-exist-ever-12345\"\nrelationship = \"sibling\"\ninject = true\n",
+        ).unwrap();
+
+        let section = build_cross_project_section(source.path());
+        // Should produce empty string — no manifest to inject.
+        assert!(
+            section.is_empty(),
+            "should skip unreachable link and produce empty section"
+        );
+    }
+
+    #[test]
+    fn injection_skips_inject_false_links() {
+        let source = TempDir::new().unwrap();
+        let linked = TempDir::new().unwrap();
+        let linked_ta = linked.path().join(".ta");
+        std::fs::create_dir_all(&linked_ta).unwrap();
+        std::fs::write(
+            linked_ta.join("project-manifest.md"),
+            "name: secret\ntype: app\nlanguage: go\n---\n\n## Purpose\n\nSec.\n## Architecture\n\nA.\n## Public API / Interface\n\nB.\n## Integration Notes\n\nC.\n",
+        ).unwrap();
+
+        let source_ta = source.path().join(".ta");
+        std::fs::create_dir_all(&source_ta).unwrap();
+        std::fs::write(
+            source_ta.join("links.toml"),
+            format!(
+                "[[link]]\nname = \"secret\"\npath = {:?}\nrelationship = \"reference\"\ninject = false\n",
+                linked.path().to_str().unwrap()
+            ),
+        ).unwrap();
+
+        let section = build_cross_project_section(source.path());
+        assert!(
+            section.is_empty(),
+            "inject=false links must not appear in context"
         );
     }
 }

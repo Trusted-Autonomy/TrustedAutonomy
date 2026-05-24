@@ -19,6 +19,8 @@
 pub mod conflict;
 pub mod copy_strategy;
 pub mod error;
+pub mod link_cache;
+pub mod links;
 pub mod merge_tool;
 pub mod overlay;
 pub mod partitioning;
@@ -30,6 +32,7 @@ pub mod windows_features;
 pub use conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
 pub use copy_strategy::{CopyStat, CopyStrategy};
 pub use error::WorkspaceError;
+pub use links::{Link, LinkStatus, Relationship};
 pub use overlay::{ExcludePatterns, OverlayStagingMode, OverlayWorkspace};
 pub use partitioning::{
     git_is_ignored, gitignore_block, p4_is_ignored, p4ignore_block, update_gitignore,

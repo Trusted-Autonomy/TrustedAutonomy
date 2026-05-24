@@ -190,6 +190,9 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 15. Gemma 4 Ollama model / profile consistency (v0.16.2.1).
     results.extend(check_gemma4_ollama(config));
 
+    // 16. Cross-project link health (v0.16.1.5).
+    results.extend(check_links(config));
+
     results
 }
 
@@ -1112,6 +1115,55 @@ fn read_active_agent(config: &GatewayConfig) -> String {
     }
 
     "claude-code".to_string()
+}
+
+// ── Link health (v0.16.1.5) ──────────────────────────────────────────────────
+
+/// Check cross-project link health from `.ta/links.toml`.
+///
+/// Returns a warning for each local-path link whose manifest is missing.
+/// Silently skips links where the path is not mounted (ENOENT → debug).
+/// Remote-only links with cached manifests are checked for staleness.
+fn check_links(config: &GatewayConfig) -> Vec<CheckResult> {
+    use ta_workspace::links::{load as load_links, LinkStatus};
+
+    let project_root = &config.workspace_root;
+    let links = load_links(project_root);
+
+    if links.is_empty() {
+        return Vec::new();
+    }
+
+    let cache_dir = project_root.join(".ta").join("link-cache");
+    let mut results = Vec::new();
+
+    for link in &links {
+        let status = link.status(project_root, &cache_dir);
+        match status {
+            LinkStatus::Ok { .. } => {
+                // Healthy — no check entry needed.
+            }
+            LinkStatus::MissingManifest => {
+                results.push(CheckResult::warn(
+                    format!("link/{}", link.name),
+                    format!(
+                        "'{}' has no .ta/project-manifest.md",
+                        link.name
+                    ),
+                    format!(
+                        "Run `ta manifest init` in the '{}' project directory to create a manifest.",
+                        link.name
+                    ),
+                ));
+            }
+            LinkStatus::Unreachable { reason } => {
+                // Path not mounted or remote unavailable — log at debug, not warn.
+                tracing::debug!(name = %link.name, %reason, "linked project unreachable — skipping doctor check");
+            }
+        }
+    }
+
+    results
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

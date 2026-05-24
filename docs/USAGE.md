@@ -11251,6 +11251,169 @@ Adding ruflow to every goal increases startup latency (MCP server boot) and intr
 
 ---
 
+## Cross-Project TA Links
+
+When you work across multiple related projects — a suite of microservices, a game engine with a plugin framework, a training pipeline feeding an inference service — agents need to understand the API contracts and integration points between projects. TA links give every agent this context automatically at goal start, without copy-pasting documentation into CLAUDE.md.
+
+### When to use it
+
+Use cross-project links when:
+- An agent in project A needs to know what endpoints project B exposes
+- A change in one project could break a consumer in another
+- Multiple projects share conventions and you want agents to stay consistent
+- You want to quickly see the public surface of a related project without switching directories
+
+### Setting up a workspace (example: cinepipe)
+
+Suppose `cinepipe` has three sub-projects side by side:
+
+```
+~/projects/
+  cinepipe-core/    # the inference service
+  cinepipe-train/   # the training pipeline
+  cinepipe-ui/      # the web frontend
+```
+
+**Step 1 — Create manifests in each project:**
+
+```bash
+cd ~/projects/cinepipe-core
+ta manifest init          # scaffolds .ta/project-manifest.md
+# Edit the manifest to describe cinepipe-core's REST API and integration notes
+
+cd ~/projects/cinepipe-train
+ta manifest init
+ta manifest validate      # check required sections are filled in
+```
+
+**Step 2 — Declare links from the project you work in:**
+
+```bash
+cd ~/projects/cinepipe-ui
+ta link add ../cinepipe-core --relationship dependency --description "REST inference API"
+ta link add ../cinepipe-train --relationship reference --description "Training pipeline"
+ta link list   # verify
+```
+
+From now on, every `ta run` in `cinepipe-ui` injects cinepipe-core's manifest into the agent's CLAUDE.md context under `## Cross-Project Context`. The agent sees the API contract without you doing anything extra.
+
+### Cross-machine links (example: PRagma + game engine)
+
+For projects on a different machine or in a separate GitHub repository, use the `repo` field:
+
+```bash
+ta link add github:myorg/pragma --relationship dependency \
+  --description "Procedural graphics framework used by the renderer"
+```
+
+TA fetches `.ta/project-manifest.md` from the GitHub repository's default branch and caches it in `.ta/link-cache/pragma.md`. The cache is refreshed automatically when it's more than 24 hours old, or manually with:
+
+```bash
+ta link refresh pragma
+ta link refresh         # refresh all remote links
+```
+
+Remote manifests require either `GITHUB_TOKEN` in your environment or `gh auth login` for private repositories. Public repositories work without authentication.
+
+### Manifest format
+
+Each project needs a `.ta/project-manifest.md` file. The format is minimal by design:
+
+```markdown
+name: cinepipe-core
+type: service          # service | library | cli | plugin | game | app
+language: python
+version: 0.3.0
+api_base: http://localhost:8080   # optional
+---
+
+## Purpose
+
+One paragraph on what this project does and who it serves.
+
+## Architecture
+
+Key components and how they fit together. 3–5 sentences.
+
+## Public API / Interface
+
+What external callers depend on. For a service: endpoints + payloads.
+For a library: key types and functions. For a CLI: commands + flags.
+
+## Integration Notes
+
+What callers need to know: auth, data formats, error conventions,
+versioning guarantees, known quirks.
+```
+
+Keep manifests to 1–2 pages. TA truncates each to ~800 tokens before injection so they stay within budget.
+
+### Relationship types
+
+When adding a link, the `--relationship` flag tells the agent how to interpret it:
+
+| Relationship | What the agent is told |
+|---|---|
+| `dependency` | "This project calls into `<name>`. Do not break its API contract." |
+| `consumer` | "`<name>` depends on this project's interface. Changes here may break it." |
+| `workspace-member` | "Co-developed sibling. Coordinate types, naming, and protocols." |
+| `sibling` | "Parallel development. Shared conventions but no direct API coupling." |
+| `reference` | "Architecturally related but no code-level coupling. Background context only." |
+
+### What agents see
+
+When a goal starts, the injected context block looks like this:
+
+```
+## Cross-Project Context
+
+The following linked projects are relevant to this goal. Use their manifests
+to understand API contracts, shared conventions, and integration points.
+
+### `cinepipe-core`
+
+This project calls into `cinepipe-core`. Do not break its API contract.
+
+name: cinepipe-core
+type: service
+language: python
+---
+
+## Purpose
+
+Inference service for LoRA-based image generation...
+...
+```
+
+### Command reference
+
+```bash
+ta manifest init               # scaffold .ta/project-manifest.md
+ta manifest validate           # check required sections + frontmatter
+ta manifest show               # print this project's manifest
+ta manifest show cinepipe-core # print a linked project's manifest
+
+ta link add ../cinepipe-train --relationship workspace-member
+ta link add github:myorg/pragma --relationship dependency
+ta link list                   # table of all links + manifest presence
+ta link status                 # check reachability of all linked projects
+ta link refresh                # re-fetch remote manifests
+ta link refresh pragma         # refresh one link by name
+ta link remove cinepipe-train  # remove a link
+```
+
+### Studio Links panel
+
+The TA Studio dashboard shows a "Linked Projects" section below the Project Health panel. Each linked project appears as a card with:
+
+- A colored dot: green = manifest found, grey = unreachable, orange = stale cache, red = manifest missing
+- The relationship badge
+- The first sentence of the manifest's Purpose section
+
+Click a card to see the full manifest in a modal.
+
+---
+
 ## Community Knowledge Hub
 
 The Community Knowledge Hub gives every TA agent access to curated, community-maintained knowledge. Agents can search documentation before making API calls, check threat intelligence before security decisions, and contribute discovered gaps back as draft artifacts that you review before they're submitted upstream.

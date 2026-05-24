@@ -21,6 +21,7 @@ pub mod health;
 pub mod health_signals;
 pub mod input;
 pub mod interactions;
+pub mod links;
 pub mod notifications;
 pub mod persona;
 pub mod plan;
@@ -425,6 +426,8 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/advisor/context", get(advisor::get_context))
         // Context file upload for Studio --context flag (v0.15.30.7).
         .route("/api/context/upload", post(context_upload::upload_context))
+        // Cross-project links (v0.16.1.5).
+        .route("/api/links", get(links::get_links))
         // Daemon lifecycle routes (v0.10.10).
         .route("/api/shutdown", post(shutdown_daemon))
         // Auth middleware on all API routes.
