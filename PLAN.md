@@ -8034,6 +8034,28 @@ ta plan init --pragma --discover
 #### Version: `0.16.1-alpha.6`
 
 ---
+### v0.16.1.6.1 — Goal Title Integrity + Non-Interactive Plan Init
+<!-- status: pending -->
+
+**Problem**: Three issues surfaced during v0.16.1.6 goal run:
+
+1. **Corrupted draft title**: `ta plan init --pragma` ran inside the goal agent context and its full terminal output (YAML block + interactive prompt text + "Cancelled.") was captured as the goal title. Titles should be immutable after goal creation — never derived from agent command output.
+
+2. **Interactive prompt fired in non-interactive context**: `ta plan init --pragma` prompts `Write this schema? [y/N]` unconditionally. Inside a goal run there is no TTY; the prompt hit EOF / timed out and printed to stdout where it was captured. The command must detect non-TTY contexts and either skip the confirm step (write directly) or emit a structured message instead.
+
+3. **Double completion output**: Goal exit prints both `draft package built: <id>` and `✓ Draft ready: "..."` back-to-back with the full (possibly long) title repeated in each. The two messages should be collapsed into one at the terminal.
+
+**Fixes**:
+
+- [ ] **Goal title lock**: Set title at goal creation from the user-supplied description string. Never update it from agent stdout. Draft summary/description is a separate field.
+- [ ] **Non-interactive `ta plan init --pragma`**: Check `stdout.is_terminal()` before printing the confirm prompt. If non-TTY: write the schema file directly (no prompt) or skip with a structured log line. No interactive prompts inside goal agent contexts.
+- [ ] **Single completion message**: Deduplicate `draft package built` + `✓ Draft ready` into one terminal line at goal exit. Title in the message capped at ~80 chars with ellipsis if longer.
+
+**Depends on**: v0.16.1.6
+
+#### Version: `0.16.1-alpha.7`
+
+---
 ### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
 <!-- status: done -->
 
