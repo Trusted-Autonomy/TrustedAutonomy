@@ -38,10 +38,10 @@ jobs:
         working-directory: plugins/vscode-ta
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'
@@ -60,7 +60,7 @@ jobs:
         run: npx vsce package --no-git-tag-version --out ta-extension.vsix
 
       - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ta-extension-vsix
           path: plugins/vscode-ta/ta-extension.vsix
@@ -76,10 +76,10 @@ jobs:
         working-directory: plugins/vscode-ta
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'
@@ -115,7 +115,7 @@ jobs:
         run: npx vsce package --out "ta-vscode-${{ steps.version.outputs.version }}.vsix"
 
       - name: Upload VSIX to GitHub release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/vscode-v')
         with:
           files: plugins/vscode-ta/ta-vscode-${{ steps.version.outputs.version }}.vsix
