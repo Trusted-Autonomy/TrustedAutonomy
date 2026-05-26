@@ -8056,6 +8056,64 @@ ta plan init --pragma --discover
 #### Version: `0.16.1-alpha.7`
 
 ---
+### v0.16.1.7 — Developer Style Constitution (`ta style`)
+<!-- status: pending -->
+
+**Problem**: Every goal agent starts cold on coding style. Users repeat the same preferences across projects — "no helper functions for single use", "explicit error types", "flat over nested" — or omit them and get generic code. There's no way to encode personal coding philosophy once and have it apply everywhere. Public figures like Andrej Karpathy publish their CLAUDE.md files; there's no mechanism to import or share these.
+
+**Solution**: A global style constitution at `~/.config/ta/style.md`, authored once, prepended to every CLAUDE.md injection at `ta run` time. A `ta style` command manages it — interview, import, view, edit.
+
+**Commands**:
+
+```
+ta style init           # Interactive interview: builds ~/.config/ta/style.md from scratch
+ta style import <src>   # Import from a file path or HTTPS URL (e.g. Karpathy's CLAUDE.md)
+ta style show           # Print current style constitution
+ta style edit           # Open in $EDITOR
+ta style clear          # Remove the global style file
+```
+
+**Interview topics for `ta style init`**:
+- Abstraction tolerance (inline vs. extract, when to create a helper)
+- Comment philosophy (none / WHY only / full docstrings)
+- Error handling style (explicit types / anyhow / panic-on-impossible)
+- Test granularity (unit / integration / none for obvious logic)
+- Naming conventions (verbosity preference, abbreviation tolerance)
+- Code organisation (flat files vs. modules, max function length gut-feel)
+- Review style (what makes a PR description useful)
+
+**Import / sharing**:
+- `ta style import` accepts a local path or an `https://` URL
+- Content is copied to `~/.config/ta/style.md` (not referenced — avoids remote drift)
+- After import, `ta style show` lets the user review and trim before committing
+- Format is plain Markdown — compatible with any CLAUDE.md-style file published publicly
+
+**Injection**:
+- `ta run` prepends `~/.config/ta/style.md` to the injected CLAUDE.md block under a `## Developer Style` heading
+- Only injected if the file exists and is non-empty; no-op otherwise
+- Shown in `ta run --dry-run` output so the user can verify what the agent sees
+
+**Sharing story**:
+- The file is plain Markdown — users can post it as a GitHub Gist, a repo file, or a wiki page
+- Others import it with `ta style import https://gist.github.com/...`
+- TA does not host a registry; the sharing mechanism is URLs, the same way dotfiles are shared today
+
+**Deliverables**:
+- [ ] `ta style` subcommand with `init`, `import`, `show`, `edit`, `clear`
+- [ ] `ta style init` interview (7 topic areas, concise prompts, skippable)
+- [ ] `ta style import <path-or-url>` — local file copy or HTTPS fetch into `~/.config/ta/style.md`
+- [ ] URL fetch uses `reqwest` (already a workspace dep); respects redirects; rejects non-200
+- [ ] `ta run` injection: prepend style file under `## Developer Style` heading if present
+- [ ] `ta run --dry-run` prints injected CLAUDE.md preview including style section
+- [ ] `ta style show` prints with a header line showing source path and char count
+- [ ] Tests: `style_init_writes_file`, `style_import_from_path`, `style_import_from_url_mock`, `style_injected_in_run_dry_run`, `style_not_injected_when_absent`
+- [ ] **USAGE.md**: "Developer Style" section — what it does, how to import a community file, example workflow
+
+**Depends on**: v0.16.1.6
+
+#### Version: `0.16.1-alpha.8`
+
+---
 ### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
 <!-- status: done -->
 
