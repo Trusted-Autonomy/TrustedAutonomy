@@ -2352,6 +2352,9 @@ ta plan validate v0.3.1              # Phase details, linked goals, draft summar
 ta plan history                      # Status transition history
 ta plan mark-done v0.8.0,v0.8.1     # Batch-mark multiple phases as done
 ta plan init                         # Extract plan-schema.yaml from existing plan
+ta plan init --pragma                # Pragma Engine: interactive architecture discovery
+ta plan init --pragma --discover     # Pragma Engine: batch auto-discovery (no interview)
+ta plan init --discover              # General: scan codebase, write discovery-notes.md
 ta plan create                       # Generate new plan from template
 ta plan create --template feature    # Feature template
 ta plan from docs/PRD.md             # Generate plan from a product document (interactive)
@@ -2408,6 +2411,74 @@ ta plan lint --fix         # Auto-fix consecutive-separators; prints a fix summa
 ```
 
 `--fix` only applies mechanical corrections (removing duplicate separators). Issues requiring judgment (missing markers, unchecked items) are reported but not auto-corrected.
+
+#### Pragma Architecture Discovery
+
+For projects built on [Pragma Engine](https://pragma.gg), `ta plan init --pragma` scans the codebase and produces a structured architecture preamble in PLAN.md that gives agents context about which services, plugins, and SDKs are deployed.
+
+**Interactive interview (default)**
+
+```bash
+ta plan init --pragma
+```
+
+Each question accepts `y`, `N`, or `?`. Type `?` to have TA look up the answer from the codebase immediately — it scans the relevant directory and prints its finding and evidence source so you can confirm or override:
+
+```
+Is player service deployed? [y/N/?] ?
+  → Found: pragma-ext-service/player/ exists; included in settings.gradle.kts
+  → player: yes (high confidence)
+Is player service deployed? [y/N/?] y
+
+  Does player have a custom plugin implementation? [y/N/?] ?
+  → Found: PragmaPlayerPlugin in pragma-ext-service/player/src/main/kotlin/com/example/PlayerPlugin.kt
+  → player custom plugin: yes (high confidence)
+  Does player have a custom plugin implementation? [y/N/?] y
+```
+
+The `?` lookup runs in 1–3 seconds (reads only the relevant directory) and always shows its evidence so you stay in control.
+
+**Batch auto-discovery (`--discover`)**
+
+```bash
+ta plan init --pragma --discover
+```
+
+Skips the interview entirely. TA scans all fields automatically (service directories, Kotlin plugin classes, Gradle dependencies, version pins, TODO/FIXME counts) and shows a confirmation summary before writing:
+
+```
+Discovered:
+  Services:  ✓ player  ✓ matchmaking  ✗ commerce  ✗ social  ✗ game-data  ✗ ops  ✗ portal
+  Plugins:   player: custom  matchmaking: built-in
+  SDK:       unreal (medium — pragma-sdk-unreal in build.gradle.kts)
+  Version:   2026.1.0 (gradle.properties:3)
+  Tech debt: 14 TODO/FIXME items in codebase
+Accept? [Y/edit/abort]
+```
+
+- `Y` / Enter — writes the snapshot and PLAN.md preamble.
+- `edit` — opens the findings as JSON in `$EDITOR` for manual adjustment before writing.
+- `abort` — exits without writing anything.
+
+**General codebase discovery**
+
+```bash
+ta plan init --discover
+```
+
+Without `--pragma`, runs a general scan: detects the language stack, lists top-level directories, and captures recent git activity. Output is written to `.ta/memory/discovery-notes.md` for use by `ta plan from` and other planning commands.
+
+**What TA looks for**
+
+| Field | Signals |
+|---|---|
+| Service deployed? | `pragma-ext-service/<service>/` directory; entry in `settings.gradle.kts` |
+| Custom plugin? | Kotlin class extending `Pragma<Service>Plugin` or `Pragma<Service>Handler` |
+| SDK integrations | `pragma-sdk-unreal/unity/web` in `build.gradle.kts`; `.uplugin` files; `Packages/manifest.json` |
+| Pragma version | `pragmaVersion=` in `gradle.properties`; `gradle/libs.versions.toml` pin |
+| Tech debt | TODO/FIXME count via `git grep` |
+
+Confidence levels (`high`, `medium`, `low`) indicate how definitive the evidence was. Low-confidence fields are shown with their reason in the confirmation summary so you know where to verify manually.
 
 #### Human Tasks
 
