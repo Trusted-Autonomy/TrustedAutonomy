@@ -7950,7 +7950,7 @@ inject = true
 
 ---
 ### v0.16.1.6 — `ta plan init` Interview UX: Per-Question Agent Lookup + `--discover` Batch Mode
-<!-- status: pending -->
+<!-- status: done -->
 
 **Problem**: `ta plan init --pragma` interviews the user with y/N prompts like "Is player service deployed?" and "Does player have a custom plugin implementation?" — questions that require reading Kotlin class hierarchies and Gradle dependency graphs to answer confidently. Users who inherited a codebase or aren't familiar with its internals are blocked. The data is in the code; the user shouldn't have to be the lookup layer.
 
@@ -8003,17 +8003,17 @@ ta plan init --pragma --discover
 
 #### Items
 
-1. [ ] **`?` option on every interview prompt** (`plan.rs`): Change each `[y/N]` prompt to `[y/N/?]`. When `?` is entered, call `lookup_field_with_agent(field_name, project_root)` for just that field. Print the agent's finding + evidence source. Re-display the same prompt so the user can confirm the agent's answer or override it. No flag required — `?` is always available.
+1. [x] **`?` option on every interview prompt** (`plan.rs`): Change each `[y/N]` prompt to `[y/N/?]`. When `?` is entered, call `lookup_field_with_agent(field_name, project_root)` for just that field. Print the agent's finding + evidence source. Re-display the same prompt so the user can confirm the agent's answer or override it. No flag required — `?` is always available.
 
-2. [ ] **`lookup_field_with_agent()`** (`plan.rs`): Minimal scoped agent call for a single field. Constructs a one-sentence task ("Find whether the player service has a custom Pragma plugin implementation in src/main/kotlin/") and a file-read scope (the relevant subdirectory only). Returns `DiscoveryFinding { value: String, confidence: Confidence, evidence: String }`. Caps at 5 tool calls / 30 seconds.
+2. [x] **`lookup_field_with_agent()`** (`plan.rs`): Minimal scoped agent call for a single field. Constructs a one-sentence task ("Find whether the player service has a custom Pragma plugin implementation in src/main/kotlin/") and a file-read scope (the relevant subdirectory only). Returns `DiscoveryFinding { value: String, confidence: Confidence, evidence: String }`. Caps at 5 tool calls / 30 seconds.
 
-3. [ ] **`--discover` flag** (`plan.rs`): Batch mode — calls `discover_pragma_all_fields()` which runs static scan then launches one agent session for all unresolved fields. Returns a complete `PragmaSnapshot`. Confirmation UI (item 4) is shown before writing.
+3. [x] **`--discover` flag** (`plan.rs`): Batch mode — calls `discover_pragma_all_fields()` which runs static scan then launches one agent session for all unresolved fields. Returns a complete `PragmaSnapshot`. Confirmation UI (item 4) is shown before writing.
 
-4. [ ] **`discover_pragma_all_fields()`** (`plan.rs`): Runs existing static scan, identifies unresolved fields, builds a single agent prompt with all discovery tasks. Agent returns JSON matching `PragmaSnapshot` schema with per-field `confidence`. Agent is scoped to read-only access, capped at 20 tool calls / 3 minutes.
+4. [x] **`discover_pragma_all_fields()`** (`plan.rs`): Runs existing static scan, identifies unresolved fields, builds a single agent prompt with all discovery tasks. Agent returns JSON matching `PragmaSnapshot` schema with per-field `confidence`. Agent is scoped to read-only access, capped at 20 tool calls / 3 minutes.
 
-5. [ ] **Agent prompt templates** (`apps/ta-cli/src/templates/`): `pragma-discover-field.md` (single-field lookup, used by `?`); `pragma-discover-all.md` (batch discovery, used by `--discover`). Both instruct the agent to express confidence and cite the file + line as evidence.
+5. [x] **Agent prompt templates** (`apps/ta-cli/src/templates/`): `pragma-discover-field.md` (single-field lookup, used by `?`); `pragma-discover-all.md` (batch discovery, used by `--discover`). Both instruct the agent to express confidence and cite the file + line as evidence.
 
-6. [ ] **Confirmation UI for `--discover`** (`plan.rs`):
+6. [x] **Confirmation UI for `--discover`** (`plan.rs`):
    ```
    Discovered:
      Services:  player ✓  matchmaking ✓  commerce ✗  social ? (medium — no config found)
@@ -8025,11 +8025,11 @@ ta plan init --pragma --discover
    ```
    `edit` opens `$EDITOR` on a JSON representation of the findings.
 
-7. [ ] **Generic `--discover` (non-Pragma)**: `ta plan init --discover` without `--pragma` launches an agent with a general "describe this codebase" prompt. Output written as `discovery-notes.md` in `.ta/memory/`. No structured schema required.
+7. [x] **Generic `--discover` (non-Pragma)**: `ta plan init --discover` without `--pragma` launches an agent with a general "describe this codebase" prompt. Output written as `discovery-notes.md` in `.ta/memory/`. No structured schema required.
 
-8. [ ] **Tests**: `interview_question_mark_invokes_lookup`, `lookup_field_returns_finding_with_evidence`, `discover_all_fields_batch_agent_call`, `confirmation_ui_formats_low_confidence_fields`, `discover_skips_agent_for_fields_resolved_by_static_scan`. Agent calls stubbed in tests.
+8. [x] **Tests**: `interview_question_mark_invokes_lookup`, `lookup_field_returns_finding_with_evidence`, `discover_all_fields_batch_agent_call`, `confirmation_ui_formats_low_confidence_fields`, `discover_skips_agent_for_fields_resolved_by_static_scan`. Agent calls stubbed in tests.
 
-9. [ ] **USAGE.md**: Update "ta plan init" section — document `?` option at prompts, `--discover` batch mode, what the agent searches for, how to read the confidence indicators.
+9. [x] **USAGE.md**: Update "ta plan init" section — document `?` option at prompts, `--discover` batch mode, what the agent searches for, how to read the confidence indicators.
 
 #### Version: `0.16.1-alpha.6`
 
