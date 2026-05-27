@@ -4544,6 +4544,8 @@ fn deny_package(
                     } else {
                         println!("Plan: phase {} reset to pending (goal denied)", phase_id);
                     }
+                    // Best-effort: tell the daemon to release the in-memory phase claim.
+                    release_phase_claim_via_daemon(&config.workspace_root, phase_id);
                 }
             }
         }
@@ -9032,7 +9034,8 @@ fn close_package(
     }
 
     // v0.14.6: Write goal audit ledger entry.
-    {
+    // Also capture goal for phase reset below.
+    let package_goal_id = {
         let goal_store = GoalRunStore::new(&config.goals_dir);
         let goal = goal_store.ok().and_then(|store| {
             store
@@ -9041,6 +9044,7 @@ fn close_package(
                 .into_iter()
                 .find(|g| g.pr_package_id == Some(package_id))
         });
+        let gid = goal.as_ref().map(|g| g.goal_run_id);
         write_goal_audit_entry(
             config,
             &pkg,
@@ -9050,6 +9054,35 @@ fn close_package(
             None,
             reason,
         );
+        gid
+    };
+
+    // Reset plan phase from in_progress → pending when a draft is closed.
+    // A closed draft means the work is abandoned — the phase is no longer in progress.
+    if let Some(goal_id) = package_goal_id {
+        let goal_store = ta_goal::GoalRunStore::new(&config.goals_dir);
+        if let Ok(store) = goal_store {
+            if let Ok(Some(goal)) = store.get(goal_id) {
+                if let Some(ref phase_id) = goal.plan_phase {
+                    let note = "phase reset to pending — draft closed";
+                    if let Err(e) = super::plan::reset_phase_if_in_progress(
+                        &config.workspace_root,
+                        phase_id,
+                        note,
+                    ) {
+                        tracing::warn!(
+                            phase = %phase_id,
+                            error = %e,
+                            "Failed to reset plan phase on close"
+                        );
+                    } else {
+                        println!("Plan: phase {} reset to pending (draft closed)", phase_id);
+                    }
+                    // Best-effort: tell the daemon to release the in-memory phase claim.
+                    release_phase_claim_via_daemon(&config.workspace_root, phase_id);
+                }
+            }
+        }
     }
 
     println!("Draft {} closed.", package_id);
@@ -11468,6 +11501,41 @@ fn fmt_velocity_duration(seconds: i64) -> String {
         let h = seconds / 3600;
         let m = (seconds % 3600) / 60;
         format!("{}h {}m", h, m)
+    }
+}
+
+/// Best-effort: tell the daemon to release its in-memory phase claim for `phase_id`.
+///
+/// Called after `deny` and `close` operations that reset PLAN.md to `pending`.
+/// If the daemon is not running or the endpoint fails, this is silently ignored —
+/// the PLAN.md reset is the authoritative gate; the in-memory claim is advisory.
+fn release_phase_claim_via_daemon(workspace_root: &std::path::Path, phase_id: &str) {
+    let daemon_url = super::daemon::resolve_daemon_url(workspace_root, None);
+    let url = format!("{}/api/plan/phase/release", daemon_url);
+
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let body = serde_json::json!({ "phase_id": phase_id });
+    match client.post(&url).json(&body).send() {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::debug!(phase = %phase_id, "Released in-memory phase claim via daemon");
+        }
+        Ok(resp) => {
+            tracing::debug!(
+                phase = %phase_id,
+                status = %resp.status(),
+                "Daemon phase release returned non-success (claim may not have existed)"
+            );
+        }
+        Err(_) => {
+            // Daemon not running — fine, PLAN.md is the authoritative gate.
+        }
     }
 }
 

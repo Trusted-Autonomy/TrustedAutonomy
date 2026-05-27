@@ -2039,6 +2039,132 @@ fn validate_phase(config: &GatewayConfig, phase_id: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
+// ── Non-interactive policy ────────────────────────────────────────────────────
+
+/// Returns `true` when stdin is not a TTY (e.g., inside a goal agent, CI, or pipe).
+fn is_noninteractive_context() -> bool {
+    use std::io::IsTerminal;
+    !std::io::stdin().is_terminal()
+}
+
+/// Configuration for non-interactive automation policy loaded from config files.
+///
+/// Checked in order: `.ta/config.toml` (project-local) → `~/.config/ta/config.toml` (global).
+#[derive(Default)]
+struct NonInteractivePolicy {
+    /// When `true`, `ta plan init` proceeds without prompting in non-interactive contexts.
+    pub auto_write_schema: bool,
+}
+
+fn load_noninteractive_policy(workspace_root: &std::path::Path) -> NonInteractivePolicy {
+    // Helper: extract [plan_init] auto_write_schema from TOML content.
+    fn parse_policy(content: &str) -> Option<bool> {
+        // Minimal TOML parse: look for [plan_init] section, then auto_write_schema.
+        let mut in_section = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_section = trimmed == "[plan_init]";
+                continue;
+            }
+            if in_section {
+                if let Some(rest) = trimmed.strip_prefix("auto_write_schema") {
+                    let rest = rest.trim();
+                    if let Some(val) = rest.strip_prefix('=') {
+                        let val = val.trim();
+                        if val == "true" {
+                            return Some(true);
+                        }
+                        if val == "false" {
+                            return Some(false);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // 1. Project-local config (highest priority).
+    let local_path = workspace_root.join(".ta/config.toml");
+    if let Ok(content) = std::fs::read_to_string(&local_path) {
+        if let Some(val) = parse_policy(&content) {
+            return NonInteractivePolicy {
+                auto_write_schema: val,
+            };
+        }
+    }
+
+    // 2. Global user config.
+    let global_path = user_config_dir_ta().map(|d| d.join("config.toml"));
+    if let Some(path) = global_path {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Some(val) = parse_policy(&content) {
+                return NonInteractivePolicy {
+                    auto_write_schema: val,
+                };
+            }
+        }
+    }
+
+    NonInteractivePolicy::default()
+}
+
+fn user_config_dir_ta() -> Option<std::path::PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return Some(std::path::PathBuf::from(xdg).join("ta"));
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".config").join("ta"))
+}
+
+/// Abort with an actionable error if we're in a non-interactive context with no approved policy.
+///
+/// Call this before any `stdin.read_line()` prompt in plan commands. Returns `Ok(())` if it's
+/// safe to prompt the user, or `Err(...)` with clear guidance if not.
+fn require_interactive_or_policy(
+    workspace_root: &std::path::Path,
+    command_desc: &str,
+) -> anyhow::Result<()> {
+    require_interactive_or_policy_inner(is_noninteractive_context(), workspace_root, command_desc)
+}
+
+fn require_interactive_or_policy_inner(
+    is_noninteractive: bool,
+    workspace_root: &std::path::Path,
+    command_desc: &str,
+) -> anyhow::Result<()> {
+    if !is_noninteractive {
+        return Ok(());
+    }
+    let policy = load_noninteractive_policy(workspace_root);
+    if policy.auto_write_schema {
+        tracing::info!(
+            command = command_desc,
+            "Non-interactive context: proceeding automatically (auto_write_schema = true)"
+        );
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Interactive prompt required but stdin is not a TTY.\n\
+        \n\
+        What happened: `{command_desc}` was called from a non-interactive context \
+        (no TTY — likely inside a goal agent or CI pipeline). It needs user confirmation \
+        before writing files, but there is no user to answer.\n\
+        \n\
+        To allow this automatically, add the following to `.ta/config.toml` \
+        (project-local) or `~/.config/ta/config.toml` (global):\n\
+        \n\
+          [plan_init]\n\
+          auto_write_schema = true\n\
+        \n\
+        This was likely triggered unintentionally. If you meant to run \
+        `ta plan init` interactively, run it outside the goal agent session \
+        (i.e., directly in your terminal, not as part of a `ta run` goal)."
+    )
+}
+
 fn plan_init(
     config: &GatewayConfig,
     source: &str,
@@ -2082,6 +2208,10 @@ fn plan_init(
     }
 
     if !yes {
+        require_interactive_or_policy(
+            &config.workspace_root,
+            "ta plan init (write plan-schema.yaml)",
+        )?;
         print!("\nWrite this schema? [y/N] ");
         use std::io::Write;
         std::io::stdout().flush()?;
@@ -5955,12 +6085,17 @@ fn plan_init_pragma(config: &GatewayConfig, discover: bool) -> anyhow::Result<()
 ///
 /// Each `[y/N]` prompt accepts `?` to trigger an immediate per-field lookup.
 fn pragma_interview_interactive(
-    _config: &GatewayConfig,
+    config: &GatewayConfig,
     project_root: &std::path::Path,
     scan_results: &[String],
     gradle_modules: &[String],
 ) -> anyhow::Result<()> {
     use std::io::Write as _;
+
+    require_interactive_or_policy(
+        &config.workspace_root,
+        "ta plan init --pragma (interactive interview)",
+    )?;
 
     let pragma_services = [
         "player",
@@ -6139,12 +6274,17 @@ fn ask_pragma_yn(
 
 /// Batch discovery path for `ta plan init --pragma --discover`.
 fn plan_init_pragma_discover(
-    _config: &GatewayConfig,
+    config: &GatewayConfig,
     project_root: &std::path::Path,
     scan_results: &[String],
     gradle_modules: &[String],
 ) -> anyhow::Result<()> {
     use std::io::Write as _;
+
+    require_interactive_or_policy(
+        &config.workspace_root,
+        "ta plan init --pragma --discover (confirmation prompt)",
+    )?;
 
     println!("Running batch discovery (scanning codebase for all fields)...");
     println!();
@@ -9463,5 +9603,120 @@ More content here that is part of a second paragraph.
             "should have section: {:?}",
             notes
         );
+    }
+
+    // ── non-interactive policy tests ─────────────────────────────────────────
+
+    #[test]
+    fn noninteractive_policy_defaults_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = load_noninteractive_policy(dir.path());
+        assert!(!policy.auto_write_schema);
+    }
+
+    #[test]
+    fn noninteractive_policy_reads_local_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("config.toml"),
+            "[plan_init]\nauto_write_schema = true\n",
+        )
+        .unwrap();
+        let policy = load_noninteractive_policy(dir.path());
+        assert!(policy.auto_write_schema);
+    }
+
+    #[test]
+    fn noninteractive_policy_false_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("config.toml"),
+            "[plan_init]\nauto_write_schema = false\n",
+        )
+        .unwrap();
+        let policy = load_noninteractive_policy(dir.path());
+        assert!(!policy.auto_write_schema);
+    }
+
+    #[test]
+    fn noninteractive_policy_missing_section_is_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("config.toml"),
+            "[other_section]\nsome_key = true\n",
+        )
+        .unwrap();
+        let policy = load_noninteractive_policy(dir.path());
+        assert!(!policy.auto_write_schema);
+    }
+
+    #[test]
+    fn noninteractive_without_policy_errors_with_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        // No config.toml → no policy → must error.
+        let err = require_interactive_or_policy_inner(
+            true, // simulate non-interactive
+            dir.path(),
+            "ta plan init (test)",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not a TTY"), "should mention TTY: {}", msg);
+        assert!(
+            msg.contains("auto_write_schema = true"),
+            "should include config key: {}",
+            msg
+        );
+        assert!(
+            msg.contains("ta plan init"),
+            "should mention the command: {}",
+            msg
+        );
+        assert!(
+            msg.contains("config.toml"),
+            "should mention config file path: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn noninteractive_with_policy_proceeds_and_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("config.toml"),
+            "[plan_init]\nauto_write_schema = true\n",
+        )
+        .unwrap();
+        // With policy set → should return Ok, not error.
+        let result = require_interactive_or_policy_inner(
+            true, // simulate non-interactive
+            dir.path(),
+            "ta plan init (test)",
+        );
+        assert!(
+            result.is_ok(),
+            "should proceed when auto_write_schema = true: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn interactive_context_always_proceeds() {
+        let dir = tempfile::tempdir().unwrap();
+        // No config, but interactive context → should always proceed.
+        let result = require_interactive_or_policy_inner(
+            false, // simulate interactive TTY
+            dir.path(),
+            "ta plan init (test)",
+        );
+        assert!(result.is_ok());
     }
 }

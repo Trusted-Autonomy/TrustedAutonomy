@@ -360,6 +360,7 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/plan/phases", get(plan::get_plan_phases))
         .route("/api/plan/phase/add", post(plan::add_plan_phase))
         .route("/api/plan/phase/claim", post(plan::claim_phase))
+        .route("/api/plan/phase/release", post(plan::release_phase))
         .route("/api/goal/start", post(plan::start_goal))
         // Plan generation (v0.14.20).
         .route("/api/plan/generate", post(plan::generate_plan_phases))
