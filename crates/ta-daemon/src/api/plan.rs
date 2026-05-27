@@ -582,6 +582,47 @@ pub async fn claim_phase(
         .into_response()
 }
 
+/// `POST /api/plan/phase/release` — Release an in-memory phase claim.
+///
+/// Called by `ta draft deny` and `ta draft close` after resetting PLAN.md to `pending`.
+/// This releases the daemon's in-memory claim registry so future `claim` calls succeed.
+///
+/// If the phase was not claimed, returns 200 with `{ "status": "not_claimed" }` — this
+/// is not an error (idempotent by design).
+pub async fn release_phase(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let phase_id = match body.get("phase_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "phase_id must not be empty" })),
+            )
+                .into_response();
+        }
+    };
+
+    let was_claimed = state.phase_claims.is_claimed(&phase_id);
+    state.phase_claims.release(&phase_id);
+
+    tracing::info!(
+        phase = %phase_id,
+        was_claimed,
+        "Phase claim released via API"
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": if was_claimed { "released" } else { "not_claimed" },
+            "phase_id": phase_id,
+        })),
+    )
+        .into_response()
+}
+
 /// Update a phase status marker in PLAN.md content.
 fn update_phase_status_in_content(content: &str, phase_id: &str, new_status: &str) -> String {
     let status_re = regex::Regex::new(r"<!--\s*status:\s*\w+\s*-->").expect("static regex");
@@ -1321,6 +1362,89 @@ Future work.
         assert!(
             states.is_empty(),
             "orphaned phase_id must not produce an active state entry"
+        );
+    }
+
+    // ── phase claim release tests (v0.16.1.6.1) ─────────────────────────────
+
+    #[test]
+    fn denied_draft_releases_phase_claim() {
+        // The phase claim registry must allow re-claiming after release.
+        let claims = crate::phase_claim::PhaseClaims::new();
+        claims.try_claim("v0.1.0", Some("goal-a")).unwrap();
+        assert!(claims.is_claimed("v0.1.0"));
+
+        // Simulate what release_phase handler does.
+        claims.release("v0.1.0");
+        assert!(!claims.is_claimed("v0.1.0"));
+
+        // Phase can be claimed again after release.
+        assert!(claims.try_claim("v0.1.0", Some("goal-b")).is_ok());
+    }
+
+    #[test]
+    fn denied_draft_resets_planmd_to_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("PLAN.md");
+        std::fs::write(
+            &plan_path,
+            "### v0.1.0 — Test\n<!-- status: in_progress -->\n",
+        )
+        .unwrap();
+
+        let updated = update_phase_status_in_content(
+            &std::fs::read_to_string(&plan_path).unwrap(),
+            "v0.1.0",
+            "pending",
+        );
+        std::fs::write(&plan_path, &updated).unwrap();
+
+        let content = std::fs::read_to_string(&plan_path).unwrap();
+        assert!(
+            content.contains("status: pending"),
+            "PLAN.md should have pending status after reset: {}",
+            content
+        );
+        assert!(
+            !content.contains("in_progress"),
+            "PLAN.md should not have in_progress: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn closed_goal_releases_phase_claim() {
+        let claims = crate::phase_claim::PhaseClaims::new();
+        claims.try_claim("v0.2.0", Some("goal-c")).unwrap();
+
+        // release() is idempotent — calling it twice is fine.
+        claims.release("v0.2.0");
+        claims.release("v0.2.0"); // should not panic
+        assert!(!claims.is_claimed("v0.2.0"));
+    }
+
+    #[test]
+    fn applied_draft_marks_phase_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("PLAN.md");
+        std::fs::write(
+            &plan_path,
+            "### v0.3.0 — Apply Test\n<!-- status: in_progress -->\n",
+        )
+        .unwrap();
+
+        let updated = update_phase_status_in_content(
+            &std::fs::read_to_string(&plan_path).unwrap(),
+            "v0.3.0",
+            "done",
+        );
+        std::fs::write(&plan_path, &updated).unwrap();
+
+        let content = std::fs::read_to_string(&plan_path).unwrap();
+        assert!(
+            content.contains("status: done"),
+            "PLAN.md should have done status after apply: {}",
+            content
         );
     }
 }

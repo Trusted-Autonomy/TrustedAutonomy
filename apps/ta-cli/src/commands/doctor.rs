@@ -193,6 +193,9 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 16. Cross-project link health (v0.16.1.5).
     results.extend(check_links(config));
 
+    // 17. Orphaned in_progress phases — PLAN.md says in_progress but no live goal (v0.16.1.6.1).
+    results.extend(check_orphaned_in_progress_phases(config));
+
     results
 }
 
@@ -1166,6 +1169,82 @@ fn check_links(config: &GatewayConfig) -> Vec<CheckResult> {
     results
 }
 
+// ── Orphaned in_progress phase check (v0.16.1.6.1) ───────────────────────────
+
+/// Detect PLAN.md phases that are marked `in_progress` but have no live goal claim.
+///
+/// An `in_progress` marker with no active goal means a previous run was interrupted
+/// or denied without properly resetting the status. This blocks future `ta run --phase`
+/// calls with a confusing "already claimed" error.
+///
+/// Emits a [warn] for each orphaned phase, with a fix hint to reset it manually.
+fn check_orphaned_in_progress_phases(config: &GatewayConfig) -> Vec<CheckResult> {
+    use ta_goal::{GoalRunState, GoalRunStore};
+
+    let plan_path = config.workspace_root.join("PLAN.md");
+    if !plan_path.exists() {
+        return Vec::new();
+    }
+
+    let content = match std::fs::read_to_string(&plan_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    // Collect all phases with in_progress status.
+    let in_progress_phases: Vec<_> = super::plan::parse_plan(&content)
+        .into_iter()
+        .filter(|p| matches!(p.status, super::plan::PlanStatus::InProgress))
+        .collect();
+
+    if in_progress_phases.is_empty() {
+        return Vec::new();
+    }
+
+    // Load all active goals to check which phases have live claims.
+    let active_phase_ids: std::collections::HashSet<String> = GoalRunStore::new(&config.goals_dir)
+        .ok()
+        .and_then(|store| store.list().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|g| {
+            matches!(
+                g.state,
+                GoalRunState::Running
+                    | GoalRunState::Configured
+                    | GoalRunState::PrReady
+                    | GoalRunState::UnderReview
+                    | GoalRunState::Approved { .. }
+                    | GoalRunState::Finalizing { .. }
+                    | GoalRunState::DraftPending { .. }
+                    | GoalRunState::AwaitingInput { .. }
+            )
+        })
+        .filter_map(|g| g.plan_phase)
+        .collect();
+
+    let mut results = Vec::new();
+    for phase in in_progress_phases {
+        if !active_phase_ids.contains(&phase.id) {
+            results.push(CheckResult::warn(
+                "Plan phase",
+                format!(
+                    "Phase {} is marked in_progress but has no active goal",
+                    phase.id
+                ),
+                format!(
+                    "Reset it manually:\n\
+                     \x20  ta plan reset-phase {} --to pending\n\
+                     or edit PLAN.md and change \"in_progress\" \u{2192} \"pending\" for this phase.\n\
+                     Cause: a previous goal was denied or interrupted without resetting the phase.",
+                    phase.id
+                ),
+            ));
+        }
+    }
+    results
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1303,5 +1382,28 @@ mod tests {
             results.iter().all(|r| r.status != CheckStatus::Fail),
             "gemma4 check should not fail when profile is installed"
         );
+    }
+
+    #[test]
+    fn orphaned_in_progress_check_clean_when_no_plan() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let results = check_orphaned_in_progress_phases(&config);
+        assert!(results.is_empty(), "no checks when no PLAN.md");
+    }
+
+    #[test]
+    fn orphaned_in_progress_check_warns_for_stale_phase() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        // Write a PLAN.md with an in_progress phase.
+        let plan_content = "### v0.1.0 — Test Phase\n<!-- status: in_progress -->\n";
+        std::fs::write(dir.path().join("PLAN.md"), plan_content).unwrap();
+        // No goals exist → the claim is orphaned.
+        let results = check_orphaned_in_progress_phases(&config);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, CheckStatus::Warn);
+        assert!(results[0].detail.contains("v0.1.0"));
+        assert!(!results[0].fix.is_empty(), "should have a fix hint");
     }
 }

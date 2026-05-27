@@ -392,6 +392,79 @@ pub fn slugify_title(title: &str) -> String {
     }
 }
 
+/// Sanitize a goal title: strip ANSI escapes, collapse whitespace, truncate to 500 chars.
+///
+/// Titles are opaque user-supplied text. This ensures stored titles are safe to
+/// display and never corrupted by terminal output captured during a run.
+pub fn sanitize_title(title: &str) -> String {
+    // Strip ANSI/VT100 escape sequences: ESC [ ... final-byte and other ESC sequences.
+    let mut s = String::with_capacity(title.len());
+    let bytes = title.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            // ESC — skip escape sequence.
+            i += 1;
+            if i < bytes.len() {
+                match bytes[i] {
+                    b'[' => {
+                        // CSI sequence: ESC [ ... final (0x40–0x7e)
+                        i += 1;
+                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                        i += 1; // consume final byte
+                    }
+                    b']' => {
+                        // OSC sequence: ESC ] ... ST (ESC \ or BEL)
+                        i += 1;
+                        while i < bytes.len() {
+                            if bytes[i] == 0x07 {
+                                i += 1;
+                                break;
+                            }
+                            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    _ => {
+                        // Two-byte escape — skip the second byte.
+                        i += 1;
+                    }
+                }
+            }
+        } else if bytes[i] < 0x20 || bytes[i] == 0x7f {
+            // Replace other control characters (including newlines, tabs, CR) with space.
+            s.push(' ');
+            i += 1;
+        } else {
+            // Collect a run of normal UTF-8 bytes.
+            let start = i;
+            while i < bytes.len() && bytes[i] != 0x1b && bytes[i] >= 0x20 && bytes[i] != 0x7f {
+                i += 1;
+            }
+            if let Ok(chunk) = std::str::from_utf8(&bytes[start..i]) {
+                s.push_str(chunk);
+            }
+        }
+    }
+
+    // Collapse runs of whitespace to a single space and trim.
+    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Truncate to 500 chars at a character boundary with a marker.
+    const MAX_CHARS: usize = 500;
+    if collapsed.chars().count() > MAX_CHARS {
+        let cut: String = collapsed.chars().take(MAX_CHARS).collect();
+        format!("{}…", cut)
+    } else {
+        collapsed
+    }
+}
+
 impl GoalRun {
     /// Create a new GoalRun in the Created state.
     pub fn new(
@@ -402,7 +475,7 @@ impl GoalRun {
         store_path: PathBuf,
     ) -> Self {
         let now = Utc::now();
-        let title = title.into();
+        let title = sanitize_title(&title.into());
         Self {
             goal_run_id: Uuid::new_v4(),
             tag: None, // Set by GoalRunStore::save_with_tag() or manually
@@ -950,5 +1023,69 @@ mod tests {
         assert!(json.contains("\"tag\""));
         let restored: GoalRun = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.tag, Some("my-goal-01".to_string()));
+    }
+
+    // ── sanitize_title tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn title_strips_ansi_codes() {
+        let raw = "\x1b[32mGreen title\x1b[0m";
+        assert_eq!(sanitize_title(raw), "Green title");
+    }
+
+    #[test]
+    fn title_strips_osc_ansi_codes() {
+        // OSC hyperlink sequence.
+        let raw = "\x1b]8;;https://example.com\x07link text\x1b]8;;\x07";
+        assert_eq!(sanitize_title(raw), "link text");
+    }
+
+    #[test]
+    fn title_collapses_whitespace() {
+        let raw = "Fix  the\t  auth\n\nbug";
+        assert_eq!(sanitize_title(raw), "Fix the auth bug");
+    }
+
+    #[test]
+    fn title_collapses_mixed_control_and_whitespace() {
+        let raw = "title\r\nwith\nnewlines\r";
+        assert_eq!(sanitize_title(raw), "title with newlines");
+    }
+
+    #[test]
+    fn title_never_exceeds_max_length() {
+        let long = "x".repeat(600);
+        let result = sanitize_title(&long);
+        // Max 500 chars + '…' suffix
+        assert!(
+            result.chars().count() <= 501,
+            "len={}",
+            result.chars().count()
+        );
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn title_under_limit_not_truncated() {
+        let short = "Short title";
+        assert_eq!(sanitize_title(short), "Short title");
+        assert!(!sanitize_title(short).ends_with('…'));
+    }
+
+    #[test]
+    fn title_sanitized_on_goal_run_new() {
+        let gr = GoalRun::new(
+            "\x1b[31mRed Title\x1b[0m  with  spaces",
+            "objective",
+            "agent",
+            PathBuf::from("/tmp/staging"),
+            PathBuf::from("/tmp/store"),
+        );
+        assert_eq!(gr.title, "Red Title with spaces");
+    }
+
+    #[test]
+    fn title_plain_text_unchanged() {
+        assert_eq!(sanitize_title("Fix auth bug"), "Fix auth bug");
     }
 }
