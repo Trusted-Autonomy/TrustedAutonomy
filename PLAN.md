@@ -8034,22 +8034,22 @@ ta plan init --pragma --discover
 #### Version: `0.16.1-alpha.6`
 
 ---
-### v0.16.1.6.1 — Goal Title Integrity + Non-Interactive Plan Init
+### v0.16.1.6.1 — Goal Title Integrity + Safe Non-Interactive Handling
 <!-- status: pending -->
 
-**Problem**: Three issues surfaced during v0.16.1.6 goal run:
+**Problem**: Two issues surfaced during v0.16.1.6 goal run:
 
-1. **Corrupted draft title**: `ta plan init --pragma` ran inside the goal agent context and its full terminal output (YAML block + interactive prompt text + "Cancelled.") was captured as the goal title. Titles should be immutable after goal creation — never derived from agent command output.
+1. **Corrupted goal/draft title**: The goal title was never meant to be executed — it is a user-supplied description string. Somewhere in the display/storage path it was treated as renderable or scriptable content, allowing terminal output captured during the run to corrupt it. A title must be treated as an opaque text blob: stored verbatim at creation, sanitised on output (collapse whitespace, strip control characters), and never re-interpreted as a script, template, or command.
 
-2. **Interactive prompt fired in non-interactive context**: `ta plan init --pragma` prompts `Write this schema? [y/N]` unconditionally. Inside a goal run there is no TTY; the prompt hit EOF / timed out and printed to stdout where it was captured. The command must detect non-TTY contexts and either skip the confirm step (write directly) or emit a structured message instead.
+2. **Interactive prompt fired in non-interactive context**: `ta plan init --pragma` emitted a `Write this schema? [y/N]` prompt unconditionally. In a goal agent context there is no TTY and no user to answer. Blindly auto-accepting (write directly) or silently dropping (skip) are both wrong — either can take an action the user never approved or silently do nothing. The right behaviour is to detect the non-interactive context and error out with clear, actionable guidance rather than guessing. The error should tell the user: (a) what was attempted and why, (b) how to configure an approved automated path in `~/.config/ta/config.toml` or `.ta/config.toml` if they want automation, and (c) that this was likely triggered unintentionally and how to avoid it.
 
-3. **Double completion output**: Goal exit prints both `draft package built: <id>` and `✓ Draft ready: "..."` back-to-back with the full (possibly long) title repeated in each. The two messages should be collapsed into one at the terminal.
+**Note**: The "double completion output" seen in v0.16.1.6 was a direct consequence of the title being treated as scriptable content, not an independent bug.
 
 **Fixes**:
 
-- [ ] **Goal title lock**: Set title at goal creation from the user-supplied description string. Never update it from agent stdout. Draft summary/description is a separate field.
-- [ ] **Non-interactive `ta plan init --pragma`**: Check `stdout.is_terminal()` before printing the confirm prompt. If non-TTY: write the schema file directly (no prompt) or skip with a structured log line. No interactive prompts inside goal agent contexts.
-- [ ] **Single completion message**: Deduplicate `draft package built` + `✓ Draft ready` into one terminal line at goal exit. Title in the message capped at ~80 chars with ellipsis if longer.
+- [ ] **Immutable title as opaque text**: Goal title set once at creation from the user-supplied string. Never updated. On storage: strip ANSI escape sequences, collapse runs of whitespace/newlines to single space, trim to a reasonable max length (e.g. 500 chars) with truncation marker. On display: render as plain text — no Markdown interpretation, no shell expansion. The title field must never be treated as a script or template at any point in the pipeline.
+- [ ] **Non-interactive prompt policy**: When a command that would normally prompt the user runs in a non-interactive context (no TTY, inside a goal agent), check for a configured automation policy in `~/.config/ta/config.toml` or `.ta/config.toml` (e.g. `[plan_init] auto_write_schema = true`). If a policy exists and is approved: proceed non-interactively with a log line noting the automated action. If no policy: abort with an error that includes — what was attempted, why it requires user input, how to set `auto_write_schema = true` to allow it in future, and that it was likely triggered unintentionally by the agent calling an interactive command. Error text should be actionable, not just "not a TTY".
+- [ ] **Tests**: `title_strips_ansi_codes`, `title_collapses_whitespace`, `title_never_exceeds_max_length`, `noninteractive_without_policy_errors_with_guidance`, `noninteractive_with_policy_proceeds_and_logs`
 
 **Depends on**: v0.16.1.6
 
@@ -8059,55 +8059,66 @@ ta plan init --pragma --discover
 ### v0.16.1.7 — Developer Style Constitution (`ta style`)
 <!-- status: pending -->
 
-**Problem**: Every goal agent starts cold on coding style. Users repeat the same preferences across projects — "no helper functions for single use", "explicit error types", "flat over nested" — or omit them and get generic code. There's no way to encode personal coding philosophy once and have it apply everywhere. Public figures like Andrej Karpathy publish their CLAUDE.md files; there's no mechanism to import or share these.
+**Problem**: Every goal agent starts cold on coding style. Users repeat the same preferences across projects — "no helper functions for single use", "explicit error types", "flat over nested" — or omit them and get generic code. There's no way to encode personal coding philosophy once and have it apply everywhere, and no way to learn the implicit style of an existing codebase before modifying it. Public figures like Andrej Karpathy publish their CLAUDE.md style files, but there's no mechanism to import, apply, or discover equivalents.
 
-**Solution**: A global style constitution at `~/.config/ta/style.md`, authored once, prepended to every CLAUDE.md injection at `ta run` time. A `ta style` command manages it — interview, import, view, edit.
+**Solution**: A global style constitution at `~/.config/ta/style.md`, authored once, prepended to every CLAUDE.md injection at `ta run` time. Four paths to build one: write from scratch (interview), apply a curated template, import any URL, or discover from an existing codebase.
 
 **Commands**:
 
 ```
-ta style init           # Interactive interview: builds ~/.config/ta/style.md from scratch
-ta style import <src>   # Import from a file path or HTTPS URL (e.g. Karpathy's CLAUDE.md)
-ta style show           # Print current style constitution
-ta style edit           # Open in $EDITOR
-ta style clear          # Remove the global style file
+ta style init              # Interactive interview: builds ~/.config/ta/style.md from scratch
+ta style template list     # List built-in curated templates
+ta style template apply <name>  # Apply a template (merges with or replaces current)
+ta style import <src>      # Import from a file path or HTTPS URL
+ta style discover [path]   # Analyse codebase at path (default: cwd) and infer style
+ta style show              # Print current style constitution
+ta style edit              # Open in $EDITOR
+ta style clear             # Remove the global style file
 ```
 
-**Interview topics for `ta style init`**:
-- Abstraction tolerance (inline vs. extract, when to create a helper)
-- Comment philosophy (none / WHY only / full docstrings)
-- Error handling style (explicit types / anyhow / panic-on-impossible)
-- Test granularity (unit / integration / none for obvious logic)
-- Naming conventions (verbosity preference, abbreviation tolerance)
-- Code organisation (flat files vs. modules, max function length gut-feel)
-- Review style (what makes a PR description useful)
+**Built-in templates**:
+- `karpathy` — Andrej Karpathy's published CLAUDE.md preferences (flat code, minimal abstraction, explicit over implicit, no premature generalisation)
+- `minimal` — bare-bones: no comments, no helpers, explicit errors, tests only for non-obvious logic
+- `documented` — full docstrings, typed interfaces, integration tests preferred
+- `pragmatic` — balanced: WHY-only comments, extract only when used 3+ times, anyhow for errors
+
+Templates are plain Markdown files shipped with the binary; `ta style template list` shows name, one-line description, and source attribution.
+
+**Style discovery (`ta style discover`)**:
+- Analyses the codebase at the given path (or current directory) using an agent prompt
+- Agent examines: comment density and style, function length distribution, abstraction patterns (number of helper modules vs. inline logic), error handling approach, test structure, naming conventions
+- Produces a `style.md` draft capturing observed patterns with confidence indicators
+- User reviews the draft before it overwrites (or merges into) the current style file
+- Useful when joining a project, working in a cross-team codebase, or when style was never written down
+- Discovery prompt is in `src/templates/style-discover.md` — agent-readable, not hardcoded
 
 **Import / sharing**:
 - `ta style import` accepts a local path or an `https://` URL
-- Content is copied to `~/.config/ta/style.md` (not referenced — avoids remote drift)
-- After import, `ta style show` lets the user review and trim before committing
-- Format is plain Markdown — compatible with any CLAUDE.md-style file published publicly
+- Content is copied locally — no remote reference that can drift
+- Format is plain Markdown — any publicly posted CLAUDE.md-style file works
 
 **Injection**:
-- `ta run` prepends `~/.config/ta/style.md` to the injected CLAUDE.md block under a `## Developer Style` heading
+- `ta run` prepends `~/.config/ta/style.md` under a `## Developer Style` heading
 - Only injected if the file exists and is non-empty; no-op otherwise
-- Shown in `ta run --dry-run` output so the user can verify what the agent sees
+- Shown in `ta run --dry-run` output
 
 **Sharing story**:
-- The file is plain Markdown — users can post it as a GitHub Gist, a repo file, or a wiki page
-- Others import it with `ta style import https://gist.github.com/...`
-- TA does not host a registry; the sharing mechanism is URLs, the same way dotfiles are shared today
+- Plain Markdown — post as a GitHub Gist, repo file, or wiki page; others import with `ta style import <url>`
+- TA does not host a registry; sharing is URLs, the same way dotfiles are shared today
 
 **Deliverables**:
-- [ ] `ta style` subcommand with `init`, `import`, `show`, `edit`, `clear`
-- [ ] `ta style init` interview (7 topic areas, concise prompts, skippable)
-- [ ] `ta style import <path-or-url>` — local file copy or HTTPS fetch into `~/.config/ta/style.md`
-- [ ] URL fetch uses `reqwest` (already a workspace dep); respects redirects; rejects non-200
-- [ ] `ta run` injection: prepend style file under `## Developer Style` heading if present
-- [ ] `ta run --dry-run` prints injected CLAUDE.md preview including style section
-- [ ] `ta style show` prints with a header line showing source path and char count
-- [ ] Tests: `style_init_writes_file`, `style_import_from_path`, `style_import_from_url_mock`, `style_injected_in_run_dry_run`, `style_not_injected_when_absent`
-- [ ] **USAGE.md**: "Developer Style" section — what it does, how to import a community file, example workflow
+- [ ] `ta style` subcommand with `init`, `template list`, `template apply`, `import`, `discover`, `show`, `edit`, `clear`
+- [ ] `ta style init` interview (7 topic areas, all skippable)
+- [ ] Built-in templates: `karpathy`, `minimal`, `documented`, `pragmatic` — shipped as `src/templates/style-*.md`
+- [ ] `ta style template list` — tabular output with name, description, attribution
+- [ ] `ta style template apply <name>` — writes template to `~/.config/ta/style.md` (prompt if one already exists)
+- [ ] `ta style import <path-or-url>` — local copy or HTTPS fetch; `reqwest`, redirects, non-200 error
+- [ ] `ta style discover [path]` — agent-driven codebase analysis; produces draft for user review before write
+- [ ] Discovery agent prompt in `src/templates/style-discover.md`
+- [ ] `ta run` injection under `## Developer Style` heading
+- [ ] `ta run --dry-run` preview includes style section
+- [ ] Tests: `style_init_writes_file`, `style_template_list`, `style_template_apply`, `style_import_from_path`, `style_import_from_url_mock`, `style_discover_produces_draft`, `style_injected_in_run`, `style_not_injected_when_absent`
+- [ ] **USAGE.md**: "Developer Style" section — four paths to build a style file, template list, discover workflow, sharing
 
 **Depends on**: v0.16.1.6
 
