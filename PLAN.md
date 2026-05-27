@@ -8035,7 +8035,7 @@ ta plan init --pragma --discover
 
 ---
 ### v0.16.1.6.1 — Goal Title Integrity + Safe Non-Interactive Handling
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Problem**: Two issues surfaced during v0.16.1.6 goal run:
 
