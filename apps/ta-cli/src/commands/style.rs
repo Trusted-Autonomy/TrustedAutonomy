@@ -624,16 +624,8 @@ fn gather_codebase_metrics(root: &std::path::Path) -> String {
         }
     });
 
-    let comment_pct = if total_lines > 0 {
-        comment_lines * 100 / total_lines
-    } else {
-        0
-    };
-    let doc_pct = if fn_count > 0 {
-        doc_fn_count * 100 / fn_count
-    } else {
-        0
-    };
+    let comment_pct = (comment_lines * 100).checked_div(total_lines).unwrap_or(0);
+    let doc_pct = (doc_fn_count * 100).checked_div(fn_count).unwrap_or(0);
 
     let mut ext_summary: Vec<String> = extensions
         .iter()
