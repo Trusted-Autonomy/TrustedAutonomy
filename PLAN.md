@@ -8058,7 +8058,7 @@ ta plan init --pragma --discover
 
 ---
 ### v0.16.1.7 — Developer Style Constitution (`ta style`)
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Problem**: Every goal agent starts cold on coding style. Users repeat the same preferences across projects — "no helper functions for single use", "explicit error types", "flat over nested" — or omit them and get generic code. There's no way to encode personal coding philosophy once and have it apply everywhere, and no way to learn the implicit style of an existing codebase before modifying it. Public figures like Andrej Karpathy publish their CLAUDE.md style files, but there's no mechanism to import, apply, or discover equivalents.
 
@@ -8108,18 +8108,18 @@ Templates are plain Markdown files shipped with the binary; `ta style template l
 - TA does not host a registry; sharing is URLs, the same way dotfiles are shared today
 
 **Deliverables**:
-- [ ] `ta style` subcommand with `init`, `template list`, `template apply`, `import`, `discover`, `show`, `edit`, `clear`
-- [ ] `ta style init` interview (7 topic areas, all skippable)
-- [ ] Built-in templates: `karpathy`, `minimal`, `documented`, `pragmatic` — shipped as `src/templates/style-*.md`
-- [ ] `ta style template list` — tabular output with name, description, attribution
-- [ ] `ta style template apply <name>` — writes template to `~/.config/ta/style.md` (prompt if one already exists)
-- [ ] `ta style import <path-or-url>` — local copy or HTTPS fetch; `reqwest`, redirects, non-200 error
-- [ ] `ta style discover [path]` — agent-driven codebase analysis; produces draft for user review before write
-- [ ] Discovery agent prompt in `src/templates/style-discover.md`
-- [ ] `ta run` injection under `## Developer Style` heading
-- [ ] `ta run --dry-run` preview includes style section
-- [ ] Tests: `style_init_writes_file`, `style_template_list`, `style_template_apply`, `style_import_from_path`, `style_import_from_url_mock`, `style_discover_produces_draft`, `style_injected_in_run`, `style_not_injected_when_absent`
-- [ ] **USAGE.md**: "Developer Style" section — four paths to build a style file, template list, discover workflow, sharing
+- [x] `ta style` subcommand with `init`, `template list`, `template apply`, `import`, `discover`, `show`, `edit`, `clear`
+- [x] `ta style init` interview (7 topic areas, all skippable)
+- [x] Built-in templates: `karpathy`, `minimal`, `documented`, `pragmatic` — shipped as `src/templates/style-*.md`
+- [x] `ta style template list` — tabular output with name, description, attribution
+- [x] `ta style template apply <name>` — writes template to `~/.config/ta/style.md` (prompt if one already exists)
+- [x] `ta style import <path-or-url>` — local copy or HTTPS fetch; `reqwest`, redirects, non-200 error
+- [x] `ta style discover [path]` — agent-driven codebase analysis; produces draft for user review before write
+- [x] Discovery agent prompt in `src/templates/style-discover.md`
+- [x] `ta run` injection under `## Developer Style` heading
+- [x] `ta run --dry-run` preview includes style section
+- [x] Tests: `style_init_writes_file`, `style_template_list`, `style_template_apply`, `style_import_from_path`, `style_import_from_url_mock`, `style_discover_produces_draft`, `style_injected_in_run`, `style_not_injected_when_absent`
+- [x] **USAGE.md**: "Developer Style" section — four paths to build a style file, template list, discover workflow, sharing
 
 **Depends on**: v0.16.1.6
 

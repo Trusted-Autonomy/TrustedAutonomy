@@ -11322,6 +11322,82 @@ Adding ruflow to every goal increases startup latency (MCP server boot) and intr
 
 ---
 
+## Developer Style Constitution
+
+Write your coding philosophy once — in `~/.config/ta/style.md` — and have it automatically injected into every `ta run` session. Agents receive it under a `## Developer Style` heading before any project-specific context, so your preferences apply consistently across all projects and goal types.
+
+### Four ways to build your style file
+
+**1. Interactive interview (`ta style init`)**
+
+Walks through 7 topic areas — code density, error handling, abstraction, tests, naming, comments, and a free-form section — all skippable. Answers are assembled into `~/.config/ta/style.md`.
+
+```sh
+ta style init
+```
+
+**2. Apply a curated template**
+
+TA ships four built-in templates. View them with `ta style template list`, then apply one:
+
+```sh
+ta style template list
+
+# NAME           DESCRIPTION                                               ATTRIBUTION
+# karpathy       Flat code, minimal abstraction, explicit over implicit    Andrej Karpathy
+# minimal        No comments, no helpers, explicit errors                  TA built-in
+# documented     Full docstrings, typed interfaces, integration tests      TA built-in
+# pragmatic      WHY-only comments, extract at 3+, anyhow for errors       TA built-in
+
+ta style template apply pragmatic
+```
+
+**3. Import from a file or URL**
+
+Any Markdown file works — your own `CLAUDE.md` preferences, a team style guide, a public gist:
+
+```sh
+ta style import ./team-style.md
+ta style import https://gist.github.com/yourname/abc123/raw/style.md
+```
+
+Content is copied locally — no remote reference that can drift.
+
+**4. Discover from a codebase**
+
+Analyse an existing codebase and infer its style automatically. The agent examines comment density, function length distribution, abstraction patterns, error handling, test structure, and naming conventions, then produces a draft for you to review before saving:
+
+```sh
+ta style discover                    # analyses current directory
+ta style discover ~/projects/myapp   # analyses a specific project
+```
+
+This is useful when joining an existing project, or when your style evolved organically and was never written down.
+
+### Viewing and editing
+
+```sh
+ta style show          # print current style
+ta style edit          # open in $EDITOR (creates file if absent)
+ta style clear         # remove the style file
+```
+
+### How injection works
+
+When `~/.config/ta/style.md` exists and is non-empty, `ta run` prepends it under `## Developer Style` in the agent's context. If the file is absent, nothing is injected — no-op. Use `ta run --no-launch` to preview what would be injected without starting an agent session.
+
+### Sharing
+
+Style files are plain Markdown. Share yours by posting it as a GitHub Gist, a repo file, or a wiki page. Others can import it with:
+
+```sh
+ta style import https://gist.github.com/yourname/abc123/raw/style.md
+```
+
+TA does not host a registry — sharing is URLs, the same way dotfiles are shared today.
+
+---
+
 ## Cross-Project TA Links
 
 When you work across multiple related projects — a suite of microservices, a game engine with a plugin framework, a training pipeline feeding an inference service — agents need to understand the API contracts and integration points between projects. TA links give every agent this context automatically at goal start, without copy-pasting documentation into CLAUDE.md.
