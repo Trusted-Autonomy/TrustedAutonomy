@@ -501,6 +501,25 @@ enum Commands {
         #[command(subcommand)]
         command: commands::agent::AgentCommands,
     },
+    /// Manage your global developer style constitution (~/.config/ta/style.md).
+    ///
+    /// The style file is prepended to every `ta run` session under a
+    /// `## Developer Style` heading. Build one with `ta style init` (interview),
+    /// apply a curated template, import from a URL, or discover from a codebase.
+    ///
+    /// Examples:
+    ///   ta style init                         # interactive interview
+    ///   ta style template list                # list built-in templates
+    ///   ta style template apply pragmatic     # apply a template
+    ///   ta style import https://example.com/style.md
+    ///   ta style discover                     # infer from current codebase
+    ///   ta style show                         # print current style
+    ///   ta style edit                         # open in $EDITOR
+    ///   ta style clear                        # remove style file
+    Style {
+        #[command(subcommand)]
+        command: commands::style::StyleCommands,
+    },
     /// Manage the project behavioral constitution (.ta/constitution.md).
     ///
     /// `ta constitution init` asks an agent to draft a behavioral contract
@@ -1037,6 +1056,7 @@ fn main() -> anyhow::Result<()> {
             commands::advisor::advise(&config, message, goal.as_deref())
         }
         Commands::Agent { command } => commands::agent::execute(command, &config),
+        Commands::Style { command } => commands::style::execute(command),
         Commands::Constitution { command } => commands::constitution::execute(command, &config),
         Commands::Memory { command } => commands::memory::execute(command, &config),
         Commands::Adapter { command } => commands::adapter::execute(command, &project_root),

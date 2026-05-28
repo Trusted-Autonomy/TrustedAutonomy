@@ -52,6 +52,7 @@ pub mod shell;
 pub mod shell_tui;
 pub mod stats;
 pub mod status;
+pub mod style;
 pub mod sync;
 pub mod template;
 pub mod terms;

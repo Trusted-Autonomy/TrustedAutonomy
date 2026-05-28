@@ -1961,6 +1961,27 @@ pub fn execute(
         // so calling it for non-macro goals is safe.
         restore_mcp_server_config(&staging_path)?;
 
+        // Show developer style injection status (v0.16.1.7).
+        if let Some(style_content) = super::style::load_style() {
+            let preview_len = style_content.len().min(200);
+            let preview = &style_content[..preview_len];
+            let truncated = if style_content.len() > preview_len {
+                "..."
+            } else {
+                ""
+            };
+            println!();
+            println!(
+                "Developer style: ~/.config/ta/style.md ({} bytes)",
+                style_content.len()
+            );
+            println!(
+                "  Preview: {}{}",
+                preview.lines().next().unwrap_or("").trim(),
+                truncated
+            );
+        }
+
         println!("\nWorkspace ready. To use manually:");
         println!("  cd {}", staging_path.display());
         if let Some(ref pre) = agent_config.pre_launch {
@@ -4871,6 +4892,11 @@ fn build_context_content(
     context_mode: &ta_submit::config::ContextMode,
     user_context: Option<&str>,
 ) -> anyhow::Result<String> {
+    // Build developer style section from ~/.config/ta/style.md (v0.16.1.7).
+    let style_section = super::style::load_style()
+        .map(|s| format!("\n## Developer Style\n\n{}\n", s.trim()))
+        .unwrap_or_default();
+
     // Build plan context section if PLAN.md exists in source (windowed, v0.14.3.1).
     // v0.14.3.2: Skip plan injection when context_mode is "mcp" or "hybrid".
     let use_inject_mode = *context_mode == ta_submit::config::ContextMode::Inject;
@@ -5021,7 +5047,7 @@ You are working on a TA-mediated goal in a staging workspace.
 
 **Goal:** {}
 **Goal ID:** {}
-{}{}{}{}{}{}{}{}{}{}
+{}{}{}{}{}{}{}{}{}{}{}
 ## How this works
 
 - This directory is a copy of the original project
@@ -5138,6 +5164,7 @@ If your changes affect user-facing behavior (new commands, changed flags, new co
 ---"#,
         title,
         goal_id,
+        style_section,
         plan_section,
         parent_section,
         macro_section,
