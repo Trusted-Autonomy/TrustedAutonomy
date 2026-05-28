@@ -8058,7 +8058,7 @@ ta plan init --pragma --discover
 
 ---
 ### v0.16.1.7 — Developer Style Constitution (`ta style`)
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Problem**: Every goal agent starts cold on coding style. Users repeat the same preferences across projects — "no helper functions for single use", "explicit error types", "flat over nested" — or omit them and get generic code. There's no way to encode personal coding philosophy once and have it apply everywhere, and no way to learn the implicit style of an existing codebase before modifying it. Public figures like Andrej Karpathy publish their CLAUDE.md style files, but there's no mechanism to import, apply, or discover equivalents.
 
