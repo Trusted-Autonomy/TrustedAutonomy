@@ -8126,6 +8126,52 @@ Templates are plain Markdown files shipped with the binary; `ta style template l
 #### Version: `0.16.1-alpha.8`
 
 ---
+### v0.16.1.8 — `ta doctor` Intelligence & Discord Listener Stale-PID Fix
+<!-- status: pending -->
+
+**Goal**: Improve `ta doctor` from a passive reporter to an active diagnostic tool. When `ta doctor` detects anomalies (crash-loop plugins, stale PID files, high error rates), it should analyze the situation and tell the user exactly what is wrong and what to do — not just hand them a log path and say "check it manually." Also fix the Discord listener stale-PID crash loop that causes thousands of restart attempts when a dead process's PID file isn't cleaned up.
+
+**Why**: The current `ta daemon log` suggestion is not actionable. A crash loop producing 7,000+ restart entries with `restarts=7181` while a stale PID file blocks every attempt is a known, diagnosable pattern. The daemon has all the information needed to detect, explain, and fix this — but today it just logs and retries, leaving the user to discover the root cause themselves.
+
+**Problem 1: `ta doctor` log analysis**
+
+When `ta doctor` detects a plugin crash loop (>10 restarts/10 min), instead of:
+```
+[warn] Discord listener restarting repeatedly — check .ta/daemon.log
+```
+It should:
+1. Read the last N lines of daemon.log (or the relevant plugin's stderr)
+2. Extract the actual error line(s) from the crash output
+3. Present a diagnosis: "Discord listener is blocked: another instance is running at PID 10435 (or stale PID file exists)"
+4. Offer a concrete fix: "`ta doctor --fix` will remove the stale PID file and restart the listener"
+
+**Problem 2: Discord listener stale-PID crash loop**
+
+Root cause: `ta-channel-discord` starts, reads `.ta/discord-listener.pid`, finds PID 10435, checks if that process is alive (it isn't — it was killed), but instead of clearing the stale PID file, prints an error and exits. The daemon's restart loop fires every 10 seconds indefinitely.
+
+Fix:
+- **In `ta-channel-discord`**: When the PID file exists but the process is dead (ESRCH / no such process), treat the file as stale — overwrite it with the current PID and continue startup. Only block on a live conflicting process.
+- **In `ta doctor`**: Detect stale PID files in `.ta/` by checking if the recorded PID is alive. Report as `[warn]` with fix instruction. `--fix` removes the stale file and restarts the listener.
+- **In the daemon's `ChannelListenerManager`**: After a plugin exits with code 1 and the restart count exceeds a configurable threshold (`restart_fail_threshold`, default 5), read the plugin's last stderr output and include it in the crash loop warning event rather than just logging the exit code. This surfaces the actual error in `ta status` and Studio health panel.
+
+**Scope**:
+- `plugins/ta-channel-discord/src/main.rs` — stale PID detection (check PID liveness before blocking)
+- `crates/ta-daemon/src/channel_listener_manager.rs` — capture stderr on crash-loop, emit structured error event with last-N-lines
+- `apps/ta-cli/src/commands/doctor.rs` — `check_stale_pid_files()`, log analysis when crash loop detected, read + parse last stderr from health signal
+- `crates/ta-daemon/src/health_collector.rs` — include last-stderr in plugin crash loop signal
+
+1. [ ] **`ta-channel-discord` stale-PID fix**: On startup, read `.ta/discord-listener.pid`. If PID file exists: check if process is alive (send signal 0). If dead (ESRCH), log `"Found stale PID file (PID {old_pid} is dead) — removing and continuing"`, delete the file, write current PID, continue. If alive and not us, exit with the existing conflict message.
+2. [ ] **Daemon crash-loop stderr capture**: In `ChannelListenerManager`, when `exit_code != 0`, read the plugin's stderr (captured pipe). Store last 10 lines in the health signal alongside `restarts` count. Emit a structured `PluginCrashLoop` event after `restart_fail_threshold` consecutive failures with the captured stderr.
+3. [ ] **`ta doctor` crash-loop diagnosis**: When `ta doctor` detects a crash-loop signal, read the captured stderr from the health signal (or scan daemon.log), extract the error message pattern, and emit a human-readable diagnosis. Known patterns: stale PID, missing binary, auth failure, network error. Unknown patterns: show the raw last-stderr line.
+4. [ ] **`ta doctor --fix` stale PID cleanup**: `check_stale_pid_files()` scans all `.ta/*.pid` files, reads each, checks liveness, reports dead ones as `[warn]`. `--fix` removes stale files and triggers plugin restart via daemon API.
+5. [ ] **Tests**: `stale_pid_detected_and_cleared` (discord listener logic), `crash_loop_stderr_captured_in_signal`, `doctor_diagnoses_stale_pid_from_signal`, `doctor_fix_removes_stale_pid`.
+6. [ ] **USAGE.md**: Update "ta doctor" section to note log analysis capability. Document the stale PID fix pattern. Add "Plugin crash loops" to the diagnostics table.
+
+**Depends on**: v0.16.1.7
+
+#### Version: `0.16.1-alpha.9`
+
+---
 ### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
 <!-- status: done -->
 
