@@ -18,6 +18,7 @@ auto_stage = [
     ".ta/goal-audit.jsonl",        # TA appends on every goal state change; shared audit trail
     ".ta/velocity-history.jsonl",  # TA appends velocity entries on draft apply; team-shared
     # Do NOT add .ta/workflow-runs/*.json — those are transient per-machine execution state
+    "flake.lock",
 ]
 
 [submit]
