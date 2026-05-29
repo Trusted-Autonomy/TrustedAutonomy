@@ -196,6 +196,12 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 17. Orphaned in_progress phases — PLAN.md says in_progress but no live goal (v0.16.1.6.1).
     results.extend(check_orphaned_in_progress_phases(config));
 
+    // 18. Stale PID files — .ta/*.pid points to a dead process (v0.16.1.8).
+    results.extend(check_stale_pid_files(config));
+
+    // 19. Plugin crash-loop diagnosis — reads .ta/discord-crash-state.json (v0.16.1.8).
+    results.extend(check_plugin_crash_loop_diagnosis(config));
+
     results
 }
 
@@ -978,9 +984,49 @@ fn apply_fix(
             )?;
             Ok("Ran gc to clean up stale goals".to_string())
         }
-        "plugin_crash_loop" => {
-            println!("  To restart the daemon: run `ta daemon restart`");
-            Ok("Manual action needed: ta daemon restart".to_string())
+        "plugin_crash_loop" | "stale_pid" => {
+            // Remove stale PID files for all .ta/*.pid entries.
+            let ta_dir = config.workspace_root.join(".ta");
+            let mut removed = 0usize;
+            if let Ok(entries) = std::fs::read_dir(&ta_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("pid") {
+                        continue;
+                    }
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(pid) = content.trim().parse::<u32>() {
+                            if !is_pid_alive(pid) {
+                                if let Err(e) = std::fs::remove_file(&path) {
+                                    println!(
+                                        "  Warning: could not remove {}: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                } else {
+                                    println!("  Removed stale PID file: {}", path.display());
+                                    removed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Remove crash state file now that user is fixing the issue.
+            let crash_state = config.workspace_root.join(".ta/discord-crash-state.json");
+            if crash_state.exists() {
+                let _ = std::fs::remove_file(&crash_state);
+            }
+            if removed > 0 {
+                println!("  Restart the daemon to bring the plugin back: ta daemon restart");
+                Ok(format!(
+                    "Removed {} stale PID file(s) — run `ta daemon restart` to restart the plugin",
+                    removed
+                ))
+            } else {
+                println!("  No stale PID files found. Run `ta daemon restart` if the plugin is still down.");
+                Ok("No stale PID files found — run `ta daemon restart` if needed".to_string())
+            }
         }
         "daemon_error_rate" => {
             println!("  Run `ta daemon log` to inspect errors.");
@@ -1245,6 +1291,220 @@ fn check_orphaned_in_progress_phases(config: &GatewayConfig) -> Vec<CheckResult>
     results
 }
 
+// ── Stale PID file check (v0.16.1.8) ─────────────────────────────────────────
+
+/// Returns true if a process with the given PID is currently alive.
+fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output()
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.contains(&pid.to_string()) && !stdout.contains("No tasks")
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Check `.ta/*.pid` files — warn for any file whose recorded PID is no longer alive.
+///
+/// A stale PID file blocks the plugin from restarting (it sees the file and
+/// assumes another instance is running), causing a crash loop.
+fn check_stale_pid_files(config: &GatewayConfig) -> Vec<CheckResult> {
+    let ta_dir = config.workspace_root.join(".ta");
+    if !ta_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+
+    let entries = match std::fs::read_dir(&ta_dir) {
+        Ok(e) => e,
+        Err(_) => return results,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("pid") {
+            continue;
+        }
+
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let pid: u32 = match content.trim().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        if !is_pid_alive(pid) {
+            results.push(CheckResult::warn(
+                "Stale PID file",
+                format!(
+                    "{} contains dead PID {} — plugin likely crashed or was not shut down cleanly",
+                    file_name, pid
+                ),
+                format!(
+                    "run `ta doctor --fix` to remove the stale PID file and restart the plugin\n\
+                     or manually: rm {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+
+    results
+}
+
+// ── Plugin crash-loop diagnosis (v0.16.1.8) ───────────────────────────────────
+
+/// Read `.ta/discord-crash-state.json` (written by the daemon's channel_listener_manager)
+/// and emit a human-readable diagnosis with a specific fix hint.
+///
+/// Known patterns diagnosed:
+/// - Stale PID file blocking every restart
+/// - Missing environment variable (TA_DISCORD_TOKEN etc.)
+/// - Discord auth failure / invalid token
+/// - Network connectivity issue
+fn check_plugin_crash_loop_diagnosis(config: &GatewayConfig) -> Vec<CheckResult> {
+    let crash_state_path = config.workspace_root.join(".ta/discord-crash-state.json");
+    if !crash_state_path.exists() {
+        return Vec::new();
+    }
+
+    let content = match std::fs::read_to_string(&crash_state_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let state: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let consecutive_failures = state["consecutive_failures"].as_u64().unwrap_or(0);
+    if consecutive_failures == 0 {
+        return Vec::new();
+    }
+
+    let last_stderr: Vec<String> = state["last_stderr"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let plugin = state["plugin"].as_str().unwrap_or("unknown");
+    let diagnosis = diagnose_crash_stderr(&last_stderr);
+
+    let detail = format!(
+        "{} crashed {} consecutive time(s). {}",
+        plugin, consecutive_failures, diagnosis.message
+    );
+
+    let fix = format!(
+        "{}\n  `ta doctor --fix` will remove stale PID files and clean up crash state.",
+        diagnosis.fix_hint
+    );
+
+    vec![CheckResult::warn("Plugin crash loop", detail, fix)]
+}
+
+struct CrashDiagnosis {
+    message: String,
+    fix_hint: String,
+}
+
+/// Pattern-match last stderr lines to diagnose the crash cause.
+fn diagnose_crash_stderr(lines: &[String]) -> CrashDiagnosis {
+    let combined = lines.join("\n").to_lowercase();
+
+    if combined.contains("already running")
+        || combined.contains("stale pid")
+        || combined.contains("another discord listener")
+    {
+        return CrashDiagnosis {
+            message: "Cause: stale PID file is blocking every restart attempt.".to_string(),
+            fix_hint:
+                "Remove the stale PID file: `ta doctor --fix` or `rm .ta/discord-listener.pid`"
+                    .to_string(),
+        };
+    }
+
+    if combined.contains("not set")
+        || combined.contains("missing token")
+        || combined.contains("environment variable")
+    {
+        return CrashDiagnosis {
+            message: "Cause: required environment variable is missing (likely TA_DISCORD_TOKEN or TA_DISCORD_CHANNEL_ID).".to_string(),
+            fix_hint: "Set the missing env var in the daemon's environment and run `ta daemon restart`".to_string(),
+        };
+    }
+
+    if combined.contains("unauthorized")
+        || combined.contains("invalid token")
+        || combined.contains("401")
+        || (combined.contains("auth") && combined.contains("error"))
+    {
+        return CrashDiagnosis {
+            message:
+                "Cause: Discord authentication failure — the bot token may be invalid or revoked."
+                    .to_string(),
+            fix_hint:
+                "Verify TA_DISCORD_TOKEN is a valid Discord bot token and run `ta daemon restart`"
+                    .to_string(),
+        };
+    }
+
+    if combined.contains("connection refused")
+        || combined.contains("no route to host")
+        || combined.contains("network unreachable")
+        || combined.contains("timed out")
+    {
+        return CrashDiagnosis {
+            message: "Cause: network connectivity issue — cannot reach Discord API.".to_string(),
+            fix_hint: "Check network/firewall settings and run `ta daemon restart`".to_string(),
+        };
+    }
+
+    let last_line = lines.last().cloned().unwrap_or_default();
+    CrashDiagnosis {
+        message: if last_line.is_empty() {
+            "Cause: unknown (no stderr output captured).".to_string()
+        } else {
+            format!("Last error: {}", last_line)
+        },
+        fix_hint: "Check `ta daemon log` for full details and run `ta daemon restart`".to_string(),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1405,5 +1665,115 @@ mod tests {
         assert_eq!(results[0].status, CheckStatus::Warn);
         assert!(results[0].detail.contains("v0.1.0"));
         assert!(!results[0].fix.is_empty(), "should have a fix hint");
+    }
+
+    // ── Stale PID file checks (v0.16.1.8) ────────────────────────────────────
+
+    #[test]
+    fn stale_pid_check_no_ta_dir_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        // No .ta/ directory — should return no results.
+        let results = check_stale_pid_files(&config);
+        assert!(results.is_empty(), "no checks when .ta/ does not exist");
+    }
+
+    #[test]
+    fn stale_pid_check_warns_for_dead_pid() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+
+        // Write a PID file with a dead PID.
+        std::fs::write(ta_dir.join("discord-listener.pid"), u32::MAX.to_string()).unwrap();
+
+        let config = test_config(&dir);
+        let results = check_stale_pid_files(&config);
+        assert_eq!(results.len(), 1, "should warn for one stale PID file");
+        assert_eq!(results[0].status, CheckStatus::Warn);
+        assert!(
+            results[0].detail.contains("discord-listener.pid"),
+            "detail should name the file: {}",
+            results[0].detail
+        );
+        assert!(!results[0].fix.is_empty(), "should provide a fix hint");
+    }
+
+    #[test]
+    fn doctor_diagnoses_stale_pid_from_signal() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+
+        let crash_state = serde_json::json!({
+            "plugin": "ta-channel-discord",
+            "consecutive_failures": 7,
+            "last_stderr": [
+                "Another Discord listener is already running (PID 10435). \
+                 Stop it first, or remove .ta/discord-listener.pid"
+            ],
+            "pid_path": ".ta/discord-listener.pid",
+            "updated_at": "2026-05-28T10:00:00Z"
+        });
+        std::fs::write(
+            ta_dir.join("discord-crash-state.json"),
+            serde_json::to_string_pretty(&crash_state).unwrap(),
+        )
+        .unwrap();
+
+        let config = test_config(&dir);
+        let results = check_plugin_crash_loop_diagnosis(&config);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, CheckStatus::Warn);
+        assert!(
+            results[0].detail.contains("stale PID") || results[0].detail.contains("blocking"),
+            "diagnosis should identify stale PID cause: {}",
+            results[0].detail
+        );
+        assert!(
+            results[0].fix.contains("doctor --fix")
+                || results[0].fix.contains("discord-listener.pid"),
+            "fix should mention doctor --fix or the PID file: {}",
+            results[0].fix
+        );
+    }
+
+    #[test]
+    fn doctor_fix_removes_stale_pid() {
+        use crate::commands::health_signals::{HealthSignal, SignalSeverity};
+
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+
+        let pid_path = ta_dir.join("discord-listener.pid");
+        std::fs::write(&pid_path, u32::MAX.to_string()).unwrap();
+
+        // Also create a crash state file — it should be removed on fix.
+        let crash_path = ta_dir.join("discord-crash-state.json");
+        std::fs::write(
+            &crash_path,
+            serde_json::json!({ "consecutive_failures": 3 }).to_string(),
+        )
+        .unwrap();
+
+        let config = test_config(&dir);
+        let signal = HealthSignal {
+            kind: "stale_pid".to_string(),
+            severity: SignalSeverity::Warn,
+            message: "stale PID file".to_string(),
+            action: "ta doctor --fix".to_string(),
+        };
+        let result = apply_fix(&config, &signal);
+        assert!(result.is_ok(), "apply_fix should not error: {:?}", result);
+
+        assert!(
+            !pid_path.exists(),
+            "stale PID file should be removed by fix"
+        );
+        assert!(
+            !crash_path.exists(),
+            "crash state file should be cleared by fix"
+        );
     }
 }

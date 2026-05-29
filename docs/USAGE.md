@@ -3372,6 +3372,26 @@ ta doctor --fix --yes   # same as ta gc — auto-applies all fixes
 
 **Health signals in CLI output:** `ta status` shows a Health block with any active signals. `ta run` prints warn/crit signals as a pre-flight banner before launching an agent. `ta draft view` appends warn/crit signals as a footer so you see issues before applying a draft.
 
+**Plugin crash loops:** When the Discord listener crashes repeatedly, `ta doctor` diagnoses the root cause instead of pointing you at raw log files:
+
+```
+[warn] Plugin crash loop  ta-channel-discord crashed 7x consecutively.
+                          Cause: stale PID file is blocking every restart attempt.
+       Remove the stale PID file: `ta doctor --fix` or `rm .ta/discord-listener.pid`
+       `ta doctor --fix` will remove stale PID files and clean up crash state.
+```
+
+The daemon captures the last 10 lines of the plugin's stderr on each crash. Known patterns diagnosed automatically:
+
+| Pattern in stderr | Diagnosis | Fix |
+|---|---|---|
+| "already running (PID …)" | Stale PID file from a previous crash | `ta doctor --fix` removes the file |
+| "environment variable … not set" | Missing `TA_DISCORD_TOKEN` or `TA_DISCORD_CHANNEL_ID` | Set the env var, `ta daemon restart` |
+| "unauthorized" / "invalid token" | Bad or revoked Discord bot token | Update `TA_DISCORD_TOKEN`, `ta daemon restart` |
+| "connection refused" / "timed out" | Network or firewall issue | Check connectivity, `ta daemon restart` |
+
+Run `ta doctor --fix` to remove stale PID files and clear crash state in one step.
+
 ### Intelligent Status Dashboard
 
 Running `ta` with no arguments (or `ta status`) shows the unified project dashboard. Items are prioritized: urgent issues first, then active work, then recent completions, then suggested next actions.

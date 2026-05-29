@@ -353,6 +353,53 @@ fn check_stale_drafts_signal(config: &GatewayConfig, signals: &mut Vec<HealthSig
 }
 
 fn check_plugin_crash_loops(config: &GatewayConfig, signals: &mut Vec<HealthSignal>) {
+    // Prefer the structured crash-state file written by channel_listener_manager (v0.16.1.8).
+    // It contains the last stderr output and is much more actionable than log scanning.
+    let crash_state_path = config.workspace_root.join(".ta/discord-crash-state.json");
+    if crash_state_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&crash_state_path) {
+            if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
+                let consecutive_failures = state["consecutive_failures"].as_u64().unwrap_or(0);
+                if consecutive_failures > 0 {
+                    let plugin = state["plugin"].as_str().unwrap_or("plugin");
+                    let last_stderr: Vec<String> = state["last_stderr"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    // Quick pattern diagnosis for the action hint.
+                    let combined = last_stderr.join("\n").to_lowercase();
+                    let hint =
+                        if combined.contains("already running") || combined.contains("stale pid") {
+                            "stale PID file blocking restarts — run `ta doctor --fix` to clear it"
+                        } else if combined.contains("not set")
+                            || combined.contains("environment variable")
+                        {
+                            "missing env var — check TA_DISCORD_TOKEN; run `ta doctor` for details"
+                        } else {
+                            "run `ta doctor` for diagnosis; `ta doctor --fix` to auto-resolve"
+                        };
+
+                    signals.push(HealthSignal::new(
+                        "plugin_crash_loop",
+                        SignalSeverity::Warn,
+                        format!(
+                            "Plugin crash loop: {} crashed {}x consecutively",
+                            plugin, consecutive_failures
+                        ),
+                        hint.to_string(),
+                    ));
+                    return; // crash state is authoritative — skip log scanning
+                }
+            }
+        }
+    }
+
+    // Fall back to daemon.log scanning when no crash-state file is present.
     let log_path = config.workspace_root.join(".ta/daemon.log");
     if !log_path.exists() {
         return;
@@ -363,12 +410,9 @@ fn check_plugin_crash_loops(config: &GatewayConfig, signals: &mut Vec<HealthSign
         Err(_) => return,
     };
 
-    // Count lines containing plugin restart/crash patterns in the last 10 minutes worth
-    // of log entries. We look for lines with timestamps and restart indicators.
     let now = Utc::now();
     let window = chrono::Duration::minutes(10);
 
-    // Patterns: "restarting", "plugin crashed", "restart attempt"
     let crash_patterns = [
         "restarting plugin",
         "plugin crashed",
@@ -378,10 +422,8 @@ fn check_plugin_crash_loops(config: &GatewayConfig, signals: &mut Vec<HealthSign
     ];
 
     let mut recent_crashes = 0usize;
-    let mut crash_context = String::new();
 
     for line in content.lines().rev().take(5000) {
-        // Try to parse a timestamp from the line (format varies; look for ISO-like prefix).
         let is_recent = parse_log_timestamp(line)
             .map(|ts| (now - ts).abs() < window)
             .unwrap_or(false);
@@ -390,9 +432,6 @@ fn check_plugin_crash_loops(config: &GatewayConfig, signals: &mut Vec<HealthSign
             let lower = line.to_lowercase();
             if crash_patterns.iter().any(|p| lower.contains(p)) {
                 recent_crashes += 1;
-                if crash_context.is_empty() {
-                    crash_context = line.chars().take(120).collect();
-                }
             }
         }
     }
@@ -405,7 +444,7 @@ fn check_plugin_crash_loops(config: &GatewayConfig, signals: &mut Vec<HealthSign
                 "Plugin crash loop detected: {}x restarts in last 10 min",
                 recent_crashes
             ),
-            "check `ta daemon log` for details; run `ta daemon restart` if needed".to_string(),
+            "run `ta doctor` for diagnosis; `ta daemon restart` if needed".to_string(),
         ));
     }
 }

@@ -54,7 +54,7 @@ const RATE_LIMIT_MAX: u32 = 10;
 const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
-// PID file helpers (unchanged from before)
+// PID file helpers
 // ---------------------------------------------------------------------------
 
 fn pid_file_path() -> PathBuf {
@@ -68,59 +68,65 @@ fn pid_file_path() -> PathBuf {
     }
 }
 
-fn acquire_pid_lock() -> Result<(), String> {
-    let pid_path = pid_file_path();
+/// Returns true if a process with the given PID is alive (signal 0 succeeds).
+fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output()
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.contains(&pid.to_string()) && !stdout.contains("No tasks")
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Acquire the PID lock at `pid_path`.
+///
+/// - If the file exists and the recorded PID is alive → error (conflict).
+/// - If the file exists but the PID is dead → log a stale-PID message, remove it, continue.
+/// - Writes the current process PID to the file and returns Ok(()).
+fn acquire_pid_lock_at(pid_path: &std::path::Path) -> Result<(), String> {
     if pid_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = contents.trim().parse::<u32>() {
-                #[cfg(unix)]
-                {
-                    use std::process::Command;
-                    if Command::new("kill")
-                        .args(["-0", &pid.to_string()])
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false)
-                    {
-                        return Err(format!(
-                            "Another Discord listener is already running (PID {}). \
-                             Stop it first, or remove {}",
-                            pid,
-                            pid_path.display()
-                        ));
-                    }
+        if let Ok(contents) = std::fs::read_to_string(pid_path) {
+            if let Ok(old_pid) = contents.trim().parse::<u32>() {
+                if is_pid_alive(old_pid) {
+                    return Err(format!(
+                        "Another Discord listener is already running (PID {}). \
+                         Stop it first, or remove {}",
+                        old_pid,
+                        pid_path.display()
+                    ));
                 }
-                #[cfg(windows)]
-                {
-                    use std::process::Command;
-                    if Command::new("tasklist")
-                        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-                        .output()
-                        .map(|o| {
-                            let stdout = String::from_utf8_lossy(&o.stdout);
-                            stdout.contains(&pid.to_string()) && !stdout.contains("No tasks")
-                        })
-                        .unwrap_or(false)
-                    {
-                        return Err(format!(
-                            "Another Discord listener is already running (PID {}). \
-                             Stop it first, or remove {}",
-                            pid,
-                            pid_path.display()
-                        ));
-                    }
-                }
+                // PID is dead — stale file.
+                eprintln!(
+                    "[discord-listener] Found stale PID file (PID {} is dead) — removing and continuing",
+                    old_pid
+                );
             }
         }
-        eprintln!(
-            "[discord-listener] Removing stale PID file: {}",
-            pid_path.display()
-        );
-        let _ = std::fs::remove_file(&pid_path);
+        let _ = std::fs::remove_file(pid_path);
     }
 
     let pid = std::process::id();
-    if let Err(e) = std::fs::write(&pid_path, pid.to_string()) {
+    if let Err(e) = std::fs::write(pid_path, pid.to_string()) {
         return Err(format!(
             "Cannot write PID file {}: {}",
             pid_path.display(),
@@ -133,6 +139,10 @@ fn acquire_pid_lock() -> Result<(), String> {
         pid
     );
     Ok(())
+}
+
+fn acquire_pid_lock() -> Result<(), String> {
+    acquire_pid_lock_at(&pid_file_path())
 }
 
 fn release_pid_lock() {
@@ -1211,6 +1221,59 @@ mod tests {
         assert!(s.session_id.is_none());
         assert!(s.sequence.is_none());
         assert!(s.resume_gateway_url.is_none());
+    }
+
+    // ── PID file tests (v0.16.1.8) ────────────────────────────────────────────
+
+    /// A stale PID file (dead process) should be silently removed and the lock acquired.
+    #[test]
+    fn stale_pid_detected_and_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("discord-listener.pid");
+
+        // Write a PID that is guaranteed to be dead (u32::MAX is never a valid live PID).
+        std::fs::write(&pid_path, u32::MAX.to_string()).unwrap();
+
+        let result = acquire_pid_lock_at(&pid_path);
+        assert!(
+            result.is_ok(),
+            "acquire_pid_lock_at should succeed when recorded PID is dead: {:?}",
+            result
+        );
+
+        // PID file must now contain the current process's PID.
+        let written = std::fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert_eq!(
+            written,
+            std::process::id(),
+            "PID file should contain current process PID after stale-PID cleanup"
+        );
+    }
+
+    /// A live conflicting process should cause acquire_pid_lock_at to return Err.
+    #[test]
+    fn live_pid_causes_conflict_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("discord-listener.pid");
+
+        // Write our own PID — we are definitely alive.
+        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+
+        let result = acquire_pid_lock_at(&pid_path);
+        assert!(
+            result.is_err(),
+            "acquire_pid_lock_at should fail when recorded PID is alive"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("already running"),
+            "error should mention 'already running': {}",
+            err
+        );
     }
 
     // ── v0.12.4.1: goal input routing tests ──────────────────────────────────

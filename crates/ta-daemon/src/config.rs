@@ -1303,6 +1303,14 @@ pub struct DiscordListenerConfig {
     /// Maximum consecutive restarts before giving up. 0 = unlimited.
     #[serde(default = "default_max_restarts")]
     pub max_restarts: u32,
+    /// Number of consecutive exit-code-1 failures before the manager writes a
+    /// crash-state file to `.ta/discord-crash-state.json` (v0.16.1.8).
+    ///
+    /// The crash-state file captures the last 10 lines of stderr so `ta doctor`
+    /// can diagnose the root cause (stale PID, missing env var, auth failure, etc.).
+    /// Set to 0 to disable crash-state writing. Default: 5.
+    #[serde(default = "default_restart_fail_threshold")]
+    pub restart_fail_threshold: u32,
 }
 
 fn default_discord_binary() -> String {
@@ -1317,6 +1325,10 @@ fn default_max_restarts() -> u32 {
     0 // unlimited by default
 }
 
+fn default_restart_fail_threshold() -> u32 {
+    5
+}
+
 impl Default for DiscordListenerConfig {
     fn default() -> Self {
         Self {
@@ -1324,6 +1336,7 @@ impl Default for DiscordListenerConfig {
             binary: default_discord_binary(),
             restart_delay_secs: default_restart_delay_secs(),
             max_restarts: default_max_restarts(),
+            restart_fail_threshold: default_restart_fail_threshold(),
         }
     }
 }
