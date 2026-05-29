@@ -8127,7 +8127,7 @@ Templates are plain Markdown files shipped with the binary; `ta style template l
 
 ---
 ### v0.16.1.8 — `ta doctor` Intelligence & Discord Listener Stale-PID Fix
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Improve `ta doctor` from a passive reporter to an active diagnostic tool. When `ta doctor` detects anomalies (crash-loop plugins, stale PID files, high error rates), it should analyze the situation and tell the user exactly what is wrong and what to do — not just hand them a log path and say "check it manually." Also fix the Discord listener stale-PID crash loop that causes thousands of restart attempts when a dead process's PID file isn't cleaned up.
 
