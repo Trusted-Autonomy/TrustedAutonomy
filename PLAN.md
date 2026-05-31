@@ -8173,7 +8173,7 @@ Fix:
 
 ---
 ### v0.16.1.9 — IDE Index Exclusion for `.ta/` Runtime Directories
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Prevent JetBrains IDEs (IntelliJ, CLion, RustRover) and VS Code from indexing TA runtime directories (`.ta/staging/`, `.ta/goals/`, `.ta/sessions/`, etc.). These directories contain large auto-generated JSON, lock files, and staging copies of the entire project — indexing them bloats symbol tables, slows autocomplete, and causes spurious "conflicting symbol" warnings.
 
