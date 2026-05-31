@@ -8172,6 +8172,40 @@ Fix:
 #### Version: `0.16.1-alpha.9`
 
 ---
+### v0.16.1.9 — IDE Index Exclusion for `.ta/` Runtime Directories
+<!-- status: pending -->
+
+**Goal**: Prevent JetBrains IDEs (IntelliJ, CLion, RustRover) and VS Code from indexing TA runtime directories (`.ta/staging/`, `.ta/goals/`, `.ta/sessions/`, etc.). These directories contain large auto-generated JSON, lock files, and staging copies of the entire project — indexing them bloats symbol tables, slows autocomplete, and causes spurious "conflicting symbol" warnings.
+
+**Why**: The `.ta/staging/` directory is a full copy of the workspace. When the IDE indexes it, every symbol appears twice, every file has a shadow copy, and search results are polluted with staging artifacts. `.ta/goals/` and `.ta/sessions/` contain tens of thousands of JSONL lines that have no value in IDE search. This is a consistent pain point for any TA-enabled project. The fix should require zero user configuration — TA sets it up automatically.
+
+**Design**:
+
+- **Source of truth**: `LOCAL_TA_PATHS` in `crates/ta-workspace/src/partitioning.rs` already lists every runtime path that should be excluded from git, taignore, and backups. The same list drives IDE exclusion.
+- **JetBrains** (`ta-plugin-intellij`): Register a `DirectoryIndexExcludePolicy` that reads the TA paths list and returns them as excluded URLs. No `.idea/` file changes needed — the policy is applied dynamically at IDE startup.
+- **VS Code** (`ta-plugin-vscode`): Add `.ta/staging`, `.ta/goals/`, `.ta/sessions/`, `.ta/store/`, `.ta/backups/` etc. to `files.exclude` and `search.exclude` in the workspace's `.vscode/settings.json`. Emit these entries on `ta init` (or on first `ta doctor` run if the file is missing entries). Never overwrite user-added excludes — merge only.
+- **`ta doctor` check**: Add a new `check_ide_exclusions()` check. If `.idea/` exists and no `DirectoryIndexExcludePolicy` plugin jar is found in the project plugin path, warn. If `.vscode/` exists and `settings.json` is missing the TA excludes, warn with `--fix` support to add them.
+- **`ta init`**: Emit `.vscode/settings.json` excludes as part of standard project initialization (alongside `.gitignore` and `.taignore`).
+
+**Scope**:
+- `crates/ta-workspace/src/partitioning.rs` — expose `LOCAL_TA_PATHS` as a public `pub const` (or `pub fn`) so both the CLI and plugin can consume the authoritative list
+- `apps/ta-cli/src/commands/doctor.rs` — `check_ide_exclusions()`: detect `.idea/` and `.vscode/` presence, check for TA excludes, emit `[warn]` + `--fix` for VS Code settings
+- `apps/ta-cli/src/commands/init.rs` — emit `.vscode/settings.json` excludes on `ta init`
+- `plugins/ta-plugin-intellij/src/main/kotlin/` — `TaDirectoryIndexExcludePolicy.kt` implementing `DirectoryIndexExcludePolicy`, registered in `plugin.xml`
+- `plugins/ta-plugin-intellij/src/main/resources/META-INF/plugin.xml` — register the policy extension
+
+1. [ ] **Expose `LOCAL_TA_PATHS` publicly** in `partitioning.rs`: change from private to `pub const TA_RUNTIME_DIRS: &[&str]` (or a `pub fn ta_runtime_dirs() -> &'static [&'static str]`). Ensure the list covers all directories that appear in `.gitignore` and `.taignore` (staging, goals, sessions, store, backups, heartbeats, workflow-runs, advisor-notes, draft-build-ctx, memory, link-cache, events, interactions, pr_packages, review).
+2. [ ] **VS Code `ta init` integration**: In `init.rs`, after writing `.gitignore` and `.taignore`, write or merge `.vscode/settings.json` with `files.exclude` and `search.exclude` entries for every path in `TA_RUNTIME_DIRS`. Use merge-not-overwrite logic: read existing JSON (if any), add missing keys, write back.
+3. [ ] **`ta doctor` VS Code check**: `check_ide_exclusions()` reads `.vscode/settings.json` (if `.vscode/` exists), checks that `files.exclude` contains all `TA_RUNTIME_DIRS` entries, and emits `[warn] .vscode/settings.json is missing TA runtime excludes — run ta doctor --fix`. `--fix` calls the same merge logic as `ta init`.
+4. [ ] **JetBrains `TaDirectoryIndexExcludePolicy`**: Kotlin class in the IntelliJ plugin that implements `com.intellij.openapi.roots.AdditionalLibraryRootsProvider` (or the newer `DirectoryIndexExcludePolicy` on SDK 241+). `getExcludeUrlsForProject(project)` returns a `VirtualFile` URL for each `TA_RUNTIME_DIRS` entry found under the project root. Registered in `plugin.xml` under the `com.intellij.directoryIndexExcludePolicy` extension point.
+5. [ ] **Tests**: `ta_runtime_dirs_are_complete` (verify list matches `.gitignore` patterns), `vscode_settings_merged_not_overwritten` (merge test with existing user settings), `doctor_detects_missing_vscode_excludes`, `doctor_fix_adds_vscode_excludes`.
+6. [ ] **USAGE.md**: Add "IDE integration" section under "Project Setup". Note that `ta init` auto-configures VS Code excludes. Mention that the JetBrains plugin handles exclusion automatically. Add to `ta doctor` diagnostics table: "IDE index exclusions".
+
+**Depends on**: v0.16.1.8
+
+#### Version: `0.16.1-alpha.10`
+
+---
 ### v0.16.2 — Ollama Agent Framework Plugin (Extract & Standalone)
 <!-- status: done -->
 
