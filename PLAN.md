@@ -8207,7 +8207,7 @@ Fix:
 
 ---
 ### v0.16.1.10 — IDE Exclude Manifest (`ide-excludes.json`)
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Replace the hardcoded directory list in the JetBrains plugin's `companion object` with a machine-readable `.ta/ide-excludes.json` manifest that TA writes from `LOCAL_TA_PATHS`. Any editor plugin or community extension reads this single file — no TA fork or Rust knowledge required to add support for a new editor.
 
