@@ -152,3 +152,4 @@ result-*
 .ta/*.log
 .ta/*.pid
 .ta/*.lock
+.ta/*-crash-state.json
