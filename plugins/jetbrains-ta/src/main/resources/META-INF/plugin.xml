@@ -43,6 +43,10 @@
         <!-- Startup: connect to daemon and start SSE listener -->
         <postStartupActivity
             implementation="com.trustedautonomy.ta.TaStartupActivity"/>
+
+        <!-- Exclude .ta/ runtime directories from IDE indexing (staging/, goals/, sessions/, etc.) -->
+        <directoryIndexExcludePolicy
+            implementation="com.trustedautonomy.ta.TaDirectoryIndexExcludePolicy"/>
     </extensions>
 
     <actions>
