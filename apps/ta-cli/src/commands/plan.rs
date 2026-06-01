@@ -4271,8 +4271,33 @@ pub fn resolve_phase(
             }));
         }
 
-        // Step 2: prefix expansion — only among pending phases.
+        // Step 1b: if the token exactly matches a Done phase with no pending sub-phases,
+        // proceed without phase linkage rather than falling through to a misleading
+        // "not yet in PLAN.md" message and then failing at the claim step.
         let token_norm = token.trim_start_matches('v');
+        let done_match = phases
+            .iter()
+            .any(|p| phase_ids_match(&p.id, token) && p.status == PlanStatus::Done);
+        if done_match {
+            let has_pending_sub = phases.iter().any(|p| {
+                p.status == PlanStatus::Pending
+                    && p.id
+                        .trim_start_matches('v')
+                        .starts_with(&format!("{}.", token_norm))
+            });
+            if !has_pending_sub {
+                if !quiet {
+                    println!(
+                        "Title matches completed phase {token} — proceeding without phase \
+                         linking.\nTo run in the context of a specific phase use --phase."
+                    );
+                }
+                return Ok(None);
+            }
+            // Has pending sub-phases — fall through to prefix expansion so the sub-phase is picked.
+        }
+
+        // Step 2: prefix expansion — only among pending phases.
         let prefix_matches: Vec<&PlanPhase> = phases
             .iter()
             .filter(|p| {
