@@ -205,6 +205,9 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 20. IDE index exclusions — VS Code settings.json (v0.16.1.9).
     results.extend(check_ide_exclusions(config));
 
+    // 21. IDE exclude manifest — .ta/ide-excludes.json (v0.16.1.10).
+    results.extend(check_ide_excludes_manifest(config));
+
     results
 }
 
@@ -950,6 +953,39 @@ fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
         println!();
     }
 
+    // IDE exclude manifest fix.
+    if ide_manifest_needs_fix(&config.workspace_root) {
+        println!("[warn] .ta/ide-excludes.json is missing or out of date");
+        println!("  Fix: regenerate manifest from current ta_runtime_dirs()");
+
+        let should_fix = if yes {
+            println!("  → Applying (--yes)");
+            true
+        } else {
+            print!("  Apply fix? [y/N]: ");
+            io::stdout().flush().ok();
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).ok();
+            input.trim().eq_ignore_ascii_case("y")
+        };
+
+        if should_fix {
+            match crate::commands::init::write_ide_excludes_manifest(&config.workspace_root) {
+                Ok(_) => {
+                    println!("  ✓ Regenerated .ta/ide-excludes.json");
+                    fixed += 1;
+                }
+                Err(e) => {
+                    println!("  ✗ Failed: {}", e);
+                }
+            }
+        } else {
+            println!("  Skipped.");
+            skipped += 1;
+        }
+        println!();
+    }
+
     println!("{} fix(es) applied, {} skipped.", fixed, skipped);
     Ok(())
 }
@@ -1603,6 +1639,118 @@ fn check_ide_exclusions(config: &GatewayConfig) -> Vec<CheckResult> {
     )]
 }
 
+// ── IDE exclude manifest check (v0.16.1.10) ──────────────────────────────────
+
+/// Check that `.ta/ide-excludes.json` exists and includes all current `ta_runtime_dirs()`.
+///
+/// Missing or out-of-date manifests mean community editor plugins (Zed, Helix, Neovim, etc.)
+/// won't exclude the full set of TA runtime directories after a TA upgrade.
+fn check_ide_excludes_manifest(config: &GatewayConfig) -> Vec<CheckResult> {
+    use ta_workspace::partitioning::ta_runtime_dirs;
+
+    let ta_dir = config.workspace_root.join(".ta");
+    if !ta_dir.exists() {
+        return Vec::new();
+    }
+
+    let manifest_path = ta_dir.join("ide-excludes.json");
+    if !manifest_path.exists() {
+        return vec![CheckResult::warn(
+            "IDE manifest",
+            ".ta/ide-excludes.json is missing".to_string(),
+            "run `ta doctor --fix` to generate it, or `ta init` for a new project".to_string(),
+        )];
+    }
+
+    let content = match std::fs::read_to_string(&manifest_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![CheckResult::warn(
+                "IDE manifest",
+                format!(".ta/ide-excludes.json could not be read: {}", e),
+                "run `ta doctor --fix` to regenerate the manifest".to_string(),
+            )];
+        }
+    };
+
+    let manifest: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            return vec![CheckResult::warn(
+                "IDE manifest",
+                format!(".ta/ide-excludes.json is invalid JSON: {}", e),
+                "run `ta doctor --fix` to regenerate the manifest".to_string(),
+            )];
+        }
+    };
+
+    let manifest_dirs: Vec<String> = manifest
+        .get("dirs")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let missing: Vec<&str> = ta_runtime_dirs()
+        .filter(|d| !manifest_dirs.iter().any(|m| m == d))
+        .collect();
+
+    if missing.is_empty() {
+        vec![CheckResult::ok(
+            "IDE manifest",
+            format!(
+                ".ta/ide-excludes.json is current ({} dirs)",
+                manifest_dirs.len()
+            ),
+        )]
+    } else {
+        vec![CheckResult::warn(
+            "IDE manifest",
+            format!(
+                ".ta/ide-excludes.json is out of date — {} dir(s) missing: {}",
+                missing.len(),
+                missing.join(", ")
+            ),
+            "run `ta doctor --fix` to regenerate the manifest".to_string(),
+        )]
+    }
+}
+
+/// Returns true when `.ta/ide-excludes.json` is absent or missing any `ta_runtime_dirs()` entry.
+fn ide_manifest_needs_fix(project_root: &Path) -> bool {
+    use ta_workspace::partitioning::ta_runtime_dirs;
+
+    let ta_dir = project_root.join(".ta");
+    if !ta_dir.exists() {
+        return false;
+    }
+    let manifest_path = ta_dir.join("ide-excludes.json");
+    if !manifest_path.exists() {
+        return true;
+    }
+    let content = match std::fs::read_to_string(&manifest_path) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    let manifest: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    let manifest_dirs: Vec<String> = manifest
+        .get("dirs")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    ta_runtime_dirs().any(|d| !manifest_dirs.iter().any(|m| m == d))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1985,6 +2133,117 @@ mod tests {
         assert!(
             !crash_path.exists(),
             "crash state file should be cleared by fix"
+        );
+    }
+
+    // ── IDE exclude manifest checks (v0.16.1.10) ──────────────────────────────
+
+    #[test]
+    fn doctor_detects_missing_manifest() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        // .ta/ exists but ide-excludes.json does not.
+
+        let config = test_config(&dir);
+        let results = check_ide_excludes_manifest(&config);
+        assert_eq!(results.len(), 1, "should warn when manifest is absent");
+        assert_eq!(results[0].status, CheckStatus::Warn);
+        assert!(
+            results[0].detail.contains("missing"),
+            "detail should mention missing: {}",
+            results[0].detail
+        );
+        assert!(
+            results[0].fix.contains("doctor --fix"),
+            "fix hint should mention doctor --fix: {}",
+            results[0].fix
+        );
+    }
+
+    #[test]
+    fn doctor_detects_stale_manifest() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        // Write a manifest that is missing 'memory/' (a required dir).
+        let stale = serde_json::json!({
+            "version": 1,
+            "ta_dir": ".ta",
+            "dirs": ["staging/", "goals/"]  // intentionally incomplete
+        });
+        std::fs::write(
+            ta_dir.join("ide-excludes.json"),
+            serde_json::to_string_pretty(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let config = test_config(&dir);
+        let results = check_ide_excludes_manifest(&config);
+        assert_eq!(results.len(), 1, "should warn for stale manifest");
+        assert_eq!(results[0].status, CheckStatus::Warn);
+        assert!(
+            results[0].detail.contains("out of date"),
+            "detail should say out of date: {}",
+            results[0].detail
+        );
+    }
+
+    #[test]
+    fn doctor_fix_rewrites_manifest() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        // Write a stale manifest.
+        let stale = serde_json::json!({
+            "version": 1,
+            "ta_dir": ".ta",
+            "dirs": ["staging/"]  // intentionally incomplete
+        });
+        std::fs::write(
+            ta_dir.join("ide-excludes.json"),
+            serde_json::to_string_pretty(&stale).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            ide_manifest_needs_fix(dir.path()),
+            "should detect stale manifest before fix"
+        );
+
+        crate::commands::init::write_ide_excludes_manifest(dir.path()).unwrap();
+
+        assert!(
+            !ide_manifest_needs_fix(dir.path()),
+            "manifest should be up to date after fix"
+        );
+    }
+
+    #[test]
+    fn doctor_manifest_ok_when_current() {
+        let dir = TempDir::new().unwrap();
+        crate::commands::init::write_ide_excludes_manifest(dir.path()).unwrap();
+
+        let config = test_config(&dir);
+        let results = check_ide_excludes_manifest(&config);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].status,
+            CheckStatus::Ok,
+            "up-to-date manifest should pass: {}",
+            results[0].detail
+        );
+    }
+
+    #[test]
+    fn doctor_no_manifest_check_when_no_ta_dir() {
+        let dir = TempDir::new().unwrap();
+        // No .ta/ directory.
+        let config = test_config(&dir);
+        let results = check_ide_excludes_manifest(&config);
+        assert!(
+            results.is_empty(),
+            "no manifest check when .ta/ does not exist"
         );
     }
 }

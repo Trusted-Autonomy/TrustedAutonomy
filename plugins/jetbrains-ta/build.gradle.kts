@@ -23,12 +23,21 @@ repositories {
 dependencies {
     // Gson is bundled with IntelliJ Platform — declare compileOnly so it's not re-bundled in the plugin JAR
     compileOnly("com.google.code.gson:gson:2.10.1")
+    // For unit tests that don't need the IntelliJ runtime (manifest parsing, file I/O).
+    testImplementation("com.google.code.gson:gson:2.10.1")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.22")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
     intellijPlatform {
         create("IC", providers.gradleProperty("platformVersion").get())
         pluginVerifier()
         zipSigner()
     }
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 intellijPlatform {
