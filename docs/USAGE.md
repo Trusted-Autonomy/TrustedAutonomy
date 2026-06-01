@@ -87,6 +87,7 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [API Mediation](#api-mediation)
    - [Project Setup](#project-setup)
    - [Project Initialization](#project-initialization)
+   - [IDE Integration](#ide-integration)
    - [Add TA to an Existing Project](#add-ta-to-an-existing-project)
    - [Framework Registry](#framework-registry)
    - [Workflow Engine](#workflow-engine)
@@ -9561,6 +9562,7 @@ Available templates: `rust-workspace`, `typescript-monorepo`, `python-ml`, `go-s
 
 `ta init run` automatically:
 - Detects your VCS (git / perforce) and runs `ta setup vcs` to write the correct ignore entries
+- Writes `.vscode/settings.json` with `files.exclude` and `search.exclude` entries for all TA runtime directories (see [IDE Integration](#ide-integration))
 - Creates `.ta/project.toml` with `version = "0.1.0-alpha"` as the starting point for semver tracking
 - Optionally creates a GitHub remote via `gh repo create` (requires `gh` CLI)
 
@@ -9597,6 +9599,56 @@ If `CLAUDE.md` already exists, `ta init run` leaves it untouched and prints:
 ```
 
 Edit the generated `CLAUDE.md` to add project-specific rules (protected files, code style, reviewer names) — the generated sections are a starting point, not a locked-down template.
+
+### IDE Integration
+
+TA runtime directories (`.ta/staging/`, `.ta/goals/`, `.ta/sessions/`, etc.) contain staging copies of the entire workspace, JSONL event logs, and lock files. Without exclusion, IDE indexers treat these as source files — every symbol appears twice, search results show staging artifacts, and autocomplete slows down.
+
+#### VS Code
+
+`ta init run` automatically writes `.vscode/settings.json` with `files.exclude` and `search.exclude` entries for all TA runtime directories:
+
+```json
+{
+  "files.exclude": {
+    ".ta/staging/": true,
+    ".ta/goals/": true,
+    ".ta/sessions/": true,
+    ".ta/store/": true,
+    ".ta/memory/": true
+  },
+  "search.exclude": {
+    ".ta/staging/": true,
+    ".ta/goals/": true
+  }
+}
+```
+
+The merge is non-destructive — your existing `files.exclude` and `search.exclude` entries are preserved. If you add VS Code to a project after `ta init`, run:
+
+```bash
+ta doctor --fix
+# [warn] .vscode/settings.json is missing N TA runtime exclude(s)
+#   Apply fix? [y/N]: y
+#   ✓ Updated .vscode/settings.json with TA runtime excludes
+```
+
+#### JetBrains (IntelliJ IDEA, CLion, RustRover, PyCharm)
+
+The **Trusted Autonomy** JetBrains plugin registers a `DirectoryIndexExcludePolicy` that dynamically excludes all `.ta/` runtime directories at IDE startup. No `.idea/` file changes are needed — the policy applies automatically to any project where the plugin is installed and the `.ta/` directory exists.
+
+Install from the JetBrains Marketplace: search for "Trusted Autonomy".
+
+#### `ta doctor` check
+
+`ta doctor` includes an "IDE exclusions" check. If `.vscode/` exists and `settings.json` is missing TA entries, it emits:
+
+```
+[warn] IDE exclusions  .vscode/settings.json is missing 34 TA runtime exclude(s) — IDE may index staging dirs
+       run `ta doctor --fix` to add the missing entries to .vscode/settings.json
+```
+
+Run `ta doctor --fix` to apply the fix interactively, or `ta doctor --fix --yes` to apply without prompts.
 
 ### Generating a Project Plan
 

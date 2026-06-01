@@ -202,6 +202,9 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 19. Plugin crash-loop diagnosis — reads .ta/discord-crash-state.json (v0.16.1.8).
     results.extend(check_plugin_crash_loop_diagnosis(config));
 
+    // 20. IDE index exclusions — VS Code settings.json (v0.16.1.9).
+    results.extend(check_ide_exclusions(config));
+
     results
 }
 
@@ -910,6 +913,43 @@ fn execute_fix(config: &GatewayConfig, yes: bool) -> anyhow::Result<()> {
         println!();
     }
 
+    // VS Code settings.json fix.
+    let vscode_missing = vscode_missing_excludes(&config.workspace_root);
+    if !vscode_missing.is_empty() {
+        println!(
+            "[warn] .vscode/settings.json is missing {} TA runtime exclude(s)",
+            vscode_missing.len()
+        );
+        println!("  Fix: add missing entries to files.exclude and search.exclude");
+
+        let should_fix = if yes {
+            println!("  → Applying (--yes)");
+            true
+        } else {
+            print!("  Apply fix? [y/N]: ");
+            io::stdout().flush().ok();
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).ok();
+            input.trim().eq_ignore_ascii_case("y")
+        };
+
+        if should_fix {
+            match crate::commands::init::write_vscode_settings_excludes(&config.workspace_root) {
+                Ok(_) => {
+                    println!("  ✓ Updated .vscode/settings.json with TA runtime excludes");
+                    fixed += 1;
+                }
+                Err(e) => {
+                    println!("  ✗ Failed: {}", e);
+                }
+            }
+        } else {
+            println!("  Skipped.");
+            skipped += 1;
+        }
+        println!();
+    }
+
     println!("{} fix(es) applied, {} skipped.", fixed, skipped);
     Ok(())
 }
@@ -1505,6 +1545,64 @@ fn diagnose_crash_stderr(lines: &[String]) -> CrashDiagnosis {
     }
 }
 
+// ── IDE index exclusion check (v0.16.1.9) ────────────────────────────────────
+
+/// Returns `LOCAL_TA_PATHS` entries missing from `.vscode/settings.json`'s `files.exclude`.
+///
+/// Returns an empty vec when `.vscode/` does not exist (no VS Code project) or when
+/// `settings.json` cannot be parsed (conservative — don't warn on broken JSON).
+fn vscode_missing_excludes(project_root: &Path) -> Vec<String> {
+    use ta_workspace::partitioning::LOCAL_TA_PATHS;
+
+    let settings_path = project_root.join(".vscode").join("settings.json");
+    if !settings_path.exists() {
+        return Vec::new();
+    }
+
+    let raw = match std::fs::read_to_string(&settings_path) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let settings: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let files_exclude = settings
+        .get("files.exclude")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    LOCAL_TA_PATHS
+        .iter()
+        .map(|p| format!(".ta/{}", p))
+        .filter(|key| !files_exclude.contains_key(key))
+        .collect()
+}
+
+/// Check that VS Code's `settings.json` excludes all TA runtime paths.
+///
+/// Skips silently when `.vscode/` does not exist. Emits a single `[warn]` when
+/// any entries are missing, with a `--fix` hint to add them automatically.
+fn check_ide_exclusions(config: &GatewayConfig) -> Vec<CheckResult> {
+    let missing = vscode_missing_excludes(&config.workspace_root);
+    if missing.is_empty() {
+        // Either .vscode/ doesn't exist, or all entries are present.
+        return Vec::new();
+    }
+
+    vec![CheckResult::warn(
+        "IDE exclusions",
+        format!(
+            ".vscode/settings.json is missing {} TA runtime exclude(s) — IDE may index staging dirs",
+            missing.len()
+        ),
+        "run `ta doctor --fix` to add the missing entries to .vscode/settings.json".to_string(),
+    )]
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1735,6 +1833,119 @@ mod tests {
                 || results[0].fix.contains("discord-listener.pid"),
             "fix should mention doctor --fix or the PID file: {}",
             results[0].fix
+        );
+    }
+
+    // ── IDE exclusion checks (v0.16.1.9) ─────────────────────────────────────
+
+    #[test]
+    fn doctor_detects_missing_vscode_excludes() {
+        let dir = TempDir::new().unwrap();
+        // Create .vscode/settings.json with NO TA entries.
+        let vscode_dir = dir.path().join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("settings.json"),
+            r#"{"editor.formatOnSave": true}"#,
+        )
+        .unwrap();
+
+        let config = test_config(&dir);
+        let results = check_ide_exclusions(&config);
+        assert_eq!(results.len(), 1, "should warn when TA excludes are missing");
+        assert_eq!(results[0].status, CheckStatus::Warn);
+        assert!(
+            results[0].detail.contains("missing"),
+            "detail should mention missing entries: {}",
+            results[0].detail
+        );
+        assert!(
+            results[0].fix.contains("doctor --fix"),
+            "fix hint should mention doctor --fix: {}",
+            results[0].fix
+        );
+    }
+
+    #[test]
+    fn doctor_no_warn_when_vscode_dir_absent() {
+        let dir = TempDir::new().unwrap();
+        // No .vscode/ directory at all.
+        let config = test_config(&dir);
+        let results = check_ide_exclusions(&config);
+        assert!(
+            results.is_empty(),
+            "no warning when .vscode/ does not exist"
+        );
+    }
+
+    #[test]
+    fn vscode_settings_merged_not_overwritten() {
+        let dir = TempDir::new().unwrap();
+        let vscode_dir = dir.path().join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        // Pre-existing user setting that must survive the merge.
+        std::fs::write(
+            vscode_dir.join("settings.json"),
+            r#"{"editor.tabSize": 4, "files.exclude": {"node_modules/": true}}"#,
+        )
+        .unwrap();
+
+        crate::commands::init::write_vscode_settings_excludes(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(vscode_dir.join("settings.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // User's pre-existing key must be preserved.
+        assert_eq!(
+            parsed["editor.tabSize"],
+            serde_json::Value::Number(4.into()),
+            "user setting editor.tabSize must not be overwritten"
+        );
+        assert_eq!(
+            parsed["files.exclude"]["node_modules/"],
+            serde_json::Value::Bool(true),
+            "user's files.exclude entry must not be overwritten"
+        );
+        // TA entries must be present.
+        assert_eq!(
+            parsed["files.exclude"][".ta/staging/"],
+            serde_json::Value::Bool(true),
+            ".ta/staging/ must be added to files.exclude"
+        );
+        assert_eq!(
+            parsed["search.exclude"][".ta/goals/"],
+            serde_json::Value::Bool(true),
+            ".ta/goals/ must be added to search.exclude"
+        );
+    }
+
+    #[test]
+    fn doctor_fix_adds_vscode_excludes() {
+        let dir = TempDir::new().unwrap();
+        let vscode_dir = dir.path().join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("settings.json"),
+            r#"{"editor.formatOnSave": true}"#,
+        )
+        .unwrap();
+
+        // Verify missing before fix.
+        let missing_before = vscode_missing_excludes(dir.path());
+        assert!(
+            !missing_before.is_empty(),
+            "should detect missing excludes before fix"
+        );
+
+        // Apply fix.
+        crate::commands::init::write_vscode_settings_excludes(dir.path()).unwrap();
+
+        // Verify nothing missing after fix.
+        let missing_after = vscode_missing_excludes(dir.path());
+        assert!(
+            missing_after.is_empty(),
+            "all excludes should be present after fix, still missing: {:?}",
+            missing_after
         );
     }
 

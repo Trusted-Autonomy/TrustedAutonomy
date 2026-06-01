@@ -70,6 +70,15 @@ pub const LOCAL_TA_PATHS: &[&str] = &[
     "*.lock", // replaces the specific release.lock entry
 ];
 
+/// Returns only the directory entries from `LOCAL_TA_PATHS` (those ending with `/`).
+///
+/// Used by IDE integrations (VS Code `files.exclude`, JetBrains `DirectoryIndexExcludePolicy`)
+/// to exclude TA runtime directories from file search and symbol indexing. File entries and
+/// glob patterns are omitted — IDEs handle those differently.
+pub fn ta_runtime_dirs() -> impl Iterator<Item = &'static str> {
+    LOCAL_TA_PATHS.iter().copied().filter(|p| p.ends_with('/'))
+}
+
 /// VCS backend detected or configured for the project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VcsBackend {
@@ -474,5 +483,50 @@ mod tests {
             LOCAL_TA_PATHS.contains(&"link-cache/"),
             "link-cache/ must be in LOCAL_TA_PATHS so remote manifests are not committed"
         );
+    }
+
+    #[test]
+    fn ta_runtime_dirs_are_complete() {
+        let dirs: Vec<&str> = super::ta_runtime_dirs().collect();
+        // Must include all known runtime directories.
+        for required in &[
+            "staging/",
+            "store/",
+            "goals/",
+            "sessions/",
+            "interactions/",
+            "pr_packages/",
+            "review/",
+            "backups/",
+            "heartbeats/",
+            "workflow-runs/",
+            "advisor-notes/",
+            "draft-build-ctx/",
+            "memory/",
+            "link-cache/",
+        ] {
+            assert!(
+                dirs.contains(required),
+                "ta_runtime_dirs() missing required directory entry: {}",
+                required
+            );
+        }
+        // Must not include non-directory entries.
+        for dir in &dirs {
+            assert!(
+                dir.ends_with('/'),
+                "ta_runtime_dirs() returned non-directory entry: {}",
+                dir
+            );
+        }
+        // The gitignore block must contain every directory returned by ta_runtime_dirs().
+        let block = gitignore_block();
+        for dir in &dirs {
+            assert!(
+                block.contains(&format!(".ta/{}", dir)),
+                "gitignore block is missing ta_runtime_dirs() entry: .ta/{}",
+                dir
+            );
+        }
     }
 }

@@ -296,6 +296,10 @@ fn run_init(
     generate_memory_toml(&ta_dir, &project_type)?;
     generate_policy_yaml(&ta_dir, &project_type)?;
     generate_taignore(project_root, &project_type)?;
+    // Emit .vscode/settings.json excludes so VS Code does not index TA runtime dirs.
+    if let Err(e) = write_vscode_settings_excludes(project_root) {
+        println!("  Warning: could not write .vscode/settings.json: {}", e);
+    }
     // v0.15.13.3: for git projects, add .gitattributes hint for project-memory merge.
     let is_git = project_root.join(".git").exists();
     if is_git {
@@ -377,6 +381,7 @@ fn run_init(
     println!("  .ta/constitutions/     — starter constitutions");
     println!("  .ta/project.toml       — project version");
     println!("  .taignore              — file exclusion patterns");
+    println!("  .vscode/settings.json  — IDE exclusions for TA runtime dirs");
     if is_game_engine {
         println!("  .ta/bmad.toml          — BMAD machine-local install config");
         println!("  .ta/agents/bmad-*.toml — BMAD role agent configs");
@@ -922,6 +927,60 @@ fn generate_taignore(project_root: &Path, project_type: &ProjectType) -> anyhow:
     );
     std::fs::write(&path, content)?;
     println!("  Created .taignore");
+    Ok(())
+}
+
+/// Write or merge `.vscode/settings.json` with TA runtime directory excludes.
+///
+/// Adds all `LOCAL_TA_PATHS` entries to `files.exclude` and `search.exclude` so VS Code
+/// does not index staging copies, JSONL event logs, or other TA runtime state. Uses
+/// merge-not-overwrite logic: reads existing JSON (if any), adds only missing keys, writes back.
+pub(crate) fn write_vscode_settings_excludes(project_root: &Path) -> anyhow::Result<()> {
+    use ta_workspace::partitioning::LOCAL_TA_PATHS;
+
+    let vscode_dir = project_root.join(".vscode");
+    std::fs::create_dir_all(&vscode_dir)?;
+    let settings_path = vscode_dir.join("settings.json");
+
+    // Read existing settings or start with empty object.
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let raw = std::fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(Default::default()))
+    } else {
+        serde_json::Value::Object(Default::default())
+    };
+
+    if !settings.is_object() {
+        settings = serde_json::Value::Object(Default::default());
+    }
+
+    let obj = settings.as_object_mut().unwrap();
+
+    // Ensure files.exclude and search.exclude are objects.
+    for key in &["files.exclude", "search.exclude"] {
+        obj.entry(key.to_string())
+            .or_insert(serde_json::Value::Object(Default::default()));
+    }
+
+    let mut added = 0usize;
+    for path in LOCAL_TA_PATHS {
+        let key = format!(".ta/{}", path);
+        for section in &["files.exclude", "search.exclude"] {
+            if let Some(map) = obj.get_mut(*section).and_then(|v| v.as_object_mut()) {
+                if !map.contains_key(&key) {
+                    map.insert(key.clone(), serde_json::Value::Bool(true));
+                    added += 1;
+                }
+            }
+        }
+    }
+
+    if added > 0 || !settings_path.exists() {
+        let content = serde_json::to_string_pretty(&settings)?;
+        std::fs::write(&settings_path, content + "\n")?;
+        println!("  Updated .vscode/settings.json (TA runtime excludes added)");
+    }
+
     Ok(())
 }
 
