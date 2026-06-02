@@ -8302,7 +8302,7 @@ The plugin's own `README.md` covers everything Ollama-specific: prerequisites, m
 
 ---
 ### v0.16.3 — Agent Context Files & Manifest Inheritance
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Let agent manifests declare the context files and instructions they need, and let user-level base manifests be shared across projects via inheritance — without a separate skill registry, new directory conventions, or implicit two-way coupling.
 
@@ -8339,18 +8339,18 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 #### Items
 
-1. [ ] **`context.files` in agent manifests** (`crates/ta-goal/src/agent_profile.rs`): Add `context: Option<AgentContext>` struct with `files: Vec<String>`. Resolve each path at goal-start time: `.ta/`-prefixed → project root, `~/`-prefixed → home dir, absolute → as-is. Read file contents, delimit with `<!-- context: <path> -->` markers, append to the injected CLAUDE.md block.
-2. [ ] **`inherit` field** (`crates/ta-goal/src/agent_profile.rs`): `inherit: Option<String>` resolved to an absolute path. Load base manifest, merge with inheriting manifest (inheriting fields win; `context.files` lists are concatenated base-first). Reject chains (`inherit` in a base manifest is an error).
-3. [ ] **`~/.config/ta/agents/` scan on init** (`apps/ta-cli/src/commands/init.rs`): `ta init` checks if `~/.config/ta/agents/` exists; if not, creates it with a commented example `base-coder.toml`. `ta doctor` checks that `context.files` entries in installed manifests all resolve to real files, emits `[warn]` for missing ones.
-4. [ ] **`ta agent list`** (CLI): Short command showing all agent profiles from `.ta/agents/` and `~/.config/ta/agents/` with name, model, inherit source (if any), and context file count.
-5. [ ] **`ta plugin list --agents`** (`apps/ta-cli/src/commands/plugins.rs`): Extend `ta plugin list` with an `--agents` flag. Enumerate registered agent plugins (`ta-agent-ollama`, `ta-agent-claude`, future plugins) with name, version, binary path, loaded profile count, currently active model. Separate section from channel plugins. `ta plugin list` with no flags shows both.
-6. [ ] **Agent TOML profile inventory**: At daemon start, scan `~/.config/ta/agents/` and `.ta/agents/` for `*.toml` profiles. Index: profile name → `{ agent_plugin, model, version, last_used, context_file_count }`. Expose via `GET /api/agents/profiles`. Surface in `ta plugin list --agents`.
-7. [ ] **`ta doctor` Ollama probe** (`crates/ta-daemon/src/health.rs`): When `ta-agent-ollama` is registered, probe `GET http://localhost:11434/api/tags`. Check: (a) Ollama reachable, (b) each model in installed profiles is pulled. Emit `WARN` + suggested `ollama pull <model>`. `ta doctor --fix` runs the pull.
-8. [ ] **Workflow → agent usage index**: Scan `.ta/workflows/*.toml` for `agent =` fields at daemon start. Map `agent_name → [workflow_names]`. Surface in `ta plugin list --agents` as "used by" column. Flag profiles unreferenced by any workflow as "unused".
-9. [ ] **`ta plugin status <name>`** (CLI): Per-agent detail view — binary path, version, profiles, context files, workflows referencing this agent, last-used timestamp.
-10. [ ] **Studio Agents panel** (`assets/index.html`): Section in Dashboard from `GET /api/agents/profiles`. Ollama: connected/disconnected indicator with model list. "No agent plugins installed" placeholder. Depends on item 6.
-11. [ ] **Tests**: `context.files` resolves paths correctly (project-relative, home-relative, absolute). Missing file emits warn, not panic. `inherit` merges fields correctly; chain rejected. `ta agent list` shows profiles from both dirs. Ollama probe reports reachable/unreachable. Workflow usage index maps agents to workflows. Unused detection correct.
-12. [ ] **USAGE.md**: "Agent context files" section — `context.files`, `inherit`, personal base manifests in `~/.config/ta/agents/`, example showing project-scoped style guide + personal base coder. Replace any "skill plugin" references.
+1. [x] **`context.files` in agent manifests** (`crates/ta-goal/src/agent_profile.rs`): Add `context: Option<AgentContext>` struct with `files: Vec<String>`. Resolve each path at goal-start time: `.ta/`-prefixed → project root, `~/`-prefixed → home dir, absolute → as-is. Read file contents, delimit with `<!-- context: <path> -->` markers, append to the injected CLAUDE.md block.
+2. [x] **`inherit` field** (`crates/ta-goal/src/agent_profile.rs`): `inherit: Option<String>` resolved to an absolute path. Load base manifest, merge with inheriting manifest (inheriting fields win; `context.files` lists are concatenated base-first). Reject chains (`inherit` in a base manifest is an error).
+3. [x] **`~/.config/ta/agents/` scan on init** (`apps/ta-cli/src/commands/init.rs`): `ta init` checks if `~/.config/ta/agents/` exists; if not, creates it with a commented example `base-coder.toml`. `ta doctor` checks that `context.files` entries in installed manifests all resolve to real files, emits `[warn]` for missing ones.
+4. [x] **`ta agent list`** (CLI): Short command showing all agent profiles from `.ta/agents/` and `~/.config/ta/agents/` with name, model, inherit source (if any), and context file count.
+5. [x] **`ta plugin list --agents`** (`apps/ta-cli/src/commands/plugins.rs`): Extend `ta plugin list` with an `--agents` flag. Enumerate registered agent plugins (`ta-agent-ollama`, `ta-agent-claude`, future plugins) with name, version, binary path, loaded profile count, currently active model. Separate section from channel plugins. `ta plugin list` with no flags shows both.
+6. [x] **Agent TOML profile inventory**: At daemon start, scan `~/.config/ta/agents/` and `.ta/agents/` for `*.toml` profiles. Index: profile name → `{ agent_plugin, model, version, last_used, context_file_count }`. Expose via `GET /api/agents/profiles`. Surface in `ta plugin list --agents`.
+7. [x] **`ta doctor` Ollama probe** (`crates/ta-daemon/src/health.rs`): When `ta-agent-ollama` is registered, probe `GET http://localhost:11434/api/tags`. Check: (a) Ollama reachable, (b) each model in installed profiles is pulled. Emit `WARN` + suggested `ollama pull <model>`. `ta doctor --fix` runs the pull.
+8. [x] **Workflow → agent usage index**: Scan `.ta/workflows/*.toml` for `agent =` fields at daemon start. Map `agent_name → [workflow_names]`. Surface in `ta plugin list --agents` as "used by" column. Flag profiles unreferenced by any workflow as "unused".
+9. [x] **`ta plugin status <name>`** (CLI): Per-agent detail view — binary path, version, profiles, context files, workflows referencing this agent, last-used timestamp.
+10. [x] **Studio Agents panel** (`assets/index.html`): Section in Dashboard from `GET /api/agents/profiles`. Ollama: connected/disconnected indicator with model list. "No agent plugins installed" placeholder. Depends on item 6.
+11. [x] **Tests**: `context.files` resolves paths correctly (project-relative, home-relative, absolute). Missing file emits warn, not panic. `inherit` merges fields correctly; chain rejected. `ta agent list` shows profiles from both dirs. Ollama probe reports reachable/unreachable. Workflow usage index maps agents to workflows. Unused detection correct.
+12. [x] **USAGE.md**: "Agent context files" section — `context.files`, `inherit`, personal base manifests in `~/.config/ta/agents/`, example showing project-scoped style guide + personal base coder. Replace any "skill plugin" references.
 
 #### Version: `0.16.3-alpha`
 

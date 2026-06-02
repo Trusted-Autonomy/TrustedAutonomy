@@ -312,6 +312,10 @@ fn run_init(
         generate_gitattributes_project_memory(project_root)?;
     }
     generate_agent_configs(&ta_dir)?;
+    // v0.16.3: Ensure personal agent base-manifest directory exists.
+    if let Err(e) = ensure_user_agents_dir() {
+        tracing::warn!(error = %e, "Could not create ~/.config/ta/agents/ — skipping");
+    }
     generate_constitutions(&ta_dir)?;
     seed_memory_entries(&ta_dir, &project_type, project_root)?;
 
@@ -1053,6 +1057,53 @@ fn generate_gitattributes_project_memory(project_root: &Path) -> anyhow::Result<
         )?;
     }
     println!("  Updated .gitattributes (project-memory merge strategy)");
+    Ok(())
+}
+
+/// Ensure `~/.config/ta/agents/` exists and contains a commented example `base-coder.toml`.
+///
+/// Called by `ta init` so users have a ready-to-use location for personal base manifests.
+/// Creates the directory silently if already present.
+pub(crate) fn ensure_user_agents_dir() -> anyhow::Result<()> {
+    let user_agents_dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".config")
+        .join("ta")
+        .join("agents");
+
+    if !user_agents_dir.exists() {
+        std::fs::create_dir_all(&user_agents_dir)?;
+
+        let example = r#"# base-coder.toml — personal base manifest shared across all projects.
+# Reference this from a project manifest with:
+#   inherit = "~/.config/ta/agents/base-coder.toml"
+#
+# Fields here are defaults; project manifests override them.
+# context.files are merged (base files first, then project files).
+#
+# Uncomment and customize:
+#
+# name = "base-coder"
+# version = "1.0.0"
+# description = "Personal base agent defaults"
+# command = "claude"
+# args = ["--headless", "--output-format", "stream-json", "--verbose"]
+#
+# [context]
+# files = [
+#   "~/.config/ta/constitutions/personal-style.md",
+# ]
+#
+# [memory]
+# inject = "mcp"
+# max_entries = 20
+"#;
+        std::fs::write(user_agents_dir.join("base-coder.toml"), example)?;
+        println!("  Created ~/.config/ta/agents/ with example base-coder.toml");
+    }
+
     Ok(())
 }
 

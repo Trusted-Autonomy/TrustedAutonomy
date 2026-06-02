@@ -380,6 +380,7 @@
     <div class="tab" onclick="switchTab('projects')" id="tab-projects">Projects</div>
     <div class="tab" onclick="switchTab('workflows')">Workflows</div>
     <div class="tab" onclick="switchTab('release')">Release</div>
+    <div class="tab" onclick="switchTab('agents')">Agents</div>
     <div class="tab" onclick="switchTab('personas')">Personas</div>
     <div class="tab" onclick="switchTab('advisor')">Advisor</div>
     <div class="tab" onclick="switchTab('health')" id="tab-health">Health</div>
@@ -651,6 +652,7 @@ function switchTab(tab) {
   else if (tab === 'projects') loadProjects();
   else if (tab === 'workflows') loadWorkflows();
   else if (tab === 'release') loadRelease();
+  else if (tab === 'agents') loadAgents();
   else if (tab === 'personas') loadPersonas();
   else if (tab === 'advisor') loadAdvisor();
   else if (tab === 'health') loadHealthPage();
@@ -3233,6 +3235,75 @@ async function pollWorkflowStatus(id) {
 }
 
 // ── Personas (v0.14.20) ───────────────────────────────────────
+// ── Agents panel (v0.16.3) ───────────────────────────────────────
+
+async function loadAgents() {
+  app.innerHTML = '<div class="loading">Loading agents...</div>';
+  try {
+    const resp = await fetch('/api/agents/profiles');
+    const data = resp.ok ? await resp.json() : { profiles: [], total: 0 };
+    renderAgents(data.profiles || []);
+  } catch (e) {
+    renderAgents([]);
+  }
+}
+
+function renderAgents(profiles) {
+  let html = '<div class="section"><h3>Agent Profiles</h3>';
+
+  if (profiles.length === 0) {
+    html += '<p style="color:var(--muted)">No agent profiles installed.</p>';
+    html += '<p style="color:var(--muted);font-size:0.85rem">Install an Ollama profile: <code>ta agent install gemma4</code></p>';
+    html += '</div>';
+    app.innerHTML = html;
+    return;
+  }
+
+  const project = profiles.filter(p => p.source === 'project');
+  const user = profiles.filter(p => p.source === 'user');
+  const builtin = profiles.filter(p => p.source === 'builtin');
+
+  const renderTable = (list, title) => {
+    if (!list.length) return '';
+    let t = `<h4 style="margin:0.75rem 0 0.4rem;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:.05em">${title}</h4>`;
+    t += '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
+    t += '<thead><tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border)">'
+       + '<th style="padding:0.3rem 0.5rem">Name</th>'
+       + '<th style="padding:0.3rem 0.5rem">Model</th>'
+       + '<th style="padding:0.3rem 0.5rem">Inherit</th>'
+       + '<th style="padding:0.3rem 0.5rem">Ctx</th>'
+       + '<th style="padding:0.3rem 0.5rem">Used By</th>'
+       + '</tr></thead><tbody>';
+    for (const p of list) {
+      const model = p.model || '—';
+      const inherit = p.inherit ? (p.inherit.replace(/^.*\//, '~/…/')) : '—';
+      const ctx = p.context_file_count || 0;
+      const wf = (p.used_by_workflows || []).join(', ') || '—';
+      t += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:0.3rem 0.5rem;font-weight:500">${p.name}</td>
+        <td style="padding:0.3rem 0.5rem;color:var(--muted)">${model}</td>
+        <td style="padding:0.3rem 0.5rem;color:var(--muted);font-size:0.78rem">${inherit}</td>
+        <td style="padding:0.3rem 0.5rem;text-align:center">${ctx || '—'}</td>
+        <td style="padding:0.3rem 0.5rem;color:var(--muted);font-size:0.78rem">${wf}</td>
+      </tr>`;
+    }
+    t += '</tbody></table>';
+    return t;
+  };
+
+  html += renderTable(project, `Project (${project.length})`);
+  html += renderTable(user, `User (${user.length})`);
+  html += renderTable(builtin, `Built-in (${builtin.length})`);
+
+  html += '<p style="margin-top:1rem;font-size:0.8rem;color:var(--muted)">'
+        + '<code>ta agent list</code> — show profiles with full details · '
+        + '<code>ta plugin list --agents</code> — show agent plugin summary'
+        + '</p>';
+
+  html += '</div>';
+  app.innerHTML = html;
+}
+
 async function loadPersonas() {
   app.innerHTML = '<div class="loading">Loading personas...</div>';
   try {
