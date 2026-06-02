@@ -300,6 +300,12 @@ fn run_init(
     if let Err(e) = write_vscode_settings_excludes(project_root) {
         println!("  Warning: could not write .vscode/settings.json: {}", e);
     }
+    // Write .ta/ide-excludes.json for community editor plugins.
+    if let Err(e) = write_ide_excludes_manifest(project_root) {
+        println!("  Warning: could not write .ta/ide-excludes.json: {}", e);
+    } else {
+        println!("  Created .ta/ide-excludes.json");
+    }
     // v0.15.13.3: for git projects, add .gitattributes hint for project-memory merge.
     let is_git = project_root.join(".git").exists();
     if is_git {
@@ -382,6 +388,7 @@ fn run_init(
     println!("  .ta/project.toml       — project version");
     println!("  .taignore              — file exclusion patterns");
     println!("  .vscode/settings.json  — IDE exclusions for TA runtime dirs");
+    println!("  .ta/ide-excludes.json  — IDE exclude manifest for community editor plugins");
     if is_game_engine {
         println!("  .ta/bmad.toml          — BMAD machine-local install config");
         println!("  .ta/agents/bmad-*.toml — BMAD role agent configs");
@@ -981,6 +988,30 @@ pub(crate) fn write_vscode_settings_excludes(project_root: &Path) -> anyhow::Res
         println!("  Updated .vscode/settings.json (TA runtime excludes added)");
     }
 
+    Ok(())
+}
+
+/// Write `.ta/ide-excludes.json` — the machine-readable IDE exclude manifest.
+///
+/// Format: `{"version": 1, "ta_dir": ".ta", "dirs": ["staging/", "goals/", ...]}`
+///
+/// Idempotent: rewrites unconditionally (file is generated, not user-edited).
+/// Community editor plugins (Zed, Helix, Neovim, Nova, etc.) read this file to
+/// discover which directories to exclude from file search and symbol indexing.
+pub(crate) fn write_ide_excludes_manifest(project_root: &Path) -> anyhow::Result<()> {
+    use ta_workspace::partitioning::ta_runtime_dirs;
+
+    let ta_dir = project_root.join(".ta");
+    std::fs::create_dir_all(&ta_dir)?;
+
+    let dirs: Vec<&str> = ta_runtime_dirs().collect();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "ta_dir": ".ta",
+        "dirs": dirs,
+    });
+    let content = serde_json::to_string_pretty(&manifest)? + "\n";
+    std::fs::write(ta_dir.join("ide-excludes.json"), content)?;
     Ok(())
 }
 
@@ -1836,6 +1867,57 @@ mod tests {
             meta_content.contains("initialized_with"),
             "project-meta.toml should contain initialized_with"
         );
+    }
+
+    #[test]
+    fn manifest_written_on_init() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        run_init(&config, None, Some("test-project"), None, None, true, false).unwrap();
+
+        let manifest_path = dir.path().join(".ta").join("ide-excludes.json");
+        assert!(
+            manifest_path.exists(),
+            ".ta/ide-excludes.json should be created by ta init"
+        );
+    }
+
+    #[test]
+    fn manifest_contains_all_runtime_dirs() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        run_init(&config, None, Some("test-project"), None, None, true, false).unwrap();
+
+        let content =
+            std::fs::read_to_string(dir.path().join(".ta").join("ide-excludes.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(parsed["version"], 1, "manifest must have version=1");
+        assert_eq!(parsed["ta_dir"], ".ta", "manifest must have ta_dir=.ta");
+
+        let dirs = parsed["dirs"].as_array().unwrap();
+        let dir_strs: Vec<&str> = dirs.iter().filter_map(|v| v.as_str()).collect();
+
+        let runtime_dirs: Vec<&str> = ta_workspace::partitioning::ta_runtime_dirs().collect();
+        for d in &runtime_dirs {
+            assert!(
+                dir_strs.contains(d),
+                "manifest dirs should contain '{}' from ta_runtime_dirs()",
+                d
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        write_ide_excludes_manifest(dir.path()).unwrap();
+        write_ide_excludes_manifest(dir.path()).unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".ta").join("ide-excludes.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        // Only one "dirs" key — no duplication.
+        assert!(parsed["dirs"].is_array());
     }
 
     #[test]
