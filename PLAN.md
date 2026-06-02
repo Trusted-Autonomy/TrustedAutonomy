@@ -8302,7 +8302,7 @@ The plugin's own `README.md` covers everything Ollama-specific: prerequisites, m
 
 ---
 ### v0.16.3 — Agent Context Files & Manifest Inheritance
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Let agent manifests declare the context files and instructions they need, and let user-level base manifests be shared across projects via inheritance — without a separate skill registry, new directory conventions, or implicit two-way coupling.
 
