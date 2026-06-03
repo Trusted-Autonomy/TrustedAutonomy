@@ -8356,7 +8356,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.4 — Windows Sandbox (AppContainer + Job Objects)
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.15.16 (Windows EV signing — establishes working Windows CI pipeline)
 
