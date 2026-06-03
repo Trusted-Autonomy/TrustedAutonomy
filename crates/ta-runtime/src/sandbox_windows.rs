@@ -6,6 +6,9 @@
 // `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` flag set.  Closing the Job Object
 // handle (on TA exit or drop) kills the entire process tree immediately.
 //
+// Uses raw extern "system" declarations rather than windows-sys to avoid
+// version-resolution issues with target-conditional Cargo dependencies.
+//
 // ## What this provides
 //
 // - **Process tree teardown**: When TA exits (or crashes), the Job Object
@@ -44,6 +47,87 @@ pub struct WindowsJobObjectGuard {
 #[cfg(not(target_os = "windows"))]
 pub struct WindowsJobObjectGuard;
 
+// ── Windows Win32 bindings ─────────────────────────────────────────────────────
+//
+// Inline extern declarations avoid windows-sys version-resolution issues with
+// target-conditional Cargo.toml dependencies (lock file generated on macOS may
+// select a different version than what Windows CI resolves at build time).
+
+#[cfg(target_os = "windows")]
+mod win32 {
+    // JOBOBJECT_BASIC_LIMIT_INFORMATION (64-bit layout matches Windows SDK).
+    // repr(C) adds implicit padding so field offsets match the C struct.
+    #[repr(C)]
+    pub struct JobObjectBasicLimitInfo {
+        pub per_process_user_time_limit: i64, // LARGE_INTEGER
+        pub per_job_user_time_limit: i64,     // LARGE_INTEGER
+        pub limit_flags: u32,                 // DWORD  (offset 16)
+        // 4 bytes implicit padding → next field at offset 24
+        pub minimum_working_set_size: usize, // SIZE_T
+        pub maximum_working_set_size: usize, // SIZE_T
+        pub active_process_limit: u32,       // DWORD
+        // 4 bytes implicit padding → next field at offset 48
+        pub affinity: usize,       // ULONG_PTR
+        pub priority_class: u32,   // DWORD
+        pub scheduling_class: u32, // DWORD
+    }
+
+    // IO_COUNTERS (all fields are ULONGLONG = u64)
+    #[repr(C)]
+    pub struct IoCounters {
+        pub read_operation_count: u64,
+        pub write_operation_count: u64,
+        pub other_operation_count: u64,
+        pub read_transfer_count: u64,
+        pub write_transfer_count: u64,
+        pub other_transfer_count: u64,
+    }
+
+    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    #[repr(C)]
+    pub struct JobObjectExtendedLimitInfo {
+        pub basic_limit_information: JobObjectBasicLimitInfo,
+        pub io_info: IoCounters,
+        pub process_memory_limit: usize,
+        pub job_memory_limit: usize,
+        pub peak_process_memory_used: usize,
+        pub peak_job_memory_used: usize,
+    }
+
+    pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+    pub const PROCESS_ALL_ACCESS: u32 = 0x001F_FFFF;
+    pub const FALSE: i32 = 0;
+    // JOBOBJECTINFOCLASS::JobObjectExtendedLimitInformation = 9
+    pub const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn CreateJobObjectW(
+            lp_job_attributes: *mut std::ffi::c_void,
+            lp_name: *const u16,
+        ) -> isize;
+
+        pub fn AssignProcessToJobObject(h_job: isize, h_process: isize) -> i32;
+
+        pub fn SetInformationJobObject(
+            h_job: isize,
+            job_object_info_class: i32,
+            lp_job_object_info: *mut std::ffi::c_void,
+            cb_job_object_info_length: u32,
+        ) -> i32;
+
+        pub fn OpenProcess(
+            dw_desired_access: u32,
+            b_inherit_handle: i32,
+            dw_process_id: u32,
+        ) -> isize;
+
+        pub fn CloseHandle(h_object: isize) -> i32;
+
+        pub fn GetLastError() -> u32;
+    }
+}
+
 // ── Windows implementation ────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -53,11 +137,7 @@ impl WindowsJobObjectGuard {
     /// Returns an error if `CreateJobObject` or `SetInformationJobObject` fails.
     /// The error message includes the Win32 error code for diagnostics.
     pub fn new() -> Result<Self, String> {
-        use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
-        use windows_sys::Win32::System::JobObjects::{
-            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        };
+        use win32::*;
 
         // Safety: CreateJobObjectW with NULL attributes and NULL name creates an
         // anonymous job object with default security and no name.
@@ -66,28 +146,26 @@ impl WindowsJobObjectGuard {
         if handle == 0 {
             return Err(format!(
                 "CreateJobObjectW failed (Win32 error {})",
-                last_error()
+                unsafe { GetLastError() }
             ));
         }
 
         // Configure KILL_ON_JOB_CLOSE so the process tree is torn down when the
         // last handle to this Job Object is closed (i.e., when the guard drops).
-        // Use zeroed() to avoid depending on IO_COUNTERS visibility across windows-sys versions.
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let mut info: JobObjectExtendedLimitInfo = unsafe { std::mem::zeroed() };
+        info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
         let ok = unsafe {
             SetInformationJobObject(
                 handle,
-                JobObjectExtendedLimitInformation,
-                &mut info as *mut _ as *mut _,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                &mut info as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<JobObjectExtendedLimitInfo>() as u32,
             )
         };
 
         if ok == FALSE {
-            let err = last_error();
-            // Clean up the handle before returning the error.
+            let err = unsafe { GetLastError() };
             unsafe { CloseHandle(handle) };
             return Err(format!(
                 "SetInformationJobObject(KILL_ON_JOB_CLOSE) failed (Win32 error {})",
@@ -106,8 +184,7 @@ impl WindowsJobObjectGuard {
     ///
     /// Returns an error if `OpenProcess` or `AssignProcessToJobObject` fails.
     pub fn assign_process(&self, pid: u32) -> Result<(), String> {
-        use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
-        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
+        use win32::*;
 
         // Open the target process with sufficient rights to assign it.
         let proc_handle = unsafe { OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid) };
@@ -115,16 +192,11 @@ impl WindowsJobObjectGuard {
             return Err(format!(
                 "OpenProcess(pid={}) failed (Win32 error {})",
                 pid,
-                last_error()
+                unsafe { GetLastError() }
             ));
         }
 
-        let ok = unsafe {
-            windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(
-                self.handle,
-                proc_handle,
-            )
-        };
+        let ok = unsafe { AssignProcessToJobObject(self.handle, proc_handle) };
         // Always close the process handle we opened; we no longer need it.
         unsafe { CloseHandle(proc_handle) };
 
@@ -132,7 +204,7 @@ impl WindowsJobObjectGuard {
             return Err(format!(
                 "AssignProcessToJobObject(pid={}) failed (Win32 error {})",
                 pid,
-                last_error()
+                unsafe { GetLastError() }
             ));
         }
 
@@ -151,7 +223,7 @@ impl Drop for WindowsJobObjectGuard {
     fn drop(&mut self) {
         // Closing the handle triggers KILL_ON_JOB_CLOSE: the kernel terminates
         // all processes in the Job Object.
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+        unsafe { win32::CloseHandle(self.handle) };
     }
 }
 
@@ -174,14 +246,6 @@ impl WindowsJobObjectGuard {
     pub fn assign_process(&self, _pid: u32) -> Result<(), String> {
         Ok(())
     }
-}
-
-// ── Win32 error helper ────────────────────────────────────────────────────────
-
-/// Return the thread-local Win32 last-error code as a u32 for diagnostics.
-#[cfg(target_os = "windows")]
-fn last_error() -> u32 {
-    unsafe { windows_sys::Win32::Foundation::GetLastError() }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

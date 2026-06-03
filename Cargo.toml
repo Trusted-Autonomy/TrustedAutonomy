@@ -159,12 +159,3 @@ arboard = "3"
 
 # Testing utilities
 tempfile = "3"
-
-# Windows Job Object sandbox (v0.16.4) — Win32 API bindings, Windows-only.
-# Provides CreateJobObjectW, AssignProcessToJobObject, SetInformationJobObject.
-# Used by ta-runtime via [target.'cfg(windows)'.dependencies].
-windows-sys = { version = "0.52", features = [
-    "Win32_Foundation",
-    "Win32_System_JobObjects",
-    "Win32_System_Threading",
-] }

@@ -3863,7 +3863,6 @@ dependencies = [
  "tracing",
  "uuid",
  "which",
- "windows-sys 0.52.0",
 ]
 
 [[package]]
