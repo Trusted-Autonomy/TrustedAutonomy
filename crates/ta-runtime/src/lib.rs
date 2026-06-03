@@ -59,6 +59,7 @@ pub mod credential;
 pub mod framework;
 pub mod plugin;
 pub mod sandbox;
+pub mod sandbox_windows;
 
 // Re-export the most commonly used types.
 pub use adapter::{
@@ -81,3 +82,4 @@ pub use framework::{
     MemoryInjectMode,
 };
 pub use sandbox::{SandboxPolicy, SandboxProvider};
+pub use sandbox_windows::WindowsJobObjectGuard;

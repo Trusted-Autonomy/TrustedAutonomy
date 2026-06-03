@@ -52,7 +52,7 @@ members = [
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.16.3-alpha"
+version = "0.16.4-alpha"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
@@ -159,3 +159,12 @@ arboard = "3"
 
 # Testing utilities
 tempfile = "3"
+
+# Windows Job Object sandbox (v0.16.4) — Win32 API bindings, Windows-only.
+# Provides CreateJobObjectW, AssignProcessToJobObject, SetInformationJobObject.
+# Used by ta-runtime via [target.'cfg(windows)'.dependencies].
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

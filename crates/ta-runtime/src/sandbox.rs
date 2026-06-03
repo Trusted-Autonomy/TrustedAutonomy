@@ -1,8 +1,9 @@
-// sandbox.rs — Agent process sandboxing (v0.14.0).
+// sandbox.rs — Agent process sandboxing (v0.14.0; Windows Job Objects v0.16.4).
 //
 // Wraps a SpawnRequest to apply OS-level sandboxing before the agent process
 // starts.  On macOS this uses `sandbox-exec` with a generated `.sb` profile;
-// on Linux it uses `bwrap` (bubblewrap) when available.
+// on Linux it uses `bwrap` (bubblewrap) when available; on Windows it uses
+// Job Objects (see `sandbox_windows.rs`).
 //
 // Sandboxing is opt-in: `SandboxPolicy::disabled()` is the default and
 // passes requests through unchanged.  Enable via `[sandbox] enabled = true`
@@ -24,12 +25,20 @@
 // - Bind-mounts the working dir as rw
 // - Creates tmpfs for /tmp
 // - Network: unshared by default (--unshare-net) unless allow_network is non-empty
+//
+// ## Windows Job Objects
+//
+// Creates a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.  The agent
+// process (and all its children) are assigned to the Job Object after spawn.
+// When TA exits or the guard is dropped, the entire process tree is killed.
+// Note: Job Objects do not restrict filesystem access — that requires AppContainer.
 
 #[cfg(target_os = "macos")]
 use std::path::Path;
 use std::path::PathBuf;
 
 use crate::adapter::SpawnRequest;
+use crate::sandbox_windows::WindowsJobObjectGuard;
 
 /// A resolved sandbox policy derived from `SandboxConfig`.
 #[derive(Debug, Clone)]
@@ -60,6 +69,11 @@ pub enum SandboxProvider {
     MacosSandboxExec,
     /// Linux bubblewrap (bwrap).
     LinuxBwrap,
+    /// Windows Job Objects — process-tree teardown on TA exit.
+    ///
+    /// Does not restrict filesystem access (AppContainer handles that).
+    /// Applied post-spawn via `SandboxPolicy::post_spawn_apply()`.
+    WindowsJobObject,
 }
 
 impl SandboxPolicy {
@@ -78,6 +92,7 @@ impl SandboxPolicy {
     ///
     /// On macOS: always use sandbox-exec (built-in).
     /// On Linux: use bwrap if available on PATH.
+    /// On Windows: always use Job Objects (built-in; no external tool needed).
     /// Elsewhere: no sandboxing.
     pub fn detect_provider() -> SandboxProvider {
         #[cfg(target_os = "macos")]
@@ -92,7 +107,11 @@ impl SandboxPolicy {
                 SandboxProvider::None
             }
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            SandboxProvider::WindowsJobObject
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             SandboxProvider::None
         }
@@ -101,6 +120,9 @@ impl SandboxPolicy {
     /// Apply this policy to a SpawnRequest, wrapping it in the sandbox.
     ///
     /// If disabled or provider is None, returns the request unchanged.
+    ///
+    /// For `WindowsJobObject`, this is a no-op — Job Objects are applied
+    /// after the process is spawned via `post_spawn_apply()`.
     pub fn apply(&self, request: SpawnRequest) -> SpawnRequest {
         if !self.enabled || self.provider == SandboxProvider::None {
             return request;
@@ -109,8 +131,58 @@ impl SandboxPolicy {
         match self.provider {
             SandboxProvider::MacosSandboxExec => self.apply_macos(request),
             SandboxProvider::LinuxBwrap => self.apply_linux_bwrap(request),
+            // Job Objects are applied post-spawn; the SpawnRequest is unchanged.
+            SandboxProvider::WindowsJobObject => request,
             SandboxProvider::None => request,
         }
+    }
+
+    /// Create a Job Object guard and assign the agent process to it (Windows only).
+    ///
+    /// Call this immediately after spawning the agent process.  Hold the returned
+    /// guard alive for the duration of the agent run — dropping it closes the Job
+    /// Object handle and kills the entire process tree.
+    ///
+    /// Returns `None` when:
+    /// - sandboxing is disabled,
+    /// - the provider is not `WindowsJobObject`, or
+    /// - Job Object creation fails (a warning is logged).
+    ///
+    /// On non-Windows platforms the guard is a zero-size no-op, so this is safe
+    /// to call unconditionally on all platforms.
+    pub fn post_spawn_apply(&self, pid: u32) -> Option<WindowsJobObjectGuard> {
+        if !self.enabled || self.provider != SandboxProvider::WindowsJobObject {
+            return None;
+        }
+
+        let guard = match WindowsJobObjectGuard::new() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to create Windows Job Object — agent process tree will not be \
+                     auto-killed on TA exit. Check that TA is running without AppContainer \
+                     nesting restrictions."
+                );
+                return None;
+            }
+        };
+
+        if let Err(e) = guard.assign_process(pid) {
+            tracing::warn!(
+                pid = pid,
+                error = %e,
+                "Failed to assign agent process to Job Object — process tree teardown \
+                 will not be enforced."
+            );
+            return None;
+        }
+
+        tracing::info!(
+            pid = pid,
+            "Agent process assigned to Windows Job Object (KILL_ON_JOB_CLOSE)"
+        );
+        Some(guard)
     }
 
     /// Wrap the request in `sandbox-exec -p <profile> -- <cmd> <args>`.
@@ -381,5 +453,86 @@ mod tests {
         assert_eq!(wrapped.args[2], "--");
         assert_eq!(wrapped.args[3], "claude");
         assert_eq!(wrapped.args[4], "--print");
+    }
+
+    /// WindowsJobObject apply() is a no-op — Job Objects are applied post-spawn.
+    #[test]
+    fn windows_job_object_apply_does_not_wrap_command() {
+        let policy = SandboxPolicy {
+            enabled: true,
+            provider: SandboxProvider::WindowsJobObject,
+            allow_read: Vec::new(),
+            allow_write: Vec::new(),
+            allow_network: Vec::new(),
+        };
+        let req = dummy_request(std::path::Path::new("/tmp/staging"));
+        let wrapped = policy.apply(req.clone());
+        assert_eq!(
+            wrapped.command, req.command,
+            "WindowsJobObject must not change the command"
+        );
+        assert_eq!(
+            wrapped.args, req.args,
+            "WindowsJobObject must not change the args"
+        );
+    }
+
+    /// detect_provider() returns WindowsJobObject on Windows, None elsewhere.
+    #[test]
+    fn detect_provider_windows() {
+        let provider = SandboxPolicy::detect_provider();
+        #[cfg(target_os = "windows")]
+        assert_eq!(provider, SandboxProvider::WindowsJobObject);
+        #[cfg(target_os = "macos")]
+        assert_eq!(provider, SandboxProvider::MacosSandboxExec);
+        // Linux returns LinuxBwrap (if bwrap present) or None — just verify no panic.
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let _ = provider;
+    }
+
+    /// post_spawn_apply returns None when sandboxing is disabled.
+    #[test]
+    fn post_spawn_apply_disabled_returns_none() {
+        let policy = SandboxPolicy::disabled();
+        let guard = policy.post_spawn_apply(1234);
+        assert!(guard.is_none(), "disabled policy should return None");
+    }
+
+    /// post_spawn_apply returns None for non-WindowsJobObject providers.
+    #[test]
+    fn post_spawn_apply_non_windows_provider_returns_none() {
+        let policy = SandboxPolicy {
+            enabled: true,
+            provider: SandboxProvider::MacosSandboxExec,
+            allow_read: Vec::new(),
+            allow_write: Vec::new(),
+            allow_network: Vec::new(),
+        };
+        let guard = policy.post_spawn_apply(1234);
+        assert!(
+            guard.is_none(),
+            "non-WindowsJobObject provider should return None"
+        );
+    }
+
+    /// post_spawn_apply with WindowsJobObject and an invalid PID:
+    /// On Windows returns None (OpenProcess fails).
+    /// On non-Windows returns None (assign_process is no-op but the guard
+    /// IS returned for a valid-looking PID — so use an impossible PID).
+    #[test]
+    fn post_spawn_apply_windows_job_object_invalid_pid() {
+        let policy = SandboxPolicy {
+            enabled: true,
+            provider: SandboxProvider::WindowsJobObject,
+            allow_read: Vec::new(),
+            allow_write: Vec::new(),
+            allow_network: Vec::new(),
+        };
+        // PID 0 / 0xFFFFFFFF are never valid on any platform.
+        let guard = policy.post_spawn_apply(0);
+        // On Windows: assign_process(0) fails → returns None.
+        // On non-Windows: stub assign_process always Ok → Some(guard) is returned.
+        // The key assertion: no panic.
+        let _ = guard;
     }
 }

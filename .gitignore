@@ -149,7 +149,7 @@ result-*
 .ta/mcp_json_original
 .ta/setup-progress.json
 .ta/taignore
+.ta/ide-excludes.json
 .ta/*.log
 .ta/*.pid
 .ta/*.lock
-.ta/*-crash-state.json

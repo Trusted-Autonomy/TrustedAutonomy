@@ -4323,9 +4323,52 @@ allow_network = ["api.anthropic.com", "api.github.com"]
 ```
 
 **Platform support:**
-- **macOS**: Uses built-in `sandbox-exec` (Seatbelt). No installation required.
-- **Linux**: Uses `bwrap` (bubblewrap). Install via `apt install bubblewrap` or equivalent. If unavailable, TA warns and runs without sandboxing.
-- **Windows**: Sandboxing not yet supported — `enabled = true` is silently ignored.
+
+| Platform | Provider | What it restricts | Notes |
+|---|---|---|---|
+| **macOS** | `sandbox-exec` (Seatbelt) | Filesystem reads/writes, network | Built-in; no extra software needed |
+| **Linux** | `bwrap` (bubblewrap) | Filesystem namespace, network namespace | Install: `apt install bubblewrap` |
+| **Windows** | Job Objects | Process tree teardown only | No filesystem restriction (see note) |
+
+**Windows — Job Objects (process-tree containment)**
+
+On Windows, enabling the sandbox creates a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Every process the agent spawns joins this Job Object automatically. When TA exits (normally or via crash), the kernel immediately terminates the agent and all its child processes — no zombie agent processes linger.
+
+**What Job Objects do NOT restrict:**
+- Filesystem access — the agent can still read/write outside the staging workspace.
+- Network access — `allow_network` is accepted but not enforced on Windows.
+
+Filesystem isolation on Windows requires AppContainer, which is planned for a future phase.
+
+**How to enable sandboxing on Windows:**
+
+```toml
+# .ta/daemon.toml
+[experimental]
+sandbox = true
+
+# .ta/workflow.toml
+[sandbox]
+enabled = true
+allow_network = ["api.anthropic.com", "api.github.com"]
+```
+
+The sandbox feature is experimental and must be opted-in via `[experimental] sandbox = true` in `daemon.toml`. Without this flag, `sandbox.enabled = true` logs a warning and runs without sandboxing.
+
+**`ta doctor` sandbox check**
+
+```
+ta doctor
+```
+
+TA Doctor reports the sandbox status for the current platform:
+
+```
+[sandbox] provider: WindowsJobObject
+[sandbox] status:   active (KILL_ON_JOB_CLOSE enabled)
+```
+
+If the sandbox cannot be activated (e.g., the process is already in a nested Job Object from another tool), Doctor reports the failure and suggests the manual workaround.
 
 **What is always allowed** (regardless of `allow_read`):
 - The staging workspace (agent's working directory)
