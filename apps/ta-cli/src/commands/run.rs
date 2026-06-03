@@ -1260,8 +1260,15 @@ pub fn execute(
     // manifest to an AgentLaunchConfig.
     //
     // `resolved_framework` is stored for memory bridge injection later.
+    // Resolve the manifest, then apply inheritance (v0.16.3).
     let resolved_framework =
-        ta_runtime::AgentFrameworkManifest::resolve(agent, &config.workspace_root);
+        ta_runtime::AgentFrameworkManifest::resolve(agent, &config.workspace_root).map(|m| {
+            m.with_inheritance_applied().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Agent manifest inheritance failed — using manifest as-is");
+            // Return partially-initialized manifest without inheritance applied.
+            ta_runtime::AgentFrameworkManifest::resolve(agent, &config.workspace_root).unwrap()
+        })
+        });
 
     // Channel type and context file are derived once from resolved_framework and reused
     // at all injection sites (initial, persona, work-plan, failure-context re-inject).
@@ -1681,6 +1688,40 @@ pub fn execute(
                         e,
                         pname
                     );
+                }
+            }
+        }
+
+        // v0.16.3: Inject context.files declared in the agent manifest.
+        if let Some(fw) = &resolved_framework {
+            let ctx_files = fw.resolved_context_files(&config.workspace_root);
+            for (declared_path, resolved_path) in &ctx_files {
+                match std::fs::read_to_string(resolved_path) {
+                    Ok(content) => {
+                        let block = format!(
+                            "\n<!-- context: {} -->\n{}\n<!-- end context: {} -->\n",
+                            declared_path, content, declared_path
+                        );
+                        channel.inject_persona(&block)?;
+                        tracing::info!(
+                            path = %declared_path,
+                            "Injected agent context file"
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[warn] Agent context file '{}' not found ({}): {}. Skipping.",
+                            declared_path,
+                            resolved_path.display(),
+                            e
+                        );
+                        tracing::warn!(
+                            path = %declared_path,
+                            resolved = %resolved_path.display(),
+                            error = %e,
+                            "Agent context file missing — skipping"
+                        );
+                    }
                 }
             }
         }

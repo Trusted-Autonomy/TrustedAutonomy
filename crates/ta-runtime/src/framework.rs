@@ -76,6 +76,17 @@ fn default_max_memory_entries() -> usize {
     20
 }
 
+/// Context files injected into the agent's context file at goal start (v0.16.3).
+///
+/// Paths are resolved relative to the project root for `.ta/`-prefixed paths,
+/// relative to the home directory for `~/`-prefixed paths, or as absolute paths.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentContextConfig {
+    /// Markdown files whose contents are appended to the agent's CLAUDE.md block.
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
 /// An agent framework manifest — defines how TA launches a specific agent backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentFrameworkManifest {
@@ -116,6 +127,13 @@ pub struct AgentFrameworkManifest {
     /// Selects which AgentContextChannel implementation is used.
     #[serde(default)]
     pub channel_type: crate::channels::ChannelType,
+    /// Context files to inject into the agent's context file at goal start (v0.16.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<AgentContextConfig>,
+    /// Base manifest to inherit from (v0.16.3). Single-level only — chains are rejected.
+    /// Resolved to an absolute path: `~/`-prefixed → home dir, absolute → as-is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<String>,
 }
 
 fn default_version() -> String {
@@ -177,6 +195,8 @@ impl AgentFrameworkManifest {
                 builtin: true,
                 auth: claude_auth.clone(),
                 channel_type: crate::channels::ChannelType::ClaudeCode,
+                context: None,
+                inherit: None,
             },
             AgentFrameworkManifest {
                 name: "codex".to_string(),
@@ -205,6 +225,8 @@ impl AgentFrameworkManifest {
                     }],
                 },
                 channel_type: crate::channels::ChannelType::Codex,
+                context: None,
+                inherit: None,
             },
             AgentFrameworkManifest {
                 name: "claude-flow".to_string(),
@@ -225,6 +247,8 @@ impl AgentFrameworkManifest {
                 // claude-flow delegates to Claude — same auth requirements.
                 auth: claude_auth,
                 channel_type: crate::channels::ChannelType::ClaudeCode,
+                context: None,
+                inherit: None,
             },
             AgentFrameworkManifest {
                 name: "ollama".to_string(),
@@ -263,6 +287,8 @@ impl AgentFrameworkManifest {
                         required: false,
                     }],
                 },
+                context: None,
+                inherit: None,
             },
         ]
     }
@@ -270,6 +296,140 @@ impl AgentFrameworkManifest {
     /// Look up a built-in framework by name.
     pub fn builtin(name: &str) -> Option<AgentFrameworkManifest> {
         Self::builtins().into_iter().find(|f| f.name == name)
+    }
+
+    /// Resolve a `~/`- or absolute inherit path to an absolute `PathBuf`.
+    fn resolve_inherit_path(path_str: &str) -> PathBuf {
+        if let Some(rest) = path_str.strip_prefix("~/") {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            home.join(rest)
+        } else {
+            PathBuf::from(path_str)
+        }
+    }
+
+    /// Resolve a context file path relative to `project_root`.
+    ///
+    /// - `.ta/`-prefixed → `<project_root>/<path>`
+    /// - `~/`-prefixed   → `<home>/<rest>`
+    /// - absolute        → as-is
+    pub fn resolve_context_file_path(path_str: &str, project_root: &Path) -> PathBuf {
+        if let Some(rest) = path_str.strip_prefix("~/") {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            home.join(rest)
+        } else if Path::new(path_str).is_absolute() {
+            PathBuf::from(path_str)
+        } else {
+            project_root.join(path_str)
+        }
+    }
+
+    /// Load a manifest from a TOML or YAML file.
+    fn load_from_file(path: &Path) -> std::io::Result<AgentFrameworkManifest> {
+        let content = std::fs::read_to_string(path)?;
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext == "yaml" || ext == "yml" {
+            serde_yaml::from_str::<AgentFrameworkManifest>(&content)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        } else {
+            toml::from_str::<AgentFrameworkManifest>(&content)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        }
+    }
+
+    /// Apply inheritance: load the base manifest (if `inherit` is set) and merge.
+    ///
+    /// Fields set by the inheriting manifest win. `context.files` are concatenated
+    /// (base files first). Returns an error if the base manifest also has `inherit`
+    /// (chains are not allowed).
+    pub fn with_inheritance_applied(mut self) -> Result<AgentFrameworkManifest, String> {
+        let inherit_path_str = match self.inherit.take() {
+            Some(p) => p,
+            None => return Ok(self),
+        };
+
+        let base_path = Self::resolve_inherit_path(&inherit_path_str);
+        let mut base = Self::load_from_file(&base_path).map_err(|e| {
+            format!(
+                "Failed to load base manifest '{}': {}",
+                base_path.display(),
+                e
+            )
+        })?;
+
+        if base.inherit.is_some() {
+            return Err(format!(
+                "Manifest inheritance chains are not allowed. Base manifest '{}' also has `inherit`.",
+                base_path.display()
+            ));
+        }
+
+        // Merge: inheriting manifest fields win; context.files are concatenated base-first.
+        if self.version == default_version() && base.version != default_version() {
+            self.version = base.version;
+        }
+        if self.description.is_empty() {
+            self.description = base.description;
+        }
+        if self.sentinel == default_sentinel() && base.sentinel != default_sentinel() {
+            self.sentinel = base.sentinel;
+        }
+        if self.context_file == default_context_file()
+            && base.context_file != default_context_file()
+        {
+            self.context_file = base.context_file;
+        }
+        if matches!(self.context_inject, ContextInjectMode::Prepend)
+            && !matches!(base.context_inject, ContextInjectMode::Prepend)
+        {
+            self.context_inject = base.context_inject;
+        }
+        if self.memory.inject == MemoryInjectMode::None
+            && base.memory.inject != MemoryInjectMode::None
+        {
+            self.memory = base.memory.clone();
+        }
+        if self.auth.methods.is_empty() {
+            self.auth = base.auth;
+        }
+
+        // Merge context.files: base files first, then project files.
+        let base_files = base.context.take().map(|c| c.files).unwrap_or_default();
+        let project_files = self.context.take().map(|c| c.files).unwrap_or_default();
+        if !base_files.is_empty() || !project_files.is_empty() {
+            let mut merged = base_files;
+            merged.extend(project_files);
+            self.context = Some(AgentContextConfig { files: merged });
+        }
+
+        Ok(self)
+    }
+
+    /// Collect the resolved context file paths for this manifest.
+    ///
+    /// Missing files are skipped (with a warn log); this is intentional per spec.
+    pub fn resolved_context_files(&self, project_root: &Path) -> Vec<(String, PathBuf)> {
+        self.context
+            .as_ref()
+            .map(|c| &c.files)
+            .map(|files| {
+                files
+                    .iter()
+                    .map(|f| (f.clone(), Self::resolve_context_file_path(f, project_root)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Extract the model name from `--model <value>` in `args`, if present.
+    pub fn extract_model(&self) -> Option<&str> {
+        let mut iter = self.args.iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--model" {
+                return iter.next().map(|s| s.as_str());
+            }
+        }
+        None
     }
 
     /// Discover custom framework manifests from well-known paths.
@@ -471,6 +631,71 @@ pub fn inject_context_arg(
         extra_args,
         context_file: Some(ctx_path),
     })
+}
+
+/// Build a map of `agent_name → [workflow_names]` by scanning `.ta/workflows/*.toml` (v0.16.3).
+///
+/// Looks for `agent = "<name>"` in any TOML section. Returns an empty map when
+/// the workflows directory does not exist.
+pub fn build_workflow_agent_index(project_root: &Path) -> HashMap<String, Vec<String>> {
+    let workflows_dir = project_root.join(".ta").join("workflows");
+    let mut index: HashMap<String, Vec<String>> = HashMap::new();
+
+    if !workflows_dir.is_dir() {
+        return index;
+    }
+
+    if let Ok(entries) = std::fs::read_dir(&workflows_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "toml" {
+                continue;
+            }
+            let wf_name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(value) = toml::from_str::<toml::Value>(&content) {
+                    collect_agent_refs(&value, &wf_name, &mut index);
+                }
+            }
+        }
+    }
+
+    index
+}
+
+/// Recursively collect `agent = "<name>"` values from a TOML value tree.
+fn collect_agent_refs(
+    value: &toml::Value,
+    workflow_name: &str,
+    index: &mut HashMap<String, Vec<String>>,
+) {
+    match value {
+        toml::Value::Table(map) => {
+            if let Some(toml::Value::String(agent)) = map.get("agent") {
+                if !agent.is_empty() && agent != "builtin" {
+                    index
+                        .entry(agent.clone())
+                        .or_default()
+                        .push(workflow_name.to_string());
+                }
+            }
+            for v in map.values() {
+                collect_agent_refs(v, workflow_name, index);
+            }
+        }
+        toml::Value::Array(arr) => {
+            for v in arr {
+                collect_agent_refs(v, workflow_name, index);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Set the TA_MEMORY_OUT path in the agent's environment.
@@ -676,6 +901,162 @@ auth:
         } else {
             panic!("expected LocalService method");
         }
+    }
+
+    // ── v0.16.3 context.files and inherit tests ─────────────────────────────
+
+    #[test]
+    fn context_files_project_relative_resolved() {
+        let dir = tempdir().unwrap();
+        let project_root = dir.path();
+        let path = ".ta/constitutions/style.md";
+        let resolved = AgentFrameworkManifest::resolve_context_file_path(path, project_root);
+        assert_eq!(resolved, project_root.join(".ta/constitutions/style.md"));
+    }
+
+    #[test]
+    fn context_files_absolute_resolved() {
+        let dir = tempdir().unwrap();
+        let project_root = dir.path();
+        // Use a second tempdir so the path is genuinely absolute on all platforms.
+        let abs_dir = tempdir().unwrap();
+        let abs = abs_dir.path().join("shared-style.md");
+        let resolved =
+            AgentFrameworkManifest::resolve_context_file_path(abs.to_str().unwrap(), project_root);
+        assert_eq!(resolved, abs);
+    }
+
+    #[test]
+    fn resolved_context_files_empty_when_no_context() {
+        let dir = tempdir().unwrap();
+        let manifest = AgentFrameworkManifest {
+            name: "test".to_string(),
+            command: "cmd".to_string(),
+            context: None,
+            ..AgentFrameworkManifest::builtin("claude-code").unwrap()
+        };
+        let files = manifest.resolved_context_files(dir.path());
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn resolved_context_files_returns_project_relative_paths() {
+        let dir = tempdir().unwrap();
+        let project_root = dir.path();
+        let abs_dir = tempdir().unwrap();
+        let abs = abs_dir.path().join("absolute.md");
+        let manifest = AgentFrameworkManifest {
+            name: "test".to_string(),
+            command: "cmd".to_string(),
+            context: Some(AgentContextConfig {
+                files: vec![
+                    ".ta/constitutions/style.md".to_string(),
+                    abs.to_str().unwrap().to_string(),
+                ],
+            }),
+            ..AgentFrameworkManifest::builtin("claude-code").unwrap()
+        };
+        let files = manifest.resolved_context_files(project_root);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].1, project_root.join(".ta/constitutions/style.md"));
+        assert_eq!(files[1].1, abs);
+    }
+
+    #[test]
+    fn inherit_merges_context_files_base_first() {
+        let dir = tempdir().unwrap();
+
+        // Write base manifest.
+        let base_toml = r#"
+name = "base-coder"
+command = "claude"
+[context]
+files = ["~/.config/ta/base-style.md"]
+"#;
+        let base_path = dir.path().join("base-coder.toml");
+        std::fs::write(&base_path, base_toml).unwrap();
+
+        // Inheriting manifest.
+        let manifest = AgentFrameworkManifest {
+            name: "my-coder".to_string(),
+            command: "claude".to_string(),
+            inherit: Some(base_path.display().to_string()),
+            context: Some(AgentContextConfig {
+                files: vec![".ta/constitutions/project-style.md".to_string()],
+            }),
+            ..AgentFrameworkManifest::builtin("claude-code").unwrap()
+        };
+
+        let merged = manifest.with_inheritance_applied().unwrap();
+        let files = &merged.context.as_ref().unwrap().files;
+        assert_eq!(files.len(), 2, "should have base + project file");
+        assert_eq!(files[0], "~/.config/ta/base-style.md", "base file first");
+        assert_eq!(
+            files[1], ".ta/constitutions/project-style.md",
+            "project file second"
+        );
+    }
+
+    #[test]
+    fn inherit_chain_rejected() {
+        let dir = tempdir().unwrap();
+
+        // Base manifest that also has inherit — should be rejected.
+        let base_toml = r#"
+name = "base"
+command = "claude"
+inherit = "/some/other-base.toml"
+"#;
+        let base_path = dir.path().join("base.toml");
+        std::fs::write(&base_path, base_toml).unwrap();
+
+        let manifest = AgentFrameworkManifest {
+            name: "child".to_string(),
+            command: "claude".to_string(),
+            inherit: Some(base_path.display().to_string()),
+            context: None,
+            ..AgentFrameworkManifest::builtin("claude-code").unwrap()
+        };
+
+        let result = manifest.with_inheritance_applied();
+        assert!(result.is_err(), "chain should be rejected");
+        assert!(result.unwrap_err().contains("chains are not allowed"));
+    }
+
+    #[test]
+    fn inherit_missing_base_returns_error() {
+        let manifest = AgentFrameworkManifest {
+            name: "my-coder".to_string(),
+            command: "claude".to_string(),
+            inherit: Some("/nonexistent/base.toml".to_string()),
+            context: None,
+            ..AgentFrameworkManifest::builtin("claude-code").unwrap()
+        };
+
+        let result = manifest.with_inheritance_applied();
+        assert!(result.is_err(), "missing base should return error");
+    }
+
+    #[test]
+    fn extract_model_from_args() {
+        let manifest = AgentFrameworkManifest {
+            name: "qwen".to_string(),
+            command: "ta-agent-ollama".to_string(),
+            args: vec![
+                "--model".to_string(),
+                "qwen3.5:9b".to_string(),
+                "--base-url".to_string(),
+                "http://localhost:11434".to_string(),
+            ],
+            ..AgentFrameworkManifest::builtin("claude-code").unwrap()
+        };
+        assert_eq!(manifest.extract_model(), Some("qwen3.5:9b"));
+    }
+
+    #[test]
+    fn extract_model_absent_when_no_flag() {
+        let manifest = AgentFrameworkManifest::builtin("claude-code").unwrap();
+        assert_eq!(manifest.extract_model(), None);
     }
 
     #[test]

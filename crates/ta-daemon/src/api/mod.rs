@@ -12,6 +12,7 @@
 
 pub mod advisor;
 pub mod agent;
+pub mod agent_profiles;
 pub mod auth;
 pub mod cmd;
 pub mod context_upload;
@@ -429,6 +430,8 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/context/upload", post(context_upload::upload_context))
         // Cross-project links (v0.16.1.5).
         .route("/api/links", get(links::get_links))
+        // Agent profile inventory (v0.16.3).
+        .route("/api/agents/profiles", get(agent_profiles::list_profiles))
         // Daemon lifecycle routes (v0.10.10).
         .route("/api/shutdown", post(shutdown_daemon))
         // Auth middleware on all API routes.

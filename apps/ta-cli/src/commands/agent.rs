@@ -196,8 +196,11 @@ pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Resul
                 list_templates()
             } else if source.as_deref() == Some("external") {
                 list_external_agents(config)
-            } else {
+            } else if source.as_deref() == Some("yaml") {
                 list_agents(config)
+            } else {
+                // v0.16.3: default shows TOML agent profiles (name, model, inherit, ctx files).
+                list_agent_profiles(&config.workspace_root)
             }
         }
         AgentCommands::Add { name, from } => add_agent(name, from, config),
@@ -748,6 +751,135 @@ alignment:
 
 // ── Agent Framework commands (v0.13.8) ──────────────────────────
 
+/// List agent profiles (TOML manifests) from project and user directories (v0.16.3).
+///
+/// Shows: name, model (extracted from --model arg), inherit source, context file count.
+fn list_agent_profiles(project_root: &std::path::Path) -> anyhow::Result<()> {
+    let user_agents_dir = ta_config_dir().join("agents");
+    let project_agents_dir = project_root.join(".ta").join("agents");
+
+    let load_profiles_from = |dir: &std::path::Path| -> Vec<AgentFrameworkManifest> {
+        if !dir.is_dir() {
+            return Vec::new();
+        }
+        let mut profiles = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut by_stem: std::collections::HashMap<String, std::path::PathBuf> =
+                std::collections::HashMap::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if ext != "toml" && ext != "yaml" && ext != "yml" {
+                    continue;
+                }
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if ext == "yaml" || ext == "yml" {
+                    by_stem.insert(stem, path);
+                } else {
+                    by_stem.entry(stem).or_insert(path);
+                }
+            }
+            let mut sorted_keys: Vec<_> = by_stem.keys().cloned().collect();
+            sorted_keys.sort();
+            for key in sorted_keys {
+                let path = &by_stem[&key];
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let result = std::fs::read_to_string(path).and_then(|s| {
+                    if ext == "yaml" || ext == "yml" {
+                        serde_yaml::from_str::<AgentFrameworkManifest>(&s)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                    } else {
+                        toml::from_str::<AgentFrameworkManifest>(&s)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                    }
+                });
+                if let Ok(m) = result {
+                    profiles.push(m);
+                }
+            }
+        }
+        profiles
+    };
+
+    let print_profile_table = |profiles: &[AgentFrameworkManifest]| {
+        println!("  {:<22} {:<18} {:<22} CTX", "NAME", "MODEL", "INHERIT");
+        println!("  {}", "-".repeat(72));
+        for p in profiles {
+            let model = p.extract_model().unwrap_or("—");
+            let inherit = p
+                .inherit
+                .as_deref()
+                .map(|s| {
+                    // Shorten home-dir paths for display.
+                    if let Some(stripped) =
+                        s.strip_prefix(&std::env::var("HOME").unwrap_or_default())
+                    {
+                        format!("~{}", stripped)
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "—".to_string());
+            let ctx_count = p.context.as_ref().map(|c| c.files.len()).unwrap_or(0);
+            let ctx_str = if ctx_count == 0 {
+                "—".to_string()
+            } else {
+                ctx_count.to_string()
+            };
+            println!(
+                "  {:<22} {:<18} {:<22} {}",
+                p.name,
+                truncate_desc(model, 16),
+                truncate_desc(&inherit, 20),
+                ctx_str,
+            );
+        }
+    };
+
+    let project_profiles = load_profiles_from(&project_agents_dir);
+    let user_profiles = load_profiles_from(&user_agents_dir);
+
+    if project_profiles.is_empty() && user_profiles.is_empty() {
+        println!("No agent profiles found.");
+        println!();
+        println!(
+            "  Project profiles: {}/.ta/agents/*.toml",
+            project_root.display()
+        );
+        println!("  User profiles:    ~/.config/ta/agents/*.toml");
+        println!();
+        println!("Install an Ollama profile: ta agent install gemma4");
+        println!("List framework backends:   ta agent list --frameworks");
+        return Ok(());
+    }
+
+    if !project_profiles.is_empty() {
+        println!("Project profiles ({}):", project_profiles.len());
+        print_profile_table(&project_profiles);
+        println!();
+    }
+
+    if !user_profiles.is_empty() {
+        println!("User profiles ({}):", user_profiles.len());
+        print_profile_table(&user_profiles);
+        println!();
+    }
+
+    println!("Usage: ta run \"goal\" --agent <name>");
+    println!("       ta agent info <name>     — show full details");
+    println!("       ta agent list --frameworks — show built-in backends");
+
+    Ok(())
+}
+
 /// List all available agent framework manifests (built-in + discovered).
 fn list_frameworks(project_root: &std::path::Path) -> anyhow::Result<()> {
     let builtins = AgentFrameworkManifest::builtins();
@@ -810,6 +942,23 @@ fn framework_info(name: &str, project_root: &std::path::Path) -> anyhow::Result<
         println!("Context file: {}", f.context_file);
         println!("Context mode: {:?}", f.context_inject);
         println!("Memory mode:  {:?}", f.memory.inject);
+        if let Some(ref inh) = f.inherit {
+            println!("Inherit:      {}", inh);
+        }
+        if let Some(ref ctx) = f.context {
+            if !ctx.files.is_empty() {
+                println!("Context files ({}):", ctx.files.len());
+                for cf in &ctx.files {
+                    let resolved =
+                        AgentFrameworkManifest::resolve_context_file_path(cf, project_root);
+                    let exists = if resolved.exists() { "ok" } else { "missing" };
+                    println!("  {} [{}]", cf, exists);
+                }
+            }
+        }
+        if let Some(model) = f.extract_model() {
+            println!("Model:        {}", model);
+        }
         let caps = ta_runtime::channels::build_channel(
             &f.channel_type,
             std::path::PathBuf::from("."),

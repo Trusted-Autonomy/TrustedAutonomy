@@ -9,12 +9,18 @@
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
+use serde_yaml;
 use ta_changeset::plugin;
+use toml;
 
 #[derive(Subcommand)]
 pub enum PluginCommands {
     /// List installed channel and agent plugins from project and global directories.
-    List,
+    List {
+        /// Show agent TOML profiles (name, model, inherit, context files) instead of channel plugins (v0.16.3).
+        #[arg(long)]
+        agents: bool,
+    },
     /// Install a plugin from a local directory, GitHub, or crates.io.
     ///
     /// Source formats:
@@ -70,7 +76,13 @@ pub enum PluginCommands {
         name: String,
     },
     /// Show installed plugins with health status and version info (v0.11.3).
-    Status,
+    ///
+    /// When <name> is given, show per-agent detail view: binary path, version,
+    /// profiles, context files, workflows referencing this agent, last-used (v0.16.3).
+    Status {
+        /// Agent plugin name for per-agent detail (e.g., "ta-agent-ollama"). Optional.
+        name: Option<String>,
+    },
     /// View stderr logs for a channel plugin (v0.11.3).
     Logs {
         /// Plugin name.
@@ -86,7 +98,13 @@ pub enum PluginCommands {
 
 pub fn run_plugin(project_root: &std::path::Path, command: &PluginCommands) -> anyhow::Result<()> {
     match command {
-        PluginCommands::List => list_plugins(project_root),
+        PluginCommands::List { agents } => {
+            if *agents {
+                list_agent_profiles_for_plugins(project_root)
+            } else {
+                list_plugins(project_root)
+            }
+        }
         PluginCommands::Install { source, global } => {
             install_plugin_from_source(project_root, source, *global)
         }
@@ -95,7 +113,13 @@ pub fn run_plugin(project_root: &std::path::Path, command: &PluginCommands) -> a
         PluginCommands::Build { names, all } => build_plugins(project_root, names, *all),
         PluginCommands::Check => check_plugins(project_root),
         PluginCommands::Upgrade { name } => upgrade_plugin(project_root, name),
-        PluginCommands::Status => plugin_status(project_root),
+        PluginCommands::Status { name } => {
+            if let Some(n) = name {
+                plugin_status_detail(project_root, n)
+            } else {
+                plugin_status(project_root)
+            }
+        }
         PluginCommands::Logs {
             name,
             lines,
@@ -1317,6 +1341,183 @@ fn plugin_logs(
             }
         }
     }
+    Ok(())
+}
+
+// ── ta plugin status <name> (v0.16.3) ────────────────────────────────────────
+
+/// Per-agent detail view: binary path, version, profiles, context files, workflows.
+fn plugin_status_detail(project_root: &Path, name: &str) -> anyhow::Result<()> {
+    use ta_runtime::{build_workflow_agent_index, AgentFrameworkManifest};
+
+    let agent_plugins = plugin::discover_agent_plugins(project_root);
+    let matching = agent_plugins.iter().find(|p| p.manifest.name == name);
+
+    if let Some(p) = matching {
+        let m = &p.manifest;
+        println!("Agent plugin: {}", m.name);
+        println!("  Version:  {}", m.version);
+        println!("  Command:  {}", m.command);
+        println!("  Source:   {}", p.source);
+        if let Some(ref desc) = m.description {
+            println!("  Desc:     {}", desc);
+        }
+    } else {
+        println!("Agent plugin '{}' not found.", name);
+        println!("  (It may be a standalone TOML profile, not an installed plugin.)");
+        println!();
+    }
+
+    // Profiles using this plugin's command.
+    let all_profiles = AgentFrameworkManifest::discover(project_root);
+    let related: Vec<_> = all_profiles
+        .iter()
+        .filter(|m| {
+            m.command.contains(name)
+                || matching
+                    .as_ref()
+                    .map(|p| m.command == p.manifest.command)
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    if !related.is_empty() {
+        println!("Profiles:");
+        for p in &related {
+            let model = p.extract_model().unwrap_or("—");
+            let ctx_count = p.context.as_ref().map(|c| c.files.len()).unwrap_or(0);
+            let inherit = p.inherit.as_deref().unwrap_or("—");
+            println!(
+                "  {} (model: {}, ctx: {}, inherit: {})",
+                p.name, model, ctx_count, inherit
+            );
+            if let Some(ctx) = &p.context {
+                for f in &ctx.files {
+                    let resolved =
+                        AgentFrameworkManifest::resolve_context_file_path(f, project_root);
+                    let status = if resolved.exists() { "ok" } else { "missing" };
+                    println!("    context: {} [{}]", f, status);
+                }
+            }
+        }
+    } else {
+        println!("Profiles: (none found)");
+    }
+
+    // Workflow usage index.
+    let wf_index = build_workflow_agent_index(project_root);
+    let mut used_by: Vec<String> = Vec::new();
+    for profile in &related {
+        if let Some(workflows) = wf_index.get(&profile.name) {
+            used_by.extend(workflows.iter().cloned());
+        }
+    }
+    used_by.sort();
+    used_by.dedup();
+
+    if !used_by.is_empty() {
+        println!("Used by workflows: {}", used_by.join(", "));
+    } else {
+        println!("Used by workflows: (unused — not referenced by any .ta/workflows/*.toml)");
+    }
+
+    Ok(())
+}
+
+// ── ta plugin list --agents (v0.16.3) ────────────────────────────────────────
+
+/// List agent TOML profiles from project and user directories with plugin details.
+///
+/// Shows registered agent plugins (ta-agent-ollama, etc.) with name, version,
+/// binary path, loaded profile count, and currently active model.
+fn list_agent_profiles_for_plugins(project_root: &Path) -> anyhow::Result<()> {
+    use ta_runtime::AgentFrameworkManifest;
+
+    let agent_plugins = plugin::discover_agent_plugins(project_root);
+
+    // Collect TOML profiles from both dirs.
+    let user_agents_dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
+        .join("ta")
+        .join("agents");
+    let all_profiles = AgentFrameworkManifest::discover(project_root);
+    let user_profiles: Vec<_> = if user_agents_dir.is_dir() {
+        std::fs::read_dir(&user_agents_dir)
+            .ok()
+            .into_iter()
+            .flat_map(|rd| rd.flatten())
+            .filter(|e| {
+                let ext = e
+                    .path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                ext == "toml" || ext == "yaml" || ext == "yml"
+            })
+            .filter_map(|e| {
+                let path = e.path();
+                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                let content = std::fs::read_to_string(&path).ok()?;
+                if ext == "yaml" || ext == "yml" {
+                    serde_yaml::from_str::<AgentFrameworkManifest>(&content).ok()
+                } else {
+                    toml::from_str::<AgentFrameworkManifest>(&content).ok()
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Registered agent plugins section.
+    if !agent_plugins.is_empty() {
+        println!("Agent plugins ({}):", agent_plugins.len());
+        println!();
+        let profile_count_for = |plugin_cmd: &str| -> usize {
+            all_profiles
+                .iter()
+                .chain(user_profiles.iter())
+                .filter(|p| p.command == plugin_cmd || p.command.contains(plugin_cmd))
+                .count()
+        };
+        for p in &agent_plugins {
+            let m = &p.manifest;
+            let profiles = profile_count_for(&m.command);
+            println!("  {} v{} [{}]", m.name, m.version, p.source);
+            println!("    Command:  {}", m.command);
+            if let Some(ref desc) = m.description {
+                println!("    Desc:     {}", desc);
+            }
+            println!("    Profiles: {}", profiles);
+        }
+        println!();
+    } else {
+        println!("No agent plugins installed.");
+        println!("  Install: ta plugin install github:trustedautonomy/ta-agent-ollama");
+        println!();
+    }
+
+    // Profile summary.
+    let project_count = all_profiles.len();
+    let user_count = user_profiles.len();
+    if project_count + user_count == 0 {
+        println!("No agent profiles found.");
+        println!("  Project: {}/.ta/agents/*.toml", project_root.display());
+        println!("  User:    ~/.config/ta/agents/*.toml");
+    } else {
+        println!(
+            "Profiles: {} project, {} user",
+            all_profiles.len(),
+            user_count
+        );
+        println!("  ta agent list       — show profiles with model/inherit/context details");
+        println!("  ta agent info <n>   — per-profile detail view");
+    }
+
     Ok(())
 }
 

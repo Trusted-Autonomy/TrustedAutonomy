@@ -208,6 +208,12 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 21. IDE exclude manifest — .ta/ide-excludes.json (v0.16.1.10).
     results.extend(check_ide_excludes_manifest(config));
 
+    // 22. Agent context.files validation — check declared paths exist (v0.16.3).
+    results.extend(check_agent_context_files(config));
+
+    // 23. Ollama probe — check all Ollama profiles have their models pulled (v0.16.3).
+    results.extend(check_ollama_profiles(config));
+
     results
 }
 
@@ -1198,6 +1204,112 @@ fn check_gemma4_ollama(config: &GatewayConfig) -> Vec<CheckResult> {
             "Install a profile: ta agent install gemma4",
         )]
     }
+}
+
+// ── v0.16.3 checks ───────────────────────────────────────────────────────────
+
+/// Check context.files entries in all installed agent manifests resolve to real files.
+///
+/// Missing files emit [warn], not [fail] — they're injected at goal start and
+/// a missing file at doctor time is actionable without blocking the project.
+fn check_agent_context_files(config: &GatewayConfig) -> Vec<CheckResult> {
+    let all_manifests = AgentFrameworkManifest::discover(&config.workspace_root);
+    if all_manifests.is_empty() {
+        return vec![];
+    }
+
+    let mut results = Vec::new();
+    let project_root = &config.workspace_root;
+
+    for manifest in &all_manifests {
+        let ctx_files = manifest.resolved_context_files(project_root);
+        if ctx_files.is_empty() {
+            continue;
+        }
+        let missing: Vec<String> = ctx_files
+            .iter()
+            .filter(|(_, path)| !path.exists())
+            .map(|(declared, _)| declared.clone())
+            .collect();
+
+        if missing.is_empty() {
+            results.push(CheckResult::ok(
+                format!("context.files ({})", manifest.name),
+                format!("all {} file(s) resolved", ctx_files.len()),
+            ));
+        } else {
+            results.push(CheckResult::warn(
+                format!("context.files ({})", manifest.name),
+                format!("missing: {}", missing.join(", ")),
+                "Create the missing files or remove them from context.files in the manifest",
+            ));
+        }
+    }
+
+    results
+}
+
+/// Check all Ollama-backed agent profiles have their model pulled (v0.16.3).
+///
+/// Probes GET http://localhost:11434/api/tags. Skipped when Ollama is not running.
+/// Emits [warn] with `ollama pull <model>` suggestion for each missing model.
+fn check_ollama_profiles(config: &GatewayConfig) -> Vec<CheckResult> {
+    let all_manifests = AgentFrameworkManifest::discover(&config.workspace_root);
+    let ollama_manifests: Vec<_> = all_manifests
+        .iter()
+        .filter(|m| m.command.contains("ollama") || m.command == "ta-agent-ollama")
+        .collect();
+
+    if ollama_manifests.is_empty() {
+        return vec![];
+    }
+
+    // Probe Ollama (2 s timeout — skip silently if not running).
+    let pulled_models: Vec<String> = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()
+        .and_then(|c| c.get("http://localhost:11434/api/tags").send().ok())
+        .and_then(|r| r.json::<serde_json::Value>().ok())
+        .and_then(|v| {
+            v.get("models")?.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("name")?.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+
+    if pulled_models.is_empty() {
+        // Ollama not running or no models — skip (not a hard error).
+        return vec![];
+    }
+
+    let mut results = Vec::new();
+    for manifest in &ollama_manifests {
+        let model = match manifest.extract_model() {
+            Some(m) => m,
+            None => continue,
+        };
+        let is_pulled = pulled_models
+            .iter()
+            .any(|p| p == model || p.starts_with(&format!("{}:", model)) || p.contains(model));
+
+        if is_pulled {
+            results.push(CheckResult::ok(
+                format!("ollama model ({})", manifest.name),
+                format!("model '{}' is pulled", model),
+            ));
+        } else {
+            results.push(CheckResult::warn(
+                format!("ollama model ({})", manifest.name),
+                format!("model '{}' not found in Ollama", model),
+                format!("Run: ollama pull {}", model),
+            ));
+        }
+    }
+
+    results
 }
 
 // ── Config helpers ───────────────────────────────────────────────────────────

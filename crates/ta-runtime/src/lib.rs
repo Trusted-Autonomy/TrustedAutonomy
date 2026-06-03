@@ -75,8 +75,9 @@ pub use channels::{
 pub use config::{RuntimeConfig, RuntimeRegistry};
 pub use credential::ScopedCredential;
 pub use framework::{
-    inject_context_arg, inject_context_env, inject_memory_out_env, inject_memory_snapshot_env,
-    AgentFramework, AgentFrameworkManifest, ContextInjectMode, ContextInjectionResult,
-    FrameworkMemoryConfig, ManifestBackedFramework, MemoryInjectMode,
+    build_workflow_agent_index, inject_context_arg, inject_context_env, inject_memory_out_env,
+    inject_memory_snapshot_env, AgentContextConfig, AgentFramework, AgentFrameworkManifest,
+    ContextInjectMode, ContextInjectionResult, FrameworkMemoryConfig, ManifestBackedFramework,
+    MemoryInjectMode,
 };
 pub use sandbox::{SandboxPolicy, SandboxProvider};
