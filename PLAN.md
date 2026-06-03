@@ -8371,6 +8371,34 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 > **Focus**: Tier 2 managed-paths filesystem governance (SHA journal, Postgres/MySQL staging), followed by the unified `ta release` command system. Governance infrastructure comes first so the release pipeline itself can run under full governance.
 
 ---
+### v0.16.4.2 — Windows AppContainer Sandbox
+<!-- status: pending -->
+
+**Goal**: Complete the second half of the Windows sandbox design — AppContainer confinement that restricts filesystem access to the staging workspace path and limits network reach to declared hosts. Job Objects (v0.16.4) handle process-tree teardown; AppContainer handles capability restriction.
+
+**Why**: Job Objects alone don't restrict what files or network endpoints the agent process can reach. AppContainer is the Windows-native answer: it assigns a low-integrity SID to the process, restricts filesystem access to declared path capabilities, and blocks network access except to explicitly allowed endpoints. This is the isolation guarantee users expect from "Windows sandbox."
+
+**Design**:
+- `CreateAppContainerProfile` + `CreateAppContainerSid` to get a well-known SID for the sandbox
+- `STARTUPINFOEXW` with `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` to launch the agent in the container
+- Filesystem capability: grant `FILE_GENERIC_READ | FILE_GENERIC_WRITE` on the staging workspace path only; staging `.ta/` runtime excluded
+- Network capability: if `[sandbox.allow_network]` is empty, no `WinSock2` capability; otherwise declare named endpoints
+- Elevation: AppContainer profiles require no UAC elevation (unlike mandatory integrity labels); `CreateAppContainerProfile` is user-level
+- `ta doctor` sandbox check extended: detect AppContainer support (Win 8+), warn if unsupported kernel
+
+1. [ ] **`SandboxProvider::WindowsAppContainer`** (`crates/ta-runtime/src/sandbox_windows.rs`): `CreateAppContainerProfile(container_name)`, `CreateAppContainerSid`, build `SECURITY_CAPABILITIES` struct with filesystem + optional network capabilities. `apply()` sets `STARTUPINFOEXW` attributes before spawn.
+2. [ ] **Capability helpers**: `staging_path_capability(path)` grants RW on the staging workspace. `network_capability(hosts)` translates `[sandbox.allow_network]` to named endpoint capabilities. Empty network list → no WinSock2 capability.
+3. [ ] **Cleanup**: `DeleteAppContainerProfile(container_name)` on guard drop. Profile names include the goal ID to avoid collisions between concurrent goals.
+4. [ ] **CI test (Windows runner, real AppContainer)**: Spawn sandboxed subprocess, attempt to write to `C:\Windows\Temp\ta-escape-test.txt` (outside staging path), assert access denied (`ERROR_ACCESS_DENIED`). Assert staging path write succeeds. Requires Windows runner with AppContainer support (Win 10+).
+5. [ ] **`ta doctor` AppContainer check**: Probe `CreateAppContainerSid` availability. On pre-Win8 or restricted environments, emit `[warn] AppContainer unavailable — falling back to Job Object only`. Document fallback policy in USAGE.md.
+6. [ ] **Tests**: `appcontainer_sid_created_and_deleted`, `staging_capability_grants_rw`, `network_capability_empty_blocks_socket` (unit), plus the Windows-runner integration test from item 4.
+7. [ ] **USAGE.md**: Extend Windows sandbox section — AppContainer vs Job Object responsibilities, how to configure `[sandbox.allow_network]`, what `ta doctor` checks, elevation note (none required).
+
+**Depends on**: v0.16.4 (Job Object infrastructure, sandbox_windows.rs, post_spawn_apply hook)
+
+#### Version: `0.16.4-alpha.2`
+
+---
 ### v0.16.4.1 — Windows ProjFS: MSI Checkbox + `ta onboard` Step
 <!-- status: pending -->
 
