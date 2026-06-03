@@ -918,9 +918,12 @@ auth:
     fn context_files_absolute_resolved() {
         let dir = tempdir().unwrap();
         let project_root = dir.path();
-        let abs = "/tmp/shared-style.md";
-        let resolved = AgentFrameworkManifest::resolve_context_file_path(abs, project_root);
-        assert_eq!(resolved, std::path::PathBuf::from("/tmp/shared-style.md"));
+        // Use a second tempdir so the path is genuinely absolute on all platforms.
+        let abs_dir = tempdir().unwrap();
+        let abs = abs_dir.path().join("shared-style.md");
+        let resolved =
+            AgentFrameworkManifest::resolve_context_file_path(abs.to_str().unwrap(), project_root);
+        assert_eq!(resolved, abs);
     }
 
     #[test]
@@ -940,13 +943,15 @@ auth:
     fn resolved_context_files_returns_project_relative_paths() {
         let dir = tempdir().unwrap();
         let project_root = dir.path();
+        let abs_dir = tempdir().unwrap();
+        let abs = abs_dir.path().join("absolute.md");
         let manifest = AgentFrameworkManifest {
             name: "test".to_string(),
             command: "cmd".to_string(),
             context: Some(AgentContextConfig {
                 files: vec![
                     ".ta/constitutions/style.md".to_string(),
-                    "/tmp/absolute.md".to_string(),
+                    abs.to_str().unwrap().to_string(),
                 ],
             }),
             ..AgentFrameworkManifest::builtin("claude-code").unwrap()
@@ -954,7 +959,7 @@ auth:
         let files = manifest.resolved_context_files(project_root);
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].1, project_root.join(".ta/constitutions/style.md"));
-        assert_eq!(files[1].1, std::path::PathBuf::from("/tmp/absolute.md"));
+        assert_eq!(files[1].1, abs);
     }
 
     #[test]
