@@ -56,8 +56,7 @@ impl WindowsJobObjectGuard {
         use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
         use windows_sys::Win32::System::JobObjects::{
             CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-            JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
 
         // Safety: CreateJobObjectW with NULL attributes and NULL name creates an
@@ -73,31 +72,9 @@ impl WindowsJobObjectGuard {
 
         // Configure KILL_ON_JOB_CLOSE so the process tree is torn down when the
         // last handle to this Job Object is closed (i.e., when the guard drops).
-        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-            BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
-                PerProcessUserTimeLimit: 0,
-                PerJobUserTimeLimit: 0,
-                LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                MinimumWorkingSetSize: 0,
-                MaximumWorkingSetSize: 0,
-                ActiveProcessLimit: 0,
-                Affinity: 0,
-                PriorityClass: 0,
-                SchedulingClass: 0,
-            },
-            IoInfo: windows_sys::Win32::System::JobObjects::IO_COUNTERS {
-                ReadOperationCount: 0,
-                WriteOperationCount: 0,
-                OtherOperationCount: 0,
-                ReadTransferCount: 0,
-                WriteTransferCount: 0,
-                OtherTransferCount: 0,
-            },
-            ProcessMemoryLimit: 0,
-            JobMemoryLimit: 0,
-            PeakProcessMemoryUsed: 0,
-            PeakJobMemoryUsed: 0,
-        };
+        // Use zeroed() to avoid depending on IO_COUNTERS visibility across windows-sys versions.
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
         let ok = unsafe {
             SetInformationJobObject(
