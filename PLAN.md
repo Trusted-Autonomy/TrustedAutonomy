@@ -8400,7 +8400,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.4.1 — Windows ProjFS: MSI Checkbox + `ta onboard` Step
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Make `Client-ProjFS` (the Windows Projected File System optional feature) a one-click install for all Windows users. Game and large-project users require ProjFS for true VFS staging — the full-copy and smart-copy fallbacks are not viable at Unreal/game scale. Currently USAGE.md documents the `Dism.exe` command but nothing in the installer surface offers to enable it.
 
