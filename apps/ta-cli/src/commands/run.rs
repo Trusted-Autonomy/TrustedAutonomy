@@ -3762,7 +3762,9 @@ fn launch_agent_via_runtime(
 
     // Apply sandbox policy from workflow.toml [sandbox] section (v0.14.0).
     // The policy wraps the spawn request in sandbox-exec (macOS) or bwrap (Linux)
-    // when `sandbox.enabled = true`. Disabled by default — no behaviour change on upgrade.
+    // when `sandbox.enabled = true`. On Windows, Job Objects are applied post-spawn
+    // via `sandbox_policy.post_spawn_apply()` (v0.16.4). Disabled by default.
+    let sandbox_policy: Option<ta_runtime::SandboxPolicy>;
     let request = {
         use ta_runtime::{SandboxPolicy, SandboxProvider};
         let wf_toml = staging_path.join(".ta/workflow.toml");
@@ -3788,6 +3790,7 @@ fn launch_agent_via_runtime(
                 tracing::warn!(
                     "sandbox.enabled=true but experimental.sandbox=false — skipping sandbox"
                 );
+                sandbox_policy = None;
                 raw_request
             } else {
                 let provider = SandboxPolicy::detect_provider();
@@ -3796,6 +3799,7 @@ fn launch_agent_via_runtime(
                     "sandbox.enabled=true but no sandbox provider available on this platform — \
                      running agent without sandboxing"
                 );
+                    sandbox_policy = None;
                     raw_request
                 } else {
                     let policy = SandboxPolicy {
@@ -3819,10 +3823,13 @@ fn launch_agent_via_runtime(
                         provider = ?policy.provider,
                         "Applying sandbox policy to agent process"
                     );
-                    policy.apply(raw_request)
+                    let applied = policy.apply(raw_request);
+                    sandbox_policy = Some(policy);
+                    applied
                 }
             } // end sandbox_experimental else
         } else {
+            sandbox_policy = None;
             raw_request
         }
     };
@@ -3877,6 +3884,13 @@ fn launch_agent_via_runtime(
             cb(pid);
         }
     }
+
+    // Attach Windows Job Object guard (v0.16.4): assign the agent process to a
+    // Job Object with KILL_ON_JOB_CLOSE so the entire process tree is torn down
+    // when TA exits.  On non-Windows, post_spawn_apply is a no-op that returns None.
+    let _job_object_guard = sandbox_policy
+        .as_ref()
+        .and_then(|p| handle.pid().and_then(|pid| p.post_spawn_apply(pid)));
 
     // Emit AgentSpawned event.
     {
