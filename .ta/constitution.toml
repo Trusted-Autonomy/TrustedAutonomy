@@ -25,6 +25,13 @@ restore_fns = []
 patterns = []
 severity = "high"
 
+[rules.windows-platform-support]
+description = "All Windows-specific code must target Windows 10 (1507+) and Windows 11 — the two currently high-use versions. Win32 APIs used must be present in those versions. AppContainer (CreateAppContainerProfile), Job Objects (CreateJobObjectW), and WaitForSingleObject are all available from Win8+, which satisfies this rule. Exotic APIs requiring Win11 only, or deprecated APIs removed in Win10, are prohibited. The Windows CI runner (windows-latest on GitHub Actions) is Windows Server 2022, which is equivalent to Win11 for API availability. Tests that check platform-specific behavior must accept both WindowsAppContainer and WindowsJobObject as valid providers (AppContainer preferred, Job Object fallback for restricted environments). Never assert a single Windows provider in tests — always use an 'or' check."
+inject_fns = []
+restore_fns = []
+patterns = []
+severity = "high"
+
 [rules.vcs-ignore-coverage]
 description = "Every runtime directory TA creates under .ta/ must be listed in .gitignore before it can appear in a committed branch. When adding a new runtime subdirectory (e.g. workflow-runs/, sessions/, interactions/), update .gitignore in the same PR. The reviewer must check that `git status --short` shows no untracked .ta/ paths. Adding to .gitignore is required even if the directory is otherwise harmless — untracked paths pollute `git status` for all contributors and can leak machine-specific state into reviews."
 inject_fns = []

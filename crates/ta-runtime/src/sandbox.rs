@@ -74,6 +74,15 @@ pub enum SandboxProvider {
     /// Does not restrict filesystem access (AppContainer handles that).
     /// Applied post-spawn via `SandboxPolicy::post_spawn_apply()`.
     WindowsJobObject,
+    /// Windows AppContainer — filesystem + network isolation (v0.16.4.2).
+    ///
+    /// Spawns the agent inside a named AppContainer that:
+    ///   - Restricts filesystem writes to the staging workspace (via DACL grant)
+    ///   - Blocks outbound network unless `internetClient` capability is declared
+    ///
+    /// A Job Object is also attached post-spawn for process-tree teardown.
+    /// Applied pre-spawn via `SandboxPolicy::pre_spawn_appcontainer()`.
+    WindowsAppContainer,
 }
 
 impl SandboxPolicy {
@@ -109,7 +118,15 @@ impl SandboxPolicy {
         }
         #[cfg(target_os = "windows")]
         {
-            SandboxProvider::WindowsJobObject
+            // Prefer AppContainer (filesystem + network isolation) over Job Objects
+            // (process-tree teardown only).  AppContainer requires Windows 8+; the
+            // binary only loads there, so appcontainer_available() is a runtime guard
+            // against restricted execution environments (e.g., nested containers).
+            if crate::sandbox_windows::appcontainer_available() {
+                SandboxProvider::WindowsAppContainer
+            } else {
+                SandboxProvider::WindowsJobObject
+            }
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
@@ -133,25 +150,61 @@ impl SandboxPolicy {
             SandboxProvider::LinuxBwrap => self.apply_linux_bwrap(request),
             // Job Objects are applied post-spawn; the SpawnRequest is unchanged.
             SandboxProvider::WindowsJobObject => request,
+            // AppContainer is applied pre-spawn via pre_spawn_appcontainer(); unchanged here.
+            SandboxProvider::WindowsAppContainer => request,
             SandboxProvider::None => request,
         }
     }
 
+    /// Set up an AppContainer profile before the agent process is spawned (Windows only).
+    ///
+    /// Returns `Some(guard)` when the provider is `WindowsAppContainer` and setup succeeds.
+    /// Returns `None` when not on Windows, provider is not `WindowsAppContainer`, or disabled.
+    ///
+    /// The guard must be kept alive for the agent's entire lifetime — it is passed to
+    /// `sandboxed_spawn` to launch the process inside the container, and its Drop
+    /// implementation deletes the profile.
+    ///
+    /// `goal_id` is used to derive a unique container name (first 8 hex chars).
+    pub fn pre_spawn_appcontainer(
+        &self,
+        staging_path: &std::path::Path,
+        goal_id: &str,
+    ) -> Result<Option<crate::sandbox_windows::WindowsAppContainerGuard>, String> {
+        if !self.enabled || self.provider != SandboxProvider::WindowsAppContainer {
+            return Ok(None);
+        }
+        // Container name: "ta-" + first 8 chars of goal ID (unique per goal).
+        let container_name = format!("ta-{}", goal_id.chars().take(8).collect::<String>());
+        let allow_network = !self.allow_network.is_empty();
+        let guard = crate::sandbox_windows::WindowsAppContainerGuard::new(
+            &container_name,
+            staging_path,
+            allow_network,
+        )?;
+        Ok(Some(guard))
+    }
+
     /// Create a Job Object guard and assign the agent process to it (Windows only).
     ///
-    /// Call this immediately after spawning the agent process.  Hold the returned
-    /// guard alive for the duration of the agent run — dropping it closes the Job
-    /// Object handle and kills the entire process tree.
+    /// Call immediately after spawning the agent process. Hold the returned guard alive for
+    /// the duration of the agent run — dropping it closes the Job Object handle and kills
+    /// the entire process tree (`KILL_ON_JOB_CLOSE`).
     ///
-    /// Returns `None` when:
-    /// - sandboxing is disabled,
-    /// - the provider is not `WindowsJobObject`, or
-    /// - Job Object creation fails (a warning is logged).
+    /// Activates for both `WindowsJobObject` and `WindowsAppContainer` providers so
+    /// process-tree teardown works alongside AppContainer filesystem/network isolation.
     ///
-    /// On non-Windows platforms the guard is a zero-size no-op, so this is safe
-    /// to call unconditionally on all platforms.
+    /// Returns `None` when sandboxing is disabled, provider is not a Windows variant,
+    /// or Job Object creation fails (a structured warning is logged in that case).
     pub fn post_spawn_apply(&self, pid: u32) -> Option<WindowsJobObjectGuard> {
-        if !self.enabled || self.provider != SandboxProvider::WindowsJobObject {
+        // Attach a Job Object for process-tree teardown on both WindowsJobObject
+        // and WindowsAppContainer providers (AppContainer + Job Object work together).
+        if !self.enabled
+            || !matches!(
+                self.provider,
+                SandboxProvider::WindowsJobObject | SandboxProvider::WindowsAppContainer
+            )
+        {
             return None;
         }
 
@@ -477,12 +530,20 @@ mod tests {
         );
     }
 
-    /// detect_provider() returns WindowsJobObject on Windows, None elsewhere.
+    /// detect_provider() returns a Windows provider on Win10/Win11, macOS provider on macOS.
     #[test]
     fn detect_provider_windows() {
         let provider = SandboxPolicy::detect_provider();
         #[cfg(target_os = "windows")]
-        assert_eq!(provider, SandboxProvider::WindowsJobObject);
+        // On Win10/Win11 (the supported range) AppContainer APIs are available, so
+        // WindowsAppContainer is preferred. WindowsJobObject is the fallback for
+        // environments where AppContainer is restricted (e.g. nested containers).
+        assert!(
+            provider == SandboxProvider::WindowsAppContainer
+                || provider == SandboxProvider::WindowsJobObject,
+            "Windows provider must be WindowsAppContainer or WindowsJobObject, got {:?}",
+            provider
+        );
         #[cfg(target_os = "macos")]
         assert_eq!(provider, SandboxProvider::MacosSandboxExec);
         // Linux returns LinuxBwrap (if bwrap present) or None — just verify no panic.

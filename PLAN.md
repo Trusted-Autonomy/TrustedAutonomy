@@ -8372,7 +8372,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.4.2 — Windows AppContainer Sandbox
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Complete the second half of the Windows sandbox design — AppContainer confinement that restricts filesystem access to the staging workspace path and limits network reach to declared hosts. Job Objects (v0.16.4) handle process-tree teardown; AppContainer handles capability restriction.
 
@@ -8386,13 +8386,13 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 - Elevation: AppContainer profiles require no UAC elevation (unlike mandatory integrity labels); `CreateAppContainerProfile` is user-level
 - `ta doctor` sandbox check extended: detect AppContainer support (Win 8+), warn if unsupported kernel
 
-1. [ ] **`SandboxProvider::WindowsAppContainer`** (`crates/ta-runtime/src/sandbox_windows.rs`): `CreateAppContainerProfile(container_name)`, `CreateAppContainerSid`, build `SECURITY_CAPABILITIES` struct with filesystem + optional network capabilities. `apply()` sets `STARTUPINFOEXW` attributes before spawn.
-2. [ ] **Capability helpers**: `staging_path_capability(path)` grants RW on the staging workspace. `network_capability(hosts)` translates `[sandbox.allow_network]` to named endpoint capabilities. Empty network list → no WinSock2 capability.
-3. [ ] **Cleanup**: `DeleteAppContainerProfile(container_name)` on guard drop. Profile names include the goal ID to avoid collisions between concurrent goals.
-4. [ ] **CI test (Windows runner, real AppContainer)**: Spawn sandboxed subprocess, attempt to write to `C:\Windows\Temp\ta-escape-test.txt` (outside staging path), assert access denied (`ERROR_ACCESS_DENIED`). Assert staging path write succeeds. Requires Windows runner with AppContainer support (Win 10+).
-5. [ ] **`ta doctor` AppContainer check**: Probe `CreateAppContainerSid` availability. On pre-Win8 or restricted environments, emit `[warn] AppContainer unavailable — falling back to Job Object only`. Document fallback policy in USAGE.md.
-6. [ ] **Tests**: `appcontainer_sid_created_and_deleted`, `staging_capability_grants_rw`, `network_capability_empty_blocks_socket` (unit), plus the Windows-runner integration test from item 4.
-7. [ ] **USAGE.md**: Extend Windows sandbox section — AppContainer vs Job Object responsibilities, how to configure `[sandbox.allow_network]`, what `ta doctor` checks, elevation note (none required).
+1. [x] **`SandboxProvider::WindowsAppContainer`** (`crates/ta-runtime/src/sandbox_windows.rs`): `CreateAppContainerProfile(container_name)`, `CreateAppContainerSid`, build `SECURITY_CAPABILITIES` struct with filesystem + optional network capabilities. `apply()` sets `STARTUPINFOEXW` attributes before spawn.
+2. [x] **Capability helpers**: `staging_path_capability(path)` grants RW on the staging workspace. `network_capability(hosts)` translates `[sandbox.allow_network]` to named endpoint capabilities. Empty network list → no WinSock2 capability.
+3. [x] **Cleanup**: `DeleteAppContainerProfile(container_name)` on guard drop. Profile names include the goal ID to avoid collisions between concurrent goals.
+4. [x] **CI test (Windows runner, real AppContainer)**: Spawn sandboxed subprocess, attempt to write to `C:\Windows\Temp\ta-escape-test.txt` (outside staging path), assert access denied (`ERROR_ACCESS_DENIED`). Assert staging path write succeeds. Requires Windows runner with AppContainer support (Win 10+).
+5. [x] **`ta doctor` AppContainer check**: Probe `CreateAppContainerSid` availability. On pre-Win8 or restricted environments, emit `[warn] AppContainer unavailable — falling back to Job Object only`. Document fallback policy in USAGE.md.
+6. [x] **Tests**: `appcontainer_sid_created_and_deleted`, `staging_capability_grants_rw`, `network_capability_empty_blocks_socket` (unit), plus the Windows-runner integration test from item 4.
+7. [x] **USAGE.md**: Extend Windows sandbox section — AppContainer vs Job Object responsibilities, how to configure `[sandbox.allow_network]`, what `ta doctor` checks, elevation note (none required).
 
 **Depends on**: v0.16.4 (Job Object infrastructure, sandbox_windows.rs, post_spawn_apply hook)
 
