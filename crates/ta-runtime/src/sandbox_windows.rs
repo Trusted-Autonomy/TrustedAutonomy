@@ -1460,11 +1460,12 @@ mod tests {
     /// Windows-only: spawn a subprocess inside an AppContainer and assert that
     /// writing to a path outside the staging workspace is denied.
     ///
-    /// This test requires a Windows runner with AppContainer support (Win10+).
-    /// The escape path `C:\Windows\Temp\ta-escape-test.txt` is outside the
-    /// staging workspace, so the AppContainer must deny writes to it.
+    /// Ignored in CI: spawns a real process via CreateProcessW + WaitForSingleObject(INFINITE).
+    /// Requires a full Win10+ environment with unrestricted AppContainer support.
+    /// Run locally with: cargo test -- --ignored appcontainer_denies_write_outside_staging_path
     #[cfg(target_os = "windows")]
     #[test]
+    #[ignore]
     fn appcontainer_denies_write_outside_staging_path() {
         use crate::adapter::{SpawnRequest, StdinMode, StdoutMode};
         use std::collections::HashMap;
@@ -1521,8 +1522,12 @@ mod tests {
 
     /// Windows-only: spawn a subprocess inside an AppContainer and assert that
     /// writing to the staging workspace succeeds.
+    ///
+    /// Ignored in CI: spawns a real process via CreateProcessW + WaitForSingleObject(INFINITE).
+    /// Run locally with: cargo test -- --ignored appcontainer_allows_write_inside_staging_path
     #[cfg(target_os = "windows")]
     #[test]
+    #[ignore]
     fn appcontainer_allows_write_inside_staging_path() {
         use crate::adapter::{SpawnRequest, StdinMode, StdoutMode};
         use std::collections::HashMap;
