@@ -3859,24 +3859,42 @@ fn launch_agent_via_runtime(
 
     let agent_start = std::time::Instant::now();
 
-    // Spawn the agent.
-    let mut handle = match runtime.spawn(request) {
-        Ok(h) => h,
-        Err(e) => {
-            let event_store = FsEventStore::new(events_dir);
-            let _ = event_store.append(&EventEnvelope::new(SessionEvent::RuntimeError {
-                goal_id: Some(goal_id),
-                runtime: runtime.name().to_string(),
-                error: format!(
-                    "Agent spawn failed (runtime: {}, command: {}): {}",
-                    runtime.name(),
-                    config.command,
-                    e
-                ),
-            }));
-            return Err(std::io::Error::other(format!("Spawn failed: {}", e)));
-        }
-    };
+    // Pre-spawn AppContainer setup (v0.16.4.2) — Windows only.
+    // Creates an AppContainer profile and grants the container SID access to the
+    // staging workspace.  On non-Windows or when the provider is not AppContainer,
+    // pre_spawn_appcontainer returns None (no-op).
+    let _appcontainer_guard = sandbox_policy.as_ref().and_then(|p| {
+        p.pre_spawn_appcontainer(staging_path, &goal_id.to_string())
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "AppContainer pre-spawn setup failed — falling back to Job Object isolation"
+                );
+                None
+            })
+    });
+
+    // Spawn the agent.  On Windows with an AppContainer guard, uses CreateProcessW
+    // with STARTUPINFOEXW for filesystem/network isolation (v0.16.4.2).
+    // On all other paths, delegates to runtime.spawn().
+    let mut handle =
+        match ta_runtime::sandboxed_spawn(&*runtime, request, _appcontainer_guard.as_ref()) {
+            Ok(h) => h,
+            Err(e) => {
+                let event_store = FsEventStore::new(events_dir);
+                let _ = event_store.append(&EventEnvelope::new(SessionEvent::RuntimeError {
+                    goal_id: Some(goal_id),
+                    runtime: runtime.name().to_string(),
+                    error: format!(
+                        "Agent spawn failed (runtime: {}, command: {}): {}",
+                        runtime.name(),
+                        config.command,
+                        e
+                    ),
+                }));
+                return Err(std::io::Error::other(format!("Spawn failed: {}", e)));
+            }
+        };
 
     // Report PID for watchdog liveness tracking.
     if let Some(pid) = handle.pid() {
@@ -3885,9 +3903,11 @@ fn launch_agent_via_runtime(
         }
     }
 
-    // Attach Windows Job Object guard (v0.16.4): assign the agent process to a
-    // Job Object with KILL_ON_JOB_CLOSE so the entire process tree is torn down
-    // when TA exits.  On non-Windows, post_spawn_apply is a no-op that returns None.
+    // Attach Windows Job Object guard (v0.16.4 / v0.16.4.2): assign the agent process
+    // to a Job Object with KILL_ON_JOB_CLOSE for process-tree teardown on TA exit.
+    // Applied for both WindowsJobObject and WindowsAppContainer providers —
+    // AppContainer handles filesystem isolation; Job Object handles teardown.
+    // On non-Windows, post_spawn_apply is a no-op that returns None.
     let _job_object_guard = sandbox_policy
         .as_ref()
         .and_then(|p| handle.pid().and_then(|pid| p.post_spawn_apply(pid)));

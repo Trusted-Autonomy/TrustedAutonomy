@@ -82,4 +82,4 @@ pub use framework::{
     MemoryInjectMode,
 };
 pub use sandbox::{SandboxPolicy, SandboxProvider};
-pub use sandbox_windows::WindowsJobObjectGuard;
+pub use sandbox_windows::{sandboxed_spawn, WindowsAppContainerGuard, WindowsJobObjectGuard};

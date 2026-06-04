@@ -4328,17 +4328,40 @@ allow_network = ["api.anthropic.com", "api.github.com"]
 |---|---|---|---|
 | **macOS** | `sandbox-exec` (Seatbelt) | Filesystem reads/writes, network | Built-in; no extra software needed |
 | **Linux** | `bwrap` (bubblewrap) | Filesystem namespace, network namespace | Install: `apt install bubblewrap` |
-| **Windows** | Job Objects | Process tree teardown only | No filesystem restriction (see note) |
+| **Windows** | AppContainer + Job Objects | Filesystem, network, and process-tree teardown | Built-in; no extra software needed (Windows 8+) |
 
-**Windows — Job Objects (process-tree containment)**
+**Windows — AppContainer + Job Objects (two-layer containment)**
 
-On Windows, enabling the sandbox creates a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Every process the agent spawns joins this Job Object automatically. When TA exits (normally or via crash), the kernel immediately terminates the agent and all its child processes — no zombie agent processes linger.
+On Windows 8+, enabling the sandbox uses a two-layer approach:
 
-**What Job Objects do NOT restrict:**
-- Filesystem access — the agent can still read/write outside the staging workspace.
-- Network access — `allow_network` is accepted but not enforced on Windows.
+| Layer | Mechanism | What it controls |
+|---|---|---|
+| **AppContainer** | `CreateAppContainerProfile` + `STARTUPINFOEXW` | Filesystem access, network access |
+| **Job Object** | `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` | Process-tree teardown |
 
-Filesystem isolation on Windows requires AppContainer, which is planned for a future phase.
+**AppContainer** assigns the agent process a low-integrity SID and enforces these rules:
+- **Filesystem**: the agent can only read and write within its staging workspace. Any attempt to write to `C:\Windows\`, `C:\Users\<other>`, or other paths outside the staging directory is denied by the kernel (`ERROR_ACCESS_DENIED`).
+- **Network**: outbound network connections are blocked unless `allow_network` is non-empty. A non-empty `allow_network` list adds the `internetClient` capability SID, enabling outbound connections.
+
+**Job Object** ensures the agent and all its subprocesses are killed if TA exits unexpectedly — no zombie processes linger.
+
+**Elevation**: AppContainer does not require UAC elevation. `CreateAppContainerProfile` is a user-mode API call.
+
+**Configuring `allow_network` on Windows:**
+
+```toml
+# .ta/workflow.toml
+[sandbox]
+enabled = true
+
+# Empty = block all outbound network (strictest — recommended for code-only goals).
+allow_network = []
+
+# Or declare specific endpoints to allow outbound connections:
+allow_network = ["api.anthropic.com", "api.github.com"]
+```
+
+When `allow_network` is empty, the AppContainer has no `internetClient` capability SID — the kernel blocks all TCP/UDP connections from the agent process.
 
 **How to enable sandboxing on Windows:**
 
@@ -4361,14 +4384,20 @@ The sandbox feature is experimental and must be opted-in via `[experimental] san
 ta doctor
 ```
 
-TA Doctor reports the sandbox status for the current platform:
+TA Doctor reports both the sandbox status and AppContainer availability:
 
 ```
-[sandbox] provider: WindowsJobObject
-[sandbox] status:   active (KILL_ON_JOB_CLOSE enabled)
+[ok]   AppContainer         available — filesystem + network isolation active on Windows 8+
+[ok]   Sandbox              WindowsAppContainer (filesystem + Job Object (teardown)
 ```
 
-If the sandbox cannot be activated (e.g., the process is already in a nested Job Object from another tool), Doctor reports the failure and suggests the manual workaround.
+If AppContainer is unavailable (e.g., TA is nested inside a restricted Job Object from another tool, or the system is pre-Win8), Doctor emits a warning and the sandbox falls back to Job Object only:
+
+```
+[warn] AppContainer         not available — sandbox will use Job Object only (process teardown, no filesystem isolation)
+                            Fix: Ensure TA is running on Windows 8 or later and is not nested
+                                 inside a restricted Job Object.
+```
 
 **What is always allowed** (regardless of `allow_read`):
 - The staging workspace (agent's working directory)

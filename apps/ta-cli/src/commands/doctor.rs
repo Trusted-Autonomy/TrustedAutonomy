@@ -214,6 +214,9 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 23. Ollama probe — check all Ollama profiles have their models pulled (v0.16.3).
     results.extend(check_ollama_profiles(config));
 
+    // 24. AppContainer availability — Windows filesystem + network isolation (v0.16.4.2).
+    results.push(check_appcontainer(config));
+
     results
 }
 
@@ -1863,6 +1866,34 @@ fn ide_manifest_needs_fix(project_root: &Path) -> bool {
     ta_runtime_dirs().any(|d| !manifest_dirs.iter().any(|m| m == d))
 }
 
+// ── AppContainer availability check (v0.16.4.2) ───────────────────────────────
+
+fn check_appcontainer(_config: &GatewayConfig) -> CheckResult {
+    #[cfg(target_os = "windows")]
+    {
+        if ta_runtime::sandbox_windows::appcontainer_available() {
+            CheckResult::ok(
+                "AppContainer",
+                "available — filesystem + network isolation active on Windows 8+",
+            )
+        } else {
+            CheckResult::warn(
+                "AppContainer",
+                "not available — sandbox will use Job Object only (process teardown, no filesystem isolation)",
+                "Ensure TA is running on Windows 8 or later and is not nested inside a restricted Job Object.",
+            )
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // AppContainer is Windows-only; on other platforms report ok (n/a).
+        CheckResult::ok(
+            "AppContainer",
+            "n/a (Windows-only; macOS uses sandbox-exec, Linux uses bwrap)",
+        )
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2357,5 +2388,14 @@ mod tests {
             results.is_empty(),
             "no manifest check when .ta/ does not exist"
         );
+    }
+
+    #[test]
+    fn check_appcontainer_returns_result_without_panic() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let result = check_appcontainer(&config);
+        // Must always return a result (ok or warn) without panicking.
+        assert!(!result.name.is_empty());
     }
 }
