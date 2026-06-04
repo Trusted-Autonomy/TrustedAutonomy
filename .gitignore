@@ -83,6 +83,7 @@ result-*
 .ta/*.log
 .ta/*.lock      # includes apply.lock (written by ta draft apply, ephemeral per-machine)
 .ta/*.pid
+.ta/*-crash-state.json
 .ta/daemon.toml
 .ta/change_summary.json
 .ta/consent.json
