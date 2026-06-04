@@ -217,6 +217,9 @@ fn run_all_checks(config: &GatewayConfig) -> Vec<CheckResult> {
     // 24. AppContainer availability — Windows filesystem + network isolation (v0.16.4.2).
     results.push(check_appcontainer(config));
 
+    // 25. ProjFS availability — fast virtual staging on Windows (v0.16.4.1).
+    results.push(check_projfs(config));
+
     results
 }
 
@@ -1866,6 +1869,107 @@ fn ide_manifest_needs_fix(project_root: &Path) -> bool {
     ta_runtime_dirs().any(|d| !manifest_dirs.iter().any(|m| m == d))
 }
 
+// ── ProjFS availability check (v0.16.4.1) ─────────────────────────────────────
+
+fn check_projfs(_config: &GatewayConfig) -> CheckResult {
+    #[cfg(target_os = "windows")]
+    {
+        if ta_workspace::windows_features::is_projfs_available() {
+            return CheckResult::ok(
+                "ProjFS",
+                "Client-ProjFS enabled — fast virtual staging available",
+            );
+        } else {
+            return CheckResult::warn(
+                "ProjFS",
+                "Client-ProjFS is not enabled — staging falls back to full-copy or smart-copy",
+                "Run `ta doctor fix projfs` to enable it (requires elevation), or manually:\n       Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart",
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        CheckResult::ok("ProjFS", "n/a (Windows-only feature)")
+    }
+}
+
+/// `ta doctor fix projfs` — enable the Windows Client-ProjFS optional feature.
+///
+/// Runs `Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart`.
+/// Tries direct invocation first; if that fails (insufficient privileges), falls
+/// back to PowerShell `Start-Process -Verb RunAs` for UAC elevation. If both
+/// fail, prints the manual command.
+pub fn execute_fix_projfs() -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        enable_projfs_windows()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("ProjFS is a Windows-only feature — nothing to do on this platform.");
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn enable_projfs_windows() -> anyhow::Result<()> {
+    use std::process::Command;
+
+    println!("Enabling Windows Projected File System (Client-ProjFS)...");
+
+    match Command::new("Dism.exe")
+        .args([
+            "/Online",
+            "/Enable-Feature",
+            "/FeatureName:Client-ProjFS",
+            "/NoRestart",
+        ])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            println!("✓ Client-ProjFS enabled successfully.");
+            println!("  Set  strategy = \"projfs\"  in .ta/workflow.toml to use it.");
+            println!("  Run `ta doctor` to confirm.");
+            Ok(())
+        }
+        Ok(s) => {
+            // Likely insufficient privileges. Try elevation via PowerShell.
+            let ps_cmd = "Start-Process dism.exe \
+                -ArgumentList '/Online','/Enable-Feature','/FeatureName:Client-ProjFS','/NoRestart' \
+                -Verb RunAs -Wait";
+            let elevated = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
+                .status();
+            match elevated {
+                Ok(e) if e.success() => {
+                    println!("✓ ProjFS enable command dispatched (elevated).");
+                    println!("  Run `ta doctor` after restarting to confirm it is active.");
+                    Ok(())
+                }
+                _ => {
+                    let code = s.code().unwrap_or(-1);
+                    eprintln!("✗ Dism.exe failed (exit code: {code}).");
+                    eprintln!(
+                        "  Run the following command in an elevated PowerShell or Command Prompt:"
+                    );
+                    eprintln!(
+                        "    Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart"
+                    );
+                    Err(anyhow::anyhow!(
+                        "ProjFS enable failed (exit {code}) — run Dism.exe as administrator"
+                    ))
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ Could not run Dism.exe: {e}");
+            eprintln!("  Run the following command in an elevated PowerShell or Command Prompt:");
+            eprintln!("    Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart");
+            Err(anyhow::anyhow!("Dism.exe not found or inaccessible: {e}"))
+        }
+    }
+}
+
 // ── AppContainer availability check (v0.16.4.2) ───────────────────────────────
 
 fn check_appcontainer(_config: &GatewayConfig) -> CheckResult {
@@ -2397,5 +2501,30 @@ mod tests {
         let result = check_appcontainer(&config);
         // Must always return a result (ok or warn) without panicking.
         assert!(!result.name.is_empty());
+    }
+
+    #[test]
+    fn check_projfs_returns_result_without_panic() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(&dir);
+        let result = check_projfs(&config);
+        // Must always return a result without panicking.
+        assert_eq!(result.name, "ProjFS");
+        // On non-Windows CI platforms ProjFS must report ok (n/a), not fail.
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(result.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn execute_fix_projfs_non_windows_is_ok() {
+        // On non-Windows the function should succeed immediately (no-op).
+        #[cfg(not(target_os = "windows"))]
+        {
+            let result = execute_fix_projfs();
+            assert!(
+                result.is_ok(),
+                "execute_fix_projfs must succeed on non-Windows"
+            );
+        }
     }
 }

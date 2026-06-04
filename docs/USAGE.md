@@ -899,14 +899,22 @@ On Windows 10 version 1809 or later, TA supports the Windows Projected File Syst
 
 To enable ProjFS:
 
-1. **Via the TA installer**: check "Enable fast virtual workspace (requires Windows 10 1809+)" during installation. The installer runs `Dism.exe` to activate the optional feature.
+1. **Via the TA installer**: check "Enable fast virtual workspace (requires Windows 10 1809+)" during installation — it is checked by default. The installer runs `Dism.exe` to activate the optional feature without a UAC prompt (the MSI already runs elevated).
 
-2. **Manually (PowerShell as Administrator)**:
+2. **Via `ta onboard`**: on Windows, the setup wizard includes a "Windows Platform Features" screen after the Optional Components step. If ProjFS is not yet enabled, it offers to enable it now — selecting Yes triggers a UAC elevation dialog and runs Dism.
+
+3. **Via `ta doctor`**: if `ta doctor` reports ProjFS unavailable, run:
+   ```
+   ta doctor fix projfs
+   ```
+   This runs `Dism.exe` directly; if that requires elevation it falls back to PowerShell `Start-Process -Verb RunAs`.
+
+4. **Manually (PowerShell as Administrator)**:
    ```powershell
    Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart
    ```
 
-3. **Verify it's active**:
+5. **Verify it's active**:
    ```powershell
    Get-WindowsOptionalFeature -Online -FeatureName Client-ProjFS
    ```
@@ -919,7 +927,7 @@ Once `Client-ProjFS` is installed, set the staging strategy in `.ta/workflow.tom
 strategy = "projfs"
 ```
 
-If `Client-ProjFS` is not installed, TA falls back to `smart` staging automatically with a log message explaining how to enable it. You can always check with `ta doctor`.
+If `Client-ProjFS` is not installed, TA falls back to `smart` staging automatically with a log message explaining how to enable it. Run `ta doctor` to check current status.
 
 How ProjFS staging works:
 - **Modified files**: when the agent writes a file, the write lands in `.projfs-scratch/` — a real on-disk store in the staging root. The source file is never touched.
