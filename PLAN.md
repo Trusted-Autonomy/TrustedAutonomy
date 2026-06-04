@@ -8372,7 +8372,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.4.2 — Windows AppContainer Sandbox
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Complete the second half of the Windows sandbox design — AppContainer confinement that restricts filesystem access to the staging workspace path and limits network reach to declared hosts. Job Objects (v0.16.4) handle process-tree teardown; AppContainer handles capability restriction.
 
