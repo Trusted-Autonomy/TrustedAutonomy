@@ -8435,6 +8435,47 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 #### Version: `0.16.4.3-alpha`
 
 ---
+### v0.16.4.4 — Discord Plugin Stability: Adopt-Orphan on Daemon Restart
+<!-- status: pending -->
+
+**Goal**: Fix the `ta-channel-discord` crash loop that occurs when the daemon restarts while the Discord listener process is already alive. Currently `channel_listener_manager.rs` has no pre-spawn PID check — on restart it tries to spawn a new listener, the plugin binary finds `.ta/discord-listener.pid` alive, exits non-zero ("already running"), and that exit increments `consecutive_failures` endlessly.
+
+**Root cause**: `crates/ta-daemon/src/channel_listener_manager.rs` (~line 246, `spawn_listener()`) — no "adopt orphan" path. With `max_restarts = 0` (unlimited) and short retry delay, the daemon crash-loops thousands of times until manually restarted.
+
+1. [ ] In `spawn_listener()` (before the spawn call): check if `.ta/discord-listener.pid` exists
+2. [ ] If PID file exists and process is alive (`kill(pid, 0)` / Windows `OpenProcess`): **adopt** — skip spawning, wire up a `waitpid()`-style watch, log "existing listener adopted"
+3. [ ] If PID file exists but process is dead: delete stale PID file, then spawn normally
+4. [ ] Reset `consecutive_failures` to 0 when a healthy existing process is adopted on startup (stale crash state should not persist across daemon restart that finds a healthy plugin)
+
+**Observability**: log at `INFO` level when adopting an orphan; include PID and channel name.
+
+**Depends on**: none (isolated to `channel_listener_manager.rs`)
+
+#### Version: `0.16.4.4-alpha`
+
+---
+### v0.16.4.5 — Staging Disk Management: Exclude target/, Clean on Deny, Background GC
+<!-- status: pending -->
+
+**Goal**: Fix three root causes of runaway `.ta/staging/` disk growth. A single denied/failed goal currently leaves 7–8 GB on disk indefinitely because: (1) `target/` compiled artifacts are copied into staging, (2) `auto_clean` only fires on `ta draft apply`, not on deny/terminal states, and (3) there is no background sweep to reclaim staging for old terminal-state goals.
+
+**Root cause detail** (see memory: `project_staging_disk_pressure`):
+- **Cause A** — `ta-workspace/overlay.rs`: `target/` not in staging exclusion list → each goal snapshot is ~7-8 GB instead of ~100-200 MB
+- **Cause B** — `draft.rs:8244`: `auto_clean` block is inside apply path only; denied drafts keep staging indefinitely
+- **Cause C** — No daemon background task to remove staging for terminal-state goals older than N days
+
+1. [ ] **Fix A (highest leverage)**: Add `target/` to default exclusion list in `ta-workspace/overlay.rs` staging copy alongside existing `.ta/` exclusion. Drops per-goal staging from ~7-8 GB to ~100-200 MB.
+2. [ ] **Fix B**: In `draft.rs` `deny_package()`, add staging cleanup step after denial (same `auto_clean` pattern as apply path). Gate on `wf_cfg.staging.auto_clean`.
+3. [ ] **Fix C**: Add a tokio background task in the daemon that runs every 6–24 hours, scans goals in terminal states (applied/denied/failed/cancelled), and removes staging dirs older than `staging_retain_days` (default: 1 day). Config key: `[staging] retain_days = 1` in `workflow.toml`.
+4. [ ] `ta doctor` reports staging size per goal and flags goals in terminal states with stale staging dirs.
+
+**Observability**: log at `INFO` when GC sweep runs; log paths removed and bytes freed.
+
+**Depends on**: none (Fix A and B are independent; Fix C is additive)
+
+#### Version: `0.16.4.5-alpha`
+
+---
 ### v0.16.5 — Template Engine: Data-driven `ta init` with Feature Components
 <!-- status: pending -->
 
