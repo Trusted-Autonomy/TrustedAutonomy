@@ -8418,7 +8418,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.4.3 — Onboard Wizard: Fix Dynamic Step Title in Summary Screen
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Fix `render_summary_step` hardcoding "Step 5 — Summary & Confirm" even when the 6-step Windows flow (with the WindowsFeatures step) is active. Windows users without ProjFS installed see a mislabeled heading on the final wizard screen.
 
@@ -8426,9 +8426,9 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 **Fix**: Replace the hardcoded heading string in `render_summary_step` with a dynamic format derived from the current step's index and total step count, matching the pattern used by all other wizard step renderers.
 
-1. [ ] Fix `render_summary_step` heading to compute step number dynamically from `WizardStep::index()` / total step count rather than hardcoding "Step 5".
-2. [ ] Verify heading is correct for both 5-step (non-Windows / ProjFS already enabled) and 6-step (Windows without ProjFS) flows.
-3. [ ] No regression in gauge display or step sequence.
+1. [x] Fix `render_summary_step` heading to compute step number dynamically from `WizardStep::index()` / total step count rather than hardcoding "Step 5".
+2. [x] Verify heading is correct for both 5-step (non-Windows / ProjFS already enabled) and 6-step (Windows without ProjFS) flows.
+3. [x] No regression in gauge display or step sequence.
 
 **Depends on**: v0.16.4.1 (WindowsFeatures wizard step added)
 
