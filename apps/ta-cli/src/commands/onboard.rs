@@ -1304,7 +1304,9 @@ fn render_windows_features_step(frame: &mut Frame, state: &WizardState, area: Re
 fn render_summary_step(frame: &mut Frame, state: &WizardState, area: Rect) {
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(10)]).split(area);
 
-    let title = Paragraph::new("Step 5 — Summary & Confirm").style(
+    let has_wf = !state.projfs_available;
+    let step_num = WizardStep::Summary.index(has_wf) + 1;
+    let title = Paragraph::new(format!("Step {step_num} — Summary & Confirm")).style(
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
