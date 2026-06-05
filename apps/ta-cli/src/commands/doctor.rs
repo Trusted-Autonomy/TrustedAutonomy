@@ -1875,16 +1875,16 @@ fn check_projfs(_config: &GatewayConfig) -> CheckResult {
     #[cfg(target_os = "windows")]
     {
         if ta_workspace::windows_features::is_projfs_available() {
-            return CheckResult::ok(
+            CheckResult::ok(
                 "ProjFS",
                 "Client-ProjFS enabled — fast virtual staging available",
-            );
+            )
         } else {
-            return CheckResult::warn(
+            CheckResult::warn(
                 "ProjFS",
                 "Client-ProjFS is not enabled — staging falls back to full-copy or smart-copy",
                 "Run `ta doctor fix projfs` to enable it (requires elevation), or manually:\n       Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart",
-            );
+            )
         }
     }
     #[cfg(not(target_os = "windows"))]
