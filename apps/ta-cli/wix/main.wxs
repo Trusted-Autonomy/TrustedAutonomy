@@ -23,7 +23,8 @@
 <?define ProgramFilesFolder = "ProgramFilesFolder" ?>
 <?endif ?>
 
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package
     Name="Trusted Autonomy"
     Version="$(var.Version)"
@@ -194,15 +195,30 @@
       After enabling, set strategy = "projfs" in .ta/workflow.toml:
         [staging]
         strategy = "projfs"
+
+      Level="1" means this feature is checked by default. The Condition below
+      sets Level="0" (hidden/disabled) on Windows versions before 10 (VersionNT < 1000),
+      since ProjFS requires Windows 10 version 1809 or later.
     -->
     <Feature
       Id="ProjFS"
       Title="Enable fast virtual workspace (requires Windows 10 1809+)"
       Description="Enables Windows Projected File System (ProjFS) for near-instant, zero-disk-cost staging. Files are hydrated from source on demand — only files the agent actually reads are physically accessed."
-      Level="2"
+      Level="1"
       AllowAdvertise="no">
+      <!-- Disable on Windows versions below 10 (VersionNT < 1000 = pre-Win10) -->
+      <Condition Level="0"><![CDATA[VersionNT < 1000]]></Condition>
       <ComponentRef Id="EnableProjFS" />
     </Feature>
+
+    <!--
+      Installer UI: feature-tree wizard that exposes the ProjFS checkbox on the
+      "Platform Features" page. WixUI_FeatureTree provides Welcome, License,
+      InstallDir, and Features pages — users can uncheck ProjFS if not needed.
+      Silent installs (/qn) bypass this UI entirely.
+    -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
 
     <!--
       Custom action: run DISM to enable Client-ProjFS when the ProjFS feature is selected.

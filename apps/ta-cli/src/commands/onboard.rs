@@ -617,17 +617,21 @@ pub fn execute_non_interactive(
 
 #[derive(Debug, Clone, PartialEq)]
 enum WizardStep {
-    Provider,    // Step 1
-    ApiKey,      // Step 1b (if anthropic + key not found)
-    OllamaModel, // Step 1c (if ollama)
-    Agent,       // Step 2
-    Framework,   // Step 3
-    Optionals,   // Step 4
-    Summary,     // Step 5
+    Provider,        // Step 1
+    ApiKey,          // Step 1b (if anthropic + key not found)
+    OllamaModel,     // Step 1c (if ollama)
+    Agent,           // Step 2
+    Framework,       // Step 3
+    Optionals,       // Step 4
+    WindowsFeatures, // Step 5 (Windows only, when ProjFS not yet enabled)
+    Summary,         // Step 5 or 6
 }
 
 impl WizardStep {
-    fn index(&self) -> usize {
+    /// Return the 0-based display index for the progress bar.
+    /// `has_windows_features` is true when the WindowsFeatures step is active
+    /// (Windows platform and ProjFS not yet available).
+    fn index(&self, has_windows_features: bool) -> usize {
         match self {
             WizardStep::Provider => 0,
             WizardStep::ApiKey => 0,
@@ -635,7 +639,15 @@ impl WizardStep {
             WizardStep::Agent => 1,
             WizardStep::Framework => 2,
             WizardStep::Optionals => 3,
-            WizardStep::Summary => 4,
+            WizardStep::WindowsFeatures => 4,
+            // Summary is step 5 when WindowsFeatures is present, otherwise step 5 (index 4).
+            WizardStep::Summary => {
+                if has_windows_features {
+                    5
+                } else {
+                    4
+                }
+            }
         }
     }
 }
@@ -664,6 +676,9 @@ struct WizardState {
     // Detected values
     detected_api_key: Option<String>,
     ollama_detected: bool,
+    // Windows platform features (step shown on Windows when ProjFS not yet enabled)
+    projfs_available: bool,
+    windows_features_idx: usize, // 0 = Yes (enable ProjFS), 1 = No (skip)
     // Error/status message
     message: Option<String>,
 }
@@ -691,6 +706,12 @@ impl WizardState {
             0
         };
 
+        // Detect whether ProjFS is already enabled on Windows.
+        #[cfg(target_os = "windows")]
+        let projfs_available = ta_workspace::windows_features::is_projfs_available();
+        #[cfg(not(target_os = "windows"))]
+        let projfs_available = true;
+
         WizardState {
             step: WizardStep::Provider,
             provider_idx,
@@ -706,6 +727,8 @@ impl WizardState {
             agent_available: [claude_code_ok, codex_ok, claude_flow_ok],
             detected_api_key,
             ollama_detected,
+            projfs_available,
+            windows_features_idx: 0, // default: Yes, enable ProjFS
             message: None,
         }
     }
@@ -786,6 +809,15 @@ impl WizardState {
                 true
             }
             WizardStep::Optionals => {
+                // On Windows, offer to enable ProjFS if it isn't already active.
+                if !self.projfs_available {
+                    self.step = WizardStep::WindowsFeatures;
+                } else {
+                    self.step = WizardStep::Summary;
+                }
+                true
+            }
+            WizardStep::WindowsFeatures => {
                 self.step = WizardStep::Summary;
                 true
             }
@@ -826,8 +858,16 @@ impl WizardState {
                 self.step = WizardStep::Framework;
                 true
             }
-            WizardStep::Summary => {
+            WizardStep::WindowsFeatures => {
                 self.step = WizardStep::Optionals;
+                true
+            }
+            WizardStep::Summary => {
+                if !self.projfs_available {
+                    self.step = WizardStep::WindowsFeatures;
+                } else {
+                    self.step = WizardStep::Optionals;
+                }
                 true
             }
         }
@@ -857,9 +897,10 @@ fn render_wizard(frame: &mut Frame, state: &WizardState) {
     ])
     .split(inner);
 
-    // Progress bar
-    let total_steps = 5u16;
-    let current_step = state.step.index() as u16 + 1;
+    // Progress bar — 6 steps on Windows when ProjFS isn't yet enabled, 5 otherwise.
+    let has_wf = !state.projfs_available;
+    let total_steps = if has_wf { 6u16 } else { 5u16 };
+    let current_step = state.step.index(has_wf) as u16 + 1;
     let progress = (current_step * 100) / total_steps;
     let gauge = Gauge::default()
         .block(Block::default())
@@ -876,6 +917,7 @@ fn render_wizard(frame: &mut Frame, state: &WizardState) {
         WizardStep::Agent => render_agent_step(frame, state, chunks[1]),
         WizardStep::Framework => render_framework_step(frame, state, chunks[1]),
         WizardStep::Optionals => render_optionals_step(frame, state, chunks[1]),
+        WizardStep::WindowsFeatures => render_windows_features_step(frame, state, chunks[1]),
         WizardStep::Summary => render_summary_step(frame, state, chunks[1]),
     }
 
@@ -1215,6 +1257,50 @@ fn render_optionals_step(frame: &mut Frame, state: &WizardState, area: Rect) {
     frame.render_widget(help, chunks[2]);
 }
 
+fn render_windows_features_step(frame: &mut Frame, state: &WizardState, area: Rect) {
+    let chunks = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(8),
+        Constraint::Length(4),
+    ])
+    .split(area);
+
+    let title_text = "Step 5 — Windows Platform Features\n\nFast virtual workspace (ProjFS) is not enabled.\nEnable it now? [recommended for game and large projects]";
+    let title = Paragraph::new(title_text).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(title, chunks[0]);
+
+    let items = vec![
+        ListItem::new("● Yes  — enable ProjFS now  (UAC elevation dialog will appear)"),
+        ListItem::new("○ No   — skip  (enable later with: ta doctor fix projfs)"),
+    ];
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.windows_features_idx));
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::NONE))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    let hint = if state.windows_features_idx == 0 {
+        "ProjFS gives near-instant staging for large projects (Unreal Engine, Unity, large Node repos)."
+    } else {
+        "ProjFS can be enabled later: run  ta doctor fix projfs  in an elevated shell."
+    };
+    let help_text = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(help_text, chunks[2]);
+}
+
 fn render_summary_step(frame: &mut Frame, state: &WizardState, area: Rect) {
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(10)]).split(area);
 
@@ -1325,8 +1411,8 @@ fn render_summary_step(frame: &mut Frame, state: &WizardState, area: Rect) {
 // ── TUI event loop ─────────────────────────────────────────────────────────
 
 /// Run the interactive TUI wizard. Returns the final config to apply, or None if aborted.
-fn run_tui_wizard() -> anyhow::Result<Option<(GlobalConfig, bool, bool)>> {
-    // Returns (config, install_claude_flow, install_bmad)
+fn run_tui_wizard() -> anyhow::Result<Option<(GlobalConfig, bool, bool, bool)>> {
+    // Returns (config, install_claude_flow, install_bmad, enable_projfs)
     let mut state = WizardState::new();
     let mut stdout = std::io::stdout();
 
@@ -1377,13 +1463,15 @@ fn run_tui_wizard() -> anyhow::Result<Option<(GlobalConfig, bool, bool)>> {
 
     let install_cf = state.optionals[0];
     let install_bmad = state.optionals[1];
+    // Enable ProjFS when: user selected Yes on the WindowsFeatures step.
+    let enable_projfs = !state.projfs_available && state.windows_features_idx == 0;
 
     // Store API key if entered
     if state.provider_idx == 0 && !state.api_key_input.is_empty() {
         store_api_key(&state.api_key_input)?;
     }
 
-    Ok(Some((cfg, install_cf, install_bmad)))
+    Ok(Some((cfg, install_cf, install_bmad, enable_projfs)))
 }
 
 fn run_wizard_loop(
@@ -1484,6 +1572,24 @@ fn run_wizard_loop(
                         _ => {}
                     }
                 }
+
+                WizardStep::WindowsFeatures => match key.code {
+                    KeyCode::Up if state.windows_features_idx > 0 => {
+                        state.windows_features_idx -= 1;
+                    }
+                    KeyCode::Down if state.windows_features_idx < 1 => {
+                        state.windows_features_idx += 1;
+                    }
+                    KeyCode::Enter | KeyCode::Right => {
+                        state.advance();
+                        state.message = None;
+                    }
+                    KeyCode::Esc | KeyCode::Left => {
+                        state.go_back();
+                        state.message = None;
+                    }
+                    _ => {}
+                },
 
                 WizardStep::Summary => match key.code {
                     KeyCode::Enter => {
@@ -1646,7 +1752,7 @@ pub fn execute(
             println!("Setup cancelled. Run 'ta onboard' to configure later.");
             return Ok(());
         }
-        Some((cfg, do_install_cf, do_install_bmad)) => {
+        Some((cfg, do_install_cf, do_install_bmad, do_enable_projfs)) => {
             // Write config first.
             write_config(&cfg)?;
 
@@ -1662,6 +1768,13 @@ pub fn execute(
                 if let Err(e) = install_bmad() {
                     eprintln!("Warning: BMAD install failed: {e}");
                 }
+            }
+
+            // Enable ProjFS if selected on the Windows Features step.
+            if do_enable_projfs {
+                println!();
+                println!("Enabling Windows Projected File System (Client-ProjFS)...");
+                enable_projfs_from_wizard();
             }
 
             // Final confirmation.
@@ -1752,6 +1865,73 @@ fn run_web_mode(project_root: &std::path::Path) -> anyhow::Result<()> {
 
     println!("If the browser didn't open, navigate to: {}", setup_url);
     Ok(())
+}
+
+// ── Windows ProjFS enablement (v0.16.4.1) ─────────────────────────────────
+
+/// Run Dism.exe to enable Client-ProjFS after the onboarding wizard selects it.
+/// On Windows, tries direct invocation first, then falls back to PowerShell
+/// elevation (`-Verb RunAs`). On non-Windows, this is a no-op (the wizard
+/// never sets `do_enable_projfs = true` on non-Windows).
+#[cfg(target_os = "windows")]
+fn enable_projfs_from_wizard() {
+    use std::process::Command;
+
+    match Command::new("Dism.exe")
+        .args([
+            "/Online",
+            "/Enable-Feature",
+            "/FeatureName:Client-ProjFS",
+            "/NoRestart",
+        ])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            println!("  ✓ Client-ProjFS enabled successfully.");
+            println!("    Set  strategy = \"projfs\"  in .ta/workflow.toml to use it.");
+        }
+        Ok(s) => {
+            // Direct invocation failed (likely insufficient privileges). Try
+            // elevation via PowerShell's Start-Process -Verb RunAs which shows
+            // the UAC consent dialog.
+            let ps_cmd = "Start-Process dism.exe \
+                -ArgumentList '/Online','/Enable-Feature','/FeatureName:Client-ProjFS','/NoRestart' \
+                -Verb RunAs -Wait";
+            let elevated = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
+                .status();
+            match elevated {
+                Ok(e) if e.success() => {
+                    println!("  ✓ ProjFS enable command dispatched (elevated).");
+                    println!("    Run  ta doctor  after restarting to confirm it is active.");
+                }
+                _ => {
+                    eprintln!(
+                        "  ✗ ProjFS enable failed (Dism exit code: {}).",
+                        s.code().unwrap_or(-1)
+                    );
+                    eprintln!(
+                        "    To enable manually, run in an elevated PowerShell or Command Prompt:"
+                    );
+                    eprintln!(
+                        "      Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("  ✗ Could not run Dism.exe: {}", e);
+            eprintln!("    To enable manually, run in an elevated PowerShell or Command Prompt:");
+            eprintln!(
+                "      Dism.exe /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart"
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn enable_projfs_from_wizard() {
+    // Non-Windows: the wizard never sets enable_projfs=true, so this is never called.
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -2162,5 +2342,32 @@ foo = "bar"
             "new provider type should be written"
         );
         assert!(content.contains("codex"), "new agent should be written");
+    }
+
+    #[test]
+    fn wizard_state_projfs_available_non_windows() {
+        // On non-Windows (CI/macOS/Linux) projfs_available must always be true
+        // so the WindowsFeatures step is never injected into the wizard flow.
+        let state = WizardState::new();
+        #[cfg(not(target_os = "windows"))]
+        assert!(
+            state.projfs_available,
+            "projfs_available must be true on non-Windows so Windows Features step is skipped"
+        );
+        // default selection is Yes (index 0)
+        assert_eq!(state.windows_features_idx, 0);
+    }
+
+    #[test]
+    fn wizard_step_index_with_windows_features() {
+        // When has_windows_features=true (Windows + ProjFS not available):
+        // Summary shifts to index 5 (step 6 of 6).
+        assert_eq!(WizardStep::Optionals.index(true), 3);
+        assert_eq!(WizardStep::WindowsFeatures.index(true), 4);
+        assert_eq!(WizardStep::Summary.index(true), 5);
+        // When has_windows_features=false (non-Windows or ProjFS already enabled):
+        // Summary stays at index 4 (step 5 of 5).
+        assert_eq!(WizardStep::Optionals.index(false), 3);
+        assert_eq!(WizardStep::Summary.index(false), 4);
     }
 }

@@ -326,6 +326,12 @@ enum Commands {
         /// `ta doctor --fix --yes` is equivalent to `ta gc` but with richer output.
         #[arg(long)]
         yes: bool,
+        /// Optional subcommand: "fix <component>".
+        ///
+        /// Currently supports:
+        ///   ta doctor fix projfs   — enable the Windows Client-ProjFS feature (requires elevation)
+        #[arg(trailing_var_arg = true, value_name = "SUBCOMMAND [COMPONENT]")]
+        extra_args: Vec<String>,
     },
 
     /// Upgrade project-level TA configuration to the current binary version (v0.15.18).
@@ -1154,7 +1160,13 @@ fn main() -> anyhow::Result<()> {
             fix_denied,
             fix,
             yes,
-        } => commands::doctor::execute(&config, *json, *fix_denied, *fix, *yes),
+            extra_args,
+        } => match extra_args.as_slice() {
+            [sub, comp, ..] if sub == "fix" && comp == "projfs" => {
+                commands::doctor::execute_fix_projfs()
+            }
+            _ => commands::doctor::execute(&config, *json, *fix_denied, *fix, *yes),
+        },
         Commands::Upgrade(args) => commands::upgrade::execute(&config, args),
         Commands::Conversation { goal_id, json } => {
             commands::conversation::execute(&config, goal_id, *json)
