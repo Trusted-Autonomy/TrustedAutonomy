@@ -8418,7 +8418,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.4.3 — Onboard Wizard: Fix Dynamic Step Title in Summary Screen
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Fix `render_summary_step` hardcoding "Step 5 — Summary & Confirm" even when the 6-step Windows flow (with the WindowsFeatures step) is active. Windows users without ProjFS installed see a mislabeled heading on the final wizard screen.
 
