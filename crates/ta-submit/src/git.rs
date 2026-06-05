@@ -30,6 +30,68 @@ pub struct GitAdapter {
     plan_file: String,
 }
 
+/// Strip ANSI escape sequences and ASCII control characters from a string.
+///
+/// Goal titles can be contaminated with terminal escape codes when an agent
+/// runs a TUI command (e.g. `ta onboard`) and its output leaks into metadata.
+/// This must be applied before using any title in branch names or PR titles.
+fn strip_ansi_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // CSI sequence: ESC [ <params> <final>  (final byte 0x40–0x7E)
+            // OSC sequence: ESC ] ... ST/BEL
+            // Other two-char sequences: skip next char
+            match chars.peek().copied() {
+                Some('[') | Some('(') | Some(')') => {
+                    chars.next(); // consume '[' / '(' / ')'
+                    for ch in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&ch) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next(); // consume ']'
+                    for ch in chars.by_ref() {
+                        if ch == '\x07' || ch == '\u{9C}' {
+                            break;
+                        }
+                        if ch == '\x1b' {
+                            chars.next(); // consume '\\' of ST
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next(); // skip next char for unknown two-char sequences
+                }
+            }
+        } else if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+            // Drop other ASCII control chars (BEL, BS, DEL, etc.)
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Truncate `s` to at most `max_chars` Unicode scalar values.
+///
+/// Trims trailing whitespace and dashes after truncation to avoid ugly endings.
+fn truncate_title(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    s.chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim_end_matches(|c: char| c == '-' || c.is_whitespace())
+        .to_string()
+}
+
 impl GitAdapter {
     /// Create a new GitAdapter for the given working directory
     pub fn new(work_dir: impl Into<std::path::PathBuf>) -> Self {
@@ -124,8 +186,8 @@ impl GitAdapter {
         let prefix = &config.git.branch_prefix;
 
         // Step 1: lowercase + replace non-alphanumeric/dash with dash.
-        let raw: String = ctx
-            .title
+        // Strip ANSI escapes first — titles can be contaminated by TUI output.
+        let raw: String = strip_ansi_controls(&ctx.title)
             .to_lowercase()
             .chars()
             .map(|c| {
@@ -656,7 +718,10 @@ impl SourceAdapter for GitAdapter {
         // is targeted even if the working tree HEAD has drifted (e.g. daemon
         // restart between push and PR creation).
         // v0.14.7.3: Prefix PR title with [<shortref>] for goal traceability.
-        let pr_title = format!("[{}] {}", ctx.shortref(), ctx.title);
+        // Strip ANSI escapes and truncate so the full title stays within GitHub's
+        // 256-character limit (prefix is 12 chars, leaving 240 for the body).
+        let clean = truncate_title(&strip_ansi_controls(&ctx.title), 240);
+        let pr_title = format!("[{}] {}", ctx.shortref(), clean);
         let output = Command::new("gh")
             .args([
                 "pr",
@@ -1700,6 +1765,71 @@ mod tests {
         let branch = adapter.branch_name(&CommitContext::from(&goal), &config);
         assert!(!branch.contains("--"), "no consecutive dashes: {}", branch);
         assert!(branch.contains("fix"), "should contain 'fix': {}", branch);
+    }
+
+    #[test]
+    fn test_strip_ansi_controls_removes_csi_sequences() {
+        let ansi = "\x1b[38;5;6;49mcolored text\x1b[0m normal";
+        assert_eq!(strip_ansi_controls(ansi), "colored text normal");
+    }
+
+    #[test]
+    fn test_strip_ansi_controls_removes_cursor_positioning() {
+        let ansi = "\x1b[1;1HHello\x1b[2;1HWorld";
+        assert_eq!(strip_ansi_controls(ansi), "HelloWorld");
+    }
+
+    #[test]
+    fn test_strip_ansi_controls_removes_mode_toggles() {
+        // ?1049h (alternate screen), ?25l (hide cursor)
+        let ansi = "\x1b[?1049h\x1b[?25ltext\x1b[?25h\x1b[?1049l";
+        assert_eq!(strip_ansi_controls(ansi), "text");
+    }
+
+    #[test]
+    fn test_strip_ansi_controls_preserves_plain_text() {
+        let plain = "v0.16.4.1 — Windows ProjFS: MSI Checkbox + ta onboard Step";
+        assert_eq!(strip_ansi_controls(plain), plain);
+    }
+
+    #[test]
+    fn test_truncate_title_under_limit() {
+        assert_eq!(truncate_title("short title", 240), "short title");
+    }
+
+    #[test]
+    fn test_truncate_title_at_limit_trims_trailing_dash() {
+        let long = "a".repeat(238) + "-b";
+        let result = truncate_title(&long, 240);
+        assert!(result.len() <= 240);
+        assert!(!result.ends_with('-'));
+    }
+
+    #[test]
+    fn test_branch_name_strips_ansi_from_title() {
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path()).unwrap();
+        let adapter = GitAdapter::new(dir.path());
+        let config = SubmitConfig::default();
+
+        // Title contaminated with ANSI escape codes (simulates TUI output leak)
+        let ansi_title = "v0.16.4.1 \x1b[?1049h\x1b[1;1H\x1b[38;5;6;49mta onboard Step";
+        let goal = GoalRun::new(
+            ansi_title,
+            "Test",
+            "test-agent",
+            dir.path().to_path_buf(),
+            dir.path().join("store"),
+        );
+        let branch = adapter.branch_name(&CommitContext::from(&goal), &config);
+        assert!(
+            !branch.contains('\x1b'),
+            "branch must not contain ESC: {branch}"
+        );
+        assert!(
+            branch.contains("v0"),
+            "should contain title content: {branch}"
+        );
     }
 
     #[test]

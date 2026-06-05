@@ -58,6 +58,7 @@ This applies to both manual work and TA-mediated goals. When `ta pr apply --git-
 - Commit in logical working units
 - All work stays within ~/development/TrustedAutonomy/
 - Use `tempfile::tempdir()` for all test fixtures that need filesystem access
+- **Never run interactive TUI commands and capture their output into goal titles, PR titles, or summaries.** Commands like `ta onboard`, `ta shell`, or anything that renders to a terminal produce ANSI escape sequences that corrupt metadata (branch names, PR titles). GitHub enforces a 256-character PR title limit. If you need to test a TUI flow, run it in isolation and do not include its output in any structured field.
 
 ## Release Rules
 
