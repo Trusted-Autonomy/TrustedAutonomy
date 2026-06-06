@@ -8476,7 +8476,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.5 — Template Engine: Data-driven `ta init` with Feature Components
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Refactor `ta init` from hardcoded Rust match arms to a data-driven template engine. Templates become TOML files (bundled or user-installed) that compose named feature components implemented as Rust trait objects. Enables community templates without code changes to TA itself.
 
