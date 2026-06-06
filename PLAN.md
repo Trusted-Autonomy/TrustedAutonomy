@@ -8436,16 +8436,16 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.4.4 — Discord Plugin Stability: Adopt-Orphan on Daemon Restart
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Fix the `ta-channel-discord` crash loop that occurs when the daemon restarts while the Discord listener process is already alive. Currently `channel_listener_manager.rs` has no pre-spawn PID check — on restart it tries to spawn a new listener, the plugin binary finds `.ta/discord-listener.pid` alive, exits non-zero ("already running"), and that exit increments `consecutive_failures` endlessly.
 
 **Root cause**: `crates/ta-daemon/src/channel_listener_manager.rs` (~line 246, `spawn_listener()`) — no "adopt orphan" path. With `max_restarts = 0` (unlimited) and short retry delay, the daemon crash-loops thousands of times until manually restarted.
 
-1. [ ] In `spawn_listener()` (before the spawn call): check if `.ta/discord-listener.pid` exists
-2. [ ] If PID file exists and process is alive (`kill(pid, 0)` / Windows `OpenProcess`): **adopt** — skip spawning, wire up a `waitpid()`-style watch, log "existing listener adopted"
-3. [ ] If PID file exists but process is dead: delete stale PID file, then spawn normally
-4. [ ] Reset `consecutive_failures` to 0 when a healthy existing process is adopted on startup (stale crash state should not persist across daemon restart that finds a healthy plugin)
+1. [x] In `spawn_listener()` (before the spawn call): check if `.ta/discord-listener.pid` exists
+2. [x] If PID file exists and process is alive (`kill(pid, 0)` / Windows `OpenProcess`): **adopt** — skip spawning, wire up a `waitpid()`-style watch, log "existing listener adopted"
+3. [x] If PID file exists but process is dead: delete stale PID file, then spawn normally
+4. [x] Reset `consecutive_failures` to 0 when a healthy existing process is adopted on startup (stale crash state should not persist across daemon restart that finds a healthy plugin)
 
 **Observability**: log at `INFO` level when adopting an orphan; include PID and channel name.
 

@@ -3591,20 +3591,11 @@ fn launch_agent_interactive(
     Vec<(InteractionRequest, InteractionResponse)>,
 )> {
     // Build args with template substitution.
-    let mut args: Vec<String> = config
+    let args: Vec<String> = config
         .args_template
         .iter()
         .map(|t| t.replace("{prompt}", prompt))
         .collect();
-
-    // Auto-approve configured MCP servers (same as headless path).
-    let cmd_stem = std::path::Path::new(&config.command)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if cmd_stem == "claude" {
-        args.extend(mcp_allowed_tools_args(staging_path));
-    }
 
     // Launch via PTY.
     let pty_config = pty_capture::PtyLaunchConfig {
@@ -3747,17 +3738,6 @@ fn launch_agent_via_runtime(
         .collect();
     if headless {
         args.extend_from_slice(&config.headless_args);
-    }
-
-    // Auto-approve MCP servers already configured in .mcp.json so Claude Code
-    // does not prompt the user for approval on each tool invocation. The servers
-    // were injected from the user's own TA/Claude config — no human gate needed.
-    let cmd_stem = std::path::Path::new(&config.command)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if cmd_stem == "claude" {
-        args.extend(mcp_allowed_tools_args(staging_path));
     }
 
     let stdin_mode = if headless {
@@ -4418,29 +4398,6 @@ fn restore_claude_settings(staging_path: &Path) -> anyhow::Result<()> {
 
 pub(crate) const MCP_JSON_PATH: &str = ".mcp.json";
 pub(crate) const MCP_JSON_BACKUP: &str = ".ta/mcp_json_original";
-
-/// Build `--allowedTools mcp__<name>__*` args for every server in `.mcp.json`.
-///
-/// Claude Code requires explicit opt-in per server to skip the interactive
-/// approval prompt. Since the user already configured these servers in their
-/// TA/Claude settings, auto-approving them here is correct — they are not
-/// externally injected at runtime.
-fn mcp_allowed_tools_args(staging_path: &Path) -> Vec<String> {
-    let mcp_path = staging_path.join(MCP_JSON_PATH);
-    let Ok(content) = std::fs::read_to_string(&mcp_path) else {
-        return Vec::new();
-    };
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return Vec::new();
-    };
-    let Some(servers) = val.get("mcpServers").and_then(|s| s.as_object()) else {
-        return Vec::new();
-    };
-    servers
-        .keys()
-        .flat_map(|name| ["--allowedTools".to_string(), format!("mcp__{name}__*")])
-        .collect()
-}
 
 /// Inject TA MCP server config into a directory's `.mcp.json`.
 ///
@@ -7917,40 +7874,6 @@ non_interactive_env:
             path == "main.rs"
         });
         assert!(main_in_diff, "main.rs change must appear in diff");
-    }
-
-    // ── MCP auto-approve allowed-tools tests ──
-
-    #[test]
-    fn mcp_allowed_tools_args_returns_empty_when_no_mcp_json() {
-        let staging = tempfile::TempDir::new().unwrap();
-        let args = mcp_allowed_tools_args(staging.path());
-        assert!(args.is_empty(), "no .mcp.json → no --allowedTools args");
-    }
-
-    #[test]
-    fn mcp_allowed_tools_args_returns_pairs_for_each_server() {
-        let staging = tempfile::TempDir::new().unwrap();
-        std::fs::write(
-            staging.path().join(MCP_JSON_PATH),
-            r#"{"mcpServers": {"ta": {"command": "ta"}, "ta-memory": {"command": "ta-memory"}}}"#,
-        )
-        .unwrap();
-        let args = mcp_allowed_tools_args(staging.path());
-        // Expect: [--allowedTools, mcp__ta__*, --allowedTools, mcp__ta-memory__*]
-        assert_eq!(args.len(), 4);
-        let flags: Vec<&str> = args.iter().map(String::as_str).collect();
-        assert!(flags.contains(&"--allowedTools"));
-        assert!(flags.contains(&"mcp__ta__*"));
-        assert!(flags.contains(&"mcp__ta-memory__*"));
-    }
-
-    #[test]
-    fn mcp_allowed_tools_args_handles_empty_servers() {
-        let staging = tempfile::TempDir::new().unwrap();
-        std::fs::write(staging.path().join(MCP_JSON_PATH), r#"{"mcpServers": {}}"#).unwrap();
-        let args = mcp_allowed_tools_args(staging.path());
-        assert!(args.is_empty(), "empty mcpServers → no --allowedTools args");
     }
 
     // ── Context budget tests (v0.14.3.1) ──
