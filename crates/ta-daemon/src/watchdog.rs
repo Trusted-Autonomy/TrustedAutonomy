@@ -1316,16 +1316,27 @@ pub fn startup_gc_pass(
     let mut removed = 0u32;
     let mut freed_bytes = 0u64;
 
+    // Load the pr_packages dir once for denied-draft checks below.
+    let pr_packages_dir = project_root.join(".ta").join("pr_packages");
+
     for goal in &goals {
         let is_failed = matches!(goal.state, GoalRunState::Failed { .. });
         let is_applied_completed = matches!(
             goal.state,
             GoalRunState::Applied | GoalRunState::Completed | GoalRunState::Merged
         );
+        // PrReady goals whose draft was denied never transition to a terminal state.
+        // GC treats them as terminal once they're past the applied cutoff.
+        let is_denied_pr_ready = matches!(
+            goal.state,
+            GoalRunState::PrReady | GoalRunState::UnderReview
+        ) && goal
+            .pr_package_id
+            .is_some_and(|id| is_draft_denied(&pr_packages_dir, id));
 
         let past_cutoff = if is_failed {
             goal.updated_at < failed_cutoff
-        } else if is_applied_completed {
+        } else if is_applied_completed || is_denied_pr_ready {
             goal.updated_at < applied_cutoff
         } else {
             false
@@ -1356,6 +1367,20 @@ pub fn startup_gc_pass(
     }
 
     (removed, freed_bytes)
+}
+
+/// Check whether the draft package with `id` has `Denied` status.
+///
+/// Reads the package JSON file directly to avoid a dependency on ta-cli from
+/// the daemon crate. Uses a simple string search so it degrades gracefully if
+/// the file is absent or unreadable.
+fn is_draft_denied(pr_packages_dir: &Path, id: uuid::Uuid) -> bool {
+    let path = pr_packages_dir.join(format!("{}.json", id));
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    // DraftStatus::Denied serialises as {"Denied": {...}} — check for the key.
+    content.contains("\"Denied\"")
 }
 
 fn walkdir_size_wd(path: &Path) -> u64 {

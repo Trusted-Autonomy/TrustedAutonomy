@@ -4551,6 +4551,40 @@ fn deny_package(
         }
     }
 
+    // Clean staging directory on denial, same as on apply (Fix B — disk pressure).
+    // A denied draft is a terminal state; keeping 7-8 GB of staging indefinitely
+    // was the root cause of runaway .ta/staging/ disk usage.
+    if let Some(goal_id) = package_goal_id {
+        let goal_store = ta_goal::GoalRunStore::new(&config.goals_dir);
+        if let Ok(store) = goal_store {
+            if let Ok(Some(goal)) = store.get(goal_id) {
+                let wf_cfg = ta_submit::WorkflowConfig::load_or_default(
+                    &config.workspace_root.join(".ta/workflow.toml"),
+                );
+                if wf_cfg.staging.auto_clean
+                    && !goal.workspace_path.as_os_str().is_empty()
+                    && goal.workspace_path.exists()
+                {
+                    match std::fs::remove_dir_all(&goal.workspace_path) {
+                        Ok(()) => {
+                            println!(
+                                "Auto-cleaned staging directory: {} (staging.auto_clean=true)",
+                                goal.workspace_path.display(),
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: could not auto-clean staging {}: {}",
+                                goal.workspace_path.display(),
+                                e,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     println!("Denied draft package {}: {}", package_id, reason);
     Ok(())
 }
