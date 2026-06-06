@@ -8436,7 +8436,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.4.4 — Discord Plugin Stability: Adopt-Orphan on Daemon Restart
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Fix the `ta-channel-discord` crash loop that occurs when the daemon restarts while the Discord listener process is already alive. Currently `channel_listener_manager.rs` has no pre-spawn PID check — on restart it tries to spawn a new listener, the plugin binary finds `.ta/discord-listener.pid` alive, exits non-zero ("already running"), and that exit increments `consecutive_failures` endlessly.
 
