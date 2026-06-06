@@ -1953,6 +1953,30 @@ pub fn execute(
         }
     }
 
+    // Redirect `cargo build` / `cargo test` in staging back to the source project's
+    // target directory so agent builds reuse the existing cache and create no new
+    // disk usage in staging. Without this, each goal that runs cargo accumulates
+    // 3-7 GB of fresh build artifacts in staging even though source already has
+    // a warm target/ cache.
+    //
+    // Gated on: (1) workspace has a Cargo.toml, (2) CARGO_TARGET_DIR not already set,
+    // (3) source dir is known. Config override: set CARGO_TARGET_DIR explicitly in
+    // workflow.toml [agent_env] to point elsewhere (e.g., a shared sccache dir).
+    if let Some(ref src_dir) = goal.source_dir {
+        let has_cargo_toml =
+            src_dir.join("Cargo.toml").exists() || staging_path.join("Cargo.toml").exists();
+        if has_cargo_toml && !agent_config.env.contains_key("CARGO_TARGET_DIR") {
+            agent_config.env.insert(
+                "CARGO_TARGET_DIR".to_string(),
+                src_dir.join("target").display().to_string(),
+            );
+            tracing::debug!(
+                target_dir = %src_dir.join("target").display(),
+                "Redirecting CARGO_TARGET_DIR to source project cache"
+            );
+        }
+    }
+
     // Emit GoalStarted event to FsEventStore (v0.9.4.1).
     // Skip when reusing an existing goal — the MCP tool already emitted GoalStarted.
     if existing_goal_id.is_none() {
