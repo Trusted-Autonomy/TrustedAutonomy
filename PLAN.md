@@ -8454,24 +8454,23 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 #### Version: `0.16.4.4-alpha`
 
 ---
-### v0.16.4.5 — Staging Disk Management: Exclude target/, Clean on Deny, Background GC
-<!-- status: pending -->
+### v0.16.4.5 — Staging Disk Management: CARGO_TARGET_DIR Redirect, Clean on Deny, GC for Denied Drafts
+<!-- status: done -->
 
-**Goal**: Fix three root causes of runaway `.ta/staging/` disk growth. A single denied/failed goal currently leaves 7–8 GB on disk indefinitely because: (1) `target/` compiled artifacts are copied into staging, (2) `auto_clean` only fires on `ta draft apply`, not on deny/terminal states, and (3) there is no background sweep to reclaim staging for old terminal-state goals.
+**Goal**: Fix the actual root causes of runaway `.ta/staging/` disk growth (6-8 GB per goal).
 
-**Root cause detail** (see memory: `project_staging_disk_pressure`):
-- **Cause A** — `ta-workspace/overlay.rs`: `target/` not in staging exclusion list → each goal snapshot is ~7-8 GB instead of ~100-200 MB
-- **Cause B** — `draft.rs:8244`: `auto_clean` block is inside apply path only; denied drafts keep staging indefinitely
-- **Cause C** — No daemon background task to remove staging for terminal-state goals older than N days
+**Root cause (corrected from plan)**: `target/` and `.git/` were already excluded from the initial staging copy since v0.15.18 and `goal.rs::load_excludes_with_adapter()` respectively. The 6-8 GB was entirely from: (A) agent `cargo build`/`cargo test` creating a fresh `target/` in staging from scratch (3-7 GB), and (B) denied drafts never triggering staging cleanup.
 
-1. [ ] **Fix A (highest leverage)**: Add `target/` to default exclusion list in `ta-workspace/overlay.rs` staging copy alongside existing `.ta/` exclusion. Drops per-goal staging from ~7-8 GB to ~100-200 MB.
-2. [ ] **Fix B**: In `draft.rs` `deny_package()`, add staging cleanup step after denial (same `auto_clean` pattern as apply path). Gate on `wf_cfg.staging.auto_clean`.
-3. [ ] **Fix C**: Add a tokio background task in the daemon that runs every 6–24 hours, scans goals in terminal states (applied/denied/failed/cancelled), and removes staging dirs older than `staging_retain_days` (default: 1 day). Config key: `[staging] retain_days = 1` in `workflow.toml`.
-4. [ ] `ta doctor` reports staging size per goal and flags goals in terminal states with stale staging dirs.
+**Actual root causes fixed**:
+- **Cause A** — `run.rs`: agent cargo invocations in staging built fresh from zero because `CARGO_TARGET_DIR` was unset. Source target/ cache was ignored.
+- **Cause B** — `draft.rs`: `auto_clean` block was inside apply path only; denied drafts kept staging indefinitely.
+- **Cause C** — `watchdog.rs::startup_gc_pass()`: only checked `Failed`/`Applied`/`Completed`/`Merged` states. `PrReady` goals with denied draft packages were invisible to the periodic 6h GC sweep.
 
-**Observability**: log at `INFO` when GC sweep runs; log paths removed and bytes freed.
+1. [x] **Fix A (highest leverage)**: Inject `CARGO_TARGET_DIR` pointing to source project's `target/` into the agent environment when workspace has a `Cargo.toml`. Agent builds reuse the existing incremental cache — staging stays ~26 MB instead of 3-7 GB. User override respected. (`run.rs`, commit 32adfb80f0)
+2. [x] **Fix B**: In `draft.rs` `deny_package()`, add staging cleanup step after denial (same `auto_clean` block as apply path). Gate on `wf_cfg.staging.auto_clean`. (PR #481)
+3. [x] **Fix C**: Extend `startup_gc_pass()` in `watchdog.rs` to recognise `PrReady`/`UnderReview` goals whose draft package has `Denied` status as GC-eligible (using `is_draft_denied()` helper). The existing 6h periodic GC task now cleans these up automatically. (PR #481)
 
-**Depends on**: none (Fix A and B are independent; Fix C is additive)
+**Deferred**: `ta doctor` per-goal staging size reporting → v0.16.5.x
 
 #### Version: `0.16.4.5-alpha`
 
