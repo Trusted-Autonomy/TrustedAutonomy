@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use clap::Subcommand;
+use ta_init::feature::TemplateContext;
 use ta_mcp_gateway::GatewayConfig;
 use ta_memory::key_schema::{detect_project_type, ProjectType};
 
@@ -291,11 +292,23 @@ fn run_init(
     // Generate all config files from template.
     std::fs::create_dir_all(&ta_dir)?;
 
-    generate_workflow_toml(&ta_dir, &project_type, security_level)?;
-    write_claude_md(project_root, name, &project_type, overwrite)?;
-    generate_memory_toml(&ta_dir, &project_type)?;
-    generate_policy_yaml(&ta_dir, &project_type)?;
-    generate_taignore(project_root, &project_type)?;
+    // Pragma projects use the data-driven template engine (v0.16.5).
+    // All other project types use the original hardcoded generators.
+    if matches!(project_type, ProjectType::PragmaKotlin) {
+        let ctx = TemplateContext {
+            project_root: project_root.to_path_buf(),
+            project_name: name.to_string(),
+            vars: std::collections::HashMap::new(),
+        };
+        ta_init::bundled::apply_pragma(&ctx)?;
+    } else {
+        generate_workflow_toml(&ta_dir, &project_type, security_level)?;
+        write_claude_md(project_root, name, &project_type, overwrite)?;
+        generate_memory_toml(&ta_dir, &project_type)?;
+        generate_policy_yaml(&ta_dir, &project_type)?;
+        generate_taignore(project_root, &project_type)?;
+    }
+
     // Emit .vscode/settings.json excludes so VS Code does not index TA runtime dirs.
     if let Err(e) = write_vscode_settings_excludes(project_root) {
         println!("  Warning: could not write .vscode/settings.json: {}", e);
@@ -340,27 +353,18 @@ fn run_init(
         );
     }
 
-    // Game engine / game-services templates: additional files.
+    // Game engine / game-services templates (non-Pragma): additional files.
+    // Pragma now uses the data-driven template engine (v0.16.5) — its BMAD files
+    // are written by BmadPlannerFeature and PragmaContextFeature in apply_pragma().
     let is_game_engine = matches!(
         project_type,
-        ProjectType::UnrealCpp | ProjectType::UnityCsharp | ProjectType::PragmaKotlin
+        ProjectType::UnrealCpp | ProjectType::UnityCsharp
     );
     if is_game_engine {
         generate_bmad_toml(&ta_dir)?;
         generate_bmad_agent_configs(&ta_dir)?;
         generate_mcp_json(project_root)?;
         generate_onboarding_goal(&ta_dir, &project_type, name)?;
-    }
-
-    // Pragma-specific: planner agent, Kotlin constitution, architecture PLAN.md stub.
-    if matches!(project_type, ProjectType::PragmaKotlin) {
-        generate_pragma_planner_agent(&ta_dir)?;
-        generate_pragma_constitution(&ta_dir)?;
-        generate_pragma_plan_stub(project_root, name)?;
-        // Detect git and capture recent commits for planner context (item 5).
-        if project_root.join(".git").exists() {
-            capture_git_context_for_pragma(&ta_dir, project_root);
-        }
     }
 
     // Run VCS setup automatically.
@@ -400,6 +404,11 @@ fn run_init(
         println!("  .ta/onboarding-goal.md — First-run discovery goal");
     }
     if matches!(project_type, ProjectType::PragmaKotlin) {
+        // Pragma uses the template engine — list all generated files.
+        println!("  .ta/bmad.toml                  — BMAD machine-local install config");
+        println!("  .ta/agents/bmad-*.toml         — BMAD role agent configs");
+        println!("  .mcp.json                      — Claude Flow MCP server config");
+        println!("  .ta/onboarding-goal.md         — First-run discovery goal");
         println!("  .ta/agents/pragma-planner.toml — Pragma BMAD planner agent");
         println!("  .ta/constitutions/kotlin.yaml  — Kotlin code constitution");
         println!("  PLAN.md                        — Pragma service phase stub");
@@ -1589,6 +1598,9 @@ fn extract_workspace_members(content: &str) -> Vec<String> {
 }
 
 /// Generate `.ta/agents/pragma-planner.toml` — BMAD planner manifest pre-loaded
+///
+/// Kept for unit testing. Production code uses PragmaContextFeature (ta-init engine).
+#[cfg(test)]
 /// with Pragma 2026.1.0 architecture context.
 ///
 /// The agent knows the service catalog, plugin extension model, and BMAD milestone
@@ -1672,6 +1684,9 @@ interview_topics = [
 }
 
 /// Generate `.ta/constitutions/kotlin.yaml` — Kotlin-appropriate behavioral rules.
+///
+/// Kept for unit testing. Production code uses PragmaContextFeature (ta-init engine).
+#[cfg(test)]
 fn generate_pragma_constitution(ta_dir: &Path) -> anyhow::Result<()> {
     let const_dir = ta_dir.join("constitutions");
     std::fs::create_dir_all(&const_dir)?;
@@ -1706,6 +1721,9 @@ rules:
 ///
 /// Produces a minimal skeleton that developers fill in with their actual milestones.
 /// Only created when PLAN.md does not already exist.
+///
+/// Kept for unit testing. Production code uses the plan.md.tera scaffold (ta-init engine).
+#[cfg(test)]
 fn generate_pragma_plan_stub(project_root: &Path, project_name: &str) -> anyhow::Result<()> {
     let path = project_root.join("PLAN.md");
     if path.exists() {
@@ -1830,48 +1848,7 @@ Versions follow `MAJOR.MINOR.PATCH` semver. Each phase maps to a version increme
     Ok(())
 }
 
-/// Capture recent git commits into `.ta/memory/pragma-git-context.json` so the
-/// planner agent has commit history context for its architecture snapshot (item 5).
-///
-/// Best-effort: logs a warning on failure but does not abort init.
-fn capture_git_context_for_pragma(ta_dir: &Path, project_root: &Path) {
-    let output = std::process::Command::new("git")
-        .args(["log", "--oneline", "-20"])
-        .current_dir(project_root)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let log = String::from_utf8_lossy(&out.stdout).to_string();
-            let lines: Vec<&str> = log.lines().collect();
-            let memory_dir = ta_dir.join("memory");
-            let _ = std::fs::create_dir_all(&memory_dir);
-            let entry = serde_json::json!({
-                "key": "vcs:recent-commits",
-                "value": {
-                    "commits": lines,
-                    "count": lines.len(),
-                    "adapter": "git",
-                },
-                "tags": ["vcs", "git", "init-seed"],
-                "source": "ta-init pragma",
-                "created_at": chrono::Utc::now().to_rfc3339(),
-            });
-            let path = memory_dir.join("vcs_recent_commits.json");
-            if let Ok(json) = serde_json::to_string_pretty(&entry) {
-                if std::fs::write(&path, json).is_ok() {
-                    println!(
-                        "  Captured {} recent git commits for planner context",
-                        lines.len()
-                    );
-                }
-            }
-        }
-        _ => {
-            println!("  Note: could not read git log — run `git init` if this is a new repo");
-        }
-    }
-}
+// capture_git_context_for_pragma: moved to ta-init crate (PragmaContextFeature).
 
 #[cfg(test)]
 mod tests {

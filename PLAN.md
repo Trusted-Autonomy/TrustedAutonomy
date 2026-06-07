@@ -8476,7 +8476,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.5 — Template Engine: Data-driven `ta init` with Feature Components
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Refactor `ta init` from hardcoded Rust match arms to a data-driven template engine. Templates become TOML files (bundled or user-installed) that compose named feature components implemented as Rust trait objects. Enables community templates without code changes to TA itself.
 
@@ -8484,17 +8484,17 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 **Depends on**: v0.15.30.3 (Pragma template as reference implementation to migrate)
 
-1. [ ] **`Feature` trait** (`crates/ta-init/src/feature.rs`): `trait Feature { fn name(&str) -> &str; fn apply(&self, ctx: &TemplateContext) -> Result<()>; }`. Implementations: `KotlinVerifyFeature`, `BmadPlannerFeature`, `GitAdapterFeature`, `PerforceAdapterFeature`, `PragmaContextFeature`, `Ue5ContextFeature`. Each is a small, focused struct with no cross-feature dependencies.
+1. [x] **`Feature` trait** (`crates/ta-init/src/feature.rs`): `trait Feature { fn name(&str) -> &str; fn apply(&self, ctx: &TemplateContext) -> Result<()>; }`. Implementations: `KotlinVerifyFeature`, `BmadPlannerFeature`, `GitAdapterFeature`, `PerforceAdapterFeature`, `PragmaContextFeature`, `Ue5ContextFeature`. Each is a small, focused struct with no cross-feature dependencies.
 
-2. [ ] **Template TOML format** (`templates/<name>.toml`): `[template]` header with `name`, `description`, `version`; `features = [...]` list of feature names; `[vars]` section with user-promptable variables (name, type, default, prompt string); `[scaffold]` listing source template files and destination paths (Tera template rendering with var substitution).
+2. [x] **Template TOML format** (`templates/<name>.toml`): `[template]` header with `name`, `description`, `version`; `features = [...]` list of feature names; `[vars]` section with user-promptable variables (name, type, default, prompt string); `[scaffold]` listing source template files and destination paths (Tera template rendering with var substitution).
 
-3. [ ] **Scaffold file rendering**: Template files in `templates/<name>/` use Tera syntax (`{{ project_name }}`, `{% if ue_sdk %}`). Rendered at init time with collected vars. Destination paths relative to project root.
+3. [x] **Scaffold file rendering**: Template files in `templates/<name>/` use Tera syntax (`{{ project_name }}`, `{% if ue_sdk %}`). Rendered at init time with collected vars. Destination paths relative to project root.
 
-4. [ ] **`ta template list`**: Lists available templates (bundled + user-installed from `~/.config/ta/templates/`). Shows name, description, version, feature list.
+4. [x] **`ta template list`**: Lists available templates (bundled + user-installed from `~/.config/ta/templates/`). Shows name, description, version, feature list.
 
-5. [ ] **`ta template install <url>`**: Fetches a template TOML from a URL, validates schema, checks SHA-256 if provided, writes to `~/.config/ta/templates/<name>.toml`. Fetches scaffold files into `~/.config/ta/templates/<name>/`. No code execution on install — templates are pure data.
+5. [x] **`ta template install <url>`**: Fetches a template TOML from a URL, validates schema, checks SHA-256 if provided, writes to `~/.config/ta/templates/<name>.toml`. Fetches scaffold files into `~/.config/ta/templates/<name>/`. No code execution on install — templates are pure data.
 
-6. [ ] **Migrate Pragma template**: Rewrite v0.15.30.3's hardcoded Pragma init as `templates/pragma.toml` + `templates/pragma/` scaffold files + `PragmaContextFeature` impl. User-visible behaviour unchanged.
+6. [x] **Migrate Pragma template**: Rewrite v0.15.30.3's hardcoded Pragma init as `templates/pragma.toml` + `templates/pragma/` scaffold files + `PragmaContextFeature` impl. User-visible behaviour unchanged.
 
 #### Version: `0.16.5-alpha`
 

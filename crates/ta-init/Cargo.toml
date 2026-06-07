@@ -1,0 +1,17 @@
+[package]
+name = "ta-init"
+version.workspace = true
+edition = "2021"
+description = "Template engine and feature components for ta init"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+tera = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

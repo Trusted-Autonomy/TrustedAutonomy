@@ -708,6 +708,30 @@ ta setup refine workflow         # adjust workflow settings
 ta init templates                # list all built-in templates
 ```
 
+### Install a community template
+
+Templates can be installed from the community registry, GitHub, direct URLs, or local directories. The v0.16.5 engine supports a new `.toml` URL format — download a template manifest and its scaffold files in one step:
+
+```bash
+# Install from a .toml URL (v0.16.5 engine format — downloads manifest + scaffold files)
+ta template install https://example.com/templates/my-template.toml
+
+# Install from a GitHub repo archive
+ta template install github:myorg/my-template
+
+# Install from a local directory
+ta template install ./my-local-template
+
+# List installed templates (shows feature list for engine-format templates)
+ta template list
+```
+
+When listing templates, engine-format templates show their feature components:
+
+```
+  my-template          v1.0.0  My custom template  [kotlin-verify, bmad-planner, pragma-context]
+```
+
 ### Start a development session
 
 There are three ways to work with TA, depending on how much control you want:

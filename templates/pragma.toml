@@ -1,0 +1,36 @@
+features = ["kotlin-verify", "bmad-planner", "git-adapter", "pragma-context"]
+
+[template]
+name = "pragma"
+description = "Pragma Engine Kotlin game services backend (requires BMAD + Claude Flow)"
+version = "1.0.0"
+
+[vars.project_name]
+type = "string"
+prompt = "Project name"
+default = ""
+
+[[scaffold]]
+source = "CLAUDE.md.tera"
+dest = "CLAUDE.md"
+
+[[scaffold]]
+source = "workflow.toml.tera"
+dest = ".ta/workflow.toml"
+
+[[scaffold]]
+source = "memory.toml.tera"
+dest = ".ta/memory.toml"
+
+[[scaffold]]
+source = "policy.yaml.tera"
+dest = ".ta/policy.yaml"
+
+[[scaffold]]
+source = "taignore.tera"
+dest = ".taignore"
+
+[[scaffold]]
+source = "plan.md.tera"
+dest = "PLAN.md"
+optional = true
