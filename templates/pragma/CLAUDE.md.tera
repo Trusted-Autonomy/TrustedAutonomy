@@ -1,0 +1,22 @@
+# {{ project_name }}
+
+## Build
+
+./gradlew assemble
+
+## Verify (all must pass before committing)
+
+./gradlew ktlintCheck
+./gradlew test
+
+## Git
+
+Always work on a feature branch. Never commit directly to main.
+Branch prefixes: feature/, fix/, refactor/, docs/
+
+## Rules
+
+- Run verify after every code change, before committing
+- Never edit generated files in pragma-core/build/ directly
+- Pragma plugins implement interfaces in pragma-plugin-common; check extension points before adding new ones
+- Run `./gradlew ktlintFormat` to auto-fix style issues before committing

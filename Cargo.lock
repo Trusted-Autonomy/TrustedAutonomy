@@ -319,6 +319,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -422,6 +432,28 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-link",
+]
+
+[[package]]
+name = "chrono-tz"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93698b29de5e97ad0ae26447b344c482a7284c737d9ddc5f9e52b74a336671bb"
+dependencies = [
+ "chrono",
+ "chrono-tz-build",
+ "phf",
+]
+
+[[package]]
+name = "chrono-tz-build"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c088aee841df9c3041febbb73934cfc39708749bf96dc827e3359cd39ef11b1"
+dependencies = [
+ "parse-zoneinfo",
+ "phf",
+ "phf_codegen",
 ]
 
 [[package]]
@@ -700,6 +732,12 @@ dependencies = [
  "once_cell",
  "parking_lot_core",
 ]
+
+[[package]]
+name = "deunicode"
+version = "1.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 
 [[package]]
 name = "digest"
@@ -1116,6 +1154,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "globset"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "globwalk"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bf760ebf69878d9fd8f110c89703d90ce35095324d1f1edcb595c63945ee757"
+dependencies = [
+ "bitflags 2.11.0",
+ "ignore",
+ "walkdir",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1292,6 +1354,15 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "humansize"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb51c9a029ddc91b07a787f1d86b53ccfa49b0e86688c946ebe8d3555685dd7"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "hyper"
@@ -1529,6 +1600,22 @@ checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "ignore"
+version = "0.4.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b915661dd01db3f05050265b2477bcc6527b3792388e2749b41623cc592be67d"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
 ]
 
 [[package]]
@@ -2168,6 +2255,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse-zoneinfo"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f2a05b18d44e2957b88f96ba460715e295bc1d7510468a2f3d3b44535d26c24"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2184,6 +2280,87 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "pest"
+version = "2.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0848c601009d37dfa3430c4666e147e49cdcf1b92ecd3e63657d8a5f19da662"
+dependencies = [
+ "memchr",
+ "ucd-trie",
+]
+
+[[package]]
+name = "pest_derive"
+version = "2.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11f486f1ea21e6c10ed15d5a7c77165d0ee443402f0780849d1768e7d9d6fe77"
+dependencies = [
+ "pest",
+ "pest_generator",
+]
+
+[[package]]
+name = "pest_generator"
+version = "2.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8040c4647b13b210a963c1ed407c1ff4fdfa01c31d6d2a098218702e6664f94f"
+dependencies = [
+ "pest",
+ "pest_meta",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "pest_meta"
+version = "2.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89815c69d36021a140146f26659a81d6c2afa33d216d736dd4be5381a7362220"
+dependencies = [
+ "pest",
+ "sha2",
+]
+
+[[package]]
+name = "phf"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
+dependencies = [
+ "phf_shared",
+]
+
+[[package]]
+name = "phf_codegen"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aef8048c789fa5e851558d709946d6d79a8ff88c0440c587967f8e94bfb1216a"
+dependencies = [
+ "phf_generator",
+ "phf_shared",
+]
+
+[[package]]
+name = "phf_generator"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
+dependencies = [
+ "phf_shared",
+ "rand 0.8.5",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
+]
 
 [[package]]
 name = "pin-project-lite"
@@ -3192,10 +3369,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "siphasher"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "slug"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "882a80f72ee45de3cc9a5afeb2da0331d58df69e4e7d8eeb5d3c7784ae67e724"
+dependencies = [
+ "deunicode",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "smallvec"
@@ -3343,7 +3536,7 @@ dependencies = [
 
 [[package]]
 name = "ta-actions"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3357,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "ta-agent-ollama"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -3372,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "ta-audit"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3388,7 +3581,7 @@ dependencies = [
 
 [[package]]
 name = "ta-build"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -3400,7 +3593,7 @@ dependencies = [
 
 [[package]]
 name = "ta-changeset"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3420,7 +3613,7 @@ dependencies = [
 
 [[package]]
 name = "ta-cli"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3448,6 +3641,7 @@ dependencies = [
  "ta-credentials",
  "ta-events",
  "ta-goal",
+ "ta-init",
  "ta-mcp-gateway",
  "ta-mediation",
  "ta-memory",
@@ -3470,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-comfyui"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -3485,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-discord"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3499,7 +3693,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-email"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3513,7 +3707,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-fs"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3530,7 +3724,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-drive"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3539,7 +3733,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-mock-gmail"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3548,7 +3742,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-slack"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3562,7 +3756,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-unity"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "serde",
@@ -3575,7 +3769,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-unreal"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "serde",
@@ -3589,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "ta-connector-web"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3598,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "ta-credentials"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3612,7 +3806,7 @@ dependencies = [
 
 [[package]]
 name = "ta-daemon"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3660,7 +3854,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-overlay"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3674,7 +3868,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-proxy"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3687,7 +3881,7 @@ dependencies = [
 
 [[package]]
 name = "ta-db-proxy-sqlite"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -3703,7 +3897,7 @@ dependencies = [
 
 [[package]]
 name = "ta-events"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3721,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "ta-extension"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3738,7 +3932,7 @@ dependencies = [
 
 [[package]]
 name = "ta-goal"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3753,8 +3947,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ta-init"
+version = "0.16.5-alpha"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tera",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "ta-mcp-gateway"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "regex",
@@ -3786,7 +3993,7 @@ dependencies = [
 
 [[package]]
 name = "ta-mediation"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3801,7 +4008,7 @@ dependencies = [
 
 [[package]]
 name = "ta-memory"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "glob",
@@ -3819,7 +4026,7 @@ dependencies = [
 
 [[package]]
 name = "ta-output-schema"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -3831,7 +4038,7 @@ dependencies = [
 
 [[package]]
 name = "ta-policy"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "glob",
@@ -3846,7 +4053,7 @@ dependencies = [
 
 [[package]]
 name = "ta-runtime"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3867,7 +4074,7 @@ dependencies = [
 
 [[package]]
 name = "ta-sandbox"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -3880,7 +4087,7 @@ dependencies = [
 
 [[package]]
 name = "ta-session"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -3895,7 +4102,7 @@ dependencies = [
 
 [[package]]
 name = "ta-submit"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "chrono",
  "libc",
@@ -3913,7 +4120,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workflow"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3932,7 +4139,7 @@ dependencies = [
 
 [[package]]
 name = "ta-workspace"
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3961,6 +4168,28 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tera"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8004bca281f2d32df3bacd59bc67b312cb4c70cea46cbd79dbe8ac5ed206722"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "globwalk",
+ "humansize",
+ "lazy_static",
+ "percent-encoding",
+ "pest",
+ "pest_derive",
+ "rand 0.8.5",
+ "regex",
+ "serde",
+ "serde_json",
+ "slug",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -4306,6 +4535,12 @@ name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+
+[[package]]
+name = "ucd-trie"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
 name = "unicode-ident"

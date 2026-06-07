@@ -47,12 +47,13 @@ members = [
     "apps/ta-cli",
     "crates/ta-agent-ollama",
     "crates/ta-extension",
+    "crates/ta-init",
 ]
 
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.16.4-alpha.4"
+version = "0.16.5-alpha"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
@@ -156,6 +157,9 @@ base64 = "0.22"
 # On headless environments (no display server), Clipboard::new() returns Err and we handle
 # the failure gracefully (return None / no-op).
 arboard = "3"
+
+# Tera template engine — used by ta-init for scaffold file rendering (v0.16.5).
+tera = "1"
 
 # Testing utilities
 tempfile = "3"

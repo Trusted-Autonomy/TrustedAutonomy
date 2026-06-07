@@ -70,6 +70,9 @@ pub struct TemplateManifest {
     pub version: String,
     /// One-line description.
     pub description: String,
+    /// Named feature components (v0.16.5 engine format).
+    #[serde(default)]
+    pub features: Vec<String>,
     /// Searchable tags.
     #[serde(default)]
     pub tags: Vec<String>,
@@ -443,6 +446,11 @@ fn install_template(source: &str, local: bool, project_root: &Path) -> anyhow::R
         return Ok(());
     }
 
+    // New format: URL ending in .toml — download manifest + scaffold files (v0.16.5).
+    if is_url && source.ends_with(".toml") {
+        return install_template_from_toml_url(source, local, project_root);
+    }
+
     // For remote sources, determine the URL.
     let (url, inferred_name) = if is_github {
         // github:user/repo
@@ -476,6 +484,140 @@ fn install_template(source: &str, local: bool, project_root: &Path) -> anyhow::R
     println!("Downloading template from: {}", url);
     install_from_remote(&url, &install_dir)?;
 
+    Ok(())
+}
+
+// ── install from TOML URL (v0.16.5) ─────────────────────────────
+
+/// Install a template from a direct `.toml` URL (v0.16.5 engine format).
+///
+/// Steps:
+///   1. Download the TOML file and parse it as a `ta_init::TemplateManifest`.
+///   2. Write the manifest to `~/.config/ta/templates/<name>/template.toml`
+///      (in the legacy flat format so `ta template list` can show it).
+///   3. For each `[[scaffold]]` source file, derive a sibling URL and download
+///      into `~/.config/ta/templates/<name>/<source>`.
+///   4. Print a summary of downloaded files.
+fn install_template_from_toml_url(
+    url: &str,
+    local: bool,
+    project_root: &Path,
+) -> anyhow::Result<()> {
+    println!("Downloading template manifest from: {}", url);
+
+    let toml_bytes = download_bytes(url).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to download template manifest from '{url}': {e}\n\
+             Check the URL and your network connection."
+        )
+    })?;
+    let toml_str = std::str::from_utf8(&toml_bytes)
+        .map_err(|e| anyhow::anyhow!("Template manifest at '{url}' is not valid UTF-8: {e}"))?;
+
+    // Parse as ta-init engine manifest.
+    let engine_manifest = ta_init::engine::parse_manifest(toml_str).map_err(|e| {
+        anyhow::anyhow!(
+            "Template manifest at '{url}' failed to parse: {e}\n\
+             Ensure the file follows the v0.16.5 template format with [template] header."
+        )
+    })?;
+
+    let name = &engine_manifest.template.name;
+    if name.is_empty() || name.contains(' ') {
+        anyhow::bail!(
+            "Template name '{}' from '{}' is invalid — must be non-empty and contain no spaces.",
+            name,
+            url
+        );
+    }
+
+    // Determine install directory.
+    let install_dir = if local {
+        project_templates_dir(project_root).join(name)
+    } else {
+        global_templates_dir().join(name)
+    };
+    std::fs::create_dir_all(&install_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create template directory '{}': {e}",
+            install_dir.display()
+        )
+    })?;
+
+    // Write the original TOML manifest verbatim (preserves engine format).
+    let manifest_path = install_dir.join("template.toml");
+    std::fs::write(&manifest_path, toml_bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to write template manifest to '{}': {e}",
+            manifest_path.display()
+        )
+    })?;
+    println!(
+        "  Written manifest: {} v{}",
+        name, engine_manifest.template.version
+    );
+
+    // Derive base URL for scaffold files.
+    // If URL is https://example.com/templates/foo.toml, scaffold base is
+    // https://example.com/templates/foo/
+    let scaffold_base = {
+        let without_toml = url.trim_end_matches(".toml");
+        format!("{}/", without_toml)
+    };
+
+    // Download each scaffold source file.
+    let mut downloaded = 0usize;
+    let mut skipped = 0usize;
+    for entry in &engine_manifest.scaffold {
+        let source_url = format!("{}{}", scaffold_base, entry.source);
+        match download_bytes(&source_url) {
+            Ok(content) => {
+                let dest = install_dir.join(&entry.source);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&dest, &content).map_err(|e| {
+                    anyhow::anyhow!("Failed to write scaffold file '{}': {e}", dest.display())
+                })?;
+                println!("  Downloaded scaffold: {}", entry.source);
+                downloaded += 1;
+            }
+            Err(e) => {
+                if entry.optional {
+                    println!("  Skipped optional scaffold: {} ({})", entry.source, e);
+                    skipped += 1;
+                } else {
+                    anyhow::bail!(
+                        "Failed to download required scaffold file '{}' from '{}': {e}\n\
+                         Check that the scaffold files are hosted alongside the template manifest.",
+                        entry.source,
+                        source_url
+                    );
+                }
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "Installed template '{}' v{} to {}",
+        name,
+        engine_manifest.template.version,
+        install_dir.display()
+    );
+    println!("  Description: {}", engine_manifest.template.description);
+    if !engine_manifest.features.is_empty() {
+        println!("  Features: {}", engine_manifest.features.join(", "));
+    }
+    println!("  Scaffold files: {} downloaded", downloaded);
+    if skipped > 0 {
+        println!("  Scaffold files: {} optional skipped", skipped);
+    }
+    println!();
+    println!(
+        "Use `ta init run --template {}` to initialize a project.",
+        name
+    );
     Ok(())
 }
 
@@ -529,7 +671,21 @@ fn list_templates(available: bool, project_root: &Path) -> anyhow::Result<()> {
                     .as_ref()
                     .map(|m| m.description.as_str())
                     .unwrap_or("(no manifest)");
-                println!("  {:<20} v{}  {}", name, ver, desc);
+                let features = manifest
+                    .as_ref()
+                    .map(|m| m.features.as_slice())
+                    .unwrap_or(&[]);
+                if features.is_empty() {
+                    println!("  {:<20} v{}  {}", name, ver, desc);
+                } else {
+                    println!(
+                        "  {:<20} v{}  {}  [{}]",
+                        name,
+                        ver,
+                        desc,
+                        features.join(", ")
+                    );
+                }
             }
             println!();
         }
@@ -546,7 +702,21 @@ fn list_templates(available: bool, project_root: &Path) -> anyhow::Result<()> {
                     .as_ref()
                     .map(|m| m.description.as_str())
                     .unwrap_or("(no manifest)");
-                println!("  {:<20} v{}  {}", name, ver, desc);
+                let features = manifest
+                    .as_ref()
+                    .map(|m| m.features.as_slice())
+                    .unwrap_or(&[]);
+                if features.is_empty() {
+                    println!("  {:<20} v{}  {}", name, ver, desc);
+                } else {
+                    println!(
+                        "  {:<20} v{}  {}  [{}]",
+                        name,
+                        ver,
+                        desc,
+                        features.join(", ")
+                    );
+                }
             }
             println!();
         }
