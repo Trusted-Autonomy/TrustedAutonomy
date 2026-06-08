@@ -8508,12 +8508,27 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 **Depends on**: v0.16.1 (community IDE plugin guide, REST API contract documented — the Neovim plugin is implemented as a community-style integration using the same guide)
 
-1. [ ] **Diff view**: Opens staging diff in a split buffer using `vim.diff()` or `diffview.nvim`.
-2. [ ] **Floating window**: `:TA status` shows daemon health and active goal in a floating window.
-3. [ ] **Commands**: `:TA start`, `:TA approve <id>`, `:TA deny <id>`, `:TA shell`.
-4. [ ] **luarocks / GitHub Releases packaging**: Distribute via `luarocks` and GitHub Releases.
+1. [x] **Diff view**: Opens staging diff in a split buffer using `vim.diff()` or `diffview.nvim`.
+2. [x] **Floating window**: `:TA status` shows daemon health and active goal in a floating window.
+3. [x] **Commands**: `:TA start`, `:TA approve <id>`, `:TA deny <id>`, `:TA shell`.
+4. [x] **luarocks / GitHub Releases packaging**: Distribute via `luarocks` and GitHub Releases.
 
 #### Version: `0.16.6-alpha`
+
+---
+### v0.16.6.1 — Neovim Plugin Security Fix + Follow-up Phase Re-claim
+<!-- status: pending -->
+
+**Why**: Two bugs found during v0.16.6 review:
+1. Phase argument is not sanitized before interpolation in the Neovim plugin command builder — potential argument injection vector.
+2. `ta run --follow-up <goal>/<n>` fails with "Phase already claimed" when the parent goal has a plan phase — a follow-up should reuse the in-progress phase, not try to claim it again.
+
+**Items**:
+1. [ ] **Neovim phase input sanitization** (`lua/ta/commands.lua`): Sanitize the `phase` argument before interpolating it into the command string sent to `/api/cmd`. Title already escapes double quotes (`commands.lua:36`) but phase does not — a value like `x" --injected-flag "y` could inject additional arguments. Fix: apply the same escaping to the phase argument, or pass phase as a structured JSON field rather than shell-interpolating it.
+2. [ ] **Follow-up skips phase claim** (`apps/ta-cli/src/commands/run.rs`): When `--follow-up` is specified, both the pre-staging claim (line ~1433) and the post-goal claim (line ~1589) must be skipped. The phase is already `in_progress` from the original goal — re-claiming produces a fatal "already claimed" error. Fix: add `follow_up.is_none()` guard to both claim sites. The pre-staging block condition (`if let (Some(phase_id), None) = (phase, existing_goal_id)`) should also require `follow_up.is_none()`; the second claim at `if !pre_staging_phase_claimed` should be gated on `follow_up.is_none()` as well.
+3. [ ] **Tests**: `ta run --follow-up <id>` with a phase-linked parent goal succeeds without "already claimed" error; phase input with double-quotes or flag-like content is rejected or escaped before command dispatch.
+
+#### Version: `0.16.6-alpha.1`
 
 ---
 ### v0.17.0 — Managed Paths: SHA Filesystem + URI Journal
