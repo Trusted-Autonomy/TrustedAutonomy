@@ -8500,7 +8500,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.6 — Neovim Plugin
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 > Deferred from v0.16.2 — Ollama, skills, and Windows sandbox are higher priority for the v0.16 cohort. Neovim targets the Rust/systems developer audience already comfortable with the CLI; the web Studio and VS Code extension serve the broader audience first.
 
