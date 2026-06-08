@@ -52,6 +52,7 @@ This applies to both manual work and TA-mediated goals. When `ta pr apply --git-
 
 - Never commit directly to `main` — always use a feature branch + PR
 - **Before any `git checkout`, `git commit`, or `git push`**: check for `.ta/apply.lock`. If it exists and the PID inside is alive, a `ta draft apply` is in progress — wait for it to finish before touching the git repo. Doing git operations mid-apply causes "no changes to commit" rollbacks. (v0.15.11.1 will enforce this at the TA level; until then, enforce manually.)
+- **After every commit or set of commits, verify the working tree is clean**: run `git status` and confirm "nothing to commit, working tree clean". If there are uncommitted changes (e.g., Cargo.lock after a version bump, .ta/ files after a draft apply, unstaged modifications), commit or restore them before moving on. Never leave main in a dirty state.
 - Never disable or skip tests
 - Run tests after every code change, before committing
 - Always run `cargo fmt --all -- --check` before every `git push`
