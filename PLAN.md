@@ -8517,7 +8517,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.16.6.1 — Neovim Plugin Security Fix + Follow-up Phase Re-claim
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Why**: Two bugs found during v0.16.6 review:
 1. Phase argument is not sanitized before interpolation in the Neovim plugin command builder — potential argument injection vector.
