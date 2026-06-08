@@ -1428,63 +1428,69 @@ pub fn execute(
     //   3. Push to the tracking remote (abort if push fails).
     //   4. Create overlay — staging base now == committed HEAD.
     //
-    // Skipped when: no phase is specified, or this is a --goal-id reuse (the
-    // goal + phase were already claimed by an earlier `ta goal start`).
-    let pre_staging_phase_claimed = if let (Some(phase_id), None) = (phase, existing_goal_id) {
-        let source_root = source
-            .map(|p| p.to_owned())
-            .unwrap_or_else(|| config.workspace_root.clone());
+    // Skipped when: no phase is specified, this is a --goal-id reuse (the
+    // goal + phase were already claimed by an earlier `ta goal start`), or
+    // this is a follow-up run (the phase is already in_progress from the
+    // parent goal — re-claiming produces a fatal "already claimed" error).
+    let pre_staging_phase_claimed = if follow_up.is_none() {
+        if let (Some(phase_id), None) = (phase, existing_goal_id) {
+            let source_root = source
+                .map(|p| p.to_owned())
+                .unwrap_or_else(|| config.workspace_root.clone());
 
-        // Step 1: claim the phase (daemon preferred for mutex; fallback to direct write).
-        let claimed = match try_daemon_claim_phase(&source_root, phase_id, None) {
-            Ok(ClaimOutcome::Claimed) => {
-                if !quiet {
-                    println!(
-                        "Plan: phase {} claimed via daemon (in_progress, pre-staging)",
+            // Step 1: claim the phase (daemon preferred for mutex; fallback to direct write).
+            let claimed = match try_daemon_claim_phase(&source_root, phase_id, None) {
+                Ok(ClaimOutcome::Claimed) => {
+                    if !quiet {
+                        println!(
+                            "Plan: phase {} claimed via daemon (in_progress, pre-staging)",
+                            phase_id
+                        );
+                    }
+                    tracing::info!(phase = %phase_id, "phase claimed via daemon before staging");
+                    true
+                }
+                Ok(ClaimOutcome::FallbackDirect) => {
+                    // Daemon not running — write directly with pending-only guard.
+                    match super::plan::mark_phase_in_source(&source_root, phase_id) {
+                        Ok(()) => {
+                            if !quiet {
+                                println!(
+                                    "Plan: phase {} marked in_progress (direct, pre-staging)",
+                                    phase_id
+                                );
+                            }
+                            tracing::info!(phase = %phase_id, "phase marked in_progress directly before staging");
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(phase = %phase_id, error = %e, "mark_phase_in_source failed pre-staging — will retry after goal creation");
+                            false
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Daemon rejected the claim (phase already in_progress or done).
+                    anyhow::bail!(
+                        "Phase {} could not be claimed: {}\n\
+                         Use `ta plan status` to check the current phase state.\n\
+                         If the phase was left in_progress by a crashed run, reset it with \
+                         `ta plan reset {}`.",
+                        phase_id,
+                        e,
                         phase_id
                     );
                 }
-                tracing::info!(phase = %phase_id, "phase claimed via daemon before staging");
-                true
-            }
-            Ok(ClaimOutcome::FallbackDirect) => {
-                // Daemon not running — write directly with pending-only guard.
-                match super::plan::mark_phase_in_source(&source_root, phase_id) {
-                    Ok(()) => {
-                        if !quiet {
-                            println!(
-                                "Plan: phase {} marked in_progress (direct, pre-staging)",
-                                phase_id
-                            );
-                        }
-                        tracing::info!(phase = %phase_id, "phase marked in_progress directly before staging");
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!(phase = %phase_id, error = %e, "mark_phase_in_source failed pre-staging — will retry after goal creation");
-                        false
-                    }
-                }
-            }
-            Err(e) => {
-                // Daemon rejected the claim (phase already in_progress or done).
-                anyhow::bail!(
-                    "Phase {} could not be claimed: {}\n\
-                     Use `ta plan status` to check the current phase state.\n\
-                     If the phase was left in_progress by a crashed run, reset it with \
-                     `ta plan reset {}`.",
-                    phase_id,
-                    e,
-                    phase_id
-                );
-            }
-        };
+            };
 
-        // Step 2+3: commit + push only if the claim succeeded.
-        if claimed {
-            commit_and_push_plan_status(&source_root, phase_id, quiet)?;
+            // Step 2+3: commit + push only if the claim succeeded.
+            if claimed {
+                commit_and_push_plan_status(&source_root, phase_id, quiet)?;
+            }
+            claimed
+        } else {
+            false
         }
-        claimed
     } else {
         false
     };
@@ -1585,8 +1591,9 @@ pub fn execute(
     // the commit if a phase was specified — skip the claim here to avoid a 409
     // from the daemon (phase already in_progress). If no pre-staging claim was
     // made (no phase, or reused existing goal where phase was already claimed),
-    // fall back to the original daemon/direct claim flow.
-    if !pre_staging_phase_claimed {
+    // fall back to the original daemon/direct claim flow. Also skip for follow-up
+    // runs: the phase is already in_progress from the parent goal.
+    if !pre_staging_phase_claimed && follow_up.is_none() {
         if let Some(ref phase_id) = goal.plan_phase {
             let source_root = goal.source_dir.as_deref().unwrap_or(&config.workspace_root);
             match try_daemon_claim_phase(source_root, phase_id, Some(&goal_id)) {
@@ -4266,14 +4273,11 @@ const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Skill(*)",
     "TodoRead(*)",
     "TodoWrite(*)",
-    // TA's own MCP servers — always auto-approved.
-    // Global user MCPs are merged in dynamically by inject_claude_settings_with_security
-    // by reading ~/.claude/settings.json permissions.allow for mcp__*__ patterns.
-    // Note: Claude rejects bare "mcp__*" allow rules — patterns must have a
-    // literal server prefix, e.g. "mcp__ta__*" not "mcp__*".
-    "mcp__ta__*",
-    "mcp__ta-memory__*",
-    "mcp__ta-community-hub__*",
+    // Approve all MCP tools from all servers — covers TA-injected servers
+    // (ta, ta-memory) and any MCPs the user has configured globally in
+    // ~/.claude/settings.json. User-configured servers are trusted by
+    // definition; they can't appear unless the user explicitly added them.
+    "mcp__*",
 ];
 
 /// Built-in forbidden tool patterns — community-maintained deny list.
@@ -4357,39 +4361,11 @@ fn inject_claude_settings_with_security(
     std::fs::write(&backup_path, &original_content)?;
 
     // Build allow and deny lists.
-    // Start with the static defaults, then merge mcp__*__* patterns from the
-    // user's global ~/.claude/settings.json so globally configured MCP servers
-    // are auto-approved in staging without requiring per-server hardcoding.
-    let mut allow: Vec<String> = DEFAULT_ALLOWED_TOOLS
+    let allow: Vec<String> = DEFAULT_ALLOWED_TOOLS
         .iter()
         .filter(|t| web_search_enabled || !t.starts_with("WebSearch"))
         .map(|s| format!("\"{}\"", s))
         .collect();
-    // Merge global MCP allow patterns (mcp__<server>__*) from ~/.claude/settings.json.
-    if let Ok(home) = std::env::var("HOME") {
-        let global_path = std::path::Path::new(&home)
-            .join(".claude")
-            .join("settings.json");
-        if let Ok(content) = std::fs::read_to_string(&global_path) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(arr) = val.pointer("/permissions/allow").and_then(|v| v.as_array()) {
-                    for entry in arr {
-                        if let Some(s) = entry.as_str() {
-                            // Only copy MCP patterns with a valid server prefix (mcp__X__*).
-                            // Bare "mcp__*" is rejected by Claude — skip those.
-                            let is_valid_mcp = s.starts_with("mcp__") && s[5..].contains("__");
-                            if is_valid_mcp {
-                                let quoted = format!("\"{}\"", s);
-                                if !allow.contains(&quoted) {
-                                    allow.push(quoted);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
     let mut forbidden = load_forbidden_tools(source_dir);
     // Merge security-profile patterns (dedup).
     for pattern in extra_deny {
@@ -8713,5 +8689,144 @@ plan_pending_window = 7
             section.is_empty(),
             "inject=false links must not appear in context"
         );
+    }
+
+    // ── v0.16.6.1: follow-up skips phase claim ────────────────────────────────
+
+    #[test]
+    fn follow_up_run_does_not_mark_phase_in_progress() {
+        // When --follow-up is specified the phase is already in_progress from the
+        // parent goal.  Re-claiming it would fail with a 409 from the daemon.
+        // With the fix the pre-staging and post-goal claim blocks are both skipped
+        // when follow_up is Some(_), so PLAN.md must not be modified.
+        //
+        // Strategy: create a parent goal (no PLAN.md / no phase) to get a real
+        // goal ID, then add PLAN.md with a pending phase and run the follow-up.
+        // Without the guard the pending phase would be claimed (changed to
+        // in_progress) even on a follow-up run; with the guard it stays pending.
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("CLAUDE.md"), "# Instructions\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        // 1. Create parent goal (no phase, no PLAN.md yet).
+        execute(
+            &config,
+            Some("Parent goal"),
+            "claude-code",
+            Some(project.path()),
+            "Parent objective",
+            None, // no phase
+            None, // no follow_up
+            None,
+            None,
+            None,
+            true, // no_launch
+            false,
+            false,
+            None,
+            false,
+            false,
+            true, // quiet
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Retrieve the parent goal's ID.
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let parent_id = goal_store.list().unwrap()[0].goal_run_id.to_string();
+
+        // 2. Add PLAN.md with a pending phase.
+        let plan_content = "### v0.16.6.1 — Test Phase\n<!-- status: pending -->\n\n1. [ ] item\n\n#### Version: `0.16.6-alpha.1`\n";
+        std::fs::write(project.path().join("PLAN.md"), plan_content).unwrap();
+
+        // 3. Follow-up run referencing that phase.
+        execute(
+            &config,
+            Some("Follow-up goal"),
+            "claude-code",
+            Some(project.path()),
+            "Follow-up objective",
+            Some("v0.16.6.1"),
+            Some(&Some(parent_id)), // follow_up = Some(parent_id)
+            None,
+            None,
+            None,
+            true, // no_launch
+            false,
+            false,
+            None,
+            false,
+            false,
+            true, // quiet
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // PLAN.md must not have been modified to in_progress — the claim was skipped.
+        let plan_after = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert!(
+            plan_after.contains("<!-- status: pending -->"),
+            "phase must stay pending when follow_up is set; got:\n{plan_after}"
+        );
+        assert!(
+            !plan_after.contains("<!-- status: in_progress -->"),
+            "phase must not be claimed as in_progress on a follow-up run"
+        );
+    }
+
+    // ── v0.16.6.1: Neovim phase input validation (pure-Rust mirror) ─────────
+
+    #[test]
+    fn phase_arg_rejects_injection_characters() {
+        // Mirror of the Lua validation logic: phase IDs are version strings like
+        // v0.16.6.1 — only alphanumeric, dots, and dashes are valid.  Any other
+        // character (especially `"`) is rejected before the command is dispatched.
+        //
+        // Note: the daemon's split_respecting_quotes toggles in_quotes on every `"`
+        // without backslash-escape handling, so escaping alone cannot prevent
+        // injection.  Validation (rejecting invalid chars) is the correct fix.
+        fn sanitize_phase(phase: &str) -> Option<String> {
+            let p = phase.trim();
+            if p.is_empty() {
+                return Some(String::new());
+            }
+            // Reject if any character is not alphanumeric, a dot, or a dash.
+            if p.chars()
+                .any(|c| !c.is_alphanumeric() && c != '.' && c != '-')
+            {
+                return None;
+            }
+            Some(format!(" --phase \"{p}\""))
+        }
+
+        // Valid phase IDs are accepted and produce a clean --phase argument.
+        assert_eq!(
+            sanitize_phase("v0.16.6.1"),
+            Some(" --phase \"v0.16.6.1\"".to_string())
+        );
+        assert_eq!(
+            sanitize_phase("  v0.16.6  "),
+            Some(" --phase \"v0.16.6\"".to_string())
+        );
+        assert_eq!(
+            sanitize_phase("v0.17.0-alpha.1"),
+            Some(" --phase \"v0.17.0-alpha.1\"".to_string())
+        );
+
+        // Injection attempts are rejected (return None).
+        assert_eq!(sanitize_phase("v0.16\" --injected-flag \"x"), None);
+        assert_eq!(sanitize_phase("v0.16; rm -rf /"), None);
+        assert_eq!(sanitize_phase("v0.16\nphase2"), None);
+
+        // Empty / whitespace-only is returned as empty (no --phase arg).
+        assert_eq!(sanitize_phase(""), Some(String::new()));
+        assert_eq!(sanitize_phase("   "), Some(String::new()));
     }
 }

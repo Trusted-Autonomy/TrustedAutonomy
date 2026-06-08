@@ -31,7 +31,15 @@ function M.start(args)
     vim.ui.input({ prompt = "Plan phase (optional, e.g. v0.16.6): " }, function(phase)
       local phase_arg = ""
       if phase and vim.trim(phase) ~= "" then
-        phase_arg = ' --phase "' .. vim.trim(phase) .. '"'
+        local p = vim.trim(phase)
+        -- Phase IDs are version strings (e.g. v0.16.6.1) — only alphanumeric,
+        -- dots, and dashes are valid.  Reject anything else so characters like
+        -- `"` cannot break out of the quoted argument and inject extra flags.
+        if p:match("[^%w%.%-]") then
+          err('Invalid phase "' .. p .. '" — only letters, digits, dots, and dashes allowed')
+          return
+        end
+        phase_arg = ' --phase "' .. p .. '"'
       end
       local cmd = 'ta run "' .. title:gsub('"', '\\"') .. '"' .. phase_arg
       info("Starting goal: " .. title .. "…")
