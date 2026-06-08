@@ -4266,9 +4266,11 @@ const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Skill(*)",
     "TodoRead(*)",
     "TodoWrite(*)",
-    // TA's own MCP tools — always auto-approved so agents never prompt
-    // for the tools they need to interact with the TA daemon.
-    "mcp__ta__*",
+    // Approve all MCP tools from all servers — covers TA-injected servers
+    // (ta, ta-memory) and any MCPs the user has configured globally in
+    // ~/.claude/settings.json. User-configured servers are trusted by
+    // definition; they can't appear unless the user explicitly added them.
+    "mcp__*",
 ];
 
 /// Built-in forbidden tool patterns — community-maintained deny list.
