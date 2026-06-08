@@ -4266,11 +4266,14 @@ const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Skill(*)",
     "TodoRead(*)",
     "TodoWrite(*)",
-    // Approve all MCP tools from all servers — covers TA-injected servers
-    // (ta, ta-memory) and any MCPs the user has configured globally in
-    // ~/.claude/settings.json. User-configured servers are trusted by
-    // definition; they can't appear unless the user explicitly added them.
-    "mcp__*",
+    // TA's own MCP servers — always auto-approved.
+    // Global user MCPs are merged in dynamically by inject_claude_settings_with_security
+    // by reading ~/.claude/settings.json permissions.allow for mcp__*__ patterns.
+    // Note: Claude rejects bare "mcp__*" allow rules — patterns must have a
+    // literal server prefix, e.g. "mcp__ta__*" not "mcp__*".
+    "mcp__ta__*",
+    "mcp__ta-memory__*",
+    "mcp__ta-community-hub__*",
 ];
 
 /// Built-in forbidden tool patterns — community-maintained deny list.
@@ -4354,11 +4357,39 @@ fn inject_claude_settings_with_security(
     std::fs::write(&backup_path, &original_content)?;
 
     // Build allow and deny lists.
-    let allow: Vec<String> = DEFAULT_ALLOWED_TOOLS
+    // Start with the static defaults, then merge mcp__*__* patterns from the
+    // user's global ~/.claude/settings.json so globally configured MCP servers
+    // are auto-approved in staging without requiring per-server hardcoding.
+    let mut allow: Vec<String> = DEFAULT_ALLOWED_TOOLS
         .iter()
         .filter(|t| web_search_enabled || !t.starts_with("WebSearch"))
         .map(|s| format!("\"{}\"", s))
         .collect();
+    // Merge global MCP allow patterns (mcp__<server>__*) from ~/.claude/settings.json.
+    if let Ok(home) = std::env::var("HOME") {
+        let global_path = std::path::Path::new(&home)
+            .join(".claude")
+            .join("settings.json");
+        if let Ok(content) = std::fs::read_to_string(&global_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(arr) = val.pointer("/permissions/allow").and_then(|v| v.as_array()) {
+                    for entry in arr {
+                        if let Some(s) = entry.as_str() {
+                            // Only copy MCP patterns with a valid server prefix (mcp__X__*).
+                            // Bare "mcp__*" is rejected by Claude — skip those.
+                            let is_valid_mcp = s.starts_with("mcp__") && s[5..].contains("__");
+                            if is_valid_mcp {
+                                let quoted = format!("\"{}\"", s);
+                                if !allow.contains(&quoted) {
+                                    allow.push(quoted);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut forbidden = load_forbidden_tools(source_dir);
     // Merge security-profile patterns (dedup).
     for pattern in extra_deny {
