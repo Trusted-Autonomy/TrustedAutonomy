@@ -413,6 +413,33 @@ pub struct CapturedInput {
     pub text: String,
 }
 
+/// RAII guard that restores the terminal to its saved state on drop.
+///
+/// Handles both normal return and panics. Without this, killing `ta run`
+/// while an interactive agent session is running leaves the terminal in
+/// whatever raw/alternate-screen state the agent set — causing ^M on Enter
+/// and ^C on Ctrl+C in the calling shell.
+struct TerminalRestoreGuard {
+    saved: libc::termios,
+}
+
+impl TerminalRestoreGuard {
+    fn save() -> Option<Self> {
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut t) } == 0 {
+            Some(Self { saved: t })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &self.saved) };
+    }
+}
+
 /// Run an agent in a PTY with stdin interleaving.
 ///
 /// This is the main entry point for interactive sessions:
@@ -421,6 +448,12 @@ pub struct CapturedInput {
 /// 3. Human input from stdin is forwarded to the agent's PTY stdin
 /// 4. All I/O is logged with timestamps for audit
 pub fn run_interactive_pty(config: PtyLaunchConfig<'_>) -> io::Result<PtySessionResult> {
+    // Save terminal state now; restored on drop regardless of how we exit.
+    // Without this, abruptly killing `ta run` leaves ^M/^C artifacts because
+    // the agent's escape sequences (raw mode, alternate screen) were forwarded
+    // to the parent terminal but the cleanup sequences never ran.
+    let _term_guard = TerminalRestoreGuard::save();
+
     let sink = config.output_sink.unwrap_or_else(|| Arc::new(TerminalSink));
 
     let mut pty = PtySession::spawn_with_sink(
