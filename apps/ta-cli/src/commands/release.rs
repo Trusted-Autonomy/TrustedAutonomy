@@ -1095,12 +1095,37 @@ fn execute_shell_step(
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_CEILING_DIRECTORIES");
 
+    // Null stdin so the subprocess cannot access or modify the controlling
+    // terminal's settings (e.g., nix develop / bash subshells call tcsetattr
+    // on fd 0, leaving the terminal in raw mode and breaking subsequent
+    // read_line() calls at approval gates).
+    command.stdin(std::process::Stdio::null());
+
     // Inject step-level env vars with substitution.
     for (k, v) in &step.env {
         command.env(k, substitute_vars(v, version, commits, last_tag));
     }
 
+    // Save terminal state before the subprocess runs and restore it after,
+    // in case anything still reaches the terminal device via stdout/stderr.
+    #[cfg(unix)]
+    let saved_termios: Option<libc::termios> = {
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut t) } == 0 {
+            Some(t)
+        } else {
+            None
+        }
+    };
+
     let status = command.status()?;
+
+    #[cfg(unix)]
+    if let Some(saved) = saved_termios {
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &saved);
+        }
+    }
     if !status.success() {
         anyhow::bail!(
             "Step '{}' failed (exit code: {:?})",
@@ -2104,6 +2129,18 @@ fn prompt_approval_default(
 
     // TTY context: prompt directly.
     if stdin_is_tty() {
+        // Restore terminal to canonical mode before reading user input.
+        // Shell pipeline steps (e.g., nix develop subshells) may have left
+        // the terminal in raw mode, causing Enter to echo ^M instead of \n.
+        #[cfg(unix)]
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
+                t.c_lflag |= libc::ICANON | libc::ECHO | libc::ECHOE | libc::ECHOK;
+                t.c_iflag |= libc::ICRNL;
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &t);
+            }
+        }
         let prompt_hint = if default_yes { "[Y/n]" } else { "[y/N]" };
         print!("Proceed with '{}'? {} ", step_name, prompt_hint);
         io::stdout().flush()?;
