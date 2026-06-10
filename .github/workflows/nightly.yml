@@ -242,6 +242,7 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           wix build apps/ta-cli/wix/main.wxs `
+            -ext WixToolset.UI.wixext `
             -d SourceDir="$releaseDir" `
             -d Version="$msiVersion" `
             -d Platform=x64 `
