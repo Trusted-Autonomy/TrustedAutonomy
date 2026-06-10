@@ -886,6 +886,37 @@ fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
+/// GC for managed-paths SHA blobs (`ta gc governed-paths`).
+///
+/// Removes blobs from `.ta/sha-fs/` that are not referenced by any live journal
+/// entry in `.ta/governed/journal.jsonl`. Prints a summary of bytes reclaimed.
+pub fn execute_governed_paths(
+    config: &ta_mcp_gateway::GatewayConfig,
+    retain_days: u32,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use ta_governed_paths::GovernedPathManager;
+
+    let mgr = GovernedPathManager::open(&config.workspace_root)?;
+    let stats = mgr.gc(retain_days, dry_run)?;
+
+    if stats.dry_run {
+        println!(
+            "[gc] governed-paths (dry-run): {} blob(s) would be removed, {} freed",
+            stats.blobs_removed,
+            stats.bytes_freed_display(),
+        );
+    } else {
+        println!(
+            "[gc] governed-paths: removed {} blob(s), freed {} ({} kept)",
+            stats.blobs_removed,
+            stats.bytes_freed_display(),
+            stats.blobs_kept,
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

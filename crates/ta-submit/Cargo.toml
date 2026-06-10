@@ -16,9 +16,9 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ta-changeset = { path = "../ta-changeset", version = "0.16.6-alpha.1" }
-ta-goal = { path = "../ta-goal", version = "0.16.6-alpha.1" }
-ta-workspace = { path = "../ta-workspace", version = "0.16.6-alpha.1" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha" }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha" }
 toml = "0.8"
 
 [target.'cfg(unix)'.dependencies]

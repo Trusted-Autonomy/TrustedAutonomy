@@ -4585,6 +4585,10 @@ fn deny_package(
         }
     }
 
+    // v0.17.0: Record DENIED entries in the governed-paths URI journal for all
+    // write entries that belong to this goal, so GC can reclaim the blobs.
+    record_governed_path_denials(config, package_goal_id, package_id);
+
     println!("Denied draft package {}: {}", package_id, reason);
     Ok(())
 }
@@ -8488,7 +8492,71 @@ fn apply_package(
         }
     }
 
+    // v0.17.0: Record Applied journal entries for any governed-path writes and
+    // run auto-GC to reclaim blobs outside the retention window.
+    if !dry_run {
+        record_governed_path_applied(config, goal.goal_run_id, package_id, &target_dir);
+        run_governed_paths_auto_gc(config);
+    }
+
     Ok(())
+}
+
+/// v0.17.0: Append `Applied` journal entries for all pending writes belonging to this goal.
+fn record_governed_path_applied(
+    config: &GatewayConfig,
+    goal_id: uuid::Uuid,
+    draft_id: uuid::Uuid,
+    _target_dir: &std::path::Path,
+) {
+    let mgr = match ta_governed_paths::GovernedPathManager::open(&config.workspace_root) {
+        Ok(m) => m,
+        Err(_) => return, // No governed paths configured yet — skip silently.
+    };
+
+    let pending = match mgr.journal().pending_writes_for_goal(goal_id) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read governed-path journal during apply");
+            return;
+        }
+    };
+
+    for entry in pending {
+        // The blob was already stored when the write was captured; apply_path will
+        // restore it to the real path (which the overlay already did) and log the event.
+        let abs_path = config
+            .workspace_root
+            .join(entry.uri.trim_start_matches("fs://workspace/"));
+        if let Err(e) = mgr.apply_path(&abs_path, &entry.sha256, Some(goal_id), Some(draft_id)) {
+            tracing::warn!(
+                error = %e,
+                uri = %entry.uri,
+                "Failed to record governed-path Applied journal entry"
+            );
+        }
+    }
+}
+
+/// v0.17.0: Run governed-path GC automatically after apply (retain-days = 30).
+fn run_governed_paths_auto_gc(config: &GatewayConfig) {
+    let mgr = match ta_governed_paths::GovernedPathManager::open(&config.workspace_root) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    match mgr.gc(30, false) {
+        Ok(stats) if stats.blobs_removed > 0 => {
+            eprintln!(
+                "[apply] governed-paths auto-gc: removed {} blob(s), freed {}",
+                stats.blobs_removed,
+                stats.bytes_freed_display(),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "governed-path auto-GC failed (non-fatal)");
+        }
+    }
 }
 
 // ── Draft amendment (v0.3.4) ────────────────────────────────────────
@@ -11543,6 +11611,43 @@ fn fmt_velocity_duration(seconds: i64) -> String {
 /// Called after `deny` and `close` operations that reset PLAN.md to `pending`.
 /// If the daemon is not running or the endpoint fails, this is silently ignored —
 /// the PLAN.md reset is the authoritative gate; the in-memory claim is advisory.
+/// v0.17.0: Record DENIED journal entries in the governed-paths URI journal for all
+/// pending write entries associated with `goal_id`.  Best-effort — failures are
+/// logged but do not abort the deny flow.
+fn record_governed_path_denials(
+    config: &GatewayConfig,
+    goal_id: Option<uuid::Uuid>,
+    draft_id: uuid::Uuid,
+) {
+    let Some(gid) = goal_id else { return };
+
+    let mgr = match ta_governed_paths::GovernedPathManager::open(&config.workspace_root) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::debug!(error = %e, "governed-paths not available (no journal yet)");
+            return;
+        }
+    };
+
+    let pending = match mgr.journal().pending_writes_for_goal(gid) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, goal_id = %gid, "Failed to read governed-path journal");
+            return;
+        }
+    };
+
+    for entry in pending {
+        if let Err(e) = mgr.deny_write(&entry.uri, &entry.sha256, Some(gid), Some(draft_id)) {
+            tracing::warn!(
+                error = %e,
+                uri = %entry.uri,
+                "Failed to record governed-path DENIED journal entry"
+            );
+        }
+    }
+}
+
 fn release_phase_claim_via_daemon(workspace_root: &std::path::Path, phase_id: &str) {
     let daemon_url = super::daemon::resolve_daemon_url(workspace_root, None);
     let url = format!("{}/api/plan/phase/release", daemon_url);

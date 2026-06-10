@@ -8532,15 +8532,15 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.17.0 — Managed Paths: SHA Filesystem + URI Journal
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Items**:
-1. [ ] **`governed_paths` config** (`[workflow.toml]`): `[[governed_paths]]` entries with `path`, `mode` (`read-only`/`read-write`), `purpose`, `max_sha_store_mb`. Parsed by `WorkflowConfig`. `read-only` paths block writes at the FUSE/intercept layer.
-2. [ ] **SHA store** (`.ta/sha-fs/<sha256>`): Content-addressed blob store. Write: compute SHA-256, store full file at `.ta/sha-fs/<sha256>` if not present (dedup automatic). Read: transparent passthrough to real path if URI not in journal. Entries immutable once written.
+1. [x] **`governed_paths` config** (`[workflow.toml]`): `[[governed_paths]]` entries with `path`, `mode` (`read-only`/`read-write`), `purpose`, `max_sha_store_mb`. Parsed by `WorkflowConfig`. `read-only` paths block writes at the FUSE/intercept layer.
+2. [x] **SHA store** (`.ta/sha-fs/<sha256>`): Content-addressed blob store. Write: compute SHA-256, store full file at `.ta/sha-fs/<sha256>` if not present (dedup automatic). Read: transparent passthrough to real path if URI not in journal. Entries immutable once written.
 
-3. [ ] **Apply/rollback**: `ta draft apply` writes SHA blob content to each real path in the journal. `ta draft deny` records a `DENIED` entry in the journal (the write already landed; deny prevents any further replay). Rollback: write pre-goal SHA blob to real path.
-4. [ ] **GC** (`ta gc governed-paths`): Remove SHA blobs not referenced by any live journal entry (entries older than `--retain-days`, default 30). Print bytes reclaimed. Runs automatically after `ta draft apply` for entries older than the retention window.
-5. [ ] **Tests**: Write to governed path → SHA blob created, journal entry appended; read-your-writes via journal; pre-goal snapshot SHA recorded; `ta draft apply` writes blob to real path; `ta draft deny` records DENIED; GC removes unreferenced blobs; `read-only` mode blocks write at FUSE layer; Windows file-watcher fallback captures write.
+3. [x] **Apply/rollback**: `ta draft apply` writes SHA blob content to each real path in the journal. `ta draft deny` records a `DENIED` entry in the journal (the write already landed; deny prevents any further replay). Rollback: write pre-goal SHA blob to real path.
+4. [x] **GC** (`ta gc governed-paths`): Remove SHA blobs not referenced by any live journal entry (entries older than `--retain-days`, default 30). Print bytes reclaimed. Runs automatically after `ta draft apply` for entries older than the retention window.
+5. [x] **Tests**: Write to governed path → SHA blob created, journal entry appended; read-your-writes via journal; pre-goal snapshot SHA recorded; `ta draft apply` writes blob to real path; `ta draft deny` records DENIED; GC removes unreferenced blobs; `read-only` mode blocks write at FUSE layer; Windows file-watcher fallback captures write.
 
 #### Version: `0.17.0-alpha`
 
@@ -8548,16 +8548,15 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 **Depends on**: v0.17.0 (URI journal pattern established for governed resources)
 
 **Items**:
-6. [ ] **`ta-db-proxy-postgres` crate** (`crates/ta-db-proxy-postgres/`): Implements `DbProxyPlugin`. Connects to a Postgres logical replication slot created at goal start. Agent connects to a read-write replica or the primary (configured via `db://postgres/<conn>#<table>` URI). WAL events captured to JSONL mutation log during the goal. `apply()` replays log against target; `deny()` discards log and drops replication slot.
+6. [x] **`ta-db-proxy-postgres` crate** (`crates/ta-db-proxy-postgres/`): Implements `DbProxyPlugin`. Connects to a Postgres logical replication slot created at goal start. Agent connects to a read-write replica or the primary (configured via `db://postgres/<conn>#<table>` URI). WAL events captured to JSONL mutation log during the goal. `apply()` replays log against target; `deny()` discards log and drops replication slot.
 
-7. [ ] **Constitution rules for DB** (default `constitution.toml`): `[[rules.warn]]` fires when a DB draft contains > N rows modified (configurable, default 100). `[[rules.block]]` fires on schema-altering statements (`DROP TABLE`, `TRUNCATE`, `ALTER TABLE DROP COLUMN`) unless `allow_schema_drops = true` in `[actions.db_query]`.
-8. [ ] **`ta-db-proxy` registry** (`crates/ta-db-proxy/src/registry.rs`): Maps URI scheme + driver to the correct plugin backend. `db://postgres/*` → `PostgresProxyPlugin`; `db://sqlite/*` → `SqliteProxyPlugin`; `db://mysql/*` → `MysqlProxyPlugin`. Plugins are optional features — `ta-db-proxy-postgres` behind `[features] postgres`.
+7. [x] **Constitution rules for DB** (default `constitution.toml`): `[[rules.warn]]` fires when a DB draft contains > N rows modified (configurable, default 100). `[[rules.block]]` fires on schema-altering statements (`DROP TABLE`, `TRUNCATE`, `ALTER TABLE DROP COLUMN`) unless `allow_schema_drops = true` in `[actions.db_query]`.
+8. [x] **`ta-db-proxy` registry** (`crates/ta-db-proxy/src/registry.rs`): Maps URI scheme + driver to the correct plugin backend. `db://postgres/*` → `PostgresProxyPlugin`; `db://sqlite/*` → `SqliteProxyPlugin`; `db://mysql/*` → `MysqlProxyPlugin`. Plugins are optional features — `ta-db-proxy-postgres` behind `[features] postgres`.
 
-9. [ ] **`policy = "review"` as default** for `[actions.db_query]`: Default is `review` (not `auto`). Every DB mutation is held for human review showing the row-level diff before execution. `policy = "auto"` requires explicit opt-in.
-10. [ ] **Tests**: Postgres replication slot created/dropped on goal start/deny; WAL capture round-trip; row-level diff rendering for INSERT/UPDATE/DELETE; schema-drop constitution rule blocks `DROP TABLE`; credential vault resolves DSN without exposing it to agent; large-mutation warning fires at configured threshold.
+9. [x] **`policy = "review"` as default** for `[actions.db_query]`: Default is `review` (not `auto`). Every DB mutation is held for human review showing the row-level diff before execution. `policy = "auto"` requires explicit opt-in.
+10. [x] **Tests**: Postgres replication slot created/dropped on goal start/deny; WAL capture round-trip; row-level diff rendering for INSERT/UPDATE/DELETE; schema-drop constitution rule blocks `DROP TABLE`; credential vault resolves DSN without exposing it to agent; large-mutation warning fires at configured threshold.
 
 > **Focus**: Unified `ta release` command system. Builds on the governed filesystem from v0.17.0-v0.17.1 — release pipelines run under full governance. that works for any release type — binary distributions, content deliveries, service deployments — via a pluggable `ReleaseAdapter` abstraction. Replaces the current ad-hoc dispatch/channel/VCS approach with a single coherent model and a simplified command surface.
-
 ### v0.17.0.1 — Studio Draft Review Details
 <!-- status: pending -->
 

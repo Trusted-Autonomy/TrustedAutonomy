@@ -1,25 +1,22 @@
 [package]
-name = "ta-session"
+name = "ta-governed-paths"
 version.workspace = true
 edition = "2021"
-description = "Session & Human Control Plane — continuous conversation lifecycle for TA goals"
+description = "Managed paths: SHA content-addressed filesystem and URI journal for Trusted Autonomy"
 license = "Apache-2.0"
 repository = "https://github.com/trustedautonomy/ta"
 homepage = "https://github.com/trustedautonomy/ta"
-keywords = ["ai", "agent", "autonomy", "session", "control"]
+keywords = ["ai", "agent", "autonomy", "filesystem", "journal"]
 categories = ["development-tools"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-
-# Workspace crates
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha" }
+sha2 = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
