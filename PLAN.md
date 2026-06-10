@@ -8557,6 +8557,19 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 10. [ ] **Tests**: Postgres replication slot created/dropped on goal start/deny; WAL capture round-trip; row-level diff rendering for INSERT/UPDATE/DELETE; schema-drop constitution rule blocks `DROP TABLE`; credential vault resolves DSN without exposing it to agent; large-mutation warning fires at configured threshold.
 
 > **Focus**: Unified `ta release` command system. Builds on the governed filesystem from v0.17.0-v0.17.1 — release pipelines run under full governance. that works for any release type — binary distributions, content deliveries, service deployments — via a pluggable `ReleaseAdapter` abstraction. Replaces the current ad-hoc dispatch/channel/VCS approach with a single coherent model and a simplified command surface.
+
+### v0.17.0.1 — Studio Draft Review Details
+<!-- status: pending -->
+
+**Problem**: When a goal reaches `PrReady` state in TA Studio, the review panel shows no meaningful content — the supervisor results, file change summary, and agent decision log visible in `ta draft view` are absent. Users must drop to the CLI to understand what the draft contains before approving.
+
+**Items**:
+1. [ ] **Draft detail API**: Expose full `ta draft view <id>` payload (supervisor verdict, agent decision log, file diff summary, artifact list) via the daemon's REST/MCP API so Studio can consume it.
+2. [ ] **Studio review panel**: Render the draft detail in the goal's review card — supervisor verdict badge, per-file change list, agent decision log entries, and approve/deny actions in one view.
+3. [ ] **Tests**: Draft ready event triggers panel population; supervisor PASS/WARN/BLOCK verdict renders correctly; deny from Studio panel works end-to-end.
+
+#### Version: `0.17.0-alpha.1`
+
 ### v0.17.1 — Database Proxy (Postgres, MySQL, SQLite)
 <!-- status: pending -->
 
