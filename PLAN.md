@@ -8532,7 +8532,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.17.0 — Managed Paths: SHA Filesystem + URI Journal
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Items**:
 1. [ ] **`governed_paths` config** (`[workflow.toml]`): `[[governed_paths]]` entries with `path`, `mode` (`read-only`/`read-write`), `purpose`, `max_sha_store_mb`. Parsed by `WorkflowConfig`. `read-only` paths block writes at the FUSE/intercept layer.
