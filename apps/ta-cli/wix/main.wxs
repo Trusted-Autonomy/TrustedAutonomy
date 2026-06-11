@@ -206,8 +206,6 @@
       Description="Enables Windows Projected File System (ProjFS) for near-instant, zero-disk-cost staging. Files are hydrated from source on demand — only files the agent actually reads are physically accessed."
       Level="1"
       AllowAdvertise="no">
-      <!-- Disable on Windows versions below 10 (VersionNT < 1000 = pre-Win10) -->
-      <Condition Level="0"><![CDATA[VersionNT < 1000]]></Condition>
       <ComponentRef Id="EnableProjFS" />
     </Feature>
 
