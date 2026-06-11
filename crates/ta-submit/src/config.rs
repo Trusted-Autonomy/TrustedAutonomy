@@ -203,6 +203,56 @@ pub struct WorkflowConfig {
     /// ```
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub agent_profiles: HashMap<String, AgentProfile>,
+
+    /// Managed paths with SHA-filesystem tracking and URI journal (v0.17.0).
+    ///
+    /// Each entry declares a workspace path that TA should govern:
+    /// ```toml
+    /// [[governed_paths]]
+    /// path = "data/outputs"
+    /// mode = "read-write"
+    /// purpose = "ComfyUI render outputs"
+    /// max_sha_store_mb = 1024
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub governed_paths: Vec<GovernedPathEntry>,
+}
+
+/// A single entry in the `[[governed_paths]]` array (v0.17.0).
+///
+/// Mirrors `ta_governed_paths::GovernedPathConfig` but lives here so
+/// `WorkflowConfig` can be deserialized without pulling in the full crate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GovernedPathEntry {
+    /// Path to govern, relative to the workspace root.
+    pub path: std::path::PathBuf,
+    /// Access mode: `"read-write"` (default) or `"read-only"`.
+    #[serde(default)]
+    pub mode: GovernedPathMode,
+    /// Human-readable description of what this path contains.
+    #[serde(default)]
+    pub purpose: String,
+    /// Maximum total SHA store size in MB (unlimited when absent).
+    #[serde(default)]
+    pub max_sha_store_mb: Option<u64>,
+}
+
+/// Access mode for a governed path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum GovernedPathMode {
+    #[default]
+    ReadWrite,
+    ReadOnly,
+}
+
+impl std::fmt::Display for GovernedPathMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GovernedPathMode::ReadWrite => write!(f, "read-write"),
+            GovernedPathMode::ReadOnly => write!(f, "read-only"),
+        }
+    }
 }
 
 /// Commit auto-staging configuration (v0.14.3.7).

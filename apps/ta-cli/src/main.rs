@@ -49,6 +49,28 @@ struct Cli {
     command: Option<Commands>,
 }
 
+/// Subcommands for `ta gc` that target specific subsystems.
+#[derive(Subcommand)]
+enum GcSubcommand {
+    /// Remove unreferenced SHA blobs from the managed-paths store (v0.17.0).
+    ///
+    /// Scans `.ta/sha-fs/` and removes any blob not referenced by a live journal
+    /// entry in `.ta/governed/journal.jsonl`. Prints the total bytes reclaimed.
+    ///
+    /// Examples:
+    ///   ta gc governed-paths
+    ///   ta gc governed-paths --retain-days 14
+    ///   ta gc governed-paths --dry-run
+    GovernedPaths {
+        /// Blobs referenced by journal entries newer than this many days are always kept (default: 30).
+        #[arg(long, default_value = "30")]
+        retain_days: u32,
+        /// Show what would be removed without making changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
@@ -255,6 +277,9 @@ enum Commands {
         command: commands::daemon::DaemonCommands,
     },
     /// Unified garbage collection: goals, drafts, staging directories, and event store.
+    ///
+    /// Subcommands:
+    ///   ta gc governed-paths  — remove unreferenced SHA blobs from managed paths
     Gc {
         /// Show what would be cleaned without making changes.
         #[arg(long)]
@@ -289,6 +314,9 @@ enum Commands {
         /// Prompts for confirmation unless --dry-run is also set.
         #[arg(long)]
         delete_stale: bool,
+        /// Governed-paths GC subcommand.
+        #[command(subcommand)]
+        gc_subcommand: Option<GcSubcommand>,
     },
     /// System-wide health check: runtime chain, auth validation, agent binaries, daemon, VCS.
     ///
@@ -1127,19 +1155,26 @@ fn main() -> anyhow::Result<()> {
             force,
             status,
             delete_stale,
-        } => commands::gc::execute(
-            &config,
-            *dry_run,
-            *threshold_days,
-            *all,
-            *archive,
-            *include_events,
-            *compact,
-            *compact_after_days,
-            *force,
-            *status,
-            *delete_stale,
-        ),
+            gc_subcommand,
+        } => match gc_subcommand {
+            Some(GcSubcommand::GovernedPaths {
+                retain_days,
+                dry_run: gp_dry_run,
+            }) => commands::gc::execute_governed_paths(&config, *retain_days, *gp_dry_run),
+            None => commands::gc::execute(
+                &config,
+                *dry_run,
+                *threshold_days,
+                *all,
+                *archive,
+                *include_events,
+                *compact,
+                *compact_after_days,
+                *force,
+                *status,
+                *delete_stale,
+            ),
+        },
         Commands::Operations { command } => commands::operations::execute(command, &config),
         Commands::Runbook { command } => commands::runbook::execute(command, &config),
         Commands::Connector { command } => commands::connector::execute(command, &config),
