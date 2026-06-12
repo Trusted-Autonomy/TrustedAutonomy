@@ -8558,7 +8558,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 > **Focus**: Unified `ta release` command system. Builds on the governed filesystem from v0.17.0-v0.17.1 — release pipelines run under full governance. that works for any release type — binary distributions, content deliveries, service deployments — via a pluggable `ReleaseAdapter` abstraction. Replaces the current ad-hoc dispatch/channel/VCS approach with a single coherent model and a simplified command surface.
 ### v0.17.0.1 — Studio Draft Review Details
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Problem**: When a goal reaches `PrReady` state in TA Studio, the review panel shows no meaningful content — the supervisor results, file change summary, and agent decision log visible in `ta draft view` are absent. Users must drop to the CLI to understand what the draft contains before approving.
 
