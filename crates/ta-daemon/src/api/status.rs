@@ -81,6 +81,10 @@ pub struct AgentInfo {
     /// Agent process ID, if tracked (v0.11.2.4).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_pid: Option<u32>,
+    /// Draft package UUID when this goal has reached pr_ready state (v0.17.0.1).
+    /// Allows Studio to navigate directly to the draft review panel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<String>,
 }
 
 /// `GET /api/status` — Project dashboard as JSON.
@@ -153,6 +157,7 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
                             vcs_state: None, // Populated by VCS check if configured
                             process_health: health_opt,
                             agent_pid: g.agent_pid,
+                            draft_id: g.pr_package_id.map(|id| id.to_string()),
                         }
                     })
                     .collect();

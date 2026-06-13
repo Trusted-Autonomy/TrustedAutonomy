@@ -1594,9 +1594,11 @@ function renderPhaseCard(ph, subMap) {
   const chevron = hasSubs
     ? `<span class="chevron" onclick="toggleSubPhases('${esc(ph.id)}')" id="chevron-${esc(ph.id)}">${expanded ? '▼' : '▶'}</span>`
     : '';
-  // Active button: pr_ready → link to Drafts; running → info
+  // Active button: pr_ready → link to specific draft detail; running → info
   const activeBtn = isPrReady
-    ? `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="switchTab('drafts')" title="Draft ready — click to review">Review Draft</button>`
+    ? (ph.draft_id
+        ? `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="switchTab('drafts');setTimeout(()=>showDraftDetail('${esc(ph.draft_id)}'),100)" title="Draft ready — click to review">Review Draft</button>`
+        : `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="switchTab('drafts')" title="Draft ready — click to review">Review Draft</button>`)
     : `<button class="btn btn-sm btn-ghost" onclick="showAlert('A goal for this phase is already running. Use the Dashboard to monitor progress, or the Drafts tab to review the output.')" title="A goal for this phase is already active">Active &#9654;</button>`;
   return `<div class="card" id="phase-card-${esc(ph.id)}">
     <div class="card-header">
@@ -1920,17 +1922,21 @@ function renderDraftDetail(d) {
   let supervisorBody = '';
   if (d.supervisor_review) {
     const sv = d.supervisor_review;
-    const verdict = sv.verdict || sv.result || '';
+    const verdict = (sv.verdict || sv.result || '').toLowerCase();
+    const verdictColor = verdict === 'pass' ? 'var(--green)' : verdict === 'block' ? 'var(--red)' : 'var(--yellow)';
+    const verdictIcon = verdict === 'pass' ? '✓' : verdict === 'block' ? '✗' : '⚠';
     const findings = Array.isArray(sv.findings) ? sv.findings : (sv.notes ? [sv.notes] : []);
-    supervisorBody = (verdict ? `<p><strong>Verdict:</strong> ${esc(verdict)}</p>` : '') +
-      findings.map(f => `<p style="font-size:0.85rem;color:var(--muted)">${esc(typeof f === 'string' ? f : JSON.stringify(f))}</p>`).join('');
+    const summaryLine = sv.summary || '';
+    supervisorBody = (verdict ? `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem"><span style="font-weight:700;color:${verdictColor};font-size:1rem">${verdictIcon} ${esc(verdict.toUpperCase())}</span>${sv.agent ? `<span style="font-size:0.8rem;color:var(--muted)">via ${esc(sv.agent)}</span>` : ''}</div>` : '') +
+      (summaryLine ? `<p style="margin-bottom:0.5rem">${esc(summaryLine)}</p>` : '') +
+      findings.map(f => `<p style="font-size:0.85rem;color:var(--muted)">• ${esc(typeof f === 'string' ? f : JSON.stringify(f))}</p>`).join('');
   }
-  const supervisorSection = supervisorBody ? `<details class="section"><summary>Supervisor Analysis</summary><div class="detail-body">${supervisorBody}</div></details>` : '';
+  const supervisorSection = supervisorBody ? `<details open class="section"><summary>Supervisor Analysis</summary><div class="detail-body">${supervisorBody}</div></details>` : '';
 
   // Agent Decision Log section.
   let decisionBody = '';
-  if (Array.isArray(d.decision_log) && d.decision_log.length > 0) {
-    decisionBody = d.decision_log.map(entry => {
+  if (Array.isArray(d.agent_decision_log) && d.agent_decision_log.length > 0) {
+    decisionBody = d.agent_decision_log.map(entry => {
       const dec = entry.decision || entry.title || '';
       const rat = entry.rationale || entry.reason || '';
       const conf = typeof entry.confidence === 'number' ? Math.round(entry.confidence * 100) + '%' : '';
