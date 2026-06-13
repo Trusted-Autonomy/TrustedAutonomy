@@ -8558,16 +8558,169 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 > **Focus**: Unified `ta release` command system. Builds on the governed filesystem from v0.17.0-v0.17.1 — release pipelines run under full governance. that works for any release type — binary distributions, content deliveries, service deployments — via a pluggable `ReleaseAdapter` abstraction. Replaces the current ad-hoc dispatch/channel/VCS approach with a single coherent model and a simplified command surface.
 ### v0.17.0.1 — Studio Draft Review Details
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Problem**: When a goal reaches `PrReady` state in TA Studio, the review panel shows no meaningful content — the supervisor results, file change summary, and agent decision log visible in `ta draft view` are absent. Users must drop to the CLI to understand what the draft contains before approving.
 
 **Items**:
-1. [ ] **Draft detail API**: Expose full `ta draft view <id>` payload (supervisor verdict, agent decision log, file diff summary, artifact list) via the daemon's REST/MCP API so Studio can consume it.
-2. [ ] **Studio review panel**: Render the draft detail in the goal's review card — supervisor verdict badge, per-file change list, agent decision log entries, and approve/deny actions in one view.
-3. [ ] **Tests**: Draft ready event triggers panel population; supervisor PASS/WARN/BLOCK verdict renders correctly; deny from Studio panel works end-to-end.
+1. [x] **Draft detail API**: Expose full `ta draft view <id>` payload (supervisor verdict, agent decision log, file diff summary, artifact list) via the daemon's REST/MCP API so Studio can consume it.
+2. [x] **Studio review panel**: Render the draft detail in the goal's review card — supervisor verdict badge, per-file change list, agent decision log entries, and approve/deny actions in one view.
+3. [x] **Tests**: Draft ready event triggers panel population; supervisor PASS/WARN/BLOCK verdict renders correctly; deny from Studio panel works end-to-end.
 
 #### Version: `0.17.0-alpha.1`
+
+---
+
+### v0.17.0.2 — AgentAction: Structured Output and Routing Foundation
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.1 (draft detail API needed for structured pre-injection)
+
+**Problem**: `AdvisorOutcome` is a binary exit signal (`Applied | Denied | TimedOut | SpawnFailed`). The workflow engine can't distinguish *why* an advisor denied, route to a rework goal, request a plan modification, or arm a CI monitor — because actions carry no structured data or routing key.
+
+**Solution**: A typed `AgentAction` enum carried in `ActionEnvelope`. Each action has an action ID, role, agent, timestamp, typed payload, and extensible metadata. An `ActionRouter` (trait + built-in impls) maps action kind to `WorkflowPrimitive` execution, enabling chains like `Apply → WaitCI → Merge → SyncBuild → Continue`.
+
+**Items**:
+1. [ ] **`AgentAction` enum** in `crates/ta-session/src/agent_action.rs`:
+   `Apply { draft_id, confidence, notes }`, `Deny { draft_id, reason, rework_hint }`,
+   `PlanMod { phase_id, edit: PlanEdit, justification }`, `StartGoal { title, phase_id, context }`,
+   `Escalate { question, escalate_to: RoleRef }`, `WaitCI { pr_number, checks }`, `Merge { pr_number }`, `Continue`
+2. [ ] **`ActionEnvelope`** struct: `action_id: Uuid`, `agent_id: String`, `role: TeamRole`, `timestamp`, `action: AgentAction`, `metadata: serde_json::Value`
+3. [ ] **`WorkflowPrimitive` trait** + `ActionRouter`: `matches(&AgentAction) → bool`, `execute(&ActionEnvelope, &WorkflowContext) → Result<ActionEnvelope, PrimitiveError>`. Router is `Vec<Box<dyn WorkflowPrimitive>>`, tried in priority order.
+4. [ ] **Built-in primitives**: `ApplyPrimitive`, `DenyPrimitive`, `StartGoalPrimitive`, `EscalatePrimitive`
+5. [ ] **Action audit log**: Every `ActionEnvelope` appended to `.ta/action-log.jsonl` (flock-protected line append, same pattern as existing JSONL stores)
+6. [ ] **Constitution guard for `PlanMod`**: Reject any `AgentAction::PlanMod` that removes or weakens a `constitution_check` step or `[[rules.block]]` entry unless `allow_plan_structural_edits = true` in session config AND `AdvisorSecurity::Auto`
+7. [ ] **Event-driven draft polling**: Replace `poll_draft_outcome` sleep-loop with file-watcher notify on `.ta/drafts/<id>.json` — no spin-sleep; falls back to 500ms poll if watcher unavailable
+8. [ ] **`AdvisorOutcome` → `ActionEnvelope` conversion**: backward-compat bridge so existing `spawn_advisor_agent` callers still work
+9. [ ] **Tests**: router matches correct primitive; constitution guard blocks structural plan edits; audit log appends correctly and is flock-safe under concurrent writes; event-driven poll resolves applied/denied; backward-compat conversion round-trips
+
+#### Version: `0.17.0-alpha.2`
+
+---
+
+### v0.17.0.3 — Virtual Team Roles + Advisor Structured Context
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.2 (AgentAction + ActionEnvelope)
+
+**Problem**: The advisor is a generic agent with no team role. There's no way to configure different autonomy levels per role, and the advisor's first action is a blind `ta_draft_view` MCP call — structured draft data isn't pre-populated in context.
+
+**Items**:
+1. [ ] **`TeamRole` enum** + **`TeamMember`** struct in `ta-session`:
+   Roles: `Implementer`, `Reviewer`, `QA`, `Architect`, `ReleaseManager`, `Human(String)`.
+   `TeamMember { role, agent_id, security: AdvisorSecurity, persona: Option<String> }`
+2. [ ] **`team.toml`** schema + parser (`.ta/team.toml`):
+   ```toml
+   [[members]]
+   role = "reviewer"
+   agent_id = "claude-sonnet-4-6"
+   security = "auto"
+   persona = "strict-reviewer"
+   ```
+3. [ ] **`DraftSummary`** struct in `ta-changeset` (mirrors `ta draft view` JSON): `supervisor_verdict`, `file_list: Vec<FileDiff>`, `decision_log: Vec<DecisionEntry>`, `artifact_count`, `constitution_signals`
+4. [ ] **`build_advisor_context()` extended**: accepts `Option<DraftSummary>` — pre-populates supervisor verdict, file list, and decision log as structured sections in CLAUDE.md, removing the need for the advisor to call `ta_draft_view` before producing its first message
+5. [ ] **Reviewer lock**: atomic `O_CREAT | O_EXCL` create of `.ta/drafts/<id>.reviewer.lock` — second advisor returns `AdvisorOutcome::ReviewerBusy { active_advisor_goal_id }` rather than racing
+6. [ ] **`.ta/personas/` governed path**: added to default `governed_paths` config with `mode = "read-only"` — advisor subprocess CLAUDE.md includes explicit instruction prohibiting writes to `.ta/personas/`
+7. [ ] **`ta team list` / `ta team assign <role> <agent-id>`** commands
+8. [ ] **Tests**: reviewer lock is TOCTOU-safe (O_CREAT|O_EXCL); personas dir blocked from write in staging; `DraftSummary` round-trips through advisor context and is present before first MCP call; `team.toml` parse round-trip
+
+#### Version: `0.17.0-alpha.3`
+
+---
+
+### v0.17.0.4 — Workflow Step Types: agent_review, pr_monitor, plan_check, sync_build
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.3 (TeamMember + DraftSummary injection)
+
+**Problem**: The workflow YAML engine has no step types for "invoke advisor and route on outcome", "wait for CI and merge", "check if next phases need updating", or "sync + rebuild locally". The autonomous loop can't be expressed declaratively.
+
+**New step types** added to `ta-workflow` crate `WorkflowStepKind`:
+```yaml
+- type: agent_review
+  role: reviewer
+  draft: latest
+  timeout: 30m
+  on_apply:    sync_build
+  on_deny:     rework
+  on_escalate: human_gate
+  on_plan_mod: plan_check
+
+- type: pr_monitor
+  wait_for: ci_pass
+  timeout: 60m
+  on_pass:    [merge, sync_build_local]
+  on_fail:    [check_logs, escalate]
+  on_timeout: escalate
+
+- type: plan_check
+  agent_role: architect
+  check_phases: next_3
+  on_modification: replan
+  on_no_change: continue
+
+- type: sync_build
+  steps: [git_pull, cargo_build, install_local]
+  on_failure: escalate
+
+- type: human_gate
+  message: "{{escalation.question}}"
+  options: [apply, deny, modify]
+```
+
+`on_*` keys map `AgentAction` kind → next step ID or primitive. The router reads `on_<action_kind>` from step YAML and fires the next step, passing `ActionEnvelope` as context.
+
+**Items**:
+1. [ ] `WorkflowStepKind` enum: `AgentReview`, `PrMonitor`, `PlanCheck`, `SyncBuild`, `HumanGate` variants
+2. [ ] Workflow YAML parser: new step type fields + `on_*` routing key map
+3. [ ] `ta workflow run` executor: dispatch new step types via `ActionRouter`; `pr_monitor` arms `Monitor` on `gh pr view` CI status
+4. [ ] `ta workflow validate`: DAG validation — reject `on_*` pointing to undefined steps; detect static cycles; warn on missing `on_timeout` for blocking steps
+5. [ ] `ta_ask_human` in autonomous/headless context: routes to `Escalate` action + notification dispatch (ta-events) + `HumanGate` step — does not block the loop thread
+6. [ ] Built-in template: `ta workflow init --template autonomous-phase-loop` scaffolds a complete standard phase loop workflow
+7. [ ] Tests: `agent_review → Apply → sync_build` routes correctly; `pr_monitor` timeout fires `escalate`; DAG validator rejects cycles and undefined step refs; `ta_ask_human` headless produces `Escalate` not blocking read
+
+#### Version: `0.17.0-alpha.4`
+
+---
+
+### v0.17.0.5 — Autonomous Phase Loop (`ta plan build --autonomous`)
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.4 (workflow step types)
+
+**The end-to-end command.** Iterates pending plan phases through the full cycle without human input, escalating only when the cycle guard or drift threshold is hit.
+
+```bash
+ta plan build --autonomous \
+  --phases v0.17.1,v0.17.2 \
+  --workflow .ta/workflows/autonomous-phase-loop.yaml \
+  --team .ta/team.toml \
+  --max-rework-cycles 3 \
+  --drift-threshold 20 \
+  --on-escalate notify-slack
+```
+
+Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Apply: push branch + PR + `pr_monitor` → CI pass → merge → `sync_build` → next phase. On deny: rework cycle up to `--max-rework-cycles`, then escalate with full rework history.
+
+**Red-team mitigations**:
+- **Runtime cycle detection**: `(phase_id, action_kind)` visited set per iteration — `PlanMod → StartGoal → PlanMod` cycles detected and escalated
+- **Rework history in escalation**: escalation message includes all previous deny reasons + draft IDs
+- **Drift detection**: `git diff --name-only <staging_base>..HEAD` count before each phase; abort with `ta plan build --sync` suggestion if `> drift_threshold` files changed
+- **ActionEnvelope validation**: parent process verifies `role` and `security` in received envelope match spawning `TeamMember` config — subprocess cannot self-escalate
+
+**Items**:
+1. [ ] `ta plan build --autonomous` command + loop engine in `apps/ta-cli/src/commands/plan.rs`
+2. [ ] Rework cycle guard: per-phase `(phase_id, rework_round)` tracked in `.ta/action-log.jsonl`; escalate with full rework history at `max_rework_cycles`
+3. [ ] Runtime cycle detection: visited `(phase_id, action_kind)` set checked before each `ActionRouter.execute()` call
+4. [ ] Drift detection: configurable threshold + actionable abort message naming the diverged files
+5. [ ] `ActionEnvelope` validation: parent rejects envelopes where role/security exceed session config
+6. [ ] `ta plan build status`: live view (2s refresh) — current phase, step type, last action kind, CI check states, rework cycle count
+7. [ ] Integration test: two-phase autonomous run with mock `gh pr view` CI fixture → both phases apply, zero human input, action log contains full trace
+8. [ ] USAGE.md: "Autonomous phase loop" section
+
+#### Version: `0.17.0-alpha.5`
+
+---
 
 ### v0.17.1 — Database Proxy (Postgres, MySQL, SQLite)
 <!-- status: pending -->

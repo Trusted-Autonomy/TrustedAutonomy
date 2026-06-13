@@ -40,6 +40,11 @@ pub struct ApiPlanPhase {
     pub running: bool,
     /// True if a goal referencing this phase has reached pr_ready state (draft ready for review).
     pub pr_ready: bool,
+    /// UUID of the draft package for the pr_ready goal, if any (v0.17.0.1).
+    /// Present only when `pr_ready` is true. Allows Studio to navigate directly
+    /// to the draft detail panel without a separate lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<String>,
 }
 
 // ── Parsing ────────────────────────────────────────────────────
@@ -186,6 +191,7 @@ pub fn parse_plan_phases(content: &str) -> Vec<ApiPlanPhase> {
             depends_on,
             running: false,  // populated separately
             pr_ready: false, // populated separately
+            draft_id: None,  // populated separately
         });
     }
 
@@ -261,6 +267,49 @@ pub fn active_phase_states(
     states
 }
 
+/// Returns a map of phase_id → draft_id (pr_package_id) for phases whose
+/// goal has reached `pr_ready` state (v0.17.0.1).
+///
+/// Used by `get_plan_phases` to populate `ApiPlanPhase.draft_id` so Studio
+/// can navigate directly to the draft detail panel.
+pub fn active_phase_draft_ids(
+    goals_dir: &std::path::Path,
+) -> std::collections::HashMap<String, String> {
+    let mut result: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let dir = match std::fs::read_dir(goals_dir) {
+        Ok(d) => d,
+        Err(_) => return result,
+    };
+    for entry in dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let state = val
+            .get("state")
+            .and_then(|v| v.get("state").or(Some(v)))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        if state != "pr_ready" {
+            continue;
+        }
+        let Some(phase_id) = val.get("plan_phase").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(draft_id) = val.get("pr_package_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        result.insert(phase_id.to_string(), draft_id.to_string());
+    }
+    result
+}
+
 /// Returns the set of phase IDs that have at least one active goal.
 /// Convenience wrapper around `active_phase_states` for callers that only
 /// need presence (not the specific state).
@@ -315,6 +364,7 @@ pub async fn get_plan_phases(State(state): State<Arc<AppState>>) -> impl IntoRes
     // Annotate phases with their active goal state (orphaned phase IDs are suppressed).
     let goals_dir = project_root.join(".ta").join("goals");
     let active_states = active_phase_states(&goals_dir, &known_ids);
+    let draft_ids = active_phase_draft_ids(&goals_dir);
     for ph in &mut phases {
         let state = active_states
             .get(&ph.id)
@@ -328,6 +378,18 @@ pub async fn get_plan_phases(State(state): State<Arc<AppState>>) -> impl IntoRes
         if let Some(s) = state {
             ph.pr_ready = s == "pr_ready";
             ph.running = !ph.pr_ready; // running = active but not pr_ready
+        }
+        if ph.pr_ready {
+            ph.draft_id = draft_ids
+                .get(&ph.id)
+                .or_else(|| draft_ids.get(&format!("v{}", ph.id)))
+                .or_else(|| {
+                    draft_ids
+                        .iter()
+                        .find(|(a, _)| ids_match(a, &ph.id))
+                        .map(|(_, v)| v)
+                })
+                .cloned();
         }
     }
 
@@ -1421,6 +1483,70 @@ Future work.
         claims.release("v0.2.0");
         claims.release("v0.2.0"); // should not panic
         assert!(!claims.is_claimed("v0.2.0"));
+    }
+
+    // ── v0.17.0.1: active_phase_draft_ids ────────────────────────────────────
+
+    #[test]
+    fn active_phase_draft_ids_returns_draft_for_pr_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        let draft_uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        let goal = serde_json::json!({
+            "plan_phase": "v0.17.0",
+            "state": "pr_ready",
+            "pr_package_id": draft_uuid,
+        });
+        std::fs::write(goals_dir.join("g.json"), goal.to_string()).unwrap();
+
+        let ids = active_phase_draft_ids(&goals_dir);
+        assert_eq!(
+            ids.get("v0.17.0").map(|s| s.as_str()),
+            Some(draft_uuid),
+            "draft_id should be the pr_package_id of the pr_ready goal"
+        );
+    }
+
+    #[test]
+    fn active_phase_draft_ids_ignores_running_goals() {
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        let goal = serde_json::json!({
+            "plan_phase": "v0.17.0",
+            "state": "running",
+            "pr_package_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        });
+        std::fs::write(goals_dir.join("g.json"), goal.to_string()).unwrap();
+
+        let ids = active_phase_draft_ids(&goals_dir);
+        assert!(
+            ids.is_empty(),
+            "running goals should not appear in draft_ids"
+        );
+    }
+
+    #[test]
+    fn active_phase_draft_ids_ignores_goal_without_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let goals_dir = dir.path().join("goals");
+        std::fs::create_dir_all(&goals_dir).unwrap();
+
+        // pr_ready but no pr_package_id yet (draft build still in progress).
+        let goal = serde_json::json!({
+            "plan_phase": "v0.17.0",
+            "state": "pr_ready",
+        });
+        std::fs::write(goals_dir.join("g.json"), goal.to_string()).unwrap();
+
+        let ids = active_phase_draft_ids(&goals_dir);
+        assert!(
+            ids.is_empty(),
+            "pr_ready goal without pr_package_id should not produce a draft_id entry"
+        );
     }
 
     #[test]

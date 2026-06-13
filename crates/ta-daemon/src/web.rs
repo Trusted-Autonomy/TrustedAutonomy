@@ -1098,6 +1098,196 @@ mod tests {
         assert_eq!(ct, "image/png");
     }
 
+    // ── v0.17.0.1: draft detail endpoint returns supervisor_review and agent_decision_log ──
+
+    /// Build a minimal valid DraftPackage JSON with the given UUID.
+    fn minimal_draft_json(id: Uuid) -> serde_json::Value {
+        serde_json::json!({
+            "package_version": "1.0.0",
+            "package_id": id.to_string(),
+            "created_at": "2026-01-01T00:00:00Z",
+            "goal": {
+                "goal_id": "aabbccdd-0000-0000-0000-000000000000",
+                "title": "Test goal",
+                "objective": "test",
+                "success_criteria": [],
+                "constraints": []
+            },
+            "iteration": {
+                "iteration_id": "iter-1",
+                "sequence": 1,
+                "workspace_ref": {"type": "staging_dir", "ref": "test"}
+            },
+            "agent_identity": {
+                "agent_id": "test-agent",
+                "agent_type": "test",
+                "constitution_id": "default",
+                "capability_manifest_hash": "abc"
+            },
+            "summary": {"what_changed": "test", "why": "test", "impact": "none", "rollback_plan": "none", "open_questions": [], "alternatives_considered": []},
+            "plan": {"completed_steps": [], "next_steps": [], "decision_log": []},
+            "changes": {"artifacts": [], "patch_sets": [], "pending_actions": []},
+            "risk": {"risk_score": 0, "findings": [], "policy_decisions": []},
+            "provenance": {"inputs": [], "tool_trace_hash": "test"},
+            "review_requests": {"requested_actions": [], "reviewers": [], "required_approvals": 1},
+            "signatures": {"package_hash": "test", "agent_signature": "test"}
+        })
+    }
+
+    fn write_draft_json(packages_dir: &std::path::Path, id: Uuid, extra: serde_json::Value) {
+        let mut v = minimal_draft_json(id);
+        if let Some(map) = v.as_object_mut() {
+            if let Some(extra_map) = extra.as_object() {
+                for (k, val) in extra_map {
+                    map.insert(k.clone(), val.clone());
+                }
+            }
+        }
+        std::fs::write(
+            packages_dir.join(format!("{}.json", id)),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn draft_detail_returns_supervisor_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+
+        write_draft_json(
+            &packages_dir,
+            id,
+            serde_json::json!({
+                "supervisor_review": {
+                    "verdict": "pass",
+                    "scope_ok": true,
+                    "findings": ["All good"],
+                    "summary": "Changes are aligned with goal",
+                    "agent": "builtin",
+                    "duration_secs": 1.2
+                }
+            }),
+        );
+
+        let app = build_router(packages_dir);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/drafts/{}", id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status_code = resp.status();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            status_code,
+            StatusCode::OK,
+            "body: {}",
+            String::from_utf8_lossy(&body_bytes)
+        );
+        let val: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            val["supervisor_review"]["verdict"],
+            serde_json::json!("pass"),
+            "supervisor verdict should be 'pass'"
+        );
+        assert_eq!(
+            val["supervisor_review"]["summary"],
+            serde_json::json!("Changes are aligned with goal"),
+        );
+    }
+
+    #[tokio::test]
+    async fn draft_detail_returns_agent_decision_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+
+        write_draft_json(
+            &packages_dir,
+            id,
+            serde_json::json!({
+                "agent_decision_log": [
+                    {
+                        "decision": "Use JSON for serialization",
+                        "rationale": "Widely supported and human-readable",
+                        "alternatives": ["BSON", "MessagePack"],
+                        "confidence": 0.95
+                    }
+                ]
+            }),
+        );
+
+        let app = build_router(packages_dir);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/drafts/{}", id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let log = val["agent_decision_log"]
+            .as_array()
+            .expect("agent_decision_log should be an array");
+        assert_eq!(log.len(), 1, "should have one decision log entry");
+        assert_eq!(
+            log[0]["decision"],
+            serde_json::json!("Use JSON for serialization")
+        );
+        assert_eq!(log[0]["confidence"], serde_json::json!(0.95));
+    }
+
+    #[tokio::test]
+    async fn deny_draft_updates_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        write_draft_json(&packages_dir, id, serde_json::json!({}));
+
+        let app = build_router(packages_dir.clone());
+        let deny_body = serde_json::json!({"reason": "not what I asked for"});
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/drafts/{}/deny", id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(deny_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp_val["status"], serde_json::json!("Denied"));
+
+        // Verify the package file on disk reflects the denied status.
+        let pkg_path = packages_dir.join(format!("{}.json", id));
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(pkg_path).unwrap()).unwrap();
+        let status_str = serde_json::to_string(&on_disk["status"]).unwrap();
+        assert!(
+            status_str.contains("Denied") || status_str.contains("denied"),
+            "on-disk status should reflect denied: {}",
+            status_str
+        );
+    }
+
     #[tokio::test]
     async fn memory_create_and_list() {
         let dir = tempfile::tempdir().unwrap();
