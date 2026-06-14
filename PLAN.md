@@ -8572,7 +8572,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 ---
 
 ### v0.17.0.2 — AgentAction: Structured Output and Routing Foundation
-<!-- status: in_progress -->
+<!-- status: pending -->
 
 **Depends on**: v0.17.0.1 (draft detail API needed for structured pre-injection)
 
