@@ -4362,30 +4362,46 @@ fn inject_claude_settings_with_security(
     std::fs::create_dir_all(&backup_dir)?;
     std::fs::write(&backup_path, &original_content)?;
 
-    // Build allow list: start from defaults, then merge any mcp__<server>__*
-    // entries found in the user's global ~/.claude/settings.json so that
-    // user-configured MCP servers are auto-approved in staging.
+    // Build allow list: start from defaults, then merge the user's global
+    // ~/.claude/settings.json allow list so that user-configured MCP servers,
+    // Bash patterns, and other tools are auto-approved in staging.
+    // Also inherit defaultMode and skipDangerousModePermissionPrompt so that
+    // settings.local.json doesn't silently override the user's global "dontAsk"
+    // mode back to interactive prompts.
     let mut allow: Vec<String> = DEFAULT_ALLOWED_TOOLS
         .iter()
         .filter(|t| web_search_enabled || !t.starts_with("WebSearch"))
         .map(|s| format!("\"{}\"", s))
         .collect();
+    let mut global_default_mode: Option<String> = None;
+    let mut global_skip_dangerous: Option<bool> = None;
     if let Ok(home) = std::env::var("HOME") {
         let global_path = std::path::Path::new(&home)
             .join(".claude")
             .join("settings.json");
         if let Ok(content) = std::fs::read_to_string(&global_path) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                // Inherit defaultMode (e.g. "dontAsk") so staging doesn't revert to prompts.
+                if let Some(m) = val
+                    .pointer("/permissions/defaultMode")
+                    .and_then(|v| v.as_str())
+                {
+                    global_default_mode = Some(m.to_string());
+                }
+                // Inherit skipDangerousModePermissionPrompt.
+                if let Some(b) = val
+                    .get("skipDangerousModePermissionPrompt")
+                    .and_then(|v| v.as_bool())
+                {
+                    global_skip_dangerous = Some(b);
+                }
+                // Merge all allow entries from global settings (MCP and non-MCP).
                 if let Some(arr) = val.pointer("/permissions/allow").and_then(|v| v.as_array()) {
                     for entry in arr {
                         if let Some(s) = entry.as_str() {
-                            // Only copy mcp__<server>__* patterns (valid scoped wildcards).
-                            let is_scoped_mcp = s.starts_with("mcp__") && s[5..].contains("__");
-                            if is_scoped_mcp {
-                                let quoted = format!("\"{}\"", s);
-                                if !allow.contains(&quoted) {
-                                    allow.push(quoted);
-                                }
+                            let quoted = format!("\"{}\"", s);
+                            if !allow.contains(&quoted) {
+                                allow.push(quoted);
                             }
                         }
                     }
@@ -4402,6 +4418,14 @@ fn inject_claude_settings_with_security(
     }
     let deny: Vec<String> = forbidden.iter().map(|s| format!("\"{}\"", s)).collect();
 
+    // Build optional extra fields inherited from global settings.
+    let default_mode_field = global_default_mode
+        .map(|m| format!(",\n    \"defaultMode\": \"{}\"", m))
+        .unwrap_or_default();
+    let skip_dangerous_field = global_skip_dangerous
+        .map(|b| format!(",\n  \"skipDangerousModePermissionPrompt\": {}", b))
+        .unwrap_or_default();
+
     let settings_json = format!(
         r#"{{
   "_comment": "Injected by Trusted Autonomy. Agent works in a staging sandbox — all changes require human review before applying. See .ta-forbidden-tools to deny specific patterns.",
@@ -4411,11 +4435,13 @@ fn inject_claude_settings_with_security(
     ],
     "deny": [
       {}
-    ]
-  }}
+    ]{}
+  }}{}
 }}"#,
         allow.join(",\n      "),
-        deny.join(",\n      ")
+        deny.join(",\n      "),
+        default_mode_field,
+        skip_dangerous_field,
     );
 
     // Ensure .claude/ directory exists.
