@@ -269,9 +269,51 @@ pub fn spawn_advisor_agent(config: &AdvisorConfig, ta_bin: &Path) -> Result<Uuid
     ))
 }
 
+/// Check a draft file for a terminal status.
+///
+/// Returns `Some(outcome)` when the file exists and contains `applied` or `denied`.
+fn check_draft_terminal(draft_file: &Path, draft_id: Uuid) -> Option<AdvisorOutcome> {
+    match std::fs::read_to_string(draft_file) {
+        Ok(content) => {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                let status_key = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                match status_key {
+                    "applied" => return Some(AdvisorOutcome::Applied),
+                    "denied" => return Some(AdvisorOutcome::Denied),
+                    _ => {}
+                }
+                if v.get("applied").is_some() {
+                    return Some(AdvisorOutcome::Applied);
+                }
+                if v.get("denied").is_some() {
+                    return Some(AdvisorOutcome::Denied);
+                }
+                // Heuristic fallback for bare string values.
+                if content.contains("\"applied\"") {
+                    return Some(AdvisorOutcome::Applied);
+                }
+                if content.contains("\"denied\"") {
+                    return Some(AdvisorOutcome::Denied);
+                }
+            }
+            None
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(draft_id = %draft_id, "Draft file not found yet, waiting...");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(draft_id = %draft_id, error = %e, "Error reading draft file");
+            None
+        }
+    }
+}
+
 /// Poll the draft status until it reaches a terminal state (Applied or Denied).
 ///
-/// Checks every `poll_interval` until `timeout` is reached. Returns the outcome.
+/// Preferred path: watches `.ta/drafts/<id>.json` with `notify` for modify/create
+/// events — no spin-sleep. Falls back to `poll_interval` (min 500 ms) sleep-polling
+/// when a file watcher cannot be established.
 pub fn poll_draft_outcome(
     workspace_root: &Path,
     draft_id: Uuid,
@@ -282,6 +324,64 @@ pub fn poll_draft_outcome(
     let draft_file = drafts_dir.join(format!("{}.json", draft_id));
     let deadline = Instant::now() + timeout;
 
+    // Check immediately before setting up any watcher.
+    if let Some(outcome) = check_draft_terminal(&draft_file, draft_id) {
+        return outcome;
+    }
+
+    if Instant::now() >= deadline {
+        tracing::warn!(
+            draft_id = %draft_id,
+            timeout_secs = timeout.as_secs(),
+            "Advisor timed out waiting for draft outcome"
+        );
+        return AdvisorOutcome::TimedOut;
+    }
+
+    // Attempt event-driven watching on the drafts directory.
+    match try_watch_draft(&drafts_dir) {
+        Ok((mut _watcher, rx)) => {
+            tracing::debug!(draft_id = %draft_id, "Using file-watcher for draft polling");
+            loop {
+                if Instant::now() >= deadline {
+                    tracing::warn!(
+                        draft_id = %draft_id,
+                        timeout_secs = timeout.as_secs(),
+                        "Advisor timed out waiting for draft outcome"
+                    );
+                    return AdvisorOutcome::TimedOut;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match rx.recv_timeout(remaining.min(Duration::from_secs(5))) {
+                    Ok(_event) => {
+                        if let Some(outcome) = check_draft_terminal(&draft_file, draft_id) {
+                            return outcome;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Periodic check to catch any events the watcher may have missed.
+                        if let Some(outcome) = check_draft_terminal(&draft_file, draft_id) {
+                            return outcome;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        tracing::warn!(draft_id = %draft_id, "File watcher channel disconnected, falling back to poll");
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                draft_id = %draft_id,
+                error = %e,
+                "File watcher unavailable, falling back to 500 ms poll"
+            );
+        }
+    }
+
+    // Fallback: sleep-based polling (at least 500 ms between checks).
+    let effective_interval = poll_interval.max(Duration::from_millis(500));
     loop {
         if Instant::now() >= deadline {
             tracing::warn!(
@@ -292,38 +392,42 @@ pub fn poll_draft_outcome(
             return AdvisorOutcome::TimedOut;
         }
 
-        match std::fs::read_to_string(&draft_file) {
-            Ok(content) => {
-                // Quick heuristic parse — look for "status" field in the JSON.
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                    let status_key = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                    match status_key {
-                        "applied" => return AdvisorOutcome::Applied,
-                        "denied" => return AdvisorOutcome::Denied,
-                        // For nested status objects (Approved/Denied with metadata)
-                        _ if content.contains("\"applied\"") => return AdvisorOutcome::Applied,
-                        _ if content.contains("\"denied\"") => return AdvisorOutcome::Denied,
-                        _ => {}
-                    }
-                    // Check for nested object variant {"applied": {...}} or {"denied": {...}}.
-                    if v.get("applied").is_some() {
-                        return AdvisorOutcome::Applied;
-                    }
-                    if v.get("denied").is_some() {
-                        return AdvisorOutcome::Denied;
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!(draft_id = %draft_id, "Draft file not found yet, waiting...");
-            }
-            Err(e) => {
-                tracing::warn!(draft_id = %draft_id, error = %e, "Error reading draft file");
-            }
-        }
+        std::thread::sleep(effective_interval);
 
-        std::thread::sleep(poll_interval);
+        if let Some(outcome) = check_draft_terminal(&draft_file, draft_id) {
+            return outcome;
+        }
     }
+}
+
+/// Attempt to set up a file-system watcher on `dir`.
+///
+/// Returns the watcher (must be kept alive) and the event receiver.
+/// Returns `Err` if the watcher cannot be established (platform unsupported, etc.).
+fn try_watch_draft(
+    dir: &Path,
+) -> Result<
+    (
+        notify::RecommendedWatcher,
+        std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    ),
+    notify::Error,
+> {
+    use notify::Watcher;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::RecommendedWatcher::new(
+        move |res| {
+            let _ = tx.send(res);
+        },
+        notify::Config::default(),
+    )?;
+
+    if dir.exists() {
+        watcher.watch(dir, notify::RecursiveMode::NonRecursive)?;
+    }
+
+    Ok((watcher, rx))
 }
 
 /// Constitution guard: verify that auto-apply is permitted by the project constitution.
