@@ -16,10 +16,14 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# flock(2) for concurrent-safe audit log writes
+libc = { workspace = true }
+# file-watcher for event-driven draft polling (falls back to poll on unavailability)
+notify = { workspace = true }
 
 # Workspace crates
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.1" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.1" }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.2" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.2" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

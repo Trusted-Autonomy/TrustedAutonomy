@@ -8570,9 +8570,8 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 #### Version: `0.17.0-alpha.1`
 
 ---
-
 ### v0.17.0.2 — AgentAction: Structured Output and Routing Foundation
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.1 (draft detail API needed for structured pre-injection)
 
@@ -8581,23 +8580,22 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 **Solution**: A typed `AgentAction` enum carried in `ActionEnvelope`. Each action has an action ID, role, agent, timestamp, typed payload, and extensible metadata. An `ActionRouter` (trait + built-in impls) maps action kind to `WorkflowPrimitive` execution, enabling chains like `Apply → WaitCI → Merge → SyncBuild → Continue`.
 
 **Items**:
-1. [ ] **`AgentAction` enum** in `crates/ta-session/src/agent_action.rs`:
+1. [x] **`AgentAction` enum** in `crates/ta-session/src/agent_action.rs`:
    `Apply { draft_id, confidence, notes }`, `Deny { draft_id, reason, rework_hint }`,
    `PlanMod { phase_id, edit: PlanEdit, justification }`, `StartGoal { title, phase_id, context }`,
    `Escalate { question, escalate_to: RoleRef }`, `WaitCI { pr_number, checks }`, `Merge { pr_number }`, `Continue`
-2. [ ] **`ActionEnvelope`** struct: `action_id: Uuid`, `agent_id: String`, `role: TeamRole`, `timestamp`, `action: AgentAction`, `metadata: serde_json::Value`
-3. [ ] **`WorkflowPrimitive` trait** + `ActionRouter`: `matches(&AgentAction) → bool`, `execute(&ActionEnvelope, &WorkflowContext) → Result<ActionEnvelope, PrimitiveError>`. Router is `Vec<Box<dyn WorkflowPrimitive>>`, tried in priority order.
-4. [ ] **Built-in primitives**: `ApplyPrimitive`, `DenyPrimitive`, `StartGoalPrimitive`, `EscalatePrimitive`
-5. [ ] **Action audit log**: Every `ActionEnvelope` appended to `.ta/action-log.jsonl` (flock-protected line append, same pattern as existing JSONL stores)
-6. [ ] **Constitution guard for `PlanMod`**: Reject any `AgentAction::PlanMod` that removes or weakens a `constitution_check` step or `[[rules.block]]` entry unless `allow_plan_structural_edits = true` in session config AND `AdvisorSecurity::Auto`
-7. [ ] **Event-driven draft polling**: Replace `poll_draft_outcome` sleep-loop with file-watcher notify on `.ta/drafts/<id>.json` — no spin-sleep; falls back to 500ms poll if watcher unavailable
-8. [ ] **`AdvisorOutcome` → `ActionEnvelope` conversion**: backward-compat bridge so existing `spawn_advisor_agent` callers still work
-9. [ ] **Tests**: router matches correct primitive; constitution guard blocks structural plan edits; audit log appends correctly and is flock-safe under concurrent writes; event-driven poll resolves applied/denied; backward-compat conversion round-trips
+2. [x] **`ActionEnvelope`** struct: `action_id: Uuid`, `agent_id: String`, `role: TeamRole`, `timestamp`, `action: AgentAction`, `metadata: serde_json::Value`
+3. [x] **`WorkflowPrimitive` trait** + `ActionRouter`: `matches(&AgentAction) → bool`, `execute(&ActionEnvelope, &WorkflowContext) → Result<ActionEnvelope, PrimitiveError>`. Router is `Vec<Box<dyn WorkflowPrimitive>>`, tried in priority order.
+4. [x] **Built-in primitives**: `ApplyPrimitive`, `DenyPrimitive`, `StartGoalPrimitive`, `EscalatePrimitive`
+5. [x] **Action audit log**: Every `ActionEnvelope` appended to `.ta/action-log.jsonl` (flock-protected line append, same pattern as existing JSONL stores)
+6. [x] **Constitution guard for `PlanMod`**: Reject any `AgentAction::PlanMod` that removes or weakens a `constitution_check` step or `[[rules.block]]` entry unless `allow_plan_structural_edits = true` in session config AND `AdvisorSecurity::Auto`
+7. [x] **Event-driven draft polling**: Replace `poll_draft_outcome` sleep-loop with file-watcher notify on `.ta/drafts/<id>.json` — no spin-sleep; falls back to 500ms poll if watcher unavailable
+8. [x] **`AdvisorOutcome` → `ActionEnvelope` conversion**: backward-compat bridge so existing `spawn_advisor_agent` callers still work
+9. [x] **Tests**: router matches correct primitive; constitution guard blocks structural plan edits; audit log appends correctly and is flock-safe under concurrent writes; event-driven poll resolves applied/denied; backward-compat conversion round-trips
 
 #### Version: `0.17.0-alpha.2`
 
 ---
-
 ### v0.17.0.3 — Virtual Team Roles + Advisor Structured Context
 <!-- status: pending -->
 
@@ -8627,7 +8625,6 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 #### Version: `0.17.0-alpha.3`
 
 ---
-
 ### v0.17.0.4 — Workflow Step Types: agent_review, pr_monitor, plan_check, sync_build
 <!-- status: pending -->
 
@@ -8682,7 +8679,6 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 #### Version: `0.17.0-alpha.4`
 
 ---
-
 ### v0.17.0.5 — Autonomous Phase Loop (`ta plan build --autonomous`)
 <!-- status: pending -->
 
@@ -8721,7 +8717,6 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.5`
 
 ---
-
 ### v0.17.1 — Database Proxy (Postgres, MySQL, SQLite)
 <!-- status: pending -->
 

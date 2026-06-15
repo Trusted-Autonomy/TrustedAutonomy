@@ -1,7 +1,10 @@
 // ta-session — Session & Human Control Plane (Layer 3).
 
+pub mod action_audit;
+pub mod action_router;
 pub mod advisor_agent;
 pub mod advisor_session;
+pub mod agent_action;
 pub mod error;
 pub mod intent;
 pub mod manager;
@@ -11,12 +14,20 @@ pub mod session;
 pub mod workflow_manager;
 pub mod workflow_session;
 
+pub use action_audit::{ActionAuditLog, AuditLogError};
+pub use action_router::{
+    check_plan_mod_constitution, ActionRouter, ApplyPrimitive, DenyPrimitive, EscalatePrimitive,
+    PrimitiveError, StartGoalPrimitive, WorkflowContext, WorkflowPrimitive,
+};
 pub use advisor_agent::{
     build_advisor_context, check_advisor_auto_approve, poll_draft_outcome, spawn_advisor_agent,
     write_advisor_context, AdvisorConfig, AdvisorOutcome,
 };
 pub use advisor_session::{
     build_response_and_options, AdvisorContext, AdvisorOption, AdvisorSession,
+};
+pub use agent_action::{
+    advisor_outcome_to_envelope, ActionEnvelope, AgentAction, PlanEdit, RoleRef, TeamRole,
 };
 pub use error::SessionError;
 pub use intent::{classify_intent, Intent, IntentResult};
