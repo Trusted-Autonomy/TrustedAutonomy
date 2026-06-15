@@ -313,6 +313,18 @@ pub enum PlanCommands {
     ///   ta plan repair
     #[command(name = "repair")]
     Repair,
+    /// Reset a phase from `in_progress` back to `pending`.
+    ///
+    /// Use this to unblock a phase after a goal was abandoned, crashed, or
+    /// produced a draft that was denied without auto-resetting the marker.
+    ///
+    /// Examples:
+    ///   ta plan reset v0.17.0.2
+    #[command(name = "reset")]
+    Reset {
+        /// Phase ID to reset (e.g. v0.17.0.2).
+        phase: String,
+    },
     /// Build pending plan phases by running governed goals in sequence.
     ///
     /// For each pending phase, optionally shows an interactive planning session
@@ -559,6 +571,7 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
         PlanCommands::Lint { fix } => plan_lint_cmd(config, *fix),
         PlanCommands::HumanTasks { done } => plan_human_tasks_cmd(config, *done),
         PlanCommands::Repair => plan_repair(config),
+        PlanCommands::Reset { phase } => plan_reset(config, phase),
         PlanCommands::Build {
             auto,
             filter,
@@ -1328,6 +1341,54 @@ pub fn reset_phase_if_in_progress(
         .append(true)
         .open(&history_path)?;
     writeln!(file, "{}", entry)?;
+    Ok(())
+}
+
+/// CLI handler for `ta plan reset <phase-id>`.
+fn plan_reset(config: &GatewayConfig, phase_id: &str) -> anyhow::Result<()> {
+    let plan_path = config.workspace_root.join("PLAN.md");
+    if !plan_path.exists() {
+        anyhow::bail!("PLAN.md not found at {:?}.", plan_path);
+    }
+    let content = std::fs::read_to_string(&plan_path)?;
+    let phases = parse_plan(&content);
+    let phase = phases
+        .iter()
+        .find(|p| phase_ids_match(&p.id, phase_id))
+        .ok_or_else(|| anyhow::anyhow!("Phase '{}' not found in PLAN.md.", phase_id))?;
+
+    match phase.status {
+        PlanStatus::InProgress => {}
+        PlanStatus::Pending => {
+            println!("Phase {} is already pending — nothing to reset.", phase_id);
+            return Ok(());
+        }
+        PlanStatus::Done => {
+            anyhow::bail!(
+                "Phase {} is marked done and cannot be reset to pending. \
+                 If you need to re-open it, edit PLAN.md directly.",
+                phase_id
+            );
+        }
+        _ => {
+            anyhow::bail!(
+                "Phase {} has status '{}' — only in_progress phases can be reset.",
+                phase_id,
+                phase.status
+            );
+        }
+    }
+
+    reset_phase_if_in_progress(
+        &config.workspace_root,
+        phase_id,
+        "manual reset via `ta plan reset`",
+    )?;
+    println!("Phase {} reset to pending.", phase_id);
+    println!(
+        "Run `ta run \"<goal title>\" --phase {}` to start a new goal.",
+        phase_id
+    );
     Ok(())
 }
 
