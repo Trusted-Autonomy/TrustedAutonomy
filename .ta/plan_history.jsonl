@@ -388,3 +388,4 @@
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.2","source":"daemon_claim","timestamp":"2026-06-13T15:05:03.163792+00:00"}
 {"new_status":"done","old_status":"in_progress","phase_id":"v0.17.0.2","timestamp":"2026-06-15T05:59:38.479314+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.3","source":"daemon_claim","timestamp":"2026-06-15T15:21:20.453841+00:00"}
+{"new_status":"pending","note":"phase reset to pending — goal cancelled (user deleted goal)","old_status":"in_progress","phase_id":"v0.17.0.3","timestamp":"2026-06-15T15:29:48.223878+00:00"}
