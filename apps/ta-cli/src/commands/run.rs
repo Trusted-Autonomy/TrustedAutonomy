@@ -3769,6 +3769,17 @@ fn launch_agent_via_runtime(
         .collect();
     if headless {
         args.extend_from_slice(&config.headless_args);
+
+        // For claude-code: pass --strict-mcp-config so Claude skips the per-project
+        // MCP server approval dialog that would otherwise block every new staging path.
+        // --mcp-config points to the injected .mcp.json so the `ta` (and ta-memory)
+        // servers are loaded without any interactive prompt.
+        if config.name.as_deref() == Some("claude-code") {
+            let mcp_path = staging_path.join(".mcp.json");
+            args.push("--strict-mcp-config".to_string());
+            args.push("--mcp-config".to_string());
+            args.push(mcp_path.display().to_string());
+        }
     }
 
     let stdin_mode = if headless {
@@ -4537,25 +4548,18 @@ pub(crate) fn inject_mcp_server_config(staging_path: &Path) -> anyhow::Result<()
         }
     });
 
-    // Merge with existing .mcp.json if present.
-    let mut mcp_config: serde_json::Value = if original_content != NO_ORIGINAL_SENTINEL {
-        serde_json::from_str(&original_content)
-            .unwrap_or_else(|_| serde_json::json!({ "mcpServers": {} }))
-    } else {
-        serde_json::json!({ "mcpServers": {} })
-    };
-
-    // Add or update the "trusted-autonomy" server entry.
-    if let Some(servers) = mcp_config
-        .get_mut("mcpServers")
-        .and_then(|s| s.as_object_mut())
-    {
-        servers.insert("ta".to_string(), ta_server_entry);
-    } else {
-        mcp_config["mcpServers"] = serde_json::json!({
+    // Write a minimal MCP config with only the `ta` server — do NOT merge with
+    // the original .mcp.json. The original file typically contains project-level
+    // servers (claude-flow, ta-community-hub, ta-memory) that are not needed inside
+    // staging and would trigger Claude Code's per-project MCP approval dialog for
+    // every new staging path. ta-memory and ta-community-hub are injected separately
+    // by inject_memory_mcp_server() with staging-correct paths; claude-flow is never
+    // needed inside an agent run.
+    let mcp_config = serde_json::json!({
+        "mcpServers": {
             "ta": ta_server_entry
-        });
-    }
+        }
+    });
 
     std::fs::write(&mcp_json_path, serde_json::to_string_pretty(&mcp_config)?)?;
     Ok(())
