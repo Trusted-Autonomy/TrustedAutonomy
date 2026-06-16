@@ -550,7 +550,90 @@ pub async fn claim_phase(
             .into_response();
     }
 
-    // Step 1: acquire in-memory claim (serialised by mutex).
+    // Step 1: read PLAN.md and validate phase status.
+    //
+    // We check PLAN.md BEFORE the in-memory registry so we can self-heal stale
+    // claims: if PLAN.md says `pending` but the registry still holds an entry
+    // (e.g. the goal was deleted without the daemon being notified), we auto-
+    // release the stale registry entry so the new run proceeds without requiring
+    // a daemon restart.
+    let plan_path = state.project_root.join("PLAN.md");
+    let plan_content: Option<String> = if plan_path.exists() {
+        match std::fs::read_to_string(&plan_path) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": format!("Failed to read PLAN.md: {}", e) })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(ref content) = plan_content {
+        let phases = parse_plan_phases(content);
+        let maybe_phase = phases.iter().find(|p| ids_match(&p.id, &phase_id));
+
+        match maybe_phase.map(|p| p.status.as_str()) {
+            Some("done") => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!("Phase {} is already done", phase_id)
+                    })),
+                )
+                    .into_response();
+            }
+            Some("pending") => {
+                // PLAN.md says pending — any in-memory claim is stale.
+                // Auto-release so this run can proceed without a daemon restart.
+                state.phase_claims.release(&phase_id);
+            }
+            // PLAN.md in_progress + in-memory claim held → genuine concurrent run,
+            // block and surface recovery options.
+            Some("in_progress") if state.phase_claims.is_claimed(&phase_id) => {
+                let goal_hint = state
+                    .phase_claims
+                    .snapshot()
+                    .into_iter()
+                    .find(|(k, _)| k == &phase_id)
+                    .and_then(|(_, g)| g)
+                    .map(|g| format!("goal {}", g))
+                    .unwrap_or_else(|| "unknown goal".to_string());
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Phase {} could not be claimed: already in progress ({}). \
+                             If the previous run was killed or failed before producing a draft, \
+                             run `ta goal delete <id>` or `ta plan reset {}` to reclaim it.",
+                            phase_id, goal_hint, phase_id
+                        ),
+                        "hint": {
+                            "phase_id": phase_id,
+                            "held_by": goal_hint,
+                            "recovery": [
+                                "ta goal list   # find the stuck goal ID",
+                                format!("ta goal delete <id>       # delete goal + auto-unclaim"),
+                                format!("ta plan reset {}          # force-clear if goal is gone", phase_id),
+                            ]
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            // PLAN.md in_progress but in-memory claim absent — daemon was restarted and
+            // its registry was cleared. Allow the claim; the in_progress marker will be
+            // rewritten below.
+            Some("in_progress") => {}
+            _ => {} // phase not found or unrecognised status — proceed
+        }
+    }
+
+    // Step 2: acquire the in-memory claim (serialised by mutex).
     if let Err(msg) = state
         .phase_claims
         .try_claim(&phase_id, body.goal_id.as_deref())
@@ -562,53 +645,9 @@ pub async fn claim_phase(
             .into_response();
     }
 
-    // Step 2: validate PLAN.md — phase must be pending.
-    let plan_path = state.project_root.join("PLAN.md");
-    if plan_path.exists() {
-        let content = match std::fs::read_to_string(&plan_path) {
-            Ok(c) => c,
-            Err(e) => {
-                state.phase_claims.release(&phase_id);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": format!("Failed to read PLAN.md: {}", e) })),
-                )
-                    .into_response();
-            }
-        };
-
-        let phases = parse_plan_phases(&content);
-        let maybe_phase = phases.iter().find(|p| ids_match(&p.id, &phase_id));
-
-        match maybe_phase.map(|p| p.status.as_str()) {
-            Some("done") => {
-                state.phase_claims.release(&phase_id);
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!("Phase {} is already done", phase_id)
-                    })),
-                )
-                    .into_response();
-            }
-            Some("in_progress") => {
-                state.phase_claims.release(&phase_id);
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!(
-                            "Phase {} is already claimed (in_progress in PLAN.md)",
-                            phase_id
-                        )
-                    })),
-                )
-                    .into_response();
-            }
-            _ => {} // pending or not found — proceed
-        }
-
-        // Step 3: write in_progress marker to PLAN.md.
-        let updated = update_phase_status_in_content(&content, &phase_id, "in_progress");
+    // Step 3: write `in_progress` marker to PLAN.md.
+    if let Some(ref content) = plan_content {
+        let updated = update_phase_status_in_content(content, &phase_id, "in_progress");
         if let Err(e) = std::fs::write(&plan_path, &updated) {
             state.phase_claims.release(&phase_id);
             return (
@@ -617,24 +656,24 @@ pub async fn claim_phase(
             )
                 .into_response();
         }
+    }
 
-        // Step 4: record in plan_history.jsonl.
-        let history_path = state.project_root.join(".ta/plan_history.jsonl");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&history_path)
-        {
-            use std::io::Write as _;
-            let entry = serde_json::json!({
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "phase_id": phase_id,
-                "old_status": "pending",
-                "new_status": "in_progress",
-                "source": "daemon_claim",
-            });
-            let _ = writeln!(file, "{}", entry);
-        }
+    // Step 4: record in plan_history.jsonl.
+    let history_path = state.project_root.join(".ta/plan_history.jsonl");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&history_path)
+    {
+        use std::io::Write as _;
+        let entry = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "phase_id": phase_id,
+            "old_status": "pending",
+            "new_status": "in_progress",
+            "source": "daemon_claim",
+        });
+        let _ = writeln!(file, "{}", entry);
     }
 
     (
