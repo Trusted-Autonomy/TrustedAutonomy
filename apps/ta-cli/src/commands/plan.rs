@@ -1341,7 +1341,31 @@ pub fn reset_phase_if_in_progress(
         .append(true)
         .open(&history_path)?;
     writeln!(file, "{}", entry)?;
+
+    // Best-effort: tell the daemon to release its in-memory claim so future
+    // `ta run` calls succeed without requiring a daemon restart.
+    release_daemon_phase_claim(project_root, phase_id);
+
     Ok(())
+}
+
+/// Fire-and-forget HTTP call to release the daemon's in-memory phase claim.
+///
+/// The daemon holds phase claims in RAM — resetting PLAN.md alone leaves a
+/// stale entry that blocks the next `ta run` with "already claimed". This
+/// function corrects that. Errors are silently swallowed: the daemon may not
+/// be running, and PLAN.md is already the authoritative source of truth.
+fn release_daemon_phase_claim(project_root: &Path, phase_id: &str) {
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    else {
+        return;
+    };
+    let daemon_url = super::daemon::resolve_daemon_url(project_root, None);
+    let url = format!("{}/api/plan/phase/release", daemon_url);
+    let body = serde_json::json!({ "phase_id": phase_id });
+    let _ = client.post(&url).json(&body).send();
 }
 
 /// CLI handler for `ta plan reset <phase-id>`.
