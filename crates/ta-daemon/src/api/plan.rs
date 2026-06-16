@@ -592,44 +592,43 @@ pub async fn claim_phase(
                 // Auto-release so this run can proceed without a daemon restart.
                 state.phase_claims.release(&phase_id);
             }
-            Some("in_progress") => {
-                // PLAN.md still shows in_progress. Only block if the in-memory
-                // claim is also held — that's the legitimate concurrent-run guard.
-                if state.phase_claims.is_claimed(&phase_id) {
-                    let goal_hint = state
-                        .phase_claims
-                        .snapshot()
-                        .into_iter()
-                        .find(|(k, _)| k == &phase_id)
-                        .and_then(|(_, g)| g)
-                        .map(|g| format!("goal {}", g))
-                        .unwrap_or_else(|| "unknown goal".to_string());
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(serde_json::json!({
-                            "error": format!(
-                                "Phase {} could not be claimed: already in progress ({}). \
-                                 If the previous run was killed or failed before producing a draft, \
-                                 run `ta goal delete <id>` or `ta plan reset {}` to reclaim it.",
-                                phase_id, goal_hint, phase_id
-                            ),
-                            "hint": {
-                                "phase_id": phase_id,
-                                "held_by": goal_hint,
-                                "recovery": [
-                                    "ta goal list   # find the stuck goal ID",
-                                    format!("ta goal delete <id>       # delete goal + auto-unclaim"),
-                                    format!("ta plan reset {}          # force-clear if goal is gone", phase_id),
-                                ]
-                            }
-                        })),
-                    )
-                        .into_response();
-                }
-                // In-memory claim absent but PLAN.md says in_progress — the daemon
-                // was restarted and its registry was cleared. Allow the claim; the
-                // in_progress marker will be rewritten below.
+            // PLAN.md in_progress + in-memory claim held → genuine concurrent run,
+            // block and surface recovery options.
+            Some("in_progress") if state.phase_claims.is_claimed(&phase_id) => {
+                let goal_hint = state
+                    .phase_claims
+                    .snapshot()
+                    .into_iter()
+                    .find(|(k, _)| k == &phase_id)
+                    .and_then(|(_, g)| g)
+                    .map(|g| format!("goal {}", g))
+                    .unwrap_or_else(|| "unknown goal".to_string());
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Phase {} could not be claimed: already in progress ({}). \
+                             If the previous run was killed or failed before producing a draft, \
+                             run `ta goal delete <id>` or `ta plan reset {}` to reclaim it.",
+                            phase_id, goal_hint, phase_id
+                        ),
+                        "hint": {
+                            "phase_id": phase_id,
+                            "held_by": goal_hint,
+                            "recovery": [
+                                "ta goal list   # find the stuck goal ID",
+                                format!("ta goal delete <id>       # delete goal + auto-unclaim"),
+                                format!("ta plan reset {}          # force-clear if goal is gone", phase_id),
+                            ]
+                        }
+                    })),
+                )
+                    .into_response();
             }
+            // PLAN.md in_progress but in-memory claim absent — daemon was restarted and
+            // its registry was cleared. Allow the claim; the in_progress marker will be
+            // rewritten below.
+            Some("in_progress") => {}
             _ => {} // phase not found or unrecognised status — proceed
         }
     }
