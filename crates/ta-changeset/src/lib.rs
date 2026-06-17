@@ -18,6 +18,7 @@ pub mod diff;
 pub mod diff_handlers;
 pub mod draft_package;
 pub mod draft_resolver;
+pub mod draft_summary;
 pub mod error;
 pub mod explanation;
 pub mod interaction;
@@ -97,6 +98,8 @@ pub use uri_pattern::{filter_uris, matches_uri};
 pub use webhook_channel::WebhookChannel;
 
 pub use milestone_draft::{MilestoneDraft, PhaseSummary};
+
+pub use draft_summary::{ConstitutionSignal, DraftSummary, FileDiff};
 
 // Backwards compatibility: export old names as aliases
 pub use draft_package::DraftPackage as PRPackage;

@@ -12,7 +12,6 @@ use crate::advisor_agent::AdvisorOutcome;
 // ── TeamRole ──────────────────────────────────────────────────────────────────
 
 /// Role of the agent/team member producing or consuming an action.
-/// Extended in v0.17.0.3 with TeamMember + team.toml.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamRole {
@@ -36,6 +35,21 @@ impl std::fmt::Display for TeamRole {
             TeamRole::Human(id) => write!(f, "human:{}", id),
         }
     }
+}
+
+// ── TeamMember ────────────────────────────────────────────────────────────────
+
+/// A configured team member with role, agent identity, security level, and optional persona (v0.17.0.3).
+///
+/// Persisted in `.ta/team.toml` and used by the advisor subsystem to select
+/// the right agent, security posture, and persona for each role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub role: TeamRole,
+    pub agent_id: String,
+    pub security: crate::workflow_session::AdvisorSecurity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 // ── RoleRef ───────────────────────────────────────────────────────────────────
@@ -227,6 +241,16 @@ pub fn advisor_outcome_to_envelope(
             question: format!(
                 "Advisor subprocess failed to start: {}. Manual review required.",
                 reason
+            ),
+            escalate_to: RoleRef::Role(TeamRole::Human("primary".to_string())),
+        },
+        AdvisorOutcome::ReviewerBusy {
+            active_advisor_goal_id,
+        } => AgentAction::Escalate {
+            question: format!(
+                "Another advisor (goal {}) is already reviewing this draft. \
+                 Wait for it to complete or manually review the draft.",
+                active_advisor_goal_id
             ),
             escalate_to: RoleRef::Role(TeamRole::Human("primary".to_string())),
         },

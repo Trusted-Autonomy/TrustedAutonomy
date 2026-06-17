@@ -1127,6 +1127,16 @@ fn run_session(
                                         // Fall back to prompt gate.
                                         false
                                     }
+                                    AdvisorOutcome::ReviewerBusy {
+                                        active_advisor_goal_id,
+                                    } => {
+                                        eprintln!(
+                                            "  ✗ Reviewer busy: another advisor (goal {}) is \
+                                             already reviewing this draft. Falling back to manual gate.",
+                                            active_advisor_goal_id
+                                        );
+                                        false
+                                    }
                                 }
                             }
                             Err(e) => {

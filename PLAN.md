@@ -8597,17 +8597,17 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.17.0.3 — Virtual Team Roles + Advisor Structured Context
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.2 (AgentAction + ActionEnvelope)
 
 **Problem**: The advisor is a generic agent with no team role. There's no way to configure different autonomy levels per role, and the advisor's first action is a blind `ta_draft_view` MCP call — structured draft data isn't pre-populated in context.
 
 **Items**:
-1. [ ] **`TeamRole` enum** + **`TeamMember`** struct in `ta-session`:
+1. [x] **`TeamRole` enum** + **`TeamMember`** struct in `ta-session`:
    Roles: `Implementer`, `Reviewer`, `QA`, `Architect`, `ReleaseManager`, `Human(String)`.
    `TeamMember { role, agent_id, security: AdvisorSecurity, persona: Option<String> }`
-2. [ ] **`team.toml`** schema + parser (`.ta/team.toml`):
+2. [x] **`team.toml`** schema + parser (`.ta/team.toml`):
    ```toml
    [[members]]
    role = "reviewer"
@@ -8615,12 +8615,12 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
    security = "auto"
    persona = "strict-reviewer"
    ```
-3. [ ] **`DraftSummary`** struct in `ta-changeset` (mirrors `ta draft view` JSON): `supervisor_verdict`, `file_list: Vec<FileDiff>`, `decision_log: Vec<DecisionEntry>`, `artifact_count`, `constitution_signals`
-4. [ ] **`build_advisor_context()` extended**: accepts `Option<DraftSummary>` — pre-populates supervisor verdict, file list, and decision log as structured sections in CLAUDE.md, removing the need for the advisor to call `ta_draft_view` before producing its first message
-5. [ ] **Reviewer lock**: atomic `O_CREAT | O_EXCL` create of `.ta/drafts/<id>.reviewer.lock` — second advisor returns `AdvisorOutcome::ReviewerBusy { active_advisor_goal_id }` rather than racing
-6. [ ] **`.ta/personas/` governed path**: added to default `governed_paths` config with `mode = "read-only"` — advisor subprocess CLAUDE.md includes explicit instruction prohibiting writes to `.ta/personas/`
-7. [ ] **`ta team list` / `ta team assign <role> <agent-id>`** commands
-8. [ ] **Tests**: reviewer lock is TOCTOU-safe (O_CREAT|O_EXCL); personas dir blocked from write in staging; `DraftSummary` round-trips through advisor context and is present before first MCP call; `team.toml` parse round-trip
+3. [x] **`DraftSummary`** struct in `ta-changeset` (mirrors `ta draft view` JSON): `supervisor_verdict`, `file_list: Vec<FileDiff>`, `decision_log: Vec<DecisionEntry>`, `artifact_count`, `constitution_signals`
+4. [x] **`build_advisor_context()` extended**: accepts `Option<DraftSummary>` — pre-populates supervisor verdict, file list, and decision log as structured sections in CLAUDE.md, removing the need for the advisor to call `ta_draft_view` before producing its first message
+5. [x] **Reviewer lock**: atomic `O_CREAT | O_EXCL` create of `.ta/drafts/<id>.reviewer.lock` — second advisor returns `AdvisorOutcome::ReviewerBusy { active_advisor_goal_id }` rather than racing
+6. [x] **`.ta/personas/` governed path**: added to default `governed_paths` config with `mode = "read-only"` — advisor subprocess CLAUDE.md includes explicit instruction prohibiting writes to `.ta/personas/`
+7. [x] **`ta team list` / `ta team assign <role> <agent-id>`** commands
+8. [x] **Tests**: reviewer lock is TOCTOU-safe (O_CREAT|O_EXCL); personas dir blocked from write in staging; `DraftSummary` round-trips through advisor context and is present before first MCP call; `team.toml` parse round-trip
 
 #### Version: `0.17.0-alpha.3`
 

@@ -554,6 +554,19 @@ enum Commands {
         #[command(subcommand)]
         command: commands::style::StyleCommands,
     },
+    /// Manage the virtual team: agent role assignments, security levels, and personas.
+    ///
+    /// `ta team list` shows roles configured in .ta/team.toml.
+    /// `ta team assign <role> <agent-id>` adds or updates a role assignment.
+    ///
+    /// Examples:
+    ///   ta team list
+    ///   ta team assign reviewer claude-sonnet-4-6 --security auto --persona strict-reviewer
+    ///   ta team assign implementer claude-opus-4-8
+    Team {
+        #[command(subcommand)]
+        command: commands::team::TeamCommands,
+    },
     /// Manage the project behavioral constitution (.ta/constitution.md).
     ///
     /// `ta constitution init` asks an agent to draft a behavioral contract
@@ -1091,6 +1104,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Agent { command } => commands::agent::execute(command, &config),
         Commands::Style { command } => commands::style::execute(command),
+        Commands::Team { command } => commands::team::execute(command, &config),
         Commands::Constitution { command } => commands::constitution::execute(command, &config),
         Commands::Memory { command } => commands::memory::execute(command, &config),
         Commands::Adapter { command } => commands::adapter::execute(command, &project_root),
