@@ -20,7 +20,7 @@ toml = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }
 sha2 = "0.10"
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.2" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.3" }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

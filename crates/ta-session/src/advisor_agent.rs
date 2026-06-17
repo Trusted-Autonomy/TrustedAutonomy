@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use ta_changeset::draft_summary::DraftSummary;
+
 use crate::phase_summary::PhaseSummary;
 use crate::workflow_session::AdvisorSecurity;
 
@@ -28,6 +30,8 @@ pub enum AdvisorOutcome {
     TimedOut,
     /// Advisor subprocess failed to start or exited with an error.
     SpawnFailed { reason: String },
+    /// Another advisor is already reviewing this draft (reviewer lock held).
+    ReviewerBusy { active_advisor_goal_id: Uuid },
 }
 
 impl std::fmt::Display for AdvisorOutcome {
@@ -37,6 +41,11 @@ impl std::fmt::Display for AdvisorOutcome {
             AdvisorOutcome::Denied => write!(f, "denied"),
             AdvisorOutcome::TimedOut => write!(f, "timed_out"),
             AdvisorOutcome::SpawnFailed { reason } => write!(f, "spawn_failed: {}", reason),
+            AdvisorOutcome::ReviewerBusy {
+                active_advisor_goal_id,
+            } => {
+                write!(f, "reviewer_busy: {}", active_advisor_goal_id)
+            }
         }
     }
 }
@@ -60,6 +69,12 @@ pub struct AdvisorConfig {
     pub persona: Option<String>,
     /// Optional pre-built phase summary for milestone review.
     pub phase_summary: Option<PhaseSummary>,
+    /// Optional pre-built draft summary for context injection (v0.17.0.3).
+    ///
+    /// When present, `build_advisor_context` pre-populates the advisor's CLAUDE.md
+    /// with the supervisor verdict, file list, and decision log so the advisor can
+    /// present a useful first message without calling `ta_draft_view`.
+    pub draft_summary: Option<DraftSummary>,
     /// Timeout for the advisor conversation (default: 30 min).
     pub timeout: Duration,
 }
@@ -81,6 +96,7 @@ impl AdvisorConfig {
             security: AdvisorSecurity::ReadOnly,
             persona: None,
             phase_summary: None,
+            draft_summary: None,
             timeout: Duration::from_secs(30 * 60),
         }
     }
@@ -97,6 +113,11 @@ impl AdvisorConfig {
 
     pub fn with_phase_summary(mut self, summary: PhaseSummary) -> Self {
         self.phase_summary = Some(summary);
+        self
+    }
+
+    pub fn with_draft_summary(mut self, summary: DraftSummary) -> Self {
+        self.draft_summary = Some(summary);
         self
     }
 
@@ -126,7 +147,7 @@ pub fn build_advisor_context(config: &AdvisorConfig) -> String {
     );
 
     ctx.push_str(&format!("**Draft ID**: `{}`\n\n", config.draft_id));
-    ctx.push_str("Use `ta_draft_view` to read the full draft, `ta_fs_read` for file contents.\n\n");
+    ctx.push_str("Use `ta_draft_view` for the full diff, `ta_fs_read` for file contents.\n\n");
 
     // Security level: list available tools.
     ctx.push_str("## Available Actions\n\n");
@@ -156,6 +177,19 @@ pub fn build_advisor_context(config: &AdvisorConfig) -> String {
         }
     }
 
+    // Restrictions — always emitted.
+    ctx.push_str(
+        "## Restrictions\n\n\
+         - You may NOT write to `.ta/personas/` — this directory is governed read-only for agents. \
+         Persona files can only be modified by humans via the normal `ta draft` workflow.\n\n",
+    );
+
+    // Pre-populated draft summary (v0.17.0.3) — removes the need for an initial ta_draft_view call.
+    if let Some(ref ds) = config.draft_summary {
+        ctx.push_str(&ds.render_markdown());
+        ctx.push('\n');
+    }
+
     // Phase summary if present.
     if let Some(ref ps) = config.phase_summary {
         ctx.push_str("## Phase Run Summary\n\n");
@@ -163,21 +197,120 @@ pub fn build_advisor_context(config: &AdvisorConfig) -> String {
         ctx.push('\n');
     }
 
-    ctx.push_str(
-        "## Conversation Protocol\n\n\
-         1. Call `ta_draft_view` to load the draft summary.\n\
-         2. Present: what changed, key decisions, any risks flagged, questions for the human.\n\
-         3. Call `ta_ask_human(\"Here's what changed: [summary]. Any concerns before I apply?\")` \
-            — use `response_hint: freeform`.\n\
-         4. Interpret the human's response:\n\
-            - \"apply\" / \"looks good\" → call `ta draft approve`, then `ta draft apply`, then exit.\n\
-            - \"skip\" / \"don't apply\" → call `ta draft deny`, then exit.\n\
-            - A modification request → present the `ta run \"...\"` command (or fire it in auto mode).\n\
-            - A question → answer from the decision log and `ta_fs_read`, then loop back to step 2.\n\
-         5. Never apply without explicit human approval (unless security = auto and confidence ≥ 80%).\n"
-    );
+    // Conversation protocol — varies depending on whether draft summary is pre-loaded.
+    if config.draft_summary.is_some() {
+        ctx.push_str(
+            "## Conversation Protocol\n\n\
+             The draft summary is pre-loaded above. You can begin presenting to the human immediately.\n\
+             1. Present: what changed, key decisions, any risks flagged, questions for the human.\n\
+             2. Call `ta_ask_human(\"Here's what changed: [summary]. Any concerns before I apply?\")` \
+                — use `response_hint: freeform`.\n\
+             3. Interpret the human's response:\n\
+                - \"apply\" / \"looks good\" → call `ta draft approve`, then `ta draft apply`, then exit.\n\
+                - \"skip\" / \"don't apply\" → call `ta draft deny`, then exit.\n\
+                - A modification request → present the `ta run \"...\"` command (or fire it in auto mode).\n\
+                - A question → answer from the decision log and `ta_fs_read`, then loop back to step 1.\n\
+             4. Never apply without explicit human approval (unless security = auto and confidence ≥ 80%).\n\
+             5. For full file diffs, use `ta_draft_view` or `ta_fs_read` as needed.\n"
+        );
+    } else {
+        ctx.push_str(
+            "## Conversation Protocol\n\n\
+             1. Call `ta_draft_view` to load the draft summary.\n\
+             2. Present: what changed, key decisions, any risks flagged, questions for the human.\n\
+             3. Call `ta_ask_human(\"Here's what changed: [summary]. Any concerns before I apply?\")` \
+                — use `response_hint: freeform`.\n\
+             4. Interpret the human's response:\n\
+                - \"apply\" / \"looks good\" → call `ta draft approve`, then `ta draft apply`, then exit.\n\
+                - \"skip\" / \"don't apply\" → call `ta draft deny`, then exit.\n\
+                - A modification request → present the `ta run \"...\"` command (or fire it in auto mode).\n\
+                - A question → answer from the decision log and `ta_fs_read`, then loop back to step 2.\n\
+             5. Never apply without explicit human approval (unless security = auto and confidence ≥ 80%).\n"
+        );
+    }
 
     ctx
+}
+
+// ── Reviewer Lock ─────────────────────────────────────────────────────────────
+
+/// RAII guard that holds `.ta/drafts/<draft_id>.reviewer.lock`.
+///
+/// Deletes the lock file when dropped. Created by [`acquire_reviewer_lock`].
+#[derive(Debug)]
+pub struct ReviewerLock {
+    path: PathBuf,
+}
+
+impl Drop for ReviewerLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Attempt to acquire the reviewer lock for `draft_id` using O_CREAT|O_EXCL semantics.
+///
+/// Creates `.ta/drafts/<draft_id>.reviewer.lock` containing `{"advisor_goal_id":"<uuid>"}`.
+/// Returns `Ok(ReviewerLock)` on success.
+/// Returns `Err(active_goal_id)` if the lock already exists (another advisor is active).
+///
+/// The lock is TOCTOU-safe because `create_new(true)` maps to `O_CREAT|O_EXCL` on
+/// POSIX systems and `CREATE_NEW` on Windows — both are atomic at the filesystem level.
+pub fn acquire_reviewer_lock(
+    workspace_root: &Path,
+    draft_id: Uuid,
+    advisor_goal_id: Uuid,
+) -> Result<ReviewerLock, Uuid> {
+    let drafts_dir = workspace_root.join(".ta").join("drafts");
+    let lock_path = drafts_dir.join(format!("{}.reviewer.lock", draft_id));
+
+    // Ensure the directory exists.
+    if let Err(e) = std::fs::create_dir_all(&drafts_dir) {
+        tracing::warn!(draft_id = %draft_id, error = %e, "Failed to create drafts dir for reviewer lock");
+    }
+
+    let content = serde_json::json!({ "advisor_goal_id": advisor_goal_id }).to_string();
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true) // O_CREAT | O_EXCL — atomic
+        .open(&lock_path)
+    {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            let _ = file.write_all(content.as_bytes());
+            tracing::debug!(
+                draft_id = %draft_id,
+                advisor_goal_id = %advisor_goal_id,
+                "Acquired reviewer lock"
+            );
+            Ok(ReviewerLock { path: lock_path })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Read the existing lock to extract the active goal ID.
+            let active_id = std::fs::read_to_string(&lock_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v.get("advisor_goal_id")
+                        .and_then(|id| id.as_str())
+                        .map(String::from)
+                })
+                .and_then(|s| Uuid::parse_str(&s).ok())
+                .unwrap_or(Uuid::nil());
+            tracing::debug!(
+                draft_id = %draft_id,
+                active_goal_id = %active_id,
+                "Reviewer lock busy"
+            );
+            Err(active_id)
+        }
+        Err(e) => {
+            tracing::warn!(draft_id = %draft_id, error = %e, "Unexpected error acquiring reviewer lock");
+            // Treat unexpected errors as busy to avoid racing.
+            Err(Uuid::nil())
+        }
+    }
 }
 
 /// Write the advisor context to `.ta/advisor/<item_id>/context.md` in the workspace.
@@ -458,6 +591,7 @@ pub fn check_advisor_auto_approve(
 mod tests {
     use super::*;
     use crate::phase_summary::{PhaseRecord, PhaseSummary};
+    use ta_changeset::draft_summary::{ConstitutionSignal, DraftSummary, FileDiff};
     use tempfile::TempDir;
 
     fn make_config(tmp: &TempDir) -> AdvisorConfig {
@@ -541,6 +675,145 @@ mod tests {
             }
             .to_string(),
             "spawn_failed: no binary"
+        );
+        let busy_id = Uuid::nil();
+        assert_eq!(
+            AdvisorOutcome::ReviewerBusy {
+                active_advisor_goal_id: busy_id
+            }
+            .to_string(),
+            format!("reviewer_busy: {}", busy_id)
+        );
+    }
+
+    // ── Reviewer lock tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn reviewer_lock_is_exclusive() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ta/drafts")).unwrap();
+        let draft_id = Uuid::new_v4();
+        let goal_id_1 = Uuid::new_v4();
+        let goal_id_2 = Uuid::new_v4();
+
+        // First acquire succeeds.
+        let lock1 = acquire_reviewer_lock(tmp.path(), draft_id, goal_id_1).unwrap();
+
+        // Second acquire fails (lock is held).
+        let result = acquire_reviewer_lock(tmp.path(), draft_id, goal_id_2);
+        assert!(
+            result.is_err(),
+            "Second acquire should fail while lock is held"
+        );
+
+        // After the first lock is released, a new acquire succeeds.
+        drop(lock1);
+        let lock2 = acquire_reviewer_lock(tmp.path(), draft_id, goal_id_2);
+        assert!(lock2.is_ok(), "Should acquire after previous lock dropped");
+    }
+
+    #[test]
+    fn reviewer_lock_records_goal_id() {
+        let tmp = TempDir::new().unwrap();
+        let draft_id = Uuid::new_v4();
+        let goal_id = Uuid::new_v4();
+        let _lock = acquire_reviewer_lock(tmp.path(), draft_id, goal_id).unwrap();
+
+        let lock_path = tmp
+            .path()
+            .join(".ta/drafts")
+            .join(format!("{}.reviewer.lock", draft_id));
+        let content = std::fs::read_to_string(&lock_path).unwrap();
+        assert!(content.contains(&goal_id.to_string()));
+    }
+
+    #[test]
+    fn reviewer_lock_returns_active_goal_on_busy() {
+        let tmp = TempDir::new().unwrap();
+        let draft_id = Uuid::new_v4();
+        let active_goal = Uuid::new_v4();
+
+        let _lock = acquire_reviewer_lock(tmp.path(), draft_id, active_goal).unwrap();
+        let err = acquire_reviewer_lock(tmp.path(), draft_id, Uuid::new_v4()).unwrap_err();
+        assert_eq!(
+            err, active_goal,
+            "Busy error should contain the active goal ID"
+        );
+    }
+
+    #[test]
+    fn reviewer_lock_cleans_up_on_drop() {
+        let tmp = TempDir::new().unwrap();
+        let draft_id = Uuid::new_v4();
+        let lock_path = tmp
+            .path()
+            .join(".ta/drafts")
+            .join(format!("{}.reviewer.lock", draft_id));
+
+        {
+            let _lock = acquire_reviewer_lock(tmp.path(), draft_id, Uuid::new_v4()).unwrap();
+            assert!(lock_path.exists());
+        }
+        assert!(!lock_path.exists(), "Lock file should be removed on drop");
+    }
+
+    // ── Personas restriction tests ─────────────────────────────────────────────
+
+    #[test]
+    fn build_advisor_context_prohibits_personas_writes() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp);
+        let ctx = build_advisor_context(&config);
+        assert!(
+            ctx.contains(".ta/personas/"),
+            "Context should mention .ta/personas/"
+        );
+        assert!(
+            ctx.contains("NOT write") || ctx.contains("read-only"),
+            "Context should prohibit writing to personas dir"
+        );
+    }
+
+    // ── Draft summary injection tests ──────────────────────────────────────────
+
+    #[test]
+    fn build_advisor_context_with_draft_summary() {
+        let tmp = TempDir::new().unwrap();
+        let mut summary = DraftSummary::new();
+        summary.artifact_count = 3;
+        summary.supervisor_verdict = Some("no blocking issues".to_string());
+        summary.file_list.push(FileDiff {
+            path: "src/main.rs".to_string(),
+            action: "modified".to_string(),
+            what: Some("Added team commands".to_string()),
+        });
+        summary.constitution_signals.push(ConstitutionSignal {
+            signal: "no tests added".to_string(),
+            severity: "warn".to_string(),
+        });
+        let config = make_config(&tmp).with_draft_summary(summary);
+        let ctx = build_advisor_context(&config);
+        assert!(ctx.contains("Draft Summary"));
+        assert!(ctx.contains("no blocking issues"));
+        assert!(ctx.contains("src/main.rs"));
+        assert!(ctx.contains("Added team commands"));
+        assert!(ctx.contains("[WARN]"));
+        // Without a pre-loaded summary the protocol says "1. Call `ta_draft_view`"
+        // With a summary it should say the summary is pre-loaded.
+        assert!(
+            !ctx.contains("1. Call `ta_draft_view` to load the draft summary"),
+            "Protocol should not ask to load draft view when summary is pre-populated"
+        );
+    }
+
+    #[test]
+    fn build_advisor_context_without_draft_summary_keeps_protocol() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp);
+        let ctx = build_advisor_context(&config);
+        assert!(
+            ctx.contains("Call `ta_draft_view` to load the draft summary"),
+            "Without summary, protocol should still instruct ta_draft_view"
         );
     }
 
