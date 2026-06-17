@@ -8626,7 +8626,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.17.0.4 — Workflow Step Types: agent_review, pr_monitor, plan_check, sync_build
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.17.0.3 (TeamMember + DraftSummary injection)
 
