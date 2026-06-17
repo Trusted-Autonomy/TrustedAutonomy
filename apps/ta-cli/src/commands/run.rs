@@ -3769,17 +3769,20 @@ fn launch_agent_via_runtime(
         .collect();
     if headless {
         args.extend_from_slice(&config.headless_args);
+    }
 
-        // For claude-code: pass --strict-mcp-config so Claude skips the per-project
-        // MCP server approval dialog that would otherwise block every new staging path.
-        // --mcp-config points to the injected .mcp.json so the `ta` (and ta-memory)
-        // servers are loaded without any interactive prompt.
-        if config.name.as_deref() == Some("claude-code") {
-            let mcp_path = staging_path.join(".mcp.json");
-            args.push("--strict-mcp-config".to_string());
-            args.push("--mcp-config".to_string());
-            args.push(mcp_path.display().to_string());
-        }
+    // For claude-code: pass --strict-mcp-config so Claude skips the per-project
+    // MCP server approval dialog. This applies to both headless and interactive runs
+    // because every goal uses a new UUID staging path — Claude would otherwise prompt
+    // for approval on every single run. The staging .mcp.json is TA-controlled (only
+    // the `ta` server, written by inject_mcp_server_config), so skipping the dialog
+    // is safe and expected. Users who want selective or global MCP approval control
+    // can configure auto_approve_mcp in workflow.toml (v0.17.0.4+).
+    if config.name.as_deref() == Some("claude-code") {
+        let mcp_path = staging_path.join(".mcp.json");
+        args.push("--strict-mcp-config".to_string());
+        args.push("--mcp-config".to_string());
+        args.push(mcp_path.display().to_string());
     }
 
     let stdin_mode = if headless {
