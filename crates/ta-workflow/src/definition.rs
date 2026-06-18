@@ -52,6 +52,11 @@ impl WorkflowCatalog {
                 "Single specialist reviewer: runs one agent with a role objective, \
                 produces a structured score + findings (v0.15.15)",
             ),
+            (
+                "autonomous-phase-loop",
+                "Autonomous phase loop: agent_review → apply/deny → sync_build; \
+                pr_monitor + plan_check gates; human_gate on escalation (v0.17.0.4)",
+            ),
         ]
     }
 
@@ -456,7 +461,8 @@ verdict:
         assert!(names.contains(&"plan-build-loop"));
         assert!(names.contains(&"code-review-consensus"));
         assert!(names.contains(&"review-specialist"));
-        assert_eq!(catalog.len(), 8);
+        assert!(names.contains(&"autonomous-phase-loop"));
+        assert_eq!(catalog.len(), 9);
     }
 
     #[test]
@@ -469,6 +475,7 @@ verdict:
         assert!(WorkflowCatalog::is_known("plan-build-loop"));
         assert!(WorkflowCatalog::is_known("code-review-consensus"));
         assert!(WorkflowCatalog::is_known("review-specialist"));
+        assert!(WorkflowCatalog::is_known("autonomous-phase-loop"));
         assert!(!WorkflowCatalog::is_known("unknown-workflow"));
         assert!(!WorkflowCatalog::is_known(""));
     }

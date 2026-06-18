@@ -8626,7 +8626,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.17.0.4 — Workflow Step Types: agent_review, pr_monitor, plan_check, sync_build
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.3 (TeamMember + DraftSummary injection)
 
@@ -8668,13 +8668,13 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 `on_*` keys map `AgentAction` kind → next step ID or primitive. The router reads `on_<action_kind>` from step YAML and fires the next step, passing `ActionEnvelope` as context.
 
 **Items**:
-1. [ ] `WorkflowStepKind` enum: `AgentReview`, `PrMonitor`, `PlanCheck`, `SyncBuild`, `HumanGate` variants
-2. [ ] Workflow YAML parser: new step type fields + `on_*` routing key map
-3. [ ] `ta workflow run` executor: dispatch new step types via `ActionRouter`; `pr_monitor` arms `Monitor` on `gh pr view` CI status
-4. [ ] `ta workflow validate`: DAG validation — reject `on_*` pointing to undefined steps; detect static cycles; warn on missing `on_timeout` for blocking steps
-5. [ ] `ta_ask_human` in autonomous/headless context: routes to `Escalate` action + notification dispatch (ta-events) + `HumanGate` step — does not block the loop thread
-6. [ ] Built-in template: `ta workflow init --template autonomous-phase-loop` scaffolds a complete standard phase loop workflow
-7. [ ] Tests: `agent_review → Apply → sync_build` routes correctly; `pr_monitor` timeout fires `escalate`; DAG validator rejects cycles and undefined step refs; `ta_ask_human` headless produces `Escalate` not blocking read
+1. [x] `WorkflowStepKind` enum: `AgentReview`, `PrMonitor`, `PlanCheck`, `SyncBuild`, `HumanGate` variants
+2. [x] Workflow YAML parser: new step type fields + `on_*` routing key map
+3. [x] `ta workflow run` executor: dispatch new step types via `ActionRouter`; `pr_monitor` arms `Monitor` on `gh pr view` CI status
+4. [x] `ta workflow validate`: DAG validation — reject `on_*` pointing to undefined steps; detect static cycles; warn on missing `on_timeout` for blocking steps
+5. [x] `ta_ask_human` in autonomous/headless context: routes to `Escalate` action + notification dispatch (ta-events) + `HumanGate` step — does not block the loop thread
+6. [x] Built-in template: `ta workflow init --template autonomous-phase-loop` scaffolds a complete standard phase loop workflow
+7. [x] Tests: `agent_review → Apply → sync_build` routes correctly; `pr_monitor` timeout fires `escalate`; DAG validator rejects cycles and undefined step refs; `ta_ask_human` headless produces `Escalate` not blocking read
 
 #### Version: `0.17.0-alpha.4`
 
@@ -9054,3 +9054,109 @@ Key capabilities:
 7. [ ] **Update `ExternalVcsAdapter` plugin protocol**: Add `FileAtHead { repo_root, rel_path }` and `HeadRevId { repo_root }` message types to `vcs_plugin_protocol.rs`. External plugins that declare the `history_read` capability receive these messages and return content/rev-id. Plugins that don't declare it get the default `None`.
 
 #### Version: `0.15.29-alpha.1`
+### v0.17.0.4.5 — Step Statechart: Context, Actions, and Payloads
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.4 (routing-graph foundation)
+
+**Problem**: The v0.17.0.4 routing graph has correct topology but no data layer. Steps cannot pass structured data to each other, cannot trigger TA primitives or external actions as side-effects of transitions, and cannot make routing decisions based on accumulated state. Building the autonomous loop (v0.17.0.5) on the routing graph alone would require workarounds for every one of these gaps.
+
+**Design**: Each step is a state in a hierarchical state machine. Steps wait for events (their type defines which events); transitions carry guards, actions, and payloads; a `WorkflowContext` accumulates mutable extended state across the entire execution.
+
+**`WorkflowContext`** — extended state object that flows through all transitions:
+```rust
+pub struct WorkflowContext {
+    pub fields: serde_json::Map<String, serde_json::Value>,
+    pub history: Vec<TransitionRecord>,   // full audit trail
+}
+```
+
+**`StepInput` / `StepOutput`** — what a step receives on entry and emits on exit:
+```rust
+pub struct StepInput {
+    pub step_id: String,
+    pub trigger: Option<TransitionPayload>,   // who entered us + what they emitted
+    pub context: WorkflowContext,
+}
+pub struct StepOutput {
+    pub edge: String,                         // which transition to take
+    pub data: serde_json::Value,              // payload to next step's trigger
+    pub context_patch: serde_json::Map<String, Value>,  // fields to merge
+}
+```
+
+**`StepAction`** — typed action a step can invoke on entry, on transition, or on exit:
+```rust
+pub enum StepAction {
+    Ta(TaAction),          // ta.apply_draft, ta.escalate, ta.start_goal, ta.merge_pr …
+    External(ExternalAction), // external.send_email, external.execute_trade …
+    SetContext { key: String, value: TemplateExpr },
+}
+// External actions are brokered by TA — step YAML never carries credentials.
+// TA resolves the adapter, checks constitution guard, injects auth, returns result.
+```
+
+**Revised `transitions:` map** replaces flat `on_*` keys in step YAML:
+```yaml
+steps:
+  agent_review:
+    type: agent_review
+    role: reviewer
+    timeout: 30m
+    entry_actions:
+      - ta.notify:
+          message: "Review started for {{context.draft_id}}"
+    transitions:
+      apply:
+        guard: "context.rework_count < 3"
+        actions:
+          - ta.apply_draft:
+              draft_id: "{{trigger.data.draft_id}}"
+          - external.send_email:
+              to: "{{context.author_email}}"
+              subject: "Draft approved"
+        context_patch:
+          last_applied_draft: "{{trigger.data.draft_id}}"
+        payload:
+          draft_id: "{{trigger.data.draft_id}}"
+          confidence: "{{trigger.data.confidence}}"
+        to: pr_monitor
+      deny:
+        guard: "context.rework_count < 3"
+        actions:
+          - external.post_slack:
+              channel: "#reviews"
+              message: "Rework needed: {{trigger.data.reason}}"
+        context_patch:
+          rework_count: "{{context.rework_count + 1}}"
+          last_denial_reason: "{{trigger.data.reason}}"
+        to: rework
+      deny:
+        guard: "context.rework_count >= 3"
+        actions:
+          - ta.escalate:
+              question: "3 rework cycles exhausted — manual review required."
+              role: human
+        to: human_gate
+      timeout:
+        actions:
+          - external.send_email:
+              to: "{{context.team_lead}}"
+              subject: "Review timed out after 30m"
+        to: human_gate
+```
+
+**`sync_build` is retired as a step type** — it is a synchronous action sequence, not a state waiting for an external event. Replaced by `ta.run_build` actions on transitions or in `entry_actions`. The `human_gate` step gains typed exit routes via the `transitions:` map (previously had none).
+
+**Items**:
+1. [ ] `WorkflowContext` struct with `fields` map and `history: Vec<TransitionRecord>`; `StepInput` (step_id + trigger payload + context); `StepOutput` (edge + data + context_patch) — replaces `StepOutcome` — `crates/ta-workflow/src/step_context.rs`
+2. [ ] `StepAction` enum: `Ta(TaAction)` variants (apply_draft, deny_draft, start_goal, plan_mod, escalate, merge_pr, run_build, notify); `External(ExternalAction)` (action_type + params + await_result + result_key); `SetContext` — brokered via `ActionRouter`, never carries credentials — `crates/ta-workflow/src/step_action.rs`
+3. [ ] `Transition` struct: trigger string, optional `GuardExpr`, ordered `Vec<StepAction>`, `ContextPatch`, payload template, `TransitionTarget` (Single/Parallel/Terminal); replaces `on_*` flat fields in all `WorkflowStepKind` variants — `crates/ta-workflow/src/step_kind.rs`
+4. [ ] Guard evaluator: `GuardExpr` parses simple boolean expressions over `context.field` (`< > == != and or not`); evaluated before action dispatch — `crates/ta-workflow/src/step_guard.rs`
+5. [ ] Template interpolation: `{{trigger.data.field}}`, `{{context.field}}`, `{{step.elapsed_secs}}` resolved in action params and payload before dispatch — extend `crates/ta-workflow/src/params.rs` or new `step_template.rs`
+6. [ ] Updated executor: `execute_step(input: StepInput) -> StepOutput`; evaluates guards to select matching transition; dispatches `entry_actions`; dispatches transition actions via `ActionRouter`; applies `context_patch`; returns `StepOutput` with edge + payload — `crates/ta-workflow/src/step_executor.rs`
+7. [ ] Updated validator: `validate_step_workflow()` checks guard expressions are parseable; all action types are registered (TA built-ins known statically, external actions checked against adapter registry); duplicate trigger+guard combinations warn; `sync_build` step type emits migration hint
+8. [ ] Backward-compat migration: `on_*` flat keys in existing YAML are auto-promoted to `transitions:` with no guard, no actions, no payload — parse succeeds with a deprecation warning pointing to the new format
+9. [ ] Tests: context threading across 3 steps; guard selects correct branch at rework_count boundary; `ta.apply_draft` action dispatched on apply transition; `external.send_email` brokered without credentials in params; `sync_build` step type migration warning; template interpolation resolves trigger.data and context fields
+
+#### Version: `0.17.0-alpha.4.5`

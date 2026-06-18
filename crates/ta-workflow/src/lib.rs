@@ -9,6 +9,7 @@
 //   - Parallel agent swarm coordination (v0.13.7)
 //   - Multi-agent consensus review workflow (v0.15.15)
 //   - Natural language → workflow intent resolver (v0.15.24)
+//   - Step-based workflow types for autonomous phase loops (v0.17.0.4)
 
 pub mod artifact_dag;
 pub mod artifact_store;
@@ -22,6 +23,9 @@ pub mod process_engine;
 pub mod registry;
 pub mod scorer;
 pub mod serial_phases;
+pub mod step_executor;
+pub mod step_kind;
+pub mod step_validate;
 pub mod swarm;
 pub mod trigger;
 pub mod validate;
@@ -53,6 +57,14 @@ pub use interaction::{AwaitHumanConfig, InteractionRequest, InteractionResponse}
 pub use serial_phases::{
     evaluate_gates, run_gate, GateFailure, GateResult, SerialPhasesState, StepState, WorkflowGate,
 };
+pub use step_executor::{
+    ask_human_headless, execute_pr_monitor_tick, execute_sync_build, execute_sync_build_step,
+    poll_pr_ci_status, BuildStepResult, PrCiStatus, StepError, StepExecutionContext, StepOutcome,
+};
+pub use step_kind::{
+    parse_timeout_secs, PrWaitCondition, StepTarget, StepWorkflowDef, WorkflowStepKind,
+};
+pub use step_validate::validate_step_workflow;
 pub use swarm::{IntegrationConfig, SubGoalSpec, SubGoalStatus, SwarmState};
 pub use ta_changeset::ArtifactType;
 pub use trigger::{TriggerCondition, TriggerConfig, TriggerWaitRecord};

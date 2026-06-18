@@ -10633,7 +10633,7 @@ This creates `.ta/workflows/my-pipeline.yaml` with annotated comments explaining
 ta workflow new my-pipeline --from deploy-pipeline
 ```
 
-Available templates: `governed-goal`, `simple-review`, `security-audit`, `milestone-review`, `deploy-pipeline`, `plan-implement-review`. Browse them with `ta workflow list --templates`.
+Available templates: `governed-goal`, `simple-review`, `security-audit`, `milestone-review`, `deploy-pipeline`, `plan-implement-review`, `autonomous-phase-loop`. Browse them with `ta workflow list --templates`.
 
 **Step 2: Create missing agent configs.**
 
@@ -10687,6 +10687,101 @@ Even when the workflow is valid, the validator shows any remaining missing agent
 ```bash
 ta workflow start .ta/workflows/my-pipeline.yaml
 ```
+
+#### Step-Based Workflows for Autonomous Loops
+
+The standard stage-based workflow model runs linearly: stage A → stage B → stage C. For autonomous phase loops — where outcomes drive routing decisions — TA supports a _step-based_ model with explicit `on_*` routing keys.
+
+**Five step types:**
+
+| Type | What it does |
+|------|-------------|
+| `agent_review` | Invokes an advisor agent to review the latest draft. Routes on `Apply`, `Deny`, `Escalate`, or `PlanMod`. |
+| `pr_monitor` | Polls `gh pr view` for CI status. Routes on `pass` (CI green), `fail` (check failed), or `timeout`. |
+| `plan_check` | Invokes an architect agent to review upcoming plan phases. Routes on `modification` or `no_change`. |
+| `sync_build` | Runs a sequence of named build steps (`git_pull`, `cargo_build`, `install_local`). Routes on `failure`. |
+| `human_gate` | Non-blocking escalation point. In headless mode, emits `Escalate` without blocking the loop thread. |
+
+**Creating the built-in autonomous phase loop:**
+
+```bash
+ta workflow init autonomous-phase-loop
+# → creates .ta/workflows/autonomous-phase-loop.yaml
+```
+
+Or scaffold one from the template:
+
+```bash
+ta workflow new my-loop --from autonomous-phase-loop
+```
+
+**Example step workflow YAML:**
+
+```yaml
+name: autonomous-phase-loop
+initial_step: agent_review
+
+steps:
+  agent_review:
+    type: agent_review
+    role: reviewer
+    draft: latest
+    timeout: 30m
+    on_apply: pr_monitor      # draft approved → watch CI
+    on_deny: human_gate       # draft denied → escalate
+    on_escalate: human_gate
+    on_plan_mod: plan_check   # plan change proposed → check phases
+    on_timeout: human_gate
+
+  pr_monitor:
+    type: pr_monitor
+    wait_for: ci_pass
+    timeout: 60m
+    on_pass: [merge, sync_build]  # sequence: merge then rebuild
+    on_fail: human_gate
+    on_timeout: human_gate
+
+  merge:
+    type: sync_build
+    steps: [git_pull]
+    on_failure: human_gate
+
+  sync_build:
+    type: sync_build
+    steps: [cargo_build, install_local]
+    on_failure: human_gate
+
+  plan_check:
+    type: plan_check
+    agent_role: architect
+    check_phases: next_3
+    on_modification: human_gate
+    on_no_change: done
+
+  done:
+    type: sync_build
+    steps: []
+
+  human_gate:
+    type: human_gate
+    message: "{{escalation.question}}"
+    options: [apply, deny, modify]
+```
+
+**Validating a step workflow:**
+
+```bash
+ta workflow validate .ta/workflows/autonomous-phase-loop.yaml
+```
+
+The validator checks:
+- `initial_step` exists in the steps map
+- All `on_*` targets reference defined steps (including sequences)
+- No static cycles reachable from `initial_step`
+- Blocking steps (`agent_review`, `pr_monitor`, `human_gate`) have `on_timeout` configured — warns if missing
+- Unreachable steps (warning only)
+
+**Headless escalation:** In autonomous/headless contexts, `human_gate` steps do not block the loop. Instead they fire an `Escalate` action and the loop suspends at that step until a human response is received via `ta workflow resume`.
 
 #### Managing agents and workflows
 
