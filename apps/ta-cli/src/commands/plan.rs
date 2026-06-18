@@ -990,7 +990,12 @@ pub fn update_phase_status_with_schema(
         i += 1;
     }
 
-    result.join("\n")
+    let mut out = result.join("\n");
+    // Preserve trailing newline: `str::lines()` strips it, join() doesn't restore it.
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Read and parse PLAN.md from a project directory.
@@ -3310,6 +3315,18 @@ Write the completed PLAN.md to the workspace root. Do NOT write any other files.
 
 // ─── Plan Intelligence (v0.11.3) ─────────────────────────────────────────────
 
+fn join_preserving_newline(lines: &[impl AsRef<str>], original: &str) -> String {
+    let mut out = lines
+        .iter()
+        .map(|l| l.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if original.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 fn plan_add_item(
     config: &GatewayConfig,
     description: &str,
@@ -3352,7 +3369,7 @@ fn plan_add_item(
     };
     let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     new_lines.insert(insert, new_item.clone());
-    std::fs::write(&plan_path, new_lines.join("\n"))?;
+    std::fs::write(&plan_path, join_preserving_newline(&new_lines, &content))?;
     println!("Added to phase {}: {}", target.id, new_item);
     Ok(())
 }
@@ -3412,7 +3429,7 @@ fn plan_move_item(
         }
     }
     nl.insert(last_item.map(|i| i + 1).unwrap_or(te), line.clone());
-    std::fs::write(&plan_path, nl.join("\n"))?;
+    std::fs::write(&plan_path, join_preserving_newline(&nl, &content))?;
     println!("Moved from {} to {}: {}", from_id, to_id, line.trim());
     Ok(())
 }
@@ -3501,6 +3518,9 @@ fn plan_create_phase(
     out.push_str(&section);
     if at < lines.len() {
         out.push_str(&lines[at..].join("\n"));
+    }
+    if content.ends_with('\n') && !out.ends_with('\n') {
+        out.push('\n');
     }
     std::fs::write(&plan_path, out)?;
     println!("Created phase: {} — {}", id, title);
