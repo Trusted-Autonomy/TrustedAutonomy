@@ -22,9 +22,10 @@ use clap::Subcommand;
 use ta_changeset::sources::{ExternalSource, Lockfile, PackageManifest, SourceCache};
 use ta_mcp_gateway::GatewayConfig;
 use ta_workflow::{
-    artifact_dag, cached_index_path, format_confirmation_card, resolve_intent, ArtifactStore,
-    ArtifactType, ParamValues, PlanContext, RegistryEntry, RegistryIndex, ResolutionResult,
-    TemplateLibrary, WorkflowCatalog, WorkflowDefinition, WorkflowEngine, YamlWorkflowEngine,
+    artifact_dag, cached_index_path, format_confirmation_card, resolve_intent,
+    validate_step_workflow, ArtifactStore, ArtifactType, ParamValues, PlanContext, RegistryEntry,
+    RegistryIndex, ResolutionResult, StepWorkflowDef, TemplateLibrary, WorkflowCatalog,
+    WorkflowDefinition, WorkflowEngine, YamlWorkflowEngine,
 };
 
 use super::email_manager;
@@ -390,8 +391,9 @@ pub fn execute(command: &WorkflowCommands, config: &GatewayConfig) -> anyhow::Re
         WorkflowCommands::Show { name } => show_template(name, config),
         WorkflowCommands::Init { name } => match name.as_str() {
             "email-manager" => email_manager::init_email_manager(&config.workspace_root),
+            "autonomous-phase-loop" => init_autonomous_phase_loop(&config.workspace_root),
             other => anyhow::bail!(
-                "Unknown built-in workflow '{}'. Supported: email-manager\n\
+                "Unknown built-in workflow '{}'. Supported: email-manager, autonomous-phase-loop\n\
                      To scaffold a custom workflow definition, use: ta workflow new {}",
                 other,
                 other
@@ -963,10 +965,11 @@ fn new_workflow(
                 "milestone-review" => TEMPLATE_MILESTONE_REVIEW.to_string(),
                 "deploy-pipeline" => TEMPLATE_DEPLOY_PIPELINE.to_string(),
                 "plan-implement-review" => TEMPLATE_PLAN_IMPLEMENT_REVIEW.to_string(),
+                "autonomous-phase-loop" => TEMPLATE_AUTONOMOUS_PHASE_LOOP.to_string(),
                 _ => {
                     anyhow::bail!(
                         "Unknown template: '{}'\n\
-                         Available templates: governed-goal, simple-review, security-audit, milestone-review, deploy-pipeline, plan-implement-review\n\
+                         Available templates: governed-goal, simple-review, security-audit, milestone-review, deploy-pipeline, plan-implement-review, autonomous-phase-loop\n\
                          List all: ta workflow list --templates",
                         template_name
                     );
@@ -1127,6 +1130,11 @@ fn validate_workflow_cmd(path: &std::path::Path, config: &GatewayConfig) -> anyh
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
 
+    // Detect step-based workflows by the presence of "initial_step:" at the top level.
+    if content.contains("initial_step:") {
+        return validate_step_workflow_cmd(path, &content);
+    }
+
     let def = match WorkflowDefinition::from_yaml(&content) {
         Ok(d) => d,
         Err(e) => {
@@ -1201,6 +1209,100 @@ fn validate_workflow_cmd(path: &std::path::Path, config: &GatewayConfig) -> anyh
             println!("  ta agent new {} --type {}", agent_name, agent_type);
         }
     }
+
+    Ok(())
+}
+
+/// Validate a step-based workflow YAML file (v0.17.0.4).
+///
+/// Detects `initial_step:` top-level key to distinguish step workflows from stage workflows.
+fn validate_step_workflow_cmd(path: &std::path::Path, content: &str) -> anyhow::Result<()> {
+    let def = match StepWorkflowDef::from_yaml(content) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("YAML parse error in {}:", path.display());
+            println!("  {}", e);
+            println!();
+            println!("Fix the YAML syntax and try again.");
+            return Ok(());
+        }
+    };
+
+    let result = validate_step_workflow(&def);
+
+    if result.findings.is_empty() {
+        println!("Step workflow '{}' is valid.", def.name);
+        println!("  Initial step: {}", def.initial_step);
+        println!("  Steps: {} defined", def.steps.len());
+        let reachable = def.reachable_from_initial();
+        println!("  Reachable: {}", reachable.join(", "));
+        return Ok(());
+    }
+
+    println!(
+        "Validation results for '{}' ({}):",
+        def.name,
+        path.display()
+    );
+    println!();
+
+    for finding in &result.findings {
+        let icon = match finding.severity {
+            ta_workflow::validate::ValidationSeverity::Error => "ERROR",
+            ta_workflow::validate::ValidationSeverity::Warning => "WARN ",
+        };
+        println!("  [{}] {}: {}", icon, finding.location, finding.message);
+        if let Some(suggestion) = &finding.suggestion {
+            println!("         -> {}", suggestion);
+        }
+    }
+
+    println!();
+    println!(
+        "  {} error(s), {} warning(s)",
+        result.error_count(),
+        result.warning_count()
+    );
+
+    if result.has_errors() {
+        println!();
+        println!("Fix errors before starting this workflow.");
+    }
+
+    Ok(())
+}
+
+/// Initialise the `autonomous-phase-loop` built-in workflow template (v0.17.0.4).
+///
+/// Creates `.ta/workflows/autonomous-phase-loop.yaml` with the standard five-step
+/// phase loop: agent_review → apply → sync_build; pr_monitor → merge; plan_check gate.
+fn init_autonomous_phase_loop(workspace_root: &std::path::Path) -> anyhow::Result<()> {
+    let workflows_dir = workspace_root.join(".ta").join("workflows");
+    std::fs::create_dir_all(&workflows_dir)?;
+
+    let dest = workflows_dir.join("autonomous-phase-loop.yaml");
+    if dest.exists() {
+        println!(
+            "Workflow already exists: {}\n\
+             Edit the file to customise it, or delete it to reinitialise.",
+            dest.display()
+        );
+        return Ok(());
+    }
+
+    std::fs::write(&dest, TEMPLATE_AUTONOMOUS_PHASE_LOOP)?;
+
+    println!("Created: {}", dest.display());
+    println!();
+    println!("This workflow implements the standard autonomous phase loop:");
+    println!("  agent_review → apply → sync_build → pr_monitor → merge → plan_check → next phase");
+    println!("  Any escalation routes to human_gate without blocking the loop thread.");
+    println!();
+    println!("Validate it with:");
+    println!("  ta workflow validate {}", dest.display());
+    println!();
+    println!("Run it with (requires --phase v0.X.Y.Z and --team .ta/team.toml):");
+    println!("  ta plan build --autonomous --workflow {}", dest.display());
 
     Ok(())
 }
@@ -2226,6 +2328,72 @@ roles:
 
 verdict:
   pass_threshold: 0.7
+"#;
+
+/// Autonomous phase loop template (v0.17.0.4).
+///
+/// Standard five-step workflow for `ta plan build --autonomous`:
+///   agent_review → on_apply → pr_monitor → merge → sync_build → plan_check
+///   Any escalation (deny, timeout, CI failure) routes to human_gate.
+const TEMPLATE_AUTONOMOUS_PHASE_LOOP: &str = r#"# autonomous-phase-loop — Standard step workflow for ta plan build --autonomous.
+#
+# Flow:
+#   agent_review → on_apply → pr_monitor → on_pass [merge, sync_build] → plan_check → done
+#   agent_review → on_deny/on_timeout → human_gate
+#   pr_monitor → on_fail/on_timeout → human_gate
+#   plan_check → on_modification → human_gate | on_no_change → done
+#
+# Customise timeouts, roles, and build steps for your project.
+# Run: ta workflow validate .ta/workflows/autonomous-phase-loop.yaml
+
+name: autonomous-phase-loop
+initial_step: agent_review
+
+steps:
+  agent_review:
+    type: agent_review
+    role: reviewer
+    draft: latest
+    timeout: 30m
+    on_apply: pr_monitor
+    on_deny: human_gate
+    on_escalate: human_gate
+    on_plan_mod: plan_check
+    on_timeout: human_gate
+
+  pr_monitor:
+    type: pr_monitor
+    wait_for: ci_pass
+    timeout: 60m
+    on_pass: [merge, sync_build]
+    on_fail: human_gate
+    on_timeout: human_gate
+
+  merge:
+    type: sync_build
+    steps: [git_pull]
+    on_failure: human_gate
+
+  sync_build:
+    type: sync_build
+    steps: [cargo_build, install_local]
+    on_failure: human_gate
+
+  plan_check:
+    type: plan_check
+    agent_role: architect
+    check_phases: next_3
+    on_modification: human_gate
+    on_no_change: done
+
+  done:
+    type: sync_build
+    steps: []
+
+  human_gate:
+    type: human_gate
+    message: "{{escalation.question}}"
+    options: [apply, deny, modify]
 "#;
 
 // ── Artifact-typed workflow commands (v0.14.10) ───────────────────────────────
