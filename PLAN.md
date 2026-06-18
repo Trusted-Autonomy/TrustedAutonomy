@@ -8680,7 +8680,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.17.0.4.5 — Step Statechart: Context, Actions, and Payloads
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.17.0.4 (routing-graph foundation)
 
