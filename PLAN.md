@@ -8680,7 +8680,7 @@ This replaces `ta skill install`: "installing a skill" is `cp my-skill.md ~/.con
 
 ---
 ### v0.17.0.4.5 — Step Statechart: Context, Actions, and Payloads
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.4 (routing-graph foundation)
 
@@ -8774,15 +8774,15 @@ steps:
 **`sync_build` is retired as a step type** — it is a synchronous action sequence, not a state waiting for an external event. Replaced by `ta.run_build` actions on transitions or in `entry_actions`. The `human_gate` step gains typed exit routes via the `transitions:` list (previously had none).
 
 **Items**:
-1. [ ] `WorkflowContext` struct with `fields` map and `history: Vec<TransitionRecord>`; `StepInput` (step_id + trigger payload + context); `StepOutput` (edge + data + context_patch) — replaces `StepOutcome` — `crates/ta-workflow/src/step_context.rs`
-2. [ ] `StepAction` enum: `Ta(TaAction)` variants (apply_draft, deny_draft, start_goal, plan_mod, escalate, merge_pr, run_build, notify); `External(ExternalAction)` (action_type + params + await_result + result_key); `SetContext` — brokered via `ActionRouter`, never carries credentials — `crates/ta-workflow/src/step_action.rs`
-3. [ ] `Transition` struct: `on` (trigger event string), optional `GuardExpr`, ordered `Vec<StepAction>`, `ContextPatch`, payload template, `TransitionTarget` (Single/Parallel/Terminal); transitions are a `Vec<Transition>` (list, not map) so multiple guards per event are unambiguous — `crates/ta-workflow/src/step_kind.rs`
-4. [ ] Guard evaluator: `GuardExpr` parses simple boolean expressions over `context.field` (`< > == != and or not`); evaluated before action dispatch; first matching transition wins — `crates/ta-workflow/src/step_guard.rs`
-5. [ ] Template interpolation: `{{trigger.data.field}}`, `{{context.field}}`, `{{step.elapsed_secs}}` resolved in action params and payload before dispatch — extend `crates/ta-workflow/src/params.rs` or new `step_template.rs`
-6. [ ] Updated executor: `execute_step(input: StepInput) -> StepOutput`; evaluates guards to select matching transition; dispatches `entry_actions`; dispatches transition actions via `ActionRouter`; applies `context_patch`; returns `StepOutput` with edge + payload — `crates/ta-workflow/src/step_executor.rs`
-7. [ ] Updated validator: `validate_step_workflow()` checks guard expressions are parseable; all action types are registered (TA built-ins known statically, external actions checked against adapter registry); duplicate `on`+guard combinations warn; `sync_build` step type emits migration hint
-8. [ ] Backward-compat migration: `on_*` flat keys in existing YAML are auto-promoted to `transitions:` list entries with no guard, no actions, no payload — parse succeeds with a deprecation warning pointing to the new format
-9. [ ] Tests: context threading across 3 steps; guard selects correct branch at rework_count boundary; `ta.apply_draft` action dispatched on apply transition; `external.send_email` brokered without credentials in params; `sync_build` step type migration warning; template interpolation resolves trigger.data and context fields
+1. [x] `WorkflowContext` struct with `fields` map and `history: Vec<TransitionRecord>`; `StepInput` (step_id + trigger payload + context); `StepOutput` (edge + data + context_patch) — replaces `StepOutcome` — `crates/ta-workflow/src/step_context.rs`
+2. [x] `StepAction` enum: `Ta(TaAction)` variants (apply_draft, deny_draft, start_goal, plan_mod, escalate, merge_pr, run_build, notify); `External(ExternalAction)` (action_type + params + await_result + result_key); `SetContext` — brokered via `ActionRouter`, never carries credentials — `crates/ta-workflow/src/step_action.rs`
+3. [x] `Transition` struct: `on` (trigger event string), optional `GuardExpr`, ordered `Vec<StepAction>`, `ContextPatch`, payload template, `TransitionTarget` (Single/Parallel/Terminal); transitions are a `Vec<Transition>` (list, not map) so multiple guards per event are unambiguous — `crates/ta-workflow/src/step_kind.rs`
+4. [x] Guard evaluator: `GuardExpr` parses simple boolean expressions over `context.field` (`< > == != and or not`); evaluated before action dispatch; first matching transition wins — `crates/ta-workflow/src/step_guard.rs`
+5. [x] Template interpolation: `{{trigger.data.field}}`, `{{context.field}}`, `{{step.elapsed_secs}}` resolved in action params and payload before dispatch — extend `crates/ta-workflow/src/params.rs` or new `step_template.rs`
+6. [x] Updated executor: `execute_step(input: StepInput) -> StepOutput`; evaluates guards to select matching transition; dispatches `entry_actions`; dispatches transition actions via `ActionRouter`; applies `context_patch`; returns `StepOutput` with edge + payload — `crates/ta-workflow/src/step_executor.rs`
+7. [x] Updated validator: `validate_step_workflow()` checks guard expressions are parseable; all action types are registered (TA built-ins known statically, external actions checked against adapter registry); duplicate `on`+guard combinations warn; `sync_build` step type emits migration hint
+8. [x] Backward-compat migration: `on_*` flat keys in existing YAML are auto-promoted to `transitions:` list entries with no guard, no actions, no payload — parse succeeds with a deprecation warning pointing to the new format
+9. [x] Tests: context threading across 3 steps; guard selects correct branch at rework_count boundary; `ta.apply_draft` action dispatched on apply transition; `external.send_email` brokered without credentials in params; `sync_build` step type migration warning; template interpolation resolves trigger.data and context fields
 
 #### Version: `0.17.0-alpha.4.5`
 

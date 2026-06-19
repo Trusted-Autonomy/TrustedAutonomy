@@ -1,16 +1,20 @@
-// step_executor.rs — Step execution outcomes and headless human-gate logic (v0.17.0.4).
+// step_executor.rs — Step execution outcomes and statechart executor (v0.17.0.4.5).
 //
 // Provides:
-//   StepOutcome       — result of executing one "tick" of a workflow step
-//   StepExecutionContext — configuration for the step runner
+//   StepOutcome           — result of executing one "tick" of a workflow step (legacy)
+//   StepExecutionContext  — configuration for the step runner
 //   ask_human_headless()  — non-blocking escalation (no stdin read)
 //   route_step()          — map an action-kind string to the next StepTarget
 //   execute_pr_monitor_tick() — poll `gh pr view` and route on CI outcome
 //   execute_sync_build_step() — run a named build sub-step
+//   execute_step()        — full statechart executor with guards, actions, context patches
 
 use std::path::PathBuf;
 
+use crate::step_action::{ActionRouter, StepAction};
+use crate::step_context::{StepInput, StepOutput, TransitionPayload, WorkflowContext};
 use crate::step_kind::{parse_timeout_secs, StepTarget, StepWorkflowDef, WorkflowStepKind};
+use crate::step_template::{resolve_context_patch, resolve_params};
 
 // ── StepError ─────────────────────────────────────────────────────────────────
 
@@ -24,7 +28,7 @@ pub enum StepError {
 
 // ── StepOutcome ───────────────────────────────────────────────────────────────
 
-/// Result of executing one tick of a workflow step.
+/// Result of executing one tick of a workflow step (legacy API).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
     /// Proceed to a single next step.
@@ -34,13 +38,8 @@ pub enum StepOutcome {
     /// Workflow is complete — no more steps to execute.
     Complete,
     /// Human input is required (headless: fire notification + suspend loop).
-    ///
-    /// In headless mode, the loop should emit this as an Escalate action rather
-    /// than blocking on stdin. The caller dispatches a notification via ta-events.
     EscalateRequired { question: String },
     /// Step is still in progress (e.g., pr_monitor waiting for CI, advisor still reviewing).
-    ///
-    /// The runner should retry after a delay.
     Pending,
 }
 
@@ -104,15 +103,6 @@ impl StepExecutionContext {
 // ── ask_human_headless ────────────────────────────────────────────────────────
 
 /// Non-blocking human-gate handler for headless/autonomous contexts.
-///
-/// Instead of blocking on stdin (which would deadlock an autonomous loop),
-/// returns `StepOutcome::EscalateRequired`. The caller is responsible for:
-/// 1. Emitting an `AgentAction::Escalate` via the ActionRouter
-/// 2. Dispatching a notification via ta-events
-/// 3. Suspending the workflow loop at this step until a response arrives
-///
-/// This satisfies item 5: `ta_ask_human` in headless context routes to `Escalate`
-/// rather than blocking.
 pub fn ask_human_headless(question: &str) -> StepOutcome {
     tracing::info!(question = %question, "headless human-gate: escalating without blocking stdin");
     StepOutcome::EscalateRequired {
@@ -122,12 +112,7 @@ pub fn ask_human_headless(question: &str) -> StepOutcome {
 
 // ── route_step ────────────────────────────────────────────────────────────────
 
-/// Route from a completed step using an action-kind string.
-///
-/// Looks up `def.steps[step_id]`, calls `kind.route_for(action_kind)`, and
-/// converts the result to a `StepOutcome`.
-///
-/// Returns `StepOutcome::Complete` if no route is configured for the action.
+/// Route from a completed step using an action-kind string (legacy API).
 pub fn route_step(
     def: &StepWorkflowDef,
     step_id: &str,
@@ -152,27 +137,140 @@ pub fn route_step(
     }
 }
 
+// ── execute_step ──────────────────────────────────────────────────────────────
+
+/// Execute a step using the full statechart model (v0.17.0.4.5).
+///
+/// 1. Dispatches `entry_actions` via `router` (with template resolution).
+/// 2. Finds the matching transition by evaluating guards.
+/// 3. Dispatches transition actions via `router`.
+/// 4. Resolves `context_patch` and `payload` templates.
+/// 5. Returns `StepOutput` with `edge`, `data`, and `context_patch`.
+///
+/// Returns `StepOutput::terminal()` when no transition matches.
+pub fn execute_step(
+    def: &StepWorkflowDef,
+    input: StepInput,
+    elapsed_secs: u64,
+    router: &mut dyn ActionRouter,
+) -> Result<StepOutput, StepError> {
+    let kind = def
+        .steps
+        .get(&input.step_id)
+        .ok_or_else(|| StepError::StepNotFound(input.step_id.clone()))?;
+
+    let trigger_ref = input.trigger.as_ref();
+
+    // 1. Dispatch entry_actions with template resolution.
+    for action in kind.entry_actions() {
+        let resolved_params =
+            resolve_params(&action.params, trigger_ref, &input.context, elapsed_secs);
+        let resolved = StepAction {
+            action_type: action.action_type.clone(),
+            params: resolved_params,
+        };
+        if let Err(e) = router.dispatch(&resolved) {
+            tracing::warn!(
+                step = %input.step_id,
+                action = %action.action_type,
+                error = %e,
+                "entry_action dispatch failed (continuing)"
+            );
+        }
+    }
+
+    // 2. Determine the trigger event name.
+    let event = input
+        .trigger
+        .as_ref()
+        .map(|t| t.edge.as_str())
+        .unwrap_or("start");
+
+    // 3. Find matching transition.
+    let transition = match kind.select_transition(event, &input.context) {
+        Some(t) => t,
+        None => {
+            tracing::debug!(
+                step = %input.step_id,
+                event = %event,
+                "no matching transition — step is terminal"
+            );
+            return Ok(StepOutput::terminal());
+        }
+    };
+
+    // 4. Dispatch transition actions.
+    for action in &transition.actions {
+        let resolved_params =
+            resolve_params(&action.params, trigger_ref, &input.context, elapsed_secs);
+        let resolved = StepAction {
+            action_type: action.action_type.clone(),
+            params: resolved_params,
+        };
+        if let Err(e) = router.dispatch(&resolved) {
+            tracing::warn!(
+                step = %input.step_id,
+                action = %action.action_type,
+                error = %e,
+                "transition action dispatch failed (continuing)"
+            );
+        }
+    }
+
+    // 5. Resolve context_patch and payload.
+    let context_patch = resolve_context_patch(
+        &transition.context_patch,
+        trigger_ref,
+        &input.context,
+        elapsed_secs,
+    );
+
+    let data = resolve_payload(
+        &transition.payload,
+        trigger_ref,
+        &input.context,
+        elapsed_secs,
+    );
+
+    Ok(StepOutput {
+        edge: transition.on.clone(),
+        data,
+        context_patch,
+    })
+}
+
+/// Resolve templates in a payload value (recursively for objects, directly for strings).
+fn resolve_payload(
+    payload: &serde_json::Value,
+    trigger: Option<&TransitionPayload>,
+    ctx: &WorkflowContext,
+    elapsed_secs: u64,
+) -> serde_json::Value {
+    use crate::step_template::resolve_template;
+    match payload {
+        serde_json::Value::String(s) => {
+            serde_json::Value::String(resolve_template(s, trigger, ctx, elapsed_secs))
+        }
+        serde_json::Value::Object(map) => {
+            serde_json::Value::Object(resolve_params(map, trigger, ctx, elapsed_secs))
+        }
+        other => other.clone(),
+    }
+}
+
 // ── execute_pr_monitor_tick ───────────────────────────────────────────────────
 
 /// PR CI status returned by `gh pr view`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCiStatus {
-    /// All required checks passed.
     AllPassed,
-    /// One or more checks failed.
     Failed,
-    /// Checks are still running (pending/queued).
     Pending,
-    /// PR is already merged.
     Merged,
-    /// PR was closed without merging.
     Closed,
 }
 
 /// Poll `gh pr view --json statusCheckRollup` and map the result to a `PrCiStatus`.
-///
-/// Returns `PrCiStatus::Pending` if `gh` is unavailable or parsing fails —
-/// the caller should retry after a delay.
 pub fn poll_pr_ci_status(pr_number: u64) -> PrCiStatus {
     let output = std::process::Command::new("gh")
         .args([
@@ -207,12 +305,6 @@ pub fn poll_pr_ci_status(pr_number: u64) -> PrCiStatus {
 }
 
 /// Execute one monitoring tick for a `pr_monitor` step.
-///
-/// Polls PR CI status and returns the appropriate `StepOutcome` based on the
-/// step's `on_pass`/`on_fail`/`on_timeout` routing.
-///
-/// `elapsed_secs` should be the number of seconds since the step started —
-/// used to check whether the timeout has fired.
 pub fn execute_pr_monitor_tick(
     kind: &WorkflowStepKind,
     pr_number: u64,
@@ -230,7 +322,6 @@ pub fn execute_pr_monitor_tick(
         _ => return StepOutcome::Pending,
     };
 
-    // Check timeout first.
     let effective_timeout = ctx
         .timeout_override_secs
         .or_else(|| timeout_str.as_deref().and_then(parse_timeout_secs));
@@ -250,7 +341,6 @@ pub fn execute_pr_monitor_tick(
         }
     }
 
-    // Poll CI status.
     match poll_pr_ci_status(pr_number) {
         PrCiStatus::AllPassed | PrCiStatus::Merged => match on_pass {
             Some(target) => StepOutcome::from_target(target),
@@ -276,13 +366,6 @@ pub struct BuildStepResult {
 }
 
 /// Execute a single named build sub-step.
-///
-/// Built-in step names:
-///   `git_pull`      → `git pull --ff-only`
-///   `cargo_build`   → `cargo build --workspace`
-///   `install_local` → `bash install_local.sh`
-///
-/// Any other name is treated as a shell command.
 pub fn execute_sync_build_step(
     step_name: &str,
     workspace_root: &std::path::Path,
@@ -291,18 +374,7 @@ pub fn execute_sync_build_step(
         "git_pull" => ("git", &["pull", "--ff-only"]),
         "cargo_build" => ("cargo", &["build", "--workspace"]),
         "install_local" => ("bash", &["install_local.sh"]),
-        other => {
-            // Treat as a shell command.
-            let parts: Vec<&str> = other.splitn(2, ' ').collect();
-            if parts.is_empty() {
-                return BuildStepResult {
-                    step_name: step_name.to_string(),
-                    success: false,
-                    exit_code: None,
-                    output_lines: vec!["empty step name".to_string()],
-                };
-            }
-            // We can't return references to stack data here, so fall back to sh -c.
+        _ => {
             let output = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(step_name)
@@ -361,11 +433,11 @@ pub fn execute_sync_build_step(
 }
 
 /// Run all build steps for a `sync_build` step and return the outcome.
-///
-/// Stops at the first failed sub-step and routes via `on_failure`.
 pub fn execute_sync_build(kind: &WorkflowStepKind, ctx: &StepExecutionContext) -> StepOutcome {
     let (steps, on_failure) = match kind {
-        WorkflowStepKind::SyncBuild { steps, on_failure } => (steps, on_failure),
+        WorkflowStepKind::SyncBuild {
+            steps, on_failure, ..
+        } => (steps, on_failure),
         _ => return StepOutcome::Complete,
     };
 
@@ -394,7 +466,12 @@ pub fn execute_sync_build(kind: &WorkflowStepKind, ctx: &StepExecutionContext) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::step_kind::{PrWaitCondition, StepTarget, StepWorkflowDef, WorkflowStepKind};
+    use crate::step_action::{CollectingActionRouter, NoopActionRouter, StepAction};
+    use crate::step_context::{TransitionPayload, WorkflowContext};
+    use crate::step_guard::GuardExpr;
+    use crate::step_kind::{
+        PrWaitCondition, StepTarget, StepWorkflowDef, Transition, WorkflowStepKind,
+    };
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -411,6 +488,8 @@ mod tests {
             on_escalate: None,
             on_plan_mod: None,
             on_timeout: on_timeout.map(|s| StepTarget::Single(s.to_string())),
+            transitions: vec![],
+            entry_actions: vec![],
         }
     }
 
@@ -424,6 +503,8 @@ mod tests {
             ])),
             on_fail: Some(StepTarget::Single("escalate".to_string())),
             on_timeout: on_timeout.map(|s| StepTarget::Single(s.to_string())),
+            transitions: vec![],
+            entry_actions: vec![],
         }
     }
 
@@ -451,8 +532,6 @@ mod tests {
 
     #[test]
     fn ask_human_headless_does_not_block() {
-        // Verify the call returns immediately (no stdin read).
-        // If ask_human_headless blocked on stdin, this test would hang.
         let start = std::time::Instant::now();
         let _ = ask_human_headless("continue?");
         assert!(
@@ -475,6 +554,8 @@ mod tests {
             WorkflowStepKind::SyncBuild {
                 steps: vec!["cargo_build".to_string()],
                 on_failure: None,
+                transitions: vec![],
+                entry_actions: vec![],
             },
         );
         let def = def_with_steps(steps, "review");
@@ -495,11 +576,12 @@ mod tests {
             WorkflowStepKind::SyncBuild {
                 steps: vec![],
                 on_failure: None,
+                transitions: vec![],
+                entry_actions: vec![],
             },
         );
         let def = def_with_steps(steps, "review");
 
-        // "plan_mod" has no on_plan_mod configured → Complete.
         let outcome = route_step(&def, "review", "plan_mod").unwrap();
         assert_eq!(outcome, StepOutcome::Complete);
     }
@@ -519,7 +601,6 @@ mod tests {
         let ctx = StepExecutionContext::new(tmp.path());
         let kind = make_pr_monitor_step("60m", Some("escalate"));
 
-        // Simulate elapsed time exceeding the 60m timeout (3601 seconds).
         let outcome = execute_pr_monitor_tick(&kind, 42, 3601, &ctx);
         assert_eq!(outcome, StepOutcome::Next("escalate".to_string()));
     }
@@ -533,10 +614,11 @@ mod tests {
             timeout: Some("30m".to_string()),
             on_pass: None,
             on_fail: None,
-            on_timeout: None, // no on_timeout configured
+            on_timeout: None,
+            transitions: vec![],
+            entry_actions: vec![],
         };
 
-        // Elapsed > timeout → Complete (no route).
         let outcome = execute_pr_monitor_tick(&kind, 99, 9999, &ctx);
         assert_eq!(outcome, StepOutcome::Complete);
     }
@@ -547,11 +629,7 @@ mod tests {
         let ctx = StepExecutionContext::new(tmp.path());
         let kind = make_pr_monitor_step("60m", Some("escalate"));
 
-        // Elapsed < timeout; gh is not available in test env so poll returns Pending.
-        // We can't force gh to be unavailable, but we can verify the elapsed check:
         let outcome = execute_pr_monitor_tick(&kind, 99, 10, &ctx);
-        // Either Pending (gh unavailable) or a routed outcome (gh available).
-        // Both are valid — the important thing is it doesn't panic.
         assert!(matches!(
             outcome,
             StepOutcome::Pending
@@ -564,7 +642,6 @@ mod tests {
     #[test]
     fn pr_monitor_context_timeout_override() {
         let tmp = TempDir::new().unwrap();
-        // Override to 0 seconds → fires immediately.
         let ctx = StepExecutionContext::new(tmp.path()).with_timeout(0);
         let kind = make_pr_monitor_step("60m", Some("escalate"));
 
@@ -619,6 +696,8 @@ mod tests {
             on_escalate: None,
             on_plan_mod: None,
             on_timeout: None,
+            transitions: vec![],
+            entry_actions: vec![],
         };
         let ctx = StepExecutionContext::new(tmp.path()).with_timeout(120);
         assert_eq!(ctx.effective_timeout_secs(&kind), Some(120));
@@ -636,8 +715,290 @@ mod tests {
             on_escalate: None,
             on_plan_mod: None,
             on_timeout: None,
+            transitions: vec![],
+            entry_actions: vec![],
         };
         let ctx = StepExecutionContext::new(tmp.path());
         assert_eq!(ctx.effective_timeout_secs(&kind), Some(45 * 60));
+    }
+
+    // ── execute_step (v0.17.0.4.5) ───────────────────────────────────────────
+
+    fn make_def_with_transitions(
+        step_id: &str,
+        transitions: Vec<Transition>,
+        entry_actions: Vec<StepAction>,
+    ) -> StepWorkflowDef {
+        let mut steps = HashMap::new();
+        steps.insert(
+            step_id.to_string(),
+            WorkflowStepKind::HumanGate {
+                message: String::new(),
+                options: vec![],
+                transitions,
+                entry_actions,
+            },
+        );
+        StepWorkflowDef {
+            name: "test".to_string(),
+            initial_step: step_id.to_string(),
+            steps,
+        }
+    }
+
+    #[test]
+    fn execute_step_applies_context_patch() {
+        let mut patch = serde_json::Map::new();
+        patch.insert("rework_count".to_string(), serde_json::json!(1));
+
+        let def = make_def_with_transitions(
+            "gate",
+            vec![Transition {
+                on: "start".to_string(),
+                guard: None,
+                actions: vec![],
+                context_patch: patch,
+                payload: serde_json::Value::Null,
+                to: Some(StepTarget::Single("next".to_string())),
+            }],
+            vec![],
+        );
+
+        let input = StepInput::initial("gate", WorkflowContext::new());
+        let mut router = NoopActionRouter;
+        let output = execute_step(&def, input, 0, &mut router).unwrap();
+
+        assert_eq!(output.edge, "start");
+        assert_eq!(
+            output.context_patch.get("rework_count"),
+            Some(&serde_json::json!(1))
+        );
+    }
+
+    #[test]
+    fn guard_selects_correct_branch_at_rework_count_boundary() {
+        let def = make_def_with_transitions(
+            "gate",
+            vec![
+                Transition {
+                    on: "deny".to_string(),
+                    guard: Some(GuardExpr::parse("context.rework_count < 3").unwrap()),
+                    actions: vec![],
+                    context_patch: serde_json::Map::new(),
+                    payload: serde_json::Value::Null,
+                    to: Some(StepTarget::Single("rework".to_string())),
+                },
+                Transition {
+                    on: "deny".to_string(),
+                    guard: Some(GuardExpr::parse("context.rework_count >= 3").unwrap()),
+                    actions: vec![],
+                    context_patch: serde_json::Map::new(),
+                    payload: serde_json::Value::Null,
+                    to: Some(StepTarget::Single("human_gate".to_string())),
+                },
+            ],
+            vec![],
+        );
+
+        // rework_count = 2: first branch matches (< 3)
+        let mut ctx_low = WorkflowContext::new();
+        ctx_low
+            .fields
+            .insert("rework_count".to_string(), serde_json::json!(2));
+        let trigger_deny = TransitionPayload {
+            source_step: "prev".to_string(),
+            edge: "deny".to_string(),
+            data: serde_json::Value::Null,
+        };
+        let input_low = StepInput::with_trigger("gate", trigger_deny.clone(), ctx_low);
+        let mut router = NoopActionRouter;
+        let out_low = execute_step(&def, input_low, 0, &mut router).unwrap();
+        assert_eq!(out_low.edge, "deny");
+        // The transition selected routes to "rework"
+        // Verify by checking edge (both transitions have on:"deny", so check via target)
+        // We can verify this by checking what select_transition returns separately
+        let kind = def.steps.get("gate").unwrap();
+        let mut ctx_low2 = WorkflowContext::new();
+        ctx_low2
+            .fields
+            .insert("rework_count".to_string(), serde_json::json!(2));
+        let t_low = kind.select_transition("deny", &ctx_low2).unwrap();
+        assert_eq!(t_low.to, Some(StepTarget::Single("rework".to_string())));
+
+        // rework_count = 3: second branch matches (>= 3)
+        let mut ctx_high = WorkflowContext::new();
+        ctx_high
+            .fields
+            .insert("rework_count".to_string(), serde_json::json!(3));
+        let t_high = kind.select_transition("deny", &ctx_high).unwrap();
+        assert_eq!(
+            t_high.to,
+            Some(StepTarget::Single("human_gate".to_string()))
+        );
+    }
+
+    #[test]
+    fn ta_apply_draft_action_dispatched_on_apply() {
+        let mut params = serde_json::Map::new();
+        params.insert("draft_id".to_string(), serde_json::json!("d1"));
+
+        let def = make_def_with_transitions(
+            "review",
+            vec![Transition {
+                on: "start".to_string(),
+                guard: None,
+                actions: vec![StepAction {
+                    action_type: "ta.apply_draft".to_string(),
+                    params,
+                }],
+                context_patch: serde_json::Map::new(),
+                payload: serde_json::Value::Null,
+                to: Some(StepTarget::Single("build".to_string())),
+            }],
+            vec![],
+        );
+
+        let input = StepInput::initial("review", WorkflowContext::new());
+        let mut router = CollectingActionRouter::new();
+        execute_step(&def, input, 0, &mut router).unwrap();
+
+        assert_eq!(router.dispatched.len(), 1);
+        assert_eq!(router.dispatched[0].action_type, "ta.apply_draft");
+        assert_eq!(
+            router.dispatched[0].params["draft_id"],
+            serde_json::json!("d1")
+        );
+    }
+
+    #[test]
+    fn external_send_email_no_credentials_in_params() {
+        let mut params = serde_json::Map::new();
+        params.insert("to".to_string(), serde_json::json!("alice@example.com"));
+        params.insert("subject".to_string(), serde_json::json!("Draft approved"));
+        // No password, token, or secret fields.
+
+        let def = make_def_with_transitions(
+            "review",
+            vec![Transition {
+                on: "start".to_string(),
+                guard: None,
+                actions: vec![StepAction {
+                    action_type: "external.send_email".to_string(),
+                    params,
+                }],
+                context_patch: serde_json::Map::new(),
+                payload: serde_json::Value::Null,
+                to: None,
+            }],
+            vec![],
+        );
+
+        let input = StepInput::initial("review", WorkflowContext::new());
+        let mut router = CollectingActionRouter::new();
+        execute_step(&def, input, 0, &mut router).unwrap();
+
+        assert_eq!(router.dispatched.len(), 1);
+        let dispatched = &router.dispatched[0];
+        assert_eq!(dispatched.action_type, "external.send_email");
+        // Verify no credential fields.
+        assert!(!dispatched.params.contains_key("password"));
+        assert!(!dispatched.params.contains_key("token"));
+        assert!(!dispatched.params.contains_key("secret"));
+        // Verify legitimate fields are present.
+        assert_eq!(
+            dispatched.params["to"],
+            serde_json::json!("alice@example.com")
+        );
+    }
+
+    #[test]
+    fn template_interpolation_resolves_context_and_trigger_fields() {
+        let mut action_params = serde_json::Map::new();
+        action_params.insert("to".to_string(), serde_json::json!("{{context.author}}"));
+        action_params.insert(
+            "ref".to_string(),
+            serde_json::json!("{{trigger.data.draft_id}}"),
+        );
+
+        let def = make_def_with_transitions(
+            "review",
+            vec![Transition {
+                on: "apply".to_string(),
+                guard: None,
+                actions: vec![StepAction {
+                    action_type: "external.send_email".to_string(),
+                    params: action_params,
+                }],
+                context_patch: serde_json::Map::new(),
+                payload: serde_json::Value::Null,
+                to: None,
+            }],
+            vec![],
+        );
+
+        let mut ctx = WorkflowContext::new();
+        ctx.fields
+            .insert("author".to_string(), serde_json::json!("alice"));
+
+        let trigger = TransitionPayload {
+            source_step: "prev".to_string(),
+            edge: "apply".to_string(),
+            data: serde_json::json!({"draft_id": "d42"}),
+        };
+        let input = StepInput::with_trigger("review", trigger, ctx);
+        let mut router = CollectingActionRouter::new();
+        execute_step(&def, input, 0, &mut router).unwrap();
+
+        assert_eq!(router.dispatched.len(), 1);
+        let dispatched = &router.dispatched[0];
+        assert_eq!(dispatched.params["to"], serde_json::json!("alice"));
+        assert_eq!(dispatched.params["ref"], serde_json::json!("d42"));
+    }
+
+    #[test]
+    fn execute_step_entry_actions_dispatched_before_transition() {
+        let entry_action = StepAction::new("ta.notify");
+
+        let def = make_def_with_transitions(
+            "gate",
+            vec![Transition {
+                on: "start".to_string(),
+                guard: None,
+                actions: vec![StepAction::new("ta.apply_draft")],
+                context_patch: serde_json::Map::new(),
+                payload: serde_json::Value::Null,
+                to: None,
+            }],
+            vec![entry_action],
+        );
+
+        let input = StepInput::initial("gate", WorkflowContext::new());
+        let mut router = CollectingActionRouter::new();
+        execute_step(&def, input, 0, &mut router).unwrap();
+
+        // entry action dispatched first, then transition action.
+        assert_eq!(router.dispatched.len(), 2);
+        assert_eq!(router.dispatched[0].action_type, "ta.notify");
+        assert_eq!(router.dispatched[1].action_type, "ta.apply_draft");
+    }
+
+    #[test]
+    fn execute_step_unknown_step_returns_error() {
+        let def = def_with_steps(HashMap::new(), "start");
+        let input = StepInput::initial("nonexistent", WorkflowContext::new());
+        let mut router = NoopActionRouter;
+        assert!(matches!(
+            execute_step(&def, input, 0, &mut router),
+            Err(StepError::StepNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn execute_step_no_matching_transition_returns_terminal() {
+        let def = make_def_with_transitions("gate", vec![], vec![]);
+        let input = StepInput::initial("gate", WorkflowContext::new());
+        let mut router = NoopActionRouter;
+        let output = execute_step(&def, input, 0, &mut router).unwrap();
+        assert!(output.is_terminal());
     }
 }

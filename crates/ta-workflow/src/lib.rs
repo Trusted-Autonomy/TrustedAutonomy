@@ -23,8 +23,12 @@ pub mod process_engine;
 pub mod registry;
 pub mod scorer;
 pub mod serial_phases;
+pub mod step_action;
+pub mod step_context;
 pub mod step_executor;
+pub mod step_guard;
 pub mod step_kind;
+pub mod step_template;
 pub mod step_validate;
 pub mod swarm;
 pub mod trigger;
@@ -57,13 +61,22 @@ pub use interaction::{AwaitHumanConfig, InteractionRequest, InteractionResponse}
 pub use serial_phases::{
     evaluate_gates, run_gate, GateFailure, GateResult, SerialPhasesState, StepState, WorkflowGate,
 };
+pub use step_action::{
+    ActionRouter, CollectingActionRouter, NoopActionRouter, StepAction, KNOWN_TA_ACTIONS,
+};
+pub use step_context::{
+    StepInput, StepOutput, TransitionPayload, TransitionRecord, WorkflowContext,
+};
 pub use step_executor::{
-    ask_human_headless, execute_pr_monitor_tick, execute_sync_build, execute_sync_build_step,
-    poll_pr_ci_status, BuildStepResult, PrCiStatus, StepError, StepExecutionContext, StepOutcome,
+    ask_human_headless, execute_pr_monitor_tick, execute_step, execute_sync_build,
+    execute_sync_build_step, poll_pr_ci_status, BuildStepResult, PrCiStatus, StepError,
+    StepExecutionContext, StepOutcome,
 };
+pub use step_guard::GuardExpr;
 pub use step_kind::{
-    parse_timeout_secs, PrWaitCondition, StepTarget, StepWorkflowDef, WorkflowStepKind,
+    parse_timeout_secs, PrWaitCondition, StepTarget, StepWorkflowDef, Transition, WorkflowStepKind,
 };
+pub use step_template::{resolve_context_patch, resolve_params, resolve_template};
 pub use step_validate::validate_step_workflow;
 pub use swarm::{IntegrationConfig, SubGoalSpec, SubGoalStatus, SwarmState};
 pub use ta_changeset::ArtifactType;
