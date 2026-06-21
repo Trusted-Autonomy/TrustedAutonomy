@@ -8788,7 +8788,7 @@ steps:
 
 ---
 ### v0.17.0.6 — Connector Supervisor: Fault-Isolated Plugin Processes
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Inbound connectors (Discord, Slack, Telegram, etc.) run as supervised subprocesses. A crashed or slow connector cannot starve the daemon's HTTP handler or accumulate unbounded event backlogs. The daemon remains fully responsive regardless of connector health.
 
 **Problem**: Connectors are already separate processes, but the daemon has no adopt-orphan check before restart (crash-loops 5000+ times when old process is still alive), no bounded event queue (stale events accumulate indefinitely and contend with HTTP handlers), and no health signaling protocol (daemon cannot distinguish a slow connector from a dead one). The `/api/status` endpoint compounds this by scanning all goals/drafts on every call, making the daemon appear unreachable to the CLI even when healthy.
