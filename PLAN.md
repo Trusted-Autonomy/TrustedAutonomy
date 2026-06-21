@@ -8900,6 +8900,87 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 #### Version: `0.17.0-alpha.8`
 
 ---
+### v0.17.0.9 — Daemon Hardening: Security, Durability, and Operational Stability
+<!-- status: pending -->
+**Goal**: Address all Critical and High findings from the red team audit. Make the daemon safe against malicious agent subprocesses, resilient to crashes during apply, and operationally stable under load. Medium findings addressed where low-effort; Low findings deferred to maintenance.
+
+**Audit source**: Red team review of `ta-daemon`, `ta-workspace`, `ta-cli/run.rs`, `ta-mcp-gateway` — June 2026.
+
+#### Security (Critical + High)
+
+**[Critical] CORS wildcard enables CSRF from any webpage**
+- `crates/ta-daemon/src/web.rs:587` — `CorsLayer::permissive()` allows any origin to call the local API; combined with loopback bypass grants Admin scope
+- Fix: Restrict to Studio origin (`app://ta-studio`, `http://localhost:<ui-port>`); require explicit Bearer token when cross-origin
+
+**[Critical] Unauthenticated shutdown via loopback**
+- `crates/ta-daemon/src/api/mod.rs:436` — `POST /api/shutdown` is reachable from any loopback process (including agent subprocesses)
+- Fix: Require explicit `X-TA-Admin-Confirm: shutdown` header; rate-limit to 1 call/minute from any source
+
+**[High] GitHub webhook fails open without secret**
+- `crates/ta-daemon/src/api/webhooks.rs:44` — `secret = ""` default accepts all payloads unauthenticated
+- Fix: Reject all webhook payloads when secret is unconfigured; emit startup warning; document required config
+
+**[High] Arbitrary path registration via `POST /api/projects`**
+- `crates/ta-daemon/src/api/mod.rs:205` — accepts any filesystem path as a project, enabling information disclosure
+- Fix: Require registered paths to contain `.ta/` subdirectory; reject RFC 1918 / root / system paths
+
+**[High] SSRF via `connectivity_check_url` in daemon.toml**
+- `crates/ta-daemon/src/config.rs:649` + `watchdog.rs:457` — agent can write this field via settings API, point it at internal hosts
+- Fix: Validate on load: HTTPS only, reject RFC 1918 / 169.254.x.x / localhost; disallow settings API mutation
+
+**[High] `reqwest::blocking` blocks Tokio worker in watchdog**
+- `crates/ta-daemon/src/watchdog.rs:458` — sync HTTP call on the async runtime thread pool
+- Fix: Wrap in `tokio::task::spawn_blocking` or replace with async `reqwest` + `tokio::time::timeout`
+
+**[High] Unbounded background task spawning from `/api/cmd`**
+- `crates/ta-daemon/src/api/cmd.rs:129` — each POST spawns 4 tasks with no concurrency limit
+- Fix: Gate with `tokio::sync::Semaphore` bounded by `daemon_config.agent.max_sessions`
+
+#### Durability (High)
+
+**[High] Non-atomic draft apply — partial state on crash**
+- `crates/ta-workspace/src/overlay.rs:692` — sequential `fs::copy` with no journal; crash leaves mixed destination state
+- Fix: Write `.ta/apply.journal` (list of planned ops) before starting; tick off each op; on startup, detect and offer to complete/rollback via `ta doctor --fix`
+
+**[High] TokenStore TOCTOU race on concurrent creates**
+- `crates/ta-daemon/src/config.rs:1566` — read-all / append / write-all without file lock; concurrent creates silently lose tokens
+- Fix: Use `Arc<Mutex<>>` around token store in-process; use advisory file lock for multi-process safety
+
+#### Extensibility
+
+**[High priority] `GoalRunState` missing `#[non_exhaustive]`**
+- `crates/ta-goal/src/goal_run.rs:31` — new states require match exhaustion edits in 3+ crates; no forward-compat guard
+- Fix: Add `#[non_exhaustive]` immediately; add `Custom(String)` variant for extension states
+
+**Built-in agent config is a hardcoded match arm**
+- `apps/ta-cli/src/commands/run.rs:199` — adding new built-in agents (Gemini, Strands) requires editing match
+- Fix: Move built-in configs to YAML files in `<binary-dir>/agents/`; the `_` arm becomes the sole fallback
+
+#### Operational (Medium)
+
+- Token validation reads full file per request → cache with `Arc<RwLock<Vec<TokenRecord>>>`, invalidate on mutate
+- Idle timeout uses `Mutex<Instant>` at high lock rate → replace with `Arc<AtomicU64>` (Unix ms timestamp)
+- `println!` in `overlay.rs:396` pollutes MCP stdout → replace with `tracing::info!`
+- Broadcast channel capacity 256 → raise to 1024; add sweep of channels map after goal ends
+
+**Items**:
+1. [ ] CORS: replace `CorsLayer::permissive()` with allowlist of Studio origins in `web.rs` and new API router; require Bearer token for cross-origin requests
+2. [ ] Shutdown guard: add `X-TA-Admin-Confirm: shutdown` header check + rate limiter to `POST /api/shutdown`
+3. [ ] Webhook fail-safe: reject payloads when `[webhooks.github] secret = ""`; emit startup warning if webhooks configured without secret
+4. [ ] Project path allowlist: `POST /api/projects` must verify path contains `.ta/`; reject system/root/RFC-1918 paths
+5. [ ] SSRF guard: validate `connectivity_check_url` on config load and on settings API write (HTTPS only, no private addresses); `PUT /api/settings` cannot mutate this field without admin token
+6. [ ] Watchdog async: replace `reqwest::blocking` with `reqwest` async + `spawn_blocking` wrapper in `watchdog.rs`
+7. [ ] `/api/cmd` concurrency limit: gate spawning with `Semaphore(max_sessions)` before forking command tasks
+8. [ ] Apply journal: write `.ta/apply.journal` before `overlay.apply_to()`; tick entries on completion; `ta doctor --fix` detects and recovers incomplete applies
+9. [ ] TokenStore locking: wrap with `Arc<Mutex<TokenStore>>` in daemon state; use append-only file write
+10. [ ] `GoalRunState` forward compat: add `#[non_exhaustive]` + `Custom(String)` variant; audit all match sites for `_ => unreachable!()`
+11. [ ] Agent config YAML: move `builtin_agent_config()` match arms to `agents/claude-code.yaml`, `agents/codex.yaml`, `agents/claude-flow.yaml` shipped alongside the binary
+12. [ ] Operational: token cache, AtomicU64 idle timeout, `println!` → `tracing`, broadcast capacity 1024
+13. [ ] Secrets masking: settings API returns `"***"` for `bot_token`, `api_key` fields; add `[credentials]` section doc pointing to env var alternatives
+
+#### Version: `0.17.0-alpha.9`
+
+---
 ### v0.17.0.5 — Autonomous Phase Loop (`ta plan build --autonomous`)
 <!-- status: pending -->
 
