@@ -8916,13 +8916,21 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 - `crates/ta-daemon/src/api/mod.rs:436` — `POST /api/shutdown` is reachable from any loopback process (including agent subprocesses)
 - Fix: Require explicit `X-TA-Admin-Confirm: shutdown` header; rate-limit to 1 call/minute from any source
 
+**[High] Binary masquerade — no verification before exec**
+- `apps/ta-cli/src/commands/run.rs:199` + `BareProcessRuntime::spawn()` — TA calls `Command::new("claude")` with zero binary verification; no hash check, no code signing check, no path pinning, no preload sanitization; child inherits full parent environment including `ANTHROPIC_API_KEY`
+- Attack (30-second exploit): prepend `/tmp/evil/` to PATH containing a fake `claude` that exfiltrates staging and proxies to the real binary — user sees normal output
+- **Do NOT SHA-pin binaries**: agent binaries update constantly (npm, Anthropic releases); every update breaks the pin; this is a support ticket generator, not a security control
+- **Do NOT use `codesign -v`**: npm-installed claude shims are shell scripts, not signed Mach-O binaries; `codesign` errors on them; useless for this threat model
+- Correct fix — two steps, both required: (1) **Absolute path pinning in `daemon.toml`**: `[agent.trusted_binaries] claude-code = "/home/user/.nvm/.../claude"` — `which::which()` resolves the binary, compare canonical result to stored path, abort if different; (2) **Strip preload vars before spawn**: explicitly `cmd.env_remove("LD_PRELOAD"); cmd.env_remove("DYLD_INSERT_LIBRARIES"); cmd.env_remove("DYLD_LIBRARY_PATH")` in `BareProcessRuntime::spawn()` — 3 lines, eliminates injection surface entirely
+
 **[High] GitHub webhook fails open without secret**
 - `crates/ta-daemon/src/api/webhooks.rs:44` — `secret = ""` default accepts all payloads unauthenticated
 - Fix: Reject all webhook payloads when secret is unconfigured; emit startup warning; document required config
 
 **[High] Arbitrary path registration via `POST /api/projects`**
-- `crates/ta-daemon/src/api/mod.rs:205` — accepts any filesystem path as a project, enabling information disclosure
-- Fix: Require registered paths to contain `.ta/` subdirectory; reject RFC 1918 / root / system paths
+- `crates/ta-daemon/src/api/mod.rs:205` — current `validate()` only checks `exists()` and `is_dir()`; no canonicalization, no `.ta/` check, no system path block
+- Correct algorithm: (1) `fs::canonicalize()` first — resolves ALL symlinks and `..` components; (2) check that `canonical.join(".ta").is_dir()` — `.ta/` as DIRECT child, not "contains .ta/ anywhere in path string" (that's bypassable by creating `/tmp/evil/.ta`); (3) block short list of system roots (`/`, `/etc`, `/usr`, `/var`); (4) optional office mode: check canonical path starts with a configured workspace root
+- **Do NOT use string-contains check**: `path.contains(".ta/")` is bypassable — attacker creates the `.ta/` dir at any depth then registers the ancestor
 
 **[High] SSRF via `connectivity_check_url` in daemon.toml**
 - `crates/ta-daemon/src/config.rs:649` + `watchdog.rs:457` — agent can write this field via settings API, point it at internal hosts
@@ -8933,8 +8941,10 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 - Fix: Wrap in `tokio::task::spawn_blocking` or replace with async `reqwest` + `tokio::time::timeout`
 
 **[High] Unbounded background task spawning from `/api/cmd`**
-- `crates/ta-daemon/src/api/cmd.rs:129` — each POST spawns 4 tasks with no concurrency limit
-- Fix: Gate with `tokio::sync::Semaphore` bounded by `daemon_config.agent.max_sessions`
+- `crates/ta-daemon/src/api/cmd.rs:129` — each POST spawns 4–6 tasks unconditionally; `max_parallel_sessions` exists in config and `/api/status` but is **display-only, never enforced** here
+- Fix: Add `cmd_semaphore: Arc<Semaphore>` to `AppState`, initialized from new `commands.max_background_tasks` config (default 4, user-configurable — DGX Spark users set 8+); use `try_acquire_owned()` (atomic, no TOCTOU window); hold `_permit` in task so it's released on exit
+- Separate concerns: `max_background_tasks` (for `/api/cmd` subprocess tasks) ≠ `max_parallel_goals` (for concurrent `ta run` goals) ≠ `max_sessions` (interactive sessions). **Do NOT** collapse these into one field.
+- Resource-aware auto-limit (read `/proc/meminfo`) is not worth the complexity — a user-configurable static limit with clear docs is simpler, observable, and correct
 
 #### Durability (High)
 
@@ -8964,19 +8974,20 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 - Broadcast channel capacity 256 → raise to 1024; add sweep of channels map after goal ends
 
 **Items**:
-1. [ ] CORS: replace `CorsLayer::permissive()` with allowlist of Studio origins in `web.rs` and new API router; require Bearer token for cross-origin requests
-2. [ ] Shutdown guard: add `X-TA-Admin-Confirm: shutdown` header check + rate limiter to `POST /api/shutdown`
-3. [ ] Webhook fail-safe: reject payloads when `[webhooks.github] secret = ""`; emit startup warning if webhooks configured without secret
-4. [ ] Project path allowlist: `POST /api/projects` must verify path contains `.ta/`; reject system/root/RFC-1918 paths
-5. [ ] SSRF guard: validate `connectivity_check_url` on config load and on settings API write (HTTPS only, no private addresses); `PUT /api/settings` cannot mutate this field without admin token
-6. [ ] Watchdog async: replace `reqwest::blocking` with `reqwest` async + `spawn_blocking` wrapper in `watchdog.rs`
-7. [ ] `/api/cmd` concurrency limit: gate spawning with `Semaphore(max_sessions)` before forking command tasks
-8. [ ] Apply journal: write `.ta/apply.journal` before `overlay.apply_to()`; tick entries on completion; `ta doctor --fix` detects and recovers incomplete applies
-9. [ ] TokenStore locking: wrap with `Arc<Mutex<TokenStore>>` in daemon state; use append-only file write
-10. [ ] `GoalRunState` forward compat: add `#[non_exhaustive]` + `Custom(String)` variant; audit all match sites for `_ => unreachable!()`
-11. [ ] Agent config YAML: move `builtin_agent_config()` match arms to `agents/claude-code.yaml`, `agents/codex.yaml`, `agents/claude-flow.yaml` shipped alongside the binary
-12. [ ] Operational: token cache, AtomicU64 idle timeout, `println!` → `tracing`, broadcast capacity 1024
-13. [ ] Secrets masking: settings API returns `"***"` for `bot_token`, `api_key` fields; add `[credentials]` section doc pointing to env var alternatives
+1. [ ] Binary masquerade: (a) add `[agent.trusted_binaries]` map to `DaemonConfig`; before spawn, resolve binary via `which::which()` and compare canonical path to stored value — abort with actionable error if mismatch; (b) in `BareProcessRuntime::spawn()`, strip `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH` from inherited env before merging agent config env vars
+2. [ ] CORS: replace `CorsLayer::permissive()` with allowlist of Studio origins in `web.rs` and new API router; require Bearer token for cross-origin requests
+3. [ ] Shutdown guard: add `X-TA-Admin-Confirm: shutdown` header check + rate limiter to `POST /api/shutdown`
+4. [ ] Webhook fail-safe: reject payloads when `[webhooks.github] secret = ""`; emit startup warning if webhooks configured without secret
+5. [ ] Project path canonicalization: `POST /api/projects` `validate()` must: (1) `fs::canonicalize()` the path; (2) check `canonical.join(".ta").is_dir()` (direct child only — not string-contains); (3) block system roots (`/`, `/etc`, `/usr`, `/var`, `/bin`); (4) optional: enforce `office.workspace_roots` allowlist
+6. [ ] `/api/cmd` concurrency: add `cmd_semaphore: Arc<Semaphore>` to `AppState` from new `commands.max_background_tasks` config (default 4); use `try_acquire_owned()` before `tokio::spawn`; hold `_permit` in task body so slot releases on exit; also add `max_parallel_goals` enforcement for `ta run` invocations; document DGX/high-core configs in USAGE.md
+7. [ ] SSRF guard: validate `connectivity_check_url` on config load and on settings API write (HTTPS only, no private addresses); `PUT /api/settings` cannot mutate this field without admin token
+8. [ ] Watchdog async: replace `reqwest::blocking` with `reqwest` async + `spawn_blocking` wrapper in `watchdog.rs`
+9. [ ] Apply journal: write `.ta/apply.journal` before `overlay.apply_to()`; tick entries on completion; `ta doctor --fix` detects and recovers incomplete applies
+10. [ ] TokenStore locking: wrap with `Arc<Mutex<TokenStore>>` in daemon state; use append-only file write
+11. [ ] `GoalRunState` forward compat: add `#[non_exhaustive]` + `Custom(String)` variant; audit all match sites for `_ => unreachable!()`
+12. [ ] Agent config YAML: move `builtin_agent_config()` match arms to `agents/claude-code.yaml`, `agents/codex.yaml`, `agents/claude-flow.yaml` shipped alongside the binary
+13. [ ] Operational: token cache (`Arc<RwLock<>>`), `AtomicU64` idle timeout, `println!` → `tracing::info!` in `overlay.rs`, broadcast capacity 1024
+14. [ ] Secrets masking: settings API returns `"***"` for `bot_token`, `api_key` fields; add `[credentials]` section doc pointing to env var alternatives
 
 #### Version: `0.17.0-alpha.9`
 
