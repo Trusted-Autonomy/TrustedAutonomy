@@ -1,17 +1,78 @@
-// connector.rs — `ta connector` subcommand: install, list, status, start, stop.
+// connector.rs — `ta connector` subcommand: install, list, status, start, stop, restart.
 //
-// Manages TA connector MCP servers (Unreal Engine, Unity, etc.).
-// Each connector wraps an external MCP server process (Python, UE5 plugin, etc.)
-// and exposes it through TA's policy/audit/draft flow.
+// Manages two categories of TA connectors:
+//   1. MCP server connectors (Unreal Engine, Unity, ComfyUI) — installed and managed externally.
+//   2. Supervised connectors (defined in [[connectors.managed]] in workflow.toml) — spawned and
+//      monitored by the daemon's ConnectorSupervisor (v0.17.0.6).
+//
+// `ta connector list`    — shows all known supervisor-managed connectors (from .ta/connectors/).
+// `ta connector status`  — shows status for a specific or all connectors.
+// `ta connector restart` — clears the Suspended state and signals the supervisor to restart.
 
 use anyhow::Result;
 use clap::Subcommand;
+use serde::{Deserialize, Serialize};
 
 use ta_connector_comfyui::config::ComfyUiConnectorConfig;
 use ta_connector_unity::config::UnityConnectorConfig;
 use ta_connector_unreal::{backends::make_backend, config::UnrealConnectorConfig};
 
 use ta_mcp_gateway::GatewayConfig;
+
+// ─── Supervisor status types (mirrors connector_supervisor.rs) ────────────────
+// Kept in sync with the daemon's ConnectorSupervisorStatus struct.
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SupervisorStatus {
+    pub name: String,
+    pub status: String,
+    pub pid: Option<u32>,
+    pub restart_count: u32,
+    pub last_heartbeat_secs_ago: Option<u64>,
+    pub last_started_at: Option<String>,
+    pub updated_at: String,
+}
+
+fn read_supervisor_status(project_root: &std::path::Path, name: &str) -> Option<SupervisorStatus> {
+    let path = project_root
+        .join(".ta")
+        .join("connectors")
+        .join(name)
+        .join("supervisor-status.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn list_supervised_connectors(project_root: &std::path::Path) -> Vec<SupervisorStatus> {
+    let connectors_dir = project_root.join(".ta").join("connectors");
+    if !connectors_dir.exists() {
+        return vec![];
+    }
+    let mut results = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&connectors_dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(s) = read_supervisor_status(project_root, &name) {
+                    results.push(s);
+                }
+            }
+        }
+    }
+    results.sort_by(|a, b| a.name.cmp(&b.name));
+    results
+}
+
+fn signal_connector_restart(project_root: &std::path::Path, name: &str) -> std::io::Result<()> {
+    let signal_path = project_root
+        .join(".ta")
+        .join("connectors")
+        .join(name)
+        .join("restart-signal");
+    std::fs::write(&signal_path, "restart")
+}
+
+const RESTART_SIGNAL_POLL_SECS: u64 = 5;
 
 #[derive(Subcommand)]
 pub enum ConnectorCommands {
@@ -35,21 +96,45 @@ pub enum ConnectorCommands {
         #[arg(long)]
         url: Option<String>,
     },
-    /// List installed connectors and their current backend selection.
+    /// List all supervised connectors (from [[connectors.managed]] in workflow.toml).
+    ///
+    /// Shows name, status, PID, last heartbeat, and restart count for each connector
+    /// managed by the daemon's ConnectorSupervisor. Also shows installed MCP connectors.
+    ///
+    /// Examples:
+    ///   ta connector list
     List,
-    /// Show whether a connector's MCP server process is running.
+    /// Show connector status — supervised and MCP connectors.
+    ///
+    /// For supervised connectors, shows PID, restart count, last heartbeat, and whether
+    /// the connector is suspended (requires `ta connector restart <name>` to resume).
+    ///
+    /// Examples:
+    ///   ta connector status
+    ///   ta connector status discord
     Status {
-        /// Connector name (e.g., "unreal", "unity"). Shows all if omitted.
+        /// Connector name. Shows all if omitted.
         connector: Option<String>,
     },
-    /// Start a connector's MCP server process.
+    /// Start a connector's MCP server process (MCP connectors only).
     Start {
         /// Connector name (e.g., "unreal").
         connector: String,
     },
-    /// Stop a connector's MCP server process.
+    /// Stop a connector's MCP server process (MCP connectors only).
     Stop {
         /// Connector name (e.g., "unreal").
+        connector: String,
+    },
+    /// Restart a suspended supervised connector.
+    ///
+    /// Clears the Suspended state so the ConnectorSupervisor resumes managing the connector.
+    /// A connector is suspended after 5 consecutive failures within 5 minutes.
+    ///
+    /// Examples:
+    ///   ta connector restart discord
+    Restart {
+        /// Connector name (must match a [[connectors.managed]] entry in workflow.toml).
         connector: String,
     },
 }
@@ -65,6 +150,7 @@ pub fn execute(command: &ConnectorCommands, config: &GatewayConfig) -> Result<()
         ConnectorCommands::Status { connector } => status(connector.as_deref(), config),
         ConnectorCommands::Start { connector } => start(connector, config),
         ConnectorCommands::Stop { connector } => stop(connector),
+        ConnectorCommands::Restart { connector } => restart(connector, config),
     }
 }
 
@@ -295,7 +381,42 @@ fn install_unreal(backend: &str) -> Result<()> {
 }
 
 fn list(gateway: &GatewayConfig) -> Result<()> {
-    println!("Installed connectors:");
+    // ── Supervised connectors (managed by ConnectorSupervisor) ──────────────
+    let supervised = list_supervised_connectors(&gateway.workspace_root);
+    if !supervised.is_empty() {
+        println!("Supervised connectors (daemon-managed):");
+        println!();
+        println!(
+            "  {:<18} {:<12} {:<8} {:<16} RESTARTS",
+            "NAME", "STATUS", "PID", "LAST HEARTBEAT"
+        );
+        println!("  {}", "-".repeat(68));
+        for s in &supervised {
+            let pid_str = s
+                .pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "—".to_string());
+            let hb_str = match s.last_heartbeat_secs_ago {
+                Some(secs) if secs < 60 => format!("{}s ago", secs),
+                Some(secs) => format!("{}m ago", secs / 60),
+                None => "—".to_string(),
+            };
+            println!(
+                "  {:<18} {:<12} {:<8} {:<16} {}",
+                s.name, s.status, pid_str, hb_str, s.restart_count
+            );
+            if s.status == "suspended" {
+                println!(
+                    "    ⚠ Suspended: run `ta connector restart {}` to resume",
+                    s.name
+                );
+            }
+        }
+        println!();
+    }
+
+    // ── MCP server connectors ───────────────────────────────────────────────
+    println!("Installed MCP connectors:");
     println!();
 
     let default_cfg = load_unreal_config(gateway);
@@ -400,6 +521,34 @@ fn list(gateway: &GatewayConfig) -> Result<()> {
 }
 
 fn status(connector: Option<&str>, gateway: &GatewayConfig) -> Result<()> {
+    // Check if the name matches a supervised connector first.
+    if let Some(name) = connector {
+        if let Some(s) = read_supervisor_status(&gateway.workspace_root, name) {
+            println!("{} connector (supervised):", name);
+            println!("  status:         {}", s.status);
+            println!(
+                "  pid:            {}",
+                s.pid.map(|p| p.to_string()).unwrap_or("—".to_string())
+            );
+            println!("  restart count:  {}", s.restart_count);
+            let hb = match s.last_heartbeat_secs_ago {
+                Some(secs) if secs < 60 => format!("{}s ago", secs),
+                Some(secs) => format!("{}m ago", secs / 60),
+                None => "—".to_string(),
+            };
+            println!("  last heartbeat: {}", hb);
+            if let Some(ref started) = s.last_started_at {
+                println!("  last started:   {}", started);
+            }
+            if s.status == "suspended" {
+                println!();
+                println!("  ⚠ Connector is suspended after repeated failures.");
+                println!("    Run `ta connector restart {}` to resume.", name);
+            }
+            return Ok(());
+        }
+    }
+
     let targets: Vec<&str> = match connector {
         Some(c) => vec![c],
         None => vec!["unreal", "comfyui", "unity"],
@@ -554,6 +703,40 @@ fn stop(connector: &str) -> Result<()> {
             anyhow::bail!(
                 "Unknown connector '{}'. Available: unreal, comfyui, unity",
                 other
+            );
+        }
+    }
+    Ok(())
+}
+
+fn restart(connector: &str, gateway: &GatewayConfig) -> Result<()> {
+    // Verify the connector is known to the supervisor.
+    let status = read_supervisor_status(&gateway.workspace_root, connector);
+
+    match &status {
+        Some(s) if s.status == "suspended" => {
+            signal_connector_restart(&gateway.workspace_root, connector)?;
+            println!(
+                "Restart signal sent to '{}' — daemon will resume it within {}s.",
+                connector, RESTART_SIGNAL_POLL_SECS,
+            );
+        }
+        Some(s) => {
+            println!(
+                "Connector '{}' is not suspended (status: '{}').",
+                connector, s.status
+            );
+            println!(
+                "Restart is only needed when status is 'suspended'. Current status: {}.",
+                s.status
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "Connector '{}' is not managed by the ConnectorSupervisor.\n\
+                 Add it to [[connectors.managed]] in .ta/workflow.toml first.\n\
+                 For MCP connectors (unreal, unity, comfyui), use `ta connector start`.",
+                connector
             );
         }
     }

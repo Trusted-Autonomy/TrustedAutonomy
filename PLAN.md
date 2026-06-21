@@ -8788,7 +8788,7 @@ steps:
 
 ---
 ### v0.17.0.6 — Connector Supervisor: Fault-Isolated Plugin Processes
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Inbound connectors (Discord, Slack, Telegram, etc.) run as supervised subprocesses. A crashed or slow connector cannot starve the daemon's HTTP handler or accumulate unbounded event backlogs. The daemon remains fully responsive regardless of connector health.
 
 **Problem**: Connectors are already separate processes, but the daemon has no adopt-orphan check before restart (crash-loops 5000+ times when old process is still alive), no bounded event queue (stale events accumulate indefinitely and contend with HTTP handlers), and no health signaling protocol (daemon cannot distinguish a slow connector from a dead one). The `/api/status` endpoint compounds this by scanning all goals/drafts on every call, making the daemon appear unreachable to the CLI even when healthy.
@@ -8817,16 +8817,16 @@ Event queue isolation
 ```
 
 **Items**:
-1. [ ] `ConnectorSupervisor`: Tokio background task in `ta-daemon`; loads connector list from `.ta/workflow.toml`; spawns each with `tokio::process::Command`
-2. [ ] Adopt-orphan check before restart: read pid from `.ta/connectors/<name>/status`, send SIGTERM, wait up to 5s for exit, SIGKILL if still alive
-3. [ ] Exponential backoff per connector: `restart_count` → `min(2^restart_count, 60)` seconds; reset on successful heartbeat
-4. [ ] Suspend after 5 failures in 5 min: set `backoff_state = Suspended`; `ta connector restart <name>` clears it
-5. [ ] Heartbeat protocol: supervisor reads `.ta/connectors/<name>/heartbeat` mtime; if stale > 90s, treat connector as unhealthy and restart
-6. [ ] Bounded event queue: `VecDeque<ConnectorEvent>` with capacity 1000 per connector; sender drops event (logs warn) when full
-7. [ ] TTL eviction background task: scans queues every 60s, drops events older than 600s, no mutex held during I/O
-8. [ ] `/api/status` response cache: `Arc<RwLock<(Instant, StatusResponse)>>`; returns cached value if age < 5s; background refresh task updates it
-9. [ ] CLI: `ta connector list` (name, status, pid, last heartbeat, restart count), `ta connector restart <name>`, `ta connector status <name>`
-10. [ ] Docs: update USAGE.md connector supervision section; document heartbeat protocol for third-party connector authors
+1. [x] `ConnectorSupervisor`: Tokio background task in `ta-daemon`; loads connector list from `.ta/workflow.toml`; spawns each with `tokio::process::Command`
+2. [x] Adopt-orphan check before restart: read pid from `.ta/connectors/<name>/status`, send SIGTERM, wait up to 5s for exit, SIGKILL if still alive
+3. [x] Exponential backoff per connector: `restart_count` → `min(2^restart_count, 60)` seconds; reset on successful heartbeat
+4. [x] Suspend after 5 failures in 5 min: set `backoff_state = Suspended`; `ta connector restart <name>` clears it
+5. [x] Heartbeat protocol: supervisor reads `.ta/connectors/<name>/heartbeat` mtime; if stale > 90s, treat connector as unhealthy and restart
+6. [x] Bounded event queue: `VecDeque<ConnectorEvent>` with capacity 1000 per connector; sender drops event (logs warn) when full
+7. [x] TTL eviction background task: scans queues every 60s, drops events older than 600s, no mutex held during I/O
+8. [x] `/api/status` response cache: `Arc<RwLock<(Instant, StatusResponse)>>`; returns cached value if age < 5s; background refresh task updates it
+9. [x] CLI: `ta connector list` (name, status, pid, last heartbeat, restart count), `ta connector restart <name>`, `ta connector status <name>`
+10. [x] Docs: update USAGE.md connector supervision section; document heartbeat protocol for third-party connector authors
 
 #### Version: `0.17.0-alpha.6`
 

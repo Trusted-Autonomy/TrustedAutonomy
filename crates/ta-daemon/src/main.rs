@@ -36,6 +36,7 @@ pub mod channel_dispatcher;
 pub mod channel_listener_manager;
 mod config;
 pub mod config_watcher;
+pub mod connector_supervisor;
 pub mod external_channel;
 pub mod notification_dispatcher;
 pub mod office;
@@ -249,6 +250,10 @@ async fn main() -> Result<()> {
             shutdown.clone(),
         );
     }
+
+    // Start the ConnectorSupervisor for [[connectors.managed]] entries (v0.17.0.6).
+    // Runs in both API and MCP modes. No-op if workflow.toml has no managed connectors.
+    connector_supervisor::start(project_root.clone(), shutdown.clone());
 
     if cli.api {
         // API server mode: start the full HTTP API.

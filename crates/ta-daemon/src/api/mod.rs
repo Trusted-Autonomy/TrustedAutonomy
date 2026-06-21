@@ -74,6 +74,9 @@ pub struct AppState {
     pub phase_claims: Arc<PhaseClaims>,
     /// Cached health signals for `/health/signals` endpoint (v0.15.30.6).
     pub signals_cache: Arc<health_signals::SignalsCache>,
+    /// 5-second cache for `/api/status` responses (v0.17.0.6).
+    /// Prevents the status endpoint from scanning all goals+drafts on every call.
+    pub status_cache: Arc<status::StatusCache>,
 }
 
 impl AppState {
@@ -105,6 +108,7 @@ impl AppState {
             active_project_root: Arc::new(std::sync::RwLock::new(project_root.clone())),
             phase_claims: Arc::new(PhaseClaims::new()),
             signals_cache: Arc::new(health_signals::SignalsCache::default()),
+            status_cache: Arc::new(status::StatusCache::new()),
             project_root,
             daemon_config,
         }
