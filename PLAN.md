@@ -8831,6 +8831,75 @@ Event queue isolation
 #### Version: `0.17.0-alpha.6`
 
 ---
+### v0.17.0.7 — Headroom: Context Compression for Claude Agents
+<!-- status: pending -->
+**Goal**: Integrate [headroom](https://github.com/chopratejas/headroom) as an opt-in (default-on for Claude) context compression proxy. Agents get 60–95% fewer tokens consumed by tool outputs, logs, and file reads — longer effective context, lower API cost, fewer mid-task context-window failures.
+
+**How it works**: headroom runs as a local HTTP proxy (port 8787 by default). TA sets `ANTHROPIC_BASE_URL=http://localhost:8787` when launching the agent; headroom compresses payloads and forwards to the real Anthropic API. The daemon manages the headroom process as a supervised connector (per v0.17.0.6 supervisor model).
+
+**Interaction with other frameworks**: headroom's proxy mode is OpenAI-compatible — it intercepts any agent that uses an OpenAI-compatible endpoint (Claude Code, Codex, LangGraph, CrewAI, Strands, pydantic-ai, etc.). No framework-specific integration needed. The `headroom learn` feature (mines failed sessions → writes CLAUDE.md) is explicitly disabled in TA-managed runs to avoid conflicts with TA's CLAUDE.md injection/backup/restore cycle.
+
+**Configuration**:
+```toml
+# .ta/daemon.toml
+[compression]
+enabled = true          # false to disable globally
+port = 8787
+algorithms = ["smart-crusher", "code-compressor", "kompress"]  # content-aware routing
+cache_aligner = true    # stabilize prompt prefixes for provider KV cache hits
+headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file)
+
+[compression.per_agent]
+"claude-code" = true    # on by default
+"codex" = false         # off by default for codex (uses different context model)
+```
+
+**Items**:
+1. [ ] `HeadroomSupervisor`: spawn `headroom proxy --port 8787` as a managed connector subprocess in `ta-daemon`; health-check via `GET http://localhost:8787/health`; restart on failure with exponential backoff (same supervisor model as v0.17.0.6)
+2. [ ] `[compression]` section in `DaemonConfig` (config.rs): `enabled`, `port`, `algorithms`, `cache_aligner`, `headroom_learn` (always false), `per_agent` map
+3. [ ] `launch_agent_via_runtime()` in `run.rs`: when compression is enabled and the agent is in `per_agent` allow-list, set `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` in the subprocess environment
+4. [ ] Detect headroom binary: check `PATH` for `headroom`, then `~/.local/bin/headroom`, then `~/.venv/bin/headroom`; if not found and `compression.enabled = true`, print actionable install instructions and continue without compression (never hard-fail)
+5. [ ] `ta compression status` command: shows proxy URL, headroom version, tokens saved in current session (via `headroom perf`), compression ratio, whether cache aligner is active
+6. [ ] `ta compression disable` / `ta compression enable`: toggle `[compression].enabled` in `daemon.toml`; restart headroom supervisor
+7. [ ] Windows installer checkbox: "Enable context compression (headroom)" — runs `pip install headroom-ai[all]` via bundled Python during install; checked by default
+8. [ ] Docs: USAGE.md section "Context Compression" — how it works, how to verify savings, how to disable, note on `headroom_learn = false` and why
+
+#### Version: `0.17.0-alpha.7`
+
+---
+### v0.17.0.8 — Agent Runtime Resolution: daemon.toml Default Respected by `ta run`
+<!-- status: pending -->
+**Goal**: Make `ta run` actually use the `[agent].default_framework` from `daemon.toml` when no `--agent` flag is given. Currently `--agent` has `default_value = "claude-code"` hardcoded in clap, so `daemon.toml`'s configured default is silently ignored.
+
+**Current broken resolution** (all of items 2–4 below are dead code):
+```
+// Comment in run.rs says:
+//   1. --agent flag
+//   2. workflow YAML agent_framework field (resolved upstream) ← never happens
+//   3. [agent].default_framework in daemon.toml (resolved by caller) ← never happens
+//   4. built-in default "claude-code"
+// Reality: clap default_value = "claude-code" always fills slot 1
+```
+
+**Fixed resolution order**:
+```
+1. --agent CLI flag (explicit user override)
+2. workflow YAML agent_framework field (from --workflow <file>)
+3. [agent].default_framework in daemon.toml (fetched from /api/status)
+4. "claude-code" (built-in fallback)
+```
+
+**Items**:
+1. [ ] Change `ta run --agent` from `String` with `default_value = "claude-code"` to `Option<String>` in `main.rs`
+2. [ ] Add `resolve_effective_agent(cli_agent, workflow_yaml_path, config)` helper: reads workflow YAML `agent_framework` if `--workflow` was given; fetches `default_agent` from `/api/status` if daemon is running; falls back to `"claude-code"`
+3. [ ] Call `resolve_effective_agent()` in the `Commands::Run` handler before passing to `execute()` — also in `execute_serial_phases()` and `execute_swarm()`
+4. [ ] `ta dev --agent` (same gap): change to `Option<String>` and apply same resolution
+5. [ ] `ta daemon config show` output: add "Effective agent: <name>" line showing what `ta run` will use
+6. [ ] Test: with `daemon.toml` `default_framework = "codex"`, `ta run "test"` (no `--agent`) should launch codex, not claude-code
+
+#### Version: `0.17.0-alpha.8`
+
+---
 ### v0.17.0.5 — Autonomous Phase Loop (`ta plan build --autonomous`)
 <!-- status: pending -->
 
