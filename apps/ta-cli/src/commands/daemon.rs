@@ -383,7 +383,9 @@ pub fn ensure_running(project_root: &Path) -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(2))
         .build()?;
 
-    let status_url = format!("{}/api/status", base_url);
+    // Use /health (not /api/status) — /api/status scans all drafts/goals and can
+    // take 4+ seconds on large workspaces, reliably exceeding the 2s timeout.
+    let status_url = format!("{}/health", base_url);
     let reachable = client.get(&status_url).send().is_ok();
 
     if reachable {
@@ -537,7 +539,7 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
         Some(p) if is_process_alive(p) => {
             // Daemon PID is alive — query for details.
             let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(3))
+                .timeout(std::time::Duration::from_secs(15))
                 .build()?;
 
             let status_url = format!("{}/api/status", base_url);
