@@ -2,18 +2,59 @@
 //
 // Returns the same data as `ta status` but as JSON — project name, version,
 // current phase, active agents, pending drafts, and recent events.
+//
+// Response caching (v0.17.0.6): the full response is cached for 5 seconds.
+// Repeated CLI calls (e.g., polling loops, status bars) are O(1) instead of
+// O(goals + drafts).  The cache is populated on first access and refreshed
+// whenever it is stale.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Serialize;
+use tokio::sync::RwLock;
 
 use ta_events::store::{EventQueryFilter, EventStore, FsEventStore};
 use ta_goal::{GoalRunState, GoalRunStore};
 
 use crate::api::AppState;
+
+// ─── 5-second status response cache ──────────────────────────────────────────
+
+const STATUS_CACHE_TTL_SECS: u64 = 5;
+
+/// Thread-safe 5-second cache for the `/api/status` response.
+pub struct StatusCache {
+    inner: RwLock<Option<(Instant, serde_json::Value)>>,
+}
+
+impl StatusCache {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(None),
+        }
+    }
+
+    /// Return a cached value if it is younger than 5 seconds, or `None`.
+    pub async fn get(&self) -> Option<serde_json::Value> {
+        let guard = self.inner.read().await;
+        if let Some((ts, val)) = guard.as_ref() {
+            if ts.elapsed().as_secs() < STATUS_CACHE_TTL_SECS {
+                return Some(val.clone());
+            }
+        }
+        None
+    }
+
+    /// Store a new value with the current timestamp.
+    pub async fn set(&self, value: serde_json::Value) {
+        let mut guard = self.inner.write().await;
+        *guard = Some((Instant::now(), value));
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct ProjectStatus {
@@ -87,8 +128,22 @@ pub struct AgentInfo {
     pub draft_id: Option<String>,
 }
 
-/// `GET /api/status` — Project dashboard as JSON.
+/// `GET /api/status` — Project dashboard as JSON (cached for 5 seconds).
 pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Fast path: return cached response if fresh.
+    if let Some(cached) = state.status_cache.get().await {
+        return Json(cached).into_response();
+    }
+
+    // Slow path: compute response and cache it.
+    let response = compute_project_status(&state).await;
+    let value = serde_json::to_value(&response).unwrap_or_default();
+    state.status_cache.set(value).await;
+    Json(response).into_response()
+}
+
+/// Compute the full project status (called at most once per 5 seconds).
+async fn compute_project_status(state: &AppState) -> ProjectStatus {
     // Determine active project root and whether it's valid.
     let (active_root, active_project_path) = {
         let root = state.active_project_root.read().unwrap().clone();
@@ -194,7 +249,7 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     // Count resources whose cache is missing or older than 30 days.
     let community_pending_count = count_stale_community_resources(&active_root);
 
-    Json(ProjectStatus {
+    ProjectStatus {
         project: project_name,
         version: version.clone(),
         daemon_version: version,
@@ -214,7 +269,7 @@ pub async fn project_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         power_assertion_active,
         community_pending_count,
         active_project_path,
-    })
+    }
 }
 
 /// Count community resources with stale or missing caches.

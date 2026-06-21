@@ -14437,6 +14437,80 @@ The summary line at the end shows the count:
 
 ---
 
+## Connector Supervision
+
+TA's **ConnectorSupervisor** keeps user-defined connector processes running as long as the daemon is alive. A crashed or hung connector cannot starve the daemon's HTTP handlers or accumulate unbounded event backlogs.
+
+### Defining supervised connectors
+
+Declare connectors in `[[connectors.managed]]` inside `.ta/workflow.toml`:
+
+```toml
+[[connectors.managed]]
+name = "discord"
+command = "ta-channel-discord"
+args = ["--listen"]
+enabled = true
+
+[[connectors.managed]]
+name = "slack"
+command = "ta-channel-slack"
+args = ["--listen"]
+enabled = true
+```
+
+The daemon starts each enabled connector at startup and restarts it if it exits.
+
+### Backoff and suspension
+
+Restarts use **exponential backoff**: 1 s → 2 s → 4 s → … → 60 s cap. After **5 failures within 5 minutes** the connector is **suspended** — no further restarts occur until you intervene:
+
+```bash
+ta connector restart discord   # clears Suspended state; daemon resumes within 5 s
+```
+
+### Heartbeat protocol (for connector authors)
+
+Connectors signal liveness by touching `.ta/connectors/<name>/heartbeat` at least every 30 seconds. If the file's mtime is older than 90 seconds, the supervisor treats the connector as unhealthy and restarts it (even if the process has not exited).
+
+```bash
+# Minimal heartbeat loop (shell):
+while sleep 30; do touch .ta/connectors/my-connector/heartbeat; done
+```
+
+On clean exit, write `{"status":"stopped","reason":"..."}` to `.ta/connectors/<name>/status.json`. On error, write `{"status":"error","reason":"..."}` before exiting — this lets `ta connector status` show a human-readable reason.
+
+### CLI commands
+
+```bash
+# List all supervised connectors (name, status, PID, last heartbeat, restart count).
+ta connector list
+
+# Show detailed status for a specific connector.
+ta connector status discord
+
+# Restart a suspended connector (clears the Suspended state).
+ta connector restart discord
+```
+
+Example output:
+
+```
+Supervised connectors (daemon-managed):
+
+  NAME               STATUS       PID      LAST HEARTBEAT   RESTARTS
+  -------------------------------------------------------------------
+  discord            running      42137    12s ago          0
+  slack              suspended    —        —                7
+    ⚠ Suspended: run `ta connector restart slack` to resume
+```
+
+### Event queue
+
+The supervisor maintains an in-memory event queue per connector (capacity: 1000 events, TTL: 10 minutes). Events record lifecycle transitions (started, stopped, crashed, suspended, heartbeat\_missed). The queue is bounded — when full, new events are dropped with a log warning rather than growing without limit.
+
+---
+
 ## Getting Help
 
 - **Source and documentation**: [github.com/trustedautonomy/ta](https://github.com/trustedautonomy/ta)
