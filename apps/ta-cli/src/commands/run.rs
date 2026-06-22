@@ -1870,14 +1870,28 @@ pub fn execute(
     // For frameworks with memory.inject = "mcp" (Claude Code, Codex, Claude-Flow),
     // inject ta-memory as a local MCP server so the agent can call memory tools natively.
     // This happens for all goals when the framework supports MCP memory, not just macro goals.
-    {
+    let mcp_memory_injected = {
         use ta_runtime::MemoryInjectMode;
+        let mut injected = false;
         if let Some(ref fw) = resolved_framework {
             if matches!(fw.memory.inject, MemoryInjectMode::Mcp) {
                 if let Err(e) = inject_memory_mcp_server(&staging_path) {
                     tracing::warn!(framework = %fw.name, "Failed to inject ta-memory MCP server: {}", e);
+                } else {
+                    injected = true;
                 }
             }
+        }
+        injected
+    };
+
+    // Write (or refresh) the stable MCP agent config at project_root/.ta/mcp-agent.json.
+    // This file has STABLE content (no TA_PROJECT_ROOT varying per UUID staging path),
+    // so Claude Code approves it once and never re-prompts. ta serve inherits the cwd
+    // (staging_path) from the Claude process and discovers the project root that way.
+    if macro_goal {
+        if let Err(e) = write_stable_agent_mcp_config(&config.workspace_root, mcp_memory_injected) {
+            tracing::warn!("Failed to write stable MCP agent config: {}", e);
         }
     }
 
@@ -3771,18 +3785,26 @@ fn launch_agent_via_runtime(
         args.extend_from_slice(&config.headless_args);
     }
 
-    // For claude-code: pass --strict-mcp-config so Claude skips the per-project
-    // MCP server approval dialog. This applies to both headless and interactive runs
-    // because every goal uses a new UUID staging path — Claude would otherwise prompt
-    // for approval on every single run. The staging .mcp.json is TA-controlled (only
-    // the `ta` server, written by inject_mcp_server_config), so skipping the dialog
-    // is safe and expected. Users who want selective or global MCP approval control
-    // can configure auto_approve_mcp in workflow.toml (v0.17.0.4+).
+    // For claude-code: use --strict-mcp-config + a STABLE --mcp-config path so that
+    // Claude approves the ta MCP server once and never re-prompts. The stable config
+    // lives at project_root/.ta/mcp-agent.json and has identical content every run
+    // (no TA_PROJECT_ROOT that would vary per UUID staging path). The ta serve subprocess
+    // inherits Claude's cwd (= staging_path) so it discovers the right root at runtime.
     if config.name.as_deref() == Some("claude-code") {
-        let mcp_path = staging_path.join(".mcp.json");
+        // Stable config is three parents up from staging_path:
+        //   staging_path = project_root/.ta/staging/<uuid>
+        //   parent()     = project_root/.ta/staging
+        //   parent()     = project_root/.ta
+        //   parent()     = project_root
+        let stable_mcp_path = staging_path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(|root| root.join(".ta").join("mcp-agent.json"))
+            .unwrap_or_else(|| staging_path.join(".mcp.json")); // fallback: staging (old behavior)
         args.push("--strict-mcp-config".to_string());
         args.push("--mcp-config".to_string());
-        args.push(mcp_path.display().to_string());
+        args.push(stable_mcp_path.display().to_string());
     }
 
     let stdin_mode = if headless {
@@ -4565,6 +4587,66 @@ pub(crate) fn inject_mcp_server_config(staging_path: &Path) -> anyhow::Result<()
     });
 
     std::fs::write(&mcp_json_path, serde_json::to_string_pretty(&mcp_config)?)?;
+    Ok(())
+}
+
+/// Write a stable MCP config at `project_root/.ta/mcp-agent.json`.
+///
+/// This file has content that NEVER changes between goal runs — no `TA_PROJECT_ROOT`
+/// env var that would differ per staging UUID. When `ta serve` is launched by Claude
+/// Code as an MCP subprocess, it inherits the cwd (= staging_path) from Claude and
+/// discovers the project root that way.
+///
+/// Claude Code keys MCP approval per server config. A stable config = approved once,
+/// never re-prompted. A staging-path-scoped config = new UUID per run = re-prompt
+/// on every single goal.
+///
+/// Call this after inject_mcp_server_config (which sets up the staging .mcp.json for
+/// backup/restore) and after inject_memory_mcp_server (which adds ta-memory and
+/// ta-community-hub). Those write to staging/.mcp.json; this writes the stable copy
+/// used for the actual --mcp-config flag.
+pub(crate) fn write_stable_agent_mcp_config(
+    project_root: &Path,
+    include_memory: bool,
+) -> anyhow::Result<()> {
+    let ta_binary = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "ta".to_string());
+
+    // No TA_PROJECT_ROOT — ta serve inherits Claude's cwd (staging_path) at launch time.
+    // TA_IS_STAGING=1 prevents re-entrant goal creation from inside a goal.
+    let ta_server = serde_json::json!({
+        "command": ta_binary,
+        "args": ["serve"],
+        "env": { "TA_IS_STAGING": "1" }
+    });
+
+    let mut servers = serde_json::Map::new();
+    servers.insert("ta".to_string(), ta_server);
+
+    if include_memory {
+        let memory_server = serde_json::json!({
+            "command": ta_binary,
+            "args": ["memory", "serve"],
+            "env": { "TA_IS_STAGING": "1" }
+        });
+        let community_server = serde_json::json!({
+            "command": ta_binary,
+            "args": ["community", "serve"],
+            "env": { "TA_IS_STAGING": "1" }
+        });
+        servers.insert("ta-memory".to_string(), memory_server);
+        servers.insert("ta-community-hub".to_string(), community_server);
+    }
+
+    let config = serde_json::json!({ "mcpServers": servers });
+    let ta_dir = project_root.join(".ta");
+    std::fs::create_dir_all(&ta_dir)?;
+    std::fs::write(
+        ta_dir.join("mcp-agent.json"),
+        serde_json::to_string_pretty(&config)?,
+    )?;
     Ok(())
 }
 
