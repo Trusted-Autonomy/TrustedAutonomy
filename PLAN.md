@@ -8832,7 +8832,7 @@ Event queue isolation
 
 ---
 ### v0.17.0.7 — Headroom: Context Compression for Claude Agents
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Integrate [headroom](https://github.com/chopratejas/headroom) as an opt-in (default-on for Claude) context compression proxy. Agents get 60–95% fewer tokens consumed by tool outputs, logs, and file reads — longer effective context, lower API cost, fewer mid-task context-window failures.
 
 **How it works**: headroom runs as a local HTTP proxy (port 8787 by default). TA sets `ANTHROPIC_BASE_URL=http://localhost:8787` when launching the agent; headroom compresses payloads and forwards to the real Anthropic API. The daemon manages the headroom process as a supervised connector (per v0.17.0.6 supervisor model).
