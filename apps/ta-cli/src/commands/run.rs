@@ -1889,10 +1889,11 @@ pub fn execute(
     // This file has STABLE content (no TA_PROJECT_ROOT varying per UUID staging path),
     // so Claude Code approves it once and never re-prompts. ta serve inherits the cwd
     // (staging_path) from the Claude process and discovers the project root that way.
-    if macro_goal {
-        if let Err(e) = write_stable_agent_mcp_config(&config.workspace_root, mcp_memory_injected) {
-            tracing::warn!("Failed to write stable MCP agent config: {}", e);
-        }
+    //
+    // Must run for ALL goal types (macro and non-macro): launch_agent_via_runtime always
+    // passes --mcp-config pointing here. If the file doesn't exist, claude exits code 1.
+    if let Err(e) = write_stable_agent_mcp_config(&config.workspace_root, mcp_memory_injected) {
+        tracing::warn!("Failed to write stable MCP agent config: {}", e);
     }
 
     // v0.13.8 item 12: Memory bridge — context mode.
