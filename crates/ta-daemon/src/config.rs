@@ -102,6 +102,27 @@ pub struct DaemonConfig {
     /// ```
     #[serde(default)]
     pub gc: GcConfig,
+
+    /// Context compression via headroom proxy (v0.17.0.7).
+    ///
+    /// When enabled, the daemon spawns `headroom proxy --port <port>` and sets
+    /// `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` in the agent subprocess
+    /// environment so all API requests are compressed before forwarding.
+    ///
+    /// ```toml
+    /// [compression]
+    /// enabled = true
+    /// port = 8787
+    /// algorithms = ["smart-crusher", "code-compressor", "kompress"]
+    /// cache_aligner = true
+    /// headroom_learn = false   # always false — TA owns CLAUDE.md
+    ///
+    /// [compression.per_agent]
+    /// "claude-code" = true
+    /// "codex" = false
+    /// ```
+    #[serde(default)]
+    pub compression: CompressionConfig,
 }
 
 /// Per-operation timeout configuration (v0.15.6.2 / v0.15.7.1).
@@ -1114,6 +1135,7 @@ fn default_ta_subcommands() -> Vec<String> {
         "sync",
         "verify",
         "conversation",
+        "compression",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -1636,6 +1658,118 @@ impl ExperimentalConfig {
     }
 }
 
+/// Context compression configuration (v0.17.0.7).
+///
+/// Controls the headroom proxy that compresses tool outputs, logs, and file
+/// reads before they reach the Anthropic API, reducing token consumption by
+/// 60–95%.  Enabled by default for `claude-code`; off by default for other
+/// frameworks.
+///
+/// `headroom_learn` is always overridden to `false` in TA-managed runs to
+/// prevent headroom from modifying `CLAUDE.md` (TA owns that file through its
+/// CLAUDE.md injection/backup/restore cycle).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompressionConfig {
+    /// Whether context compression is active (default: true).
+    ///
+    /// When false, the headroom supervisor is not started and
+    /// `ANTHROPIC_BASE_URL` is not set for any agent.
+    #[serde(default = "default_compression_enabled")]
+    pub enabled: bool,
+
+    /// Port the headroom proxy listens on (default: 8787).
+    #[serde(default = "default_compression_port")]
+    pub port: u16,
+
+    /// Compression algorithms to use, in priority order (default: smart-crusher,
+    /// code-compressor, kompress).  Passed to `headroom proxy --algorithms`.
+    #[serde(default = "default_compression_algorithms")]
+    pub algorithms: Vec<String>,
+
+    /// Whether to activate headroom's cache-aligner to stabilize prompt prefixes
+    /// for provider KV cache hits (default: true).
+    #[serde(default = "default_compression_cache_aligner")]
+    pub cache_aligner: bool,
+
+    /// Whether headroom may learn from failed sessions and modify CLAUDE.md
+    /// (default: false, always forced false in TA-managed runs).
+    ///
+    /// TA owns the CLAUDE.md lifecycle (inject on run start, restore before diff).
+    /// Any headroom-driven mutation would be lost on restore or cause a spurious diff.
+    /// This field is preserved in config so it can be serialised, but the daemon
+    /// always enforces `false` regardless of what is written here.
+    #[serde(default)]
+    pub headroom_learn: bool,
+
+    /// Per-agent opt-in / opt-out map.
+    ///
+    /// Keys are agent framework names (e.g. `"claude-code"`, `"codex"`).
+    /// Values are `true` (enable) or `false` (disable).
+    ///
+    /// Agents not listed here use the framework default:
+    ///   - `"claude-code"` → true (enabled by default)
+    ///   - all others → false (disabled by default)
+    #[serde(default = "default_per_agent")]
+    pub per_agent: std::collections::HashMap<String, bool>,
+}
+
+fn default_compression_enabled() -> bool {
+    true
+}
+
+fn default_compression_port() -> u16 {
+    8787
+}
+
+fn default_compression_algorithms() -> Vec<String> {
+    vec![
+        "smart-crusher".to_string(),
+        "code-compressor".to_string(),
+        "kompress".to_string(),
+    ]
+}
+
+fn default_compression_cache_aligner() -> bool {
+    true
+}
+
+fn default_per_agent() -> std::collections::HashMap<String, bool> {
+    let mut m = std::collections::HashMap::new();
+    m.insert("claude-code".to_string(), true);
+    m.insert("codex".to_string(), false);
+    m
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_compression_enabled(),
+            port: default_compression_port(),
+            algorithms: default_compression_algorithms(),
+            cache_aligner: default_compression_cache_aligner(),
+            headroom_learn: false,
+            per_agent: default_per_agent(),
+        }
+    }
+}
+
+impl CompressionConfig {
+    /// Whether compression should be applied for a given agent framework.
+    ///
+    /// Uses the `per_agent` map first; falls back to the framework default
+    /// (`claude-code` → true, everything else → false).
+    pub fn is_enabled_for(&self, agent: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        self.per_agent
+            .get(agent)
+            .copied()
+            .unwrap_or(agent == "claude-code")
+    }
+}
+
 #[allow(dead_code)]
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -1896,6 +2030,83 @@ mod tests {
         let toml_str = toml::to_string_pretty(&config).unwrap();
         // socket_path should be omitted when None.
         assert!(!toml_str.contains("socket_path"));
+    }
+
+    #[test]
+    fn compression_config_defaults() {
+        let config = CompressionConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.port, 8787);
+        assert!(!config.headroom_learn);
+        assert!(config.cache_aligner);
+        assert!(config.algorithms.contains(&"smart-crusher".to_string()));
+    }
+
+    #[test]
+    fn compression_config_roundtrip() {
+        let toml_str = r#"
+[compression]
+enabled = true
+port = 9090
+cache_aligner = false
+headroom_learn = false
+
+[compression.per_agent]
+"claude-code" = true
+"codex" = false
+"#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.compression.enabled);
+        assert_eq!(config.compression.port, 9090);
+        assert!(!config.compression.cache_aligner);
+        assert_eq!(config.compression.per_agent.get("claude-code"), Some(&true));
+        assert_eq!(config.compression.per_agent.get("codex"), Some(&false));
+    }
+
+    #[test]
+    fn compression_disabled_when_enabled_false() {
+        let cfg = CompressionConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(!cfg.is_enabled_for("claude-code"));
+        assert!(!cfg.is_enabled_for("codex"));
+    }
+
+    #[test]
+    fn compression_per_agent_defaults() {
+        let cfg = CompressionConfig::default();
+        // claude-code defaults on
+        assert!(cfg.is_enabled_for("claude-code"));
+        // codex defaults off
+        assert!(!cfg.is_enabled_for("codex"));
+        // unknown agent defaults off
+        assert!(!cfg.is_enabled_for("custom-agent"));
+    }
+
+    #[test]
+    fn compression_per_agent_override() {
+        let mut per = std::collections::HashMap::new();
+        per.insert("custom-agent".to_string(), true);
+        let cfg = CompressionConfig {
+            per_agent: per,
+            ..Default::default()
+        };
+        assert!(cfg.is_enabled_for("custom-agent"));
+    }
+
+    #[test]
+    fn compression_headroom_learn_always_false_default() {
+        let config = DaemonConfig::default();
+        assert!(!config.compression.headroom_learn);
+    }
+
+    #[test]
+    fn compression_config_absent_uses_defaults() {
+        let toml_str = "[server]\nport = 7700\n";
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.compression.enabled);
+        assert_eq!(config.compression.port, 8787);
     }
 
     #[test]

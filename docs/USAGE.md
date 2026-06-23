@@ -12780,6 +12780,7 @@ TA has a working end-to-end workflow: staging isolation, agent wrapping, draft r
 | v0.16.0 | Stable & nightly release channels | Pending |
 | v0.16.1 | Homebrew tap | Pending |
 | v0.16.2 | VCS-agnostic release pipeline | Pending |
+| v0.17.0.7 | Context Compression via headroom proxy (`ta compression` CLI, HeadroomSupervisor, per-agent config) | Done |
 
 See [PLAN.md](../PLAN.md) for full details on each phase.
 
@@ -14508,6 +14509,90 @@ Supervised connectors (daemon-managed):
 ### Event queue
 
 The supervisor maintains an in-memory event queue per connector (capacity: 1000 events, TTL: 10 minutes). Events record lifecycle transitions (started, stopped, crashed, suspended, heartbeat\_missed). The queue is bounded — when full, new events are dropped with a log warning rather than growing without limit.
+
+---
+
+## Context Compression
+
+TA integrates with [headroom](https://github.com/chopratejas/headroom) — an OpenAI-compatible HTTP proxy that compresses LLM context payloads 60–95% before forwarding them to Anthropic's API. When enabled, the daemon spawns `headroom proxy` as a supervised subprocess and sets `ANTHROPIC_BASE_URL` in the agent's environment so all API calls flow through it transparently.
+
+Context compression is **enabled by default** and requires `headroom` to be installed separately (see below). If `headroom` is not found, TA logs a warning and continues without compression — it never hard-fails.
+
+### Installing headroom
+
+```bash
+pip install headroom-ai[all]
+```
+
+### Checking compression status
+
+```bash
+ta compression status
+```
+
+Example output:
+
+```
+Context Compression (headroom)
+  Enabled:        yes
+  Proxy URL:      http://127.0.0.1:8787
+  Cache aligner:  active
+  headroom_learn: false (always disabled in TA-managed runs)
+  Process:        running (PID 54321)
+  Restarts:       0
+  Binary:         /usr/local/bin/headroom
+  Version:        headroom 0.3.1
+
+  Performance (current session):
+    Tokens saved:    14,230 (68%)
+    Compression:     6.8x
+    Cache hits:      42
+```
+
+### Enabling and disabling compression
+
+```bash
+ta compression enable    # sets enabled = true in .ta/daemon.toml
+ta compression disable   # sets enabled = false in .ta/daemon.toml
+```
+
+Changes take effect on the next daemon startup (`ta daemon restart`). If the daemon is already running and compression was previously suspended, `ta compression enable` also sends a restart signal to the headroom supervisor so it resumes without a full daemon restart.
+
+### Daemon configuration
+
+```toml
+# .ta/daemon.toml
+[compression]
+enabled = true
+port = 8787
+algorithms = ["smart-crusher", "code-compressor", "kompress"]
+cache_aligner = true
+headroom_learn = false   # always false — TA owns CLAUDE.md
+
+[compression.per_agent]
+"claude-code" = true
+"codex" = false
+```
+
+**`headroom_learn`** is always forced to `false` in TA-managed runs. TA injects, backs up, and restores `CLAUDE.md` as part of the staging lifecycle; allowing headroom to modify it would corrupt that process.
+
+### Fault isolation
+
+The headroom supervisor uses the same exponential-backoff and suspension model as connector supervision:
+
+- **Health check**: `GET http://127.0.0.1:<port>/health` every 10 seconds
+- **Backoff**: 1 s → 2 s → … → 60 s cap on each failure
+- **Suspension**: after 5 failures in 5 minutes, the supervisor stops restarting
+
+To resume after suspension:
+
+```bash
+ta compression enable   # clears suspended state; supervisor retries within 5 s
+```
+
+### Windows installer
+
+The Windows `.msi` installer includes an optional "Enable context compression (headroom)" checkbox that runs `pip install headroom-ai[all]` during setup. The checkbox is checked by default.
 
 ---
 
