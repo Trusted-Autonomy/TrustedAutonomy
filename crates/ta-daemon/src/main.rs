@@ -38,6 +38,7 @@ mod config;
 pub mod config_watcher;
 pub mod connector_supervisor;
 pub mod external_channel;
+pub mod headroom_supervisor;
 pub mod notification_dispatcher;
 pub mod office;
 pub mod phase_claim;
@@ -254,6 +255,14 @@ async fn main() -> Result<()> {
     // Start the ConnectorSupervisor for [[connectors.managed]] entries (v0.17.0.6).
     // Runs in both API and MCP modes. No-op if workflow.toml has no managed connectors.
     connector_supervisor::start(project_root.clone(), shutdown.clone());
+
+    // Start the HeadroomSupervisor for context compression (v0.17.0.7).
+    // No-op when compression.enabled = false or the headroom binary is not installed.
+    headroom_supervisor::start(
+        project_root.clone(),
+        daemon_config.compression.clone(),
+        shutdown.clone(),
+    );
 
     if cli.api {
         // API server mode: start the full HTTP API.

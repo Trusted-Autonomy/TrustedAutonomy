@@ -8832,7 +8832,7 @@ Event queue isolation
 
 ---
 ### v0.17.0.7 — Headroom: Context Compression for Claude Agents
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Integrate [headroom](https://github.com/chopratejas/headroom) as an opt-in (default-on for Claude) context compression proxy. Agents get 60–95% fewer tokens consumed by tool outputs, logs, and file reads — longer effective context, lower API cost, fewer mid-task context-window failures.
 
 **How it works**: headroom runs as a local HTTP proxy (port 8787 by default). TA sets `ANTHROPIC_BASE_URL=http://localhost:8787` when launching the agent; headroom compresses payloads and forwards to the real Anthropic API. The daemon manages the headroom process as a supervised connector (per v0.17.0.6 supervisor model).
@@ -8855,14 +8855,14 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 ```
 
 **Items**:
-1. [ ] `HeadroomSupervisor`: spawn `headroom proxy --port 8787` as a managed connector subprocess in `ta-daemon`; health-check via `GET http://localhost:8787/health`; restart on failure with exponential backoff (same supervisor model as v0.17.0.6)
-2. [ ] `[compression]` section in `DaemonConfig` (config.rs): `enabled`, `port`, `algorithms`, `cache_aligner`, `headroom_learn` (always false), `per_agent` map
-3. [ ] `launch_agent_via_runtime()` in `run.rs`: when compression is enabled and the agent is in `per_agent` allow-list, set `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` in the subprocess environment
-4. [ ] Detect headroom binary: check `PATH` for `headroom`, then `~/.local/bin/headroom`, then `~/.venv/bin/headroom`; if not found and `compression.enabled = true`, print actionable install instructions and continue without compression (never hard-fail)
-5. [ ] `ta compression status` command: shows proxy URL, headroom version, tokens saved in current session (via `headroom perf`), compression ratio, whether cache aligner is active
-6. [ ] `ta compression disable` / `ta compression enable`: toggle `[compression].enabled` in `daemon.toml`; restart headroom supervisor
-7. [ ] Windows installer checkbox: "Enable context compression (headroom)" — runs `pip install headroom-ai[all]` via bundled Python during install; checked by default
-8. [ ] Docs: USAGE.md section "Context Compression" — how it works, how to verify savings, how to disable, note on `headroom_learn = false` and why
+1. [x] `HeadroomSupervisor`: spawn `headroom proxy --port 8787` as a managed connector subprocess in `ta-daemon`; health-check via `GET http://localhost:8787/health`; restart on failure with exponential backoff (same supervisor model as v0.17.0.6)
+2. [x] `[compression]` section in `DaemonConfig` (config.rs): `enabled`, `port`, `algorithms`, `cache_aligner`, `headroom_learn` (always false), `per_agent` map
+3. [x] `launch_agent_via_runtime()` in `run.rs`: when compression is enabled and the agent is in `per_agent` allow-list, set `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` in the subprocess environment
+4. [x] Detect headroom binary: check `PATH` for `headroom`, then `~/.local/bin/headroom`, then `~/.venv/bin/headroom`; if not found and `compression.enabled = true`, print actionable install instructions and continue without compression (never hard-fail)
+5. [x] `ta compression status` command: shows proxy URL, headroom version, tokens saved in current session (via `headroom perf`), compression ratio, whether cache aligner is active
+6. [x] `ta compression disable` / `ta compression enable`: toggle `[compression].enabled` in `daemon.toml`; restart headroom supervisor
+7. [x] Windows installer checkbox: "Enable context compression (headroom)" — runs `pip install headroom-ai[all]` via bundled Python during install; checked by default
+8. [x] Docs: USAGE.md section "Context Compression" — how it works, how to verify savings, how to disable, note on `headroom_learn = false` and why
 
 #### Version: `0.17.0-alpha.7`
 

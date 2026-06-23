@@ -5,6 +5,7 @@ pub mod analysis;
 pub mod audit;
 pub mod build;
 pub mod community;
+pub mod compression;
 pub mod config;
 pub mod connector;
 pub mod consent;

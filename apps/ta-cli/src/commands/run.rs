@@ -3776,6 +3776,10 @@ fn launch_agent_via_runtime(
         env.extend(config.non_interactive_env.clone());
     }
 
+    // Inject ANTHROPIC_BASE_URL when context compression is enabled (v0.17.0.7).
+    // staging_path = project_root/.ta/staging/<uuid>  →  3 parents up = project_root.
+    inject_compression_url(&mut env, config, staging_path);
+
     // Expand args (replace {prompt} template variable).
     let mut args: Vec<String> = config
         .args_template
@@ -6779,6 +6783,116 @@ fn check_vcs_clean(project_root: &std::path::Path, headless: bool) -> anyhow::Re
     }
 
     Ok(())
+}
+
+// ─── Context compression injection (v0.17.0.7) ───────────────────────────────
+
+/// Minimal compression config extracted from daemon.toml for the CLI.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default)]
+struct CompressionSection {
+    enabled: bool,
+    port: u16,
+    headroom_learn: bool,
+    per_agent: std::collections::HashMap<String, bool>,
+}
+
+impl Default for CompressionSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: 8787,
+            headroom_learn: false,
+            per_agent: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("claude-code".to_string(), true);
+                m.insert("codex".to_string(), false);
+                m
+            },
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct DaemonTomlCompression {
+    compression: CompressionSection,
+}
+
+/// Load the `[compression]` section from `project_root/.ta/daemon.toml`.
+fn load_compression_section(project_root: &std::path::Path) -> CompressionSection {
+    let path = project_root.join(".ta").join("daemon.toml");
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(parsed) = toml::from_str::<DaemonTomlCompression>(&content) {
+            return parsed.compression;
+        }
+    }
+    CompressionSection::default()
+}
+
+/// Return the headroom proxy URL (as `ANTHROPIC_BASE_URL`) if compression is
+/// enabled for this agent AND the headroom proxy is currently running.
+fn compression_base_url(project_root: &std::path::Path, agent_name: &str) -> Option<String> {
+    let cfg = load_compression_section(project_root);
+
+    if !cfg.enabled {
+        return None;
+    }
+
+    // Per-agent check: on by default for claude-code, off for everything else.
+    let agent_on = cfg
+        .per_agent
+        .get(agent_name)
+        .copied()
+        .unwrap_or(agent_name == "claude-code");
+    if !agent_on {
+        return None;
+    }
+
+    // Only inject if the headroom proxy appears to be running (read status file).
+    let status_path = project_root
+        .join(".ta")
+        .join("compression")
+        .join("status.json");
+    if let Ok(raw) = std::fs::read_to_string(&status_path) {
+        #[derive(serde::Deserialize)]
+        struct Status {
+            status: String,
+        }
+        if let Ok(s) = serde_json::from_str::<Status>(&raw) {
+            if s.status == "running" {
+                return Some(format!("http://127.0.0.1:{}", cfg.port));
+            }
+        }
+    }
+
+    None
+}
+
+/// Inject `ANTHROPIC_BASE_URL` into the agent env when compression is active.
+fn inject_compression_url(
+    env: &mut std::collections::HashMap<String, String>,
+    config: &AgentLaunchConfig,
+    staging_path: &std::path::Path,
+) {
+    // Derive project_root from staging_path (project_root/.ta/staging/<uuid>).
+    let project_root = staging_path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent());
+
+    let Some(root) = project_root else { return };
+
+    let agent_name = config.name.as_deref().unwrap_or("claude-code");
+
+    if let Some(url) = compression_base_url(root, agent_name) {
+        env.insert("ANTHROPIC_BASE_URL".to_string(), url.clone());
+        tracing::info!(
+            agent = %agent_name,
+            url = %url,
+            "Compression active: routing agent API calls through headroom proxy"
+        );
+    }
 }
 
 #[cfg(test)]

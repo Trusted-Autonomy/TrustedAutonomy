@@ -759,6 +759,24 @@ enum Commands {
         command: commands::connector::ConnectorCommands,
     },
 
+    /// Manage context compression via the headroom proxy (v0.17.0.7).
+    ///
+    /// Context compression routes agent API calls through a local headroom proxy
+    /// that compresses tool outputs, logs, and file reads before they reach the
+    /// Anthropic API — reducing token consumption by 60–95% and extending the
+    /// effective context window.
+    ///
+    /// Subcommands: `status`, `enable`, `disable`.
+    ///
+    /// Examples:
+    ///   ta compression status
+    ///   ta compression enable
+    ///   ta compression disable
+    Compression {
+        #[command(subcommand)]
+        command: commands::compression::CompressionCommands,
+    },
+
     /// Test and manage inbound VCS webhook triggers (v0.14.8.3).
     ///
     /// Simulates webhook events locally to verify trigger configuration
@@ -1192,6 +1210,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Operations { command } => commands::operations::execute(command, &config),
         Commands::Runbook { command } => commands::runbook::execute(command, &config),
         Commands::Connector { command } => commands::connector::execute(command, &config),
+        Commands::Compression { command } => commands::compression::execute(command, &config),
         Commands::Webhook { command } => commands::webhook::execute(command, &config),
         Commands::Serve => {
             // First-run gate: warn if provider is not yet configured.
