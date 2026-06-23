@@ -9029,7 +9029,7 @@ The supervisor reads `proxy_base_url` to inject `ANTHROPIC_BASE_URL`; reads `hea
 #### Version: `0.17.0-alpha.10`
 
 ---
-### v0.17.0.5 — Autonomous Phase Loop (`ta plan build --autonomous`)
+### v0.17.0.11 — Autonomous Phase Loop (`ta plan build --autonomous`)
 <!-- status: pending -->
 
 **Depends on**: v0.17.0.4.5 (step statechart with context, actions, and payloads)
