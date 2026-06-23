@@ -8992,6 +8992,43 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 #### Version: `0.17.0-alpha.9`
 
 ---
+### v0.17.0.10 — Generic Prompt-Optimizer Plugin System
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.7 (Headroom supervisor as the starting point)
+
+**Problem**: v0.17.0.7 hardcoded headroom as the compression backend — binary detection, startup args, health endpoint, and `ANTHROPIC_BASE_URL` injection are all headroom-specific. A user who wants a different proxy (a local semantic compressor, a rate-limiter proxy, a cost-monitoring shim) has no path.
+
+**Goal**: Replace `HeadroomSupervisor` with a generic `PromptOptimizerSupervisor` driven by plugin config. headroom becomes the reference plugin shipped as the default. Switching optimizers is a config change, not a code change.
+
+**Plugin config** (in `daemon.toml` under `[compression.plugin]`):
+```toml
+[compression]
+enabled = true
+
+[compression.plugin]
+name        = "headroom"
+command     = "headroom"
+args        = ["proxy", "--port", "8787"]
+proxy_base_url    = "http://127.0.0.1:8787"
+health_endpoint   = "http://127.0.0.1:8787/health"
+env         = { HEADROOM_LEARN = "false" }
+```
+
+The supervisor reads `proxy_base_url` to inject `ANTHROPIC_BASE_URL`; reads `health_endpoint` for liveness checks; uses `command`/`args`/`env` to spawn the process. All headroom-specific logic is removed from the supervisor.
+
+**Items**:
+1. [ ] Add `PromptOptimizerPluginConfig` struct to `crates/ta-daemon/src/config.rs`: fields `name`, `command`, `args: Vec<String>`, `proxy_base_url`, `health_endpoint`, `env: HashMap<String,String>`
+2. [ ] Replace `HeadroomSupervisor` with `PromptOptimizerSupervisor` in `crates/ta-daemon/src/`: reads plugin config instead of hardcoded headroom values; spawn, health-check, restart logic unchanged
+3. [ ] Remove hardcoded headroom binary detection (`PATH`/`~/.local/bin/headroom`/`~/.venv/bin/headroom`) from daemon; binary is now `plugin.command`, resolved by the OS
+4. [ ] Auto-populate default headroom plugin config when `compression.enabled = true` and no `[compression.plugin]` block exists (backwards compat)
+5. [ ] `ta compression plugin show` — print the active plugin config (name, command, proxy URL, health endpoint)
+6. [ ] Update `ta compression status` to show plugin name alongside proxy URL and token stats
+7. [ ] Docs: USAGE.md "Context Compression" section — explain plugin config format; show example of swapping headroom for a custom proxy
+
+#### Version: `0.17.0-alpha.10`
+
+---
 ### v0.17.0.5 — Autonomous Phase Loop (`ta plan build --autonomous`)
 <!-- status: pending -->
 
