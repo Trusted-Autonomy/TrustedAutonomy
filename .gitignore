@@ -88,6 +88,7 @@ result-*
 .ta/change_summary.json
 .ta/consent.json
 .ta/mcp_json_original
+.ta/mcp-agent.json
 
 # Local operational data — machine-specific, not team-shared
 .ta/audit.jsonl
