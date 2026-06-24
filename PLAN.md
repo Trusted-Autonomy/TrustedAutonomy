@@ -8868,7 +8868,7 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 
 ---
 ### v0.17.0.8 — Agent Runtime Resolution: daemon.toml Default Respected by `ta run`
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Make `ta run` actually use the `[agent].default_framework` from `daemon.toml` when no `--agent` flag is given. Currently `--agent` has `default_value = "claude-code"` hardcoded in clap, so `daemon.toml`'s configured default is silently ignored.
 
 **Current broken resolution** (all of items 2–4 below are dead code):
