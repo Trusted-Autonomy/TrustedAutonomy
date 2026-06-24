@@ -206,8 +206,8 @@ jobs:
         env:
           HEAD_SHA: ${{ needs.check-for-changes.outputs.head_sha }}
         run: |
-          dotnet tool install --global wix --version "4.*"
-          wix extension add WixToolset.UI.wixext
+          dotnet tool install --global wix --version "4.0.6"
+          wix extension add WixToolset.UI.wixext/4.0.6
           $ShortSha = "$env:HEAD_SHA".Substring(0, [Math]::Min(7, "$env:HEAD_SHA".Length))
           # Use a fixed semver for MSI since nightly doesn't have a version tag.
           # Read from Cargo.toml to get current version digits.

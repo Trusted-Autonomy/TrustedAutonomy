@@ -172,9 +172,10 @@ jobs:
           TAG: ${{ steps.get_version.outputs.version }}
         run: |
           # Install WiX v4 .NET global tool (~10s; windows-latest ships .NET SDK).
-          # Pin to v4.x — v5+ requires OSMF EULA acceptance and uses a different schema.
-          dotnet tool install --global wix --version "4.*"
-          wix extension add WixToolset.UI.wixext
+          # Pin to v4.0.6 — v5+ requires OSMF EULA acceptance, uses a different schema,
+          # and WixToolset.UI.wixext v7+ is incompatible with the wixext4 loader.
+          dotnet tool install --global wix --version "4.0.6"
+          wix extension add WixToolset.UI.wixext/4.0.6
 
           # Extract MSI version from tag. MSI versions are a.b.c.d; only a.b.c
           # are used for upgrade comparisons. To ensure patch releases within the
