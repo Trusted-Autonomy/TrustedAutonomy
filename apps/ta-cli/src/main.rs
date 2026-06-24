@@ -97,8 +97,10 @@ enum Commands {
         /// filled in automatically.
         title: Option<String>,
         /// Agent system to use (claude-code, codex, etc.).
-        #[arg(long, default_value = "claude-code")]
-        agent: String,
+        /// When omitted, resolves from: workflow YAML agent_framework →
+        /// [agent].default_framework in daemon.toml → "claude-code".
+        #[arg(long)]
+        agent: Option<String>,
         /// Source directory to overlay (defaults to project root).
         #[arg(long)]
         source: Option<PathBuf>,
@@ -1054,13 +1056,26 @@ fn main() -> anyhow::Result<()> {
             // look it up in PLAN.md and use the phase title + set --phase.
             let (resolved_title, resolved_phase) = resolve_phase_title(title, phase, &project_root);
 
+            // Agent runtime resolution (v0.17.0.8): --agent → workflow YAML → daemon.toml → "claude-code".
+            let resolved_agent = commands::run::resolve_effective_agent(
+                agent.as_deref(),
+                workflow.as_deref(),
+                &project_root,
+            );
+
             // serial-phases: dispatch to execute_serial_phases when --phases is provided.
             if workflow.as_deref() == Some("serial-phases") || phases.is_some() {
                 if let Some(phase_list) = phases {
                     if !phase_list.is_empty() {
                         let run_title = resolved_title.as_deref().unwrap_or("Serial phases run");
                         return commands::run::execute_serial_phases(
-                            &config, run_title, agent, objective, phase_list, gates, *quiet,
+                            &config,
+                            run_title,
+                            &resolved_agent,
+                            objective,
+                            phase_list,
+                            gates,
+                            *quiet,
                         );
                     }
                 }
@@ -1070,7 +1085,14 @@ fn main() -> anyhow::Result<()> {
             if !sub_goals.is_empty() {
                 let run_title = resolved_title.as_deref().unwrap_or("Swarm run");
                 return commands::run::execute_swarm(
-                    &config, run_title, agent, objective, sub_goals, gates, *integrate, *quiet,
+                    &config,
+                    run_title,
+                    &resolved_agent,
+                    objective,
+                    sub_goals,
+                    gates,
+                    *integrate,
+                    *quiet,
                 );
             }
 
@@ -1078,7 +1100,7 @@ fn main() -> anyhow::Result<()> {
             commands::run::execute(
                 &config,
                 resolved_title.as_deref(),
-                agent,
+                &resolved_agent,
                 source.as_deref(),
                 objective,
                 resolved_phase.as_deref(),

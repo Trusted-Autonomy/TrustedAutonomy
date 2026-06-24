@@ -519,6 +519,92 @@ fn resolve_workflow(explicit: Option<&str>, workspace_root: &std::path::Path) ->
     WorkflowKind::SingleAgent
 }
 
+// ── Agent runtime resolution (v0.17.0.8) ────────────────────────
+
+/// Minimal daemon.toml `[agent]` section for reading `default_framework`.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct DaemonTomlAgent {
+    agent: AgentSection,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(default)]
+struct AgentSection {
+    default_framework: String,
+}
+
+impl Default for AgentSection {
+    fn default() -> Self {
+        Self {
+            default_framework: "claude-code".to_string(),
+        }
+    }
+}
+
+/// Minimal workflow YAML shape for reading `agent_framework`.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct WorkflowYamlAgent {
+    agent_framework: Option<String>,
+}
+
+/// Resolve the effective agent framework for a `ta run` invocation.
+///
+/// Resolution order (highest-priority wins):
+/// 1. `--agent` CLI flag (explicit user override) — `cli_agent` is `Some(name)`
+/// 2. `agent_framework` field in the workflow YAML given by `--workflow <file>`
+/// 3. `[agent].default_framework` in `.ta/daemon.toml`
+/// 4. Built-in fallback: `"claude-code"`
+pub fn resolve_effective_agent(
+    cli_agent: Option<&str>,
+    workflow_name_or_path: Option<&str>,
+    workspace_root: &std::path::Path,
+) -> String {
+    // Priority 1: explicit --agent flag.
+    if let Some(agent) = cli_agent {
+        if !agent.is_empty() {
+            return agent.to_string();
+        }
+    }
+
+    // Priority 2: workflow YAML `agent_framework` field.
+    // The `--workflow` value can be a path to a YAML file or a built-in name.
+    // We only attempt YAML reading when the value ends with .yaml/.yml or
+    // the path exists on disk.
+    if let Some(wf) = workflow_name_or_path {
+        let wf_path = std::path::Path::new(wf);
+        let is_yaml_path = wf.ends_with(".yaml")
+            || wf.ends_with(".yml")
+            || wf_path.is_absolute()
+            || wf_path.exists();
+        if is_yaml_path {
+            if let Ok(content) = std::fs::read_to_string(wf_path) {
+                if let Ok(parsed) = serde_yaml::from_str::<WorkflowYamlAgent>(&content) {
+                    if let Some(ref fw) = parsed.agent_framework {
+                        if !fw.is_empty() {
+                            return fw.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Priority 3: [agent].default_framework from daemon.toml.
+    let daemon_toml = workspace_root.join(".ta").join("daemon.toml");
+    if let Ok(content) = std::fs::read_to_string(&daemon_toml) {
+        if let Ok(parsed) = toml::from_str::<DaemonTomlAgent>(&content) {
+            if !parsed.agent.default_framework.is_empty() {
+                return parsed.agent.default_framework;
+            }
+        }
+    }
+
+    // Priority 4: built-in fallback.
+    "claude-code".to_string()
+}
+
 // ── Serial phases workflow (v0.13.7) ────────────────────────────
 
 /// Execute a serial-phases workflow: run each phase in order, evaluate gates
@@ -9085,5 +9171,99 @@ plan_pending_window = 7
         // Empty / whitespace-only is returned as empty (no --phase arg).
         assert_eq!(sanitize_phase(""), Some(String::new()));
         assert_eq!(sanitize_phase("   "), Some(String::new()));
+    }
+
+    // ── v0.17.0.8: resolve_effective_agent ──────────────────────────
+
+    #[test]
+    fn resolve_effective_agent_explicit_flag_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        // Even with daemon.toml present, --agent wins.
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault_framework = \"codex\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_effective_agent(Some("claude-flow"), None, dir.path()),
+            "claude-flow"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_agent_daemon_toml_default_framework() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault_framework = \"codex\"\n",
+        )
+        .unwrap();
+        // No --agent → daemon.toml should provide "codex".
+        assert_eq!(resolve_effective_agent(None, None, dir.path()), "codex");
+    }
+
+    #[test]
+    fn resolve_effective_agent_falls_back_to_claude_code() {
+        let dir = tempfile::tempdir().unwrap();
+        // No daemon.toml, no --agent → built-in default.
+        assert_eq!(
+            resolve_effective_agent(None, None, dir.path()),
+            "claude-code"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_agent_daemon_toml_missing_agent_section() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        // daemon.toml exists but has no [agent] section.
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[server]\nbind = \"127.0.0.1\"\nport = 7700\n",
+        )
+        .unwrap();
+        // Should fall back to "claude-code".
+        assert_eq!(
+            resolve_effective_agent(None, None, dir.path()),
+            "claude-code"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_agent_workflow_yaml_framework() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_file = dir.path().join("my-workflow.yaml");
+        std::fs::write(
+            &workflow_file,
+            "name: test\nagent_framework: codex\nstages: []\n",
+        )
+        .unwrap();
+        // Workflow YAML wins over daemon.toml default.
+        assert_eq!(
+            resolve_effective_agent(None, Some(workflow_file.to_str().unwrap()), dir.path()),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_agent_cli_flag_beats_workflow_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_file = dir.path().join("my-workflow.yaml");
+        std::fs::write(
+            &workflow_file,
+            "name: test\nagent_framework: codex\nstages: []\n",
+        )
+        .unwrap();
+        // --agent flag beats workflow YAML.
+        assert_eq!(
+            resolve_effective_agent(
+                Some("claude-flow"),
+                Some(workflow_file.to_str().unwrap()),
+                dir.path()
+            ),
+            "claude-flow"
+        );
     }
 }
