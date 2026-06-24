@@ -16,7 +16,9 @@ use std::path::Path;
 use ta_mcp_gateway::GatewayConfig;
 
 use super::plan;
-use super::run::{build_memory_context_section_for_inject, restore_mcp_server_config};
+use super::run::{
+    build_memory_context_section_for_inject, resolve_effective_agent, restore_mcp_server_config,
+};
 
 /// Minimal agent config for the dev-loop orchestrator.
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -380,7 +382,9 @@ pub fn execute(
     // Build the orchestration prompt with plan status + memory context.
     let prompt = build_dev_prompt(&project_root, config, unrestricted);
 
-    // Load agent config (dev-loop.yaml or fallback).
+    // Agent runtime resolution (v0.17.0.8): --agent → daemon.toml default_framework → dev-loop.yaml.
+    // If no --agent flag and daemon.toml configures a non-default framework, use it.
+    // Otherwise fall through to load_dev_config (dev-loop.yaml lookup chain).
     let agent_config = if let Some(agent_id) = agent {
         DevLoopConfig {
             command: agent_id.to_string(),
@@ -388,7 +392,17 @@ pub fn execute(
             env: Default::default(),
         }
     } else {
-        load_dev_config(&project_root, unrestricted)
+        // Check daemon.toml; only bypass load_dev_config when something non-default is set.
+        let daemon_resolved = resolve_effective_agent(None, None, &project_root);
+        if daemon_resolved != "claude-code" {
+            DevLoopConfig {
+                command: daemon_resolved,
+                args_template: vec!["-p".to_string(), "{prompt}".to_string()],
+                env: Default::default(),
+            }
+        } else {
+            load_dev_config(&project_root, unrestricted)
+        }
     };
 
     let mode_label = if unrestricted {

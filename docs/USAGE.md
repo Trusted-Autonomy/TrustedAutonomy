@@ -1622,9 +1622,20 @@ qa_framework      = "claude-code"  # used by automated QA workflow roles
 
 #### Framework selection order
 
-Highest priority wins: `--agent` flag → workflow `agent_framework` field → project `daemon.toml` → user `~/.config/ta/daemon.toml` → built-in default (`claude-code`).
+`ta run` resolves the agent in priority order (highest wins):
 
-TA logs which framework was selected and why each time `ta run` is invoked.
+1. `--agent <name>` flag (explicit per-run override)
+2. `agent_framework` field in the workflow YAML (when `--workflow <file>` points to a YAML file)
+3. `[agent].default_framework` in `.ta/daemon.toml`
+4. Built-in default: `claude-code`
+
+To inspect what `ta run` will use without actually running a goal:
+
+```bash
+ta daemon config
+```
+
+Output includes the effective agent, the config file being used, and which source provided the value. `ta dev` applies the same resolution order.
 
 You can also add YAML agent configs (see [Agent Configuration](#agent-configuration)).
 

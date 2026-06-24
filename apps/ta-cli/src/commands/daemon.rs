@@ -62,6 +62,11 @@ pub enum DaemonCommands {
         #[arg(long)]
         apply: bool,
     },
+    /// Show the effective daemon configuration (port, agent framework, etc.).
+    ///
+    /// Reads daemon.toml and shows the resolved values that `ta run` will use,
+    /// including the effective default agent framework.
+    Config,
 }
 
 /// Execute a `ta daemon` subcommand.
@@ -87,6 +92,7 @@ pub fn execute(command: &DaemonCommands, project_root: &Path) -> anyhow::Result<
         ),
         DaemonCommands::Health => cmd_health(project_root),
         DaemonCommands::Install { apply } => cmd_install(project_root, *apply),
+        DaemonCommands::Config => cmd_config_show(project_root),
     }
 }
 
@@ -1177,6 +1183,51 @@ fn dirs_home() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+// ── ta daemon config show (v0.17.0.8) ────────────────────────────
+
+fn cmd_config_show(project_root: &Path) -> anyhow::Result<()> {
+    let daemon_toml = project_root.join(".ta").join("daemon.toml");
+    let base_url = resolve_daemon_url(project_root, None);
+
+    // Resolve the effective agent that `ta run` will use without --agent.
+    let effective_agent = super::run::resolve_effective_agent(None, None, project_root);
+
+    println!("Daemon configuration");
+    println!("  Config file:    {}", daemon_toml.display());
+    println!(
+        "  Config exists:  {}",
+        if daemon_toml.exists() {
+            "yes"
+        } else {
+            "no (using defaults)"
+        }
+    );
+    println!("  Daemon URL:     {}", base_url);
+    println!();
+    println!("Effective agent (what `ta run` uses without --agent):");
+    println!("  Effective agent: {}", effective_agent);
+
+    if daemon_toml.exists() {
+        // Show which source provided the agent.
+        let content = std::fs::read_to_string(&daemon_toml).unwrap_or_default();
+        let has_agent_section = content.contains("[agent]");
+        if has_agent_section {
+            println!("  Source:          daemon.toml [agent].default_framework");
+        } else {
+            println!("  Source:          built-in default");
+        }
+    } else {
+        println!("  Source:          built-in default (no daemon.toml)");
+    }
+
+    println!();
+    println!("To change the default agent, add to .ta/daemon.toml:");
+    println!("  [agent]");
+    println!("  default_framework = \"codex\"  # or: claude-code, claude-flow, ...");
+
+    Ok(())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
