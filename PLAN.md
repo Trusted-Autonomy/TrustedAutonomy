@@ -8890,12 +8890,14 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 ```
 
 **Items**:
-1. [ ] Change `ta run --agent` from `String` with `default_value = "claude-code"` to `Option<String>` in `main.rs`
-2. [ ] Add `resolve_effective_agent(cli_agent, workflow_yaml_path, config)` helper: reads workflow YAML `agent_framework` if `--workflow` was given; fetches `default_agent` from `/api/status` if daemon is running; falls back to `"claude-code"`
-3. [ ] Call `resolve_effective_agent()` in the `Commands::Run` handler before passing to `execute()` — also in `execute_serial_phases()` and `execute_swarm()`
-4. [ ] `ta dev --agent` (same gap): change to `Option<String>` and apply same resolution
-5. [ ] `ta daemon config show` output: add "Effective agent: <name>" line showing what `ta run` will use
-6. [ ] Test: with `daemon.toml` `default_framework = "codex"`, `ta run "test"` (no `--agent`) should launch codex, not claude-code
+1. [x] Change `ta run --agent` from `String` with `default_value = "claude-code"` to `Option<String>` in `main.rs`
+2. [x] Add `resolve_effective_agent(cli_agent, workflow_yaml_path, config)` helper: reads workflow YAML `agent_framework` if `--workflow` was given; fetches `default_agent` from `/api/status` if daemon is running; falls back to `"claude-code"`
+3. [x] Call `resolve_effective_agent()` in the `Commands::Run` handler before passing to `execute()` — also in `execute_serial_phases()` and `execute_swarm()`
+4. [x] `ta dev --agent` (same gap): change to `Option<String>` and apply same resolution
+5. [x] `ta daemon config show` output: add "Effective agent: <name>" line showing what `ta run` will use
+6. [x] Test: with `daemon.toml` `default_framework = "codex"`, `ta run "test"` (no `--agent`) should launch codex, not claude-code
+
+**Follow-up (v0.17.0.8.1)**: In `dev.rs`, when `resolve_effective_agent` returns `"claude-code"` but a `dev-loop.yaml` exists that specifies a *different* agent, emit a `tracing::warn!` (and optionally a `println!` to stderr) noting the conflict: daemon.toml's `default_framework = "claude-code"` is being shadowed by `dev-loop.yaml`. Helps users who set daemon.toml intentionally and are confused why `ta dev` uses something different.
 
 #### Version: `0.17.0-alpha.8`
 
