@@ -8903,7 +8903,7 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 
 ---
 ### v0.17.0.9 — Daemon Hardening: Security, Durability, and Operational Stability
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Goal**: Address all Critical and High findings from the red team audit. Make the daemon safe against malicious agent subprocesses, resilient to crashes during apply, and operationally stable under load. Medium findings addressed where low-effort; Low findings deferred to maintenance.
 
 **Audit source**: Red team review of `ta-daemon`, `ta-workspace`, `ta-cli/run.rs`, `ta-mcp-gateway` — June 2026.
