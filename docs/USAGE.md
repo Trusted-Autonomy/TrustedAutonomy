@@ -8458,7 +8458,9 @@ The daemon reads `.ta/daemon.toml` for server, auth, command, and agent settings
 [server]
 bind = "127.0.0.1"         # Bind address
 port = 7700                 # Listen port
-cors_origins = ["*"]        # CORS origins for web clients
+# CORS: restrict to named origins (app://ta-studio and localhost are always allowed).
+# Remove the wildcard entry from this list for production use.
+cors_origins = []           # Extra origins allowed by CORS policy
 
 [auth]
 require_token = false       # Require Bearer tokens
@@ -8482,11 +8484,21 @@ write_commands = [           # Commands requiring write scope
   "ta goal start *",
 ]
 timeout_secs = 30           # Command execution timeout
+max_background_tasks = 4    # Max concurrent /api/cmd background tasks (raise for DGX/high-core)
 
 [agent]
 max_sessions = 3            # Maximum concurrent agent sessions
 idle_timeout_secs = 3600    # Idle session cleanup
 default_agent = "claude-code"
+
+# Binary path pinning (masquerade defence).
+# Maps an agent command name to its absolute trusted path.
+# Before spawning, TA resolves the command via `which` and aborts if the
+# resolved path differs from the value stored here.
+# Omit an entry to disable the check for that command.
+[agent.trusted_binaries]
+# claude = "/home/user/.nvm/versions/node/v22.0.0/bin/claude"
+# codex  = "/usr/local/bin/codex"
 
 [shell.qa_agent]
 auto_start = true           # Start agent on shell launch (default: true)
@@ -8499,6 +8511,18 @@ shutdown_timeout_secs = 5   # Graceful shutdown wait
 [routing]
 use_shell_config = true     # Load routes from .ta/shell.toml
 ```
+
+#### Security hardening notes
+
+**CORS**: The daemon allows `app://ta-studio` and `http://localhost`/`http://127.0.0.1` (any port) by default. Add entries to `[server] cors_origins` only for origins that need cross-origin access. The previous wildcard `["*"]` is no longer accepted — Studio no longer requires it.
+
+**Shutdown protection**: `POST /api/shutdown` requires the header `X-TA-Admin-Confirm: shutdown` and is rate-limited to one call per 60 seconds. Automated scripts that call shutdown must include this header.
+
+**Webhook authentication**: `[webhooks.github] secret` must be set to a non-empty value. The daemon rejects all incoming webhook payloads when the secret is empty, and warns on startup if webhooks are configured without a secret.
+
+**Background task limit**: `commands.max_background_tasks` (default 4) caps the number of concurrent subprocess tasks spawned by `POST /api/cmd`. Increase to 8+ on machines with many cores (e.g. DGX Spark). The daemon returns HTTP 429 when the limit is reached.
+
+**Binary path pinning**: Populate `[agent.trusted_binaries]` to defend against PATH-based binary masquerade attacks. When an entry is present, TA aborts with an actionable error if the resolved binary path doesn't match.
 
 #### How it works
 

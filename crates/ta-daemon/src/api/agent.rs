@@ -10,6 +10,7 @@
 //   DELETE /api/agent/:id       — Stop an agent session
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -23,6 +24,13 @@ use uuid::Uuid;
 
 use crate::api::auth::{require_write, CallerIdentity};
 use crate::api::AppState;
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 /// An active agent session managed by the daemon.
 #[derive(Debug, Clone, Serialize)]
@@ -167,10 +175,12 @@ pub struct PersistentQaAgent {
     config: crate::config::QaAgentConfig,
     /// Project root for the working directory.
     project_root: std::path::PathBuf,
-    /// Last activity timestamp for idle timeout.
-    last_active: Mutex<std::time::Instant>,
+    /// Last activity timestamp for idle timeout (Unix ms, lock-free).
+    last_active: Arc<AtomicU64>,
     /// Whether a first prompt has been sent (enables --continue for chaining).
     has_conversation: Mutex<bool>,
+    /// Trusted binary paths for agent commands (v0.17.0.9 masquerade defence).
+    trusted_binaries: std::collections::HashMap<String, String>,
 }
 
 #[allow(dead_code)] // Fields used when multi-turn stdin mode is enabled (future).
@@ -191,9 +201,18 @@ impl PersistentQaAgent {
             restart_count: Mutex::new(0),
             config,
             project_root,
-            last_active: Mutex::new(std::time::Instant::now()),
+            last_active: Arc::new(AtomicU64::new(unix_now_ms())),
             has_conversation: Mutex::new(false),
+            trusted_binaries: std::collections::HashMap::new(),
         }
+    }
+
+    pub fn with_trusted_binaries(
+        mut self,
+        trusted: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.trusted_binaries = trusted;
+        self
     }
 
     /// Start the persistent agent subprocess.
@@ -270,7 +289,7 @@ impl PersistentQaAgent {
             busy: false,
         });
 
-        *self.last_active.lock().await = std::time::Instant::now();
+        self.last_active.store(unix_now_ms(), Ordering::Relaxed);
         tracing::info!(agent = %self.agent, "Persistent QA agent started");
         Ok(())
     }
@@ -289,12 +308,36 @@ impl PersistentQaAgent {
         tx: crate::api::goal_output::GoalOutputPublisher,
         parallel: bool,
     ) -> Result<(), String> {
-        *self.last_active.lock().await = std::time::Instant::now();
+        self.last_active.store(unix_now_ms(), Ordering::Relaxed);
 
         // Check if we should chain to the previous conversation.
         // parallel=true skips --continue so each parallel session starts fresh.
         let continue_conversation = !parallel && *self.has_conversation.lock().await;
         let (binary, args) = resolve_agent_command(&self.agent, prompt, continue_conversation)?;
+
+        // Binary masquerade guard: verify resolved path matches trusted config.
+        if let Some(trusted_path) = self.trusted_binaries.get(&binary) {
+            match which::which(&binary) {
+                Ok(resolved) => {
+                    let resolved_str = resolved.to_string_lossy();
+                    if resolved_str != trusted_path.as_str() {
+                        return Err(format!(
+                            "Agent binary '{}' resolved to '{}' but trusted path is '{}'. \
+                             Update [agent.trusted_binaries] in .ta/daemon.toml if the binary moved, \
+                             or remove the entry to disable this check.",
+                            binary, resolved_str, trusted_path
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Agent binary '{}' not found in PATH: {}. \
+                         Ensure the agent is installed and accessible.",
+                        binary, e
+                    ));
+                }
+            }
+        }
 
         tx.publish("stderr", format!("Agent ({})...", self.agent))
             .await;

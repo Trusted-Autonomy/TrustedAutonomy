@@ -58,6 +58,38 @@ pub struct VcsCheckRequest {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Recursively mask sensitive fields in a JSON value.
+///
+/// String values at keys `bot_token`, `api_key`, `secret`, `password`, or
+/// any key ending in `_token` are replaced with `"***"` so they are never
+/// returned in GET responses.
+pub fn mask_secrets(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                let is_secret =
+                    matches!(k.as_str(), "bot_token" | "api_key" | "secret" | "password")
+                        || k.ends_with("_token");
+                if is_secret {
+                    if let Value::String(s) = v {
+                        if !s.is_empty() {
+                            *v = Value::String("***".to_string());
+                        }
+                    }
+                } else {
+                    mask_secrets(v);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                mask_secrets(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn setup_progress_path(project_root: &std::path::Path) -> PathBuf {
     project_root.join(".ta").join("setup-progress.json")
 }
@@ -235,7 +267,9 @@ pub async fn get_settings(
                 .into_response();
         }
     };
-    Json(json!({ "section": section, "data": data })).into_response()
+    let mut response = json!({ "section": section, "data": data });
+    mask_secrets(&mut response);
+    Json(response).into_response()
 }
 
 /// `PUT /api/settings/:section` — write a settings section.
@@ -606,5 +640,48 @@ mod tests {
         let response = put_settings(State(state), Path("advisor".to_string()), Json(body)).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn mask_secrets_replaces_known_keys() {
+        let mut v = json!({
+            "bot_token": "real-token",
+            "api_key": "sk-abc",
+            "secret": "s3cr3t",
+            "password": "hunter2",
+            "name": "should-not-change",
+            "access_token": "tok",
+        });
+        mask_secrets(&mut v);
+        assert_eq!(v["bot_token"], "***");
+        assert_eq!(v["api_key"], "***");
+        assert_eq!(v["secret"], "***");
+        assert_eq!(v["password"], "***");
+        assert_eq!(v["access_token"], "***"); // ends with _token
+        assert_eq!(v["name"], "should-not-change");
+    }
+
+    #[test]
+    fn mask_secrets_preserves_empty_strings() {
+        let mut v = json!({ "bot_token": "", "api_key": "" });
+        mask_secrets(&mut v);
+        // Empty strings are not masked (no secret was set).
+        assert_eq!(v["bot_token"], "");
+        assert_eq!(v["api_key"], "");
+    }
+
+    #[test]
+    fn mask_secrets_recurses_into_nested_objects() {
+        let mut v = json!({ "nested": { "password": "p@ss" } });
+        mask_secrets(&mut v);
+        assert_eq!(v["nested"]["password"], "***");
+    }
+
+    #[test]
+    fn mask_secrets_recurses_into_arrays() {
+        let mut v = json!([{ "secret": "val" }, { "name": "ok" }]);
+        mask_secrets(&mut v);
+        assert_eq!(v[0]["secret"], "***");
+        assert_eq!(v[1]["name"], "ok");
     }
 }

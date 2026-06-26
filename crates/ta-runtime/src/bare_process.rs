@@ -135,6 +135,16 @@ impl RuntimeAdapter for BareProcessRuntime {
         let mut cmd = build_command(&request.command, &request.args);
         cmd.current_dir(&request.working_dir);
 
+        // Strip dynamic-linker preload variables before merging any env overrides.
+        // These can be injected into the parent process environment by a PATH-masquerade
+        // attack and would be inherited by the agent subprocess, allowing arbitrary
+        // code injection. Removing them eliminates the injection surface entirely.
+        // (v0.17.0.9 — binary masquerade hardening)
+        cmd.env_remove("LD_PRELOAD");
+        cmd.env_remove("LD_LIBRARY_PATH");
+        cmd.env_remove("DYLD_INSERT_LIBRARIES");
+        cmd.env_remove("DYLD_LIBRARY_PATH");
+
         for (key, value) in &request.env {
             cmd.env(key, value);
         }

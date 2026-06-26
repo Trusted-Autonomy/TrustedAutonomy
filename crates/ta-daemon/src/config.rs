@@ -951,6 +951,19 @@ pub struct CommandConfig {
     pub long_running: Vec<String>,
     /// Timeout for long-running commands like `ta run` and `ta dev` (default: 1 hour).
     pub long_timeout_secs: u64,
+    /// Maximum number of concurrent background tasks spawned by `POST /api/cmd` (v0.17.0.9).
+    ///
+    /// Each long-running command (`ta run`, `ta dev`) spawns a background task that holds
+    /// resources until the command completes. Set higher on DGX Spark or multi-core machines.
+    ///
+    /// Default: 4. Separate from `max_parallel_goals` (concurrent `ta run` goals) and
+    /// `max_sessions` (interactive agent sessions) — do not collapse these.
+    #[serde(default = "default_max_background_tasks")]
+    pub max_background_tasks: usize,
+}
+
+fn default_max_background_tasks() -> usize {
+    4
 }
 
 impl CommandConfig {
@@ -991,6 +1004,7 @@ impl Default for CommandConfig {
                 "draft apply *".to_string(),
             ],
             long_timeout_secs: 3600,
+            max_background_tasks: default_max_background_tasks(),
         }
     }
 }
@@ -1039,6 +1053,21 @@ pub struct AgentConfig {
     /// Sessions exceeding this idle time are auto-closed. Default: 1800 (30 min).
     #[serde(default = "default_parallel_idle_timeout_secs")]
     pub parallel_idle_timeout_secs: u64,
+    /// Trusted binary paths for agent commands (v0.17.0.9).
+    ///
+    /// Maps an agent command name to its absolute trusted path. Before spawning,
+    /// TA resolves the command via `which` and compares it to the stored path.
+    /// If they differ, the spawn is aborted with an actionable error.
+    ///
+    /// ```toml
+    /// [agent.trusted_binaries]
+    /// claude = "/home/user/.nvm/versions/node/v22.0.0/bin/claude"
+    /// codex  = "/usr/local/bin/codex"
+    /// ```
+    ///
+    /// Omitting an entry means no check is performed for that command.
+    #[serde(default)]
+    pub trusted_binaries: std::collections::HashMap<String, String>,
 }
 
 fn default_framework() -> String {
@@ -1074,6 +1103,7 @@ impl Default for AgentConfig {
             tool_access: AgentToolAccess::default(),
             max_parallel_sessions: default_max_parallel_sessions(),
             parallel_idle_timeout_secs: default_parallel_idle_timeout_secs(),
+            trusted_binaries: std::collections::HashMap::new(),
         }
     }
 }
@@ -1551,20 +1581,47 @@ impl TokenScope {
     }
 }
 
-/// Manages bearer tokens stored in `.ta/daemon-tokens.json`.
+/// Manages bearer tokens stored in `.ta/daemon-tokens.json` (v0.17.0.9).
+///
+/// Uses an in-process `Mutex<Vec<TokenRecord>>` cache so `validate()` does not
+/// hit disk on every request. Writes use atomic rename (write-to-tmp + rename)
+/// for crash safety and to eliminate the TOCTOU race on concurrent creates.
 pub struct TokenStore {
     tokens_path: PathBuf,
+    /// In-process cache. `None` means the cache has not been loaded yet.
+    cache: std::sync::Arc<std::sync::Mutex<Option<Vec<TokenRecord>>>>,
+}
+
+impl Clone for TokenStore {
+    fn clone(&self) -> Self {
+        Self {
+            tokens_path: self.tokens_path.clone(),
+            cache: self.cache.clone(),
+        }
+    }
 }
 
 impl TokenStore {
     pub fn new(project_root: &Path) -> Self {
         Self {
             tokens_path: project_root.join(".ta").join("daemon-tokens.json"),
+            cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
-    /// Load all tokens from disk.
+    /// Load all tokens, using the in-process cache when available.
     pub fn load(&self) -> Vec<TokenRecord> {
+        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = guard.as_ref() {
+            return cached.clone();
+        }
+        // Cache miss — load from disk.
+        let tokens = self.load_from_disk();
+        *guard = Some(tokens.clone());
+        tokens
+    }
+
+    fn load_from_disk(&self) -> Vec<TokenRecord> {
         if !self.tokens_path.exists() {
             return vec![];
         }
@@ -1574,6 +1631,7 @@ impl TokenStore {
         }
     }
 
+    /// Write tokens to disk atomically (tmp + rename) and update the cache.
     #[allow(dead_code)]
     pub fn save(&self, tokens: &[TokenRecord]) -> std::io::Result<()> {
         if let Some(parent) = self.tokens_path.parent() {
@@ -1581,12 +1639,25 @@ impl TokenStore {
         }
         let json = serde_json::to_string_pretty(tokens)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::write(&self.tokens_path, json)
+        // Write to a tmp file then rename — atomic on POSIX, minimises TOCTOU window.
+        let tmp_path = self.tokens_path.with_extension("tmp");
+        std::fs::write(&tmp_path, &json)?;
+        std::fs::rename(&tmp_path, &self.tokens_path)?;
+
+        // Update in-process cache.
+        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(tokens.to_vec());
+        Ok(())
     }
 
     #[allow(dead_code)]
     pub fn create(&self, scope: TokenScope, label: Option<String>) -> std::io::Result<TokenRecord> {
         use rand::Rng;
+        // Hold the cache lock for the full create to prevent concurrent races.
+        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+
+        let cached = guard.get_or_insert_with(|| self.load_from_disk());
+
         let mut rng = rand::thread_rng();
         let bytes: [u8; 32] = rng.gen();
         let token = format!("ta_{}", hex_encode(&bytes));
@@ -1598,30 +1669,133 @@ impl TokenStore {
             label,
         };
 
-        let mut tokens = self.load();
-        tokens.push(record.clone());
-        self.save(&tokens)?;
+        cached.push(record.clone());
+
+        // Atomic write while still holding the lock.
+        if let Some(parent) = self.tokens_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(cached.as_slice())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let tmp_path = self.tokens_path.with_extension("tmp");
+        std::fs::write(&tmp_path, &json)?;
+        std::fs::rename(&tmp_path, &self.tokens_path)?;
 
         Ok(record)
     }
 
     /// Validate a token string and return its record if valid.
+    ///
+    /// Uses the in-process cache — no disk I/O on cache hits.
     pub fn validate(&self, token: &str) -> Option<TokenRecord> {
         self.load().into_iter().find(|t| t.token == token)
     }
 
     #[allow(dead_code)]
     pub fn revoke(&self, token: &str) -> std::io::Result<bool> {
-        let mut tokens = self.load();
-        let len_before = tokens.len();
-        tokens.retain(|t| t.token != token);
-        if tokens.len() < len_before {
-            self.save(&tokens)?;
+        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cached = guard.get_or_insert_with(|| self.load_from_disk());
+
+        let len_before = cached.len();
+        cached.retain(|t| t.token != token);
+
+        if cached.len() < len_before {
+            // Atomic write.
+            if let Some(parent) = self.tokens_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let json = serde_json::to_string_pretty(cached.as_slice())
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let tmp_path = self.tokens_path.with_extension("tmp");
+            std::fs::write(&tmp_path, &json)?;
+            std::fs::rename(&tmp_path, &self.tokens_path)?;
             Ok(true)
         } else {
             Ok(false)
         }
     }
+
+    /// Invalidate the in-process cache, forcing the next `load()` to re-read from disk.
+    #[allow(dead_code)]
+    pub fn invalidate_cache(&self) {
+        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+}
+
+/// Validate a `connectivity_check_url` against SSRF attack vectors (v0.17.0.9).
+///
+/// Accepts only HTTPS URLs with public (non-private) host addresses.
+/// Returns `Ok(())` if the URL is safe or empty (empty = check disabled).
+/// Returns `Err(reason)` if the URL is unsafe.
+///
+/// Rejected patterns:
+/// - `http://` (must be HTTPS)
+/// - RFC 1918 private: 10.x, 172.16-31.x, 192.168.x
+/// - Loopback: 127.x, ::1
+/// - Link-local: 169.254.x
+/// - `localhost` hostname
+pub fn validate_connectivity_url(url: &str) -> Result<(), String> {
+    if url.is_empty() {
+        return Ok(()); // Empty = disabled, not an error.
+    }
+    if !url.starts_with("https://") {
+        return Err(format!(
+            "connectivity_check_url '{}' must use HTTPS (got {}). \
+             Plain HTTP is rejected to prevent SSRF attacks.",
+            url,
+            url.split("://").next().unwrap_or("unknown scheme")
+        ));
+    }
+    // Extract hostname from https://host[:port]/path
+    let host = url
+        .strip_prefix("https://")
+        .unwrap_or("")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(format!(
+            "connectivity_check_url '{}' resolves to localhost — rejected to prevent SSRF. \
+             Use a public HTTPS endpoint (e.g., https://api.anthropic.com).",
+            url
+        ));
+    }
+
+    // Parse as IPv4 to check private/loopback ranges.
+    if let Ok(addr) = host.parse::<std::net::IpAddr>() {
+        match addr {
+            std::net::IpAddr::V4(v4) => {
+                let octets = v4.octets();
+                let is_private = octets[0] == 10
+                    || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                    || (octets[0] == 192 && octets[1] == 168)
+                    || octets[0] == 127
+                    || (octets[0] == 169 && octets[1] == 254);
+                if is_private {
+                    return Err(format!(
+                        "connectivity_check_url '{}' resolves to a private/loopback address — \
+                         rejected to prevent SSRF. Use a public HTTPS endpoint.",
+                        url
+                    ));
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback() {
+                    return Err(format!(
+                        "connectivity_check_url '{}' is a loopback IPv6 address — rejected.",
+                        url
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Experimental feature flags — all default `false`.

@@ -96,11 +96,20 @@ impl ProjectContext {
         self.ta_dir().join("goals")
     }
 
-    /// Check if the project directory exists and has a `.ta` directory.
+    /// Validate and canonicalize the project path (v0.17.0.9).
+    ///
+    /// Checks (in order):
+    /// 1. Path must exist and be a directory.
+    /// 2. `fs::canonicalize()` to resolve ALL symlinks and `..` components.
+    /// 3. Canonical path must have `.ta/` as a **direct child** (not anywhere in the tree).
+    ///    This prevents registering an ancestor of a `.ta/` directory — a string-contains
+    ///    check would allow `/tmp/evil` when `/tmp/evil/sub/.ta/` exists.
+    /// 4. Block registration of system root paths.
     pub fn validate(&self) -> Result<(), String> {
         if !self.path.exists() {
             return Err(format!(
-                "Project '{}' path does not exist: {}",
+                "Project '{}' path does not exist: {}. \
+                 Run `ta init` in the target directory to create a TA project.",
                 self.name,
                 self.path.display()
             ));
@@ -112,6 +121,43 @@ impl ProjectContext {
                 self.path.display()
             ));
         }
+
+        // Canonicalize — resolves all symlinks and `..` components.
+        let canonical = std::fs::canonicalize(&self.path).map_err(|e| {
+            format!(
+                "Cannot canonicalize path for project '{}' ({}): {}. \
+                 Ensure the path exists and is accessible.",
+                self.name,
+                self.path.display(),
+                e
+            )
+        })?;
+
+        // Block system root paths.
+        let blocked_roots = ["/", "/etc", "/usr", "/var", "/bin", "/sbin", "/lib"];
+        for blocked in &blocked_roots {
+            if canonical == std::path::Path::new(blocked) {
+                return Err(format!(
+                    "Project '{}' resolves to a system root path '{}'. \
+                     TA cannot manage system directories.",
+                    self.name,
+                    canonical.display()
+                ));
+            }
+        }
+
+        // Require `.ta/` as a direct child of the canonical path — not a string-contains.
+        // This prevents path traversal attacks where an attacker creates `.ta/` at a
+        // deeper level and registers an ancestor directory.
+        if !canonical.join(".ta").is_dir() {
+            return Err(format!(
+                "Project '{}' at '{}' does not have a '.ta/' directory as a direct child. \
+                 Run `ta init` in the project directory to initialize it.",
+                self.name,
+                canonical.display()
+            ));
+        }
+
         Ok(())
     }
 
@@ -210,10 +256,24 @@ mod tests {
     }
 
     #[test]
-    fn validate_existing_dir() {
+    fn validate_existing_dir_with_ta() {
         let dir = tempfile::tempdir().unwrap();
+        // Provide required .ta/ child directory.
+        std::fs::create_dir(dir.path().join(".ta")).unwrap();
         let ctx = ProjectContext::new("test", dir.path());
         assert!(ctx.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_dir_without_ta_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ProjectContext::new("test", dir.path());
+        let result = ctx.validate();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains(".ta"),
+            "error should mention .ta directory"
+        );
     }
 
     #[test]

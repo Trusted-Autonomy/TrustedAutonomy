@@ -17,4 +17,4 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
-ta-db-overlay = { path = "../ta-db-overlay", version = "0.17.0-alpha.8" }
+ta-db-overlay = { path = "../ta-db-overlay", version = "0.17.0-alpha.9" }

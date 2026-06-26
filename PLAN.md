@@ -8903,7 +8903,7 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 
 ---
 ### v0.17.0.9 — Daemon Hardening: Security, Durability, and Operational Stability
-<!-- status: in_progress -->
+<!-- status: done -->
 **Goal**: Address all Critical and High findings from the red team audit. Make the daemon safe against malicious agent subprocesses, resilient to crashes during apply, and operationally stable under load. Medium findings addressed where low-effort; Low findings deferred to maintenance.
 
 **Audit source**: Red team review of `ta-daemon`, `ta-workspace`, `ta-cli/run.rs`, `ta-mcp-gateway` — June 2026.
@@ -8976,20 +8976,20 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 - Broadcast channel capacity 256 → raise to 1024; add sweep of channels map after goal ends
 
 **Items**:
-1. [ ] Binary masquerade: (a) add `[agent.trusted_binaries]` map to `DaemonConfig`; before spawn, resolve binary via `which::which()` and compare canonical path to stored value — abort with actionable error if mismatch; (b) in `BareProcessRuntime::spawn()`, strip `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH` from inherited env before merging agent config env vars
-2. [ ] CORS: replace `CorsLayer::permissive()` with allowlist of Studio origins in `web.rs` and new API router; require Bearer token for cross-origin requests
-3. [ ] Shutdown guard: add `X-TA-Admin-Confirm: shutdown` header check + rate limiter to `POST /api/shutdown`
-4. [ ] Webhook fail-safe: reject payloads when `[webhooks.github] secret = ""`; emit startup warning if webhooks configured without secret
-5. [ ] Project path canonicalization: `POST /api/projects` `validate()` must: (1) `fs::canonicalize()` the path; (2) check `canonical.join(".ta").is_dir()` (direct child only — not string-contains); (3) block system roots (`/`, `/etc`, `/usr`, `/var`, `/bin`); (4) optional: enforce `office.workspace_roots` allowlist
-6. [ ] `/api/cmd` concurrency: add `cmd_semaphore: Arc<Semaphore>` to `AppState` from new `commands.max_background_tasks` config (default 4); use `try_acquire_owned()` before `tokio::spawn`; hold `_permit` in task body so slot releases on exit; also add `max_parallel_goals` enforcement for `ta run` invocations; document DGX/high-core configs in USAGE.md
-7. [ ] SSRF guard: validate `connectivity_check_url` on config load and on settings API write (HTTPS only, no private addresses); `PUT /api/settings` cannot mutate this field without admin token
-8. [ ] Watchdog async: replace `reqwest::blocking` with `reqwest` async + `spawn_blocking` wrapper in `watchdog.rs`
-9. [ ] Apply journal: write `.ta/apply.journal` before `overlay.apply_to()`; tick entries on completion; `ta doctor --fix` detects and recovers incomplete applies
-10. [ ] TokenStore locking: wrap with `Arc<Mutex<TokenStore>>` in daemon state; use append-only file write
-11. [ ] `GoalRunState` forward compat: add `#[non_exhaustive]` + `Custom(String)` variant; audit all match sites for `_ => unreachable!()`
-12. [ ] Agent config YAML: move `builtin_agent_config()` match arms to `agents/claude-code.yaml`, `agents/codex.yaml`, `agents/claude-flow.yaml` shipped alongside the binary
-13. [ ] Operational: token cache (`Arc<RwLock<>>`), `AtomicU64` idle timeout, `println!` → `tracing::info!` in `overlay.rs`, broadcast capacity 1024
-14. [ ] Secrets masking: settings API returns `"***"` for `bot_token`, `api_key` fields; add `[credentials]` section doc pointing to env var alternatives
+1. [x] Binary masquerade: (a) add `[agent.trusted_binaries]` map to `DaemonConfig`; before spawn, resolve binary via `which::which()` and compare canonical path to stored value — abort with actionable error if mismatch; (b) in `BareProcessRuntime::spawn()`, strip `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH` from inherited env before merging agent config env vars
+2. [x] CORS: replace `CorsLayer::permissive()` with allowlist of Studio origins in `web.rs` and new API router; require Bearer token for cross-origin requests
+3. [x] Shutdown guard: add `X-TA-Admin-Confirm: shutdown` header check + rate limiter to `POST /api/shutdown`
+4. [x] Webhook fail-safe: reject payloads when `[webhooks.github] secret = ""`; emit startup warning if webhooks configured without secret
+5. [x] Project path canonicalization: `POST /api/projects` `validate()` must: (1) `fs::canonicalize()` the path; (2) check `canonical.join(".ta").is_dir()` (direct child only — not string-contains); (3) block system roots (`/`, `/etc`, `/usr`, `/var`, `/bin`); (4) optional: enforce `office.workspace_roots` allowlist
+6. [x] `/api/cmd` concurrency: add `cmd_semaphore: Arc<Semaphore>` to `AppState` from new `commands.max_background_tasks` config (default 4); use `try_acquire_owned()` before `tokio::spawn`; hold `_permit` in task body so slot releases on exit; also add `max_parallel_goals` enforcement for `ta run` invocations; document DGX/high-core configs in USAGE.md
+7. [x] SSRF guard: validate `connectivity_check_url` on config load and on settings API write (HTTPS only, no private addresses); `PUT /api/settings` cannot mutate this field without admin token
+8. [x] Watchdog async: replace `reqwest::blocking` with `reqwest` async + `spawn_blocking` wrapper in `watchdog.rs`
+9. [x] Apply journal: write `.ta/apply.journal` before `overlay.apply_to()`; tick entries on completion; `ta doctor --fix` detects and recovers incomplete applies
+10. [x] TokenStore locking: wrap with `Arc<Mutex<TokenStore>>` in daemon state; use append-only file write
+11. [x] `GoalRunState` forward compat: add `#[non_exhaustive]` + `Custom(String)` variant; audit all match sites for `_ => unreachable!()`
+12. [x] Agent config YAML: move `builtin_agent_config()` match arms to `agents/claude-code.yaml`, `agents/codex.yaml`, `agents/claude-flow.yaml` shipped alongside the binary
+13. [x] Operational: token cache (`Arc<RwLock<>>`), `AtomicU64` idle timeout, `println!` → `tracing::info!` in `overlay.rs`, broadcast capacity 1024
+14. [x] Secrets masking: settings API returns `"***"` for `bot_token`, `api_key` fields; add `[credentials]` section doc pointing to env var alternatives
 
 #### Version: `0.17.0-alpha.9`
 

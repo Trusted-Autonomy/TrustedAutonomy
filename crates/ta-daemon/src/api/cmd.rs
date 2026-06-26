@@ -112,6 +112,27 @@ pub async fn execute_command(
     let is_long = is_long_running(command_str, &state.daemon_config.commands.long_running);
 
     if is_long {
+        // Enforce concurrency limit via semaphore (v0.17.0.9).
+        // try_acquire_owned() is atomic and avoids any TOCTOU window.
+        let _permit = match state.cmd_semaphore.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let limit = state.daemon_config.commands.max_background_tasks;
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Too many background tasks ({} running). \
+                             Increase commands.max_background_tasks in daemon.toml \
+                             (current: {}). DGX Spark / high-core machines can set 8+.",
+                            limit, limit
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+        };
+
         let binary = ta_binary.clone();
         let working_dir = state.project_root.clone();
         let cmd_str = command_str.to_string();
@@ -127,6 +148,9 @@ pub async fn execute_command(
         let output_key_response = output_key.clone();
 
         tokio::spawn(async move {
+            // Hold _permit for the lifetime of this task so the semaphore slot is
+            // released when the background task completes (not when we spawn it).
+            let _permit = _permit;
             tracing::info!(
                 "Background command started: {} (output key: {})",
                 cmd_str,

@@ -37,9 +37,11 @@ pub mod workflow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::http::HeaderMap;
 use axum::middleware;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
+use tokio::sync::Semaphore;
 
 use crate::config::{DaemonConfig, ShellConfig, TokenStore};
 use crate::office::ProjectRegistry;
@@ -77,6 +79,11 @@ pub struct AppState {
     /// 5-second cache for `/api/status` responses (v0.17.0.6).
     /// Prevents the status endpoint from scanning all goals+drafts on every call.
     pub status_cache: Arc<status::StatusCache>,
+    /// Semaphore bounding concurrent background tasks from `POST /api/cmd` (v0.17.0.9).
+    /// Size comes from `commands.max_background_tasks` in daemon.toml (default 4).
+    pub cmd_semaphore: Arc<Semaphore>,
+    /// Rate-limits `POST /api/shutdown` to at most 1 call per 60 seconds (v0.17.0.9).
+    pub last_shutdown_attempt: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl AppState {
@@ -86,11 +93,13 @@ impl AppState {
         let max_sessions = daemon_config.agent.max_sessions;
         let registry = ProjectRegistry::single_project(project_root.clone());
         let qa_config = daemon_config.shell.qa_agent.clone();
-        let persistent_qa = Arc::new(agent::PersistentQaAgent::new(
-            qa_config,
-            project_root.clone(),
-        ));
+        let trusted_binaries = daemon_config.agent.trusted_binaries.clone();
+        let persistent_qa = Arc::new(
+            agent::PersistentQaAgent::new(qa_config, project_root.clone())
+                .with_trusted_binaries(trusted_binaries),
+        );
 
+        let cmd_max = daemon_config.commands.max_background_tasks;
         Self {
             pr_packages_dir: ta_dir.join("pr_packages"),
             memory_dir: ta_dir.join("memory"),
@@ -109,6 +118,8 @@ impl AppState {
             phase_claims: Arc::new(PhaseClaims::new()),
             signals_cache: Arc::new(health_signals::SignalsCache::default()),
             status_cache: Arc::new(status::StatusCache::new()),
+            cmd_semaphore: Arc::new(Semaphore::new(cmd_max)),
+            last_shutdown_attempt: Arc::new(std::sync::Mutex::new(None)),
             project_root,
             daemon_config,
         }
@@ -280,13 +291,56 @@ async fn reload_office(
     }
 }
 
-/// `POST /api/shutdown` — Graceful daemon shutdown (v0.10.10).
+/// `POST /api/shutdown` — Graceful daemon shutdown (v0.10.10 / v0.17.0.9).
 ///
-/// Responds with 200 and then exits the process. Used by the CLI's
-/// version guard to restart the daemon with a matching version.
+/// Requires the `X-TA-Admin-Confirm: shutdown` header to prevent accidental or
+/// malicious shutdown from agent subprocesses. Rate-limited to 1 call per 60 s.
 async fn shutdown_daemon(
-    axum::extract::State(_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Guard: require explicit confirmation header.
+    let confirm = headers
+        .get("x-ta-admin-confirm")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if confirm != "shutdown" {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "Shutdown requires the X-TA-Admin-Confirm: shutdown header.",
+                "hint": "Add the header to your request: X-TA-Admin-Confirm: shutdown"
+            })),
+        )
+            .into_response();
+    }
+
+    // Rate-limit: at most 1 shutdown attempt per 60 seconds.
+    {
+        let mut last = state
+            .last_shutdown_attempt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        if let Some(prev) = *last {
+            let elapsed = now.duration_since(prev);
+            if elapsed < std::time::Duration::from_secs(60) {
+                let remaining = 60u64.saturating_sub(elapsed.as_secs());
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Shutdown rate-limited. Try again in {} second(s).",
+                            remaining
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        *last = Some(now);
+    }
+
     tracing::info!("Shutdown requested via POST /api/shutdown");
     // Spawn the exit on a short delay so the response is sent first.
     tokio::spawn(async {
