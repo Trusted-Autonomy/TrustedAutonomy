@@ -613,6 +613,8 @@ fn goal_to_candidate(
         | GoalRunState::Completed
         | GoalRunState::Approved { .. }
         | GoalRunState::Created => return None,
+        // Forward-compat: unknown/custom states — treat as non-actionable.
+        _ => return None,
     };
 
     let phase_label = goal

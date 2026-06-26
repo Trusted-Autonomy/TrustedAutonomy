@@ -109,7 +109,7 @@ impl GoalOutputManager {
     /// Create a channel for a goal. Returns a GoalOutputPublisher the spawner
     /// uses to publish lines with automatic sequence numbering and history buffering.
     pub async fn create_channel(&self, goal_id: &str) -> GoalOutputPublisher {
-        let (tx, _) = broadcast::channel(256);
+        let (tx, _) = broadcast::channel(1024);
         let publisher = GoalOutputPublisher {
             sender: tx.clone(),
             counter: Arc::new(AtomicU64::new(0)),

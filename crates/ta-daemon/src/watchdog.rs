@@ -449,18 +449,26 @@ fn watchdog_cycle(
 ///
 /// Emits `ApiConnectionLost` or `ApiConnectionRestored` as the state
 /// transitions. Uses a short timeout so the watchdog cycle isn't delayed.
+///
+/// Called from within an async context (`run_watchdog` is `pub async fn`), so
+/// the blocking `reqwest` call is wrapped in `block_in_place` to avoid blocking
+/// the Tokio worker thread (v0.17.0.9 — watchdog async hardening).
 fn check_api_connectivity(
     config: &WatchdogConfig,
     state: &mut WatchdogState,
     event_store: &FsEventStore,
 ) {
     let url = &config.connectivity_check_url;
-    let reachable = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .ok()
-        .and_then(|c| c.head(url.as_str()).send().ok())
-        .is_some();
+    // block_in_place tells Tokio this thread will block; the runtime migrates
+    // other tasks away from this thread for the duration of the call.
+    let reachable = tokio::task::block_in_place(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .ok()
+            .and_then(|c| c.head(url.as_str()).send().ok())
+            .is_some()
+    });
 
     let was_reachable = state.api_was_reachable;
     state.api_was_reachable = Some(reachable);

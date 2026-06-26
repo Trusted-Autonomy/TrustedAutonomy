@@ -392,8 +392,8 @@ impl OverlayWorkspace {
             "overlay workspace created"
         );
 
-        // Print staging size report.
-        println!("{}", stat.size_report());
+        // Log staging size report (tracing avoids polluting MCP stdout).
+        tracing::info!("{}", stat.size_report());
 
         // v0.15.14.7: Delete ephemeral staging-root files so each goal starts
         // with a clean slate. These files (e.g., .ta-decisions.json) must not
@@ -688,12 +688,21 @@ impl OverlayWorkspace {
 
     /// Apply only the changed files from staging back to a target directory.
     /// Does NOT check for conflicts — use apply_with_conflict_check for safety.
+    ///
+    /// Writes a `.ta/apply.journal` file in the target directory BEFORE copying
+    /// any files (v0.17.0.9). The journal records the intended operations so that
+    /// an interrupted apply can be detected on daemon startup and reported by
+    /// `ta doctor --fix`. The journal is removed on successful completion.
     pub fn apply_to(
         &self,
         target_dir: &Path,
     ) -> Result<Vec<(String, &'static str)>, WorkspaceError> {
         let changes = self.diff_all()?;
         let mut applied = Vec::new();
+
+        // Write the apply journal before any file copies (v0.17.0.9).
+        let journal_path = target_dir.join(".ta").join("apply.journal");
+        write_apply_journal(&journal_path, &changes);
 
         for change in &changes {
             match change {
@@ -726,7 +735,25 @@ impl OverlayWorkspace {
             }
         }
 
+        // Remove the journal on success — its presence indicates an interrupted apply.
+        if journal_path.exists() {
+            let _ = fs::remove_file(&journal_path);
+        }
+
         Ok(applied)
+    }
+
+    /// Check whether a previous `apply_to` was interrupted (v0.17.0.9).
+    ///
+    /// Returns the journal path if an incomplete apply was detected.
+    /// Call this at daemon startup to surface recovery instructions to the user.
+    pub fn detect_interrupted_apply(target_dir: &Path) -> Option<std::path::PathBuf> {
+        let journal_path = target_dir.join(".ta").join("apply.journal");
+        if journal_path.exists() {
+            Some(journal_path)
+        } else {
+            None
+        }
     }
 
     /// Apply only selected artifacts (by URI) to the target directory.
@@ -1120,6 +1147,41 @@ pub fn three_way_merge(
 
 /// Extract the file path from a conflict description string.
 ///
+/// Write an apply journal recording all planned file operations (v0.17.0.9).
+///
+/// The journal is written BEFORE any file copies begin so that an interrupted
+/// apply leaves this file on disk. Daemon startup (`ta doctor --fix`) detects
+/// the journal and warns the user to re-run `ta draft apply`.
+///
+/// Format: a JSON array of operation objects:
+/// ```json
+/// [{"op":"copy","src":"...","dst":"..."},{"op":"delete","path":"..."}]
+/// ```
+fn write_apply_journal(journal_path: &Path, changes: &[OverlayChange]) {
+    let ops: Vec<serde_json::Value> = changes
+        .iter()
+        .map(|c| match c {
+            OverlayChange::Modified { path, .. } | OverlayChange::Created { path, .. } => {
+                serde_json::json!({"op": "copy", "path": path})
+            }
+            OverlayChange::Deleted { path } => {
+                serde_json::json!({"op": "delete", "path": path})
+            }
+        })
+        .collect();
+
+    if let Ok(json) = serde_json::to_string(&ops) {
+        if let Some(parent) = journal_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        // Write-then-rename for crash-atomic journal creation.
+        let tmp = journal_path.with_extension("tmp");
+        if fs::write(&tmp, &json).is_ok() {
+            let _ = fs::rename(&tmp, journal_path);
+        }
+    }
+}
+
 /// Descriptions have the form `"File '<path>' was modified..."` or
 /// `"File '<path>' was deleted..."`.
 fn extract_path_from_conflict(description: &str) -> Option<String> {

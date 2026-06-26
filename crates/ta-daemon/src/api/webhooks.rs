@@ -42,30 +42,44 @@ pub async fn github_webhook(
 ) -> impl IntoResponse {
     let secret = &state.daemon_config.webhooks.github.secret;
 
-    // Validate signature if a secret is configured.
-    if !secret.is_empty() {
-        let sig_header = headers
-            .get("x-hub-signature-256")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        if !verify_github_signature(secret.as_bytes(), &body, sig_header) {
-            tracing::warn!(
-                "GitHub webhook signature validation failed — check webhook secret in daemon.toml"
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "error": "Invalid signature. Verify that [webhooks.github] secret in daemon.toml matches the GitHub webhook secret.",
-                    "hint": "ta config show webhooks.github.secret"
-                })),
-            )
-                .into_response();
-        }
-    } else {
+    // Fail-safe: reject all payloads when no secret is configured (v0.17.0.9).
+    // Accepting unauthenticated webhooks allows any host to inject arbitrary events.
+    if secret.is_empty() {
         tracing::warn!(
-            "GitHub webhook received without signature validation — set [webhooks.github] secret in daemon.toml for production use"
+            "GitHub webhook rejected — no secret configured. \
+             Set [webhooks.github] secret in .ta/daemon.toml and configure the \
+             same secret in your GitHub webhook settings."
         );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "GitHub webhook is not configured. No webhook secret is set.",
+                "hint": "Add [webhooks.github] secret = \"your-secret\" to .ta/daemon.toml, \
+                         then set the same secret in your GitHub repository webhook settings.",
+                "docs": "https://docs.github.com/en/webhooks/using-webhooks/securing-your-webhooks"
+            })),
+        )
+            .into_response();
+    }
+
+    // Validate HMAC-SHA256 signature.
+    let sig_header = headers
+        .get("x-hub-signature-256")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_github_signature(secret.as_bytes(), &body, sig_header) {
+        tracing::warn!(
+            "GitHub webhook signature validation failed — check webhook secret in daemon.toml"
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Invalid signature. Verify that [webhooks.github] secret in daemon.toml matches the GitHub webhook secret.",
+                "hint": "ta config show webhooks.github.secret"
+            })),
+        )
+            .into_response();
     }
 
     let event_type = headers

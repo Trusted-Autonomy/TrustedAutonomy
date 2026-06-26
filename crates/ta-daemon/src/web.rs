@@ -20,12 +20,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 use chrono::Utc;
@@ -562,6 +562,42 @@ pub fn build_router(pr_packages_dir: PathBuf) -> Router {
     build_web_routes(state)
 }
 
+/// Build a restrictive CORS layer that allows only Studio and localhost origins (v0.17.0.9).
+///
+/// Allows:
+/// - `app://ta-studio`  — Electron app
+/// - `http://localhost` (any port)
+/// - `http://127.0.0.1` (any port)
+/// - Any additional origins supplied in `extra_origins`
+///
+/// Replaces `CorsLayer::permissive()` which allowed any webpage to call the local
+/// daemon API, enabling CSRF attacks from arbitrary web origins.
+pub fn build_cors_layer(extra_origins: &[String]) -> CorsLayer {
+    let mut allowed: Vec<HeaderValue> = vec![
+        HeaderValue::from_static("app://ta-studio"),
+        HeaderValue::from_static("http://localhost"),
+        HeaderValue::from_static("http://127.0.0.1"),
+    ];
+    for origin in extra_origins {
+        if let Ok(v) = HeaderValue::from_str(origin) {
+            allowed.push(v);
+        }
+    }
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            let origin_str = origin.to_str().unwrap_or("");
+            // Allow exact matches in the allowlist.
+            if allowed.iter().any(|a| a == origin) {
+                return true;
+            }
+            // Allow http://localhost:<port> and http://127.0.0.1:<port>.
+            origin_str.starts_with("http://localhost:")
+                || origin_str.starts_with("http://127.0.0.1:")
+        }))
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
+}
+
 /// Build web UI routes with the given state.
 fn build_web_routes(state: Arc<WebState>) -> Router {
     Router::new()
@@ -584,7 +620,7 @@ fn build_web_routes(state: Arc<WebState>) -> Router {
         .route("/api/memory/search", get(search_memory))
         .route("/api/memory/stats", get(memory_stats))
         .route("/api/memory/{key}", delete(delete_memory))
-        .layer(CorsLayer::permissive())
+        .layer(build_cors_layer(&[]))
         .with_state(state)
 }
 
@@ -604,11 +640,24 @@ pub fn build_full_router(
         memory_dir: app_state.memory_dir.clone(),
     });
 
+    // Build CORS layer using any extra origins from config (Studio URL, custom UIs).
+    // Filter out legacy wildcard "*" entries — the layer manages its own allow-list.
+    let extra_origins: Vec<String> = app_state
+        .daemon_config
+        .server
+        .cors_origins
+        .iter()
+        .filter(|o| o.as_str() != "*")
+        .cloned()
+        .collect();
+    let cors = build_cors_layer(&extra_origins);
+
     let web_routes = build_web_routes(web_state);
     let api_routes = crate::api::build_api_router(app_state.clone());
 
     // Merge: API routes take precedence, web routes fill in the rest.
-    (api_routes.merge(web_routes), app_state)
+    // Apply the single restrictive CORS layer at the top level.
+    (api_routes.merge(web_routes).layer(cors), app_state)
 }
 
 /// Start the web review UI server (legacy — draft/memory only).

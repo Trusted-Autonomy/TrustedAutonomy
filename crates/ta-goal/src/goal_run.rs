@@ -26,6 +26,12 @@ use crate::error::GoalError;
 /// In Rust, enums can carry data per variant (like `Failed { reason }`).
 /// The `#[serde(tag = "state")]` attribute makes this serialize as
 /// `{"state": "running"}` in JSON — clean and readable.
+/// The lifecycle state of a GoalRun (v0.17.0.9: `#[non_exhaustive]` added).
+///
+/// Downstream crates that match on this enum must add a `_` arm. Use
+/// `GoalRunState::Custom(tag)` when extending the state machine without
+/// forking this crate.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum GoalRunState {
@@ -105,6 +111,12 @@ pub enum GoalRunState {
 
     /// Goal failed at some point.
     Failed { reason: String },
+
+    /// Extension state for plugins and external state machines (v0.17.0.9).
+    ///
+    /// Use this to attach arbitrary string tags without forking `ta-goal`.
+    /// Example: `GoalRunState::Custom("waiting_for_ci".into())`.
+    Custom(String),
 }
 
 impl fmt::Display for GoalRunState {
@@ -123,6 +135,7 @@ impl fmt::Display for GoalRunState {
             GoalRunState::Finalizing { .. } => write!(f, "finalizing"),
             GoalRunState::DraftPending { .. } => write!(f, "draft_pending"),
             GoalRunState::Failed { .. } => write!(f, "failed"),
+            GoalRunState::Custom(tag) => write!(f, "custom:{}", tag),
         }
     }
 }

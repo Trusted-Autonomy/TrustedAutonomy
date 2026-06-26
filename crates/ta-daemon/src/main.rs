@@ -151,6 +151,45 @@ async fn main() -> Result<()> {
     // Load daemon configuration.
     let daemon_config = config::DaemonConfig::load(&project_root);
 
+    // Validate security-sensitive config fields at startup (v0.17.0.9).
+    // Warn on misconfiguration; don't abort — the field may be unused if the watchdog
+    // is disabled or no wake-event has occurred.
+    if let Err(e) = config::validate_connectivity_url(&daemon_config.power.connectivity_check_url) {
+        tracing::warn!(
+            error = %e,
+            "Unsafe connectivity_check_url in daemon.toml — SSRF risk. \
+             Update [power] connectivity_check_url to a public HTTPS URL."
+        );
+    }
+    // Warn if GitHub webhooks are configured without a secret.
+    if !daemon_config.webhooks.github.secret.is_empty() {
+        // Secret is set — good.
+    } else if std::env::var("TA_WEBHOOK_GITHUB_SECRET").is_err() {
+        // No secret in config and no env override — warn if the endpoint exists.
+        tracing::warn!(
+            "GitHub webhook endpoint (/api/webhooks/github) is enabled but \
+             [webhooks.github] secret is empty in daemon.toml. \
+             All webhook payloads will be rejected until a secret is configured."
+        );
+    }
+
+    // Detect interrupted draft apply (v0.17.0.9 — apply journal).
+    // If .ta/apply.journal exists without an in-progress apply.lock, a previous
+    // apply was interrupted mid-copy. Warn the user so they can re-run apply.
+    if let Some(journal_path) =
+        ta_workspace::OverlayWorkspace::detect_interrupted_apply(&project_root)
+    {
+        let lock_path = project_root.join(".ta").join("apply.lock");
+        if !lock_path.exists() {
+            tracing::warn!(
+                journal = %journal_path.display(),
+                "Incomplete draft apply detected — a previous `ta draft apply` may have been \
+                 interrupted. Run `ta doctor --fix` to inspect the state, or \
+                 re-run `ta draft apply <id>` to complete the apply."
+            );
+        }
+    }
+
     // Plugin version enforcement with auto-setup (v0.11.4).
     // If a project.toml exists, check that all required plugins are installed
     // and meet minimum version requirements. If not, attempt auto-resolve
