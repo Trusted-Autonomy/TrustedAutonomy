@@ -8995,7 +8995,7 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 
 ---
 ### v0.17.0.10 — Generic Prompt-Optimizer Plugin System
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.17.0.7 (Headroom supervisor as the starting point)
 
