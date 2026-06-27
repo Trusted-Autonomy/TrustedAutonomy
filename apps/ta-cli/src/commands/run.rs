@@ -6873,6 +6873,13 @@ fn check_vcs_clean(project_root: &std::path::Path, headless: bool) -> anyhow::Re
 
 // ─── Context compression injection (v0.17.0.7) ───────────────────────────────
 
+/// Minimal plugin config for `[compression.plugin]` in daemon.toml.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct PluginSection {
+    proxy_base_url: String,
+}
+
 /// Minimal compression config extracted from daemon.toml for the CLI.
 #[derive(Debug, serde::Deserialize)]
 #[serde(default)]
@@ -6881,6 +6888,7 @@ struct CompressionSection {
     port: u16,
     headroom_learn: bool,
     per_agent: std::collections::HashMap<String, bool>,
+    plugin: Option<PluginSection>,
 }
 
 impl Default for CompressionSection {
@@ -6895,6 +6903,7 @@ impl Default for CompressionSection {
                 m.insert("codex".to_string(), false);
                 m
             },
+            plugin: None,
         }
     }
 }
@@ -6935,7 +6944,7 @@ fn compression_base_url(project_root: &std::path::Path, agent_name: &str) -> Opt
         return None;
     }
 
-    // Only inject if the headroom proxy appears to be running (read status file).
+    // Only inject if the compression proxy appears to be running (read status file).
     let status_path = project_root
         .join(".ta")
         .join("compression")
@@ -6947,7 +6956,14 @@ fn compression_base_url(project_root: &std::path::Path, agent_name: &str) -> Opt
         }
         if let Ok(s) = serde_json::from_str::<Status>(&raw) {
             if s.status == "running" {
-                return Some(format!("http://127.0.0.1:{}", cfg.port));
+                // Prefer the plugin's proxy_base_url if explicitly configured.
+                let url = cfg
+                    .plugin
+                    .as_ref()
+                    .filter(|p| !p.proxy_base_url.is_empty())
+                    .map(|p| p.proxy_base_url.clone())
+                    .unwrap_or_else(|| format!("http://127.0.0.1:{}", cfg.port));
+                return Some(url);
             }
         }
     }
@@ -6976,7 +6992,7 @@ fn inject_compression_url(
         tracing::info!(
             agent = %agent_name,
             url = %url,
-            "Compression active: routing agent API calls through headroom proxy"
+            "Compression active: routing agent API calls through compression proxy"
         );
     }
 }

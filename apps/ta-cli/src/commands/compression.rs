@@ -1,9 +1,10 @@
-// compression.rs — `ta compression` commands (v0.17.0.7).
+// compression.rs — `ta compression` commands (v0.17.0.10).
 //
 // Subcommands:
-//   ta compression status   — show proxy URL, headroom version, performance stats
-//   ta compression enable   — set [compression].enabled = true in daemon.toml
-//   ta compression disable  — set [compression].enabled = false in daemon.toml
+//   ta compression status        — show plugin name, proxy URL, process status
+//   ta compression enable        — set [compression].enabled = true in daemon.toml
+//   ta compression disable       — set [compression].enabled = false in daemon.toml
+//   ta compression plugin show   — print the active plugin configuration
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -13,11 +14,11 @@ use ta_mcp_gateway::GatewayConfig;
 
 #[derive(Debug, Subcommand)]
 pub enum CompressionCommands {
-    /// Show context compression status: proxy URL, version, and performance stats.
+    /// Show context compression status: plugin name, proxy URL, and performance stats.
     ///
-    /// Displays whether headroom is running, the proxy URL agents use,
-    /// the detected headroom binary version, and token-savings metrics for
-    /// the current session (via `headroom perf`).
+    /// Displays whether the optimizer is running, the proxy URL agents use,
+    /// the configured plugin command, and token-savings metrics for
+    /// the current session.
     ///
     /// Example:
     ///   ta compression status
@@ -25,7 +26,7 @@ pub enum CompressionCommands {
 
     /// Enable context compression (sets [compression].enabled = true in daemon.toml).
     ///
-    /// If the daemon is running, sends a restart signal to the headroom supervisor.
+    /// If the daemon is running, sends a restart signal to the optimizer supervisor.
     /// Otherwise, restart the daemon to apply: `ta daemon restart`.
     ///
     /// Example:
@@ -39,6 +40,27 @@ pub enum CompressionCommands {
     /// Example:
     ///   ta compression disable
     Disable,
+
+    /// Manage the active prompt-optimizer plugin.
+    ///
+    /// Example:
+    ///   ta compression plugin show
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginCommands {
+    /// Print the active plugin configuration (name, command, args, proxy URL, health endpoint).
+    ///
+    /// When no `[compression.plugin]` block is set in daemon.toml, shows the
+    /// headroom built-in defaults derived from `[compression].port`.
+    ///
+    /// Example:
+    ///   ta compression plugin show
+    Show,
 }
 
 pub fn execute(command: &CompressionCommands, config: &GatewayConfig) -> Result<()> {
@@ -46,6 +68,9 @@ pub fn execute(command: &CompressionCommands, config: &GatewayConfig) -> Result<
         CompressionCommands::Status => show_status(&config.workspace_root),
         CompressionCommands::Enable => set_enabled(&config.workspace_root, true),
         CompressionCommands::Disable => set_enabled(&config.workspace_root, false),
+        CompressionCommands::Plugin { command } => match command {
+            PluginCommands::Show => show_plugin(&config.workspace_root),
+        },
     }
 }
 
@@ -53,13 +78,15 @@ pub fn execute(command: &CompressionCommands, config: &GatewayConfig) -> Result<
 
 fn show_status(workspace_root: &Path) -> Result<()> {
     let cfg = load_config(workspace_root);
+    let plugin = cfg.effective_plugin();
 
-    println!("Context Compression (headroom)");
+    println!("Context Compression");
     println!(
         "  Enabled:        {}",
         if cfg.enabled { "yes" } else { "no" }
     );
-    println!("  Proxy URL:      http://127.0.0.1:{}", cfg.port);
+    println!("  Plugin:         {}", plugin.name);
+    println!("  Proxy URL:      {}", plugin.proxy_base_url);
     println!(
         "  Cache aligner:  {}",
         if cfg.cache_aligner { "active" } else { "off" }
@@ -74,17 +101,23 @@ fn show_status(workspace_root: &Path) -> Result<()> {
     );
 
     // Supervisor process status.
-    if let Some(status) = read_headroom_status(workspace_root) {
+    if let Some(status) = read_optimizer_status(workspace_root) {
         let pid_str = status
             .pid
             .map(|p| p.to_string())
             .unwrap_or_else(|| "—".to_string());
+        let display_name = if status.plugin_name.is_empty() {
+            plugin.name.clone()
+        } else {
+            status.plugin_name.clone()
+        };
         println!("  Process:        {} (PID {})", status.status, pid_str);
         println!("  Restarts:       {}", status.restart_count);
         if status.status == "suspended" {
             println!(
-                "\n  ⚠ Headroom supervisor is suspended after repeated failures.\n  \
-                 To resume:  ta compression enable"
+                "\n  ⚠ {} supervisor is suspended after repeated failures.\n  \
+                 To resume:  ta compression enable",
+                display_name
             );
         }
     } else if cfg.enabled {
@@ -93,11 +126,10 @@ fn show_status(workspace_root: &Path) -> Result<()> {
         println!("  Process:        disabled");
     }
 
-    // Binary detection.
-    match find_headroom_binary() {
-        Some(path) => {
+    // Binary detection using plugin command.
+    match which::which(&plugin.command) {
+        Ok(path) => {
             println!("  Binary:         {}", path.display());
-            // Query headroom version.
             if let Ok(out) = std::process::Command::new(&path).arg("--version").output() {
                 let ver = String::from_utf8_lossy(&out.stdout);
                 let ver = ver.trim();
@@ -106,27 +138,37 @@ fn show_status(workspace_root: &Path) -> Result<()> {
                 }
             }
         }
-        None => {
-            println!("  Binary:         not found");
+        Err(_) => {
+            println!("  Binary:         {} (not found on PATH)", plugin.command);
             if cfg.enabled {
                 println!();
-                println!("  Install headroom to activate compression:");
-                println!("    pip install headroom-ai[all]");
-                println!();
-                println!("  Or disable compression:");
-                println!("    ta compression disable");
+                println!("  Install the plugin binary to activate compression.");
+                if plugin.name == "headroom" {
+                    println!("    pip install headroom-ai[all]");
+                    println!();
+                    println!("  Or disable compression:");
+                    println!("    ta compression disable");
+                } else {
+                    println!(
+                        "  Set the correct command in [compression.plugin] in .ta/daemon.toml."
+                    );
+                    println!("  Or disable compression: ta compression disable");
+                }
             }
         }
     }
 
     // Performance stats (only when the proxy is running).
-    let is_running = read_headroom_status(workspace_root)
+    let is_running = read_optimizer_status(workspace_root)
         .map(|s| s.status == "running")
         .unwrap_or(false);
 
     if is_running {
-        if let Some(binary) = find_headroom_binary() {
-            match std::process::Command::new(&binary).arg("perf").output() {
+        if let Ok(binary_path) = which::which(&plugin.command) {
+            match std::process::Command::new(&binary_path)
+                .arg("perf")
+                .output()
+            {
                 Ok(out) if out.status.success() => {
                     let perf = String::from_utf8_lossy(&out.stdout);
                     let perf = perf.trim();
@@ -141,6 +183,47 @@ fn show_status(workspace_root: &Path) -> Result<()> {
                 _ => {}
             }
         }
+    }
+
+    Ok(())
+}
+
+// ─── plugin show ─────────────────────────────────────────────────────────────
+
+fn show_plugin(workspace_root: &Path) -> Result<()> {
+    let cfg = load_config(workspace_root);
+    let plugin = cfg.effective_plugin();
+
+    let source = if cfg.has_explicit_plugin() {
+        "[compression.plugin] (explicit)"
+    } else {
+        "built-in headroom default"
+    };
+
+    println!("Active Prompt-Optimizer Plugin  ({})", source);
+    println!("  Name:             {}", plugin.name);
+    println!("  Command:          {}", plugin.command);
+    println!("  Args:             {}", plugin.args.join(" "));
+    println!("  Proxy base URL:   {}", plugin.proxy_base_url);
+    println!("  Health endpoint:  {}", plugin.health_endpoint);
+    if !plugin.env.is_empty() {
+        println!("  Env:");
+        let mut pairs: Vec<_> = plugin.env.iter().collect();
+        pairs.sort_by_key(|(k, _)| k.as_str());
+        for (k, v) in pairs {
+            println!("    {}={}", k, v);
+        }
+    }
+
+    if !cfg.has_explicit_plugin() {
+        println!();
+        println!("  To customise, add to .ta/daemon.toml:");
+        println!("    [compression.plugin]");
+        println!("    name            = \"{}\"", plugin.name);
+        println!("    command         = \"{}\"", plugin.command);
+        println!("    args            = {:?}", plugin.args);
+        println!("    proxy_base_url  = \"{}\"", plugin.proxy_base_url);
+        println!("    health_endpoint = \"{}\"", plugin.health_endpoint);
     }
 
     Ok(())
@@ -172,11 +255,10 @@ fn set_enabled(workspace_root: &Path, enabled: bool) -> Result<()> {
     println!("Context compression {}.", action);
 
     if enabled {
-        // If the supervisor is suspended, clear it with a restart signal.
         if let Err(e) = write_restart_signal(workspace_root) {
             tracing::debug!(
                 error = %e,
-                "Could not write headroom restart signal (daemon may not be running)"
+                "Could not write optimizer restart signal (daemon may not be running)"
             );
         }
         println!(
@@ -253,12 +335,33 @@ fn update_compression_enabled(content: &str, enabled: bool) -> String {
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
+struct PluginSection {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    proxy_base_url: String,
+    health_endpoint: String,
+    env: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
 struct CompressionConfig {
     enabled: bool,
     port: u16,
     cache_aligner: bool,
     headroom_learn: bool,
     per_agent: std::collections::HashMap<String, bool>,
+    plugin: Option<PluginSection>,
+}
+
+struct EffectivePlugin {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    proxy_base_url: String,
+    health_endpoint: String,
+    env: std::collections::HashMap<String, String>,
 }
 
 impl CompressionConfig {
@@ -267,6 +370,60 @@ impl CompressionConfig {
             self.port = 8787;
         }
         self
+    }
+
+    fn has_explicit_plugin(&self) -> bool {
+        self.plugin.is_some()
+    }
+
+    fn effective_plugin(&self) -> EffectivePlugin {
+        if let Some(ref p) = self.plugin {
+            let port = self.port;
+            let name = if p.name.is_empty() {
+                "headroom".to_string()
+            } else {
+                p.name.clone()
+            };
+            let command = if p.command.is_empty() {
+                "headroom".to_string()
+            } else {
+                p.command.clone()
+            };
+            let proxy_base_url = if p.proxy_base_url.is_empty() {
+                format!("http://127.0.0.1:{}", port)
+            } else {
+                p.proxy_base_url.clone()
+            };
+            let health_endpoint = if p.health_endpoint.is_empty() {
+                format!("http://127.0.0.1:{}/health", port)
+            } else {
+                p.health_endpoint.clone()
+            };
+            let args = if p.args.is_empty() {
+                vec!["proxy".to_string(), "--port".to_string(), port.to_string()]
+            } else {
+                p.args.clone()
+            };
+            return EffectivePlugin {
+                name,
+                command,
+                args,
+                proxy_base_url,
+                health_endpoint,
+                env: p.env.clone(),
+            };
+        }
+        let port = self.port;
+        let mut env = std::collections::HashMap::new();
+        env.insert("HEADROOM_LEARN".to_string(), "false".to_string());
+        EffectivePlugin {
+            name: "headroom".to_string(),
+            command: "headroom".to_string(),
+            args: vec!["proxy".to_string(), "--port".to_string(), port.to_string()],
+            proxy_base_url: format!("http://127.0.0.1:{}", port),
+            health_endpoint: format!("http://127.0.0.1:{}/health", port),
+            env,
+        }
     }
 }
 
@@ -294,19 +451,22 @@ fn load_config(workspace_root: &Path) -> CompressionConfig {
             m.insert("codex".to_string(), false);
             m
         },
+        plugin: None,
     }
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct HeadroomStatusFile {
+struct OptimizerStatusFile {
     pub status: String,
     #[serde(default)]
     pub pid: Option<u32>,
     #[serde(default)]
     pub restart_count: u32,
+    #[serde(default)]
+    pub plugin_name: String,
 }
 
-fn read_headroom_status(workspace_root: &Path) -> Option<HeadroomStatusFile> {
+fn read_optimizer_status(workspace_root: &Path) -> Option<OptimizerStatusFile> {
     let path = workspace_root
         .join(".ta")
         .join("compression")
@@ -319,25 +479,6 @@ fn write_restart_signal(workspace_root: &Path) -> std::io::Result<()> {
     let dir = workspace_root.join(".ta").join("compression");
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("restart-signal"), "restart")
-}
-
-fn find_headroom_binary() -> Option<std::path::PathBuf> {
-    // 1. PATH
-    if let Ok(p) = which::which("headroom") {
-        return Some(p);
-    }
-    // 2. ~/.local/bin  and  3. ~/.venv/bin
-    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-        let local = home.join(".local").join("bin").join("headroom");
-        if local.exists() {
-            return Some(local);
-        }
-        let venv = home.join(".venv").join("bin").join("headroom");
-        if venv.exists() {
-            return Some(venv);
-        }
-    }
-    None
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -396,5 +537,52 @@ mod tests {
         let result = update_compression_enabled(content, false);
         assert!(result.contains("enabled = false"));
         assert!(!result.contains("enabled = true"));
+    }
+
+    #[test]
+    fn effective_plugin_defaults_to_headroom() {
+        let cfg = CompressionConfig {
+            port: 8787,
+            ..Default::default()
+        };
+        let plugin = cfg.effective_plugin();
+        assert_eq!(plugin.name, "headroom");
+        assert_eq!(plugin.command, "headroom");
+        assert_eq!(plugin.proxy_base_url, "http://127.0.0.1:8787");
+    }
+
+    #[test]
+    fn effective_plugin_uses_explicit_config() {
+        let cfg = CompressionConfig {
+            port: 8787,
+            plugin: Some(PluginSection {
+                name: "my-proxy".to_string(),
+                command: "my-proxy-bin".to_string(),
+                args: vec!["--listen".to_string(), "9090".to_string()],
+                proxy_base_url: "http://127.0.0.1:9090".to_string(),
+                health_endpoint: "http://127.0.0.1:9090/healthz".to_string(),
+                env: std::collections::HashMap::new(),
+            }),
+            ..Default::default()
+        };
+        let plugin = cfg.effective_plugin();
+        assert_eq!(plugin.name, "my-proxy");
+        assert_eq!(plugin.proxy_base_url, "http://127.0.0.1:9090");
+        assert_eq!(plugin.health_endpoint, "http://127.0.0.1:9090/healthz");
+    }
+
+    #[test]
+    fn has_explicit_plugin_false_when_absent() {
+        let cfg = CompressionConfig::default();
+        assert!(!cfg.has_explicit_plugin());
+    }
+
+    #[test]
+    fn has_explicit_plugin_true_when_set() {
+        let cfg = CompressionConfig {
+            plugin: Some(PluginSection::default()),
+            ..Default::default()
+        };
+        assert!(cfg.has_explicit_plugin());
     }
 }

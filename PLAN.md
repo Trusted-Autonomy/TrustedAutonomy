@@ -8995,7 +8995,7 @@ headroom_learn = false  # never let headroom modify CLAUDE.md (TA owns that file
 
 ---
 ### v0.17.0.10 — Generic Prompt-Optimizer Plugin System
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.7 (Headroom supervisor as the starting point)
 
@@ -9020,13 +9020,13 @@ env         = { HEADROOM_LEARN = "false" }
 The supervisor reads `proxy_base_url` to inject `ANTHROPIC_BASE_URL`; reads `health_endpoint` for liveness checks; uses `command`/`args`/`env` to spawn the process. All headroom-specific logic is removed from the supervisor.
 
 **Items**:
-1. [ ] Add `PromptOptimizerPluginConfig` struct to `crates/ta-daemon/src/config.rs`: fields `name`, `command`, `args: Vec<String>`, `proxy_base_url`, `health_endpoint`, `env: HashMap<String,String>`
-2. [ ] Replace `HeadroomSupervisor` with `PromptOptimizerSupervisor` in `crates/ta-daemon/src/`: reads plugin config instead of hardcoded headroom values; spawn, health-check, restart logic unchanged
-3. [ ] Remove hardcoded headroom binary detection (`PATH`/`~/.local/bin/headroom`/`~/.venv/bin/headroom`) from daemon; binary is now `plugin.command`, resolved by the OS
-4. [ ] Auto-populate default headroom plugin config when `compression.enabled = true` and no `[compression.plugin]` block exists (backwards compat)
-5. [ ] `ta compression plugin show` — print the active plugin config (name, command, proxy URL, health endpoint)
-6. [ ] Update `ta compression status` to show plugin name alongside proxy URL and token stats
-7. [ ] Docs: USAGE.md "Context Compression" section — explain plugin config format; show example of swapping headroom for a custom proxy
+1. [x] Add `PromptOptimizerPluginConfig` struct to `crates/ta-daemon/src/config.rs`: fields `name`, `command`, `args: Vec<String>`, `proxy_base_url`, `health_endpoint`, `env: HashMap<String,String>`
+2. [x] Replace `HeadroomSupervisor` with `PromptOptimizerSupervisor` in `crates/ta-daemon/src/`: reads plugin config instead of hardcoded headroom values; spawn, health-check, restart logic unchanged
+3. [x] Remove hardcoded headroom binary detection (`PATH`/`~/.local/bin/headroom`/`~/.venv/bin/headroom`) from daemon; binary is now `plugin.command`, resolved by the OS
+4. [x] Auto-populate default headroom plugin config when `compression.enabled = true` and no `[compression.plugin]` block exists (backwards compat)
+5. [x] `ta compression plugin show` — print the active plugin config (name, command, proxy URL, health endpoint)
+6. [x] Update `ta compression status` to show plugin name alongside proxy URL and token stats
+7. [x] Docs: USAGE.md "Context Compression" section — explain plugin config format; show example of swapping headroom for a custom proxy
 
 #### Version: `0.17.0-alpha.10`
 

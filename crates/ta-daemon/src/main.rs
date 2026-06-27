@@ -44,6 +44,7 @@ pub mod office;
 pub mod phase_claim;
 pub mod power_manager;
 pub mod project_context;
+pub mod prompt_optimizer_supervisor;
 pub mod question_registry;
 pub mod router;
 pub mod transport;
@@ -295,9 +296,11 @@ async fn main() -> Result<()> {
     // Runs in both API and MCP modes. No-op if workflow.toml has no managed connectors.
     connector_supervisor::start(project_root.clone(), shutdown.clone());
 
-    // Start the HeadroomSupervisor for context compression (v0.17.0.7).
-    // No-op when compression.enabled = false or the headroom binary is not installed.
-    headroom_supervisor::start(
+    // Start the PromptOptimizerSupervisor for context compression (v0.17.0.10).
+    // No-op when compression.enabled = false or the plugin binary is not on PATH.
+    // headroom is the default plugin; configure [compression.plugin] in daemon.toml
+    // to use a custom optimizer.
+    prompt_optimizer_supervisor::start(
         project_root.clone(),
         daemon_config.compression.clone(),
         shutdown.clone(),
