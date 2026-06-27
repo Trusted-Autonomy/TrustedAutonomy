@@ -14549,9 +14549,11 @@ The supervisor maintains an in-memory event queue per connector (capacity: 1000 
 
 ## Context Compression
 
-TA integrates with [headroom](https://github.com/chopratejas/headroom) — an OpenAI-compatible HTTP proxy that compresses LLM context payloads 60–95% before forwarding them to Anthropic's API. When enabled, the daemon spawns `headroom proxy` as a supervised subprocess and sets `ANTHROPIC_BASE_URL` in the agent's environment so all API calls flow through it transparently.
+TA supports a generic prompt-optimizer plugin system. By default the built-in plugin is [headroom](https://github.com/chopratejas/headroom) — an OpenAI-compatible HTTP proxy that compresses LLM context payloads 60–95% before forwarding them to Anthropic's API. When enabled, the daemon spawns the configured optimizer as a supervised subprocess and sets `ANTHROPIC_BASE_URL` in the agent's environment so all API calls flow through it transparently.
 
-Context compression is **enabled by default** and requires `headroom` to be installed separately (see below). If `headroom` is not found, TA logs a warning and continues without compression — it never hard-fails.
+Context compression is **enabled by default** and requires the optimizer binary to be installed separately (see below). If the binary is not found, TA logs a warning and continues without compression — it never hard-fails.
+
+Switching optimizers is a config change — no code change required. See [Custom Optimizer Plugins](#custom-optimizer-plugins) below.
 
 ### Installing headroom
 
@@ -14568,8 +14570,9 @@ ta compression status
 Example output:
 
 ```
-Context Compression (headroom)
+Context Compression
   Enabled:        yes
+  Plugin:         headroom
   Proxy URL:      http://127.0.0.1:8787
   Cache aligner:  active
   headroom_learn: false (always disabled in TA-managed runs)
@@ -14623,6 +14626,51 @@ To resume after suspension:
 
 ```bash
 ta compression enable   # clears suspended state; supervisor retries within 5 s
+```
+
+### Custom Optimizer Plugins
+
+Any HTTP proxy that accepts OpenAI-compatible requests can replace headroom. Add a `[compression.plugin]` block to `.ta/daemon.toml`:
+
+```toml
+[compression.plugin]
+name            = "my-proxy"           # display name (ta compression status / plugin show)
+command         = "my-proxy-bin"       # executable on PATH
+args            = ["--listen", "9090"] # CLI args passed to the process
+proxy_base_url  = "http://127.0.0.1:9090"
+health_endpoint = "http://127.0.0.1:9090/healthz"
+
+[compression.plugin.env]              # optional extra env vars
+MY_PROXY_LOG = "warn"
+```
+
+When no `[compression.plugin]` block is present, TA uses the headroom defaults derived from `[compression].port`.
+
+**Inspect the active plugin:**
+
+```bash
+ta compression plugin show
+```
+
+Example output (no explicit config — headroom default):
+
+```
+Active Prompt-Optimizer Plugin  (built-in headroom default)
+  Name:             headroom
+  Command:          headroom
+  Args:             proxy --port 8787
+  Proxy base URL:   http://127.0.0.1:8787
+  Health endpoint:  http://127.0.0.1:8787/health
+  Env:
+    HEADROOM_LEARN=false
+
+  To customise, add to .ta/daemon.toml:
+    [compression.plugin]
+    name            = "headroom"
+    command         = "headroom"
+    args            = ["proxy", "--port", "8787"]
+    proxy_base_url  = "http://127.0.0.1:8787"
+    health_endpoint = "http://127.0.0.1:8787/health"
 ```
 
 ### Windows installer

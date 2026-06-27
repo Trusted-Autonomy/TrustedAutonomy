@@ -1832,9 +1832,82 @@ impl ExperimentalConfig {
     }
 }
 
+/// Per-optimizer plugin configuration for `[compression.plugin]` in `daemon.toml`.
+///
+/// Defines the process to spawn as the compression proxy. headroom is the
+/// built-in default; any HTTP proxy can be substituted via `command`/`args`/`env`
+/// without changing daemon code.
+///
+/// ```toml
+/// [compression.plugin]
+/// name             = "headroom"
+/// command          = "headroom"
+/// args             = ["proxy", "--port", "8787"]
+/// proxy_base_url   = "http://127.0.0.1:8787"
+/// health_endpoint  = "http://127.0.0.1:8787/health"
+/// env              = { HEADROOM_LEARN = "false" }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PromptOptimizerPluginConfig {
+    /// Human-readable plugin name (used in logs and `ta compression plugin show`).
+    #[serde(default = "default_plugin_name")]
+    pub name: String,
+    /// Binary to spawn, resolved by the OS via PATH.
+    #[serde(default = "default_plugin_command")]
+    pub command: String,
+    /// Arguments passed to the binary.
+    #[serde(default = "default_plugin_args")]
+    pub args: Vec<String>,
+    /// Base URL injected as `ANTHROPIC_BASE_URL` in agent environments.
+    #[serde(default = "default_proxy_base_url")]
+    pub proxy_base_url: String,
+    /// HTTP endpoint polled for liveness checks.
+    #[serde(default = "default_health_endpoint")]
+    pub health_endpoint: String,
+    /// Extra environment variables forwarded to the plugin process.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+fn default_plugin_name() -> String {
+    "headroom".to_string()
+}
+fn default_plugin_command() -> String {
+    "headroom".to_string()
+}
+fn default_plugin_args() -> Vec<String> {
+    vec![
+        "proxy".to_string(),
+        "--port".to_string(),
+        "8787".to_string(),
+    ]
+}
+fn default_proxy_base_url() -> String {
+    "http://127.0.0.1:8787".to_string()
+}
+fn default_health_endpoint() -> String {
+    "http://127.0.0.1:8787/health".to_string()
+}
+
+impl Default for PromptOptimizerPluginConfig {
+    fn default() -> Self {
+        let mut env = std::collections::HashMap::new();
+        env.insert("HEADROOM_LEARN".to_string(), "false".to_string());
+        Self {
+            name: default_plugin_name(),
+            command: default_plugin_command(),
+            args: default_plugin_args(),
+            proxy_base_url: default_proxy_base_url(),
+            health_endpoint: default_health_endpoint(),
+            env,
+        }
+    }
+}
+
 /// Context compression configuration (v0.17.0.7).
 ///
-/// Controls the headroom proxy that compresses tool outputs, logs, and file
+/// Controls the optimizer proxy that compresses tool outputs, logs, and file
 /// reads before they reach the Anthropic API, reducing token consumption by
 /// 60–95%.  Enabled by default for `claude-code`; off by default for other
 /// frameworks.
@@ -1842,6 +1915,8 @@ impl ExperimentalConfig {
 /// `headroom_learn` is always overridden to `false` in TA-managed runs to
 /// prevent headroom from modifying `CLAUDE.md` (TA owns that file through its
 /// CLAUDE.md injection/backup/restore cycle).
+///
+/// Use `[compression.plugin]` to replace headroom with a custom optimizer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CompressionConfig {
@@ -1886,6 +1961,13 @@ pub struct CompressionConfig {
     ///   - all others → false (disabled by default)
     #[serde(default = "default_per_agent")]
     pub per_agent: std::collections::HashMap<String, bool>,
+
+    /// Plugin configuration (v0.17.0.10).
+    ///
+    /// When absent, defaults to the headroom built-in using the `port` field.
+    /// Set `[compression.plugin]` to use a different optimizer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PromptOptimizerPluginConfig>,
 }
 
 fn default_compression_enabled() -> bool {
@@ -1924,6 +2006,7 @@ impl Default for CompressionConfig {
             cache_aligner: default_compression_cache_aligner(),
             headroom_learn: false,
             per_agent: default_per_agent(),
+            plugin: None,
         }
     }
 }
@@ -1941,6 +2024,28 @@ impl CompressionConfig {
             .get(agent)
             .copied()
             .unwrap_or(agent == "claude-code")
+    }
+
+    /// Return the active plugin config, falling back to headroom defaults.
+    ///
+    /// When `[compression.plugin]` is absent, builds a headroom config using
+    /// the `port` field for backwards compatibility.
+    pub fn effective_plugin(&self) -> PromptOptimizerPluginConfig {
+        if let Some(ref p) = self.plugin {
+            return p.clone();
+        }
+        // Build headroom defaults using the configured port.
+        let port = self.port;
+        let mut env = std::collections::HashMap::new();
+        env.insert("HEADROOM_LEARN".to_string(), "false".to_string());
+        PromptOptimizerPluginConfig {
+            name: "headroom".to_string(),
+            command: "headroom".to_string(),
+            args: vec!["proxy".to_string(), "--port".to_string(), port.to_string()],
+            proxy_base_url: format!("http://127.0.0.1:{}", port),
+            health_endpoint: format!("http://127.0.0.1:{}/health", port),
+            env,
+        }
     }
 }
 
@@ -2273,6 +2378,71 @@ headroom_learn = false
     fn compression_headroom_learn_always_false_default() {
         let config = DaemonConfig::default();
         assert!(!config.compression.headroom_learn);
+    }
+
+    #[test]
+    fn plugin_config_defaults_to_headroom() {
+        let cfg = CompressionConfig::default();
+        assert!(cfg.plugin.is_none());
+        let plugin = cfg.effective_plugin();
+        assert_eq!(plugin.name, "headroom");
+        assert_eq!(plugin.command, "headroom");
+        assert_eq!(plugin.proxy_base_url, "http://127.0.0.1:8787");
+        assert_eq!(plugin.health_endpoint, "http://127.0.0.1:8787/health");
+        assert_eq!(plugin.env.get("HEADROOM_LEARN"), Some(&"false".to_string()));
+    }
+
+    #[test]
+    fn plugin_config_roundtrip() {
+        let toml_str = r#"
+[compression]
+enabled = true
+
+[compression.plugin]
+name = "my-proxy"
+command = "my-proxy-bin"
+args = ["--port", "9090"]
+proxy_base_url = "http://127.0.0.1:9090"
+health_endpoint = "http://127.0.0.1:9090/health"
+"#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        let plugin = config.compression.plugin.as_ref().unwrap();
+        assert_eq!(plugin.name, "my-proxy");
+        assert_eq!(plugin.command, "my-proxy-bin");
+        assert_eq!(plugin.proxy_base_url, "http://127.0.0.1:9090");
+    }
+
+    #[test]
+    fn effective_plugin_uses_port_from_compression_config() {
+        let cfg = CompressionConfig {
+            port: 9090,
+            ..Default::default()
+        };
+        let plugin = cfg.effective_plugin();
+        assert_eq!(plugin.proxy_base_url, "http://127.0.0.1:9090");
+        assert_eq!(plugin.health_endpoint, "http://127.0.0.1:9090/health");
+        assert!(plugin.args.contains(&"9090".to_string()));
+    }
+
+    #[test]
+    fn explicit_plugin_overrides_port() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("MY_ENV".to_string(), "val".to_string());
+        let cfg = CompressionConfig {
+            port: 8787,
+            plugin: Some(PromptOptimizerPluginConfig {
+                name: "custom".to_string(),
+                command: "custom-bin".to_string(),
+                args: vec!["--port".to_string(), "9191".to_string()],
+                proxy_base_url: "http://127.0.0.1:9191".to_string(),
+                health_endpoint: "http://127.0.0.1:9191/health".to_string(),
+                env,
+            }),
+            ..Default::default()
+        };
+        let plugin = cfg.effective_plugin();
+        assert_eq!(plugin.name, "custom");
+        assert_eq!(plugin.proxy_base_url, "http://127.0.0.1:9191");
     }
 
     #[test]
