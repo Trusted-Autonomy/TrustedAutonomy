@@ -9032,7 +9032,7 @@ The supervisor reads `proxy_base_url` to inject `ANTHROPIC_BASE_URL`; reads `hea
 
 ---
 ### v0.17.0.10.1 — Compression Cleanup: Remove Legacy Supervisor & Harden Status Schema
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.17.0.10 (generic plugin supervisor)
 
