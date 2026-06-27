@@ -9031,6 +9031,23 @@ The supervisor reads `proxy_base_url` to inject `ANTHROPIC_BASE_URL`; reads `hea
 #### Version: `0.17.0-alpha.10`
 
 ---
+### v0.17.0.10.1 — Compression Cleanup: Remove Legacy Supervisor & Harden Status Schema
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.10 (generic plugin supervisor)
+
+**Problem**: `headroom_supervisor.rs` is dead code — fully superseded by `prompt_optimizer_supervisor.rs` but still declared as a public module. `status.json` has no schema version and no authoritative disabled state, requiring CLI-side inference hacks.
+
+**Items**:
+1. [ ] Delete `crates/ta-daemon/src/headroom_supervisor.rs`; remove `pub mod headroom_supervisor` from `main.rs`
+2. [ ] Add `schema_version: u32` to `OptimizerStatus` (`#[serde(default)]` = 0 for legacy files; all new writes emit `schema_version: 1`)
+3. [ ] Write `status: "disabled"` entry in `prompt_optimizer_supervisor::start()` when `config.enabled = false` — file is always authoritative; stale "running" entries from before `ta compression disable` are overwritten on next daemon start
+4. [ ] Simplify `plugin_name` fallback in `compression.rs`: replace the two-branch `if status.plugin_name.is_empty()` with `status.plugin_name.unwrap_or(plugin.name)` (after making field `Option<String>`) — no special-case needed once daemon restart always writes the field
+5. [ ] Tests: schema_version roundtrip, `disabled` status write overwrites stale entry, `plugin_name` absent in legacy JSON falls back to config value
+
+#### Version: `0.17.0-alpha.10.1`
+
+---
 ### v0.17.0.11 — Autonomous Phase Loop (`ta plan build --autonomous`)
 <!-- status: pending -->
 
