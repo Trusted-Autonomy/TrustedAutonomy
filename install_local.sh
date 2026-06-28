@@ -58,6 +58,17 @@ run_cargo() {
     fi
 }
 
+# Probe for Nix at known install paths before relying on PATH.
+# After a reboot, Nix isn't on PATH in a fresh shell until the profile is sourced.
+if ! command -v nix &>/dev/null; then
+    for _nix_dir in "/nix/var/nix/profiles/default/bin" "$HOME/.nix-profile/bin"; do
+        if [[ -x "$_nix_dir/nix" ]]; then
+            export PATH="$_nix_dir:$PATH"
+            break
+        fi
+    done
+fi
+
 if command -v nix &>/dev/null && [[ -f flake.nix ]]; then
     echo "  Using Nix devShell..."
     export PATH="/nix/var/nix/profiles/default/bin:$HOME/.nix-profile/bin:$PATH"
