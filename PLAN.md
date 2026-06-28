@@ -9346,6 +9346,51 @@ Code releases use semver. Content releases don't. Decide:
 
 #### Version: `0.18.2-alpha`
 
+### v0.18.3 — Voice-to-Text Plugin: Hands-Free Goal Input
+<!-- status: pending -->
+
+**Goal**: Enable voice-driven TA interaction. A `ta-vtt` external plugin listens for audio, transcribes with a local ASR model, and feeds the transcription as input to `ta run`, `ta shell`, or any TA command that accepts a text prompt. Parakeet (NVIDIA NeMo) is the default on Linux and macOS; the plugin protocol is open so third-party models (Whisper, faster-whisper) can be swapped in.
+
+**Platform defaults**:
+- macOS (Apple Silicon): `parakeet-mlx` — MLX-accelerated Parakeet-TDT-1.1b, runs on Neural Engine, no CUDA required
+- macOS (Intel) / Linux (with GPU): NeMo `parakeet-tdt-1.1b-v2` — CUDA-accelerated, falls back to CPU
+- Windows: `faster-whisper` (medium model) — Parakeet has no native Windows package
+
+**Plugin protocol**: JSON-over-stdio (same pattern as VCS plugins). Parent sends `{"op": "transcribe", "audio_path": "/tmp/clip.wav"}`, plugin responds `{"text": "build the next phase of v0.17", "confidence": 0.94, "duration_ms": 420}`.
+
+**Depends on**: v0.18.1 (`ta-agent` standalone — VTT plugin discovery reuses the same external plugin infrastructure)
+
+**Items**:
+
+1. [ ] **Protocol spec** (`crates/ta-vtt/src/protocol.rs`): `TranscribeRequest { audio_path, language: Option<String> }` + `TranscribeResponse { text, confidence: Option<f32>, duration_ms: u64 }`. Error response: `{ "error": "...", "code": "model_not_found" | "audio_error" | "timeout" }`.
+
+2. [ ] **Plugin discovery**: `.ta/plugins/vtt/`, `~/.config/ta/plugins/vtt/`, `$PATH` prefix `ta-vtt-`. First found wins. Config: `[vtt] plugin = "ta-vtt-parakeet"` in `daemon.toml` overrides discovery.
+
+3. [ ] **`plugins/ta-vtt-parakeet/`** — Python wrapper script:
+   - Detects platform at startup: macOS ARM → `parakeet-mlx`; macOS Intel/Linux → NeMo `parakeet-tdt-1.1b-v2`
+   - Reads `audio_path` from stdin JSON, transcribes, writes `text` + `confidence` to stdout
+   - Graceful error if model not installed: `{"error": "parakeet-mlx not installed. Run: ta vtt install", "code": "model_not_found"}`
+
+4. [ ] **`ta vtt install`** — installs the default plugin for the current platform:
+   - macOS ARM: `pip install parakeet-mlx` → writes plugin script to `~/.local/share/ta/plugins/vtt/`
+   - macOS Intel/Linux: `pip install nemo_toolkit[asr]` (or pre-built wheel)
+   - Windows: `pip install faster-whisper` + downloads `medium` model
+   - Prints exact path of installed plugin and confirms with `ta vtt test`
+
+5. [ ] **`ta vtt transcribe <audio-file>`** — one-shot CLI transcription via plugin; useful for scripting, testing, and integration with other tools.
+
+6. [ ] **`ta vtt test`** — records 3 seconds from default microphone, transcribes, prints result and confidence; confirms the full pipeline works.
+
+7. [ ] **`ta run --voice`** — records from microphone until 1.5s of silence, transcribes via plugin, shows transcription and asks to confirm before using it as the goal title. Timeout: 30s of silence aborts.
+
+8. [ ] **`ta shell` voice toggle** — `Ctrl+Space` in the web shell triggers record → transcribe → submit the transcription as a shell command. Indicator in status bar shows "🎤 Recording..." and "✓ Transcribed".
+
+9. [ ] **Tests**: Protocol round-trip with mock plugin binary (echos back a fixed transcription). Platform detection logic returns correct model for each OS/arch. `ta run --voice` uses transcription as goal title. Plugin discovery prefers `.ta/plugins/vtt/` over `$PATH`.
+
+10. [ ] **USAGE.md**: "Voice Input" section — install instructions for each platform, configure custom plugin, use `ta run --voice`, use voice toggle in shell, swap in Whisper or other models.
+
+#### Version: `0.18.3-alpha`
+
 > Items in this section are under active consideration for deferral, scoping reduction, or removal. Review before each release cycle.
 
 ### Shell Mouse Scroll & TUI-Managed Selection
