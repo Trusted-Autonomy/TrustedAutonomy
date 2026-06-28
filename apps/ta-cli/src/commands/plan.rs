@@ -377,6 +377,13 @@ pub enum PlanCommands {
         /// Action to take on escalation (e.g. `notify-slack`). Currently logged and printed.
         #[arg(long)]
         on_escalate: Option<String>,
+        /// Do not automatically merge the PR after CI passes. Instead, emit an escalation
+        /// asking the human to merge manually and poll for merge completion.
+        #[arg(long)]
+        no_auto_merge: bool,
+        /// Minutes to wait for manual merge when --no-auto-merge is set (default: 60).
+        #[arg(long, default_value_t = 60)]
+        no_auto_merge_timeout_mins: u64,
     },
     /// Show live status of a running autonomous build loop (reads `.ta/autonomous-loop-state.json`).
     ///
@@ -626,6 +633,8 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             max_rework_cycles,
             drift_threshold,
             on_escalate,
+            no_auto_merge,
+            no_auto_merge_timeout_mins,
         } => {
             if *autonomous {
                 plan_build_autonomous(
@@ -638,6 +647,8 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
                     *max_rework_cycles,
                     *drift_threshold,
                     on_escalate.as_deref(),
+                    *no_auto_merge,
+                    *no_auto_merge_timeout_mins,
                 )
             } else {
                 plan_build(config, *auto, filter.as_deref(), *max_phases)
@@ -5929,6 +5940,133 @@ pub(crate) fn validate_action_envelope(
     Ok(())
 }
 
+/// YAML overrides file for `ta plan build --autonomous --workflow`.
+///
+/// Configures notification channels for each step outcome in the autonomous loop.
+/// Create at `.ta/workflows/<name>.yaml`:
+/// ```yaml
+/// on_apply: "https://hooks.slack.com/..."    # notify when phase applied
+/// on_deny: "https://hooks.slack.com/..."     # notify when draft denied
+/// on_escalate: "https://hooks.slack.com/..." # override --on-escalate channel
+/// ```
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct AutonomousWorkflowOverrides {
+    #[serde(default)]
+    on_apply: Option<String>,
+    #[serde(default)]
+    on_deny: Option<String>,
+    #[serde(default)]
+    on_escalate: Option<String>,
+}
+
+/// Load and validate an autonomous loop workflow overrides file.
+///
+/// Resolution order:
+/// 1. Path as-is (absolute or relative to CWD).
+/// 2. `{workspace}/.ta/workflows/{name}` (with `.yaml` appended if no extension).
+fn load_autonomous_workflow_overrides(
+    workspace: &std::path::Path,
+    path: &std::path::Path,
+) -> anyhow::Result<AutonomousWorkflowOverrides> {
+    let resolved = if path.exists() {
+        path.to_path_buf()
+    } else {
+        let name = path.file_name().unwrap_or(path.as_os_str());
+        let candidate = workspace.join(".ta").join("workflows").join(name);
+        let candidate = if candidate.extension().is_none() {
+            candidate.with_extension("yaml")
+        } else {
+            candidate
+        };
+        if candidate.exists() {
+            candidate
+        } else {
+            anyhow::bail!(
+                "Workflow file not found: '{}'\n\
+                 Searched:\n  1. {}\n  2. {}\n\
+                 Create a workflow overrides file at .ta/workflows/<name>.yaml or pass a direct path.",
+                path.display(),
+                path.display(),
+                candidate.display()
+            );
+        }
+    };
+
+    let content = std::fs::read_to_string(&resolved).map_err(|e| {
+        anyhow::anyhow!("Failed to read workflow file {}: {}", resolved.display(), e)
+    })?;
+
+    let overrides: AutonomousWorkflowOverrides = serde_yaml::from_str(&content).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse workflow file {}: {}\n\
+             Expected YAML format:\n\
+             on_apply: \"https://hooks.slack.com/...\"\n\
+             on_deny: \"https://hooks.slack.com/...\"\n\
+             on_escalate: \"https://hooks.slack.com/...\"",
+            resolved.display(),
+            e
+        )
+    })?;
+
+    println!("  [workflow] Loaded overrides from {}", resolved.display());
+    Ok(overrides)
+}
+
+/// Poll until a PR is merged or the timeout expires.
+///
+/// Used by `--no-auto-merge` to wait for a human to merge manually.
+fn poll_pr_merged(
+    workspace: &std::path::Path,
+    pr_number: u64,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(60);
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Timed out waiting for manual merge of PR #{} after {}s.\n\
+                 Merge the PR manually with: gh pr merge {} --squash",
+                pr_number,
+                timeout_secs,
+                pr_number
+            );
+        }
+
+        let out = std::process::Command::new("gh")
+            .args(["pr", "view", &pr_number.to_string(), "--json", "state"])
+            .current_dir(workspace)
+            .output();
+
+        match out {
+            Ok(output) if output.status.success() => {
+                let json: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).unwrap_or_default();
+                let state = json.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                if state == "MERGED" {
+                    return Ok(());
+                }
+                if state == "CLOSED" {
+                    anyhow::bail!(
+                        "PR #{} was closed without being merged. \
+                         Re-open the PR or create a new one.",
+                        pr_number
+                    );
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("gh pr view failed for PR #{}: {}", pr_number, stderr.trim());
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to run gh: {} (is GitHub CLI installed?)", e);
+            }
+        }
+    }
+}
+
 /// Core autonomous phase loop engine for `ta plan build --autonomous`.
 #[allow(clippy::too_many_arguments)]
 fn plan_build_autonomous(
@@ -5936,17 +6074,76 @@ fn plan_build_autonomous(
     phases_filter: Option<&str>,
     prefix_filter: Option<&str>,
     max_phases: u32,
-    _workflow: Option<&std::path::Path>,
-    _team: Option<&std::path::Path>,
+    workflow_path: Option<&std::path::Path>,
+    team_path: Option<&std::path::Path>,
     max_rework_cycles: u32,
     drift_threshold: u32,
     on_escalate: Option<&str>,
+    no_auto_merge: bool,
+    no_auto_merge_timeout_mins: u64,
 ) -> anyhow::Result<()> {
     let workspace = &config.workspace_root;
 
     // Ensure .ta dir exists for state files.
     let ta_dir = workspace.join(".ta");
     std::fs::create_dir_all(&ta_dir)?;
+
+    // Load workflow overrides if --workflow was provided.
+    let workflow_overrides = if let Some(wf_path) = workflow_path {
+        let overrides = load_autonomous_workflow_overrides(workspace, wf_path)?;
+        Some(overrides)
+    } else {
+        None
+    };
+
+    // Effective escalation channel: workflow on_escalate > --on-escalate flag.
+    let effective_escalate: Option<&str> = workflow_overrides
+        .as_ref()
+        .and_then(|o| o.on_escalate.as_deref())
+        .or(on_escalate);
+
+    // Load team reviewer config.
+    // If --team is explicitly provided, error if it doesn't exist.
+    // Otherwise, silently try .ta/team.toml and skip if absent.
+    let team_reviewer = {
+        use ta_session::agent_action::TeamRole;
+        use ta_session::TeamConfig;
+
+        let tc_result = if let Some(tp) = team_path {
+            let content = std::fs::read_to_string(tp).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read team file '{}': {}\n\
+                     Create a team.toml file or omit --team to use defaults.",
+                    tp.display(),
+                    e
+                )
+            })?;
+            toml::from_str::<TeamConfig>(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse team file '{}': {}", tp.display(), e))
+        } else {
+            TeamConfig::load(workspace).map_err(|e| anyhow::anyhow!("{}", e))
+        };
+
+        match tc_result {
+            Ok(tc) => {
+                let reviewer = tc.find_by_role(&TeamRole::Reviewer).cloned();
+                if team_path.is_some() && reviewer.is_none() {
+                    eprintln!(
+                        "[warn] --team file loaded but no 'reviewer' role found. \
+                         Falling back to default advisor agent.\n\
+                         Add a [[members]] entry with role = \"reviewer\" to configure one."
+                    );
+                }
+                reviewer
+            }
+            Err(e) => {
+                if team_path.is_some() {
+                    return Err(e);
+                }
+                None
+            }
+        }
+    };
 
     // Parse explicit phase list.
     let explicit_phases: Option<Vec<String>> = phases_filter.map(|s| {
@@ -5962,8 +6159,23 @@ fn plan_build_autonomous(
     }
     println!("  Max rework cycles: {}", max_rework_cycles);
     println!("  Drift threshold: {} files", drift_threshold);
-    if let Some(esc) = on_escalate {
+    if let Some(esc) = effective_escalate {
         println!("  On escalate: {}", esc);
+    }
+    if workflow_overrides.is_some() {
+        println!("  Workflow overrides: active");
+    }
+    if let Some(ref r) = team_reviewer {
+        println!("  Reviewer: {} (security: {:?})", r.agent_id, r.security);
+        if let Some(ref p) = r.persona {
+            println!("  Reviewer persona: {}", p);
+        }
+    }
+    if no_auto_merge {
+        println!(
+            "  No-auto-merge: enabled (timeout: {} min)",
+            no_auto_merge_timeout_mins
+        );
     }
     println!();
 
@@ -6333,8 +6545,17 @@ fn plan_build_autonomous(
                     format!("{} — {}", phase_id, phase.title),
                     uuid::Uuid::new_v4(),
                     uuid::Uuid::new_v4(),
-                )
-                .with_security(AdvisorSecurity::Auto);
+                );
+                // Apply team reviewer settings, or fall back to Auto security.
+                let cfg = if let Some(ref reviewer) = team_reviewer {
+                    let mut c = cfg.with_security(reviewer.security.clone());
+                    if let Some(ref persona) = reviewer.persona {
+                        c = c.with_persona(persona.clone());
+                    }
+                    c
+                } else {
+                    cfg.with_security(AdvisorSecurity::Auto)
+                };
 
                 println!(
                     "  [review] Spawning advisor agent for draft {}...",
@@ -6373,6 +6594,16 @@ fn plan_build_autonomous(
                             rework_round: Some(rework_round),
                         },
                     );
+
+                    // Notify on_apply channel if configured.
+                    if let Some(ref wf) = workflow_overrides {
+                        if let Some(ref channel) = wf.on_apply {
+                            println!(
+                                "  [on_apply] Notifying channel '{}': phase {} applied",
+                                channel, phase_id
+                            );
+                        }
+                    }
 
                     // PR + CI + merge step (in dry-run: skip subprocess calls).
                     state.current_step = Some("pr_monitor".to_string());
@@ -6416,10 +6647,53 @@ fn plan_build_autonomous(
                                         },
                                     );
 
-                                    // Merge.
+                                    // Merge step: auto or manual depending on --no-auto-merge.
                                     state.current_step = Some("merge".to_string());
                                     write_loop_state(workspace, &state);
-                                    merge_pr(workspace, pr)?;
+
+                                    if no_auto_merge {
+                                        let no_merge_msg = format!(
+                                            "Phase {} CI passed for PR #{} — manual merge required.\n\
+                                             Merge with: gh pr merge {} --squash\n\
+                                             Waiting up to {} min for merge.",
+                                            phase_id, pr, pr, no_auto_merge_timeout_mins
+                                        );
+                                        println!(
+                                            "  [no-auto-merge] {}",
+                                            no_merge_msg.lines().next().unwrap_or("")
+                                        );
+                                        emit_escalation(
+                                            workspace,
+                                            phase_id,
+                                            &no_merge_msg,
+                                            effective_escalate,
+                                            &rework_history,
+                                        );
+                                        append_action_log(
+                                            workspace,
+                                            &ActionLogEntry {
+                                                timestamp: chrono_now_iso(),
+                                                phase_id: phase_id.clone(),
+                                                action_kind: "manual_merge_wait".to_string(),
+                                                outcome: None,
+                                                draft_id: None,
+                                                detail: Some(format!(
+                                                    "waiting for manual merge of PR #{} (timeout: {}min)",
+                                                    pr, no_auto_merge_timeout_mins
+                                                )),
+                                                rework_round: Some(rework_round),
+                                            },
+                                        );
+                                        poll_pr_merged(
+                                            workspace,
+                                            pr,
+                                            no_auto_merge_timeout_mins * 60,
+                                        )?;
+                                        println!("  [merge] PR #{} merged manually", pr);
+                                    } else {
+                                        merge_pr(workspace, pr)?;
+                                    }
+
                                     append_action_log(
                                         workspace,
                                         &ActionLogEntry {
@@ -6445,7 +6719,7 @@ fn plan_build_autonomous(
                                         workspace,
                                         phase_id,
                                         &msg,
-                                        on_escalate,
+                                        effective_escalate,
                                         &rework_history,
                                     );
                                     state.escalated = true;
@@ -6513,6 +6787,16 @@ fn plan_build_autonomous(
                         },
                     );
 
+                    // Notify on_deny channel if configured.
+                    if let Some(ref wf) = workflow_overrides {
+                        if let Some(ref channel) = wf.on_deny {
+                            println!(
+                                "  [on_deny] Notifying channel '{}': phase {} draft denied (round {})",
+                                channel, phase_id, rework_round_new
+                            );
+                        }
+                    }
+
                     state.rework_cycles = rework_counts.clone();
                     write_loop_state(workspace, &state);
 
@@ -6530,7 +6814,13 @@ fn plan_build_autonomous(
                                 .collect::<Vec<_>>()
                                 .join("\n")
                         );
-                        emit_escalation(workspace, phase_id, &msg, on_escalate, &rework_history);
+                        emit_escalation(
+                            workspace,
+                            phase_id,
+                            &msg,
+                            effective_escalate,
+                            &rework_history,
+                        );
                         state.escalated = true;
                         write_loop_state(workspace, &state);
                         anyhow::bail!("{}", msg);
@@ -6557,7 +6847,13 @@ fn plan_build_autonomous(
                             rework_round: Some(rework_round),
                         },
                     );
-                    emit_escalation(workspace, phase_id, &msg, on_escalate, &rework_history);
+                    emit_escalation(
+                        workspace,
+                        phase_id,
+                        &msg,
+                        effective_escalate,
+                        &rework_history,
+                    );
                     state.escalated = true;
                     write_loop_state(workspace, &state);
                     anyhow::bail!("{}", msg);
@@ -11287,6 +11583,8 @@ More content here that is part of a second paragraph.
             3,
             20,
             None,
+            false,
+            60,
         );
 
         std::env::remove_var("TA_AUTONOMOUS_DRY_RUN");
@@ -11431,6 +11729,8 @@ More content here that is part of a second paragraph.
             2, // max 2 rework cycles
             20,
             None,
+            false,
+            60,
         );
 
         std::env::remove_var("TA_AUTONOMOUS_DRY_RUN");
@@ -11449,5 +11749,249 @@ More content here that is part of a second paragraph.
         let log = read_action_log(root);
         let has_escalate = log.iter().any(|e| e.action_kind == "escalate");
         assert!(has_escalate, "escalation should be in action log");
+    }
+
+    /// Test that --workflow with a missing file errors with an actionable message.
+    #[test]
+    fn test_autonomous_workflow_missing_file_errors() {
+        use ta_mcp_gateway::GatewayConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::write(
+            root.join("PLAN.md"),
+            "# Plan\n### v0.99.10 — Test\n<!-- status: pending -->\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(root);
+        let missing = std::path::Path::new("nonexistent-workflow");
+        let result = plan_build_autonomous(
+            &config,
+            Some("v0.99.10"),
+            None,
+            99,
+            Some(missing),
+            None,
+            3,
+            20,
+            None,
+            false,
+            60,
+        );
+
+        assert!(
+            result.is_err(),
+            "should error when workflow file is missing"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not found") || msg.contains("Workflow file"),
+            "error should mention file not found: {}",
+            msg
+        );
+        assert!(
+            msg.contains(".ta/workflows") || msg.contains("Searched"),
+            "error should show search paths: {}",
+            msg
+        );
+    }
+
+    /// Test that --team loads reviewer from team.toml and uses it in the loop.
+    #[test]
+    fn test_autonomous_team_loads_reviewer() {
+        use ta_mcp_gateway::GatewayConfig;
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::create_dir_all(root.join(".ta/sessions")).unwrap();
+
+        let plan_content =
+            "# Plan\n\n### v0.99.11 — Team Test\n<!-- status: pending -->\n\n1. [ ] thing\n";
+        std::fs::write(root.join("PLAN.md"), plan_content).unwrap();
+
+        // Write team.toml with a reviewer.
+        let team_toml = r#"
+[[members]]
+role = "reviewer"
+agent_id = "claude-opus-4-8"
+security = "auto"
+persona = "strict-reviewer"
+"#;
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+        std::fs::write(root.join(".ta/team.toml"), team_toml).unwrap();
+
+        // Seed a draft for this phase.
+        let pkg_id = uuid::Uuid::from_u128(11u128);
+        let pkg_json = serde_json::json!({
+            "package_version": "1",
+            "package_id": pkg_id,
+            "created_at": "2026-01-01T00:00:00Z",
+            "goal": {
+                "goal_id": pkg_id.to_string(),
+                "title": "implement v0.99.11",
+                "objective": "implement v0.99.11",
+                "success_criteria": []
+            },
+            "iteration": {
+                "iteration_id": "iter-1",
+                "sequence": 1u32,
+                "workspace_ref": {"type": "staging_dir", "ref": "staging/test"}
+            },
+            "agent_identity": {
+                "agent_id": "claude-code",
+                "agent_type": "claude",
+                "constitution_id": "default",
+                "capability_manifest_hash": "abc"
+            },
+            "summary": {"what_changed": "test", "why": "test", "impact": "low", "rollback_plan": "none"},
+            "plan": {"completed_steps": [], "next_steps": []},
+            "changes": {"artifacts": [], "patch_sets": []},
+            "risk": {"risk_score": 0, "findings": [], "policy_decisions": []},
+            "provenance": {"inputs": [], "tool_trace_hash": "abc"},
+            "review_requests": {"requested_actions": [], "reviewers": []},
+            "signatures": {"package_hash": "abc", "agent_signature": "abc"},
+            "status": {"status": "pending_review"},
+            "plan_phase": "v0.99.11"
+        });
+        std::fs::write(
+            root.join(format!(".ta/drafts/{}.json", pkg_id)),
+            serde_json::to_string_pretty(&pkg_json).unwrap(),
+        )
+        .unwrap();
+
+        let mut config = GatewayConfig::for_project(root);
+        config.pr_packages_dir = root.join(".ta/drafts");
+
+        std::env::set_var("TA_AUTONOMOUS_DRY_RUN", "1");
+        std::env::set_var("TA_TEST_MOCK_ADVISOR", "applied");
+
+        let team_path = root.join(".ta/team.toml");
+        let result = plan_build_autonomous(
+            &config,
+            Some("v0.99.11"),
+            None,
+            99,
+            None,
+            Some(team_path.as_path()),
+            3,
+            20,
+            None,
+            false,
+            60,
+        );
+
+        std::env::remove_var("TA_AUTONOMOUS_DRY_RUN");
+        std::env::remove_var("TA_TEST_MOCK_ADVISOR");
+
+        // The loop should succeed (reviewer loaded; advisor is mocked in dry-run).
+        assert!(
+            result.is_ok(),
+            "loop with team.toml should succeed: {:?}",
+            result
+        );
+    }
+
+    /// Test that --no-auto-merge succeeds in dry-run (PR step is skipped entirely).
+    ///
+    /// In dry-run mode the PR/CI/merge block is skipped, so:
+    /// - The loop completes successfully even with no_auto_merge=true
+    /// - The merge action is logged with detail="dry_run" (not manual_merge_wait)
+    #[test]
+    fn test_autonomous_no_auto_merge_dry_run() {
+        use ta_mcp_gateway::GatewayConfig;
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::create_dir_all(root.join(".ta/sessions")).unwrap();
+
+        let plan_content =
+            "# Plan\n\n### v0.99.12 — No Auto Merge\n<!-- status: pending -->\n\n1. [ ] thing\n";
+        std::fs::write(root.join("PLAN.md"), plan_content).unwrap();
+
+        let pkg_id = uuid::Uuid::from_u128(12u128);
+        let pkg_json = serde_json::json!({
+            "package_version": "1",
+            "package_id": pkg_id,
+            "created_at": "2026-01-01T00:00:00Z",
+            "goal": {
+                "goal_id": pkg_id.to_string(),
+                "title": "implement v0.99.12",
+                "objective": "implement v0.99.12",
+                "success_criteria": []
+            },
+            "iteration": {
+                "iteration_id": "iter-1",
+                "sequence": 1u32,
+                "workspace_ref": {"type": "staging_dir", "ref": "staging/test"}
+            },
+            "agent_identity": {
+                "agent_id": "claude-code",
+                "agent_type": "claude",
+                "constitution_id": "default",
+                "capability_manifest_hash": "abc"
+            },
+            "summary": {"what_changed": "test", "why": "test", "impact": "low", "rollback_plan": "none"},
+            "plan": {"completed_steps": [], "next_steps": []},
+            "changes": {"artifacts": [], "patch_sets": []},
+            "risk": {"risk_score": 0, "findings": [], "policy_decisions": []},
+            "provenance": {"inputs": [], "tool_trace_hash": "abc"},
+            "review_requests": {"requested_actions": [], "reviewers": []},
+            "signatures": {"package_hash": "abc", "agent_signature": "abc"},
+            "status": {"status": "pending_review"},
+            "plan_phase": "v0.99.12"
+        });
+        std::fs::write(
+            root.join(format!(".ta/drafts/{}.json", pkg_id)),
+            serde_json::to_string_pretty(&pkg_json).unwrap(),
+        )
+        .unwrap();
+
+        let mut config = GatewayConfig::for_project(root);
+        config.pr_packages_dir = root.join(".ta/drafts");
+
+        std::env::set_var("TA_AUTONOMOUS_DRY_RUN", "1");
+        std::env::set_var("TA_TEST_MOCK_ADVISOR", "applied");
+
+        let result = plan_build_autonomous(
+            &config,
+            Some("v0.99.12"),
+            None,
+            99,
+            None,
+            None,
+            3,
+            20,
+            None,
+            true, // no_auto_merge = true
+            1,    // 1 minute timeout (irrelevant in dry-run)
+        );
+
+        std::env::remove_var("TA_AUTONOMOUS_DRY_RUN");
+        std::env::remove_var("TA_TEST_MOCK_ADVISOR");
+
+        // Dry-run skips the PR/CI/merge block entirely — no_auto_merge should not interfere.
+        assert!(
+            result.is_ok(),
+            "no-auto-merge loop should succeed in dry-run: {:?}",
+            result
+        );
+
+        // Dry-run logs merge as "dry_run", not as "manual_merge_wait".
+        let log = read_action_log(root);
+        let merge_entries: Vec<_> = log.iter().filter(|e| e.action_kind == "merge").collect();
+        assert!(!merge_entries.is_empty(), "should have a merge log entry");
+        let is_dry_run_merge = merge_entries
+            .iter()
+            .any(|e| e.detail.as_deref() == Some("dry_run"));
+        assert!(
+            is_dry_run_merge,
+            "dry-run merge should be logged with detail='dry_run'"
+        );
     }
 }

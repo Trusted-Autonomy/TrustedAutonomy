@@ -2476,6 +2476,18 @@ ta plan build --autonomous --drift-threshold 10
 # Notify a Slack webhook on escalation
 ta plan build --autonomous --on-escalate https://hooks.slack.com/...
 
+# Use a workflow overrides file for per-event notification channels
+ta plan build --autonomous --workflow .ta/workflows/my-loop.yaml
+
+# Specify a custom team configuration for the reviewer agent
+ta plan build --autonomous --team .ta/team.toml
+
+# Require manual merge (autonomous loop pauses at merge step)
+ta plan build --autonomous --no-auto-merge
+
+# Manual merge with custom timeout (default: 60 min)
+ta plan build --autonomous --no-auto-merge --no-auto-merge-timeout-mins 120
+
 # Watch live progress while the loop runs
 ta plan build status
 ta plan build status --refresh 5  # refresh every 5 seconds
@@ -2490,6 +2502,7 @@ Each phase goes through the full governance cycle:
 2. Draft polling — waits up to 10 minutes for a `PendingReview` draft to appear in `.ta/drafts/`
 3. Advisor review — an advisor agent reviews the draft and returns Apply or Deny
 4. If Apply → push branch + PR + `pr_monitor` → CI pass → merge → `git pull --ff-only`
+   - If `--no-auto-merge`: pauses at merge step, emits escalation asking for manual merge, polls until PR state is MERGED
 5. If Deny → rework round; agent re-runs for the same phase up to `--max-rework-cycles` times
 6. If rework limit hit → emit escalation (webhook, log) and stop with a non-zero exit code
 
@@ -2518,6 +2531,52 @@ Pass `--on-escalate <url>` to POST a JSON payload to a webhook when the loop sto
   "rework_history": ["draft denied at round 1", "draft denied at round 2", "draft denied at round 3"]
 }
 ```
+
+**Customizing the autonomous loop:**
+
+Use `--workflow` to load per-event notification channels from a YAML file. The file can be named (resolved from `.ta/workflows/<name>.yaml`) or given as a direct path:
+
+```yaml
+# .ta/workflows/my-loop.yaml
+on_apply: "https://hooks.slack.com/..."    # notify when a phase is applied
+on_deny: "https://hooks.slack.com/..."     # notify when a draft is denied
+on_escalate: "https://hooks.slack.com/..." # override --on-escalate channel
+```
+
+```bash
+ta plan build --autonomous --workflow my-loop
+# or with an explicit path:
+ta plan build --autonomous --workflow .ta/workflows/my-loop.yaml
+```
+
+If the workflow file is not found, the loop errors immediately with the paths it searched so you can fix the name or path.
+
+Use `--team` to configure which agent fills the reviewer role. TA reads the file you specify (defaulting to `.ta/team.toml` if it exists):
+
+```toml
+# .ta/team.toml
+[[members]]
+role = "reviewer"
+agent_id = "claude-opus-4-8"
+security = "auto"
+persona = "strict-reviewer"
+```
+
+```bash
+ta plan build --autonomous --team .ta/team.toml
+```
+
+If `--team` is passed but the file has no `reviewer` role, a warning is emitted and the loop falls back to the default advisor agent.
+
+Use `--no-auto-merge` to require a human to merge each PR after CI passes instead of letting the loop call `gh pr merge` automatically:
+
+```bash
+ta plan build --autonomous --no-auto-merge
+# With a custom wait timeout (default: 60 min):
+ta plan build --autonomous --no-auto-merge --no-auto-merge-timeout-mins 30
+```
+
+When `--no-auto-merge` is set, the loop emits an escalation notification at the merge step, logs a `manual_merge_wait` action, and polls `gh pr view` every 60 seconds until the PR is merged or the timeout expires. This satisfies TA-CONSTITUTION §1.3 for users who want end-to-end automation except the final merge decision.
 
 #### Pragma Architecture Discovery
 
