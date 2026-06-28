@@ -9300,6 +9300,52 @@ Code releases use semver. Content releases don't. Decide:
 6. [ ] **`ta governed status`**: Shows all active FUSE mounts, session-level governed paths, SHA store sizes, live checkpoints, and the last 10 writes per governed path.
 7. [ ] **Tests**: ComfyUI mock process writes to governed path → captured in journal with correct process attribution; checkpoint/restore round-trip; eviction when max size exceeded; DB mutation from external process captured via replication slot.
 
+### v0.18.1 — Extract Agent Framework as `ta-agent` Standalone Library
+<!-- status: pending -->
+
+**Goal**: Extract the agent launch, lifecycle, and runtime code from `ta-cli` and `ta-goal` into a standalone `ta-agent` crate. This enables Meridian, IDE plugins, and third-party tools to spawn and manage Claude Code agents without depending on the full TA stack.
+
+**Depends on**: v0.17.0.12 (Meridian integration — defines the consumer API)
+
+**Items**:
+
+1. [ ] **Extract `ta-agent` crate**: Move `launch_agent_via_runtime`, `AgentRuntime` trait, `headless_args` builder, and staging lifecycle helpers into a new `crates/ta-agent/` crate. Public API: `AgentSession::start(config) -> AgentHandle`, `AgentHandle::wait() -> AgentOutcome`.
+
+2. [ ] **MCP config injection**: Move `write_stable_agent_mcp_config` and `inject_mcp_server_config` into `ta-agent`. Config injection is part of agent lifecycle, not CLI.
+
+3. [ ] **`ta-cli` migration**: Replace direct calls with `ta-agent` crate. All existing behavior preserved — no regressions in `ta run`, `ta shell`, headless goal execution.
+
+4. [ ] **Meridian adapter**: Add `MeridianAgentBackend` in Meridian that uses `ta-agent` to spawn suggestion queries without shelling out to `claude -p`.
+
+5. [ ] **Tests**: Agent start/stop round-trip with mock runtime. Config injection idempotency. Staging lifecycle: start → exit → outcome captured.
+
+6. [ ] **USAGE.md**: `ta-agent` library documentation for third-party integrators.
+
+#### Version: `0.18.1-alpha`
+
+### v0.18.2 — Extract App Packaging as `ta-package` + Cross-Platform Installer
+<!-- status: pending -->
+
+**Goal**: Extract the release pipeline and installer scaffolding from TA into a standalone `ta-package` crate and a shared GitHub Actions reusable workflow. Meridian and future plugin apps produce signed, versioned Windows/Mac/Linux installers without reimplementing packaging logic.
+
+**Depends on**: v0.17.4 (release management stable), v0.18.1 (`ta-agent` standalone)
+
+**Items**:
+
+1. [ ] **Extract `ta-package` crate**: Move `ReleaseAsset`, `InstallerConfig`, archive/checksum helpers, and platform-detection code from `ta-cli/release.rs` into `crates/ta-package/`.
+
+2. [ ] **Cross-platform installer template**: Reusable GitHub Actions workflow (`.github/workflows/installer-release.yml`, `workflow_call`) building on `ubuntu-latest`, `macos-latest`, `windows-latest` and uploading to GitHub Releases.
+
+3. [ ] **Meridian CI integration**: Meridian's `.github/workflows/release.yml` calls the shared template. Produces `meridian-linux-x86_64.tar.gz`, `meridian-macos-aarch64.tar.gz`, `meridian-windows-x86_64.zip`.
+
+4. [ ] **Code-signing stubs**: macOS `codesign` and Windows Authenticode hooks in the pipeline template (no-op when certs absent; documented for users who want signing).
+
+5. [ ] **Tests**: Archive round-trip (pack → unpack → binary executes). Checksum generation and verification. Platform-detection on current host.
+
+6. [ ] **USAGE.md**: Packaging guide — "How to add a TA-based app to the installer pipeline."
+
+#### Version: `0.18.2-alpha`
+
 > Items in this section are under active consideration for deferral, scoping reduction, or removal. Review before each release cycle.
 
 ### Shell Mouse Scroll & TUI-Managed Selection
