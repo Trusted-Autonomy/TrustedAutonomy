@@ -9049,7 +9049,7 @@ The supervisor reads `proxy_base_url` to inject `ANTHROPIC_BASE_URL`; reads `hea
 
 ---
 ### v0.17.0.11 — Autonomous Phase Loop (`ta plan build --autonomous`)
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.4.5 (step statechart with context, actions, and payloads)
 
@@ -9074,14 +9074,14 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 - **ActionEnvelope validation**: parent process verifies `role` and `security` in received envelope match spawning `TeamMember` config — subprocess cannot self-escalate
 
 **Items**:
-1. [ ] `ta plan build --autonomous` command + loop engine in `apps/ta-cli/src/commands/plan.rs`
-2. [ ] Rework cycle guard: per-phase `(phase_id, rework_round)` tracked in `.ta/action-log.jsonl`; escalate with full rework history at `max_rework_cycles`
-3. [ ] Runtime cycle detection: visited `(phase_id, action_kind)` set checked before each `ActionRouter.execute()` call
-4. [ ] Drift detection: configurable threshold + actionable abort message naming the diverged files
-5. [ ] `ActionEnvelope` validation: parent rejects envelopes where role/security exceed session config
-6. [ ] `ta plan build status`: live view (2s refresh) — current phase, step type, last action kind, CI check states, rework cycle count
-7. [ ] Integration test: two-phase autonomous run with mock `gh pr view` CI fixture → both phases apply, zero human input, action log contains full trace
-8. [ ] USAGE.md: "Autonomous phase loop" section
+1. [x] `ta plan build --autonomous` command + loop engine in `apps/ta-cli/src/commands/plan.rs`
+2. [x] Rework cycle guard: per-phase `(phase_id, rework_round)` tracked in `.ta/action-log.jsonl`; escalate with full rework history at `max_rework_cycles`
+3. [x] Runtime cycle detection: visited `(phase_id, action_kind)` set checked before each `ActionRouter.execute()` call
+4. [x] Drift detection: configurable threshold + actionable abort message naming the diverged files
+5. [x] `ActionEnvelope` validation: parent rejects envelopes where role/security exceed session config
+6. [x] `ta plan build status`: live view (2s refresh) — current phase, step type, last action kind, CI check states, rework cycle count
+7. [x] Integration test: two-phase autonomous run with mock `gh pr view` CI fixture → both phases apply, zero human input, action log contains full trace
+8. [x] USAGE.md: "Autonomous phase loop" section
 
 #### Version: `0.17.0-alpha.5`
 
@@ -9299,7 +9299,6 @@ Code releases use semver. Content releases don't. Decide:
 
 6. [ ] **`ta governed status`**: Shows all active FUSE mounts, session-level governed paths, SHA store sizes, live checkpoints, and the last 10 writes per governed path.
 7. [ ] **Tests**: ComfyUI mock process writes to governed path → captured in journal with correct process attribution; checkpoint/restore round-trip; eviction when max size exceeded; DB mutation from external process captured via replication slot.
-
 ### v0.18.1 — Extract Agent Framework as `ta-agent` Standalone Library
 <!-- status: pending -->
 
@@ -9322,7 +9321,6 @@ Code releases use semver. Content releases don't. Decide:
 6. [ ] **USAGE.md**: `ta-agent` library documentation for third-party integrators.
 
 #### Version: `0.18.1-alpha`
-
 ### v0.18.2 — Extract App Packaging as `ta-package` + Cross-Platform Installer
 <!-- status: pending -->
 
@@ -9345,7 +9343,6 @@ Code releases use semver. Content releases don't. Decide:
 6. [ ] **USAGE.md**: Packaging guide — "How to add a TA-based app to the installer pipeline."
 
 #### Version: `0.18.2-alpha`
-
 ### v0.18.3 — Voice-to-Text Plugin: Hands-Free Goal Input
 <!-- status: pending -->
 

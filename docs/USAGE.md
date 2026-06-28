@@ -2456,6 +2456,69 @@ ta plan lint --fix         # Auto-fix consecutive-separators; prints a fix summa
 
 `--fix` only applies mechanical corrections (removing duplicate separators). Issues requiring judgment (missing markers, unchecked items) are reported but not auto-corrected.
 
+#### Autonomous Phase Loop
+
+`ta plan build --autonomous` runs pending plan phases end-to-end without human input. For each phase it: starts a headless goal, waits for the resulting draft, runs an advisor agent review, and — if approved — pushes a branch, opens a PR, waits for CI to pass, merges, and syncs before moving to the next phase. It only escalates (and stops) when the rework cycle limit is hit or drift threshold is exceeded.
+
+```bash
+# Run all pending phases unattended
+ta plan build --autonomous
+
+# Run specific phases only
+ta plan build --autonomous --phases v0.17.1,v0.17.2
+
+# Limit how many rework cycles before escalation (default: 3)
+ta plan build --autonomous --max-rework-cycles 2
+
+# Abort if more than N files have uncommitted changes (default: 20)
+ta plan build --autonomous --drift-threshold 10
+
+# Notify a Slack webhook on escalation
+ta plan build --autonomous --on-escalate https://hooks.slack.com/...
+
+# Watch live progress while the loop runs
+ta plan build status
+ta plan build status --refresh 5  # refresh every 5 seconds
+ta plan build status --once       # print current state and exit
+```
+
+**How it works:**
+
+Each phase goes through the full governance cycle:
+
+1. `ta run --headless --phase X` — agent implements the phase in a staging workspace
+2. Draft polling — waits up to 10 minutes for a `PendingReview` draft to appear in `.ta/drafts/`
+3. Advisor review — an advisor agent reviews the draft and returns Apply or Deny
+4. If Apply → push branch + PR + `pr_monitor` → CI pass → merge → `git pull --ff-only`
+5. If Deny → rework round; agent re-runs for the same phase up to `--max-rework-cycles` times
+6. If rework limit hit → emit escalation (webhook, log) and stop with a non-zero exit code
+
+**Safeguards:**
+
+- **Rework cycle guard**: each `(phase_id, rework_round)` is tracked in `.ta/action-log.jsonl`; when a phase reaches `--max-rework-cycles` denials, the loop escalates with the full rework history so you know exactly why each attempt was rejected
+- **Runtime cycle detection**: a `(phase_id, action_kind)` visited set prevents infinite loops — if the same phase+action combination appears twice, the loop escalates immediately
+- **Drift detection**: before each phase, `git diff --name-only HEAD` is counted; if the uncommitted file count exceeds `--drift-threshold`, the loop aborts with the list of changed files and a `git stash` suggestion
+- **ActionEnvelope validation**: action envelopes from advisor agents are validated against the session's security level before being acted on — an advisor cannot self-escalate to a higher permission tier
+
+**State and logs:**
+
+| File | Contents |
+|---|---|
+| `.ta/action-log.jsonl` | Append-only JSONL; one entry per action (start_goal, draft_found, agent_review, merge, escalate, …) |
+| `.ta/autonomous-loop-state.json` | Live state snapshot — current phase, step, rework counts, CI check status; refreshed by `ta plan build status` |
+
+**Escalation webhook:**
+
+Pass `--on-escalate <url>` to POST a JSON payload to a webhook when the loop stops due to rework exhaustion or a fatal error:
+
+```json
+{
+  "phase_id": "v0.17.1",
+  "reason": "max rework cycles (3) exceeded",
+  "rework_history": ["draft denied at round 1", "draft denied at round 2", "draft denied at round 3"]
+}
+```
+
 #### Pragma Architecture Discovery
 
 For projects built on [Pragma Engine](https://pragma.gg), `ta plan init --pragma` scans the codebase and produces a structured architecture preamble in PLAN.md that gives agents context about which services, plugins, and SDKs are deployed.
