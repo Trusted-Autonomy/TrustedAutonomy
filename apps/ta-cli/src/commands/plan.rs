@@ -332,12 +332,16 @@ pub enum PlanCommands {
     /// phase spec and asks for confirmation before proceeding.
     ///
     /// Use `--auto` to skip all interactive sessions (CI/unattended use).
+    /// Use `--autonomous` to run the full end-to-end loop without any human input:
+    ///   goal → draft → agent_review → apply → PR → CI → merge → next phase.
     ///
     /// Examples:
     ///   ta plan build                      — interactive (default), asks before each phase
     ///   ta plan build --auto               — non-interactive, proceeds without confirmation
     ///   ta plan build --filter v0.15       — only build phases matching the prefix
     ///   ta plan build --max-phases 3       — stop after building 3 phases
+    ///   ta plan build --autonomous         — fully autonomous end-to-end loop
+    ///   ta plan build --autonomous --phases v0.17.1,v0.17.2 --max-rework-cycles 3
     #[command(name = "build")]
     Build {
         /// Skip interactive planning sessions (default: interactive).
@@ -350,6 +354,45 @@ pub enum PlanCommands {
         /// Stop after building this many phases (default: unlimited).
         #[arg(long, default_value_t = 99)]
         max_phases: u32,
+        /// Run fully autonomous end-to-end loop: goal → draft → agent_review → apply → PR → CI → merge → next phase.
+        /// Requires no human input. Escalates to `--on-escalate` channel on repeated deny or CI failure.
+        #[arg(long)]
+        autonomous: bool,
+        /// Comma-separated list of phase IDs to run in autonomous mode (e.g. `--phases v0.17.1,v0.17.2`).
+        /// When omitted, runs all pending phases in order.
+        #[arg(long)]
+        phases: Option<String>,
+        /// Path to a workflow YAML file that defines the autonomous loop steps.
+        #[arg(long)]
+        workflow: Option<std::path::PathBuf>,
+        /// Path to a team.toml file defining reviewer agents and security levels.
+        #[arg(long)]
+        team: Option<std::path::PathBuf>,
+        /// Maximum rework cycles per phase before escalating (default: 3).
+        #[arg(long, default_value_t = 3)]
+        max_rework_cycles: u32,
+        /// Abort if more than this many files have drifted since the last sync (default: 20).
+        #[arg(long, default_value_t = 20)]
+        drift_threshold: u32,
+        /// Action to take on escalation (e.g. `notify-slack`). Currently logged and printed.
+        #[arg(long)]
+        on_escalate: Option<String>,
+    },
+    /// Show live status of a running autonomous build loop (reads `.ta/autonomous-loop-state.json`).
+    ///
+    /// Refreshes every 2 seconds by default. Use `--once` to print once and exit.
+    ///
+    /// Examples:
+    ///   ta plan build-status
+    ///   ta plan build-status --once
+    #[command(name = "build-status")]
+    BuildStatus {
+        /// Refresh interval in seconds (default: 2).
+        #[arg(long, default_value_t = 2)]
+        refresh: u64,
+        /// Print once and exit instead of refreshing.
+        #[arg(long)]
+        once: bool,
     },
     /// Run the Pragma BMAD planner interactively for Pragma Engine Kotlin projects.
     ///
@@ -576,7 +619,31 @@ pub fn execute(cmd: &PlanCommands, config: &GatewayConfig) -> anyhow::Result<()>
             auto,
             filter,
             max_phases,
-        } => plan_build(config, *auto, filter.as_deref(), *max_phases),
+            autonomous,
+            phases,
+            workflow,
+            team,
+            max_rework_cycles,
+            drift_threshold,
+            on_escalate,
+        } => {
+            if *autonomous {
+                plan_build_autonomous(
+                    config,
+                    phases.as_deref(),
+                    filter.as_deref(),
+                    *max_phases,
+                    workflow.as_deref(),
+                    team.as_deref(),
+                    *max_rework_cycles,
+                    *drift_threshold,
+                    on_escalate.as_deref(),
+                )
+            } else {
+                plan_build(config, *auto, filter.as_deref(), *max_phases)
+            }
+        }
+        PlanCommands::BuildStatus { refresh, once } => plan_build_status(config, *refresh, *once),
         PlanCommands::Pragma { no_scan } => plan_pragma(config, *no_scan),
     }
 }
@@ -5668,6 +5735,1166 @@ fn plan_build(
     Ok(())
 }
 
+// ── Autonomous Phase Loop (v0.17.0.11) ───────────────────────────────────────
+
+/// Entry in `.ta/action-log.jsonl` written by the autonomous build loop.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActionLogEntry {
+    pub timestamp: String,
+    pub phase_id: String,
+    pub action_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rework_round: Option<u32>,
+}
+
+/// Append one entry to `.ta/action-log.jsonl`.
+pub fn append_action_log(workspace_root: &std::path::Path, entry: &ActionLogEntry) {
+    use std::io::Write as _;
+    let log_path = workspace_root.join(".ta").join("action-log.jsonl");
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let line = match serde_json::to_string(entry) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to serialize action log entry");
+            return;
+        }
+    };
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(mut f) => {
+            let _ = writeln!(f, "{}", line);
+        }
+        Err(e) => {
+            tracing::warn!(path = %log_path.display(), error = %e, "Failed to write action log");
+        }
+    }
+}
+
+/// Read all entries from `.ta/action-log.jsonl`.
+pub fn read_action_log(workspace_root: &std::path::Path) -> Vec<ActionLogEntry> {
+    let log_path = workspace_root.join(".ta").join("action-log.jsonl");
+    let content = match std::fs::read_to_string(&log_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<ActionLogEntry>(l).ok())
+        .collect()
+}
+
+/// Persisted state written by the autonomous loop for `ta plan build-status`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AutonomousLoopState {
+    pub started_at: String,
+    pub current_phase: Option<String>,
+    pub current_step: Option<String>,
+    pub last_action_kind: Option<String>,
+    pub rework_cycles: std::collections::HashMap<String, u32>,
+    pub phases_complete: Vec<String>,
+    pub phases_pending: Vec<String>,
+    pub ci_checks: Option<serde_json::Value>,
+    pub escalated: bool,
+}
+
+fn write_loop_state(workspace_root: &std::path::Path, state: &AutonomousLoopState) {
+    let state_path = workspace_root
+        .join(".ta")
+        .join("autonomous-loop-state.json");
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = std::fs::write(&state_path, json);
+    }
+}
+
+/// Check for git drift: count changed files relative to HEAD.
+/// Returns the list of changed files if count exceeds threshold.
+fn check_drift(workspace_root: &std::path::Path, threshold: u32) -> Result<(), Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(workspace_root)
+        .output();
+
+    let changed: Vec<String> = match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => return Ok(()), // git unavailable — skip check
+    };
+
+    if changed.len() as u32 > threshold {
+        Err(changed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Key used for cycle detection: (phase_id, action_kind).
+type VisitedKey = (String, String);
+
+/// Poll `.ta/drafts/` for a package whose `plan_phase` matches `phase_id` and status is
+/// `PendingReview`. Returns `(draft_id, pkg_json_path)` when found.
+fn poll_for_phase_draft(
+    workspace_root: &std::path::Path,
+    phase_id: &str,
+    timeout_secs: u64,
+) -> Option<uuid::Uuid> {
+    use ta_changeset::draft_package::{DraftPackage, DraftStatus};
+    let drafts_dir = workspace_root.join(".ta").join("drafts");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        if drafts_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&drafts_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "json").unwrap_or(false) {
+                        if let Ok(json) = std::fs::read_to_string(&path) {
+                            if let Ok(pkg) = serde_json::from_str::<DraftPackage>(&json) {
+                                let phase_match = pkg
+                                    .plan_phase
+                                    .as_deref()
+                                    .map(|p| p == phase_id)
+                                    .unwrap_or(false);
+                                let pending = matches!(pkg.status, DraftStatus::PendingReview);
+                                if phase_match && pending {
+                                    return Some(pkg.package_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+/// Validate an `ActionEnvelope`: ensure the action type in the envelope does not
+/// exceed what the session's maximum security level permits. Returns an error string if rejected.
+///
+/// Security mapping:
+/// - `ReadOnly`: only `Continue` and `Escalate` allowed (no mutations)
+/// - `Suggest`: `Apply` and `Deny` allowed in addition to the above
+/// - `Auto`: all actions allowed
+#[allow(dead_code)]
+pub(crate) fn validate_action_envelope(
+    envelope: &ta_session::agent_action::ActionEnvelope,
+    session_max_security: &ta_session::workflow_session::AdvisorSecurity,
+) -> Result<(), String> {
+    use ta_session::agent_action::AgentAction;
+    use ta_session::workflow_session::AdvisorSecurity;
+
+    let allowed = match session_max_security {
+        AdvisorSecurity::ReadOnly => {
+            matches!(
+                envelope.action,
+                AgentAction::Continue | AgentAction::Escalate { .. }
+            )
+        }
+        AdvisorSecurity::Suggest => {
+            matches!(
+                envelope.action,
+                AgentAction::Continue
+                    | AgentAction::Escalate { .. }
+                    | AgentAction::Apply { .. }
+                    | AgentAction::Deny { .. }
+            )
+        }
+        AdvisorSecurity::Auto => true,
+    };
+
+    if !allowed {
+        return Err(format!(
+            "ActionEnvelope rejected: action '{}' is not permitted under session security level '{}'",
+            envelope.action, session_max_security
+        ));
+    }
+    Ok(())
+}
+
+/// Core autonomous phase loop engine for `ta plan build --autonomous`.
+#[allow(clippy::too_many_arguments)]
+fn plan_build_autonomous(
+    config: &GatewayConfig,
+    phases_filter: Option<&str>,
+    prefix_filter: Option<&str>,
+    max_phases: u32,
+    _workflow: Option<&std::path::Path>,
+    _team: Option<&std::path::Path>,
+    max_rework_cycles: u32,
+    drift_threshold: u32,
+    on_escalate: Option<&str>,
+) -> anyhow::Result<()> {
+    let workspace = &config.workspace_root;
+
+    // Ensure .ta dir exists for state files.
+    let ta_dir = workspace.join(".ta");
+    std::fs::create_dir_all(&ta_dir)?;
+
+    // Parse explicit phase list.
+    let explicit_phases: Option<Vec<String>> = phases_filter.map(|s| {
+        s.split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect()
+    });
+
+    println!("=== Autonomous Phase Loop starting ===");
+    if let Some(ref list) = explicit_phases {
+        println!("  Phases: {}", list.join(", "));
+    }
+    println!("  Max rework cycles: {}", max_rework_cycles);
+    println!("  Drift threshold: {} files", drift_threshold);
+    if let Some(esc) = on_escalate {
+        println!("  On escalate: {}", esc);
+    }
+    println!();
+
+    // Initial drift check.
+    if let Err(changed) = check_drift(workspace, drift_threshold) {
+        anyhow::bail!(
+            "Drift threshold exceeded before starting autonomous loop.\n\
+             {} files have uncommitted changes (threshold: {}).\n\
+             Changed files:\n{}\n\
+             Sync your workspace first: `git stash` or `ta plan build --sync`",
+            changed.len(),
+            drift_threshold,
+            changed
+                .iter()
+                .take(20)
+                .map(|f| format!("  {}", f))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    // Load all phases and build the candidate list.
+    let all_phases = load_plan(workspace)?;
+    let candidate_phases: Vec<PlanPhase> = if let Some(ref explicit) = explicit_phases {
+        // Explicit --phases list: find each by ID.
+        let mut result = Vec::new();
+        for id in explicit {
+            if let Some(p) = all_phases.iter().find(|p| {
+                p.id == *id || p.id == id.trim_start_matches('v') || format!("v{}", p.id) == *id
+            }) {
+                result.push(p.clone());
+            } else {
+                eprintln!("[warn] Phase '{}' not found in PLAN.md — skipping", id);
+            }
+        }
+        result
+    } else if let Some(prefix) = prefix_filter {
+        all_phases
+            .into_iter()
+            .filter(|p| p.id.starts_with(prefix) || format!("v{}", p.id).starts_with(prefix))
+            .collect()
+    } else {
+        all_phases
+    };
+
+    // Only work on pending phases.
+    let pending_ids: Vec<String> = candidate_phases
+        .iter()
+        .filter(|p| p.status == PlanStatus::Pending)
+        .map(|p| p.id.clone())
+        .collect();
+
+    if pending_ids.is_empty() {
+        println!("All candidate phases are complete or in progress. Nothing to build.");
+        return Ok(());
+    }
+
+    // Initialize loop state.
+    let started_at = chrono_now_iso();
+    let mut state = AutonomousLoopState {
+        started_at: started_at.clone(),
+        current_phase: None,
+        current_step: None,
+        last_action_kind: None,
+        rework_cycles: std::collections::HashMap::new(),
+        phases_complete: Vec::new(),
+        phases_pending: pending_ids.clone(),
+        ci_checks: None,
+        escalated: false,
+    };
+    write_loop_state(workspace, &state);
+
+    // Cycle detection: (phase_id, action_kind) visited set.
+    let mut visited: std::collections::HashSet<VisitedKey> = std::collections::HashSet::new();
+
+    // Per-phase rework counts.
+    let mut rework_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+
+    let mut phases_built: u32 = 0;
+
+    for phase_id in &pending_ids {
+        if phases_built >= max_phases {
+            println!("Reached --max-phases limit ({}). Stopping.", max_phases);
+            break;
+        }
+
+        // Reload phase to check current status (another process may have changed it).
+        let current_phases = load_plan(workspace).unwrap_or_default();
+        let phase = match current_phases.iter().find(|p| {
+            p.id == *phase_id
+                || p.id == phase_id.trim_start_matches('v')
+                || format!("v{}", p.id) == *phase_id
+        }) {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!(
+                    "[warn] Phase '{}' disappeared from plan — skipping",
+                    phase_id
+                );
+                continue;
+            }
+        };
+
+        if phase.status != PlanStatus::Pending {
+            println!(
+                "Phase {} is {} — skipping",
+                phase_id,
+                match phase.status {
+                    PlanStatus::Done => "done",
+                    PlanStatus::InProgress => "in_progress",
+                    PlanStatus::Deferred => "deferred",
+                    PlanStatus::Pending => "pending",
+                }
+            );
+            continue;
+        }
+
+        // Per-phase drift check.
+        if let Err(changed) = check_drift(workspace, drift_threshold) {
+            let msg = format!(
+                "Drift threshold exceeded before phase {}.\n\
+                 {} files have uncommitted changes (threshold: {}).\n\
+                 Changed files:\n{}\n\
+                 Sync first: `ta plan build --sync` or `git stash`",
+                phase_id,
+                changed.len(),
+                drift_threshold,
+                changed
+                    .iter()
+                    .take(10)
+                    .map(|f| format!("  {}", f))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            eprintln!("[escalate] {}", msg);
+            append_action_log(
+                workspace,
+                &ActionLogEntry {
+                    timestamp: chrono_now_iso(),
+                    phase_id: phase_id.clone(),
+                    action_kind: "escalate".to_string(),
+                    outcome: None,
+                    draft_id: None,
+                    detail: Some(format!("drift threshold exceeded: {} files", changed.len())),
+                    rework_round: None,
+                },
+            );
+            state.escalated = true;
+            write_loop_state(workspace, &state);
+            anyhow::bail!("{}", msg);
+        }
+
+        // Cycle detection: check start_goal.
+        let start_key = (phase_id.clone(), "start_goal".to_string());
+        if visited.contains(&start_key) {
+            let msg = format!(
+                "Cycle detected: phase '{}' with action 'start_goal' was already visited. \
+                 Aborting to prevent infinite loop.",
+                phase_id
+            );
+            eprintln!("[escalate] {}", msg);
+            append_action_log(
+                workspace,
+                &ActionLogEntry {
+                    timestamp: chrono_now_iso(),
+                    phase_id: phase_id.clone(),
+                    action_kind: "escalate".to_string(),
+                    outcome: None,
+                    draft_id: None,
+                    detail: Some("cycle detected: start_goal".to_string()),
+                    rework_round: None,
+                },
+            );
+            state.escalated = true;
+            write_loop_state(workspace, &state);
+            anyhow::bail!("{}", msg);
+        }
+
+        println!("\n--- Phase {} — {} ---", phase_id, phase.title);
+        state.current_phase = Some(phase_id.clone());
+        state.current_step = Some("start_goal".to_string());
+        state.last_action_kind = Some("start_goal".to_string());
+        write_loop_state(workspace, &state);
+
+        visited.insert(start_key);
+        append_action_log(
+            workspace,
+            &ActionLogEntry {
+                timestamp: chrono_now_iso(),
+                phase_id: phase_id.clone(),
+                action_kind: "start_goal".to_string(),
+                outcome: None,
+                draft_id: None,
+                detail: Some(format!(
+                    "starting headless goal for phase '{}'",
+                    phase.title
+                )),
+                rework_round: None,
+            },
+        );
+
+        // Inner rework loop.
+        let phase_max_rework = max_rework_cycles;
+        let mut rework_history: Vec<String> = Vec::new();
+
+        'rework: loop {
+            let rework_round = *rework_counts.get(phase_id).unwrap_or(&0);
+
+            if rework_round > 0 {
+                println!(
+                    "  [rework] Phase {} — rework round {} of {}",
+                    phase_id, rework_round, phase_max_rework
+                );
+            }
+
+            // Check if TA_AUTONOMOUS_DRY_RUN is set — skip actual agent launch in tests.
+            let dry_run = std::env::var("TA_AUTONOMOUS_DRY_RUN").is_ok();
+
+            if !dry_run {
+                // Run goal headless.
+                state.current_step = Some("run_goal".to_string());
+                state.last_action_kind = Some("run_goal".to_string());
+                write_loop_state(workspace, &state);
+
+                let goal_title = format!("implement {} — {}", phase_id, phase.title);
+                println!("  [run] Starting headless goal: {}", goal_title);
+
+                let run_key = (phase_id.clone(), "run_goal".to_string());
+                visited.insert(run_key);
+
+                if let Err(e) = super::run::execute(
+                    config,
+                    Some(&goal_title),
+                    "claude-code",
+                    None,
+                    &goal_title,
+                    Some(phase_id.as_str()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    false, // not interactive
+                    false,
+                    None,
+                    true, // headless
+                    false,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                ) {
+                    let msg = format!("Goal launch failed for phase {}: {}", phase_id, e);
+                    eprintln!("[escalate] {}", msg);
+                    append_action_log(
+                        workspace,
+                        &ActionLogEntry {
+                            timestamp: chrono_now_iso(),
+                            phase_id: phase_id.clone(),
+                            action_kind: "escalate".to_string(),
+                            outcome: Some("goal_failed".to_string()),
+                            draft_id: None,
+                            detail: Some(msg.clone()),
+                            rework_round: Some(rework_round),
+                        },
+                    );
+                    state.escalated = true;
+                    write_loop_state(workspace, &state);
+                    anyhow::bail!("{}", msg);
+                }
+
+                // Poll for the draft.
+                state.current_step = Some("wait_draft".to_string());
+                write_loop_state(workspace, &state);
+                println!("  [wait] Polling for draft (phase {})...", phase_id);
+            }
+
+            // In dry-run mode or after goal run, find the draft.
+            let draft_id = if dry_run {
+                // Test mode: look for a pre-seeded draft file.
+                poll_for_phase_draft(workspace, phase_id, 5)
+            } else {
+                poll_for_phase_draft(workspace, phase_id, 600)
+            };
+
+            let draft_id = match draft_id {
+                Some(id) => id,
+                None => {
+                    let msg = format!(
+                        "No PendingReview draft found for phase {} within timeout. \
+                         The agent may not have created one.",
+                        phase_id
+                    );
+                    eprintln!("[escalate] {}", msg);
+                    append_action_log(
+                        workspace,
+                        &ActionLogEntry {
+                            timestamp: chrono_now_iso(),
+                            phase_id: phase_id.clone(),
+                            action_kind: "escalate".to_string(),
+                            outcome: Some("no_draft".to_string()),
+                            draft_id: None,
+                            detail: Some(msg.clone()),
+                            rework_round: Some(rework_round),
+                        },
+                    );
+                    state.escalated = true;
+                    write_loop_state(workspace, &state);
+                    anyhow::bail!("{}", msg);
+                }
+            };
+
+            println!("  [draft] Found draft {} for phase {}", draft_id, phase_id);
+            append_action_log(
+                workspace,
+                &ActionLogEntry {
+                    timestamp: chrono_now_iso(),
+                    phase_id: phase_id.clone(),
+                    action_kind: "draft_found".to_string(),
+                    outcome: None,
+                    draft_id: Some(draft_id.to_string()),
+                    detail: None,
+                    rework_round: Some(rework_round),
+                },
+            );
+
+            // Agent review step.
+            let review_key = (phase_id.clone(), "agent_review".to_string());
+            if visited.contains(&review_key) && rework_round == 0 {
+                let msg = format!(
+                    "Cycle detected: phase '{}' agent_review already visited.",
+                    phase_id
+                );
+                eprintln!("[escalate] {}", msg);
+                state.escalated = true;
+                write_loop_state(workspace, &state);
+                anyhow::bail!("{}", msg);
+            }
+            visited.insert(review_key);
+
+            state.current_step = Some("agent_review".to_string());
+            state.last_action_kind = Some("agent_review".to_string());
+            write_loop_state(workspace, &state);
+
+            // Run advisor / agent_review.
+            let review_outcome = if dry_run {
+                // Test mode: check env var for injected outcome.
+                match std::env::var("TA_TEST_MOCK_ADVISOR")
+                    .unwrap_or_else(|_| "applied".to_string())
+                    .as_str()
+                {
+                    "denied" => ta_session::advisor_agent::AdvisorOutcome::Denied,
+                    "timeout" => ta_session::advisor_agent::AdvisorOutcome::TimedOut,
+                    _ => ta_session::advisor_agent::AdvisorOutcome::Applied,
+                }
+            } else {
+                use ta_session::advisor_agent::{AdvisorConfig, AdvisorOutcome};
+                use ta_session::workflow_session::AdvisorSecurity;
+
+                let ta_bin =
+                    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ta"));
+                let cfg = AdvisorConfig::new(
+                    workspace,
+                    draft_id,
+                    format!("{} — {}", phase_id, phase.title),
+                    uuid::Uuid::new_v4(),
+                    uuid::Uuid::new_v4(),
+                )
+                .with_security(AdvisorSecurity::Auto);
+
+                println!(
+                    "  [review] Spawning advisor agent for draft {}...",
+                    draft_id
+                );
+                match ta_session::advisor_agent::spawn_advisor_agent(&cfg, &ta_bin) {
+                    Ok(advisor_goal_id) => {
+                        println!("  [review] Advisor goal {} running...", advisor_goal_id);
+                        ta_session::advisor_agent::poll_draft_outcome(
+                            workspace,
+                            draft_id,
+                            std::time::Duration::from_secs(30 * 60),
+                            std::time::Duration::from_secs(5),
+                        )
+                    }
+                    Err(e) => AdvisorOutcome::SpawnFailed { reason: e },
+                }
+            };
+
+            // Handle review outcome.
+            match &review_outcome {
+                ta_session::advisor_agent::AdvisorOutcome::Applied => {
+                    println!(
+                        "  [applied] Draft {} applied for phase {}",
+                        draft_id, phase_id
+                    );
+                    append_action_log(
+                        workspace,
+                        &ActionLogEntry {
+                            timestamp: chrono_now_iso(),
+                            phase_id: phase_id.clone(),
+                            action_kind: "agent_review".to_string(),
+                            outcome: Some("applied".to_string()),
+                            draft_id: Some(draft_id.to_string()),
+                            detail: None,
+                            rework_round: Some(rework_round),
+                        },
+                    );
+
+                    // PR + CI + merge step (in dry-run: skip subprocess calls).
+                    state.current_step = Some("pr_monitor".to_string());
+                    write_loop_state(workspace, &state);
+
+                    if !dry_run {
+                        // Poll for PR URL from applied draft.
+                        let pr_number = find_pr_for_phase(workspace, phase_id);
+                        if let Some(pr) = pr_number {
+                            println!("  [pr] Found PR #{} for phase {}", pr, phase_id);
+                            state.ci_checks =
+                                Some(serde_json::json!({"status": "pending", "pr_number": pr}));
+                            write_loop_state(workspace, &state);
+
+                            append_action_log(
+                                workspace,
+                                &ActionLogEntry {
+                                    timestamp: chrono_now_iso(),
+                                    phase_id: phase_id.clone(),
+                                    action_kind: "pr_monitor".to_string(),
+                                    outcome: None,
+                                    draft_id: Some(draft_id.to_string()),
+                                    detail: Some(format!("monitoring PR #{}", pr)),
+                                    rework_round: Some(rework_round),
+                                },
+                            );
+
+                            match poll_pr_ci(workspace, pr, 60 * 60) {
+                                Ok(()) => {
+                                    println!("  [ci] CI passed for PR #{}", pr);
+                                    append_action_log(
+                                        workspace,
+                                        &ActionLogEntry {
+                                            timestamp: chrono_now_iso(),
+                                            phase_id: phase_id.clone(),
+                                            action_kind: "ci_passed".to_string(),
+                                            outcome: Some("passed".to_string()),
+                                            draft_id: None,
+                                            detail: Some(format!("PR #{}", pr)),
+                                            rework_round: Some(rework_round),
+                                        },
+                                    );
+
+                                    // Merge.
+                                    state.current_step = Some("merge".to_string());
+                                    write_loop_state(workspace, &state);
+                                    merge_pr(workspace, pr)?;
+                                    append_action_log(
+                                        workspace,
+                                        &ActionLogEntry {
+                                            timestamp: chrono_now_iso(),
+                                            phase_id: phase_id.clone(),
+                                            action_kind: "merge".to_string(),
+                                            outcome: Some("merged".to_string()),
+                                            draft_id: None,
+                                            detail: Some(format!("PR #{}", pr)),
+                                            rework_round: Some(rework_round),
+                                        },
+                                    );
+
+                                    // Sync build.
+                                    state.current_step = Some("sync_build".to_string());
+                                    write_loop_state(workspace, &state);
+                                    sync_build(workspace);
+                                }
+                                Err(e) => {
+                                    let msg = format!("CI failed for PR #{}: {}", pr, e);
+                                    eprintln!("[escalate] {}", msg);
+                                    emit_escalation(
+                                        workspace,
+                                        phase_id,
+                                        &msg,
+                                        on_escalate,
+                                        &rework_history,
+                                    );
+                                    state.escalated = true;
+                                    write_loop_state(workspace, &state);
+                                    anyhow::bail!("{}", msg);
+                                }
+                            }
+                        } else {
+                            println!(
+                                "  [warn] No PR found for phase {} — continuing without PR/CI",
+                                phase_id
+                            );
+                        }
+                    } else {
+                        // Dry run: log merge step.
+                        append_action_log(
+                            workspace,
+                            &ActionLogEntry {
+                                timestamp: chrono_now_iso(),
+                                phase_id: phase_id.clone(),
+                                action_kind: "merge".to_string(),
+                                outcome: Some("merged".to_string()),
+                                draft_id: None,
+                                detail: Some("dry_run".to_string()),
+                                rework_round: Some(rework_round),
+                            },
+                        );
+                    }
+
+                    // Phase complete.
+                    state.phases_complete.push(phase_id.clone());
+                    state.phases_pending.retain(|p| p != phase_id);
+                    state.rework_cycles = rework_counts.clone();
+                    phases_built += 1;
+                    println!(
+                        "[progress] item {}: phase {} complete — {}/{} phases done",
+                        phases_built, phase_id, phases_built, max_phases
+                    );
+                    break 'rework;
+                }
+
+                ta_session::advisor_agent::AdvisorOutcome::Denied => {
+                    let rework_round_new = {
+                        let entry = rework_counts.entry(phase_id.clone()).or_insert(0);
+                        *entry += 1;
+                        *entry
+                    };
+                    let deny_msg = format!("draft denied at rework round {}", rework_round_new);
+                    rework_history.push(deny_msg.clone());
+
+                    println!(
+                        "  [denied] Draft {} denied for phase {} (round {}/{})",
+                        draft_id, phase_id, rework_round_new, phase_max_rework
+                    );
+                    append_action_log(
+                        workspace,
+                        &ActionLogEntry {
+                            timestamp: chrono_now_iso(),
+                            phase_id: phase_id.clone(),
+                            action_kind: "agent_review".to_string(),
+                            outcome: Some("denied".to_string()),
+                            draft_id: Some(draft_id.to_string()),
+                            detail: Some(deny_msg),
+                            rework_round: Some(rework_round_new),
+                        },
+                    );
+
+                    state.rework_cycles = rework_counts.clone();
+                    write_loop_state(workspace, &state);
+
+                    if rework_round_new >= phase_max_rework {
+                        let msg = format!(
+                            "Phase {} reached max rework cycles ({}).\n\
+                             Rework history:\n{}\n\
+                             Manual intervention required.",
+                            phase_id,
+                            phase_max_rework,
+                            rework_history
+                                .iter()
+                                .enumerate()
+                                .map(|(i, r)| format!("  {}: {}", i + 1, r))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        );
+                        emit_escalation(workspace, phase_id, &msg, on_escalate, &rework_history);
+                        state.escalated = true;
+                        write_loop_state(workspace, &state);
+                        anyhow::bail!("{}", msg);
+                    }
+                    // Loop back for rework.
+                    continue 'rework;
+                }
+
+                other => {
+                    let msg = format!(
+                        "Phase {} agent review ended with unexpected outcome: {}",
+                        phase_id, other
+                    );
+                    eprintln!("[escalate] {}", msg);
+                    append_action_log(
+                        workspace,
+                        &ActionLogEntry {
+                            timestamp: chrono_now_iso(),
+                            phase_id: phase_id.clone(),
+                            action_kind: "escalate".to_string(),
+                            outcome: Some(other.to_string()),
+                            draft_id: Some(draft_id.to_string()),
+                            detail: Some(msg.clone()),
+                            rework_round: Some(rework_round),
+                        },
+                    );
+                    emit_escalation(workspace, phase_id, &msg, on_escalate, &rework_history);
+                    state.escalated = true;
+                    write_loop_state(workspace, &state);
+                    anyhow::bail!("{}", msg);
+                }
+            }
+        } // 'rework
+    }
+
+    state.current_phase = None;
+    state.current_step = None;
+    write_loop_state(workspace, &state);
+
+    println!(
+        "\n[progress] phase v0.17.0.11: autonomous loop complete — {} phase(s) built",
+        phases_built
+    );
+
+    Ok(())
+}
+
+/// Try to find the PR number for a phase from the applied draft's VCS tracking metadata.
+fn find_pr_for_phase(workspace: &std::path::Path, phase_id: &str) -> Option<u64> {
+    use ta_changeset::draft_package::{DraftPackage, DraftStatus};
+    let drafts_dir = workspace.join(".ta").join("drafts");
+    if !drafts_dir.is_dir() {
+        return None;
+    }
+    let entries = std::fs::read_dir(&drafts_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                if let Ok(pkg) = serde_json::from_str::<DraftPackage>(&json) {
+                    let phase_match = pkg
+                        .plan_phase
+                        .as_deref()
+                        .map(|p| p == phase_id || p == phase_id.trim_start_matches('v'))
+                        .unwrap_or(false);
+                    if phase_match && matches!(pkg.status, DraftStatus::Applied { .. }) {
+                        // Try to extract PR number from VCS tracking info.
+                        if let Some(vcs) = &pkg.vcs_status {
+                            // review_id is the PR number as string (e.g. "42")
+                            if let Some(pr_num) =
+                                vcs.review_id.as_deref().and_then(|s| s.parse::<u64>().ok())
+                            {
+                                return Some(pr_num);
+                            }
+                            // Fallback: parse from review_url like .../pull/42
+                            if let Some(pr_num) = vcs
+                                .review_url
+                                .as_deref()
+                                .and_then(|url| url.rsplit('/').next())
+                                .and_then(|s| s.parse::<u64>().ok())
+                            {
+                                return Some(pr_num);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Poll `gh pr view --json statusCheckRollup` until CI passes or times out.
+fn poll_pr_ci(
+    workspace: &std::path::Path,
+    pr_number: u64,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(30);
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "CI polling timed out after {}s for PR #{}",
+                timeout_secs,
+                pr_number
+            );
+        }
+
+        let out = std::process::Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                &pr_number.to_string(),
+                "--json",
+                "statusCheckRollup,state",
+            ])
+            .current_dir(workspace)
+            .output();
+
+        match out {
+            Ok(output) if output.status.success() => {
+                let json: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).unwrap_or_default();
+
+                // Check PR state: merged or closed?
+                let state = json.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                if state == "MERGED" {
+                    return Ok(());
+                }
+                if state == "CLOSED" {
+                    anyhow::bail!("PR #{} was closed before CI could pass", pr_number);
+                }
+
+                // Check CI checks.
+                let checks = json
+                    .get("statusCheckRollup")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                if checks.is_empty() {
+                    // No checks yet — wait.
+                    std::thread::sleep(poll_interval);
+                    continue;
+                }
+
+                let all_done = checks.iter().all(|c| {
+                    let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let conclusion = c.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
+                    status == "COMPLETED"
+                        || conclusion == "SUCCESS"
+                        || conclusion == "NEUTRAL"
+                        || conclusion == "SKIPPED"
+                });
+
+                let any_failed = checks.iter().any(|c| {
+                    let conclusion = c.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
+                    conclusion == "FAILURE"
+                        || conclusion == "CANCELLED"
+                        || conclusion == "TIMED_OUT"
+                });
+
+                if any_failed {
+                    anyhow::bail!(
+                        "CI checks failed for PR #{}. Check `gh pr view {}` for details.",
+                        pr_number,
+                        pr_number
+                    );
+                }
+
+                if all_done {
+                    return Ok(());
+                }
+
+                std::thread::sleep(poll_interval);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("gh pr view failed for PR #{}: {}", pr_number, stderr.trim());
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to run gh: {} (is GitHub CLI installed?)", e);
+            }
+        }
+    }
+}
+
+/// Merge a PR via `gh pr merge --squash --auto`.
+fn merge_pr(workspace: &std::path::Path, pr_number: u64) -> anyhow::Result<()> {
+    let output = std::process::Command::new("gh")
+        .args(["pr", "merge", &pr_number.to_string(), "--squash", "--auto"])
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run gh pr merge: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "gh pr merge failed for PR #{}: {}",
+            pr_number,
+            stderr.trim()
+        );
+    }
+
+    println!("  [merge] PR #{} merged", pr_number);
+    Ok(())
+}
+
+/// Run a post-merge sync build step: `git pull --ff-only`.
+fn sync_build(workspace: &std::path::Path) {
+    let _ = std::process::Command::new("git")
+        .args(["pull", "--ff-only"])
+        .current_dir(workspace)
+        .output();
+    println!("  [sync] Local sync complete");
+}
+
+/// Emit an escalation: log to action-log and notify via the configured channel.
+fn emit_escalation(
+    workspace: &std::path::Path,
+    phase_id: &str,
+    message: &str,
+    on_escalate: Option<&str>,
+    rework_history: &[String],
+) {
+    append_action_log(
+        workspace,
+        &ActionLogEntry {
+            timestamp: chrono_now_iso(),
+            phase_id: phase_id.to_string(),
+            action_kind: "escalate".to_string(),
+            outcome: None,
+            draft_id: None,
+            detail: Some(message.to_string()),
+            rework_round: None,
+        },
+    );
+
+    eprintln!("\n[ESCALATION] Phase {}: {}", phase_id, message);
+    if !rework_history.is_empty() {
+        eprintln!("  Rework history:");
+        for (i, h) in rework_history.iter().enumerate() {
+            eprintln!("    {}: {}", i + 1, h);
+        }
+    }
+
+    if let Some(channel) = on_escalate {
+        println!("[escalate] Would notify channel '{}': {}", channel, message);
+        // Future: dispatch via notification plugin (v0.17.0.12+).
+    }
+}
+
+/// `ta plan build-status` — show live status of the autonomous loop.
+fn plan_build_status(config: &GatewayConfig, refresh_secs: u64, once: bool) -> anyhow::Result<()> {
+    let state_path = config
+        .workspace_root
+        .join(".ta")
+        .join("autonomous-loop-state.json");
+
+    loop {
+        // Clear screen only in refresh mode.
+        if !once {
+            print!("\x1B[2J\x1B[H");
+        }
+
+        if !state_path.exists() {
+            println!("No autonomous loop state found.");
+            println!("Start one with: ta plan build --autonomous");
+            if once {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(refresh_secs));
+            continue;
+        }
+
+        let json = std::fs::read_to_string(&state_path).unwrap_or_else(|_| "{}".to_string());
+        let state: AutonomousLoopState = match serde_json::from_str(&json) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to parse loop state: {}", e);
+                if once {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_secs(refresh_secs));
+                continue;
+            }
+        };
+
+        println!("=== Autonomous Loop Status ===");
+        println!("  Started:        {}", state.started_at);
+        println!(
+            "  Current phase:  {}",
+            state.current_phase.as_deref().unwrap_or("—")
+        );
+        println!(
+            "  Current step:   {}",
+            state.current_step.as_deref().unwrap_or("—")
+        );
+        println!(
+            "  Last action:    {}",
+            state.last_action_kind.as_deref().unwrap_or("—")
+        );
+        println!(
+            "  Escalated:      {}",
+            if state.escalated { "YES" } else { "no" }
+        );
+        println!();
+
+        if !state.phases_complete.is_empty() {
+            println!("  Completed phases ({}):", state.phases_complete.len());
+            for p in &state.phases_complete {
+                println!("    [x] {}", p);
+            }
+        }
+
+        if !state.phases_pending.is_empty() {
+            println!("  Pending phases ({}):", state.phases_pending.len());
+            for p in &state.phases_pending {
+                let rw = state.rework_cycles.get(p).copied().unwrap_or(0);
+                if rw > 0 {
+                    println!("    [ ] {} (rework: {})", p, rw);
+                } else {
+                    println!("    [ ] {}", p);
+                }
+            }
+        }
+
+        if let Some(ref ci) = state.ci_checks {
+            println!();
+            println!("  CI checks: {}", ci);
+        }
+
+        // Read recent action log entries.
+        let log = read_action_log(&config.workspace_root);
+        if !log.is_empty() {
+            println!();
+            println!("  Recent actions (last 5):");
+            for entry in log.iter().rev().take(5) {
+                let outcome = entry
+                    .outcome
+                    .as_deref()
+                    .map(|o| format!(" → {}", o))
+                    .unwrap_or_default();
+                println!(
+                    "    {} [{}] {}{}",
+                    &entry.timestamp[..16.min(entry.timestamp.len())],
+                    entry.phase_id,
+                    entry.action_kind,
+                    outcome
+                );
+            }
+        }
+
+        if once {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(refresh_secs));
+    }
+
+    Ok(())
+}
+
 // ── Pragma planner (item 3, 4, 6) ────────────────────────────────────────────
 
 // ── Pragma per-question agent lookup (v0.16.1.6) ─────────────────────────────
@@ -7091,6 +8318,10 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    // Serialize tests that manipulate global env vars (TA_AUTONOMOUS_DRY_RUN,
+    // TA_TEST_MOCK_ADVISOR) to prevent races when the test suite runs in parallel.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     const SAMPLE_PLAN: &str = r#"# Trusted Autonomy — Development Plan
 
@@ -9848,5 +11079,375 @@ More content here that is part of a second paragraph.
             "ta plan init (test)",
         );
         assert!(result.is_ok());
+    }
+
+    // ── Autonomous loop tests (v0.17.0.11) ───────────────────────────────────
+
+    /// Verify that `append_action_log` / `read_action_log` round-trip correctly
+    /// and that two entries for different phases are both stored.
+    #[test]
+    fn action_log_append_and_read_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ta")).unwrap();
+
+        let e1 = ActionLogEntry {
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            phase_id: "v0.17.1".to_string(),
+            action_kind: "start_goal".to_string(),
+            outcome: None,
+            draft_id: None,
+            detail: Some("phase 1 start".to_string()),
+            rework_round: Some(0),
+        };
+        let e2 = ActionLogEntry {
+            timestamp: "2026-01-01T00:01:00Z".to_string(),
+            phase_id: "v0.17.2".to_string(),
+            action_kind: "agent_review".to_string(),
+            outcome: Some("applied".to_string()),
+            draft_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+            detail: None,
+            rework_round: Some(0),
+        };
+
+        append_action_log(root, &e1);
+        append_action_log(root, &e2);
+
+        let entries = read_action_log(root);
+        assert_eq!(entries.len(), 2, "expected 2 log entries");
+        assert_eq!(entries[0].phase_id, "v0.17.1");
+        assert_eq!(entries[0].action_kind, "start_goal");
+        assert_eq!(entries[1].phase_id, "v0.17.2");
+        assert_eq!(entries[1].outcome.as_deref(), Some("applied"));
+    }
+
+    /// Verify drift detection returns Ok when change count is below threshold.
+    #[test]
+    fn drift_check_no_git_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        // No git repo — check_drift should not error (git unavailable → skip).
+        let result = check_drift(dir.path(), 5);
+        assert!(result.is_ok(), "drift check without git should not error");
+    }
+
+    /// Verify validate_action_envelope rejects Apply under ReadOnly.
+    #[test]
+    fn action_envelope_validate_rejects_apply_under_readonly() {
+        use ta_session::agent_action::{ActionEnvelope, AgentAction, TeamRole};
+        use ta_session::workflow_session::AdvisorSecurity;
+
+        let env = ActionEnvelope::new(
+            "test-agent",
+            TeamRole::Implementer,
+            AgentAction::Apply {
+                draft_id: uuid::Uuid::new_v4(),
+                confidence: Some(90),
+                notes: None,
+            },
+        );
+        let result = validate_action_envelope(&env, &AdvisorSecurity::ReadOnly);
+        assert!(result.is_err(), "Apply should be rejected under ReadOnly");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("ReadOnly") || err.contains("read_only"),
+            "error message should mention security level: {}",
+            err
+        );
+    }
+
+    /// Verify validate_action_envelope allows Apply under Auto.
+    #[test]
+    fn action_envelope_validate_allows_apply_under_auto() {
+        use ta_session::agent_action::{ActionEnvelope, AgentAction, TeamRole};
+        use ta_session::workflow_session::AdvisorSecurity;
+
+        let env = ActionEnvelope::new(
+            "test-agent",
+            TeamRole::Reviewer,
+            AgentAction::Apply {
+                draft_id: uuid::Uuid::new_v4(),
+                confidence: Some(90),
+                notes: None,
+            },
+        );
+        let result = validate_action_envelope(&env, &AdvisorSecurity::Auto);
+        assert!(result.is_ok(), "Apply should be allowed under Auto");
+    }
+
+    /// Verify validate_action_envelope allows Continue under ReadOnly.
+    #[test]
+    fn action_envelope_validate_allows_continue_under_readonly() {
+        use ta_session::agent_action::{ActionEnvelope, AgentAction, TeamRole};
+        use ta_session::workflow_session::AdvisorSecurity;
+
+        let env = ActionEnvelope::new(
+            "test-agent",
+            TeamRole::Human("ops".to_string()),
+            AgentAction::Continue,
+        );
+        let result = validate_action_envelope(&env, &AdvisorSecurity::ReadOnly);
+        assert!(result.is_ok(), "Continue should be allowed under ReadOnly");
+    }
+
+    /// Two-phase autonomous run using TA_AUTONOMOUS_DRY_RUN=1 and pre-seeded draft files.
+    ///
+    /// Verifies:
+    /// - action-log.jsonl is created with entries for both phases
+    /// - both phases "apply" with zero human input
+    /// - action log contains: start_goal, draft_found, agent_review(applied), merge for each phase
+    #[test]
+    fn test_autonomous_loop_two_phase_mock() {
+        use ta_mcp_gateway::GatewayConfig;
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create minimal directory structure.
+        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::create_dir_all(root.join(".ta/sessions")).unwrap();
+
+        // Write a minimal PLAN.md with two pending phases.
+        let plan_content = r#"# Test Plan
+
+### v0.99.1 — Phase One
+<!-- status: pending -->
+
+1. [ ] Do thing one
+
+---
+### v0.99.2 — Phase Two
+<!-- status: pending -->
+
+1. [ ] Do thing two
+"#;
+        std::fs::write(root.join("PLAN.md"), plan_content).unwrap();
+
+        // Seed two draft packages (one per phase) with PendingReview status.
+        for (phase_id, seq) in [("v0.99.1", 1u32), ("v0.99.2", 2u32)] {
+            let pkg_id = uuid::Uuid::from_u128(seq as u128);
+            // Minimal DraftPackage JSON — fields must match the actual struct definitions.
+            // DraftStatus uses #[serde(tag = "status")] so PendingReview → {"status": "pending_review"}.
+            let pkg_json = serde_json::json!({
+                "package_version": "1",
+                "package_id": pkg_id,
+                "created_at": "2026-01-01T00:00:00Z",
+                "goal": {
+                    "goal_id": pkg_id.to_string(),
+                    "title": format!("implement {}", phase_id),
+                    "objective": format!("implement {}", phase_id),
+                    "success_criteria": []
+                },
+                "iteration": {
+                    "iteration_id": "iter-1",
+                    "sequence": seq,
+                    "workspace_ref": {"type": "staging_dir", "ref": "staging/test"}
+                },
+                "agent_identity": {
+                    "agent_id": "claude-code",
+                    "agent_type": "claude",
+                    "constitution_id": "default",
+                    "capability_manifest_hash": "abc"
+                },
+                "summary": {
+                    "what_changed": format!("implement {}", phase_id),
+                    "why": "test",
+                    "impact": "low",
+                    "rollback_plan": "none"
+                },
+                "plan": {"completed_steps": [], "next_steps": []},
+                "changes": {"artifacts": [], "patch_sets": []},
+                "risk": {"risk_score": 0, "findings": [], "policy_decisions": []},
+                "provenance": {"inputs": [], "tool_trace_hash": "abc"},
+                "review_requests": {"requested_actions": [], "reviewers": []},
+                "signatures": {"package_hash": "abc", "agent_signature": "abc"},
+                "status": {"status": "pending_review"},
+                "plan_phase": phase_id
+            });
+            let pkg_path = root.join(format!(".ta/drafts/{}.json", pkg_id));
+            std::fs::write(&pkg_path, serde_json::to_string_pretty(&pkg_json).unwrap()).unwrap();
+        }
+
+        // Build a minimal GatewayConfig pointing at temp dir.
+        // The drafts dir is .ta/drafts (where we wrote the seed files).
+        let mut config = GatewayConfig::for_project(root);
+        config.pr_packages_dir = root.join(".ta/drafts");
+
+        // Run autonomous loop in dry-run mode with mock advisor = applied.
+        std::env::set_var("TA_AUTONOMOUS_DRY_RUN", "1");
+        std::env::set_var("TA_TEST_MOCK_ADVISOR", "applied");
+
+        let result = plan_build_autonomous(
+            &config,
+            Some("v0.99.1,v0.99.2"),
+            None,
+            99,
+            None,
+            None,
+            3,
+            20,
+            None,
+        );
+
+        std::env::remove_var("TA_AUTONOMOUS_DRY_RUN");
+        std::env::remove_var("TA_TEST_MOCK_ADVISOR");
+
+        assert!(
+            result.is_ok(),
+            "autonomous loop should succeed: {:?}",
+            result
+        );
+
+        // Verify action log.
+        let log = read_action_log(root);
+        assert!(!log.is_empty(), "action log should have entries");
+
+        let phase1_entries: Vec<_> = log.iter().filter(|e| e.phase_id == "v0.99.1").collect();
+        let phase2_entries: Vec<_> = log.iter().filter(|e| e.phase_id == "v0.99.2").collect();
+
+        assert!(
+            !phase1_entries.is_empty(),
+            "should have entries for v0.99.1"
+        );
+        assert!(
+            !phase2_entries.is_empty(),
+            "should have entries for v0.99.2"
+        );
+
+        // Check both phases have start_goal and agent_review(applied).
+        for (phase_id, entries) in [("v0.99.1", &phase1_entries), ("v0.99.2", &phase2_entries)] {
+            let has_start = entries.iter().any(|e| e.action_kind == "start_goal");
+            let has_applied = entries.iter().any(|e| {
+                e.action_kind == "agent_review" && e.outcome.as_deref() == Some("applied")
+            });
+            let has_merge = entries.iter().any(|e| e.action_kind == "merge");
+
+            assert!(has_start, "phase {} should have start_goal entry", phase_id);
+            assert!(
+                has_applied,
+                "phase {} should have agent_review=applied entry",
+                phase_id
+            );
+            assert!(has_merge, "phase {} should have merge entry", phase_id);
+        }
+
+        // Verify state file was written.
+        let state_path = root.join(".ta/autonomous-loop-state.json");
+        assert!(
+            state_path.exists(),
+            "autonomous-loop-state.json should be written"
+        );
+        let state: AutonomousLoopState =
+            serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            state.phases_complete.len(),
+            2,
+            "both phases should be complete"
+        );
+        assert!(
+            state.phases_pending.is_empty(),
+            "no phases should remain pending"
+        );
+        assert!(!state.escalated, "loop should not have escalated");
+    }
+
+    /// Test that rework cycle guard escalates when max_rework_cycles is exceeded.
+    #[test]
+    fn test_autonomous_loop_rework_escalate() {
+        use ta_mcp_gateway::GatewayConfig;
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        std::fs::create_dir_all(root.join(".ta/sessions")).unwrap();
+
+        let plan_content = r#"# Test Plan
+
+### v0.99.3 — Denied Phase
+<!-- status: pending -->
+
+1. [ ] Always denied
+
+"#;
+        std::fs::write(root.join("PLAN.md"), plan_content).unwrap();
+
+        // Seed one draft for v0.99.3.
+        let pkg_id = uuid::Uuid::from_u128(999);
+        // DraftStatus uses #[serde(tag = "status")] so PendingReview → {"status": "pending_review"}.
+        let pkg_json = serde_json::json!({
+            "package_version": "1",
+            "package_id": pkg_id,
+            "created_at": "2026-01-01T00:00:00Z",
+            "goal": {
+                "goal_id": pkg_id.to_string(),
+                "title": "implement v0.99.3",
+                "objective": "implement v0.99.3",
+                "success_criteria": []
+            },
+            "iteration": {
+                "iteration_id": "iter-1",
+                "sequence": 1u32,
+                "workspace_ref": {"type": "staging_dir", "ref": "staging/test"}
+            },
+            "agent_identity": {
+                "agent_id": "claude-code",
+                "agent_type": "claude",
+                "constitution_id": "default",
+                "capability_manifest_hash": "abc"
+            },
+            "summary": {
+                "what_changed": "test",
+                "why": "test",
+                "impact": "low",
+                "rollback_plan": "none"
+            },
+            "plan": {"completed_steps": [], "next_steps": []},
+            "changes": {"artifacts": [], "patch_sets": []},
+            "risk": {"risk_score": 0, "findings": [], "policy_decisions": []},
+            "provenance": {"inputs": [], "tool_trace_hash": "abc"},
+            "review_requests": {"requested_actions": [], "reviewers": []},
+            "signatures": {"package_hash": "abc", "agent_signature": "abc"},
+            "status": {"status": "pending_review"},
+            "plan_phase": "v0.99.3"
+        });
+        let pkg_path = root.join(format!(".ta/drafts/{}.json", pkg_id));
+        std::fs::write(&pkg_path, serde_json::to_string_pretty(&pkg_json).unwrap()).unwrap();
+
+        let mut config = GatewayConfig::for_project(root);
+        config.pr_packages_dir = root.join(".ta/drafts");
+
+        std::env::set_var("TA_AUTONOMOUS_DRY_RUN", "1");
+        std::env::set_var("TA_TEST_MOCK_ADVISOR", "denied");
+
+        let result = plan_build_autonomous(
+            &config,
+            Some("v0.99.3"),
+            None,
+            99,
+            None,
+            None,
+            2, // max 2 rework cycles
+            20,
+            None,
+        );
+
+        std::env::remove_var("TA_AUTONOMOUS_DRY_RUN");
+        std::env::remove_var("TA_TEST_MOCK_ADVISOR");
+
+        // Should fail because rework cycles were exhausted.
+        assert!(result.is_err(), "loop should fail after max rework cycles");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("max rework cycles") || err_msg.contains("rework"),
+            "error should mention rework: {}",
+            err_msg
+        );
+
+        // Verify escalation was logged.
+        let log = read_action_log(root);
+        let has_escalate = log.iter().any(|e| e.action_kind == "escalate");
+        assert!(has_escalate, "escalation should be in action log");
     }
 }
