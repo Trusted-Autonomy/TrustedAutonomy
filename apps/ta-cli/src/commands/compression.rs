@@ -106,11 +106,7 @@ fn show_status(workspace_root: &Path) -> Result<()> {
             .pid
             .map(|p| p.to_string())
             .unwrap_or_else(|| "—".to_string());
-        let display_name = if status.plugin_name.is_empty() {
-            plugin.name.clone()
-        } else {
-            status.plugin_name.clone()
-        };
+        let display_name = status.plugin_name.unwrap_or_else(|| plugin.name.clone());
         println!("  Process:        {} (PID {})", status.status, pid_str);
         println!("  Restarts:       {}", status.restart_count);
         if status.status == "suspended" {
@@ -463,7 +459,7 @@ struct OptimizerStatusFile {
     #[serde(default)]
     pub restart_count: u32,
     #[serde(default)]
-    pub plugin_name: String,
+    pub plugin_name: Option<String>,
 }
 
 fn read_optimizer_status(workspace_root: &Path) -> Option<OptimizerStatusFile> {
@@ -584,5 +580,22 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.has_explicit_plugin());
+    }
+
+    #[test]
+    fn optimizer_status_file_plugin_name_absent_in_legacy_json() {
+        // Legacy status.json (before v0.17.0.10.1) has no plugin_name field.
+        // The CLI must fall back to the config-derived plugin name.
+        let json = r#"{"status":"running","pid":1234,"restart_count":0,"updated_at":"2026-01-01T00:00:00Z"}"#;
+        let s: OptimizerStatusFile = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            s.plugin_name, None,
+            "missing plugin_name deserializes to None"
+        );
+
+        // Verify the fallback logic: None.unwrap_or("headroom") == "headroom"
+        let config_plugin_name = "headroom".to_string();
+        let display_name = s.plugin_name.unwrap_or(config_plugin_name);
+        assert_eq!(display_name, "headroom");
     }
 }
