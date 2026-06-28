@@ -9032,18 +9032,18 @@ The supervisor reads `proxy_base_url` to inject `ANTHROPIC_BASE_URL`; reads `hea
 
 ---
 ### v0.17.0.10.1 — Compression Cleanup: Remove Legacy Supervisor & Harden Status Schema
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.10 (generic plugin supervisor)
 
 **Problem**: `headroom_supervisor.rs` is dead code — fully superseded by `prompt_optimizer_supervisor.rs` but still declared as a public module. `status.json` has no schema version and no authoritative disabled state, requiring CLI-side inference hacks.
 
 **Items**:
-1. [ ] Delete `crates/ta-daemon/src/headroom_supervisor.rs`; remove `pub mod headroom_supervisor` from `main.rs`
-2. [ ] Add `schema_version: u32` to `OptimizerStatus` (`#[serde(default)]` = 0 for legacy files; all new writes emit `schema_version: 1`)
-3. [ ] Write `status: "disabled"` entry in `prompt_optimizer_supervisor::start()` when `config.enabled = false` — file is always authoritative; stale "running" entries from before `ta compression disable` are overwritten on next daemon start
-4. [ ] Simplify `plugin_name` fallback in `compression.rs`: replace the two-branch `if status.plugin_name.is_empty()` with `status.plugin_name.unwrap_or(plugin.name)` (after making field `Option<String>`) — no special-case needed once daemon restart always writes the field
-5. [ ] Tests: schema_version roundtrip, `disabled` status write overwrites stale entry, `plugin_name` absent in legacy JSON falls back to config value
+1. [x] Delete `crates/ta-daemon/src/headroom_supervisor.rs`; remove `pub mod headroom_supervisor` from `main.rs`
+2. [x] Add `schema_version: u32` to `OptimizerStatus` (`#[serde(default)]` = 0 for legacy files; all new writes emit `schema_version: 1`)
+3. [x] Write `status: "disabled"` entry in `prompt_optimizer_supervisor::start()` when `config.enabled = false` — file is always authoritative; stale "running" entries from before `ta compression disable` are overwritten on next daemon start
+4. [x] Simplify `plugin_name` fallback in `compression.rs`: replace the two-branch `if status.plugin_name.is_empty()` with `status.plugin_name.unwrap_or(plugin.name)` (after making field `Option<String>`) — no special-case needed once daemon restart always writes the field
+5. [x] Tests: schema_version roundtrip, `disabled` status write overwrites stale entry, `plugin_name` absent in legacy JSON falls back to config value
 
 #### Version: `0.17.0-alpha.10.1`
 
@@ -9084,6 +9084,38 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 8. [ ] USAGE.md: "Autonomous phase loop" section
 
 #### Version: `0.17.0-alpha.5`
+
+---
+### v0.17.0.12 — Meridian Integration: Token Tracking + `ta meridian`
+<!-- status: pending -->
+
+**Depends on**: Meridian repo (`Trusted-Autonomy/meridian`) shipped and on PATH
+
+**Goal**: First-class TA→Meridian integration. TA emits token counts so Meridian can report cost rather than time-as-proxy. `ta meridian` is a thin CLI delegation so users never need to invoke the Meridian binary directly.
+
+**Items**:
+1. [ ] Add `tokens_input: Option<u64>` and `tokens_output: Option<u64>` to `VelocityEntry` in `crates/ta-goal/src/velocity.rs`; write them from claude-code subprocess exit metadata when available
+2. [ ] `ta meridian` subcommand group in `apps/ta-cli/src/commands/meridian.rs` — delegates to the `meridian` binary on PATH: `ta meridian analyze` → `meridian analyze --source ta --path <project_root>`; `ta meridian init` → `meridian init`; `ta meridian suggest` → `meridian suggest --source ta --path <project_root>`
+3. [ ] Helpful error when `meridian` binary not found: print install instructions (`cargo install meridian` / `cargo install --git https://github.com/Trusted-Autonomy/meridian`)
+4. [ ] USAGE.md: "Effort & KPI Analytics (Meridian)" section — shows `ta meridian analyze`, `ta meridian suggest`, and link to Meridian standalone docs
+
+#### Version: `0.17.0-alpha.12`
+
+---
+### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.12 (Meridian integration), Meridian `suggest` command (v0.1.x)
+
+**Goal**: Use Meridian's KPI regression engine against TA plan phases — classify each historical phase by business category, score against KPIs, and surface alignment gaps with concrete suggestions for structuring future phases to better serve stated goals.
+
+**Items**:
+1. [ ] `ta meridian suggest --phases` — reads PLAN.md + velocity-history.jsonl, classifies each plan phase by title+description, scores against KPIs defined in `meridian.toml`; outputs per-phase alignment report
+2. [ ] `ta plan status --kpi` — augments existing plan status output with KPI alignment column (calls Meridian scorer in-process via library, no subprocess needed)
+3. [ ] Auto-KPI suggestion for new phases: during `ta run "title" --phase X`, if Meridian is configured, print a one-line KPI alignment score alongside the phase summary header — informational only, never blocks
+4. [ ] USAGE.md: "Aligning Plan Phases to KPIs" section
+
+#### Version: `0.17.0-alpha.13`
 
 ---
 ### v0.17.1 — Database Proxy (Postgres, MySQL, SQLite)

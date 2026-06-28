@@ -38,7 +38,6 @@ mod config;
 pub mod config_watcher;
 pub mod connector_supervisor;
 pub mod external_channel;
-pub mod headroom_supervisor;
 pub mod notification_dispatcher;
 pub mod office;
 pub mod phase_claim;

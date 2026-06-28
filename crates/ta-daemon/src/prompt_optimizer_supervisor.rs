@@ -35,7 +35,12 @@ const RESTART_SIGNAL_POLL_SECS: u64 = 5;
 /// If the plugin binary is not found or compression is disabled, this is a no-op.
 pub fn start(project_root: PathBuf, config: CompressionConfig, shutdown: Arc<Notify>) {
     if !config.enabled {
-        tracing::debug!("PromptOptimizerSupervisor: compression disabled — not starting");
+        // Write a "disabled" status file so the CLI always reads an authoritative state
+        // and stale "running" entries from before `ta compression disable` are overwritten.
+        let status_dir = project_root.join(".ta").join("compression");
+        std::fs::create_dir_all(&status_dir).ok();
+        write_status(&status_dir, "disabled", None, 0, None);
+        tracing::debug!("PromptOptimizerSupervisor: compression disabled — wrote disabled status");
         return;
     }
 
@@ -95,13 +100,17 @@ pub fn signal_restart(project_root: &Path) -> std::io::Result<()> {
 /// Written to `.ta/compression/status.json`; read by `ta compression status`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizerStatus {
+    /// Schema version: 0 for legacy files (field absent), 1 for files written by v0.17.0.10.1+.
+    #[serde(default)]
+    pub schema_version: u32,
     pub status: String,
     pub pid: Option<u32>,
     pub restart_count: u32,
     pub updated_at: String,
     /// Name of the active plugin (e.g. "headroom", "custom-proxy").
+    /// None in legacy files (before v0.17.0.10.1) and when compression is disabled.
     #[serde(default)]
-    pub plugin_name: String,
+    pub plugin_name: Option<String>,
 }
 
 // ─── Supervisor loop ──────────────────────────────────────────────────────────
@@ -112,7 +121,7 @@ async fn run_supervisor(
     shutdown: Arc<Notify>,
 ) {
     std::fs::create_dir_all(&status_dir).ok();
-    write_status(&status_dir, "starting", None, 0, &plugin.name);
+    write_status(&status_dir, "starting", None, 0, Some(&plugin.name));
 
     let mut restart_count: u32 = 0;
     let mut suspended = false;
@@ -130,12 +139,18 @@ async fn run_supervisor(
                     plugin = %plugin.name,
                     "PromptOptimizerSupervisor: restart signal received — clearing suspended state"
                 );
-                write_status(&status_dir, "starting", None, restart_count, &plugin.name);
+                write_status(
+                    &status_dir,
+                    "starting",
+                    None,
+                    restart_count,
+                    Some(&plugin.name),
+                );
             } else {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(RESTART_SIGNAL_POLL_SECS)) => {}
                     _ = shutdown.notified() => {
-                        write_status(&status_dir, "stopped", None, restart_count, &plugin.name);
+                        write_status(&status_dir, "stopped", None, restart_count, Some(&plugin.name));
                         return;
                     }
                 }
@@ -144,7 +159,13 @@ async fn run_supervisor(
         }
 
         // ── Spawn ─────────────────────────────────────────────────────────
-        write_status(&status_dir, "starting", None, restart_count, &plugin.name);
+        write_status(
+            &status_dir,
+            "starting",
+            None,
+            restart_count,
+            Some(&plugin.name),
+        );
 
         let mut cmd = tokio::process::Command::new(&plugin.command);
         cmd.args(&plugin.args)
@@ -165,7 +186,13 @@ async fn run_supervisor(
                     error = %e,
                     "PromptOptimizerSupervisor: failed to spawn plugin process"
                 );
-                write_status(&status_dir, "stopped", None, restart_count, &plugin.name);
+                write_status(
+                    &status_dir,
+                    "stopped",
+                    None,
+                    restart_count,
+                    Some(&plugin.name),
+                );
                 handle_failure(
                     &status_dir,
                     &plugin.name,
@@ -192,7 +219,7 @@ async fn run_supervisor(
             "running",
             Some(pid),
             restart_count,
-            &plugin.name,
+            Some(&plugin.name),
         );
 
         // Startup grace: give the plugin time to bind the port.
@@ -200,7 +227,7 @@ async fn run_supervisor(
             _ = tokio::time::sleep(Duration::from_secs(STARTUP_GRACE_SECS)) => {}
             _ = shutdown.notified() => {
                 let _ = child.kill().await;
-                write_status(&status_dir, "stopped", None, restart_count, &plugin.name);
+                write_status(&status_dir, "stopped", None, restart_count, Some(&plugin.name));
                 return;
             }
         }
@@ -222,7 +249,13 @@ async fn run_supervisor(
 
         let exit_reason = monitor(&mut child, &client, &plugin.health_endpoint, &shutdown).await;
         let _ = child.kill().await;
-        write_status(&status_dir, "stopped", None, restart_count, &plugin.name);
+        write_status(
+            &status_dir,
+            "stopped",
+            None,
+            restart_count,
+            Some(&plugin.name),
+        );
 
         match exit_reason {
             ExitReason::Shutdown => {
@@ -349,7 +382,13 @@ async fn handle_failure(
             SUSPEND_WINDOW_SECS,
         );
         *suspended = true;
-        write_status(status_dir, "suspended", None, *restart_count, plugin_name);
+        write_status(
+            status_dir,
+            "suspended",
+            None,
+            *restart_count,
+            Some(plugin_name),
+        );
         return;
     }
 
@@ -368,20 +407,27 @@ async fn handle_failure(
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
         _ = shutdown.notified() => {
-            write_status(status_dir, "stopped", None, *restart_count, plugin_name);
+            write_status(status_dir, "stopped", None, *restart_count, Some(plugin_name));
         }
     }
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
 
-fn write_status(dir: &Path, status: &str, pid: Option<u32>, restart_count: u32, plugin_name: &str) {
+fn write_status(
+    dir: &Path,
+    status: &str,
+    pid: Option<u32>,
+    restart_count: u32,
+    plugin_name: Option<&str>,
+) {
     let record = OptimizerStatus {
+        schema_version: 1,
         status: status.to_string(),
         pid,
         restart_count,
         updated_at: chrono::Utc::now().to_rfc3339(),
-        plugin_name: plugin_name.to_string(),
+        plugin_name: plugin_name.map(|s| s.to_string()),
     };
     if let Ok(json) = serde_json::to_string_pretty(&record) {
         let path = dir.join("status.json");
@@ -408,13 +454,13 @@ mod tests {
         let status_dir = dir.path().join(".ta").join("compression");
         std::fs::create_dir_all(&status_dir).unwrap();
 
-        write_status(&status_dir, "running", Some(42000), 1, "headroom");
+        write_status(&status_dir, "running", Some(42000), 1, Some("headroom"));
 
         let status = read_status(dir.path()).unwrap();
         assert_eq!(status.status, "running");
         assert_eq!(status.pid, Some(42000));
         assert_eq!(status.restart_count, 1);
-        assert_eq!(status.plugin_name, "headroom");
+        assert_eq!(status.plugin_name, Some("headroom".to_string()));
         assert!(!status.updated_at.is_empty());
     }
 
@@ -438,40 +484,86 @@ mod tests {
     }
 
     #[test]
-    fn start_no_op_when_disabled() {
+    fn start_writes_disabled_status() {
         let cfg = CompressionConfig {
             enabled: false,
             ..Default::default()
         };
         let dir = tempfile::tempdir().unwrap();
         let shutdown = Arc::new(Notify::new());
-        // Should return immediately without panicking.
         start(dir.path().to_path_buf(), cfg, shutdown);
+        let status = read_status(dir.path()).unwrap();
+        assert_eq!(status.status, "disabled");
+        assert_eq!(status.pid, None);
+        assert_eq!(status.plugin_name, None);
+        assert_eq!(status.schema_version, 1);
+    }
+
+    #[test]
+    fn disabled_status_overwrites_stale_running_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let status_dir = dir.path().join(".ta").join("compression");
+        std::fs::create_dir_all(&status_dir).unwrap();
+        // Simulate a stale "running" entry left by a previous daemon start.
+        write_status(&status_dir, "running", Some(99999), 0, Some("headroom"));
+        assert_eq!(read_status(dir.path()).unwrap().status, "running");
+
+        let cfg = CompressionConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let shutdown = Arc::new(Notify::new());
+        start(dir.path().to_path_buf(), cfg, shutdown);
+
+        let status = read_status(dir.path()).unwrap();
+        assert_eq!(status.status, "disabled");
+        assert_eq!(status.pid, None);
+    }
+
+    #[test]
+    fn schema_version_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let status_dir = dir.path().join(".ta").join("compression");
+        std::fs::create_dir_all(&status_dir).unwrap();
+
+        write_status(&status_dir, "running", Some(1234), 0, Some("headroom"));
+
+        let status = read_status(dir.path()).unwrap();
+        assert_eq!(
+            status.schema_version, 1,
+            "new writes must emit schema_version 1"
+        );
+    }
+
+    #[test]
+    fn legacy_json_schema_version_defaults_to_zero() {
+        // JSON written before v0.17.0.10.1 has no schema_version field.
+        let json = r#"{"status":"running","pid":1234,"restart_count":0,"updated_at":"2026-01-01T00:00:00Z"}"#;
+        let s: OptimizerStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            s.schema_version, 0,
+            "missing schema_version defaults to 0 for legacy files"
+        );
+        assert_eq!(s.plugin_name, None, "missing plugin_name defaults to None");
+        assert_eq!(s.status, "running");
     }
 
     #[test]
     fn status_serialization_all_fields() {
         let s = OptimizerStatus {
+            schema_version: 1,
             status: "suspended".to_string(),
             pid: None,
             restart_count: 7,
             updated_at: "2026-06-22T00:00:00Z".to_string(),
-            plugin_name: "my-proxy".to_string(),
+            plugin_name: Some("my-proxy".to_string()),
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: OptimizerStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema_version, 1);
         assert_eq!(back.status, "suspended");
         assert_eq!(back.restart_count, 7);
         assert!(back.pid.is_none());
-        assert_eq!(back.plugin_name, "my-proxy");
-    }
-
-    #[test]
-    fn status_backwards_compat_missing_plugin_name() {
-        // Old status.json files (before v0.17.0.10) have no plugin_name field.
-        let json = r#"{"status":"running","pid":1234,"restart_count":0,"updated_at":"2026-01-01T00:00:00Z"}"#;
-        let s: OptimizerStatus = serde_json::from_str(json).unwrap();
-        assert_eq!(s.plugin_name, ""); // defaults to empty string
-        assert_eq!(s.status, "running");
+        assert_eq!(back.plugin_name, Some("my-proxy".to_string()));
     }
 }
