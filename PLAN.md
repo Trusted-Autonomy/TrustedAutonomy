@@ -9087,7 +9087,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.11.1 — Autonomous Loop: Wire --workflow/--team Flags + --no-auto-merge Gate
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Goal**: Fix two WARN findings from advisor review of v0.17.0.11. Neither is a correctness regression — the loop works — but both are UX/safety gaps that need closing.
 
@@ -9095,15 +9095,15 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 **Items**:
 
-1. [ ] **Wire `--workflow` flag**: `_workflow` parameter in `plan_build_autonomous()` is silently ignored. Load the referenced `.ta/workflows/<name>.yaml` (or path) and apply any configured step overrides (custom `on_apply`, `on_deny`, `on_escalate` handlers). If the file doesn't exist, error with an actionable message instead of silently falling back to defaults.
+1. [x] **Wire `--workflow` flag**: `_workflow` parameter in `plan_build_autonomous()` is silently ignored. Load the referenced `.ta/workflows/<name>.yaml` (or path) and apply any configured step overrides (custom `on_apply`, `on_deny`, `on_escalate` handlers). If the file doesn't exist, error with an actionable message instead of silently falling back to defaults.
 
-2. [ ] **Wire `--team` flag**: `_team` parameter is silently ignored. Load `.ta/team.toml` (or the specified path) and use the `reviewer` member for `agent_review` steps instead of the hardcoded default agent. Emit a warning if `--team` is passed but no `reviewer` role is found in the file.
+2. [x] **Wire `--team` flag**: `_team` parameter is silently ignored. Load `.ta/team.toml` (or the specified path) and use the `reviewer` member for `agent_review` steps instead of the hardcoded default agent. Emit a warning if `--team` is passed but no `reviewer` role is found in the file.
 
-3. [ ] **`--no-auto-merge` flag**: Insert a human confirmation gate before `gh pr merge --squash --auto`. When set, the loop pauses at the merge step and emits an escalation notification (same format as `--on-escalate`) asking the human to merge manually, then polls for merge completion with a configurable timeout (default 60 min). Satisfies constitution §1.3 for users who want autonomous loop + manual merge.
+3. [x] **`--no-auto-merge` flag**: Insert a human confirmation gate before `gh pr merge --squash --auto`. When set, the loop pauses at the merge step and emits an escalation notification (same format as `--on-escalate`) asking the human to merge manually, then polls for merge completion with a configurable timeout (default 60 min). Satisfies constitution §1.3 for users who want autonomous loop + manual merge.
 
-4. [ ] **USAGE.md**: Update "Autonomous Phase Loop" section — add `--workflow`, `--team`, and `--no-auto-merge` flag descriptions with examples.
+4. [x] **USAGE.md**: Update "Autonomous Phase Loop" section — add `--workflow`, `--team`, and `--no-auto-merge` flag descriptions with examples.
 
-5. [ ] **Tests**: `--workflow` with missing file errors cleanly; `--team` loads reviewer from team.toml; `--no-auto-merge` emits escalation instead of calling `gh pr merge`.
+5. [x] **Tests**: `--workflow` with missing file errors cleanly; `--team` loads reviewer from team.toml; `--no-auto-merge` emits escalation instead of calling `gh pr merge`.
 
 #### Version: `0.17.0-alpha.11.1`
 
