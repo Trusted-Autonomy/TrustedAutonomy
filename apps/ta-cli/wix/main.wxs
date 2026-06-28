@@ -216,7 +216,7 @@
       Silent installs (/qn) bypass this UI entirely.
     -->
     <ui:WixUI Id="WixUI_FeatureTree" />
-    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+    <WixVariable Id="WixUILicenseRtf" Value="apps/ta-cli/wix/license.rtf" />
 
     <!--
       Custom action: run DISM to enable Client-ProjFS when the ProjFS feature is selected.
