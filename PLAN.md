@@ -9087,7 +9087,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.11.1 — Autonomous Loop: Wire --workflow/--team Flags + --no-auto-merge Gate
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Goal**: Fix two WARN findings from advisor review of v0.17.0.11. Neither is a correctness regression — the loop works — but both are UX/safety gaps that need closing.
 
