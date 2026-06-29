@@ -9124,23 +9124,6 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12`
 
 ---
-### v0.17.0.12.1 — Meridian Integration: MCP-First Revision + Platform Fix
-<!-- status: pending -->
-
-**Depends on**: v0.17.0.12 (Meridian Integration merged)
-
-**Goal**: Fix two oversights from v0.17.0.12 and upgrade the integration to use `meridian serve` (MCP) as the primary interface rather than shelling out to the binary per-subcommand.
-
-**Items**:
-1. [ ] **Cross-platform binary detection**: Replace the Unix-only `which` call in `find_meridian_binary()` (meridian.rs:58-65) with `std::process::Command::new("meridian").arg("--version")` probe — works on Windows (where `which` is absent) and avoids a subprocess just to find the path; fall back to explicit PATH search only if needed
-2. [ ] **Unit test coverage**: The existing test at meridian.rs:142-164 constructs a fake error manually and never calls `find_meridian_binary()`. Add an integration-style test that actually invokes the function and asserts it returns a sensible result (found or not found) depending on PATH
-3. [ ] **MCP-first agent integration**: Instead of shelling `meridian analyze`/`meridian suggest` per command, launch `meridian serve` as a sidecar MCP server and add it to the per-goal agent MCP config alongside the `ta` server — agents running goals get `meridian_report`, `meridian_analyze`, `meridian_kpis`, `meridian_suggest` as native tools with no subprocess-per-call overhead
-4. [ ] **CLI tool listing**: `ta meridian help` (or `ta meridian --list-tools`) starts a short-lived `meridian serve` session, calls the MCP `list_tools` endpoint, and prints the tool names + descriptions — users discover available capabilities without reading separate docs
-5. [ ] **USAGE.md**: Update "Effort & KPI Analytics" section to document the MCP-first model and `ta meridian help`
-
-#### Version: `0.17.0-alpha.12.1`
-
----
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
 <!-- status: pending -->
 
