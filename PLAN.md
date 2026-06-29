@@ -9174,6 +9174,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 3. [ ] **Pre-push version check hook** — `ta draft apply --git-commit` should verify Cargo.toml and CLAUDE.md agree BEFORE pushing, blocking the push if they diverge (not just relying on CI to catch it)
 4. [ ] **Version drift detection in `ta plan status`** — show current binary version vs. last-completed plan phase version; flag if they're out of sync
 5. [ ] **USAGE.md**: Document the version bump flow and how to diagnose/fix drift
+6. [ ] **Release gate: 3P plugin validation** — before every release, `ta release run` should verify all registered external tools/plugins install and respond correctly. Covers: Meridian (`meridian --version` + `meridian serve` health check), superpowers (`claude plugin list | grep superpowers`), and any user-added plugins in `EXTERNAL_TOOLS`. Failures block the release with a clear message showing which plugin failed and the install command.
 
 #### Version: `0.17.0-alpha.12.3`
 
