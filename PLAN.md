@@ -9155,6 +9155,11 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 4. [ ] **Stall classification in log**: When fallback-to-warn triggers, log *which* stall type occurred: `silence` (no events ever), `mid-thinking` (thinking started, no response), `partial-stream` (tokens received then stopped). This makes future debugging tractable.
 5. [ ] **Replace claude-flow in `EXTERNAL_TOOLS`** (`apps/ta-cli/src/commands/tools.rs`): Remove the `claude-flow` npm entry added in v0.17.0.12.1. Replace with `superpowers` (obra/superpowers Claude Code plugin, installed via `claude plugin install superpowers@superpowers-dev`). Keep `meridian` (cargo) and `bmad` (git) as-is.
 6. [ ] **USAGE.md**: Document the supervisor timeout behaviour and how to configure the silence threshold.
+7. [ ] **`ta daemon restart` graceful drain + `--force` override** (`apps/ta-cli/src/commands/daemon.rs`):
+   - **No timeout for completion** — if the daemon is responding, `ta daemon restart` requests a graceful drain (e.g. `/api/drain`), streams status messages as active connections and goal runs finish, and restarts only once the daemon signals clean. Never kill a responding daemon without `--force`.
+   - **`--force` flag** — bypass drain, force-stop immediately (SIGKILL after 1s if still alive), then restart. Also fixes the current silent-discard bug (`let _ = stop(...)`).
+   - **`ta daemon status`** — show what the daemon is actively doing: active goal runs, open MCP sessions, in-flight agent connections. Not just "running/stopped".
+   - **Principle**: Do not use hard timeouts for completion — gate on status messages and explicit completion signals. Timeouts are only for detecting unresponsiveness (silence).
 
 #### Version: `0.17.0-alpha.12.2`
 
