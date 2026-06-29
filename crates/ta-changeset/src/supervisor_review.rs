@@ -165,12 +165,29 @@ pub fn invoke_supervisor_agent(
             review
         }
         Err(e) => {
-            tracing::warn!(
-                error = %e,
-                agent = %config.agent,
-                "Supervisor agent failed — falling back to warn verdict"
-            );
-            fallback_supervisor_review(&config.agent, &e.to_string(), duration_secs)
+            let err_str = e.to_string();
+            // Extract stall type from the error message for actionable log context.
+            let stall_type = ["silence", "mid-thinking", "partial-stream"]
+                .iter()
+                .find(|&&t| err_str.contains(t))
+                .copied();
+            if let Some(stype) = stall_type {
+                tracing::warn!(
+                    error = %e,
+                    agent = %config.agent,
+                    stall_type = %stype,
+                    "Supervisor agent stalled ({}) after all retry attempts — \
+                     falling back to warn verdict",
+                    stype
+                );
+            } else {
+                tracing::warn!(
+                    error = %e,
+                    agent = %config.agent,
+                    "Supervisor agent failed — falling back to warn verdict"
+                );
+            }
+            fallback_supervisor_review(&config.agent, &err_str, duration_secs)
         }
     }
 }
@@ -211,16 +228,19 @@ fn invoke_claude_cli_supervisor(
         &[("CLAUDE_CODE_DISABLE_HOOKS", "1")]
     };
 
-    let stdout = spawn_with_heartbeat_monitor(
-        "claude",
-        &args_refs,
-        config.heartbeat_stale_secs,
-        config.heartbeat_path.as_deref(),
-        "Claude Code CLI",
-        staging,
-        disable_hooks_env,
-        Some(prompt),
-    )?;
+    // Retry up to 2× on stall (30s, then 60s backoff) before giving up.
+    let stdout = with_stall_retry("Claude Code CLI", &[30, 60], || {
+        spawn_with_heartbeat_monitor(
+            "claude",
+            &args_refs,
+            config.heartbeat_stale_secs,
+            config.heartbeat_path.as_deref(),
+            "Claude Code CLI",
+            staging,
+            disable_hooks_env,
+            Some(prompt),
+        )
+    })?;
 
     let text = extract_claude_stream_json_text(&stdout);
     let mut review = parse_supervisor_response_or_text(&text, "claude-code");
@@ -242,16 +262,18 @@ fn invoke_codex_supervisor(
     } else {
         &[("CLAUDE_CODE_DISABLE_HOOKS", "1")]
     };
-    let stdout = spawn_with_heartbeat_monitor(
-        "codex",
-        &["--approval-mode", "full-auto", "--quiet", prompt],
-        config.heartbeat_stale_secs,
-        config.heartbeat_path.as_deref(),
-        "Codex CLI",
-        staging,
-        disable_hooks_env,
-        None,
-    )?;
+    let stdout = with_stall_retry("Codex CLI", &[30, 60], || {
+        spawn_with_heartbeat_monitor(
+            "codex",
+            &["--approval-mode", "full-auto", "--quiet", prompt],
+            config.heartbeat_stale_secs,
+            config.heartbeat_path.as_deref(),
+            "Codex CLI",
+            staging,
+            disable_hooks_env,
+            None,
+        )
+    })?;
 
     let mut review = parse_supervisor_response_or_text(&stdout, "codex");
     apply_hedging_quality_gate(&mut review);
@@ -269,25 +291,27 @@ fn invoke_ollama_supervisor(
     } else {
         &[("CLAUDE_CODE_DISABLE_HOOKS", "1")]
     };
-    let stdout = spawn_with_heartbeat_monitor(
-        "ta",
-        &[
-            "agent",
-            "run",
-            "ollama",
-            "--headless",
-            "--tools",
-            "read,grep,glob",
-            "--prompt",
-            prompt,
-        ],
-        config.heartbeat_stale_secs,
-        config.heartbeat_path.as_deref(),
-        "ta-agent-ollama",
-        staging,
-        disable_hooks_env,
-        None,
-    )?;
+    let stdout = with_stall_retry("ta-agent-ollama", &[30, 60], || {
+        spawn_with_heartbeat_monitor(
+            "ta",
+            &[
+                "agent",
+                "run",
+                "ollama",
+                "--headless",
+                "--tools",
+                "read,grep,glob",
+                "--prompt",
+                prompt,
+            ],
+            config.heartbeat_stale_secs,
+            config.heartbeat_path.as_deref(),
+            "ta-agent-ollama",
+            staging,
+            disable_hooks_env,
+            None,
+        )
+    })?;
 
     let mut review = parse_supervisor_response_or_text(&stdout, "ollama");
     apply_hedging_quality_gate(&mut review);
@@ -311,6 +335,98 @@ fn is_hook_json_line(line: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Detect the start of an extended thinking block in Claude CLI stream-json output.
+///
+/// Claude CLI emits `{"type":"content_block_start","content_block":{"type":"thinking",...}}`
+/// when it enters extended thinking mode. While a thinking block is open, the model may
+/// produce no visible output tokens for an extended period — we apply a 3× silence budget
+/// so the stall watchdog does not fire prematurely.
+fn is_thinking_block_start(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') || !trimmed.contains("thinking") {
+        return false;
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        val.get("type").and_then(|t| t.as_str()) == Some("content_block_start")
+            && val
+                .get("content_block")
+                .and_then(|cb| cb.get("type"))
+                .and_then(|t| t.as_str())
+                == Some("thinking")
+    } else {
+        false
+    }
+}
+
+/// Detect the end of a content block in Claude CLI stream-json output.
+///
+/// `{"type":"content_block_stop",...}` closes the most recently opened content block,
+/// including thinking blocks. When we see this after a thinking block start, the model
+/// has finished thinking and normal token output should resume.
+fn is_content_block_stop(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        val.get("type").and_then(|t| t.as_str()) == Some("content_block_stop")
+    } else {
+        false
+    }
+}
+
+/// Retry wrapper for stall-prone subprocess invocations.
+///
+/// Calls `f()` up to `max_retries + 1` times. If `f()` returns a "stalled" error,
+/// waits `backoff_secs[attempt]` seconds and tries again. On non-stall errors or after
+/// exhausting retries, returns the error immediately.
+///
+/// The `label` string is used in log messages to identify the supervisor being retried.
+/// `backoff_secs` controls wait time before each retry; the built-in caller passes
+/// `&[30, 60]` for 30s before retry 1 and 60s before retry 2.
+fn with_stall_retry(
+    label: &str,
+    backoff_secs: &[u64],
+    mut f: impl FnMut() -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    let max_retries = backoff_secs.len();
+    let mut cumulative_wait: u64 = 0;
+
+    for attempt in 0..=max_retries {
+        match f() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                let is_stall = e.to_string().contains("Supervisor stalled");
+                if !is_stall || attempt == max_retries {
+                    return Err(e);
+                }
+                let wait = backoff_secs.get(attempt).copied().unwrap_or(60);
+                cumulative_wait += wait;
+                tracing::warn!(
+                    label = %label,
+                    attempt = attempt + 1,
+                    max_retries = %max_retries,
+                    wait_secs = wait,
+                    cumulative_wait_secs = cumulative_wait,
+                    stall_error = %e,
+                    "Supervisor stall on attempt {}/{} — retrying after {}s ({}s total wait so far)",
+                    attempt + 1,
+                    max_retries + 1,
+                    wait,
+                    cumulative_wait,
+                );
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "Supervisor '{}' stalled on all {} attempt(s) — giving up",
+        label,
+        max_retries + 1
+    )
 }
 
 /// Spawn a process and stream its stdout, writing a heartbeat file after each line received.
@@ -416,6 +532,9 @@ fn spawn_with_heartbeat_monitor(
     let mut stdout_str = String::new();
     let mut partial_output = String::new();
     let mut last_token = std::time::Instant::now();
+    // Extended-thinking awareness: when a thinking block is open, apply a 3× silence
+    // budget so the stall watchdog does not kill the supervisor mid-thought.
+    let mut thinking_open = false;
     let mut eof = false;
 
     while !eof {
@@ -428,6 +547,18 @@ fn spawn_with_heartbeat_monitor(
                 // resets once on the hook line, then waits 30s for real content.
                 if is_hook_json_line(&line) {
                     continue;
+                }
+                // Track extended thinking blocks for adaptive timeout.
+                if is_thinking_block_start(&line) && !thinking_open {
+                    thinking_open = true;
+                    tracing::info!(
+                        label = %label,
+                        "Supervisor entered extended thinking mode — \
+                         applying 3× silence timeout ({}s)",
+                        stale_secs * 3,
+                    );
+                } else if is_content_block_stop(&line) && thinking_open {
+                    thinking_open = false;
                 }
                 last_token = std::time::Instant::now();
                 stdout_str.push_str(&line);
@@ -446,17 +577,42 @@ fn spawn_with_heartbeat_monitor(
                 eof = true; // Reader sent EOF sentinel.
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Apply a 3× silence budget when inside a thinking block so the stall
+                // watchdog does not kill an extended-thinking supervisor mid-thought.
+                let effective_stale = if thinking_open {
+                    stale_duration * 3
+                } else {
+                    stale_duration
+                };
                 // No output received in poll_interval — check for stall.
-                if last_token.elapsed() >= stale_duration {
+                if last_token.elapsed() >= effective_stale {
+                    // Classify the stall type to aid future debugging.
+                    let stall_type = if partial_output.is_empty() {
+                        "silence" // no events ever received from the process
+                    } else if thinking_open {
+                        "mid-thinking" // thinking started but never closed
+                    } else {
+                        "partial-stream" // tokens received then stopped
+                    };
                     let _ = child.kill();
                     let _ = reader_handle.join();
                     if let Some(hb) = heartbeat_path {
                         let _ = std::fs::remove_file(hb);
                     }
                     let partial = partial_output.trim().to_string();
+                    tracing::warn!(
+                        label = %label,
+                        stall_type = %stall_type,
+                        silence_secs = effective_stale.as_secs(),
+                        "Supervisor stalled ({}): no tokens for {}s",
+                        stall_type,
+                        effective_stale.as_secs(),
+                    );
                     anyhow::bail!(
-                        "Supervisor stalled — no tokens received for {}s. Findings so far: {}",
-                        stale_secs,
+                        "Supervisor stalled ({}) — no tokens received for {}s. \
+                         Findings so far: {}",
+                        stall_type,
+                        effective_stale.as_secs(),
                         partial
                     );
                 }
@@ -1662,6 +1818,184 @@ mod tests {
             "stall error expected: {}",
             err
         );
+    }
+
+    // ── v0.17.0.12.2 — Extended thinking + stall classification ─────────────
+
+    #[test]
+    fn test_is_thinking_block_start_detects_thinking() {
+        let line = r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#;
+        assert!(
+            is_thinking_block_start(line),
+            "should detect thinking content_block_start"
+        );
+    }
+
+    #[test]
+    fn test_is_thinking_block_start_ignores_text_block() {
+        let line =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        assert!(
+            !is_thinking_block_start(line),
+            "text content_block_start must not be treated as thinking"
+        );
+    }
+
+    #[test]
+    fn test_is_thinking_block_start_ignores_non_json() {
+        assert!(!is_thinking_block_start("not json at all"));
+        assert!(!is_thinking_block_start(""));
+        assert!(!is_thinking_block_start("{not valid json}"));
+    }
+
+    #[test]
+    fn test_is_content_block_stop_detects_stop() {
+        let line = r#"{"type":"content_block_stop","index":0}"#;
+        assert!(
+            is_content_block_stop(line),
+            "should detect content_block_stop"
+        );
+    }
+
+    #[test]
+    fn test_is_content_block_stop_ignores_other_types() {
+        let line = r#"{"type":"content_block_start","content_block":{"type":"text"}}"#;
+        assert!(
+            !is_content_block_stop(line),
+            "content_block_start must not be treated as stop"
+        );
+        assert!(!is_content_block_stop("not json"));
+    }
+
+    /// A stream with a thinking block start then silence should fire the 3× timeout,
+    /// not the base timeout. We use stale_secs=1 and inject a thinking block line
+    /// before the process hangs — the test completes when the 3× timeout fires (3s).
+    ///
+    /// Note: this test takes ~3s due to the 3× timeout. It is marked slow but correct.
+    #[cfg(unix)]
+    #[test]
+    fn test_thinking_block_increases_timeout() {
+        // Emit a thinking block start then hang for 60s.
+        // stale_secs=1 → base timeout 1s, 3× timeout 3s.
+        // Without thinking awareness the process would be killed ~1s.
+        // With thinking awareness it should be killed ~3s.
+        let thinking_json =
+            r#"{"type":"content_block_start","content_block":{"type":"thinking","thinking":""}}"#;
+        let script = format!("echo '{}' && sleep 60", thinking_json);
+
+        let start = std::time::Instant::now();
+        let result = spawn_with_heartbeat_monitor(
+            "sh",
+            &["-c", &script],
+            1, // stale_secs = 1s base
+            None,
+            "sh",
+            None,
+            &[],
+            None,
+        );
+        let elapsed = start.elapsed().as_secs();
+
+        assert!(result.is_err(), "process should be killed on stall");
+        let err = result.unwrap_err().to_string();
+        // Error should mention "mid-thinking" stall type.
+        assert!(
+            err.contains("mid-thinking"),
+            "stall type should be 'mid-thinking' when thinking block is open: {}",
+            err
+        );
+        // Should have taken at least 2s (3× timeout, but process kill + scheduling latency).
+        assert!(
+            elapsed >= 2,
+            "extended thinking timeout should be ~3× base (got {}s)",
+            elapsed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stall_classified_as_silence_when_no_output() {
+        // Process hangs immediately with no output — stall type should be "silence".
+        let result =
+            spawn_with_heartbeat_monitor("sleep", &["60"], 1, None, "sleep", None, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("silence"),
+            "stall with no output should be classified as 'silence': {}",
+            err
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stall_classified_as_partial_stream_after_output() {
+        // Process emits output then hangs — stall type should be "partial-stream".
+        let result = spawn_with_heartbeat_monitor(
+            "sh",
+            &["-c", "echo some_output && sleep 60"],
+            1,
+            None,
+            "sh",
+            None,
+            &[],
+            None,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("partial-stream"),
+            "stall after partial output should be 'partial-stream': {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_with_stall_retry_succeeds_on_first_try() {
+        let result = with_stall_retry("test", &[], || Ok("ok".to_string()));
+        assert_eq!(result.unwrap(), "ok");
+    }
+
+    #[test]
+    fn test_with_stall_retry_propagates_non_stall_error() {
+        let result = with_stall_retry("test", &[0], || Err(anyhow::anyhow!("some other error")));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("some other error"));
+    }
+
+    #[test]
+    fn test_with_stall_retry_retries_on_stall_then_succeeds() {
+        // First call stalls, second call succeeds. Backoff 0s for test speed.
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count = call_count.clone();
+
+        let result = with_stall_retry("test", &[0], move || {
+            let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                Err(anyhow::anyhow!("Supervisor stalled (silence) — no tokens"))
+            } else {
+                Ok("ok".to_string())
+            }
+        });
+
+        assert_eq!(result.unwrap(), "ok");
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_with_stall_retry_exhausts_retries() {
+        // Always stalls — should fail after max_retries+1 attempts.
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count = call_count.clone();
+
+        let result = with_stall_retry("test", &[0, 0], move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("Supervisor stalled (silence) — no tokens"))
+        });
+
+        assert!(result.is_err());
+        // max_retries=2 → 3 total attempts (initial + 2 retries)
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     /// CLAUDE_CODE_DISABLE_HOOKS env var must be set in the supervisor subprocess env

@@ -600,7 +600,7 @@ The wizard walks you through five steps in a terminal UI:
 1. **AI Provider** — choose Anthropic Claude (API key) or Ollama (local models). If `ANTHROPIC_API_KEY` is already set in your environment, the key is detected automatically.
 2. **Implementation Agent** — choose `claude-code`, `codex`, `claude-flow`, or a custom binary. TA detects which are already on your `$PATH`.
 3. **Planning Framework** — choose Default (single-pass), BMAD (multi-role structured planning), or GSD (goal-structured decomposition).
-4. **Optional Components** — optionally install `claude-flow` (via npm) and/or BMAD (cloned to `~/.bmad`).
+4. **Optional Components** — optionally install `superpowers` (Claude Code plugin) and/or BMAD (cloned to `~/.bmad`).
 5. **Summary & Confirm** — review your selections and confirm.
 
 Configuration is written to `~/.config/ta/config.toml`. Your API key is stored securely in `~/.config/ta/secrets/` (mode 0600).
@@ -1161,6 +1161,22 @@ api_key_env = "OPENAI_API_KEY"   # TA checks this exists before spawning; codex 
 ```
 
 If the binary is not found, stalls (no tokens for `heartbeat_stale_secs`), or the response cannot be parsed, the supervisor falls back to a `warn` verdict automatically — it never blocks a draft due to its own failure.
+
+**Extended thinking awareness**
+
+When the supervisor uses a model with extended thinking enabled, TA detects the `content_block_start` / `content_block_stop` stream events emitted by the Claude CLI's `--output-format stream-json` mode. While a thinking block is open, the effective stale timeout is raised to `3 × heartbeat_stale_secs` — thinking can take tens of seconds with no visible token output. Once the thinking block closes, the threshold returns to normal.
+
+**Stall retry and classification**
+
+If the supervisor stalls despite the extended budget, TA automatically retries up to **two times** with exponential backoff (30 s, then 60 s) before falling back to `warn`. Each stall is classified in the daemon log:
+
+| Stall type | Meaning |
+|---|---|
+| `silence` | The process started but produced no output at all |
+| `mid-thinking` | Output started, a thinking block opened, but never closed |
+| `partial-stream` | Tokens arrived, then output stopped before the response was complete |
+
+The stall type appears in the structured log field `stall_type` alongside the `agent` and `error` fields, so you can diagnose whether a retry failure was a network issue, a model that ran out of thinking budget, or a partially-streamed response.
 
 **Hooks suppression in supervisor invocations**
 
@@ -7717,13 +7733,23 @@ Sends a graceful shutdown request via `POST /api/shutdown`, waits up to 5 second
 #### Restarting the daemon
 
 ```bash
+# Graceful restart — waits for active goals and agent sessions to finish first
 ta daemon restart
 
 # Restart on a different port
 ta daemon restart --port 8800
+
+# Force restart — SIGKILL the daemon immediately without waiting for drain
+ta daemon restart --force
 ```
 
-Stops the running daemon (if any), then starts a fresh one. Useful after upgrades or when the daemon version doesn't match the CLI version.
+By default, `ta daemon restart` performs a **graceful drain** before restarting:
+
+1. Checks the daemon's `/api/drain/status` endpoint every 2 seconds.
+2. Prints progress (`draining — N goals, M sessions active`) while work is in flight.
+3. Restarts once `status == "clean"` (all goals and sessions have finished), or immediately if the daemon stops responding.
+
+Use `--force` only when the daemon is unresponsive or you need to restart urgently — it bypasses the drain and sends SIGKILL. Active goal runs will be interrupted.
 
 #### Checking status
 
@@ -7731,7 +7757,7 @@ Stops the running daemon (if any), then starts a fresh one. Useful after upgrade
 ta daemon status
 ```
 
-Shows whether the daemon is running, its PID, port, version, project root, active agent count, and pending draft count. If the daemon is not running, it suggests `ta daemon start`.
+Shows whether the daemon is running, its PID, port, version, project root, uptime, active goal runs (with title, state, and running duration), active agent sessions, and pending draft count. If the daemon is not running, it suggests `ta daemon start`.
 
 #### Tailing logs
 

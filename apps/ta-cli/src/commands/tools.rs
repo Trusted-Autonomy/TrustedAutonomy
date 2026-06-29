@@ -29,6 +29,7 @@ pub struct ExternalTool {
 }
 
 /// How to install an optional external tool.
+#[allow(dead_code)]
 pub enum ExternalToolInstall {
     /// `cargo install <crate>`
     Cargo(&'static str),
@@ -39,6 +40,8 @@ pub enum ExternalToolInstall {
         url: &'static str,
         dest: &'static str,
     },
+    /// `claude plugin install <plugin-spec>` (Claude Code plugin registry)
+    ClaudePlugin(&'static str),
 }
 
 /// All optional tools TA knows about.
@@ -47,12 +50,12 @@ pub enum ExternalToolInstall {
 /// `plugins/<name>/plugin.toml` with `type = "external-tool"`.
 pub const EXTERNAL_TOOLS: &[ExternalTool] = &[
     ExternalTool {
-        name: "claude-flow",
-        label: "claude-flow agent framework",
-        description: "Multi-agent orchestration with swarm support (npm)",
-        detect_command: "claude-flow --version",
-        install_hint: "npm install -g claude-flow",
-        install: ExternalToolInstall::Npm("claude-flow"),
+        name: "superpowers",
+        label: "Superpowers Claude Code plugin",
+        description: "Agent skills and orchestration plugin for Claude Code",
+        detect_command: "claude-plugin:superpowers",
+        install_hint: "claude plugin install superpowers@superpowers-dev",
+        install: ExternalToolInstall::ClaudePlugin("superpowers@superpowers-dev"),
     },
     ExternalTool {
         name: "bmad",
@@ -88,7 +91,7 @@ pub enum ToolsCommands {
     ///
     /// Example:
     ///   ta tools install meridian
-    ///   ta tools install claude-flow
+    ///   ta tools install superpowers
     ///   ta tools install bmad
     Install {
         /// Tool name (run `ta tools list` to see available names)
@@ -129,6 +132,9 @@ pub fn check_tool_installed(tool: &ExternalTool) -> bool {
         let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
         return std::path::Path::new(&expanded).is_dir();
     }
+    if let Some(plugin_name) = tool.detect_command.strip_prefix("claude-plugin:") {
+        return check_claude_plugin_installed(plugin_name);
+    }
     let parts: Vec<&str> = tool.detect_command.split_whitespace().collect();
     if parts.is_empty() {
         return false;
@@ -140,6 +146,24 @@ pub fn check_tool_installed(tool: &ExternalTool) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Check whether a Claude Code plugin is installed by querying `claude plugin list`.
+///
+/// Returns false if `claude` is not on PATH or the plugin name is not in the output.
+fn check_claude_plugin_installed(plugin_name: &str) -> bool {
+    let output = std::process::Command::new("claude")
+        .args(["plugin", "list"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.contains(plugin_name)
+        }
+        Err(_) => false,
+    }
 }
 
 pub fn install_tool(name: &str) -> Result<()> {
@@ -201,6 +225,28 @@ pub fn install_tool(name: &str) -> Result<()> {
                 anyhow::bail!("git clone failed.\nTry manually: {}", tool.install_hint);
             }
             println!("{} installed to {}.", tool.label, expanded_dest);
+        }
+        ExternalToolInstall::ClaudePlugin(plugin_spec) => {
+            println!(
+                "Installing {} via claude plugin install {}...",
+                tool.label, plugin_spec
+            );
+            let status = std::process::Command::new("claude")
+                .args(["plugin", "install", plugin_spec])
+                .status()
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "claude not found: {e}. \
+                         Install Claude Code first (https://claude.ai/code)."
+                    )
+                })?;
+            if !status.success() {
+                anyhow::bail!(
+                    "claude plugin install failed.\nTry manually: {}",
+                    tool.install_hint
+                );
+            }
+            println!("{} installed successfully.", tool.label);
         }
     }
     Ok(())
