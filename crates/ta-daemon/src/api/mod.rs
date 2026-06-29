@@ -16,6 +16,7 @@ pub mod agent_profiles;
 pub mod auth;
 pub mod cmd;
 pub mod context_upload;
+pub mod drain;
 pub mod events;
 pub mod goal_output;
 pub mod health;
@@ -490,8 +491,9 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         .route("/api/links", get(links::get_links))
         // Agent profile inventory (v0.16.3).
         .route("/api/agents/profiles", get(agent_profiles::list_profiles))
-        // Daemon lifecycle routes (v0.10.10).
+        // Daemon lifecycle routes (v0.10.10 / v0.17.0.12.2).
         .route("/api/shutdown", post(shutdown_daemon))
+        .route("/api/drain/status", get(drain::drain_status))
         // Auth middleware on all API routes.
         .layer(middleware::from_fn_with_state(
             state.clone(),

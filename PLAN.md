@@ -9142,20 +9142,20 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.2 — Supervisor Heartbeat + Adaptive Timeout + Tool Defaults Cleanup
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.12.1
 
 **Goal**: Fix the supervisor stall bug (90s hard timeout fires mid extended-thinking, killing valid reviews) and clean up the external tool defaults introduced in v0.17.0.12.1 to replace claude-flow with superpowers.
 
 **Items**:
-1. [ ] **Supervisor heartbeat**: Replace the 90-second wall-clock watchdog with an event-driven heartbeat. Any stream event (output token, thinking block start/end, ping) resets the timer. The hard timeout only fires on true comms silence — no event of any kind for N seconds (configurable, suggested default: 120s).
-2. [ ] **Extended thinking awareness**: Detect when the last received event was a `thinking` block open (no close yet) and apply a longer silence budget (suggested: 3× the base timeout). Log when extended thinking mode is detected so the user can see the supervisor is working.
-3. [ ] **Retry on stall**: On silence timeout, retry the supervisor call 2× with exponential backoff (30s, 60s) before falling back to warn. Log the retry attempt, retry count, and cumulative wait time.
-4. [ ] **Stall classification in log**: When fallback-to-warn triggers, log *which* stall type occurred: `silence` (no events ever), `mid-thinking` (thinking started, no response), `partial-stream` (tokens received then stopped). This makes future debugging tractable.
-5. [ ] **Replace claude-flow in `EXTERNAL_TOOLS`** (`apps/ta-cli/src/commands/tools.rs`): Remove the `claude-flow` npm entry added in v0.17.0.12.1. Replace with `superpowers` (obra/superpowers Claude Code plugin, installed via `claude plugin install superpowers@superpowers-dev`). Keep `meridian` (cargo) and `bmad` (git) as-is.
-6. [ ] **USAGE.md**: Document the supervisor timeout behaviour and how to configure the silence threshold.
-7. [ ] **`ta daemon restart` graceful drain + `--force` override** (`apps/ta-cli/src/commands/daemon.rs`):
+1. [x] **Supervisor heartbeat**: Replace the 90-second wall-clock watchdog with an event-driven heartbeat. Any stream event (output token, thinking block start/end, ping) resets the timer. The hard timeout only fires on true comms silence — no event of any kind for N seconds (configurable, suggested default: 120s).
+2. [x] **Extended thinking awareness**: Detect when the last received event was a `thinking` block open (no close yet) and apply a longer silence budget (suggested: 3× the base timeout). Log when extended thinking mode is detected so the user can see the supervisor is working.
+3. [x] **Retry on stall**: On silence timeout, retry the supervisor call 2× with exponential backoff (30s, 60s) before falling back to warn. Log the retry attempt, retry count, and cumulative wait time.
+4. [x] **Stall classification in log**: When fallback-to-warn triggers, log *which* stall type occurred: `silence` (no events ever), `mid-thinking` (thinking started, no response), `partial-stream` (tokens received then stopped). This makes future debugging tractable.
+5. [x] **Replace claude-flow in `EXTERNAL_TOOLS`** (`apps/ta-cli/src/commands/tools.rs`): Remove the `claude-flow` npm entry added in v0.17.0.12.1. Replace with `superpowers` (obra/superpowers Claude Code plugin, installed via `claude plugin install superpowers@superpowers-dev`). Keep `meridian` (cargo) and `bmad` (git) as-is.
+6. [x] **USAGE.md**: Document the supervisor timeout behaviour and how to configure the silence threshold.
+7. [x] **`ta daemon restart` graceful drain + `--force` override** (`apps/ta-cli/src/commands/daemon.rs`):
    - **No timeout for completion** — if the daemon is responding, `ta daemon restart` requests a graceful drain (e.g. `/api/drain`), streams status messages as active connections and goal runs finish, and restarts only once the daemon signals clean. Never kill a responding daemon without `--force`.
    - **`--force` flag** — bypass drain, force-stop immediately (SIGKILL after 1s if still alive), then restart. Also fixes the current silent-discard bug (`let _ = stop(...)`).
    - **`ta daemon status`** — show what the daemon is actively doing: active goal runs, open MCP sessions, in-flight agent connections. Not just "running/stopped".

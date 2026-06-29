@@ -27,10 +27,20 @@ pub enum DaemonCommands {
     /// Stop the running daemon gracefully.
     Stop,
     /// Restart the daemon (stop + start). Handles version mismatches.
+    ///
+    /// By default, waits for active goal runs and agent sessions to finish
+    /// before restarting (graceful drain). Use --force to skip the drain and
+    /// force-kill immediately.
     Restart {
         /// Override the daemon HTTP port on restart.
         #[arg(long)]
         port: Option<u16>,
+        /// Skip graceful drain and force-kill the daemon immediately (SIGKILL).
+        ///
+        /// Use only when the daemon is unresponsive or you need to restart urgently.
+        /// Active goal runs will be interrupted.
+        #[arg(long)]
+        force: bool,
     },
     /// Show daemon status: PID, port, version, uptime, project root, active goals.
     Status,
@@ -74,7 +84,7 @@ pub fn execute(command: &DaemonCommands, project_root: &Path) -> anyhow::Result<
     match command {
         DaemonCommands::Start { foreground, port } => cmd_start(project_root, *foreground, *port),
         DaemonCommands::Stop => cmd_stop(project_root),
-        DaemonCommands::Restart { port } => cmd_restart(project_root, *port),
+        DaemonCommands::Restart { port, force } => cmd_restart(project_root, *port, *force),
         DaemonCommands::Status => cmd_status(project_root),
         DaemonCommands::Log {
             lines,
@@ -367,14 +377,112 @@ pub fn stop(project_root: &Path) -> anyhow::Result<()> {
 }
 
 /// Restart the daemon: stop the old one (if running), then start a new one.
+///
+/// Stops the daemon gracefully (HTTP shutdown). "Not running" errors are ignored
+/// so this can be called when the daemon may or may not be live.
 pub fn restart(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<u32> {
-    // Stop (ignore errors if not running).
-    let _ = stop(project_root);
+    // Stop the daemon, ignoring errors that simply mean it was not running.
+    match stop(project_root) {
+        Ok(_) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            // Only suppress "not running" variants — propagate real errors.
+            let is_not_running = msg.contains("not running")
+                || msg.contains("no PID file")
+                || msg.contains("Cannot reach daemon");
+            if !is_not_running {
+                return Err(e);
+            }
+        }
+    }
 
     // Brief pause to let the port be released.
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     start(project_root, port_override)
+}
+
+/// Force-kill the daemon (SIGKILL) and start a fresh one.
+///
+/// Sends SIGKILL to the daemon process (if a PID is known), waits 1s for exit,
+/// then starts a new daemon. Skips the graceful drain — active goal runs are interrupted.
+pub fn force_restart(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<u32> {
+    if let Some(pid) = read_pid(project_root) {
+        if is_process_alive(pid) {
+            eprintln!("Force-killing daemon (pid {})...", pid);
+            #[cfg(unix)]
+            {
+                let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if is_process_alive(pid) {
+                    return Err(anyhow::anyhow!(
+                        "Daemon (pid {}) did not exit after SIGKILL. \
+                         Check system resources or try manually: kill -9 {}",
+                        pid,
+                        pid
+                    ));
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                // Non-POSIX: fall back to graceful stop.
+                let _ = stop(project_root);
+            }
+        }
+    } else {
+        // No PID file — try HTTP shutdown (may already be down).
+        let _ = stop(project_root);
+    }
+    remove_pid_file(project_root);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    start(project_root, port_override)
+}
+
+/// Poll `/api/drain/status` until the daemon reports no active work.
+///
+/// Prints progress every poll cycle. Returns `Ok(())` as soon as the daemon is
+/// clean or stops responding (the latter means it already exited, which is also fine).
+/// Never times out — gate on completion signals, not wall-clock.
+fn drain_and_poll(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<()> {
+    let base_url = resolve_daemon_url(project_root, port_override);
+    let drain_url = format!("{}/api/drain/status", base_url);
+
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // Cannot build client — proceed without drain check.
+    };
+
+    eprintln!("Waiting for active work to complete before restart...");
+
+    loop {
+        match client.get(&drain_url).send() {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    let status = json["status"].as_str().unwrap_or("draining");
+                    let active_goals = json["active_goals"].as_u64().unwrap_or(0);
+                    let active_sessions = json["active_sessions"].as_u64().unwrap_or(0);
+
+                    if status == "clean" {
+                        eprintln!("  Daemon is clean — proceeding with restart.");
+                        return Ok(());
+                    }
+
+                    eprintln!(
+                        "  Draining: {} active goal(s), {} active session(s) — waiting...",
+                        active_goals, active_sessions
+                    );
+                }
+            }
+            _ => {
+                // Daemon stopped responding — already exited or unreachable.
+                return Ok(());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
 }
 
 /// Ensure the daemon is running. If it's already responding, return Ok.
@@ -504,9 +612,30 @@ fn cmd_stop(project_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_restart(project_root: &Path, port: Option<u16>) -> anyhow::Result<()> {
+fn cmd_restart(project_root: &Path, port: Option<u16>, force: bool) -> anyhow::Result<()> {
     let old_pid = read_pid(project_root);
-    let new_pid = restart(project_root, port)?;
+
+    let new_pid = if force {
+        // --force: skip drain and SIGKILL immediately.
+        eprintln!("Force restart requested — skipping graceful drain.");
+        force_restart(project_root, port)?
+    } else {
+        // Graceful restart: check if daemon is responding, drain if so.
+        let base_url = resolve_daemon_url(project_root, port);
+        let health_url = format!("{}/health", base_url);
+        let reachable = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .ok()
+            .and_then(|c| c.get(&health_url).send().ok())
+            .is_some();
+
+        if reachable {
+            drain_and_poll(project_root, port)?;
+        }
+        restart(project_root, port)?
+    };
+
     let effective_port = read_pid_port(project_root).unwrap_or(7700);
 
     if let Some(old) = old_pid {
@@ -554,10 +683,9 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
                     let json: serde_json::Value = resp.json()?;
                     let version = json["version"].as_str().unwrap_or("?");
                     let project = json["project"].as_str().unwrap_or("?");
-                    let active_agents = json["active_agents"]
-                        .as_array()
-                        .map(|a| a.len())
-                        .unwrap_or(0);
+                    let active_agents = json["active_agents"].as_array();
+                    let active_count = active_agents.map(|a| a.len()).unwrap_or(0);
+                    let active_goals = json["active_goals"].as_u64().unwrap_or(0);
                     let pending_drafts = json["pending_drafts"].as_u64().unwrap_or(0);
 
                     println!("Daemon is running.");
@@ -566,9 +694,48 @@ fn cmd_status(project_root: &Path) -> anyhow::Result<()> {
                     println!("  Version:        {}", version);
                     println!("  Project:        {}", project);
                     println!("  Project root:   {}", project_root.display());
-                    println!("  Active agents:  {}", active_agents);
+                    println!("  Active goals:   {}", active_goals);
+                    println!("  Active agents:  {}", active_count);
                     println!("  Pending drafts: {}", pending_drafts);
                     println!("  Log:            {}", log_path(project_root).display());
+
+                    // Show per-goal details when there are active goals.
+                    if let Some(agents) = active_agents {
+                        if !agents.is_empty() {
+                            println!();
+                            println!("  Active goal runs:");
+                            for a in agents {
+                                let title = a["title"].as_str().unwrap_or("?");
+                                let state = a["state"].as_str().unwrap_or("?");
+                                let secs = a["running_secs"].as_i64().unwrap_or(0);
+                                let goal_id = a["goal_id"].as_str().unwrap_or("?");
+                                let pid_str = a["agent_pid"]
+                                    .as_u64()
+                                    .map(|p| format!(" pid={}", p))
+                                    .unwrap_or_default();
+                                println!(
+                                    "    [{}] {} — {} ({}s{})",
+                                    &goal_id[..8.min(goal_id.len())],
+                                    title,
+                                    state,
+                                    secs,
+                                    pid_str,
+                                );
+                            }
+                        }
+                    }
+
+                    // Also show open agent sessions (MCP/shell connections).
+                    let drain_url = format!("{}/api/drain/status", base_url);
+                    if let Ok(dr) = client.get(&drain_url).send() {
+                        if let Ok(dj) = dr.json::<serde_json::Value>() {
+                            let sessions = dj["active_sessions"].as_u64().unwrap_or(0);
+                            if sessions > 0 {
+                                println!();
+                                println!("  Open agent sessions (MCP/shell): {}", sessions);
+                            }
+                        }
+                    }
                 }
                 _ => {
                     println!(
