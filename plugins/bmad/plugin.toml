@@ -1,0 +1,18 @@
+name = "bmad"
+version = "0.1.0"
+type = "external-tool"
+description = "BMAD planning library — structured multi-role planning with Analyst, Architect, and PM agent roles"
+detect_command = "test -d ~/.bmad/agents"
+install_hint = "git clone --depth=1 https://github.com/bmadcode/bmad-method ~/.bmad"
+
+# Integration with TA:
+#   - ta onboard   — installs BMAD and sets bmad_home in global config
+#   - Set defaults.planning_framework = "bmad" in ~/.config/ta/config.toml
+#
+# Prerequisites:
+#   - git
+
+[install]
+method = "git"
+url = "https://github.com/bmadcode/bmad-method"
+dest = "~/.bmad"

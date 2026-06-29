@@ -1,0 +1,17 @@
+name = "claude-flow"
+version = "0.1.0"
+type = "external-tool"
+description = "claude-flow agent framework — multi-agent orchestration with swarm support for parallel goal execution"
+detect_command = "claude-flow --version"
+install_hint = "npm install -g claude-flow"
+
+# Integration with TA:
+#   - ta run "goal" --agent claude-flow   — use claude-flow as the agent framework
+#   - ta onboard                           — installs claude-flow via wizard Step 4
+#
+# Prerequisites:
+#   - Node.js (https://nodejs.org)
+
+[install]
+method = "npm"
+package = "claude-flow"

@@ -239,6 +239,17 @@ print_instructions() {
 }
 
 # Main execution
+check_optional_tools() {
+    # Show optional tools status via `ta tools list` if ta is already on PATH.
+    if command -v ta >/dev/null 2>&1; then
+        echo ""
+        ta tools list 2>/dev/null || true
+        echo ""
+        echo "Install any missing tool with:  ta tools install <name>"
+        echo "Or run 'ta onboard' to install them interactively."
+    fi
+}
+
 run_onboarding() {
     # Only run the onboarding wizard if stdin is an interactive terminal.
     if [ -t 0 ] && [ -t 1 ]; then
@@ -267,6 +278,7 @@ main() {
     verify_installation
     check_path
     print_instructions
+    check_optional_tools
     run_onboarding
 }
 

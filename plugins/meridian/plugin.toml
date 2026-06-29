@@ -1,0 +1,21 @@
+name = "meridian"
+version = "0.1.0"
+type = "external-tool"
+description = "Meridian KPI analytics — velocity reports, cost-per-phase breakdowns, and goal-alignment scoring via MCP sidecar"
+detect_command = "meridian --version"
+install_hint = "cargo install meridian"
+
+# Integration with TA:
+#   - ta meridian help       — list available MCP tools exposed by Meridian
+#   - ta meridian status     — check if Meridian is installed and reachable
+#   - Meridian runs as an MCP sidecar (meridian serve) when goals are started
+#
+# Configuration: add to .ta/daemon.toml to pin a binary path:
+#   [meridian]
+#   binary = "/path/to/meridian"
+#
+# Or set TA_MERIDIAN_BINARY environment variable.
+
+[install]
+method = "cargo"
+crate = "meridian"

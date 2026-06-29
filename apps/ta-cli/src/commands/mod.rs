@@ -60,6 +60,7 @@ pub mod team;
 pub mod template;
 pub mod terms;
 pub mod token;
+pub mod tools;
 pub mod upgrade;
 pub mod verify;
 pub mod version_guard;
