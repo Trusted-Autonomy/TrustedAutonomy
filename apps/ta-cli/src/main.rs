@@ -646,6 +646,23 @@ enum Commands {
         #[command(subcommand)]
         command: commands::stats::StatsCommands,
     },
+
+    /// Effort and KPI analytics via Meridian (v0.17.0.12).
+    ///
+    /// Delegates to the `meridian` binary on PATH. TA emits token counts and
+    /// timing data in `.ta/velocity-history.jsonl` so Meridian can report
+    /// cost-per-phase, throughput, and KPI alignment rather than time-as-proxy.
+    ///
+    /// Subcommands:
+    ///   ta meridian analyze  — run KPI analysis against velocity data
+    ///   ta meridian init     — create meridian.toml with starter KPI definitions
+    ///   ta meridian suggest  — surface KPI alignment gaps with suggestions
+    ///
+    /// Install Meridian: cargo install meridian
+    Meridian {
+        #[command(subcommand)]
+        command: commands::meridian::MeridianCommands,
+    },
     /// Access and manage community knowledge resources (v0.13.6).
     ///
     /// `ta community list` shows configured resources with sync status.
@@ -1234,6 +1251,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Connector { command } => commands::connector::execute(command, &config),
         Commands::Compression { command } => commands::compression::execute(command, &config),
         Commands::Webhook { command } => commands::webhook::execute(command, &config),
+        Commands::Meridian { command } => commands::meridian::execute(command, &config),
         Commands::Serve => {
             // First-run gate: warn if provider is not yet configured.
             // TA_SKIP_ONBOARD_CHECK=1 bypasses in CI.

@@ -9109,17 +9109,17 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12 — Meridian Integration: Token Tracking + `ta meridian`
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: Meridian repo (`Trusted-Autonomy/meridian`) shipped and on PATH
 
 **Goal**: First-class TA→Meridian integration. TA emits token counts so Meridian can report cost rather than time-as-proxy. `ta meridian` is a thin CLI delegation so users never need to invoke the Meridian binary directly.
 
 **Items**:
-1. [ ] Add `tokens_input: Option<u64>` and `tokens_output: Option<u64>` to `VelocityEntry` in `crates/ta-goal/src/velocity.rs`; write them from claude-code subprocess exit metadata when available
-2. [ ] `ta meridian` subcommand group in `apps/ta-cli/src/commands/meridian.rs` — delegates to the `meridian` binary on PATH: `ta meridian analyze` → `meridian analyze --source ta --path <project_root>`; `ta meridian init` → `meridian init`; `ta meridian suggest` → `meridian suggest --source ta --path <project_root>`
-3. [ ] Helpful error when `meridian` binary not found: print install instructions (`cargo install meridian` / `cargo install --git https://github.com/Trusted-Autonomy/meridian`)
-4. [ ] USAGE.md: "Effort & KPI Analytics (Meridian)" section — shows `ta meridian analyze`, `ta meridian suggest`, and link to Meridian standalone docs
+1. [x] Add `tokens_input: Option<u64>` and `tokens_output: Option<u64>` to `VelocityEntry` in `crates/ta-goal/src/velocity.rs`; write them from claude-code subprocess exit metadata when available
+2. [x] `ta meridian` subcommand group in `apps/ta-cli/src/commands/meridian.rs` — delegates to the `meridian` binary on PATH: `ta meridian analyze` → `meridian analyze --source ta --path <project_root>`; `ta meridian init` → `meridian init`; `ta meridian suggest` → `meridian suggest --source ta --path <project_root>`
+3. [x] Helpful error when `meridian` binary not found: print install instructions (`cargo install meridian` / `cargo install --git https://github.com/Trusted-Autonomy/meridian`)
+4. [x] USAGE.md: "Effort & KPI Analytics (Meridian)" section — shows `ta meridian analyze`, `ta meridian suggest`, and link to Meridian standalone docs
 
 #### Version: `0.17.0-alpha.12`
 
