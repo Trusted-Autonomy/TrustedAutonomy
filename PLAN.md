@@ -9109,7 +9109,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12 — Meridian Integration: Token Tracking + `ta meridian`
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: Meridian repo (`Trusted-Autonomy/meridian`) shipped and on PATH
 
