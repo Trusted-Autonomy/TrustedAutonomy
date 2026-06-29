@@ -9164,6 +9164,20 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12.2`
 
 ---
+### v0.17.0.12.3 — Version Bump Reliability
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.2
+**Goal**: Make phase version bumps reliable, verifiable, and unforgeable. The current system works when goals are run with `--phase`, but sub-phase bumps silently skip when the phase link is absent, CI catches the mismatch too late, and there's no in-band confirmation that a bump occurred.
+**Items**:
+1. [ ] **Require phase link for code-changing goals** — `ta run` without `--phase` should warn loudly (or optionally error with `--require-phase` config flag) so agents never produce unlinked drafts
+2. [ ] **Bump confirmation in apply output** — `ta draft apply` should print a visible confirmation line when it bumps the version: `[version] bumped Cargo.toml + CLAUDE.md to 0.17.0-alpha.12.3` — not just a hint on no-phase
+3. [ ] **Pre-push version check hook** — `ta draft apply --git-commit` should verify Cargo.toml and CLAUDE.md agree BEFORE pushing, blocking the push if they diverge (not just relying on CI to catch it)
+4. [ ] **Version drift detection in `ta plan status`** — show current binary version vs. last-completed plan phase version; flag if they're out of sync
+5. [ ] **USAGE.md**: Document the version bump flow and how to diagnose/fix drift
+
+#### Version: `0.17.0-alpha.12.3`
+
+---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
 <!-- status: pending -->
 
