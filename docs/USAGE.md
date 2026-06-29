@@ -598,7 +598,7 @@ ta onboard
 The wizard walks you through five steps in a terminal UI:
 
 1. **AI Provider** — choose Anthropic Claude (API key) or Ollama (local models). If `ANTHROPIC_API_KEY` is already set in your environment, the key is detected automatically.
-2. **Implementation Agent** — choose `claude-code`, `codex`, `claude-flow`, or a custom binary. TA detects which are already on your `$PATH`.
+2. **Implementation Agent** — choose `claude-code`, `codex`, or a custom binary. TA detects which are already on your `$PATH`.
 3. **Planning Framework** — choose Default (single-pass), BMAD (multi-role structured planning), or GSD (goal-structured decomposition).
 4. **Optional Components** — optionally install `superpowers` (Claude Code plugin) and/or BMAD (cloned to `~/.bmad`).
 5. **Summary & Confirm** — review your selections and confirm.
