@@ -9124,6 +9124,23 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12`
 
 ---
+### v0.17.0.12.1 — Meridian Integration: MCP-First Revision + Platform Fix
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.12 (Meridian Integration merged)
+
+**Goal**: Fix two correctness issues from v0.17.0.12 and upgrade the integration to use `meridian serve` (MCP) as the primary interface for agent use — removing the per-command subprocess overhead and enabling native tool-call access to all Meridian analytics from within running goals.
+
+**Items**:
+1. [ ] **Cross-platform binary detection**: Replace Unix-only `which` call in `find_meridian_binary()` (`apps/ta-cli/src/commands/meridian.rs`) with `Command::new("meridian").arg("--version")` probe — works on Windows where `which` is absent
+2. [ ] **Unit test coverage**: The existing test at `meridian.rs:142-164` constructs a fake error manually and never calls `find_meridian_binary()`. Add a test that invokes the real function and asserts a sensible result (found or not found) based on PATH
+3. [ ] **MCP-first agent integration**: Instead of shelling `meridian analyze`/`meridian suggest` per command, launch `meridian serve` as a sidecar MCP server and add it to the per-goal agent MCP config alongside the `ta` server — agents running goals get `meridian_report`, `meridian_analyze`, `meridian_kpis`, `meridian_suggest` as native tools
+4. [ ] **CLI tool listing**: `ta meridian help` starts a short-lived `meridian serve` session, calls the MCP `list_tools` endpoint, and prints tool names + descriptions — users discover available capabilities without reading separate docs
+5. [ ] **USAGE.md**: Update "Effort & KPI Analytics" section to document the MCP-first model and `ta meridian help`
+
+#### Version: `0.17.0-alpha.12.1`
+
+---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
 <!-- status: pending -->
 
@@ -9343,6 +9360,36 @@ Code releases use semver. Content releases don't. Decide:
 6. [ ] **USAGE.md**: `ta-agent` library documentation for third-party integrators.
 
 #### Version: `0.18.1-alpha`
+
+---
+### v0.18.1.1 — Native LLM Provider Abstraction: Model-Agnostic Agent Operation
+<!-- status: pending -->
+
+**Depends on**: v0.18.1 (`ta-agent` standalone library established)
+
+**Goal**: Remove the hard subprocess dependency on `claude`/`codex`/`ta-agent-ollama` binaries. Add a `ta-llm` crate that implements a `LlmProvider` trait with native API clients for OpenAI-compatible endpoints and Anthropic — any model reachable via those protocols (GLM, DeepSeek, Ollama, Qwen, OpenAI, Azure, Anthropic) becomes a first-class `AgentFrameworkManifest` option with zero additional binaries required. Existing subprocess-based frameworks continue to work unchanged.
+
+**Design principles**:
+- No model is required. The abstraction treats `claude`, `openai`, `ollama`, and any OpenAI-compat provider identically.
+- Provider config lives in the agent manifest (`provider:` block) — same TOML, same discovery path as framework manifests today.
+- Subprocess-based frameworks are not removed — they're an equally valid launch mode. `ChannelType::NativeApi` is additive.
+- Tool-call format differences are normalized internally; upstream code sees a single `ToolCall` / `ToolResult` type.
+
+**Items**:
+1. [ ] **`ta-llm` crate** (`crates/ta-llm/`): `LlmProvider` trait with `complete(messages, tools) -> impl Stream<CompletionEvent>`. Types: `ChatMessage`, `ToolCall`, `ToolResult`, `CompletionEvent`, `ProviderConfig { kind, base_url, model, api_key_env }`.
+2. [ ] **`OpenAiCompatProvider`**: HTTP client (reqwest async) to any OpenAI-compat `/v1/chat/completions` endpoint. Configurable `base_url` covers: Ollama (`http://localhost:11434`), GLM-4 (`https://open.bigmodel.cn/api/paas/v4`), DeepSeek, Azure OpenAI, and openai.com itself. Auth: reads `api_key_env` from environment; no key required for local endpoints.
+3. [ ] **`AnthropicProvider`**: Direct Anthropic Messages API client. Removes `claude` binary requirement for headless/programmatic use while keeping the existing claude-code subprocess path for interactive goals.
+4. [ ] **Tool-call normalization**: Single internal format maps to/from OpenAI function-calling schema and Anthropic `tool_use` blocks. Upstream `ta-agent` sees one type regardless of provider.
+5. [ ] **Streaming + observability**: Token-by-token `CompletionEvent::Token` streamed to TA's event bus. `CompletionEvent::ToolCallRequested` / `ToolCallResult` feed the existing draft-build pipeline. Input/output token counts written to `VelocityEntry` (extends v0.17.0.12 token tracking to native providers).
+6. [ ] **`AgentFrameworkManifest` `provider:` block**: Add optional `provider: ProviderConfig` field. When present and `ChannelType::NativeApi`, `ta-agent` uses `ta-llm` instead of spawning a subprocess. Existing manifests without `provider:` are unchanged.
+7. [ ] **Upgrade Ollama built-in manifest**: Add `provider: { kind: openai_compat, base_url: "${OLLAMA_HOST:-http://localhost:11434}", model: "" }` to the built-in Ollama manifest. `ta-agent-ollama` binary becomes optional; the built-in path works without it.
+8. [ ] **GLM-4 example manifest**: Ship `.ta/agents/glm.example.yaml` demonstrating `provider.kind = openai_compat` + `api_key_env = TA_ZHIPUAI_API_KEY` + `base_url`. Validated against GLM-4-Plus API in CI with a smoke-test (mocked HTTP).
+9. [ ] **Tests**: Provider round-trip with mock HTTP server (wiremock or httpmock). Tool-call normalization for both schemas. Streaming backpressure. Token counting against mock response. Manifest `provider:` field round-trips through YAML serde.
+10. [ ] **USAGE.md**: "Using any LLM provider" section — shows how to write a manifest for Ollama, OpenAI, GLM, or any OpenAI-compat model; documents `TA_<PROVIDER>_API_KEY` convention.
+
+#### Version: `0.18.1.1-alpha`
+
+---
 ### v0.18.2 — Extract App Packaging as `ta-package` + Cross-Platform Installer
 <!-- status: pending -->
 
