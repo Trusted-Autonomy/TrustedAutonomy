@@ -177,6 +177,16 @@ pub struct VelocityEntry {
     /// `false` for Ollama/Codex/unknown agents where cost data is unavailable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cost_estimated: bool,
+    // ── Meridian-compatible token fields (v0.17.0.12) ───────────────
+    /// Input tokens in Meridian's field-name convention (`tokens_input`).
+    /// `None` when no token data was captured; `Some(n)` when captured (even if n=0).
+    /// Meridian reads `velocity-history.jsonl` and uses this field for cost reporting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_input: Option<u64>,
+    /// Output tokens in Meridian's field-name convention (`tokens_output`).
+    /// `None` when no token data was captured; `Some(n)` when captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_output: Option<u64>,
 }
 
 impl VelocityEntry {
@@ -220,6 +230,8 @@ impl VelocityEntry {
             cost_usd: 0.0,
             model: String::new(),
             cost_estimated: false,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
@@ -255,13 +267,17 @@ impl VelocityEntry {
 
     /// Populate token cost fields from accumulated agent token counts (v0.15.14.2).
     ///
-    /// Uses the model rate table to compute `cost_usd`. For non-Claude models,
-    /// sets `cost_usd = 0.0` and `cost_estimated = false`.
+    /// Sets both the legacy `input_tokens`/`output_tokens` fields and the Meridian-compatible
+    /// `tokens_input`/`tokens_output` Option fields. Uses the model rate table to compute
+    /// `cost_usd`. For non-Claude models, sets `cost_usd = 0.0` and `cost_estimated = false`.
     pub fn with_token_cost(mut self, input_tokens: u64, output_tokens: u64, model: &str) -> Self {
         use crate::token_cost::compute_cost;
         self.input_tokens = input_tokens;
         self.output_tokens = output_tokens;
         self.model = model.to_string();
+        // Meridian-compatible fields: Some(n) indicates data was captured.
+        self.tokens_input = Some(input_tokens);
+        self.tokens_output = Some(output_tokens);
         let (cost, estimated) = compute_cost(model, input_tokens, output_tokens);
         self.cost_usd = cost;
         self.cost_estimated = estimated;
@@ -1117,6 +1133,26 @@ mod tests {
         assert!(entry.cost_estimated);
         assert!(entry.cost_usd > 0.0);
         assert_eq!(entry.model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn with_token_cost_sets_meridian_fields() {
+        let goal = make_goal();
+        let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied).with_token_cost(
+            100_000,
+            20_000,
+            "claude-sonnet-4-6",
+        );
+        assert_eq!(entry.tokens_input, Some(100_000));
+        assert_eq!(entry.tokens_output, Some(20_000));
+    }
+
+    #[test]
+    fn meridian_fields_none_before_with_token_cost() {
+        let goal = make_goal();
+        let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied);
+        assert_eq!(entry.tokens_input, None);
+        assert_eq!(entry.tokens_output, None);
     }
 
     #[test]

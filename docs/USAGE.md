@@ -12309,6 +12309,54 @@ The CSV export includes `machine_id`, `committer`, `input_tokens`, `output_token
 
 ---
 
+## Effort & KPI Analytics (Meridian)
+
+[Meridian](https://github.com/Trusted-Autonomy/meridian) is a standalone KPI analytics tool that reads TA's velocity history to produce cost-per-phase breakdowns, throughput reports, and goal-alignment scoring. `ta meridian` is a thin delegation layer so you never need to invoke the `meridian` binary directly.
+
+### Installing Meridian
+
+```bash
+cargo install meridian
+# or from source:
+cargo install --git https://github.com/Trusted-Autonomy/meridian
+```
+
+If `meridian` is not on your PATH, `ta meridian` will print install instructions and exit.
+
+### Initializing Meridian in a project
+
+Run this once per project to create `meridian.toml` with starter KPI definitions:
+
+```bash
+ta meridian init
+```
+
+Edit `meridian.toml` to customize your team's success metrics (throughput targets, cost-per-phase budgets, category weights).
+
+### Analyzing velocity data
+
+```bash
+ta meridian analyze
+```
+
+Reads `.ta/velocity-history.jsonl` and `.ta/velocity-stats.jsonl` to compute cost-per-phase, throughput, and KPI alignment scores. Output includes a summary table and a per-phase breakdown.
+
+### Surfacing alignment suggestions
+
+```bash
+ta meridian suggest
+```
+
+Runs Meridian's regression engine against your velocity history to classify past plan phases by business category, score them against the KPIs defined in `meridian.toml`, and surface alignment gaps with concrete suggestions for structuring future phases.
+
+### How TA feeds Meridian
+
+TA writes token counts and timing data to `.ta/velocity-history.jsonl` whenever a goal completes. Each entry carries Meridian-compatible fields (`tokens_input`, `tokens_output`) in addition to TA's own cost fields, so Meridian can report actual API cost rather than using time as a cost proxy.
+
+The history file is committed to version control (unlike `velocity-stats.jsonl` which is gitignored), so team members and Meridian always see the full multi-machine history.
+
+---
+
 ## Human Review Items
 
 When an agent completes a plan phase, most items in the checklist are things the agent verified itself — tests passed, linting clean, files written. But some items can only be verified by a human: checking visual output in an editor, confirming UX wording with a stakeholder, testing a connector against a real project.

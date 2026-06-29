@@ -29,6 +29,7 @@ pub mod install;
 pub mod link;
 pub mod manifest;
 pub mod memory;
+pub mod meridian;
 pub mod new;
 pub mod notify;
 pub mod office;
