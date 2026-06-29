@@ -9142,7 +9142,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.2 — Supervisor Heartbeat + Adaptive Timeout + Tool Defaults Cleanup
-<!-- status: pending -->
+<!-- status: in_progress -->
 
 **Depends on**: v0.17.0.12.1
 
