@@ -9141,6 +9141,24 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12.1`
 
 ---
+### v0.17.0.12.2 — Supervisor Heartbeat + Adaptive Timeout + Tool Defaults Cleanup
+<!-- status: pending -->
+
+**Depends on**: v0.17.0.12.1
+
+**Goal**: Fix the supervisor stall bug (90s hard timeout fires mid extended-thinking, killing valid reviews) and clean up the external tool defaults introduced in v0.17.0.12.1 to replace claude-flow with superpowers.
+
+**Items**:
+1. [ ] **Supervisor heartbeat**: Replace the 90-second wall-clock watchdog with an event-driven heartbeat. Any stream event (output token, thinking block start/end, ping) resets the timer. The hard timeout only fires on true comms silence — no event of any kind for N seconds (configurable, suggested default: 120s).
+2. [ ] **Extended thinking awareness**: Detect when the last received event was a `thinking` block open (no close yet) and apply a longer silence budget (suggested: 3× the base timeout). Log when extended thinking mode is detected so the user can see the supervisor is working.
+3. [ ] **Retry on stall**: On silence timeout, retry the supervisor call 2× with exponential backoff (30s, 60s) before falling back to warn. Log the retry attempt, retry count, and cumulative wait time.
+4. [ ] **Stall classification in log**: When fallback-to-warn triggers, log *which* stall type occurred: `silence` (no events ever), `mid-thinking` (thinking started, no response), `partial-stream` (tokens received then stopped). This makes future debugging tractable.
+5. [ ] **Replace claude-flow in `EXTERNAL_TOOLS`** (`apps/ta-cli/src/commands/tools.rs`): Remove the `claude-flow` npm entry added in v0.17.0.12.1. Replace with `superpowers` (obra/superpowers Claude Code plugin, installed via `claude plugin install superpowers@superpowers-dev`). Keep `meridian` (cargo) and `bmad` (git) as-is.
+6. [ ] **USAGE.md**: Document the supervisor timeout behaviour and how to configure the silence threshold.
+
+#### Version: `0.17.0-alpha.12.2`
+
+---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
 <!-- status: pending -->
 
