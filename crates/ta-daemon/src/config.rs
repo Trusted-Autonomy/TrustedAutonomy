@@ -123,6 +123,40 @@ pub struct DaemonConfig {
     /// ```
     #[serde(default)]
     pub compression: CompressionConfig,
+
+    /// Meridian analytics integration (v0.17.0.12.1).
+    ///
+    /// Set `binary` when `meridian` is installed outside your PATH, or to pin
+    /// a specific version. TA auto-detects via PATH when this is omitted.
+    ///
+    /// ```toml
+    /// [meridian]
+    /// binary = "/usr/local/bin/meridian"   # full path — use when meridian is not on PATH
+    /// ```
+    #[serde(default)]
+    pub meridian: MeridianConfig,
+}
+
+/// Meridian analytics configuration in `.ta/daemon.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MeridianConfig {
+    /// Path to the `meridian` binary. Defaults to auto-detection via PATH.
+    ///
+    /// Set this when `meridian` is installed outside your PATH, or when you
+    /// want to pin a specific version:
+    ///
+    /// ```toml
+    /// [meridian]
+    /// binary = "/usr/local/bin/meridian"
+    /// ```
+    ///
+    /// Detection order (first match wins):
+    /// 1. `TA_MERIDIAN_BINARY` env var
+    /// 2. This `binary` field
+    /// 3. `meridian` on PATH (cross-platform, handles Windows PATHEXT)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<PathBuf>,
 }
 
 /// Per-operation timeout configuration (v0.15.6.2 / v0.15.7.1).

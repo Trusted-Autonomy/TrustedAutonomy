@@ -12309,6 +12309,50 @@ The CSV export includes `machine_id`, `committer`, `input_tokens`, `output_token
 
 ---
 
+## Optional Tools
+
+TA works out-of-the-box but integrates with several optional external tools to add capabilities like multi-agent orchestration, structured planning, and KPI analytics.
+
+### Listing and installing optional tools
+
+```bash
+ta tools list            # show all optional tools and their install status
+ta tools install <name>  # install a specific tool
+```
+
+Example output of `ta tools list`:
+
+```
+Optional tools for Trusted Autonomy:
+
+  claude-flow          ✓ installed
+                       Multi-agent orchestration with swarm support (npm)
+                       npm install -g claude-flow
+
+  bmad                 ✗ not found
+                       Structured multi-role planning: Analyst, Architect, PM roles
+                       git clone --depth=1 https://github.com/bmadcode/bmad-method ~/.bmad
+
+  meridian             ✗ not found
+                       Velocity reports, cost-per-phase, and goal-alignment scoring (cargo)
+                       cargo install meridian
+
+Install missing tools with:  ta tools install <name>
+```
+
+### Installing interactively
+
+Run `ta onboard` to walk through Step 4 ("Optional Components"), which presents the same list as a checkbox TUI. Check the tools you want and they will be installed before setup completes.
+
+### Adding a new optional tool
+
+Optional tools are registered in `apps/ta-cli/src/commands/tools.rs` in the `EXTERNAL_TOOLS` array. Each entry requires:
+
+1. An `ExternalTool` entry in `EXTERNAL_TOOLS` with a `name`, `detect_command`, `install_hint`, and `install` method.
+2. A `plugins/<name>/plugin.toml` manifest documenting the tool and its TA integration.
+
+---
+
 ## Effort & KPI Analytics (Meridian)
 
 [Meridian](https://github.com/Trusted-Autonomy/meridian) is a standalone KPI analytics tool that reads TA's velocity history to produce cost-per-phase breakdowns, throughput reports, and goal-alignment scoring. `ta meridian` is a thin delegation layer so you never need to invoke the `meridian` binary directly.
@@ -12354,6 +12398,44 @@ Runs Meridian's regression engine against your velocity history to classify past
 TA writes token counts and timing data to `.ta/velocity-history.jsonl` whenever a goal completes. Each entry carries Meridian-compatible fields (`tokens_input`, `tokens_output`) in addition to TA's own cost fields, so Meridian can report actual API cost rather than using time as a cost proxy.
 
 The history file is committed to version control (unlike `velocity-stats.jsonl` which is gitignored), so team members and Meridian always see the full multi-machine history.
+
+### Meridian as an MCP sidecar
+
+When Meridian is installed, TA automatically adds `meridian serve` as an MCP sidecar to every goal. Agents running goals get Meridian's analytics as native tool calls — no manual invocation needed:
+
+| Tool | What it does |
+|---|---|
+| `meridian_report` | Full velocity + cost-per-phase report |
+| `meridian_analyze` | KPI alignment analysis against `meridian.toml` |
+| `meridian_kpis` | Current KPI definitions and targets |
+| `meridian_suggest` | Alignment suggestions for future plan phases |
+
+The sidecar is added automatically when `meridian` is on your PATH. If Meridian is not installed, goals run as normal without the analytics tools.
+
+### Configuring the Meridian binary path
+
+If `meridian` is installed outside your PATH, set its location in `.ta/daemon.toml`:
+
+```toml
+[meridian]
+binary = "/usr/local/bin/meridian"
+```
+
+You can also override the path for a single session with the `TA_MERIDIAN_BINARY` environment variable:
+
+```bash
+TA_MERIDIAN_BINARY=/opt/meridian/bin/meridian ta run "My goal"
+```
+
+TA checks in order: `TA_MERIDIAN_BINARY` env var → `daemon.toml [meridian].binary` → PATH (cross-platform, handles Windows PATHEXT).
+
+### Discovering available tools
+
+```bash
+ta meridian help
+```
+
+Starts a short-lived `meridian serve` session, queries the MCP `tools/list` endpoint, and prints every tool name and description. Use this to see exactly which analytics are available as native tool calls inside a running goal — useful after upgrading Meridian to discover new capabilities.
 
 ---
 

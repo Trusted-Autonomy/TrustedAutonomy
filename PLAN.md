@@ -9125,18 +9125,18 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.1 — Meridian Integration: MCP-First Revision + Platform Fix
-<!-- status: in_progress -->
+<!-- status: done -->
 
 **Depends on**: v0.17.0.12 (Meridian Integration merged)
 
 **Goal**: Fix two correctness issues from v0.17.0.12 and upgrade the integration to use `meridian serve` (MCP) as the primary interface for agent use — removing the per-command subprocess overhead and enabling native tool-call access to all Meridian analytics from within running goals.
 
 **Items**:
-1. [ ] **Cross-platform binary detection**: Replace Unix-only `which` call in `find_meridian_binary()` (`apps/ta-cli/src/commands/meridian.rs`) with `Command::new("meridian").arg("--version")` probe — works on Windows where `which` is absent
-2. [ ] **Unit test coverage**: The existing test at `meridian.rs:142-164` constructs a fake error manually and never calls `find_meridian_binary()`. Add a test that invokes the real function and asserts a sensible result (found or not found) based on PATH
-3. [ ] **MCP-first agent integration**: Instead of shelling `meridian analyze`/`meridian suggest` per command, launch `meridian serve` as a sidecar MCP server and add it to the per-goal agent MCP config alongside the `ta` server — agents running goals get `meridian_report`, `meridian_analyze`, `meridian_kpis`, `meridian_suggest` as native tools
-4. [ ] **CLI tool listing**: `ta meridian help` starts a short-lived `meridian serve` session, calls the MCP `list_tools` endpoint, and prints tool names + descriptions — users discover available capabilities without reading separate docs
-5. [ ] **USAGE.md**: Update "Effort & KPI Analytics" section to document the MCP-first model and `ta meridian help`
+1. [x] **Cross-platform binary detection**: Replace Unix-only `which` call in `find_meridian_binary()` (`apps/ta-cli/src/commands/meridian.rs`) with `Command::new("meridian").arg("--version")` probe — works on Windows where `which` is absent
+2. [x] **Unit test coverage**: The existing test at `meridian.rs:142-164` constructs a fake error manually and never calls `find_meridian_binary()`. Add a test that invokes the real function and asserts a sensible result (found or not found) based on PATH
+3. [x] **MCP-first agent integration**: Instead of shelling `meridian analyze`/`meridian suggest` per command, launch `meridian serve` as a sidecar MCP server and add it to the per-goal agent MCP config alongside the `ta` server — agents running goals get `meridian_report`, `meridian_analyze`, `meridian_kpis`, `meridian_suggest` as native tools
+4. [x] **CLI tool listing**: `ta meridian help` starts a short-lived `meridian serve` session, calls the MCP `list_tools` endpoint, and prints tool names + descriptions — users discover available capabilities without reading separate docs
+5. [x] **USAGE.md**: Update "Effort & KPI Analytics" section to document the MCP-first model and `ta meridian help`
 
 #### Version: `0.17.0-alpha.12.1`
 

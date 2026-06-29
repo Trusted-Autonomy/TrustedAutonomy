@@ -653,8 +653,12 @@ enum Commands {
     /// timing data in `.ta/velocity-history.jsonl` so Meridian can report
     /// cost-per-phase, throughput, and KPI alignment rather than time-as-proxy.
     ///
+    /// When Meridian is installed, TA automatically adds it as an MCP sidecar
+    /// to every goal — agents get meridian tools as native tool calls.
+    ///
     /// Subcommands:
     ///   ta meridian analyze  — run KPI analysis against velocity data
+    ///   ta meridian help     — list tools exposed by meridian serve (MCP)
     ///   ta meridian init     — create meridian.toml with starter KPI definitions
     ///   ta meridian suggest  — surface KPI alignment gaps with suggestions
     ///
@@ -662,6 +666,23 @@ enum Commands {
     Meridian {
         #[command(subcommand)]
         command: commands::meridian::MeridianCommands,
+    },
+    /// Check and manage optional external tools used by TA.
+    ///
+    /// `ta tools list` — show all optional tools and whether they are installed.
+    /// `ta tools install <name>` — install a specific tool by name.
+    ///
+    /// Optional tools are listed in EXTERNAL_TOOLS (commands/tools.rs) and
+    /// documented in plugins/<name>/plugin.toml. Adding a new tool requires
+    /// one entry in EXTERNAL_TOOLS and a plugin.toml manifest.
+    ///
+    /// Examples:
+    ///   ta tools list
+    ///   ta tools install meridian
+    ///   ta tools install claude-flow
+    Tools {
+        #[command(subcommand)]
+        command: commands::tools::ToolsCommands,
     },
     /// Access and manage community knowledge resources (v0.13.6).
     ///
@@ -1252,6 +1273,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Compression { command } => commands::compression::execute(command, &config),
         Commands::Webhook { command } => commands::webhook::execute(command, &config),
         Commands::Meridian { command } => commands::meridian::execute(command, &config),
+        Commands::Tools { command } => commands::tools::execute(command),
         Commands::Serve => {
             // First-run gate: warn if provider is not yet configured.
             // TA_SKIP_ONBOARD_CHECK=1 bypasses in CI.

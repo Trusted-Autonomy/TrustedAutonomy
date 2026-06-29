@@ -1978,7 +1978,12 @@ pub fn execute(
     //
     // Must run for ALL goal types (macro and non-macro): launch_agent_via_runtime always
     // passes --mcp-config pointing here. If the file doesn't exist, claude exits code 1.
-    if let Err(e) = write_stable_agent_mcp_config(&config.workspace_root, mcp_memory_injected) {
+    let meridian_binary = super::meridian::resolve_meridian_binary(&config.workspace_root);
+    if let Err(e) = write_stable_agent_mcp_config(
+        &config.workspace_root,
+        mcp_memory_injected,
+        meridian_binary.as_deref(),
+    ) {
         tracing::warn!("Failed to write stable MCP agent config: {}", e);
     }
 
@@ -4699,6 +4704,7 @@ pub(crate) fn inject_mcp_server_config(staging_path: &Path) -> anyhow::Result<()
 pub(crate) fn write_stable_agent_mcp_config(
     project_root: &Path,
     include_memory: bool,
+    meridian_binary: Option<&str>,
 ) -> anyhow::Result<()> {
     let ta_binary = std::env::current_exe()
         .ok()
@@ -4729,6 +4735,18 @@ pub(crate) fn write_stable_agent_mcp_config(
         });
         servers.insert("ta-memory".to_string(), memory_server);
         servers.insert("ta-community-hub".to_string(), community_server);
+    }
+
+    if let Some(binary) = meridian_binary {
+        // Meridian MCP sidecar: agents get meridian_report, meridian_analyze,
+        // meridian_kpis, meridian_suggest as native tool calls.
+        // Uses the resolved binary path (which may differ from bare "meridian" on
+        // Windows or when configured via TA_MERIDIAN_BINARY / daemon.toml).
+        let meridian_server = serde_json::json!({
+            "command": binary,
+            "args": ["serve"]
+        });
+        servers.insert("meridian-analytics".to_string(), meridian_server);
     }
 
     let config = serde_json::json!({ "mcpServers": servers });

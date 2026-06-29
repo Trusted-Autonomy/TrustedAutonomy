@@ -228,3 +228,16 @@ echo "  ta dev      # developer loop"
 echo "  ta --help   # all commands"
 echo ""
 echo "Usage guide: $HOME/.local/share/ta/USAGE.html"
+
+# Optional tools — offer to install any that are missing and known to ta tools list.
+# This loop runs only in an interactive terminal session.
+if [ -t 0 ] && [ -t 1 ] && command -v ta &>/dev/null; then
+    echo ""
+    echo "Checking optional tools..."
+    ta tools list 2>/dev/null || true
+    if ta tools list 2>/dev/null | grep -q "✗ not found"; then
+        echo ""
+        echo "Install missing tools with:  ta tools install <name>"
+        echo "Or run 'ta onboard' to install them interactively."
+    fi
+fi

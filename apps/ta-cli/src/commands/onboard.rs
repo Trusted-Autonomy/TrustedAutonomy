@@ -17,6 +17,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::Context;
+
+use super::tools::EXTERNAL_TOOLS;
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -411,6 +413,7 @@ fn bmad_installed() -> bool {
 // ── Install helpers ────────────────────────────────────────────────────────
 
 /// Clone BMAD to ~/.bmad. Returns Ok(()) on success or if already installed.
+#[allow(dead_code)]
 fn install_bmad() -> anyhow::Result<()> {
     if bmad_installed() {
         return Ok(()); // Already installed.
@@ -449,6 +452,7 @@ fn install_bmad() -> anyhow::Result<()> {
 }
 
 /// Install claude-flow via npm. Returns Ok(()) on success or if already installed.
+#[allow(dead_code)]
 fn install_claude_flow() -> anyhow::Result<()> {
     if detect_claude_flow() {
         return Ok(()); // Already installed.
@@ -669,8 +673,9 @@ struct WizardState {
     custom_agent_input: String,
     // Framework: 0=default, 1=bmad, 2=gsd
     framework_idx: usize,
-    // Optionals checkboxes: [claude-flow, bmad]
-    optionals: [bool; 2],
+    // Optionals checkboxes (one per EXTERNAL_TOOLS entry)
+    optionals: Vec<bool>,
+    optionals_cursor: usize,
     // Available agent detection
     agent_available: [bool; 3], // claude-code, codex, claude-flow
     // Detected values
@@ -723,7 +728,8 @@ impl WizardState {
             agent_idx: 0,
             custom_agent_input: String::new(),
             framework_idx: 0,
-            optionals: [false, false],
+            optionals: vec![false; EXTERNAL_TOOLS.len()],
+            optionals_cursor: 0,
             agent_available: [claude_code_ok, codex_ok, claude_flow_ok],
             detected_api_key,
             ollama_detected,
@@ -802,9 +808,16 @@ impl WizardState {
                 true
             }
             WizardStep::Framework => {
-                // Pre-check optionals based on selections
-                self.optionals[0] = self.agent_idx == 2; // claude-flow if selected as agent
-                self.optionals[1] = self.framework_idx == 1; // bmad if selected
+                // Pre-check optionals based on agent/framework selections
+                for (i, tool) in EXTERNAL_TOOLS.iter().enumerate() {
+                    if i < self.optionals.len() {
+                        self.optionals[i] = match tool.name {
+                            "claude-flow" => self.agent_idx == 2,
+                            "bmad" => self.framework_idx == 1,
+                            _ => self.optionals[i],
+                        };
+                    }
+                }
                 self.step = WizardStep::Optionals;
                 true
             }
@@ -1233,27 +1246,35 @@ fn render_optionals_step(frame: &mut Frame, state: &WizardState, area: Rect) {
     );
     frame.render_widget(title, chunks[0]);
 
-    let items = vec![
-        ListItem::new(format!(
-            "[{}] claude-flow agent framework  (npm install -g claude-flow)",
-            if state.optionals[0] { "x" } else { " " }
-        )),
-        ListItem::new(format!(
-            "[{}] BMAD planning library        (git clone to ~/.bmad)",
-            if state.optionals[1] { "x" } else { " " }
-        )),
-    ];
+    let items: Vec<ListItem> = EXTERNAL_TOOLS
+        .iter()
+        .enumerate()
+        .map(|(i, tool)| {
+            ListItem::new(format!(
+                "[{}] {}  ({})",
+                if state.optionals.get(i).copied().unwrap_or(false) {
+                    "x"
+                } else {
+                    " "
+                },
+                tool.label,
+                tool.install_hint,
+            ))
+        })
+        .collect();
 
     let mut list_state = ListState::default();
-    list_state.select(Some(0)); // No cursor needed for toggle
+    list_state.select(Some(state.optionals_cursor));
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::NONE))
         .highlight_style(Style::default().fg(Color::Cyan));
     frame.render_stateful_widget(list, chunks[1], &mut list_state);
 
-    let help = Paragraph::new("Space to toggle. These will be installed when you confirm.")
-        .style(Style::default().fg(Color::DarkGray));
+    let help = Paragraph::new(
+        "↑↓ move  Space toggle  Numbers 1-9 toggle by index.  These will be installed when you confirm.",
+    )
+    .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(help, chunks[2]);
 }
 
@@ -1370,21 +1391,21 @@ fn render_summary_step(frame: &mut Frame, state: &WizardState, area: Rect) {
         Span::styled(state.framework_name(), Style::default().fg(Color::White)),
     ]));
 
-    if state.optionals[0] || state.optionals[1] {
+    let selected_tools: Vec<&str> = EXTERNAL_TOOLS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| state.optionals.get(*i).copied().unwrap_or(false))
+        .map(|(_, t)| t.label)
+        .collect();
+    if !selected_tools.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
             "Will install: ",
             Style::default().fg(Color::Gray),
         )]));
-        if state.optionals[0] {
+        for label in &selected_tools {
             lines.push(Line::from(vec![Span::styled(
-                "  • claude-flow",
-                Style::default().fg(Color::Cyan),
-            )]));
-        }
-        if state.optionals[1] {
-            lines.push(Line::from(vec![Span::styled(
-                "  • BMAD (~/.bmad)",
+                format!("  • {label}"),
                 Style::default().fg(Color::Cyan),
             )]));
         }
@@ -1413,8 +1434,8 @@ fn render_summary_step(frame: &mut Frame, state: &WizardState, area: Rect) {
 // ── TUI event loop ─────────────────────────────────────────────────────────
 
 /// Run the interactive TUI wizard. Returns the final config to apply, or None if aborted.
-fn run_tui_wizard() -> anyhow::Result<Option<(GlobalConfig, bool, bool, bool)>> {
-    // Returns (config, install_claude_flow, install_bmad, enable_projfs)
+/// Tuple: (config, selected_tool_names, enable_projfs)
+fn run_tui_wizard() -> anyhow::Result<Option<(GlobalConfig, Vec<String>, bool)>> {
     let mut state = WizardState::new();
     let mut stdout = std::io::stdout();
 
@@ -1463,8 +1484,12 @@ fn run_tui_wizard() -> anyhow::Result<Option<(GlobalConfig, bool, bool, bool)>> 
         cfg.defaults.bmad_home = Some("~/.bmad".to_string());
     }
 
-    let install_cf = state.optionals[0];
-    let install_bmad = state.optionals[1];
+    let selected_tools: Vec<String> = super::tools::EXTERNAL_TOOLS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| state.optionals.get(*i).copied().unwrap_or(false))
+        .map(|(_, t)| t.name.to_string())
+        .collect();
     // Enable ProjFS when: user selected Yes on the WindowsFeatures step.
     let enable_projfs = !state.projfs_available && state.windows_features_idx == 0;
 
@@ -1473,7 +1498,7 @@ fn run_tui_wizard() -> anyhow::Result<Option<(GlobalConfig, bool, bool, bool)>> 
         store_api_key(&state.api_key_input)?;
     }
 
-    Ok(Some((cfg, install_cf, install_bmad, enable_projfs)))
+    Ok(Some((cfg, selected_tools, enable_projfs)))
 }
 
 fn run_wizard_loop(
@@ -1551,29 +1576,39 @@ fn run_wizard_loop(
                     _ => {}
                 },
 
-                WizardStep::Optionals => {
-                    match key.code {
-                        KeyCode::Up => {
-                            // No cursor for optionals, just toggle by index
+                WizardStep::Optionals => match key.code {
+                    KeyCode::Up => {
+                        if state.optionals_cursor > 0 {
+                            state.optionals_cursor -= 1;
                         }
-                        KeyCode::Down => {}
-                        KeyCode::Char(' ') | KeyCode::Char('1') => {
-                            state.optionals[0] = !state.optionals[0];
-                        }
-                        KeyCode::Char('2') => {
-                            state.optionals[1] = !state.optionals[1];
-                        }
-                        KeyCode::Enter | KeyCode::Right => {
-                            state.advance();
-                            state.message = None;
-                        }
-                        KeyCode::Esc | KeyCode::Left => {
-                            state.go_back();
-                            state.message = None;
-                        }
-                        _ => {}
                     }
-                }
+                    KeyCode::Down => {
+                        if state.optionals_cursor + 1 < EXTERNAL_TOOLS.len() {
+                            state.optionals_cursor += 1;
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        let i = state.optionals_cursor;
+                        if i < state.optionals.len() {
+                            state.optionals[i] = !state.optionals[i];
+                        }
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        let i = (c as usize).saturating_sub('1' as usize);
+                        if i < state.optionals.len() {
+                            state.optionals[i] = !state.optionals[i];
+                        }
+                    }
+                    KeyCode::Enter | KeyCode::Right => {
+                        state.advance();
+                        state.message = None;
+                    }
+                    KeyCode::Esc | KeyCode::Left => {
+                        state.go_back();
+                        state.message = None;
+                    }
+                    _ => {}
+                },
 
                 WizardStep::WindowsFeatures => match key.code {
                     KeyCode::Up if state.windows_features_idx > 0 => {
@@ -1754,21 +1789,15 @@ pub fn execute(
             println!("Setup cancelled. Run 'ta onboard' to configure later.");
             return Ok(());
         }
-        Some((cfg, do_install_cf, do_install_bmad, do_enable_projfs)) => {
+        Some((cfg, selected_tools, do_enable_projfs)) => {
             // Write config first.
             write_config(&cfg)?;
 
             // Run optional installs with progress output.
-            if do_install_cf {
+            for tool_name in &selected_tools {
                 println!();
-                if let Err(e) = install_claude_flow() {
-                    eprintln!("Warning: claude-flow install failed: {e}");
-                }
-            }
-            if do_install_bmad {
-                println!();
-                if let Err(e) = install_bmad() {
-                    eprintln!("Warning: BMAD install failed: {e}");
+                if let Err(e) = super::tools::install_tool(tool_name) {
+                    eprintln!("Warning: {} install failed: {e}", tool_name);
                 }
             }
 
