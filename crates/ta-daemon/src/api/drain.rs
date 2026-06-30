@@ -19,7 +19,7 @@ use crate::api::AppState;
 ///
 /// Returns:
 /// - `status`: `"clean"` when no active goals or agent sessions remain, `"draining"` otherwise.
-/// - `active_goals`: number of goal runs in Running/Configured/PrReady state.
+/// - `active_goals`: number of goal runs in Running/Configured state (PrReady excluded — agent is done).
 /// - `active_sessions`: number of agent sessions in Starting/Running/Idle state.
 ///
 /// The `ta daemon restart` CLI polls this endpoint every 2 seconds and restarts
@@ -36,7 +36,7 @@ pub async fn drain_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 .filter(|g| {
                     matches!(
                         g.state,
-                        GoalRunState::Running | GoalRunState::Configured | GoalRunState::PrReady
+                        GoalRunState::Running | GoalRunState::Configured
                     )
                 })
                 .count(),
