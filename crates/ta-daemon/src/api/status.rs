@@ -182,16 +182,12 @@ async fn compute_project_status(state: &AppState) -> ProjectStatus {
                 let idle_threshold = chrono::Duration::minutes(10);
                 let now = chrono::Utc::now();
 
+                // Only Running/Configured have an agent actively executing.
+                // PrReady: agent finished, draft awaiting human review — shown
+                // separately in the status display as "pending review", not "active".
                 let active: Vec<AgentInfo> = all
                     .iter()
-                    .filter(|g| {
-                        matches!(
-                            g.state,
-                            GoalRunState::Running
-                                | GoalRunState::Configured
-                                | GoalRunState::PrReady
-                        )
-                    })
+                    .filter(|g| matches!(g.state, GoalRunState::Running | GoalRunState::Configured))
                     .map(|g| {
                         let elapsed = now.signed_duration_since(g.created_at).num_seconds();
                         let is_active = (now - g.updated_at) < idle_threshold;

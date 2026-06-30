@@ -321,11 +321,29 @@ pub fn stop(project_root: &Path) -> anyhow::Result<()> {
     let shutdown_url = format!("{}/api/shutdown", base_url);
 
     // Try graceful shutdown via HTTP.
+    // The shutdown endpoint requires X-TA-Admin-Confirm: shutdown (v0.17.0.9)
+    // to prevent accidental shutdown by agent subprocesses. Auth is bypassed for
+    // loopback, so no Bearer token is needed from the CLI.
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()?;
 
-    let http_sent = client.post(&shutdown_url).send().is_ok();
+    let resp = client
+        .post(&shutdown_url)
+        .header("X-TA-Admin-Confirm", "shutdown")
+        .send();
+
+    let http_sent = match &resp {
+        Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            eprintln!(
+                "Warning: shutdown rate-limited (tried too recently). \
+                 Falling back to SIGTERM."
+            );
+            false // fall through to PID kill
+        }
+        Ok(_) => true,
+        Err(_) => false,
+    };
 
     if !http_sent {
         // If HTTP fails, try to kill by PID.
@@ -440,9 +458,14 @@ pub fn force_restart(project_root: &Path, port_override: Option<u16>) -> anyhow:
 
 /// Poll `/api/drain/status` until the daemon reports no active work.
 ///
-/// Prints progress every poll cycle. Returns `Ok(())` as soon as the daemon is
-/// clean or stops responding (the latter means it already exited, which is also fine).
-/// Never times out — gate on completion signals, not wall-clock.
+/// Prints progress on every poll cycle. Returns `Ok(())` as soon as the daemon
+/// is clean or stops responding (already exited is also fine).
+///
+/// Times out after `DRAIN_TIMEOUT_SECS` and returns an error explaining what is
+/// still blocking so the user knows whether to wait or use `--force`.
+const DRAIN_TIMEOUT_SECS: u64 = 30;
+const DRAIN_POLL_SECS: u64 = 2;
+
 fn drain_and_poll(project_root: &Path, port_override: Option<u16>) -> anyhow::Result<()> {
     let base_url = resolve_daemon_url(project_root, port_override);
     let drain_url = format!("{}/api/drain/status", base_url);
@@ -455,7 +478,8 @@ fn drain_and_poll(project_root: &Path, port_override: Option<u16>) -> anyhow::Re
         Err(_) => return Ok(()), // Cannot build client — proceed without drain check.
     };
 
-    eprintln!("Waiting for active work to complete before restart...");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(DRAIN_TIMEOUT_SECS);
+    eprintln!("Checking for active work before restart...");
 
     loop {
         match client.get(&drain_url).send() {
@@ -466,13 +490,33 @@ fn drain_and_poll(project_root: &Path, port_override: Option<u16>) -> anyhow::Re
                     let active_sessions = json["active_sessions"].as_u64().unwrap_or(0);
 
                     if status == "clean" {
-                        eprintln!("  Daemon is clean — proceeding with restart.");
+                        eprintln!("  No active work — restarting.");
                         return Ok(());
                     }
 
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        let mut what: Vec<String> = Vec::new();
+                        if active_goals > 0 {
+                            what.push(format!("{} running goal(s)", active_goals));
+                        }
+                        if active_sessions > 0 {
+                            what.push(format!("{} active agent session(s)", active_sessions));
+                        }
+                        return Err(anyhow::anyhow!(
+                            "Drain timed out after {}s — still waiting on: {}.\n\
+                             Use `ta daemon restart --force` to interrupt active work.",
+                            DRAIN_TIMEOUT_SECS,
+                            what.join(", ")
+                        ));
+                    }
+
                     eprintln!(
-                        "  Draining: {} active goal(s), {} active session(s) — waiting...",
-                        active_goals, active_sessions
+                        "  Waiting: {} running goal(s), {} active session(s) \
+                         ({}s remaining before timeout)...",
+                        active_goals,
+                        active_sessions,
+                        remaining.as_secs()
                     );
                 }
             }
@@ -481,7 +525,7 @@ fn drain_and_poll(project_root: &Path, port_override: Option<u16>) -> anyhow::Re
                 return Ok(());
             }
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(DRAIN_POLL_SECS));
     }
 }
 
