@@ -9165,7 +9165,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.3 — Version Bump Reliability + Daemon Restart Reliability
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.2
 **Goal**: Make phase version bumps reliable, verifiable, and unforgeable. Also fix `ta daemon restart` to accurately report active work and complete within expected timeouts — it was hanging indefinitely due to idle MCP connections and stale goal state being counted as active work.
 **Items**:
