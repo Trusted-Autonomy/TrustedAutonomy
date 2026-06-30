@@ -1078,6 +1078,23 @@ pub struct WorkflowSection {
     /// ```
     #[serde(default)]
     pub post_sync_build: WorkflowPostSyncBuildConfig,
+
+    /// Require a `--phase` link when starting a code-changing goal (v0.17.0.12.3).
+    ///
+    /// Controls what happens when `ta run` is invoked without a `--phase` argument
+    /// and a PLAN.md exists in the workspace:
+    ///
+    /// - `"warn"` (default): Print a warning and proceed — the draft will be created
+    ///   without a phase link and the version will not be auto-bumped.
+    /// - `"error"`: Refuse to start the goal. The user must supply `--phase <id>`.
+    /// - `"off"`: No warning or error. Silent (original behaviour before v0.17.0.12.3).
+    ///
+    /// ```toml
+    /// [workflow]
+    /// require_phase = "warn"   # "warn" | "error" | "off"
+    /// ```
+    #[serde(default = "default_require_phase")]
+    pub require_phase: String,
 }
 
 /// Auto-approve config from `[workflow.auto_approve]` in `.ta/workflow.toml`.
@@ -1125,6 +1142,10 @@ fn default_enforce_phase_order() -> String {
     "warn".to_string()
 }
 
+fn default_require_phase() -> String {
+    "warn".to_string()
+}
+
 fn default_context_budget_chars() -> usize {
     40_000
 }
@@ -1147,6 +1168,7 @@ impl Default for WorkflowSection {
             context_mode: ContextMode::default(),
             auto_approve: WorkflowAutoApproveConfig::default(),
             post_sync_build: WorkflowPostSyncBuildConfig::default(),
+            require_phase: default_require_phase(),
         }
     }
 }

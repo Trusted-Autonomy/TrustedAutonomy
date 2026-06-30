@@ -1802,6 +1802,41 @@ fn show_status(config: &GatewayConfig, json_output: bool) -> anyhow::Result<()> 
         }
     }
 
+    // v0.17.0.12.3: Always show binary version vs last-completed plan phase and flag drift.
+    {
+        let binary = binary_version();
+        // Find last sequential done phase with a semver ID.
+        let last_done = phases
+            .iter()
+            .rev()
+            .find(|p| p.status == PlanStatus::Done && parse_semver_id(&p.id).is_some());
+        println!();
+        match last_done {
+            Some(phase) => {
+                let expected = phase_id_to_semver(&phase.id).unwrap_or_else(|| phase.id.clone());
+                if binary == expected {
+                    println!(
+                        "Version: {} ✓  (binary matches last completed phase {})",
+                        binary, phase.id
+                    );
+                } else {
+                    println!(
+                        "Version: binary={binary}  last-phase={phase_id} (expected {expected})",
+                        binary = binary,
+                        phase_id = phase.id,
+                        expected = expected,
+                    );
+                    if let Some(warning) = check_version_sync(&phases) {
+                        println!("[!] {}", warning);
+                    }
+                }
+            }
+            None => {
+                println!("Version: {}  (no completed semver phases found)", binary);
+            }
+        }
+    }
+
     Ok(())
 }
 
