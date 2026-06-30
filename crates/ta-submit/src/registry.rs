@@ -301,28 +301,13 @@ pub fn enforce_section15_plugin(manifest: &crate::vcs_plugin_manifest::VcsPlugin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
     use tempfile::tempdir;
-
-    /// Clear TA agent VCS isolation env vars so test git operations target
-    /// the temp dir, not the staging repo (see v0.13.17.3).
-    fn clear_git_env(cmd: &mut Command) -> &mut Command {
-        cmd.env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_CEILING_DIRECTORIES")
-    }
 
     #[test]
     fn test_detect_adapter_git() {
         let dir = tempdir().unwrap();
-        // Initialize a git repo
-        clear_git_env(
-            Command::new("git")
-                .args(["-c", "safe.directory=*", "init"])
-                .current_dir(dir.path()),
-        )
-        .output()
-        .unwrap();
+        // detect_adapter only checks for .git directory presence — no git binary needed.
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
 
         let adapter = detect_adapter(dir.path());
         assert_eq!(adapter.name(), "git");
@@ -359,14 +344,9 @@ mod tests {
     #[test]
     fn test_detect_adapter_git_takes_priority_over_svn() {
         let dir = tempdir().unwrap();
-        // Both .git and .svn present — Git should win
-        clear_git_env(
-            Command::new("git")
-                .args(["-c", "safe.directory=*", "init"])
-                .current_dir(dir.path()),
-        )
-        .output()
-        .unwrap();
+        // Both .git and .svn present — Git should win.
+        // detect_adapter only checks directory presence — no git binary needed.
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
         std::fs::create_dir(dir.path().join(".svn")).unwrap();
 
         let adapter = detect_adapter(dir.path());
@@ -409,14 +389,9 @@ mod tests {
     #[test]
     fn test_select_adapter_none_auto_detects() {
         let dir = tempdir().unwrap();
-        // Initialize git repo with default "none" config — should auto-detect to git
-        clear_git_env(
-            Command::new("git")
-                .args(["-c", "safe.directory=*", "init"])
-                .current_dir(dir.path()),
-        )
-        .output()
-        .unwrap();
+        // select_adapter with default "none" config auto-detects from .git presence.
+        // detect_adapter only checks directory presence — no git binary needed.
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
 
         let config = SubmitConfig::default(); // adapter = "none"
         let adapter = select_adapter(dir.path(), &config);
