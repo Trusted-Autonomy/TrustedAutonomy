@@ -7236,7 +7236,24 @@ fn apply_package(
             if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
                 match bump_workspace_version(&target_dir, &new_ver) {
                     Ok(BumpResult::Bumped(bumped)) => {
-                        println!("[version] Phase {} → bumped to {}", last_phase_id, new_ver);
+                        // Collect human-readable file names for the confirmation line.
+                        let bumped_names: Vec<String> = bumped
+                            .iter()
+                            .filter_map(|p| {
+                                p.strip_prefix(&target_dir)
+                                    .ok()
+                                    .map(|r| r.to_string_lossy().into_owned())
+                            })
+                            .collect();
+                        println!(
+                            "[version] bumped {} to {}",
+                            if bumped_names.is_empty() {
+                                "version files".to_string()
+                            } else {
+                                bumped_names.join(" + ")
+                            },
+                            new_ver
+                        );
                         // Stage bumped files immediately. bump_workspace_version writes
                         // CLAUDE.md and Cargo.toml to disk but does NOT stage them.
                         // adapter.commit() only stages draft artifacts + auto_stage_candidates;
@@ -7250,7 +7267,6 @@ fn apply_package(
                                     .args(["add", &rel.to_string_lossy()])
                                     .current_dir(&target_dir)
                                     .output();
-                                println!("[version] staged: {}", rel.display());
                             }
                         }
                     }
@@ -7588,19 +7604,30 @@ fn apply_package(
                         if let Some(new_ver) = super::plan::phase_id_to_semver(&last_phase_id) {
                             match bump_workspace_version(&target_dir, &new_ver) {
                                 Ok(BumpResult::Bumped(bumped)) => {
+                                    let bumped_names: Vec<String> = bumped
+                                        .iter()
+                                        .filter_map(|p| {
+                                            p.strip_prefix(&target_dir)
+                                                .ok()
+                                                .map(|r| r.to_string_lossy().into_owned())
+                                        })
+                                        .collect();
                                     println!(
-                                        "[version] Phase {} → bumped to {}",
-                                        last_phase_id, new_ver
+                                        "[version] bumped {} to {}",
+                                        if bumped_names.is_empty() {
+                                            "version files".to_string()
+                                        } else {
+                                            bumped_names.join(" + ")
+                                        },
+                                        new_ver
                                     );
                                     // Stage bumped files so adapter.commit() picks them up.
-                                    // Same fix as the primary bump call site above.
                                     for bumped_path in &bumped {
                                         if let Ok(rel) = bumped_path.strip_prefix(&target_dir) {
                                             let _ = std::process::Command::new("git")
                                                 .args(["add", &rel.to_string_lossy()])
                                                 .current_dir(&target_dir)
                                                 .output();
-                                            println!("[version] staged: {}", rel.display());
                                         }
                                     }
                                 }
@@ -7861,6 +7888,35 @@ fn apply_package(
                         // Continue anyway if this is a "none" adapter
                         if adapter.name() != "none" {
                             anyhow::bail!("Failed to stage changes: {}", e);
+                        }
+                    }
+                }
+
+                // Pre-push version agreement check (v0.17.0.12.3).
+                // Verify that Cargo.toml and CLAUDE.md agree on the version BEFORE
+                // pushing, so CI's version-check job doesn't catch a drift first.
+                // Runs only when a phase is linked (version auto-bumped above).
+                if git_push && !phase_ids.is_empty() {
+                    if let Some(cargo_ver) = read_cargo_version(&target_dir) {
+                        if let Some(claude_ver) = read_claude_md_version(&target_dir) {
+                            if cargo_ver != claude_ver {
+                                eprintln!();
+                                eprintln!("╔══════════════════════════════════════════════════════════════╗");
+                                eprintln!("║  VERSION DRIFT — Cargo.toml and CLAUDE.md disagree          ║");
+                                eprintln!("╠══════════════════════════════════════════════════════════════╣");
+                                eprintln!("║  Cargo.toml:  {:<47}║", cargo_ver);
+                                eprintln!("║  CLAUDE.md:   {:<47}║", claude_ver);
+                                eprintln!("╠══════════════════════════════════════════════════════════════╣");
+                                eprintln!("║  Fix: run ./scripts/bump-version.sh <version> then retry    ║");
+                                eprintln!("╚══════════════════════════════════════════════════════════════╝");
+                                eprintln!();
+                                anyhow::bail!(
+                                    "Pre-push version check failed: Cargo.toml ({}) and CLAUDE.md ({}) \
+                                     disagree. Fix the drift before pushing — CI will reject this commit.\n\
+                                     \n  ./scripts/bump-version.sh {}",
+                                    cargo_ver, claude_ver, cargo_ver
+                                );
+                            }
                         }
                     }
                 }

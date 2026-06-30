@@ -1170,6 +1170,43 @@ pub fn execute(
     };
     let phase: Option<&str> = phase_owned.as_deref();
 
+    // ── Require-phase guard (v0.17.0.12.3) ──────────────────────
+    //
+    // When a PLAN.md exists and no phase was resolved, warn or error depending
+    // on the `[workflow].require_phase` config (default: "warn").
+    // Follow-up runs and --goal-id reuses are exempt (phase already set on goal).
+    if phase.is_none() && follow_up.is_none() && existing_goal_id.is_none() {
+        let source_root = source
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| config.workspace_root.clone());
+        if source_root.join("PLAN.md").exists() {
+            let wf =
+                ta_submit::WorkflowConfig::load_or_default(&source_root.join(".ta/workflow.toml"));
+            let mode = wf.workflow.require_phase.as_str();
+            if mode == "error" {
+                anyhow::bail!(
+                    "This project requires a --phase argument (require_phase = \"error\" in workflow.toml).\n\
+                     \n\
+                     Provide a plan phase to link this goal:\n\
+                     \n  ta run \"{title}\" --phase <phase-id>\n\
+                     \n\
+                     To see available phases:  ta plan status\n\
+                     To allow unlinked goals:  set require_phase = \"warn\" or \"off\" in .ta/workflow.toml",
+                    title = title.unwrap_or("goal title"),
+                );
+            } else if mode != "off" {
+                // Default: "warn"
+                eprintln!(
+                    "[warning] No --phase specified for this goal. The draft will be created \
+                     without a plan phase link and the version will not be auto-bumped on apply.\n\
+                     \n\
+                     To link a phase:  ta run \"<title>\" --phase <phase-id>\n\
+                     To suppress:      set require_phase = \"off\" in .ta/workflow.toml"
+                );
+            }
+        }
+    }
+
     // ── Phase-order guard (v0.14.3) ──────────────────────────────
     //
     // When a target phase is specified, check that earlier pending phases

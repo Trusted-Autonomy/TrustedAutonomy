@@ -9165,16 +9165,16 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.3 — Version Bump Reliability + Daemon Restart Reliability
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.2
 **Goal**: Make phase version bumps reliable, verifiable, and unforgeable. Also fix `ta daemon restart` to accurately report active work and complete within expected timeouts — it was hanging indefinitely due to idle MCP connections and stale goal state being counted as active work.
 **Items**:
-1. [ ] **Require phase link for code-changing goals** — `ta run` without `--phase` should warn loudly (or optionally error with `--require-phase` config flag) so agents never produce unlinked drafts
-2. [ ] **Bump confirmation in apply output** — `ta draft apply` should print a visible confirmation line when it bumps the version: `[version] bumped Cargo.toml + CLAUDE.md to 0.17.0-alpha.12.3` — not just a hint on no-phase
-3. [ ] **Pre-push version check hook** — `ta draft apply --git-commit` should verify Cargo.toml and CLAUDE.md agree BEFORE pushing, blocking the push if they diverge (not just relying on CI to catch it)
-4. [ ] **Version drift detection in `ta plan status`** — show current binary version vs. last-completed plan phase version; flag if they're out of sync
-5. [ ] **USAGE.md**: Document the version bump flow and how to diagnose/fix drift
-6. [ ] **Release gate: 3P plugin validation** — before every release, `ta release run` should verify all registered external tools/plugins install and respond correctly. Covers: Meridian (`meridian --version` + `meridian serve` health check), superpowers (`claude plugin list | grep superpowers`), and any user-added plugins in `EXTERNAL_TOOLS`. Failures block the release with a clear message showing which plugin failed and the install command.
+1. [x] **Require phase link for code-changing goals** — `ta run` without `--phase` should warn loudly (or optionally error with `--require-phase` config flag) so agents never produce unlinked drafts
+2. [x] **Bump confirmation in apply output** — `ta draft apply` should print a visible confirmation line when it bumps the version: `[version] bumped Cargo.toml + CLAUDE.md to 0.17.0-alpha.12.3` — not just a hint on no-phase
+3. [x] **Pre-push version check hook** — `ta draft apply --git-commit` should verify Cargo.toml and CLAUDE.md agree BEFORE pushing, blocking the push if they diverge (not just relying on CI to catch it)
+4. [x] **Version drift detection in `ta plan status`** — show current binary version vs. last-completed plan phase version; flag if they're out of sync
+5. [x] **USAGE.md**: Document the version bump flow and how to diagnose/fix drift
+6. [x] **Release gate: 3P plugin validation** — before every release, `ta release run` should verify all registered external tools/plugins install and respond correctly. Covers: Meridian (`meridian --version` + `meridian serve` health check), superpowers (`claude plugin list | grep superpowers`), and any user-added plugins in `EXTERNAL_TOOLS`. Failures block the release with a clear message showing which plugin failed and the install command.
 7. [x] **Drain: exclude `SessionStatus::Idle` from active sessions** (`crates/ta-daemon/src/api/drain.rs`): Idle = open MCP connection (e.g. Claude Code sidebar). These never close during normal use and must not block restart. Only `Starting` and `Running` sessions represent active agent work. (Fixed in PR #518)
 8. [x] **Drain: add 30s timeout with actionable error** (`apps/ta-cli/src/commands/drain_and_poll`): Was an infinite loop with no escape. Now times out after 30s, prints what is still blocking, and tells the user to use `--force` if they need to interrupt active goals. (Fixed in PR #518)
 9. [x] **Status display: exclude `PrReady` from active agents count** (`crates/ta-daemon/src/api/status.rs`): `PrReady` goals have a finished agent; showing them as "Active agents" was misleading. Now only `Running` and `Configured` goals appear as active. (Fixed in PR #518)

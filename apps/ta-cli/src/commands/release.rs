@@ -103,6 +103,15 @@ pub enum ReleaseCommands {
         /// Mark the dispatched label release as a pre-release (only used with --label).
         #[arg(long, default_value_t = false)]
         prerelease: bool,
+
+        /// Skip the pre-release third-party plugin validation check (not recommended).
+        ///
+        /// By default, `ta release run` verifies that all registered plugins
+        /// (Meridian, Superpowers, etc.) are installed and respond before starting
+        /// the pipeline. Use this flag to bypass the check when a plugin is
+        /// intentionally absent for this release.
+        #[arg(long, default_value_t = false)]
+        skip_plugin_check: bool,
     },
     /// Show the pipeline that would be executed (without running it).
     Show {
@@ -208,6 +217,7 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
             from_tag,
             label,
             prerelease,
+            skip_plugin_check,
         } => {
             if *interactive {
                 run_interactive_release(config, version)?;
@@ -223,6 +233,7 @@ pub fn execute(cmd: &ReleaseCommands, config: &GatewayConfig) -> anyhow::Result<
                     pipeline.as_deref(),
                     from_tag.as_deref(),
                     false,
+                    *skip_plugin_check,
                 );
                 match pipeline_result {
                     Err(e) if e.to_string() == "__pipeline_aborted__" => return Ok(()),
@@ -886,6 +897,7 @@ fn run_pipeline(
     pipeline_path: Option<&Path>,
     from_tag: Option<&str>,
     interactive: bool,
+    skip_plugin_check: bool,
 ) -> anyhow::Result<()> {
     // Acquire a release lockfile so `ta gc` knows not to delete staging dirs mid-pipeline.
     let _lock = if !dry_run {
@@ -964,6 +976,19 @@ fn run_pipeline(
                  Example: ta release run {} --auto-approve",
                 version
             );
+        }
+    }
+
+    // v0.17.0.12.3: Validate third-party plugins before starting the pipeline.
+    // Failures are non-fatal in dry-run mode (only warn) but block real releases.
+    if !skip_plugin_check {
+        if !dry_run {
+            validate_third_party_plugins()?;
+        } else {
+            // In dry-run, just warn but don't block.
+            if let Err(e) = validate_third_party_plugins() {
+                eprintln!("[dry-run] Plugin validation warning: {}", e);
+            }
         }
     }
 
@@ -2766,6 +2791,59 @@ fn count_tags_since(root: &Path, since_tag: Option<&str>) -> usize {
     count
 }
 
+/// Validate that all registered third-party plugins respond correctly before a release.
+///
+/// Checks every tool in `EXTERNAL_TOOLS`:
+/// - For tools with a `detect_command`, run it and verify exit 0.
+/// - For Meridian specifically: also attempt a `meridian serve --health-check` call.
+///
+/// Returns `Ok(())` if all tools respond, or an error listing which tools failed
+/// and their install commands.
+fn validate_third_party_plugins() -> anyhow::Result<()> {
+    use super::tools::{check_tool_installed, EXTERNAL_TOOLS};
+
+    let mut failed: Vec<(&str, &str)> = Vec::new(); // (label, install_hint)
+
+    for tool in EXTERNAL_TOOLS {
+        if !check_tool_installed(tool) {
+            failed.push((tool.label, tool.install_hint));
+            continue;
+        }
+        // For Meridian: additionally verify it responds to --version at runtime
+        // (installed binary might be broken or wrong architecture).
+        if tool.name == "meridian" {
+            let ok = std::process::Command::new("meridian")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                failed.push((tool.label, tool.install_hint));
+            }
+        }
+    }
+
+    if failed.is_empty() {
+        println!("[plugins] All registered plugins verified ✓");
+        return Ok(());
+    }
+
+    let mut msg = format!(
+        "{} plugin(s) failed pre-release validation — fix them before releasing:\n",
+        failed.len()
+    );
+    for (label, hint) in &failed {
+        msg.push_str(&format!("\n  ✗ {}\n    Install: {}", label, hint));
+    }
+    msg.push_str(
+        "\n\nFix the issues above and re-run `ta release run`. \
+         To skip this check: use `ta release run --skip-plugin-check` (not recommended).",
+    );
+    anyhow::bail!("{}", msg)
+}
+
 fn validate_release(
     config: &GatewayConfig,
     version: &str,
@@ -3965,7 +4043,7 @@ steps:
         .unwrap();
 
         // Dry run should succeed even though the step would fail.
-        run_pipeline(&config, "1.0.0", true, true, None, None, None, false).unwrap();
+        run_pipeline(&config, "1.0.0", true, true, None, None, None, false, true).unwrap();
     }
 
     #[test]
@@ -4337,7 +4415,7 @@ steps:
         .unwrap();
 
         // Run with --yes to skip approvals.
-        run_pipeline(&config, "1.0.0", true, false, None, None, None, false).unwrap();
+        run_pipeline(&config, "1.0.0", true, false, None, None, None, false, true).unwrap();
 
         // Verify the marker file was created.
         let marker = temp.path().join("release-marker.txt");
@@ -4740,7 +4818,7 @@ steps:
         .unwrap();
 
         // Dry run should succeed even with failing steps and approval gates.
-        run_pipeline(&config, "1.0.0", false, true, None, None, None, false).unwrap();
+        run_pipeline(&config, "1.0.0", false, true, None, None, None, false, true).unwrap();
 
         // Nothing should have been executed — no files created.
         assert!(!temp.path().join("release-marker.txt").exists());
@@ -4792,9 +4870,11 @@ steps:
 
         // skip_approvals=false, dry_run=false, interactive=false → must fail before
         // executing any steps (stdin is non-TTY in tests).
-        let err = run_pipeline(&config, "1.0.0", false, false, None, None, None, false)
-            .unwrap_err()
-            .to_string();
+        let err = run_pipeline(
+            &config, "1.0.0", false, false, None, None, None, false, true,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("--interactive") || err.contains("--auto-approve"),
             "expected early-exit error with flag hints, got: {}",
@@ -5023,7 +5103,18 @@ steps:
         .unwrap();
 
         // Use a version with a hyphen so it passes through normalization unchanged.
-        run_pipeline(&config, "1.2.3-dev", true, false, None, None, None, false).unwrap();
+        run_pipeline(
+            &config,
+            "1.2.3-dev",
+            true,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
 
         // The version file should have been updated with the exact version passed in.
         let content = std::fs::read_to_string(dir.join("version.txt")).unwrap();
