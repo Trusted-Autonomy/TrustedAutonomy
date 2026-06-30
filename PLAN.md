@@ -9179,6 +9179,23 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12.3`
 
 ---
+### v0.17.0.12.4 — `ta memory serve` + `ta community serve` MCP Subcommands
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.3
+
+**Goal**: Implement the two MCP subcommands that `run.rs` has been generating into `.ta/mcp-agent.json` and staging `.mcp.json` since v0.13.8, but which have never existed. Until this ships, every agent goal run has two broken MCP servers silently failing at startup. Fix that immediately by guarding the injection; then ship the real implementations.
+
+**Items**:
+1. [ ] **Suppress broken injection until subcommands exist** — in `write_stable_agent_mcp_config` and `inject_memory_mcp_server` (`apps/ta-cli/src/commands/run.rs`): guard both `ta-memory` and `ta-community-hub` entries behind a binary existence / subcommand availability check. Until this phase ships, agents should not see broken servers.
+2. [ ] **`ta memory serve`** — MCP server subcommand for the default `FsMemoryStore` backend. Exposes the same memory tools already wired in `ta-mcp-gateway/src/tools/context.rs` as a standalone stdio MCP server so external clients (Claude Code, Codex, etc.) can reach TA memory without running a full `ta serve`. Uses `TA_PROJECT_ROOT` env var (set by the injector) to locate `.ta/memory/`.
+3. [ ] **`ta community serve`** — MCP server subcommand that wraps the `ta-community-hub` JSON-stdio plugin and re-exposes its five tools (`community_search`, `community_get`, `community_annotate`, `community_feedback`, `community_suggest`) as proper MCP tool calls. Spawns the `ta-community-hub` binary (searched in `~/.local/share/ta/plugins/knowledge/` and `$PATH`) and translates between MCP and the JSON-stdio protocol. Returns a clear error if `ta-community-hub` binary is not installed.
+4. [ ] **Build + install `ta-community-hub`** in `install_local.sh` — add it alongside the Discord channel plugin so a fresh `./install_local.sh` produces a working community hub binary at `~/.local/bin/ta-community-hub`.
+5. [ ] **Re-enable injection** in `write_stable_agent_mcp_config` and `inject_memory_mcp_server` after items 2–4 are implemented; remove the guard added in item 1.
+6. [ ] **USAGE.md**: Document `ta memory serve` and `ta community serve` — what they expose, how they're injected into agent runs, and how to configure community resources in `.ta/community-resources.toml`.
+
+#### Version: `0.17.0-alpha.12.4`
+
+---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
 <!-- status: pending -->
 
