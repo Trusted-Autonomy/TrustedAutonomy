@@ -33,12 +33,7 @@ pub async fn drain_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 .list()
                 .unwrap_or_default()
                 .iter()
-                .filter(|g| {
-                    matches!(
-                        g.state,
-                        GoalRunState::Running | GoalRunState::Configured
-                    )
-                })
+                .filter(|g| matches!(g.state, GoalRunState::Running | GoalRunState::Configured))
                 .count(),
             Err(_) => 0,
         }
