@@ -9184,7 +9184,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.4 — Community Tools in `ta serve` MCP Gateway
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.3
 
 **Goal**: Community tools belong in `ta serve` alongside goal, draft, plan, and context tools — not in a separate MCP server. Memory tools are already in `ta serve` (`ta-mcp-gateway/src/tools/context.rs`) so no separate memory endpoint is needed. Remove the broken `ta-memory` and `ta-community-hub` MCP injections that have been silently failing on every agent goal run since v0.13.8, and add community tools directly to the existing MCP gateway.
