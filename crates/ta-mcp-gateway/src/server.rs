@@ -1294,6 +1294,65 @@ impl TaGatewayServer {
         tools::comfyui::handle_comfyui_model_list(&self.state, params)
     }
 
+    // ── Community Knowledge Hub tools (v0.17.0.12.4) ──────────────────────────
+    // Routes to the `ta-community-hub` plugin binary via its JSON-over-stdio
+    // protocol. Returns `not_configured` if the binary isn't installed.
+
+    #[tool(
+        description = "Search across configured community knowledge resources by query, optionally filtered by intent or resource name. Returns `not_configured` if `ta-community-hub` is not installed."
+    )]
+    fn community_search(
+        &self,
+        Parameters(params): Parameters<tools::community::CommunitySearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("community_search", None, None);
+        tools::community::handle_community_search(&self.state, params)
+    }
+
+    #[tool(
+        description = "Fetch a community knowledge document by ID (`<resource-name>/<path>`). Returns `not_configured` if `ta-community-hub` is not installed."
+    )]
+    fn community_get(
+        &self,
+        Parameters(params): Parameters<tools::community::CommunityGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("community_get", None, None);
+        tools::community::handle_community_get(&self.state, params)
+    }
+
+    #[tool(
+        description = "Stage a gap annotation on a community knowledge document for human review. Requires the resource to be configured read-write. Returns `not_configured` if `ta-community-hub` is not installed."
+    )]
+    fn community_annotate(
+        &self,
+        Parameters(params): Parameters<tools::community::CommunityAnnotateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("community_annotate", None, None);
+        tools::community::handle_community_annotate(&self.state, params)
+    }
+
+    #[tool(
+        description = "Stage an upvote/downvote quality rating on a community knowledge document for batched upstream submission. Returns `not_configured` if `ta-community-hub` is not installed."
+    )]
+    fn community_feedback(
+        &self,
+        Parameters(params): Parameters<tools::community::CommunityFeedbackParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("community_feedback", None, None);
+        tools::community::handle_community_feedback(&self.state, params)
+    }
+
+    #[tool(
+        description = "Stage a new document proposal under a community knowledge resource for human review. Requires the resource to be configured read-write. Returns `not_configured` if `ta-community-hub` is not installed."
+    )]
+    fn community_suggest(
+        &self,
+        Parameters(params): Parameters<tools::community::CommunitySuggestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.audit("community_suggest", None, None);
+        tools::community::handle_community_suggest(&self.state, params)
+    }
+
     // ── Unity Engine tools (v0.15.3) ─────────────────────────────────────────
 
     #[tool(description = "Trigger a Unity Player or AssetBundle build. \
@@ -1484,8 +1543,10 @@ mod tests {
         //           ue5_sequencer_query, ue5_lighting_preset_list (v0.14.15.1)
         //           unity_build_trigger, unity_scene_query, unity_test_run,
         //           unity_addressables_build, unity_render_capture (v0.15.3)
+        //           community_search, community_get, community_annotate,
+        //           community_feedback, community_suggest (v0.17.0.12.4)
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(tools.len(), 35, "expected 35 tools, got: {:?}", names);
+        assert_eq!(tools.len(), 40, "expected 40 tools, got: {:?}", names);
     }
 
     #[test]
@@ -1497,8 +1558,9 @@ mod tests {
                 tool.name.starts_with("ta_")
                     || tool.name.starts_with("ue5_")
                     || tool.name.starts_with("comfyui_")
-                    || tool.name.starts_with("unity_"),
-                "tool '{}' should be prefixed with 'ta_', 'ue5_', 'comfyui_', or 'unity_'",
+                    || tool.name.starts_with("unity_")
+                    || tool.name.starts_with("community_"),
+                "tool '{}' should be prefixed with 'ta_', 'ue5_', 'comfyui_', 'unity_', or 'community_'",
                 tool.name
             );
         }
