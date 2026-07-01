@@ -3,6 +3,7 @@
 pub mod action;
 pub mod agent;
 pub mod comfyui;
+pub mod community;
 pub mod context;
 pub mod draft;
 pub mod event;

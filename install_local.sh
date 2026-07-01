@@ -151,6 +151,38 @@ if [[ "$BUILD_DAEMON" == true ]]; then
     else
         echo "Note: Discord plugin source not found at $DISCORD_PLUGIN_DIR — skipping plugin build."
     fi
+
+    # Community Knowledge Hub plugin. Unlike channel plugins, this is a
+    # PATH-resolved binary (ta serve's community_* MCP tools find it via
+    # `which ta-community-hub`), so it installs straight to ~/.local/bin
+    # rather than the plugins/channels directory.
+    COMMUNITY_HUB_DIR="${SCRIPT_DIR}/plugins/ta-community-hub"
+    if [[ -d "$COMMUNITY_HUB_DIR" ]]; then
+        echo "Building plugin: ta-community-hub..."
+        build_community_hub() {
+            if [[ "$PROFILE" == "dev" ]]; then
+                cargo build --manifest-path "$COMMUNITY_HUB_DIR/Cargo.toml"
+            else
+                cargo build --release --manifest-path "$COMMUNITY_HUB_DIR/Cargo.toml"
+            fi
+        }
+        if command -v nix &>/dev/null && [[ -f "${SCRIPT_DIR}/flake.nix" ]]; then
+            nix develop "${SCRIPT_DIR}" --command bash -c \
+                "$(declare -f build_community_hub); PROFILE='$PROFILE' COMMUNITY_HUB_DIR='$COMMUNITY_HUB_DIR' build_community_hub"
+        else
+            build_community_hub
+        fi
+
+        COMMUNITY_HUB_BINARY="${COMMUNITY_HUB_DIR}/${TARGET_DIR}/ta-community-hub"
+        if [[ -f "$COMMUNITY_HUB_BINARY" ]]; then
+            install -m 755 "$COMMUNITY_HUB_BINARY" "$INSTALL_DIR/ta-community-hub"
+            echo "Installed: $INSTALL_DIR/ta-community-hub"
+        else
+            echo "Warning: ta-community-hub build succeeded but binary not found at $COMMUNITY_HUB_BINARY"
+        fi
+    else
+        echo "Note: ta-community-hub source not found at $COMMUNITY_HUB_DIR — skipping plugin build."
+    fi
 fi
 
 

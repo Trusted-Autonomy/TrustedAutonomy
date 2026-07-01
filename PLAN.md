@@ -9184,16 +9184,16 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.4 — Community Tools in `ta serve` MCP Gateway
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.3
 
 **Goal**: Community tools belong in `ta serve` alongside goal, draft, plan, and context tools — not in a separate MCP server. Memory tools are already in `ta serve` (`ta-mcp-gateway/src/tools/context.rs`) so no separate memory endpoint is needed. Remove the broken `ta-memory` and `ta-community-hub` MCP injections that have been silently failing on every agent goal run since v0.13.8, and add community tools directly to the existing MCP gateway.
 
 **Items**:
-1. [ ] **Remove broken MCP injections** — delete the `ta-memory` and `ta-community-hub` entries from `write_stable_agent_mcp_config` and `inject_memory_mcp_server` in `apps/ta-cli/src/commands/run.rs`. Neither subcommand exists; agents have been getting two silent MCP startup failures on every goal run. No guard needed — just remove them.
-2. [ ] **Add community tools to `ta-mcp-gateway`** — new `crates/ta-mcp-gateway/src/tools/community.rs` exposing `community_search`, `community_get`, `community_annotate`, `community_feedback`, and `community_suggest` as native MCP tools. Each tool spawns `ta-community-hub` via its JSON-stdio protocol (same as `apps/ta-cli/src/commands/community.rs` does today) and returns results as MCP tool responses. If `ta-community-hub` binary is not installed, tools return a clear `not_configured` error rather than crashing.
-3. [ ] **Build + install `ta-community-hub`** in `install_local.sh` — add it alongside the Discord channel plugin so a fresh `./install_local.sh` installs the binary to `~/.local/bin/ta-community-hub`.
-4. [ ] **USAGE.md**: Document the community MCP tools — `community_search`, `community_get`, `community_annotate` — what they do, that they're available in every agent run via `ta serve`, and how to configure resources in `.ta/community-resources.toml`.
+1. [x] **Remove broken MCP injections** — delete the `ta-memory` and `ta-community-hub` entries from `write_stable_agent_mcp_config` and `inject_memory_mcp_server` in `apps/ta-cli/src/commands/run.rs`. Neither subcommand exists; agents have been getting two silent MCP startup failures on every goal run. No guard needed — just remove them.
+2. [x] **Add community tools to `ta-mcp-gateway`** — new `crates/ta-mcp-gateway/src/tools/community.rs` exposing `community_search`, `community_get`, `community_annotate`, `community_feedback`, and `community_suggest` as native MCP tools. Each tool spawns `ta-community-hub` via its JSON-stdio protocol (same as `apps/ta-cli/src/commands/community.rs` does today) and returns results as MCP tool responses. If `ta-community-hub` binary is not installed, tools return a clear `not_configured` error rather than crashing.
+3. [x] **Build + install `ta-community-hub`** in `install_local.sh` — add it alongside the Discord channel plugin so a fresh `./install_local.sh` installs the binary to `~/.local/bin/ta-community-hub`.
+4. [x] **USAGE.md**: Document the community MCP tools — `community_search`, `community_get`, `community_annotate` — what they do, that they're available in every agent run via `ta serve`, and how to configure resources in `.ta/community-resources.toml`.
 
 #### Version: `0.17.0-alpha.12.4`
 

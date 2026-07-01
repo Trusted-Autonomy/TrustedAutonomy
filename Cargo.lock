@@ -4004,6 +4004,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "which",
 ]
 
 [[package]]

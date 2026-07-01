@@ -101,6 +101,36 @@ Insert after v0.17.0.12.4 and before v0.17.0.13. Full phase definitions below.
 
 ---
 
+## VCS-ignore bugs surfaced 2026-07-01
+
+Two bugs found when `demo.cast` (asciinema recording, gitignored) ended up in a draft and blocked apply.
+
+### Bug 1: Source snapshot does not respect .gitignore
+
+**Symptom**: `ta goal start` copies the full source directory into staging, including files matched by `.gitignore`. When a gitignored file changes on disk between goal-start and apply (e.g. a recording file growing from 45 → 16,442 lines), the rebase fires a destructive-change safety check and blocks apply.
+
+**Root cause**: The source snapshot at `ta goal start` (or the rebase comparison at apply time) does not filter out VCS-ignored paths.
+
+**Fix**: At snapshot time AND at rebase/apply time, check each file path against the active ignore rules (`.gitignore`, `.taignore`, `ide-excludes.json`). Exclude gitignored files from: source snapshot hashes, artifact candidacy, and rebase conflict detection. This is VCS-agnostic — for git: `git check-ignore -q <path>` or use the `ignore` crate to evaluate `.gitignore` patterns without shelling out.
+
+**Scope**: `crates/ta-changeset/src/` (snapshot and rebase logic), `crates/ta-daemon/src/api/plan.rs` (apply path).
+
+### Bug 2: Agent modifying a gitignored file should surface a warning
+
+**Symptom**: An agent can write to a gitignored file in the staging workspace and TA includes it as a draft artifact without any indication that it is gitignored in the source repo.
+
+**Fix**: At `ta draft build` time, check each artifact path against VCS ignore rules. If the file is gitignored:
+- **Exclude it from draft artifacts** (the main fix — gitignored files cannot be applied to the real repo via `git commit` anyway)
+- **Log a one-line warning**: `[warn] Artifact '<path>' matches .gitignore and was excluded from this draft.`
+
+This prevents agents from accidentally modifying `.cast`, `.log`, `target/`, `node_modules/` etc. and having those appear as draft changes.
+
+**Note**: If the agent *intentionally* needs to create a gitignored file (e.g. a build artifact, local config), the user should first remove the pattern from `.gitignore` or add the file to `.taignore` explicitly.
+
+**Suggested phase**: Add to v0.17.0.12.7 (merge/apply safety) or as v0.17.0.12.8 if 12.7 is already scoped.
+
+---
+
 ## Orphaned goals cleaned (2026-06-30)
 
 - 77aa2585 (v0.17.0.2) — deleted; plan phase reset to pending

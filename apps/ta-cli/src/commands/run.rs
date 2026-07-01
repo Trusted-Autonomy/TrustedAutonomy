@@ -1989,24 +1989,12 @@ pub fn execute(
         inject_mcp_server_config(&staging_path)?;
     }
 
-    // v0.13.8 item 11: Memory bridge — MCP mode.
-    // For frameworks with memory.inject = "mcp" (Claude Code, Codex, Claude-Flow),
-    // inject ta-memory as a local MCP server so the agent can call memory tools natively.
-    // This happens for all goals when the framework supports MCP memory, not just macro goals.
-    let mcp_memory_injected = {
-        use ta_runtime::MemoryInjectMode;
-        let mut injected = false;
-        if let Some(ref fw) = resolved_framework {
-            if matches!(fw.memory.inject, MemoryInjectMode::Mcp) {
-                if let Err(e) = inject_memory_mcp_server(&staging_path) {
-                    tracing::warn!(framework = %fw.name, "Failed to inject ta-memory MCP server: {}", e);
-                } else {
-                    injected = true;
-                }
-            }
-        }
-        injected
-    };
+    // v0.17.0.12.4: ta-memory and ta-community-hub MCP server injections were
+    // removed here. Neither `ta memory serve` nor `ta community serve` is a real
+    // subcommand, so those injections were silently failing on every goal run
+    // since v0.13.8. Memory tools (ta_context) and community tools (community_*)
+    // are native tools on the stable "ta" MCP server registered below — no
+    // separate memory/community MCP server is needed.
 
     // Write (or refresh) the stable MCP agent config at project_root/.ta/mcp-agent.json.
     // This file has STABLE content (no TA_PROJECT_ROOT varying per UUID staging path),
@@ -2016,11 +2004,9 @@ pub fn execute(
     // Must run for ALL goal types (macro and non-macro): launch_agent_via_runtime always
     // passes --mcp-config pointing here. If the file doesn't exist, claude exits code 1.
     let meridian_binary = super::meridian::resolve_meridian_binary(&config.workspace_root);
-    if let Err(e) = write_stable_agent_mcp_config(
-        &config.workspace_root,
-        mcp_memory_injected,
-        meridian_binary.as_deref(),
-    ) {
+    if let Err(e) =
+        write_stable_agent_mcp_config(&config.workspace_root, meridian_binary.as_deref())
+    {
         tracing::warn!("Failed to write stable MCP agent config: {}", e);
     }
 
@@ -4442,13 +4428,14 @@ const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Skill(*)",
     "TodoRead(*)",
     "TodoWrite(*)",
-    // Approve TA's built-in MCP servers. Additional mcp__<server>__* entries
-    // are merged dynamically from ~/.claude/settings.json at injection time
-    // (see inject_claude_settings_with_security). "mcp__*" is not valid here —
+    // Approve TA's built-in MCP server. Memory (ta_context) and community
+    // (community_*) tools are native tools on this server — no separate
+    // ta-memory / ta-community-hub server entries exist (v0.17.0.12.4).
+    // Additional mcp__<server>__* entries are merged dynamically from
+    // ~/.claude/settings.json at injection time (see
+    // inject_claude_settings_with_security). "mcp__*" is not valid here —
     // Claude Code requires a literal server prefix before the wildcard.
     "mcp__ta__*",
-    "mcp__ta-memory__*",
-    "mcp__ta-community-hub__*",
 ];
 
 /// Built-in forbidden tool patterns — community-maintained deny list.
@@ -4708,11 +4695,11 @@ pub(crate) fn inject_mcp_server_config(staging_path: &Path) -> anyhow::Result<()
 
     // Write a minimal MCP config with only the `ta` server — do NOT merge with
     // the original .mcp.json. The original file typically contains project-level
-    // servers (claude-flow, ta-community-hub, ta-memory) that are not needed inside
-    // staging and would trigger Claude Code's per-project MCP approval dialog for
-    // every new staging path. ta-memory and ta-community-hub are injected separately
-    // by inject_memory_mcp_server() with staging-correct paths; claude-flow is never
-    // needed inside an agent run.
+    // servers (e.g. claude-flow) that are not needed inside staging and would
+    // trigger Claude Code's per-project MCP approval dialog for every new staging
+    // path. Memory and community tools are native tools on the "ta" server itself
+    // (see write_stable_agent_mcp_config); claude-flow is never needed inside an
+    // agent run.
     let mcp_config = serde_json::json!({
         "mcpServers": {
             "ta": ta_server_entry
@@ -4734,13 +4721,13 @@ pub(crate) fn inject_mcp_server_config(staging_path: &Path) -> anyhow::Result<()
 /// never re-prompted. A staging-path-scoped config = new UUID per run = re-prompt
 /// on every single goal.
 ///
-/// Call this after inject_mcp_server_config (which sets up the staging .mcp.json for
-/// backup/restore) and after inject_memory_mcp_server (which adds ta-memory and
-/// ta-community-hub). Those write to staging/.mcp.json; this writes the stable copy
-/// used for the actual --mcp-config flag.
+/// Call this after inject_mcp_server_config, which sets up the staging .mcp.json
+/// for backup/restore. That writes to staging/.mcp.json; this writes the stable
+/// copy used for the actual --mcp-config flag. Memory (ta_context) and community
+/// (community_*) tools are native tools on the "ta" server itself — no separate
+/// ta-memory / ta-community-hub MCP server entries are needed.
 pub(crate) fn write_stable_agent_mcp_config(
     project_root: &Path,
-    include_memory: bool,
     meridian_binary: Option<&str>,
 ) -> anyhow::Result<()> {
     let ta_binary = std::env::current_exe()
@@ -4758,21 +4745,6 @@ pub(crate) fn write_stable_agent_mcp_config(
 
     let mut servers = serde_json::Map::new();
     servers.insert("ta".to_string(), ta_server);
-
-    if include_memory {
-        let memory_server = serde_json::json!({
-            "command": ta_binary,
-            "args": ["memory", "serve"],
-            "env": { "TA_IS_STAGING": "1" }
-        });
-        let community_server = serde_json::json!({
-            "command": ta_binary,
-            "args": ["community", "serve"],
-            "env": { "TA_IS_STAGING": "1" }
-        });
-        servers.insert("ta-memory".to_string(), memory_server);
-        servers.insert("ta-community-hub".to_string(), community_server);
-    }
 
     if let Some(binary) = meridian_binary {
         // Meridian MCP sidecar: agents get meridian_report, meridian_analyze,
@@ -6317,64 +6289,6 @@ fn build_goal_context_text(
         "# TA Goal Context\n\n**Goal:** {}\n**Goal ID:** {}{}\n{}{}",
         title, goal_id, phase_line, memory_section, community_section
     )
-}
-
-/// Inject ta-memory as a local MCP server into `.mcp.json` (v0.13.8 item 11).
-///
-/// For MCP-mode memory frameworks (Claude Code, Codex, Claude-Flow), TA exposes
-/// `ta-memory` as an MCP server so the agent can call memory_read/write/search natively.
-/// This extends the existing inject_mcp_server_config logic.
-fn inject_memory_mcp_server(staging_path: &Path) -> anyhow::Result<()> {
-    let mcp_json_path = staging_path.join(MCP_JSON_PATH);
-
-    let ta_binary = std::env::current_exe()
-        .ok()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "ta".to_string());
-
-    let memory_server_entry = serde_json::json!({
-        "command": ta_binary,
-        "args": ["memory", "serve"],
-        "env": {
-            "TA_PROJECT_ROOT": staging_path.display().to_string()
-        }
-    });
-
-    // Read or create .mcp.json
-    let mut mcp_config: serde_json::Value = if mcp_json_path.exists() {
-        let content = std::fs::read_to_string(&mcp_json_path)?;
-        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({ "mcpServers": {} }))
-    } else {
-        serde_json::json!({ "mcpServers": {} })
-    };
-
-    let community_hub_entry = serde_json::json!({
-        "command": ta_binary,
-        "args": ["community", "serve"],
-        "env": {
-            "TA_PROJECT_ROOT": staging_path.display().to_string()
-        }
-    });
-
-    if let Some(servers) = mcp_config
-        .get_mut("mcpServers")
-        .and_then(|s| s.as_object_mut())
-    {
-        servers.insert("ta-memory".to_string(), memory_server_entry);
-        servers.insert("ta-community-hub".to_string(), community_hub_entry);
-    } else {
-        mcp_config["mcpServers"] = serde_json::json!({
-            "ta-memory": memory_server_entry,
-            "ta-community-hub": community_hub_entry,
-        });
-    }
-
-    if let Some(parent) = mcp_json_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&mcp_json_path, serde_json::to_string_pretty(&mcp_config)?)?;
-    tracing::debug!("Injected ta-memory and ta-community-hub MCP servers into .mcp.json");
-    Ok(())
 }
 
 /// Serialize memory entries into the agent's context file (v0.13.8 item 12).
@@ -8149,37 +8063,6 @@ non_interactive_env:
     // ── v0.13.15: MCP injection cleanup tests (item 5) ───────────
 
     #[test]
-    fn inject_memory_then_restore_removes_ta_memory_key() {
-        let staging = tempfile::TempDir::new().unwrap();
-
-        // Inject ta-memory into an empty staging dir (no pre-existing .mcp.json).
-        inject_memory_mcp_server(staging.path()).unwrap();
-
-        // .mcp.json should now exist and contain the ta-memory key.
-        let mcp_path = staging.path().join(MCP_JSON_PATH);
-        assert!(mcp_path.exists(), ".mcp.json should be created by inject");
-        let content = std::fs::read_to_string(&mcp_path).unwrap();
-        assert!(
-            content.contains("ta-memory"),
-            "ta-memory key must be present after inject"
-        );
-
-        // Restore — no backup exists (inject doesn't create one for a missing file).
-        restore_mcp_server_config(staging.path()).unwrap();
-
-        // After restore, ta-memory key must be absent.
-        if mcp_path.exists() {
-            let after = std::fs::read_to_string(&mcp_path).unwrap();
-            assert!(
-                !after.contains("ta-memory"),
-                "ta-memory key must be removed after restore, got: {}",
-                after
-            );
-        }
-        // If the file was removed entirely, that also satisfies the postcondition.
-    }
-
-    #[test]
     fn restore_mcp_no_injection_is_noop() {
         let staging = tempfile::TempDir::new().unwrap();
         // No .mcp.json, no backup — restore should be a no-op.
@@ -8187,36 +8070,42 @@ non_interactive_env:
         assert!(result.is_ok(), "restore with no state should succeed");
     }
 
+    // v0.17.0.12.4: inject_memory_mcp_server() was removed — `ta memory serve`
+    // and `ta community serve` were never real subcommands, so it silently
+    // failed to launch on every goal run. Memory (ta_context) and community
+    // (community_*) tools are now native tools on the "ta" MCP server. This
+    // test covers restore_mcp_server_config's defensive cleanup of any
+    // residual ta-memory/ta-community-hub keys left by pre-fix staging dirs.
     #[test]
-    fn inject_memory_preserves_other_mcp_keys() {
+    fn restore_mcp_removes_legacy_memory_hub_keys_without_backup() {
         let staging = tempfile::TempDir::new().unwrap();
         let mcp_path = staging.path().join(MCP_JSON_PATH);
 
-        // Write a .mcp.json with an existing non-TA server.
         std::fs::write(
             &mcp_path,
-            r#"{"mcpServers": {"my-server": {"command": "my-cmd"}}}"#,
+            r#"{"mcpServers": {"my-server": {"command": "my-cmd"}, "ta-memory": {"command": "ta"}, "ta-community-hub": {"command": "ta"}}}"#,
         )
         .unwrap();
 
-        inject_memory_mcp_server(staging.path()).unwrap();
-
-        let content = std::fs::read_to_string(&mcp_path).unwrap();
-        assert!(content.contains("ta-memory"), "ta-memory must be added");
-        assert!(
-            content.contains("my-server"),
-            "existing server must be preserved"
-        );
-
+        // No backup file — simulates a leftover from a pre-fix staging dir.
         restore_mcp_server_config(staging.path()).unwrap();
 
-        // After restore: my-server present, ta-memory absent.
-        if mcp_path.exists() {
-            let after = std::fs::read_to_string(&mcp_path).unwrap();
-            assert!(!after.contains("ta-memory"), "ta-memory must be removed");
-            // my-server was present before inject_memory and there was no backup,
-            // so restore only strips ta-memory; other keys survive.
-        }
+        let after = std::fs::read_to_string(&mcp_path).unwrap();
+        assert!(
+            !after.contains("ta-memory"),
+            "legacy ta-memory key must be removed, got: {}",
+            after
+        );
+        assert!(
+            !after.contains("ta-community-hub"),
+            "legacy ta-community-hub key must be removed, got: {}",
+            after
+        );
+        assert!(
+            after.contains("my-server"),
+            "unrelated server must be preserved, got: {}",
+            after
+        );
     }
 
     // ── v0.13.17.5: Bug 1 fix — restore_mcp unconditional ─────────

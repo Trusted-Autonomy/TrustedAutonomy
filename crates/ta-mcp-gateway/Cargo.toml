@@ -21,6 +21,7 @@ schemars = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 regex = { workspace = true }
+which = { workspace = true }
 
 # Internal crates
 ta-audit = { path = "../ta-audit", version = "0.17.0-alpha.12.3" }
