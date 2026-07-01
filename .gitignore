@@ -155,3 +155,6 @@ result-*
 .ta/*.log
 .ta/*.pid
 .ta/*.lock
+
+# Demo recordings
+*.cast
