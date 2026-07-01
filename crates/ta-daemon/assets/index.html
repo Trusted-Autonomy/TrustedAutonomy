@@ -890,7 +890,7 @@ async function applyLatestDraft() {
   try {
     const resp = await fetch('/api/drafts');
     const all = resp.ok ? await resp.json() : [];
-    const pending = all.filter(d => (d.status || '').toLowerCase().includes('pending'));
+    const pending = all.filter(d => d.status === 'PendingReview');
     if (pending.length === 0) { showAlert('No pending drafts to apply.'); return; }
     const latest = pending[0];
     const r = await fetch('/api/drafts/' + latest.package_id + '/apply', { method: 'POST' });
@@ -903,7 +903,7 @@ async function denyLatestDraft() {
   try {
     const resp = await fetch('/api/drafts');
     const all = resp.ok ? await resp.json() : [];
-    const pending = all.filter(d => (d.status || '').toLowerCase().includes('pending'));
+    const pending = all.filter(d => d.status === 'PendingReview');
     if (pending.length === 0) { showAlert('No pending drafts to deny.'); return; }
     const latest = pending[0];
     const r = await fetch('/api/drafts/' + latest.package_id + '/deny', { method: 'POST' });
@@ -1229,8 +1229,8 @@ function startDashRefresh() {
 }
 
 function renderDashboard(allDrafts, questions, status, phases, velocity, advisorCtx) {
-  const pending = allDrafts.filter(d => d.status && d.status.toLowerCase().includes('pending'));
-  const active = allDrafts.filter(d => d.status && d.status.toLowerCase().includes('draft'));
+  const pending = allDrafts.filter(d => d.status === 'PendingReview');
+  const active = allDrafts.filter(d => d.status === 'Draft');
 
   let html = '';
 
@@ -1907,7 +1907,7 @@ function renderDraftDetail(d) {
   const artifacts = (d.changes && d.changes.artifacts) || [];
   const pendingActions = (d.changes && d.changes.pending_actions) || [];
   const status = draftStatus(d);
-  const isReviewable = status.includes('pending');
+  const isReviewable = status === 'pendingreview';
   const isApproved = status.includes('approved');
 
   // Summary section (open by default).
