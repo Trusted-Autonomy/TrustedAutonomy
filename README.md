@@ -14,42 +14,13 @@
   <img src="https://img.shields.io/badge/license-Apache--2.0-lightgrey" alt="License">
 </p>
 
-**Trusted Autonomy** is a wrapper to *safely* run autonomous AI agent workflows **with human review**, and **without changing how agents behave**.
+**Run any AI agent. Get a full audit trail and independent validation of what it did — before anything is real.**
 
-It is not an agent framework. Use Claude, Codex, a local LLM, or any agent system you want. 
-Swap them with just a simple config change. Set a different agent framework for a workflow. Easily A/B test a workflow with two agents.
+The agent works on a staging copy of your project using its native tools. No permission prompts, no special APIs — it's invisible to the agent. When it finishes, you get one reviewable preview of everything it tried: file diffs, email drafts, DB writes. A supervisor independently checks whether the result actually matches your intent. You approve what you want; nothing reaches the real world until you say so.
 
-Trusted Autonomy governs how agents interact with the outside world without the agents knowing. They work as if they have full access. TA wraps them into a virtual space so writing files, DB operations, sending email, or posting to a website is captured.
-The agent sees this modified version of the world. When a goal is complete, the human is notified to review a **draft** of all changes. Approving the draft makes the agents changes in the real world. The human can reject or correct the agent's work before it actually hits your project.
+Works with Claude Code, Codex, Ollama, or any agent framework. Swap models in one config line. Run the same goal through two models and compare results side-by-side.
 
-TA ensures:
-- agents operate autonomously inside a defined charter
-- all real-world effects are staged, reviewable, and auditable
-- humans remain in control at meaningful boundaries (a draft at each milestones in simple English with detailed diffs for deep inspection)
-- orchestration layers remain swappable and unaware of the substrate
-
-```mermaid
-flowchart TD
-  H1["👤 Human sets a goal\ne.g. Handle my email correspondence\nTrack urgent emails · Reply in my voice · Notify via Slack"]
-  TA0["🛡️ Trusted Autonomy\nGoal Run\nEnforces charter · Mediates connectors\nCollects all mutations as ChangeSets\nProduces Draft Package for review"]
-  VW["🧩 Virtual Workspace\nAgents operate in a bounded capability space\nStaged-by-default mutations · Per-goal budgets"]
-  A1["🤖 Agent or Swarm\nOperates normally with native tools\nClaude · Codex · LangChain · Ollama · etc."]
-  C1["🔌 Connectors mediated\nEmail · Slack · Docs · DB · Web · Filesystem · Social"]
-  C2["🌐 Web Access mediated\nSanitized inputs · Provenance labels\nInstruction-hierarchy firewall"]
-  DP["📦 Draft Package\nChanges + rationale + risk flags\nEmail drafts · Slack queued · DB staged · File diffs"]
-  H2["👤 Human Review\nApprove · Reject · Discuss per item"]
-  APPLY["✅ Apply Approved Changes\nSend emails · Post Slack · Write DB · Apply file changes"]
-
-  H1 --> TA0 --> DP --> H2 --> APPLY
-  TA0 --> VW --> A1
-  TA0 --> C1
-  TA0 --> C2
-  A1 --> TA0
-  C1 --> TA0
-  C2 --> TA0
-  A1 -. TA is transparent to agent .-> TA0
-  DP -. Single milestone review not per-action prompts .-> H2
-```
+> **[Quick Start](#quick-start-5-minutes)** · **[User Guide](docs/USAGE.md)** · **[Plan](PLAN.md)**
 
 ---
 
@@ -94,16 +65,13 @@ Today TA mediates filesystem changes. The same staging model in future releases 
 
 ---
 
-## Current status: 0.15.24-alpha.2
+## Current status: 0.17.0-alpha
 
-Under active development. See [PLAN.md](PLAN.md) for the full roadmap.
+Under active development — 226 of 241 plan phases complete. See [PLAN.md](PLAN.md) for the full roadmap.
 
-This is an alpha release for feedback. Please note:
+Alpha release for feedback. Core staging loop and supervisor are live. Outbound action interception (email, DB, API calls declared through TA's MCP tools) is live. Full MCP proxy layer — intercepting any tool call regardless of which MCP server the agent uses — is the v0.18 headline.
 
-- **Not production-ready.** Do not use for critical or irreversible operations.
-- **The security model is not yet audited.** Sandbox isolation exists (command allowlisting, path escape detection) but has not been independently audited. Do not trust it with secrets or sensitive data without your own review.
-
-If any of these are blockers for your use case, watch the repo — progress is tracked on the [roadmap](PLAN.md).
+Security model has not been independently audited. For critical or irreversible operations, verify your own review before use.
 
 ---
 
