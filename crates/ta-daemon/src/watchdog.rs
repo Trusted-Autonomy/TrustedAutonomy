@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use reqwest;
 
 use crate::power_manager::SharedPowerManager;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ta_audit::{AuditDisposition, AuditEntry, GoalAuditLedger};
 use ta_events::schema::{HealthIssue, SessionEvent};
 use ta_events::store::{EventStore, FsEventStore};
@@ -131,6 +131,14 @@ pub struct WatchdogState {
     last_wake_wall: Option<SystemTime>,
     /// Whether the API was reachable the last time we checked (post-wake only).
     api_was_reachable: Option<bool>,
+    /// Wall-clock time the current low-disk episode was first noticed.
+    /// Reset to `None` once disk space recovers above the threshold
+    /// (v0.17.0.12.5 item 6).
+    disk_alert_first_noticed: Option<SystemTime>,
+    /// Wall-clock time the last low-disk corrective action was emitted.
+    /// Used to suppress re-firing every watchdog cycle while disk stays low
+    /// (v0.17.0.12.5 item 6).
+    last_disk_alert_wall: Option<SystemTime>,
 }
 
 impl Default for WatchdogState {
@@ -140,6 +148,8 @@ impl Default for WatchdogState {
             prev_wall: SystemTime::now(),
             last_wake_wall: None,
             api_was_reachable: None,
+            disk_alert_first_noticed: None,
+            last_disk_alert_wall: None,
         }
     }
 }
@@ -209,6 +219,74 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
         let _ = path;
         None
     }
+}
+
+/// Low-disk threshold: below this, the watchdog raises a corrective action.
+const LOW_DISK_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
+
+/// Minimum time between repeated low-disk corrective actions for the same
+/// sustained episode (v0.17.0.12.5 item 6).
+const DISK_ALERT_COOLDOWN_SECS: u64 = 600; // 10 minutes
+
+/// Evaluate the disk-space check for a given `avail_bytes` reading and update
+/// `state`'s dedup bookkeeping. Returns `Some(CorrectiveAction)` when a new
+/// alert should be raised, `None` when disk is healthy or the low-disk
+/// episode is still within its cooldown window.
+///
+/// Pulled out of `watchdog_cycle` so tests can inject a synthetic low-disk
+/// reading instead of depending on the real filesystem's free space.
+fn check_disk_space(
+    avail_bytes: Option<u64>,
+    current_wall: SystemTime,
+    state: &mut WatchdogState,
+) -> Option<CorrectiveAction> {
+    let avail = avail_bytes?;
+
+    if avail >= LOW_DISK_THRESHOLD_BYTES {
+        // Disk recovered above the threshold — a future low-disk episode
+        // should be treated as newly noticed, not a continuation.
+        state.disk_alert_first_noticed = None;
+        state.last_disk_alert_wall = None;
+        return None;
+    }
+
+    let avail_gb = avail as f64 / 1_073_741_824.0;
+    let first_noticed = *state.disk_alert_first_noticed.get_or_insert(current_wall);
+    let should_fire = state
+        .last_disk_alert_wall
+        .and_then(|last| current_wall.duration_since(last).ok())
+        .map(|elapsed| elapsed.as_secs() >= DISK_ALERT_COOLDOWN_SECS)
+        .unwrap_or(true);
+
+    if !should_fire {
+        return None;
+    }
+
+    tracing::warn!(
+        available_gb = format!("{:.2}", avail_gb),
+        "Disk space low — emitting corrective action"
+    );
+
+    let now_utc: DateTime<Utc> = current_wall.into();
+    let first_noticed_utc: DateTime<Utc> = first_noticed.into();
+    let action = CorrectiveAction::new(
+        format!("Low disk space: {:.1} GB available", avail_gb),
+        ActionSeverity::Critical,
+        format!(
+            "Available disk on project root is {:.1} GB, below the 2 GB threshold, \
+             as of {}. First noticed at {}. Stale staging directories may be \
+             consuming significant space.",
+            avail_gb,
+            now_utc.to_rfc3339(),
+            first_noticed_utc.to_rfc3339(),
+        ),
+        "Run `ta gc` to clean stale staging directories and reclaim disk space.",
+        "clean_applied_staging",
+    )
+    .set_auto_healable();
+
+    state.last_disk_alert_wall = Some(current_wall);
+    Some(action)
 }
 
 /// One watchdog check cycle. Synchronous — runs quickly and infrequently.
@@ -299,34 +377,17 @@ fn watchdog_cycle(
         false
     };
 
-    // Check disk space and emit corrective action if low.
-    let low_disk_threshold_bytes: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
-    if let Some(avail) = available_disk_bytes(project_root) {
-        if avail < low_disk_threshold_bytes {
-            let avail_gb = avail as f64 / 1_073_741_824.0;
+    // Check disk space and emit a corrective action if low, deduplicated so a
+    // sustained low-disk condition doesn't flood the operations log with a
+    // fresh entry every watchdog cycle (v0.17.0.12.5 item 6).
+    if let Some(action) = check_disk_space(available_disk_bytes(project_root), current_wall, state)
+    {
+        let ops_log = OperationsLog::for_project(project_root);
+        if let Err(e) = ops_log.append(&action) {
             tracing::warn!(
-                available_gb = format!("{:.2}", avail_gb),
-                "Disk space low — emitting corrective action"
+                "Watchdog: failed to write disk-space corrective action: {}",
+                e
             );
-            let action = CorrectiveAction::new(
-                format!("Low disk space: {:.1} GB available", avail_gb),
-                ActionSeverity::Critical,
-                format!(
-                    "Available disk on project root is {:.1} GB, below 2 GB threshold. \
-                     Stale staging directories may be consuming significant space.",
-                    avail_gb
-                ),
-                "Run `ta gc` to clean stale staging directories and reclaim disk space.",
-                "clean_applied_staging",
-            )
-            .set_auto_healable();
-            let ops_log = OperationsLog::for_project(project_root);
-            if let Err(e) = ops_log.append(&action) {
-                tracing::warn!(
-                    "Watchdog: failed to write disk-space corrective action: {}",
-                    e
-                );
-            }
         }
     }
 
@@ -1514,6 +1575,93 @@ mod tests {
         assert_eq!(cfg.stale_question_threshold_secs, 3600);
     }
 
+    // ── Disk-space alert dedup (v0.17.0.12.5 item 6) ─────────────────────
+
+    const ONE_GB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn check_disk_space_healthy_disk_returns_none() {
+        let mut state = WatchdogState::default();
+        let action = check_disk_space(Some(10 * ONE_GB), SystemTime::now(), &mut state);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn check_disk_space_unknown_disk_returns_none() {
+        let mut state = WatchdogState::default();
+        let action = check_disk_space(None, SystemTime::now(), &mut state);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn check_disk_space_low_disk_fires_first_alert() {
+        let mut state = WatchdogState::default();
+        let now = SystemTime::now();
+        let action = check_disk_space(Some(ONE_GB), now, &mut state);
+        assert!(action.is_some(), "first low-disk reading should fire");
+        assert_eq!(state.last_disk_alert_wall, Some(now));
+        assert_eq!(state.disk_alert_first_noticed, Some(now));
+    }
+
+    #[test]
+    fn check_disk_space_suppresses_refire_within_cooldown() {
+        let mut state = WatchdogState::default();
+        let t0 = SystemTime::now();
+        let first = check_disk_space(Some(ONE_GB), t0, &mut state);
+        assert!(first.is_some());
+
+        // 30s later — well within the 10 minute cooldown.
+        let t1 = t0 + Duration::from_secs(30);
+        let second = check_disk_space(Some(ONE_GB), t1, &mut state);
+        assert!(
+            second.is_none(),
+            "re-fire within cooldown window should be suppressed"
+        );
+    }
+
+    #[test]
+    fn check_disk_space_refires_after_cooldown_and_keeps_first_noticed() {
+        let mut state = WatchdogState::default();
+        let t0 = SystemTime::now();
+        check_disk_space(Some(ONE_GB), t0, &mut state);
+
+        // 11 minutes later — past the 10 minute cooldown.
+        let t1 = t0 + Duration::from_secs(11 * 60);
+        let action = check_disk_space(Some(ONE_GB), t1, &mut state)
+            .expect("should re-fire after cooldown elapses");
+
+        // "First noticed" must still reference the original episode start,
+        // not the time of this re-fire, so the message reflects how long
+        // the condition has persisted.
+        let first_noticed_utc: DateTime<Utc> = t0.into();
+        assert!(action
+            .diagnosis
+            .contains(&first_noticed_utc.to_rfc3339()[..19]));
+        assert_eq!(state.disk_alert_first_noticed, Some(t0));
+        assert_eq!(state.last_disk_alert_wall, Some(t1));
+    }
+
+    #[test]
+    fn check_disk_space_recovery_resets_episode() {
+        let mut state = WatchdogState::default();
+        let t0 = SystemTime::now();
+        check_disk_space(Some(ONE_GB), t0, &mut state);
+
+        // Disk recovers above the threshold.
+        let t1 = t0 + Duration::from_secs(5);
+        let recovered = check_disk_space(Some(10 * ONE_GB), t1, &mut state);
+        assert!(recovered.is_none());
+        assert_eq!(state.disk_alert_first_noticed, None);
+        assert_eq!(state.last_disk_alert_wall, None);
+
+        // A new low-disk episode right after recovery should fire again
+        // immediately (not suppressed by cooldown from the prior episode).
+        let t2 = t1 + Duration::from_secs(1);
+        let refired = check_disk_space(Some(ONE_GB), t2, &mut state);
+        assert!(refired.is_some(), "new episode after recovery should fire");
+        assert_eq!(state.disk_alert_first_noticed, Some(t2));
+    }
+
     #[test]
     fn watchdog_cycle_no_goals() {
         let dir = tempfile::tempdir().unwrap();
@@ -1705,6 +1853,7 @@ mod tests {
             prev_monotonic: Instant::now() - Duration::from_secs(30),
             last_wake_wall: None,
             api_was_reachable: None,
+            ..WatchdogState::default()
         };
 
         watchdog_cycle(project, &config, &mut state, None);
@@ -1739,6 +1888,7 @@ mod tests {
             prev_monotonic: Instant::now() - Duration::from_secs(31),
             last_wake_wall: None,
             api_was_reachable: None,
+            ..WatchdogState::default()
         };
 
         watchdog_cycle(project, &config, &mut state, None);
@@ -1881,6 +2031,7 @@ mod tests {
             prev_wall: now - Duration::from_secs(31),
             prev_monotonic: Instant::now() - Duration::from_secs(31),
             api_was_reachable: None,
+            ..WatchdogState::default()
         };
         let in_grace = state_recent_wake
             .last_wake_wall
@@ -1895,6 +2046,7 @@ mod tests {
             prev_wall: now - Duration::from_secs(31),
             prev_monotonic: Instant::now() - Duration::from_secs(31),
             api_was_reachable: None,
+            ..WatchdogState::default()
         };
         let in_grace_old = state_old_wake
             .last_wake_wall

@@ -9198,9 +9198,8 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12.4`
 
 ---
-
 ### v0.17.0.12.5 — Studio Cleanup + Dashboard Immediacy
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.4
 
 **Goal**: Fix three UX gaps with near-zero visual feedback: the 30s lag before dashboard shows a running goal, notifications with no timestamps, and disk-space notices with no temporal context. Fix the apply timeout and its misleading error message.
@@ -9208,16 +9207,16 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 **Items**:
 
 **Apply timeout (critical)**:
-1. [ ] **Make apply async** (`crates/ta-daemon/src/web.rs` `apply_draft_endpoint`): Instead of blocking the HTTP response for up to 120s, spawn `ta draft apply` as a background task and return `{"status": "pending", "job_id": "<uuid>"}` immediately. Add `GET /api/apply-jobs/:job_id` returning `{"status": "running"|"done"|"failed", "output": "<last N lines>", "log_path": "<path>", "commit_sha": "..."}`. Write full stdout+stderr to `.ta/logs/apply-<draft-id>-<timestamp>.log` regardless of outcome.
-2. [ ] **Studio: apply progress + log viewer**: Replace static "Applying draft…" with a polling progress indicator (every 2s via `GET /api/apply-jobs/:job_id`). On completion show `commit_sha`. On failure show a **"View Log"** button opening the log in a modal text viewer. Remove the `navigator.clipboard` fallback — clipboard is unreliable in non-HTTPS contexts and silently fails.
-3. [ ] **Apply log directory**: Create `.ta/logs/` on daemon startup. Prune logs older than 30 days. Filename: `apply-<draft-short-id>-<timestamp>.log`.
+1. [x] **Make apply async** (`crates/ta-daemon/src/web.rs` `apply_draft_endpoint`): Instead of blocking the HTTP response for up to 120s, spawn `ta draft apply` as a background task and return `{"status": "pending", "job_id": "<uuid>"}` immediately. Add `GET /api/apply-jobs/:job_id` returning `{"status": "running"|"done"|"failed", "output": "<last N lines>", "log_path": "<path>", "commit_sha": "..."}`. Write full stdout+stderr to `.ta/logs/apply-<draft-id>-<timestamp>.log` regardless of outcome.
+2. [x] **Studio: apply progress + log viewer**: Replace static "Applying draft…" with a polling progress indicator (every 2s via `GET /api/apply-jobs/:job_id`). On completion show `commit_sha`. On failure show a **"View Log"** button opening the log in a modal text viewer. Remove the `navigator.clipboard` fallback — clipboard is unreliable in non-HTTPS contexts and silently fails.
+3. [x] **Apply log directory**: Create `.ta/logs/` on daemon startup. Prune logs older than 30 days. Filename: `apply-<draft-short-id>-<timestamp>.log`.
 
 **Dashboard immediacy (30s watchdog lag)**:
-4. [ ] **Goal-started immediate event**: When `ta run` transitions a goal to `Running`, push a status-change event immediately (before the watchdog cycle). Studio picks it up on next tick; new goal appears in < 2s.
+4. [x] **Goal-started immediate event**: When `ta run` transitions a goal to `Running`, push a status-change event immediately (before the watchdog cycle). Studio picks it up on next tick; new goal appears in < 2s.
 
 **Notification timestamps**:
-5. [ ] **Timestamp on all notifications**: Add `timestamp: DateTime<Utc>` to the `Notification` struct in `crates/ta-events/src/notification.rs`. All creation sites stamp `Utc::now()`. Studio renders timestamp in notification list (e.g. "Jun 29 14:32").
-6. [ ] **Disk space deduplication + timing**: `crates/ta-daemon/src/watchdog.rs` fires a disk-low alert every 30s while disk is below 2 GB — producing 9+ identical notices with no "when." Fix: suppress re-fires for 10 minutes. Message includes: current free space, timestamp, threshold, and "first noticed at <time>".
+5. [x] **Timestamp on all notifications**: Add `timestamp: DateTime<Utc>` to the `Notification` struct in `crates/ta-events/src/notification.rs`. All creation sites stamp `Utc::now()`. Studio renders timestamp in notification list (e.g. "Jun 29 14:32").
+6. [x] **Disk space deduplication + timing**: `crates/ta-daemon/src/watchdog.rs` fires a disk-low alert every 30s while disk is below 2 GB — producing 9+ identical notices with no "when." Fix: suppress re-fires for 10 minutes. Message includes: current free space, timestamp, threshold, and "first noticed at <time>".
 
 #### Version: `0.17.0-alpha.12.5`
 
