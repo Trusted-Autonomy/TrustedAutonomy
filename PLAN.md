@@ -9198,6 +9198,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12.4`
 
 ---
+
 ### v0.17.0.12.5 — Studio Cleanup + Dashboard Immediacy
 <!-- status: pending -->
 **Depends on**: v0.17.0.12.4
