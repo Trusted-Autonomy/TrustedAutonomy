@@ -1353,8 +1353,12 @@ mod tests {
         let old_log = logs_dir.join("apply-old-20200101T000000Z.log");
         std::fs::write(&old_log, "old").unwrap();
         let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400);
-        let old_file = std::fs::File::open(&old_log).unwrap();
-        old_file
+        // Windows requires write-access on the file handle to call SetFileTime.
+        // File::open (read-only) returns PermissionDenied (error 5) on Windows CI.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old_log)
+            .unwrap()
             .set_modified(old_time)
             .expect("platform supports setting mtime");
 
