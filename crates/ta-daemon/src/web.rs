@@ -9,6 +9,8 @@
 //   GET  /api/drafts/:id           → draft detail (DraftPackage JSON)
 //   POST /api/drafts/:id/approve   → approve a draft
 //   POST /api/drafts/:id/deny      → deny a draft { reason }
+//   POST /api/drafts/:id/apply     → apply a draft in the background, returns { status, job_id } (v0.17.0.12.5)
+//   GET  /api/apply-jobs/:job_id   → poll a background apply job (v0.17.0.12.5)
 //   GET  /api/memory               → list memory entries (v0.5.7)
 //   GET  /api/memory/search        → semantic search (?q=query) (v0.5.7)
 //   GET  /api/memory/stats         → memory statistics (v0.5.7)
@@ -16,8 +18,9 @@
 //   DELETE /api/memory/:key        → delete memory entry (v0.5.7)
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode};
@@ -39,6 +42,93 @@ use ta_memory::{FsMemoryStore, MemoryStore};
 struct WebState {
     pr_packages_dir: PathBuf,
     memory_dir: PathBuf,
+    /// In-memory tracking of background `ta draft apply` jobs, keyed by job id
+    /// (v0.17.0.12.5). Cleared on daemon restart — job status is also durably
+    /// recorded in the log file at `ApplyJobRecord::log_path`.
+    apply_jobs: Arc<Mutex<HashMap<String, ApplyJobRecord>>>,
+}
+
+// ── Apply jobs (v0.17.0.12.5) ───────────────────────────────────────
+
+/// Status of a background `ta draft apply` job.
+#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ApplyJobStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+/// Tracked state of a background `ta draft apply` job, polled via
+/// `GET /api/apply-jobs/:job_id`.
+#[derive(Clone, Serialize)]
+struct ApplyJobRecord {
+    status: ApplyJobStatus,
+    /// Last N lines of combined stdout+stderr. Full output is always in `log_path`.
+    output: String,
+    log_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_sha: Option<String>,
+}
+
+/// Keep only the last `n` lines of `s` (apply job output can be long; the poll
+/// response should stay small — the full output is always on disk at `log_path`).
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= n {
+        s.to_string()
+    } else {
+        lines[lines.len() - n..].join("\n")
+    }
+}
+
+/// Directory where `ta draft apply` job logs are written.
+fn apply_logs_dir(project_root: &std::path::Path) -> PathBuf {
+    project_root.join(".ta").join("logs")
+}
+
+/// Ensure `.ta/logs/` exists and prune log files older than `retention_days`.
+///
+/// Called on daemon startup (v0.17.0.12.5 item 3) so logs don't accumulate
+/// indefinitely. Failures are logged but non-fatal — a missing/unprunable
+/// logs dir should never block daemon startup.
+fn ensure_and_prune_logs_dir(project_root: &std::path::Path, retention_days: i64) {
+    let dir = apply_logs_dir(project_root);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            path = %dir.display(),
+            error = %e,
+            "Failed to create apply logs directory"
+        );
+        return;
+    }
+
+    let cutoff = Utc::now() - chrono::Duration::days(retention_days);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(path = %dir.display(), error = %e, "Failed to read apply logs directory");
+            return;
+        }
+    };
+
+    let mut pruned = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("log") {
+            continue;
+        }
+        let modified = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(m) => chrono::DateTime::<Utc>::from(m),
+            Err(_) => continue,
+        };
+        if modified < cutoff && std::fs::remove_file(&path).is_ok() {
+            pruned += 1;
+        }
+    }
+    if pruned > 0 {
+        tracing::info!(pruned, path = %dir.display(), "Pruned old apply logs");
+    }
 }
 
 // ── API types ────────────────────────────────────────────────────
@@ -251,9 +341,12 @@ async fn approve_draft(
 
 /// `POST /api/drafts/:id/apply` — Apply an approved or pending draft to the workspace.
 ///
-/// Spawns `ta draft apply <short_id> --git-commit` and waits for it to finish
-/// (up to 120 seconds). Returns the combined output and the parsed commit SHA on
-/// success, or an error message on failure.
+/// Spawns `ta draft apply <short_id> --git-commit` as a background task and
+/// returns immediately with `{"status": "pending", "job_id": "<uuid>"}`
+/// (v0.17.0.12.5 item 1 — previously this blocked the HTTP response for up to
+/// 120 seconds, which made Studio look hung on slow applies). Poll
+/// `GET /api/apply-jobs/:job_id` for progress. Full stdout+stderr is written to
+/// `.ta/logs/apply-<draft-short-id>-<timestamp>.log` regardless of outcome.
 async fn apply_draft_endpoint(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
@@ -297,61 +390,106 @@ async fn apply_draft_endpoint(
         .to_path_buf();
 
     let ta_bin = find_ta_binary_web();
-    let short_id = &id[..8.min(id.len())];
+    let short_id = id[..8.min(id.len())].to_string();
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        tokio::process::Command::new(&ta_bin)
+    let logs_dir = apply_logs_dir(&project_root);
+    if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to create apply logs directory {}: {}", logs_dir.display(), e)
+            })),
+        )
+            .into_response();
+    }
+    let log_path = logs_dir.join(format!(
+        "apply-{}-{}.log",
+        short_id,
+        Utc::now().format("%Y%m%dT%H%M%SZ")
+    ));
+
+    let job_id = Uuid::new_v4().to_string();
+    state.apply_jobs.lock().unwrap().insert(
+        job_id.clone(),
+        ApplyJobRecord {
+            status: ApplyJobStatus::Running,
+            output: String::new(),
+            log_path: log_path.display().to_string(),
+            commit_sha: None,
+        },
+    );
+
+    let jobs = state.apply_jobs.clone();
+    let job_id_task = job_id.clone();
+    let log_path_task = log_path.clone();
+    tokio::spawn(async move {
+        let result = tokio::process::Command::new(&ta_bin)
             .arg("--project-root")
             .arg(&project_root)
             .arg("draft")
             .arg("apply")
-            .arg(short_id)
+            .arg(&short_id)
             .arg("--git-commit")
             .current_dir(&project_root)
-            .output(),
-    )
-    .await;
+            .output()
+            .await;
 
-    match result {
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": "apply timed out after 120 seconds"
-            })),
-        )
-            .into_response(),
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("Failed to spawn ta: {}. Is `ta` on PATH?", e)
-            })),
-        )
-            .into_response(),
-        Ok(Ok(out)) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let combined = format!("{}{}", stdout, stderr);
-            let commit_sha = parse_commit_sha(&combined);
+        let (status, combined) = match result {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                let combined = format!("{}{}", stdout, stderr);
+                let status = if out.status.success() {
+                    ApplyJobStatus::Done
+                } else {
+                    ApplyJobStatus::Failed
+                };
+                (status, combined)
+            }
+            Err(e) => (
+                ApplyJobStatus::Failed,
+                format!("Failed to spawn ta: {}. Is `ta` on PATH?", e),
+            ),
+        };
 
-            if out.status.success() {
-                Json(serde_json::json!({
-                    "status": "applied",
-                    "commit_sha": commit_sha,
-                    "output": combined,
-                }))
-                .into_response()
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": "apply failed",
-                        "output": combined,
-                    })),
-                )
-                    .into_response()
+        if let Err(e) = std::fs::write(&log_path_task, &combined) {
+            tracing::warn!(
+                path = %log_path_task.display(),
+                error = %e,
+                "Failed to write apply job log"
+            );
+        }
+
+        let commit_sha = parse_commit_sha(&combined);
+        if let Ok(mut map) = jobs.lock() {
+            if let Some(job) = map.get_mut(&job_id_task) {
+                job.status = status;
+                job.output = tail_lines(&combined, 200);
+                job.commit_sha = commit_sha;
             }
         }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "status": "pending",
+            "job_id": job_id,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /api/apply-jobs/:job_id` — Poll the status of a background apply job
+/// started via `POST /api/drafts/:id/apply` (v0.17.0.12.5 item 1).
+async fn get_apply_job(
+    State(state): State<Arc<WebState>>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    let map = state.apply_jobs.lock().unwrap();
+    match map.get(&job_id) {
+        Some(job) => Json(job).into_response(),
+        None => (StatusCode::NOT_FOUND, "apply job not found").into_response(),
     }
 }
 
@@ -557,6 +695,7 @@ pub fn build_router(pr_packages_dir: PathBuf) -> Router {
     let state = Arc::new(WebState {
         pr_packages_dir,
         memory_dir,
+        apply_jobs: Arc::new(Mutex::new(HashMap::new())),
     });
 
     build_web_routes(state)
@@ -615,6 +754,7 @@ fn build_web_routes(state: Arc<WebState>) -> Router {
         .route("/api/drafts/{id}/approve", post(approve_draft))
         .route("/api/drafts/{id}/deny", post(deny_draft))
         .route("/api/drafts/{id}/apply", post(apply_draft_endpoint))
+        .route("/api/apply-jobs/{job_id}", get(get_apply_job))
         // Memory routes (v0.5.7)
         .route("/api/memory", get(list_memory).post(create_memory))
         .route("/api/memory/search", get(search_memory))
@@ -638,6 +778,7 @@ pub fn build_full_router(
     let web_state = Arc::new(WebState {
         pr_packages_dir: app_state.pr_packages_dir.clone(),
         memory_dir: app_state.memory_dir.clone(),
+        apply_jobs: Arc::new(Mutex::new(HashMap::new())),
     });
 
     // Build CORS layer using any extra origins from config (Studio URL, custom UIs).
@@ -690,6 +831,10 @@ pub async fn serve_daemon_api(
     // Write PID file for daemon discovery (v0.10.16).
     let pid_path = project_root.join(".ta").join("daemon.pid");
     write_pid_file(&pid_path, &daemon_config.server);
+
+    // Ensure `.ta/logs/` exists and prune apply job logs older than 30 days
+    // (v0.17.0.12.5 item 3).
+    ensure_and_prune_logs_dir(&project_root, 30);
 
     // Clean up PID file on shutdown.
     let pid_path_clone = pid_path.clone();
@@ -1113,6 +1258,116 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn apply_job_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_router(dir.path().to_path_buf());
+        let resp = app
+            .oneshot(
+                Request::get("/api/apply-jobs/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// v0.17.0.12.5 item 1: apply must return immediately with a job id instead
+    /// of blocking the HTTP response on the subprocess.
+    #[tokio::test]
+    async fn apply_draft_returns_pending_job_id_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        write_draft_json(&packages_dir, id, serde_json::json!({}));
+
+        let app = build_router(packages_dir);
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/drafts/{}/apply", id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "pending");
+        let job_id = json["job_id"].as_str().expect("job_id present");
+        Uuid::parse_str(job_id).expect("job_id is a valid UUID");
+    }
+
+    #[test]
+    fn tail_lines_keeps_short_output_unchanged() {
+        let s = "a\nb\nc";
+        assert_eq!(super::tail_lines(s, 10), s);
+    }
+
+    #[test]
+    fn tail_lines_truncates_to_last_n_lines() {
+        let s = (0..10)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(super::tail_lines(&s, 3), "7\n8\n9");
+    }
+
+    #[test]
+    fn ensure_and_prune_logs_dir_creates_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        super::ensure_and_prune_logs_dir(dir.path(), 30);
+        assert!(dir.path().join(".ta").join("logs").is_dir());
+    }
+
+    #[test]
+    fn ensure_and_prune_logs_dir_keeps_recent_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join(".ta").join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        let recent_log = logs_dir.join("apply-recent-20260101T000000Z.log");
+        std::fs::write(&recent_log, "recent").unwrap();
+        // Non-`.log` files must never be touched by pruning.
+        let other_file = logs_dir.join("notes.txt");
+        std::fs::write(&other_file, "notes").unwrap();
+
+        super::ensure_and_prune_logs_dir(dir.path(), 30);
+
+        assert!(recent_log.exists());
+        assert!(other_file.exists());
+    }
+
+    #[test]
+    fn ensure_and_prune_logs_dir_removes_logs_older_than_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join(".ta").join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        let old_log = logs_dir.join("apply-old-20200101T000000Z.log");
+        std::fs::write(&old_log, "old").unwrap();
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400);
+        // Windows requires write-access on the file handle to call SetFileTime.
+        // File::open (read-only) returns PermissionDenied (error 5) on Windows CI.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old_log)
+            .unwrap()
+            .set_modified(old_time)
+            .expect("platform supports setting mtime");
+
+        super::ensure_and_prune_logs_dir(dir.path(), 30);
+
+        assert!(
+            !old_log.exists(),
+            "log older than retention should be pruned"
+        );
     }
 
     #[test]

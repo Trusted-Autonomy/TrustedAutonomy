@@ -271,6 +271,7 @@
   .notif-item.critical { border-left-color: var(--red); background: rgba(248,113,113,0.06); }
   .notif-item-summary { font-weight: 500; }
   .notif-item-action { font-size: 0.75rem; color: var(--muted); font-family: monospace; margin-top: 0.15rem; }
+  .notif-item-time { font-size: 0.7rem; color: var(--muted); margin-top: 0.25rem; }
   /* Context-sensitive suggestion chips (v0.16.1.3) */
   .advisor-suggestions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.75rem; }
   .suggestion-chip { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
@@ -489,10 +490,14 @@ function renderNotifPanel(notifications) {
         const linkHtml = n.entity_id
           ? `<span style="font-size:0.72rem;color:${color};cursor:pointer" onclick="closeNotifAndNavigate('${esc(n.entity_id)}','${esc(n.notification_type)}')">View →</span>`
           : '';
+        const timeHtml = n.generated_at
+          ? `<div class="notif-item-time" title="${esc(new Date(n.generated_at).toLocaleString())}">${esc(formatNotifTime(n.generated_at))}</div>`
+          : '';
         return `<div class="notif-item ${esc(sev)}" style="display:flex;justify-content:space-between;align-items:flex-start">
           <div>
             <div class="notif-item-summary">${esc(n.summary)}</div>
             <div class="notif-item-action">${esc(n.suggested_action)}</div>
+            ${timeHtml}
           </div>
           ${linkHtml}
         </div>`;
@@ -537,6 +542,17 @@ function timeAgo(iso) {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return hrs + 'h ago';
   return Math.floor(hrs / 24) + 'd ago';
+}
+
+// Absolute timestamp for notifications, e.g. "Jun 29 14:32" (v0.17.0.12.5).
+function formatNotifTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const month = d.toLocaleString(undefined, { month: 'short' });
+  const day = d.getDate();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${month} ${day} ${hh}:${mm}`;
 }
 
 function badgeClass(status) {
@@ -1221,11 +1237,32 @@ async function loadDashboard() {
   }
 }
 
-// Set up 30-second auto-refresh for Dashboard.
+// Set up 30-second auto-refresh for Dashboard (fallback if SSE is unavailable).
 let _dashRefreshTimer = null;
 function startDashRefresh() {
   if (_dashRefreshTimer) clearInterval(_dashRefreshTimer);
   _dashRefreshTimer = setInterval(() => { if (currentTab === 'dashboard') loadDashboard(); }, 30000);
+}
+
+// Dashboard immediacy (v0.17.0.12.5 item 4): subscribe to the daemon's SSE
+// event stream so a newly-started goal appears on the dashboard within the
+// stream's ~2s server-side poll tick, instead of waiting up to 30s for the
+// next fallback timer refresh. `ta run` / `ta_goal_start` already emit
+// `goal_started` immediately on the Configured→Running transition.
+let _dashEventSource = null;
+function startDashEventStream() {
+  if (_dashEventSource) return;
+  try {
+    _dashEventSource = new EventSource('/api/events?types=goal_started,goal_completed,goal_failed');
+  } catch (e) {
+    return; // EventSource unsupported/unavailable — 30s fallback timer still covers us.
+  }
+  const refreshIfOnDashboard = () => { if (currentTab === 'dashboard') loadDashboard(); };
+  _dashEventSource.addEventListener('goal_started', refreshIfOnDashboard);
+  _dashEventSource.addEventListener('goal_completed', refreshIfOnDashboard);
+  _dashEventSource.addEventListener('goal_failed', refreshIfOnDashboard);
+  // On error the browser auto-reconnects per the EventSource spec; nothing
+  // to do here besides letting the 30s timer keep working as a fallback.
 }
 
 function renderDashboard(allDrafts, questions, status, phases, velocity, advisorCtx) {
@@ -2018,26 +2055,22 @@ async function doDraftAction(id, action) {
   const btn = event && event.target;
 
   if (action === 'apply') {
-    // Call the daemon apply endpoint (v0.16.1.2).
+    // Kick off a background apply job and poll for progress (v0.17.0.12.5).
+    // The endpoint returns immediately with a job_id instead of blocking on
+    // the subprocess, so the UI shows live progress instead of a long stall.
     if (btn) btn.disabled = true;
     const statusEl = document.createElement('div');
     statusEl.style.cssText = 'margin-top:0.75rem;font-size:0.85rem;color:var(--accent)';
-    statusEl.textContent = 'Applying draft — this may take a minute…';
+    statusEl.textContent = 'Starting apply…';
     if (btn && btn.parentElement) btn.parentElement.appendChild(statusEl);
     try {
       const r = await fetch('/api/drafts/' + id + '/apply', { method: 'POST' });
       const data = await r.json().catch(() => ({}));
-      if (r.ok) {
-        const sha = data.commit_sha ? ' — commit: ' + data.commit_sha : '';
-        statusEl.style.color = 'var(--green)';
-        statusEl.textContent = 'Applied successfully' + sha + '.';
-        setTimeout(() => loadDrafts(), 2000);
+      if (r.ok && data.job_id) {
+        pollApplyJob(data.job_id, statusEl, btn);
       } else {
-        // Fall back to clipboard so the user can still apply manually.
-        const cmd = 'ta draft apply ' + id.slice(0, 8) + ' --git-commit';
-        if (navigator.clipboard) await navigator.clipboard.writeText(cmd).catch(() => {});
         statusEl.style.color = 'var(--red)';
-        statusEl.textContent = 'Apply failed: ' + (data.error || r.status) + '. CLI command copied to clipboard.';
+        statusEl.textContent = 'Apply failed to start: ' + (data.error || r.status) + '.';
         if (btn) btn.disabled = false;
       }
     } catch (e) {
@@ -2088,6 +2121,72 @@ async function doDraftAction(id, action) {
     showAlert('Network error');
     if (btn) btn.disabled = false;
   }
+}
+
+// ── Apply job progress (v0.17.0.12.5) ──────────────────────────
+const APPLY_POLL_INTERVAL_MS = 2000;
+
+function pollApplyJob(jobId, statusEl, btn) {
+  let elapsed = 0;
+  const tick = async () => {
+    let job;
+    try {
+      const r = await fetch('/api/apply-jobs/' + jobId);
+      if (!r.ok) {
+        statusEl.style.color = 'var(--red)';
+        statusEl.textContent = 'Lost track of apply job (' + r.status + ').';
+        if (btn) btn.disabled = false;
+        return;
+      }
+      job = await r.json();
+    } catch (e) {
+      statusEl.style.color = 'var(--red)';
+      statusEl.textContent = 'Network error while polling apply job: ' + e.message;
+      if (btn) btn.disabled = false;
+      return;
+    }
+
+    if (job.status === 'running') {
+      elapsed += APPLY_POLL_INTERVAL_MS / 1000;
+      statusEl.style.color = 'var(--accent)';
+      statusEl.textContent = 'Applying draft… (' + elapsed + 's)';
+      setTimeout(tick, APPLY_POLL_INTERVAL_MS);
+      return;
+    }
+
+    if (job.status === 'done') {
+      const sha = job.commit_sha ? ' — commit: ' + job.commit_sha : '';
+      statusEl.style.color = 'var(--green)';
+      statusEl.textContent = 'Applied successfully' + sha + '.';
+      setTimeout(() => loadDrafts(), 2000);
+      return;
+    }
+
+    // job.status === 'failed'
+    statusEl.style.color = 'var(--red)';
+    statusEl.innerHTML = '';
+    statusEl.append('Apply failed. ');
+    const viewLogBtn = document.createElement('button');
+    viewLogBtn.className = 'btn btn-ghost btn-sm';
+    viewLogBtn.textContent = 'View Log';
+    viewLogBtn.onclick = () => showApplyLogModal(job);
+    statusEl.appendChild(viewLogBtn);
+    if (btn) btn.disabled = false;
+  };
+  tick();
+}
+
+function showApplyLogModal(job) {
+  const overlay = document.getElementById('link-modal-overlay');
+  const body = document.getElementById('link-modal-body');
+  body.innerHTML = `
+    <div style="margin-bottom:1rem">
+      <strong style="font-size:1rem">Apply Log</strong>
+      <p style="font-size:0.75rem;color:var(--muted);margin:0.3rem 0 0;font-family:monospace">${esc(job.log_path || '')}</p>
+    </div>
+    <pre>${esc(job.output || '(no output captured)')}</pre>
+  `;
+  overlay.style.display = 'flex';
 }
 
 // ── Agent Questions ────────────────────────────────────────────
@@ -3834,6 +3933,7 @@ pollHealthSignals();
 loadVersion();
 pollNotifications();
 startDashRefresh();
+startDashEventStream();
 setInterval(loadVersion, 60000);
 </script>
 </body>

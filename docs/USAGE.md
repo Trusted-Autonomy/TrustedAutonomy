@@ -362,7 +362,13 @@ A bell icon (🔔) in the top-right corner of the header shows a badge count whe
 - Drafts ready for your review
 - Corrective actions proposed by the watchdog
 
-The panel links directly to the relevant draft or goal. Notifications are polled every 60 seconds.
+Each notification shows when it actually happened (e.g. "Jun 29 14:32"), not when you happened to check — hover the timestamp for the full date/time. The panel links directly to the relevant draft or goal. Notifications are polled every 60 seconds.
+
+Disk-space warnings are deduplicated: once the watchdog raises a low-disk corrective action, it won't fire again for 10 minutes even if disk stays low, and the message includes current free space plus "First noticed at `<time>`" so you can see how long the condition has persisted.
+
+### Dashboard Immediacy
+
+The Dashboard tab refreshes every 30 seconds by default, but also subscribes to the daemon's live event stream — when a goal starts, completes, or fails, the dashboard updates within about 2 seconds instead of waiting for the next 30-second tick. The 30-second poll remains as a fallback if the event stream is unavailable.
 
 ### Workflow Template Catalog
 
@@ -7702,6 +7708,16 @@ To disable the web UI:
 [server]
 web_ui = false
 ```
+
+#### Applying a draft from the browser
+
+Clicking **Apply** on a draft in the **Review Drafts** tab kicks off `ta draft apply --git-commit` as a background job and returns immediately — it does not block the page. The button's status text polls progress every 2 seconds and updates in place:
+
+- While running: `Applying draft… (Ns)`
+- On success: `Applied successfully — commit: <sha>`, then the draft list refreshes
+- On failure: `Apply failed.` with a **View Log** button that opens the full apply output (stdout + stderr) in a modal
+
+Every apply attempt writes its full output to `.ta/logs/apply-<draft-short-id>-<timestamp>.log` regardless of outcome, so you can always inspect a past run even after the browser tab is closed. Logs older than 30 days are pruned automatically on daemon startup.
 
 ### Daemon Lifecycle Management
 

@@ -83,6 +83,16 @@ impl Notification {
         self
     }
 
+    /// Override `generated_at` with the time the underlying event actually
+    /// happened, rather than the time this notification was rendered
+    /// (v0.17.0.12.5 item 5). Without this, every poll of `/api/notifications`
+    /// stamps `Utc::now()`, so a notification for an hour-old issue looks
+    /// like it just happened.
+    fn with_generated_at(mut self, generated_at: DateTime<Utc>) -> Self {
+        self.generated_at = generated_at;
+        self
+    }
+
     fn with_entity(mut self, entity_id: impl Into<String>) -> Self {
         self.entity_id = Some(entity_id.into());
         self
@@ -129,7 +139,8 @@ pub async fn get_notifications(State(state): State<Arc<AppState>>) -> impl IntoR
                                 &goal.goal_run_id.to_string()[..8]
                             ),
                         )
-                        .with_entity(goal.goal_run_id.to_string());
+                        .with_entity(goal.goal_run_id.to_string())
+                        .with_generated_at(goal.updated_at);
                         notifications.push(notif);
                     }
                 }
@@ -149,7 +160,8 @@ pub async fn get_notifications(State(state): State<Arc<AppState>>) -> impl IntoR
                                 &goal.goal_run_id.to_string()[..8]
                             ),
                         )
-                        .with_entity(goal.goal_run_id.to_string());
+                        .with_entity(goal.goal_run_id.to_string())
+                        .with_generated_at(goal.updated_at);
                         notifications.push(notif);
                     }
                 }
@@ -165,7 +177,8 @@ pub async fn get_notifications(State(state): State<Arc<AppState>>) -> impl IntoR
                         "ta draft list  →  ta draft view <id>  →  ta draft approve <id>"
                             .to_string(),
                     )
-                    .with_entity(goal.goal_run_id.to_string());
+                    .with_entity(goal.goal_run_id.to_string())
+                    .with_generated_at(goal.updated_at);
                     notifications.push(notif);
                 }
             }
@@ -206,7 +219,8 @@ pub async fn get_notifications(State(state): State<Arc<AppState>>) -> impl IntoR
                 action.issue.clone(),
                 format!("ta operations log  →  action key: {}", action.action_key),
             )
-            .with_detail(format!("{} — {}", action.diagnosis, action.proposed_action));
+            .with_detail(format!("{} — {}", action.diagnosis, action.proposed_action))
+            .with_generated_at(action.created_at);
 
             if let Some(goal_id) = action.goal_id {
                 notif = notif.with_entity(goal_id.to_string());
@@ -307,5 +321,20 @@ mod tests {
     fn count_pending_drafts_missing_dir() {
         let count = count_pending_drafts(std::path::Path::new("/nonexistent/path"));
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn with_generated_at_overrides_default_now() {
+        let historical = Utc::now() - chrono::Duration::hours(3);
+        let n = Notification::new(
+            "id1",
+            "corrective_action",
+            NotificationSeverity::Critical,
+            "Disk low",
+            "ta gc",
+        )
+        .with_generated_at(historical);
+
+        assert_eq!(n.generated_at, historical);
     }
 }
