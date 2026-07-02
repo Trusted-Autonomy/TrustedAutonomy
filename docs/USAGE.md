@@ -362,7 +362,7 @@ A bell icon (🔔) in the top-right corner of the header shows a badge count whe
 - Drafts ready for your review
 - Corrective actions proposed by the watchdog
 
-The panel links directly to the relevant draft or goal. Notifications are polled every 60 seconds.
+The panel links directly to the relevant draft or goal, and each entry shows when it was generated (e.g. "Jun 29 14:32"). Notifications are polled every 60 seconds; the Dashboard tab also refreshes immediately (rather than waiting for its normal 30-second cycle) whenever a goal starts or a draft changes state.
 
 ### Workflow Template Catalog
 
@@ -1024,6 +1024,15 @@ approval_required = false   # default: single-author flow — apply auto-approve
 ```
 
 When `approval_required = true`, `ta draft apply` on a `PendingReview` draft prints an actionable error directing the reviewer to run `ta draft approve <id>` first.
+
+#### Applying a Draft from Studio
+
+Clicking **Apply** in TA Studio no longer blocks on the full apply (which can take a while if it triggers a build/test run) — it starts the apply in the background and shows a live progress line that updates every 2 seconds until the apply finishes:
+
+- **On success**: the commit SHA is shown and the draft list refreshes automatically.
+- **On failure**: a **View Log** button appears, opening the full apply output (stdout+stderr) in a modal so you can see exactly what went wrong without leaving the browser.
+
+The full log for every apply is also written to `.ta/logs/apply-<draft-id>-<timestamp>.log` on the daemon host, regardless of outcome. Logs older than 30 days are pruned automatically on daemon startup.
 
 #### Draft View Output
 
