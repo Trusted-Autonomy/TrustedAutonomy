@@ -324,8 +324,10 @@ pub fn stop(project_root: &Path) -> anyhow::Result<()> {
     // The shutdown endpoint requires X-TA-Admin-Confirm: shutdown (v0.17.0.9)
     // to prevent accidental shutdown by agent subprocesses. Auth is bypassed for
     // loopback, so no Bearer token is needed from the CLI.
+    // Use a 10s timeout: the daemon is known alive (drain check already passed),
+    // so 3s was too short — a busy daemon handling drain cleanup could miss it.
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
     let resp = client
@@ -342,18 +344,26 @@ pub fn stop(project_root: &Path) -> anyhow::Result<()> {
             false // fall through to PID kill
         }
         Ok(_) => true,
-        Err(_) => false,
+        Err(e) if e.is_timeout() => {
+            // Daemon is alive (drain check passed) but took > 10s to ack shutdown.
+            // Send SIGTERM — the daemon's signal handler triggers clean shutdown.
+            eprintln!(
+                "Warning: daemon did not acknowledge HTTP shutdown within 10s \
+                 — sending SIGTERM to allow clean exit. Use --force to skip waiting."
+            );
+            false
+        }
+        Err(_) => false, // connection error: daemon not reachable, fall through to PID
     };
 
     if !http_sent {
-        // If HTTP fails, try to kill by PID.
+        // HTTP shutdown didn't succeed — try to kill by PID.
         if let Some(pid) = read_pid(project_root) {
             if is_process_alive(pid) {
                 #[cfg(unix)]
                 {
                     let _ = Command::new("kill").arg(pid.to_string()).output();
                 }
-                eprintln!("Sent SIGTERM to daemon (pid {}).", pid);
             } else {
                 eprintln!("Daemon not running (stale PID file).");
                 remove_pid_file(project_root);
