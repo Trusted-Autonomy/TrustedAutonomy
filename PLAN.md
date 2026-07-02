@@ -9200,7 +9200,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 ---
 
 ### v0.17.0.12.5 — Studio Cleanup + Dashboard Immediacy
-<!-- status: in_progress -->
+<!-- status: pending -->
 **Depends on**: v0.17.0.12.4
 
 **Goal**: Fix three UX gaps with near-zero visual feedback: the 30s lag before dashboard shows a running goal, notifications with no timestamps, and disk-space notices with no temporal context. Fix the apply timeout and its misleading error message.
