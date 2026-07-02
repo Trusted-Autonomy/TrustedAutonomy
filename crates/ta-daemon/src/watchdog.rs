@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use reqwest;
 
 use crate::power_manager::SharedPowerManager;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ta_audit::{AuditDisposition, AuditEntry, GoalAuditLedger};
 use ta_events::schema::{HealthIssue, SessionEvent};
 use ta_events::store::{EventStore, FsEventStore};
@@ -131,6 +131,12 @@ pub struct WatchdogState {
     last_wake_wall: Option<SystemTime>,
     /// Whether the API was reachable the last time we checked (post-wake only).
     api_was_reachable: Option<bool>,
+    /// When the current low-disk episode was first observed (`None` when disk
+    /// is not currently low). Reset once disk space recovers (v0.17.0.12.5).
+    disk_alert_first_noticed: Option<DateTime<Utc>>,
+    /// When the disk-low corrective action was last written to the operations
+    /// log, used to suppress re-fires while disk stays low (v0.17.0.12.5).
+    disk_alert_last_fired: Option<SystemTime>,
 }
 
 impl Default for WatchdogState {
@@ -140,6 +146,8 @@ impl Default for WatchdogState {
             prev_wall: SystemTime::now(),
             last_wake_wall: None,
             api_was_reachable: None,
+            disk_alert_first_noticed: None,
+            disk_alert_last_fired: None,
         }
     }
 }
@@ -208,6 +216,23 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
     {
         let _ = path;
         None
+    }
+}
+
+/// Decide whether a disk-low corrective action should be (re-)fired, given
+/// when it was last fired and how long re-fires should be suppressed for
+/// (v0.17.0.12.5 item 6).
+fn should_fire_disk_alert(
+    last_fired: Option<SystemTime>,
+    current_wall: SystemTime,
+    suppress_secs: u64,
+) -> bool {
+    match last_fired {
+        None => true,
+        Some(last) => current_wall
+            .duration_since(last)
+            .map(|d| d.as_secs() >= suppress_secs)
+            .unwrap_or(true),
     }
 }
 
@@ -299,34 +324,62 @@ fn watchdog_cycle(
         false
     };
 
-    // Check disk space and emit corrective action if low.
+    // Check disk space and emit a corrective action if low. Re-fires are
+    // suppressed for 10 minutes so a persistently-low disk doesn't spam the
+    // operations log with an identical notice every watchdog cycle — this
+    // was producing 9+ duplicate notices with no indication of "when"
+    // (v0.17.0.12.5 item 6).
     let low_disk_threshold_bytes: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
+    const DISK_ALERT_SUPPRESS_SECS: u64 = 10 * 60;
     if let Some(avail) = available_disk_bytes(project_root) {
         if avail < low_disk_threshold_bytes {
             let avail_gb = avail as f64 / 1_073_741_824.0;
-            tracing::warn!(
-                available_gb = format!("{:.2}", avail_gb),
-                "Disk space low — emitting corrective action"
-            );
-            let action = CorrectiveAction::new(
-                format!("Low disk space: {:.1} GB available", avail_gb),
-                ActionSeverity::Critical,
-                format!(
-                    "Available disk on project root is {:.1} GB, below 2 GB threshold. \
-                     Stale staging directories may be consuming significant space.",
-                    avail_gb
-                ),
-                "Run `ta gc` to clean stale staging directories and reclaim disk space.",
-                "clean_applied_staging",
-            )
-            .set_auto_healable();
-            let ops_log = OperationsLog::for_project(project_root);
-            if let Err(e) = ops_log.append(&action) {
-                tracing::warn!(
-                    "Watchdog: failed to write disk-space corrective action: {}",
-                    e
-                );
+
+            if state.disk_alert_first_noticed.is_none() {
+                state.disk_alert_first_noticed = Some(now);
             }
+            let first_noticed = state.disk_alert_first_noticed.unwrap();
+
+            let should_fire = should_fire_disk_alert(
+                state.disk_alert_last_fired,
+                current_wall,
+                DISK_ALERT_SUPPRESS_SECS,
+            );
+
+            if should_fire {
+                tracing::warn!(
+                    available_gb = format!("{:.2}", avail_gb),
+                    first_noticed = %first_noticed.to_rfc3339(),
+                    "Disk space low — emitting corrective action"
+                );
+                let action = CorrectiveAction::new(
+                    format!("Low disk space: {:.1} GB available", avail_gb),
+                    ActionSeverity::Critical,
+                    format!(
+                        "Available disk on project root is {:.1} GB, below the 2 GB \
+                         threshold (checked at {}). First noticed at {}. Stale staging \
+                         directories may be consuming significant space.",
+                        avail_gb,
+                        now.to_rfc3339(),
+                        first_noticed.to_rfc3339(),
+                    ),
+                    "Run `ta gc` to clean stale staging directories and reclaim disk space.",
+                    "clean_applied_staging",
+                )
+                .set_auto_healable();
+                let ops_log = OperationsLog::for_project(project_root);
+                if let Err(e) = ops_log.append(&action) {
+                    tracing::warn!(
+                        "Watchdog: failed to write disk-space corrective action: {}",
+                        e
+                    );
+                }
+                state.disk_alert_last_fired = Some(current_wall);
+            }
+        } else {
+            // Disk recovered — the next low-disk dip starts a fresh episode.
+            state.disk_alert_first_noticed = None;
+            state.disk_alert_last_fired = None;
         }
     }
 
@@ -1424,6 +1477,34 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    // ── v0.17.0.12.5 item 6: disk-space alert dedup ─────────────────
+
+    #[test]
+    fn should_fire_disk_alert_when_never_fired() {
+        assert!(should_fire_disk_alert(None, SystemTime::now(), 600));
+    }
+
+    #[test]
+    fn should_fire_disk_alert_suppressed_within_window() {
+        let last_fired = SystemTime::now();
+        let just_after = last_fired + Duration::from_secs(60);
+        assert!(!should_fire_disk_alert(Some(last_fired), just_after, 600));
+    }
+
+    #[test]
+    fn should_fire_disk_alert_fires_after_window_elapses() {
+        let last_fired = SystemTime::now();
+        let much_later = last_fired + Duration::from_secs(601);
+        assert!(should_fire_disk_alert(Some(last_fired), much_later, 600));
+    }
+
+    #[test]
+    fn should_fire_disk_alert_fires_exactly_at_boundary() {
+        let last_fired = SystemTime::now();
+        let at_boundary = last_fired + Duration::from_secs(600);
+        assert!(should_fire_disk_alert(Some(last_fired), at_boundary, 600));
+    }
+
     #[test]
     fn truncate_preview_short() {
         assert_eq!(truncate_preview("hello", 10), "hello");
@@ -1705,6 +1786,7 @@ mod tests {
             prev_monotonic: Instant::now() - Duration::from_secs(30),
             last_wake_wall: None,
             api_was_reachable: None,
+            ..Default::default()
         };
 
         watchdog_cycle(project, &config, &mut state, None);
@@ -1739,6 +1821,7 @@ mod tests {
             prev_monotonic: Instant::now() - Duration::from_secs(31),
             last_wake_wall: None,
             api_was_reachable: None,
+            ..Default::default()
         };
 
         watchdog_cycle(project, &config, &mut state, None);
@@ -1881,6 +1964,7 @@ mod tests {
             prev_wall: now - Duration::from_secs(31),
             prev_monotonic: Instant::now() - Duration::from_secs(31),
             api_was_reachable: None,
+            ..Default::default()
         };
         let in_grace = state_recent_wake
             .last_wake_wall
@@ -1895,6 +1979,7 @@ mod tests {
             prev_wall: now - Duration::from_secs(31),
             prev_monotonic: Instant::now() - Duration::from_secs(31),
             api_was_reachable: None,
+            ..Default::default()
         };
         let in_grace_old = state_old_wake
             .last_wake_wall

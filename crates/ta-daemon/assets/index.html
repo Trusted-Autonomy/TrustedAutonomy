@@ -489,10 +489,15 @@ function renderNotifPanel(notifications) {
         const linkHtml = n.entity_id
           ? `<span style="font-size:0.72rem;color:${color};cursor:pointer" onclick="closeNotifAndNavigate('${esc(n.entity_id)}','${esc(n.notification_type)}')">View →</span>`
           : '';
+        const timeStr = formatNotifTime(n.generated_at);
+        const timeHtml = timeStr
+          ? `<div class="notif-item-time" style="font-size:0.68rem;color:var(--muted);margin-top:0.15rem">${esc(timeStr)}</div>`
+          : '';
         return `<div class="notif-item ${esc(sev)}" style="display:flex;justify-content:space-between;align-items:flex-start">
           <div>
             <div class="notif-item-summary">${esc(n.summary)}</div>
             <div class="notif-item-action">${esc(n.suggested_action)}</div>
+            ${timeHtml}
           </div>
           ${linkHtml}
         </div>`;
@@ -520,6 +525,20 @@ function closeNotifAndNavigate(entityId, notifType) {
 setInterval(pollNotifications, 60000);
 
 // ── Utilities ─────────────────────────────────────────────────
+
+// Format an ISO timestamp as "Jun 29 14:32" for compact display in the
+// notification feed (v0.17.0.12.5 item 5).
+function formatNotifTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const month = d.toLocaleString(undefined, { month: 'short' });
+  const day = d.getDate();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${month} ${day} ${hh}:${mm}`;
+}
+
 function esc(s) {
   if (s === null || s === undefined) return '';
   const el = document.createElement('span');
@@ -1221,11 +1240,47 @@ async function loadDashboard() {
   }
 }
 
-// Set up 30-second auto-refresh for Dashboard.
+// Set up 30-second auto-refresh for Dashboard (fallback if the event
+// stream below is unavailable).
 let _dashRefreshTimer = null;
 function startDashRefresh() {
   if (_dashRefreshTimer) clearInterval(_dashRefreshTimer);
   _dashRefreshTimer = setInterval(() => { if (currentTab === 'dashboard') loadDashboard(); }, 30000);
+}
+
+// ── Dashboard immediacy via SSE (v0.17.0.12.5 item 4) ──────────
+// `ta run` writes a GoalStarted event to the event store immediately, but
+// Studio previously only picked it up on the next 30s dashboard poll. The
+// daemon's `/api/events` stream already replays new events within ~2s
+// (crates/ta-daemon/src/api/events.rs); subscribe to it and refresh the
+// dashboard right away instead of waiting for the timer.
+const DASH_REFRESH_EVENT_TYPES = [
+  'goal_started', 'goal_completed',
+  'draft_built', 'draft_submitted', 'draft_approved', 'draft_denied', 'draft_applied',
+];
+let _dashEventSource = null;
+let _dashRefreshDebounce = null;
+
+function scheduleDashRefresh() {
+  if (_dashRefreshDebounce) clearTimeout(_dashRefreshDebounce);
+  // Small debounce so a burst of related events (e.g. draft built + submitted)
+  // triggers one reload, not several.
+  _dashRefreshDebounce = setTimeout(() => {
+    if (currentTab === 'dashboard') loadDashboard();
+  }, 300);
+}
+
+function startDashEventStream() {
+  if (_dashEventSource || typeof EventSource === 'undefined') return;
+  try {
+    const url = '/api/events?types=' + DASH_REFRESH_EVENT_TYPES.join(',');
+    _dashEventSource = new EventSource(url);
+    DASH_REFRESH_EVENT_TYPES.forEach(type => {
+      _dashEventSource.addEventListener(type, scheduleDashRefresh);
+    });
+    // On error the browser's EventSource auto-reconnects; the 30s poll
+    // above remains as a fallback in case the stream never recovers.
+  } catch (_) {}
 }
 
 function renderDashboard(allDrafts, questions, status, phases, velocity, advisorCtx) {
@@ -2018,28 +2073,26 @@ async function doDraftAction(id, action) {
   const btn = event && event.target;
 
   if (action === 'apply') {
-    // Call the daemon apply endpoint (v0.16.1.2).
+    // Apply runs as a background job on the daemon (v0.17.0.12.5 item 1) —
+    // the POST returns a job_id immediately and we poll for progress instead
+    // of blocking the button on a potentially slow build/test/commit.
     if (btn) btn.disabled = true;
     const statusEl = document.createElement('div');
     statusEl.style.cssText = 'margin-top:0.75rem;font-size:0.85rem;color:var(--accent)';
-    statusEl.textContent = 'Applying draft — this may take a minute…';
+    statusEl.textContent = 'Starting apply…';
     if (btn && btn.parentElement) btn.parentElement.appendChild(statusEl);
+
+    const startedAt = Date.now();
     try {
       const r = await fetch('/api/drafts/' + id + '/apply', { method: 'POST' });
       const data = await r.json().catch(() => ({}));
-      if (r.ok) {
-        const sha = data.commit_sha ? ' — commit: ' + data.commit_sha : '';
-        statusEl.style.color = 'var(--green)';
-        statusEl.textContent = 'Applied successfully' + sha + '.';
-        setTimeout(() => loadDrafts(), 2000);
-      } else {
-        // Fall back to clipboard so the user can still apply manually.
-        const cmd = 'ta draft apply ' + id.slice(0, 8) + ' --git-commit';
-        if (navigator.clipboard) await navigator.clipboard.writeText(cmd).catch(() => {});
+      if (!r.ok || !data.job_id) {
         statusEl.style.color = 'var(--red)';
-        statusEl.textContent = 'Apply failed: ' + (data.error || r.status) + '. CLI command copied to clipboard.';
+        statusEl.textContent = 'Apply failed to start: ' + (data.error || r.status);
         if (btn) btn.disabled = false;
+        return;
       }
+      pollApplyJob(data.job_id, statusEl, btn, startedAt);
     } catch (e) {
       statusEl.style.color = 'var(--red)';
       statusEl.textContent = 'Network error: ' + e.message;
@@ -2087,6 +2140,66 @@ async function doDraftAction(id, action) {
   } catch (e) {
     showAlert('Network error');
     if (btn) btn.disabled = false;
+  }
+}
+
+// ── Apply job progress (v0.17.0.12.5 item 2) ───────────────────
+// Polls GET /api/apply-jobs/:job_id every 2s until the background apply
+// finishes, updating the inline status line. On failure, offers a "View Log"
+// button instead of the old (unreliable outside HTTPS) clipboard fallback.
+async function pollApplyJob(jobId, statusEl, btn, startedAt) {
+  let job;
+  try {
+    const r = await fetch('/api/apply-jobs/' + jobId);
+    job = r.ok ? await r.json().catch(() => null) : null;
+  } catch (_) {
+    job = null;
+  }
+
+  if (!job) {
+    setTimeout(() => pollApplyJob(jobId, statusEl, btn, startedAt), 2000);
+    return;
+  }
+
+  const elapsed = Math.round((Date.now() - startedAt) / 1000);
+
+  if (job.status === 'running') {
+    statusEl.textContent = `Applying draft — ${elapsed}s elapsed…`;
+    setTimeout(() => pollApplyJob(jobId, statusEl, btn, startedAt), 2000);
+    return;
+  }
+
+  if (job.status === 'done') {
+    const sha = job.commit_sha ? ' — commit: ' + job.commit_sha : '';
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = 'Applied successfully' + sha + ` (${elapsed}s).`;
+    setTimeout(() => loadDrafts(), 2000);
+    return;
+  }
+
+  // job.status === 'failed' (or an unrecognized terminal status).
+  statusEl.style.color = 'var(--red)';
+  statusEl.textContent = `Apply failed after ${elapsed}s.`;
+  const viewLogBtn = document.createElement('button');
+  viewLogBtn.className = 'btn btn-ghost btn-sm';
+  viewLogBtn.style.marginLeft = '0.5rem';
+  viewLogBtn.textContent = 'View Log';
+  viewLogBtn.onclick = () => showApplyLogModal(jobId);
+  statusEl.appendChild(viewLogBtn);
+  if (btn) btn.disabled = false;
+}
+
+async function showApplyLogModal(jobId) {
+  const overlay = document.getElementById('link-modal-overlay');
+  const body = document.getElementById('link-modal-body');
+  body.innerHTML = '<div class="loading">Loading log…</div>';
+  overlay.style.display = 'flex';
+  try {
+    const r = await fetch('/api/apply-jobs/' + jobId + '/log');
+    const text = r.ok ? await r.text() : 'Could not load log: ' + r.status;
+    body.innerHTML = `<h3 style="margin-bottom:0.75rem">Apply Log</h3><pre>${esc(text)}</pre>`;
+  } catch (e) {
+    body.innerHTML = `<p style="color:var(--red)">Failed to load log: ${esc(e.message)}</p>`;
   }
 }
 
@@ -3834,6 +3947,7 @@ pollHealthSignals();
 loadVersion();
 pollNotifications();
 startDashRefresh();
+startDashEventStream();
 setInterval(loadVersion, 60000);
 </script>
 </body>
