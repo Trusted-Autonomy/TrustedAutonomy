@@ -158,3 +158,6 @@ result-*
 
 # Demo recordings
 *.cast
+
+# Local-only work queue (machine-specific, not shared via git)
+memory/work_queue.md
