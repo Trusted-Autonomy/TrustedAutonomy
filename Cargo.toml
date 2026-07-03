@@ -55,7 +55,7 @@ members = [
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.17.0-alpha.12.3"
+version = "0.17.0-alpha.12.9"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
@@ -162,6 +162,10 @@ arboard = "3"
 
 # Tera template engine — used by ta-init for scaffold file rendering (v0.16.5).
 tera = "1"
+
+# Semver parsing/validation — used to verify generated version strings parse
+# correctly under the deep-phase-ID bump logic (v0.17.0.12.10).
+semver = "1"
 
 # Testing utilities
 tempfile = "3"

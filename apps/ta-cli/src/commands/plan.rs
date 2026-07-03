@@ -1906,24 +1906,109 @@ fn parse_semver_id(id: &str) -> Option<Vec<u32>> {
     parts
 }
 
+/// Maximum number of sub-phase segments (beyond `major.minor.patch`) that are
+/// encoded losslessly as dot-separated semver pre-release identifiers.
+///
+/// Chosen because this project's deepest observed phase nesting (`v0.17.0.12.10`,
+/// i.e. 2 sub-segments) is comfortably under it, while still bounding the
+/// pre-release chain length. Beyond this depth, `phase_id_to_semver` truncates
+/// and appends a build-metadata discriminator instead (see below).
+const MAX_SUBPHASE_DEPTH: usize = 4;
+
+/// Derive a stable 4-hex-char discriminator from a phase ID string.
+///
+/// Deterministic per phase-id (not per-commit) so the same overflowing phase ID
+/// always produces the same build-metadata suffix, regardless of which commit
+/// happens to perform the bump.
+fn phase_id_discriminator(phase_id: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(phase_id.as_bytes());
+    format!("{:x}", digest)[..4].to_string()
+}
+
 /// Convert a plan phase ID to the canonical workspace semver string.
 ///
 /// Phase ID mapping (per CLAUDE.md version policy):
-///   v0.14.22       → "0.14.22-alpha"
-///   v0.14.22.1     → "0.14.22-alpha.1"
-///   v0.14.22.2     → "0.14.22-alpha.2"
-///   v0.15.0        → "0.15.0-alpha"
+///   v0.14.22           → "0.14.22-alpha"
+///   v0.14.22.1         → "0.14.22-alpha.1"
+///   v0.14.22.2         → "0.14.22-alpha.2"
+///   v0.15.0            → "0.15.0-alpha"
+///   v0.17.0.12.9       → "0.17.0-alpha.12.9"
+///   v0.17.0.12.9.1     → "0.17.0-alpha.12.9.1"
+///
+/// Sub-phase IDs are handled generically: any number of segments beyond
+/// `major.minor.patch` are appended in order as dot-separated pre-release
+/// identifiers, up to `MAX_SUBPHASE_DEPTH` of them. This is valid semver —
+/// the spec allows pre-release identifiers to repeat indefinitely — and
+/// Cargo's semver parser accepts it.
+///
+/// Beyond `MAX_SUBPHASE_DEPTH` sub-segments, the pre-release chain is truncated
+/// to the first `MAX_SUBPHASE_DEPTH` and a build-metadata suffix (`+xxxx`) is
+/// appended containing a 4-hex-char discriminator derived from a stable hash of
+/// the *full* phase ID. Semver build metadata is explicitly excluded from
+/// precedence/ordering comparisons by spec-compliant tooling (cargo, the
+/// `semver` crate, shields.io), so this never breaks version sorting or the
+/// `version-check` CI job's equality check — it's purely an extra disambiguator
+/// for the rare case of very deep nesting.
 ///
 /// Non-semver phase IDs (e.g., "4b", "Phase 1") return `None` — no auto-bump.
 pub fn phase_id_to_semver(phase_id: &str) -> Option<String> {
     let parts = parse_semver_id(phase_id)?;
-    match parts.as_slice() {
-        // Three-part: v0.14.22 → "0.14.22-alpha"
-        [major, minor, patch] => Some(format!("{}.{}.{}-alpha", major, minor, patch)),
-        // Four-part: v0.14.22.1 → "0.14.22-alpha.1"
-        [major, minor, patch, sub] => Some(format!("{}.{}.{}-alpha.{}", major, minor, patch, sub)),
-        _ => None,
+    if parts.len() < 3 {
+        return None;
     }
+    let (major, minor, patch) = (parts[0], parts[1], parts[2]);
+    let sub_segments = &parts[3..];
+
+    if sub_segments.is_empty() {
+        return Some(format!("{}.{}.{}-alpha", major, minor, patch));
+    }
+
+    if sub_segments.len() <= MAX_SUBPHASE_DEPTH {
+        let pre_release = sub_segments
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(".");
+        return Some(format!(
+            "{}.{}.{}-alpha.{}",
+            major, minor, patch, pre_release
+        ));
+    }
+
+    // Beyond MAX_SUBPHASE_DEPTH: truncate the pre-release chain and disambiguate
+    // with a build-metadata discriminator derived from the full phase ID.
+    let truncated = sub_segments[..MAX_SUBPHASE_DEPTH]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join(".");
+    let discriminator = phase_id_discriminator(phase_id);
+    Some(format!(
+        "{}.{}.{}-alpha.{}+{}",
+        major, minor, patch, truncated, discriminator
+    ))
+}
+
+/// Loudly warn (tracing + stderr) that a phase ID could not be converted to a
+/// version via `phase_id_to_semver` and that the version bump was skipped.
+///
+/// This is the fix for the 6-phase version drift root cause: `phase_id_to_semver`
+/// returning `None` used to be handled with a silent `if let Some(...) = ...`
+/// that skipped the bump with no visibility at all. Call this from the `else`
+/// arm everywhere `phase_id_to_semver` gates an auto-bump.
+pub fn warn_unparseable_phase_id_for_bump(phase_id: &str) {
+    tracing::warn!(
+        phase = %phase_id,
+        "phase_id_to_semver could not parse phase ID — version bump skipped"
+    );
+    eprintln!(
+        "[version] Warning: phase ID '{}' could not be converted to a version \
+         (expected `vMAJOR.MINOR.PATCH[.SUB...]`, e.g. `v0.17.0` or `v0.17.0.12.9`) — \
+         version bump skipped. If this phase should bump the version, rename it to \
+         follow that format, or run ./scripts/bump-version.sh manually.",
+        phase_id
+    );
 }
 
 /// Check for out-of-order phases: a `Done` phase appears after a `Pending` phase
@@ -5867,9 +5952,14 @@ fn write_loop_state(workspace_root: &std::path::Path, state: &AutonomousLoopStat
 /// Check for git drift: count changed files relative to HEAD.
 /// Returns the list of changed files if count exceeds threshold.
 fn check_drift(workspace_root: &std::path::Path, threshold: u32) -> Result<(), Vec<String>> {
+    // Clear GIT_DIR/GIT_WORK_TREE so this always operates on `workspace_root`,
+    // not whatever repo an ambient environment variable happens to point at
+    // (e.g. a wrapper script or IDE integration that exports them globally).
     let output = std::process::Command::new("git")
         .args(["diff", "--name-only", "HEAD"])
         .current_dir(workspace_root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
         .output();
 
     let changed: Vec<String> = match output {
@@ -5891,21 +5981,45 @@ fn check_drift(workspace_root: &std::path::Path, threshold: u32) -> Result<(), V
 /// Key used for cycle detection: (phase_id, action_kind).
 type VisitedKey = (String, String);
 
-/// Poll `.ta/drafts/` for a package whose `plan_phase` matches `phase_id` and status is
-/// `PendingReview`. Returns `(draft_id, pkg_json_path)` when found.
+/// Outcome of polling `.ta/drafts/` for a phase's draft package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftPollOutcome {
+    /// A draft matching the phase is awaiting review — proceed with agent review.
+    PendingReview(uuid::Uuid),
+    /// The draft reached `Applied` before this poll ever observed it as `PendingReview`
+    /// (e.g. a human ran `ta draft apply` mid-run) — the phase already succeeded.
+    AlreadyApplied(uuid::Uuid),
+    /// The draft reached `Denied` before this poll ever observed it as `PendingReview`.
+    AlreadyDenied(uuid::Uuid, String),
+    /// No draft for the phase reached any recognizable state within the timeout.
+    TimedOut,
+}
+
+/// Poll `.ta/drafts/` for a package whose `plan_phase` matches `phase_id`.
+///
+/// Detects not just `PendingReview` but any terminal state the draft may have reached
+/// out-of-band (e.g. a human ran `ta draft apply` or `ta draft deny` while this loop
+/// was waiting). Previously this only matched `PendingReview`, so a draft that was
+/// applied or denied by some other path was never detected — the poll silently ran
+/// out the full timeout and the orchestrator escalated with a misleading "no draft
+/// found" message even though the phase had actually succeeded (or been denied).
+///
+/// Emits a heartbeat line roughly every `HEARTBEAT_INTERVAL` so a long-but-healthy
+/// wait is distinguishable from a stuck one without cross-checking `ta draft view`.
 fn poll_for_phase_draft(
     workspace_root: &std::path::Path,
     phase_id: &str,
     timeout_secs: u64,
-) -> Option<uuid::Uuid> {
+) -> DraftPollOutcome {
     use ta_changeset::draft_package::{DraftPackage, DraftStatus};
+    const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
+
     let drafts_dir = workspace_root.join(".ta").join("drafts");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_secs(timeout_secs);
+    let mut last_heartbeat = start;
 
     loop {
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
         if drafts_dir.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&drafts_dir) {
                 for entry in entries.flatten() {
@@ -5918,9 +6032,23 @@ fn poll_for_phase_draft(
                                     .as_deref()
                                     .map(|p| p == phase_id)
                                     .unwrap_or(false);
-                                let pending = matches!(pkg.status, DraftStatus::PendingReview);
-                                if phase_match && pending {
-                                    return Some(pkg.package_id);
+                                if !phase_match {
+                                    continue;
+                                }
+                                match &pkg.status {
+                                    DraftStatus::PendingReview => {
+                                        return DraftPollOutcome::PendingReview(pkg.package_id);
+                                    }
+                                    DraftStatus::Applied { .. } => {
+                                        return DraftPollOutcome::AlreadyApplied(pkg.package_id);
+                                    }
+                                    DraftStatus::Denied { reason, .. } => {
+                                        return DraftPollOutcome::AlreadyDenied(
+                                            pkg.package_id,
+                                            reason.clone(),
+                                        );
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -5928,6 +6056,21 @@ fn poll_for_phase_draft(
                 }
             }
         }
+
+        if std::time::Instant::now() >= deadline {
+            return DraftPollOutcome::TimedOut;
+        }
+
+        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+            println!(
+                "  [wait] Still waiting for draft (phase {}) — {}s elapsed (timeout at {}s)",
+                phase_id,
+                start.elapsed().as_secs(),
+                timeout_secs
+            );
+            last_heartbeat = std::time::Instant::now();
+        }
+
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
 }
@@ -6491,19 +6634,81 @@ fn plan_build_autonomous(
             }
 
             // In dry-run mode or after goal run, find the draft.
-            let draft_id = if dry_run {
+            let poll_outcome = if dry_run {
                 // Test mode: look for a pre-seeded draft file.
                 poll_for_phase_draft(workspace, phase_id, 5)
             } else {
                 poll_for_phase_draft(workspace, phase_id, 600)
             };
 
-            let draft_id = match draft_id {
-                Some(id) => id,
-                None => {
+            let draft_id = match poll_outcome {
+                DraftPollOutcome::PendingReview(id) => id,
+                DraftPollOutcome::AlreadyApplied(id) => {
+                    // The draft reached Applied out-of-band (e.g. a human ran
+                    // `ta draft apply` while this loop was polling) before we ever
+                    // observed it as PendingReview. The phase already succeeded —
+                    // treat it as such and advance instead of waiting out the timeout.
+                    println!(
+                        "  [applied] Draft {} for phase {} was already applied — advancing",
+                        id, phase_id
+                    );
+                    append_action_log(
+                        workspace,
+                        &ActionLogEntry {
+                            timestamp: chrono_now_iso(),
+                            phase_id: phase_id.clone(),
+                            action_kind: "draft_found".to_string(),
+                            outcome: Some("already_applied".to_string()),
+                            draft_id: Some(id.to_string()),
+                            detail: Some(
+                                "draft reached Applied out-of-band before agent review".to_string(),
+                            ),
+                            rework_round: Some(rework_round),
+                        },
+                    );
+                    state.phases_complete.push(phase_id.clone());
+                    state.phases_pending.retain(|p| p != phase_id);
+                    state.rework_cycles = rework_counts.clone();
+                    phases_built += 1;
+                    println!(
+                        "[progress] item {}: phase {} complete — {}/{} phases done",
+                        phases_built, phase_id, phases_built, max_phases
+                    );
+                    break 'rework;
+                }
+                DraftPollOutcome::AlreadyDenied(id, reason) => {
                     let msg = format!(
-                        "No PendingReview draft found for phase {} within timeout. \
-                         The agent may not have created one.",
+                        "Draft {} for phase {} was denied out-of-band before agent review: {}\n\
+                         Manual intervention required.",
+                        id, phase_id, reason
+                    );
+                    append_action_log(
+                        workspace,
+                        &ActionLogEntry {
+                            timestamp: chrono_now_iso(),
+                            phase_id: phase_id.clone(),
+                            action_kind: "escalate".to_string(),
+                            outcome: Some("denied_out_of_band".to_string()),
+                            draft_id: Some(id.to_string()),
+                            detail: Some(msg.clone()),
+                            rework_round: Some(rework_round),
+                        },
+                    );
+                    emit_escalation(
+                        workspace,
+                        phase_id,
+                        &msg,
+                        effective_escalate,
+                        &rework_history,
+                    );
+                    state.escalated = true;
+                    write_loop_state(workspace, &state);
+                    anyhow::bail!("{}", msg);
+                }
+                DraftPollOutcome::TimedOut => {
+                    let msg = format!(
+                        "No draft reached PendingReview (or any terminal state) for phase {} \
+                         within timeout. The agent may not have created one.",
                         phase_id
                     );
                     eprintln!("[escalate] {}", msg);
@@ -10103,6 +10308,90 @@ Build it.
         assert_eq!(phase_id_to_semver("alpha"), None);
     }
 
+    // ── v0.17.0.12.10: version-bump depth generalization ──────────────────────
+
+    #[test]
+    fn phase_id_to_semver_five_and_six_part_pass_through() {
+        // v0.17.0.12.9 — 2 sub-segments, well within MAX_SUBPHASE_DEPTH (4).
+        assert_eq!(
+            phase_id_to_semver("v0.17.0.12.9"),
+            Some("0.17.0-alpha.12.9".to_string())
+        );
+        // v0.17.0.12.9.1 — 3 sub-segments.
+        assert_eq!(
+            phase_id_to_semver("v0.17.0.12.9.1"),
+            Some("0.17.0-alpha.12.9.1".to_string())
+        );
+    }
+
+    #[test]
+    fn phase_id_to_semver_exact_boundary_at_max_subphase_depth() {
+        // Exactly MAX_SUBPHASE_DEPTH (4) sub-segments: pass-through, no truncation,
+        // no build-metadata suffix.
+        let four_sub = "v0.17.0.1.2.3.4";
+        let got = phase_id_to_semver(four_sub).expect("should parse");
+        assert_eq!(got, "0.17.0-alpha.1.2.3.4");
+        assert!(
+            !got.contains('+'),
+            "should not have build metadata: {}",
+            got
+        );
+
+        // MAX_SUBPHASE_DEPTH + 1 (5) sub-segments: truncate to 4 + discriminator.
+        let five_sub = "v0.17.0.1.2.3.4.5";
+        let got_over = phase_id_to_semver(five_sub).expect("should parse");
+        assert!(
+            got_over.starts_with("0.17.0-alpha.1.2.3.4+"),
+            "expected truncated pre-release + build metadata, got: {}",
+            got_over
+        );
+        // Exactly one '+' introducing 4 hex chars of build metadata.
+        let plus_idx = got_over.find('+').expect("must contain build metadata");
+        let suffix = &got_over[plus_idx + 1..];
+        assert_eq!(suffix.len(), 4);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn phase_id_to_semver_discriminator_is_stable_and_distinct() {
+        let id = "v0.17.0.1.2.3.4.5";
+        let first = phase_id_to_semver(id).unwrap();
+        let second = phase_id_to_semver(id).unwrap();
+        assert_eq!(
+            first, second,
+            "discriminator must be reproducible for the same phase ID"
+        );
+
+        // A different overflowing phase ID should (overwhelmingly likely) get a
+        // different discriminator, proving it's derived from the full ID, not a
+        // constant or just the truncated prefix.
+        let other = phase_id_to_semver("v0.17.0.1.2.3.4.9").unwrap();
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn phase_id_to_semver_all_generated_forms_parse_as_semver() {
+        let ids = [
+            "v0.14.22",
+            "v0.15.0",
+            "v0.14.22.1",
+            "v0.17.0.12.9",
+            "v0.17.0.12.9.1",
+            "v0.17.0.1.2.3.4",     // exact boundary
+            "v0.17.0.1.2.3.4.5",   // overflow: truncate + build metadata
+            "v0.17.0.1.2.3.4.5.6", // deeper overflow
+        ];
+        for id in ids {
+            let ver = phase_id_to_semver(id).unwrap_or_else(|| panic!("{} should parse", id));
+            semver::Version::parse(&ver).unwrap_or_else(|e| {
+                panic!(
+                    "generated version '{}' for {} is not valid semver: {}",
+                    ver, id, e
+                )
+            });
+        }
+    }
+
     // ── v0.15.13.5: Phase in-progress marking tests ──
 
     #[test]
@@ -11450,6 +11739,104 @@ More content here that is part of a second paragraph.
         assert_eq!(entries[0].action_kind, "start_goal");
         assert_eq!(entries[1].phase_id, "v0.17.2");
         assert_eq!(entries[1].outcome.as_deref(), Some("applied"));
+    }
+
+    /// Build a minimal valid `DraftPackage` JSON blob for `poll_for_phase_draft` tests,
+    /// with the given `plan_phase` and a `status` object (already-tagged, e.g.
+    /// `{"status": "applied", ...}`).
+    fn seed_draft_package_json(
+        root: &std::path::Path,
+        pkg_id: uuid::Uuid,
+        phase_id: &str,
+        status: serde_json::Value,
+    ) {
+        let pkg_json = serde_json::json!({
+            "package_version": "1",
+            "package_id": pkg_id,
+            "created_at": "2026-01-01T00:00:00Z",
+            "goal": {
+                "goal_id": pkg_id.to_string(),
+                "title": format!("implement {}", phase_id),
+                "objective": format!("implement {}", phase_id),
+                "success_criteria": []
+            },
+            "iteration": {
+                "iteration_id": "iter-1",
+                "sequence": 1,
+                "workspace_ref": {"type": "staging_dir", "ref": "staging/test"}
+            },
+            "agent_identity": {
+                "agent_id": "claude-code",
+                "agent_type": "claude",
+                "constitution_id": "default",
+                "capability_manifest_hash": "abc"
+            },
+            "summary": {
+                "what_changed": format!("implement {}", phase_id),
+                "why": "test",
+                "impact": "low",
+                "rollback_plan": "none"
+            },
+            "plan": {"completed_steps": [], "next_steps": []},
+            "changes": {"artifacts": [], "patch_sets": []},
+            "risk": {"risk_score": 0, "findings": [], "policy_decisions": []},
+            "provenance": {"inputs": [], "tool_trace_hash": "abc"},
+            "review_requests": {"requested_actions": [], "reviewers": []},
+            "signatures": {"package_hash": "abc", "agent_signature": "abc"},
+            "status": status,
+            "plan_phase": phase_id
+        });
+        std::fs::create_dir_all(root.join(".ta/drafts")).unwrap();
+        let pkg_path = root.join(format!(".ta/drafts/{}.json", pkg_id));
+        std::fs::write(&pkg_path, serde_json::to_string_pretty(&pkg_json).unwrap()).unwrap();
+    }
+
+    /// v0.17.0.12.10: a draft that reached `Applied` out-of-band (e.g. a human ran
+    /// `ta draft apply` while the autonomous loop was polling) must be detected —
+    /// previously `poll_for_phase_draft` only matched `PendingReview` and would run
+    /// out the full timeout, escalating with a misleading "no draft found" message
+    /// even though the phase had actually succeeded.
+    #[test]
+    fn poll_for_phase_draft_detects_already_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_id = uuid::Uuid::new_v4();
+        seed_draft_package_json(
+            dir.path(),
+            pkg_id,
+            "v0.99.5",
+            serde_json::json!({"status": "applied", "applied_at": "2026-01-01T00:00:00Z"}),
+        );
+
+        let outcome = poll_for_phase_draft(dir.path(), "v0.99.5", 2);
+        assert_eq!(outcome, DraftPollOutcome::AlreadyApplied(pkg_id));
+    }
+
+    /// Mirror of the above for `Denied` — must be detected and reported accurately
+    /// rather than surfacing as a generic "no draft found" timeout.
+    #[test]
+    fn poll_for_phase_draft_detects_already_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_id = uuid::Uuid::new_v4();
+        seed_draft_package_json(
+            dir.path(),
+            pkg_id,
+            "v0.99.6",
+            serde_json::json!({"status": "denied", "reason": "out of scope", "denied_by": "operator"}),
+        );
+
+        let outcome = poll_for_phase_draft(dir.path(), "v0.99.6", 2);
+        assert_eq!(
+            outcome,
+            DraftPollOutcome::AlreadyDenied(pkg_id, "out of scope".to_string())
+        );
+    }
+
+    /// No matching draft at all within the timeout still reports `TimedOut`.
+    #[test]
+    fn poll_for_phase_draft_times_out_when_no_draft_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = poll_for_phase_draft(dir.path(), "v0.99.7", 1);
+        assert_eq!(outcome, DraftPollOutcome::TimedOut);
     }
 
     /// Verify drift detection returns Ok when change count is below threshold.
