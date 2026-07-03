@@ -9258,7 +9258,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.7 — Merge Shared Files for Parallel Work
-<!-- status: in_progress -->
+<!-- status: pending -->
 **Depends on**: v0.17.0.12.6
 
 **Goal**: When Advisor-triggered plan changes and in-flight goal drafts both modify the same files (PLAN.md, CLAUDE.md, Cargo.toml, memory/*.md), `ta draft apply` currently overwrites main with the staging snapshot — discarding any direct edits made while the goal was running. Fix with a 3-way merge and advisor patch queue.
