@@ -9508,23 +9508,20 @@ Code releases use semver. Content releases don't. Decide:
 
 ---
 ### v0.17.3.1 — sage-lore Design Review
-<!-- status: pending -->
-
-<!-- status: pending -->
+<!-- status: done -->
 
 **Depends on**: v0.17.3
 
-**Why deferred here**: sage-lore's deterministic execution and scan-once security model are architecturally aligned with TA's staged-action thesis, but integrating at the orchestration layer requires the `ta release` core (v0.17.3) to be stable first. A premature evaluation would miss the context of how TA's adapter and release surfaces interact with external orchestrators.
+**Sources**: [kwg/sage-lore](https://github.com/kwg/sage-lore) (LLM orchestration engine — the actual subject of this review) and [gendigitalinc/sage](https://github.com/gendigitalinc/sage) (unrelated project, also named "Sage" — a real-time Agent Detection & Response layer, included here for its community threat-rule contribution model, directly relevant to a "constitution amendment via community rules" capability TA doesn't have a design for yet).
+
+**Why**: this review was originally scheduled with no verifiable source — "sage-lore's 20 Scroll primitives" and "scan-once security model" couldn't be confirmed by web search alone (three targeted searches, zero matches) until the real source was supplied directly. Completed 2026-07-03 once the correct repos were identified. Full findings, capability audit, security-model comparison, and decision: [`docs/design/sage-lore-review.md`](../docs/design/sage-lore-review.md).
 
 **Items**:
 
-1. [ ] **Capability audit**: Map sage-lore's 20 Scroll primitives to TA concepts (goal, draft, plan phase, policy gate). Identify gaps and overlaps.
-
-2. [ ] **Security model comparison**: sage-lore scan-once vs TA staging overlay. Are they additive (sage-lore enforces input constraints, TA enforces output constraints) or redundant?
-
-3. [ ] **Integration options**: (a) sage-lore as an orchestrator that drives `ta run` goals via CLI; (b) Scroll DSL as a workflow definition language inside `.ta/workflows/`; (c) no integration — document why.
-
-4. [ ] **Decision document**: `docs/design/sage-lore-review.md` — recommendation (integrate / complement / skip) with rationale and any follow-on plan phases.
+1. [x] **Capability audit**: Mapped sage-lore's [21 Scroll primitives](https://github.com/kwg/sage-lore#primitives) (corrected from the original "20" — confirmed 21 in `v1.0.0-beta.1.2`) to TA concepts (goal, draft, plan phase, policy gate). Biggest real gap found: TA has no structured way to compose *what happens inside* a single goal (sage-lore's `parallel`/`consensus`/`concurrent`/`branch`/`loop` primitives vs. TA's single freeform agent session per goal).
+2. [x] **Security model comparison**: confirmed additive, not redundant. sage-lore's scan-once model is an **input-constraint** check (is this workflow definition safe to run at all, evaluated once before execution); TA's staging + draft + constitution model is an **output-constraint** check (is the actual diff this run produced safe to apply, evaluated after execution). [gendigitalinc/sage](https://github.com/gendigitalinc/sage)'s real-time [decision pipeline](https://github.com/gendigitalinc/sage/blob/main/docs/decision-pipeline.md) is a third, complementary layer again — intercepts individual tool calls *during* execution. All three can coexist.
+3. [x] **Integration options**: (a) sage-lore as an orchestrator driving `ta run` goals — rejected, inverts TA's "agent works inside TA's staging" thesis. (b) Scroll DSL as a workflow definition language inside `.ta/workflows/` — premature; TA's existing `workflow.toml` step types cover today's needs, revisit once multi-agent parallelism work matures. (c) No sage-lore integration; adopt sage's community-rule-contribution pattern as a design template for TA's constitution system — **recommended**.
+4. [x] **Decision document**: [`docs/design/sage-lore-review.md`](../docs/design/sage-lore-review.md) — **complement, don't integrate** sage-lore itself. **Do** pursue a follow-on design for community-contributed constitution rules, modeled directly on [gendigitalinc/sage](https://github.com/gendigitalinc/sage)'s `threats/*.yaml` + `pre-release`-branch security-review pipeline (see [CONTRIBUTING.md](https://github.com/gendigitalinc/sage/blob/main/CONTRIBUTING.md)) — a `.ta/constitution-rules/` directory of individually-authored, individually-attributed rule files with a defined signal contract (confidence/category/severity/source/reason), staged for review before activating in a project's live `constitution.toml`. Not yet numbered as its own phase — should sequence after the v0.17.1/v0.17.4 adapter-protocol-unification work from today's other review, since both need a "community contribution + review before trust" mechanism and should share it rather than building two parallel pipelines.
 
 #### Version: `0.17.3.1-alpha`
 
