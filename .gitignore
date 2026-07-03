@@ -89,6 +89,8 @@ result-*
 .ta/consent.json
 .ta/mcp_json_original
 .ta/mcp-agent.json
+.ta/advisor-history.json
+.ta/advisor-history.jsonl
 
 # Local operational data — machine-specific, not team-shared
 .ta/audit.jsonl
