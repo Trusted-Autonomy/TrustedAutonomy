@@ -9278,7 +9278,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.8 — Doctor Log Hygiene + Advisor Progress Visibility + Onboarding Gaps
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.7
 
 **Goal**: Clear the accumulated maintenance work queue: bound `daemon.log` growth via `ta doctor --fix`, have the Advisor surface liveness for long-running goals that emit no progress events, wire the derived-title Meridian call into velocity records, and close onboarding gaps for Meridian/Windows/superpowers.
