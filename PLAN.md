@@ -9304,7 +9304,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.9 — Studio UX Cleanup (Systematic Fix Pass)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.8
 
 **Goal**: v0.17.0.12.6 shipped the Studio redesign, but several of its own spec items landed broken or regressed in real use, plus new issues surfaced (redundant Advisor widget, polling instead of reliable event-driven updates, tab navigation fighting on load). Systematically fix these rather than patching individually.
