@@ -103,6 +103,9 @@ result-*
 .ta/velocity-stats.jsonl
 .ta/operations.jsonl
 .ta/heartbeats/
+.ta/action-log.jsonl
+.ta/autonomous-loop-state.json
+.ta/logs/
 
 # Local override files — personal settings, never team-shared
 .ta/*.local.toml
