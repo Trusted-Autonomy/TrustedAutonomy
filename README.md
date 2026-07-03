@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest">
-    <img src="https://img.shields.io/github/v/release/Trusted-Autonomy/TrustedAutonomy?label=stable&color=blue&display_name=tag&sort=date" alt="Latest stable release">
+    <img src="https://img.shields.io/github/v/release/Trusted-Autonomy/TrustedAutonomy?label=stable&color=blue&display_name=tag" alt="Latest stable release">
   </a>
   <a href="https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly">
     <img src="https://img.shields.io/badge/nightly-latest-orange" alt="Latest nightly build">
@@ -138,7 +138,7 @@ The two questions governance and orchestration each answer:
 
 | Channel | Version | Downloads |
 |---------|---------|-----------|
-| **Stable** | [![stable](https://img.shields.io/github/v/release/Trusted-Autonomy/TrustedAutonomy?label=&color=blue&display_name=tag&sort=date)](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest) | [macOS · Linux · Windows](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest) |
+| **Stable** | [![stable](https://img.shields.io/github/v/release/Trusted-Autonomy/TrustedAutonomy?label=&color=blue&display_name=tag)](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest) | [macOS · Linux · Windows](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/latest) |
 | **Nightly** | [![nightly](https://img.shields.io/badge/nightly-latest-orange)](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly) | [macOS · Linux · Windows](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly) · [History](https://github.com/Trusted-Autonomy/TrustedAutonomy/releases/tag/nightly#nightly-history) |
 
 **Build from source:**

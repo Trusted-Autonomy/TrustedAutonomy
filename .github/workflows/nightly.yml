@@ -437,10 +437,24 @@ jobs:
           BUILD_DATE=$(date -u +"%Y-%m-%d")
           RELEASE_TITLE="Nightly ${BUILD_DATE} (${HEAD_SHA_SHORT})"
 
-          # Keep the nightly release as a permanent draft. Draft releases are not
-          # subject to GitHub's "Immutable releases" restriction, so assets can
-          # be replaced with --clobber on every run. Download URLs are identical
-          # to published releases; the draft state only affects the releases UI.
+          # GitHub's "Immutable releases" restriction blocks replacing assets on a
+          # *published* release, but not on a draft one. The nightly release needs
+          # its assets clobbered on every run, so we do a draft -> upload -> publish
+          # dance: if a published nightly release exists from a previous run, flip
+          # it back to draft first so assets can be replaced, upload the new
+          # assets, then un-draft at the end.
+          #
+          # Root cause of the nightly release staying stuck as draft forever: this
+          # workflow previously only ever called `--draft` and never un-set it —
+          # there was no publish step at all, not an auth/ID/ordering bug. A draft
+          # release is invisible to anonymous/public viewers (the badge and the
+          # `releases/tag/nightly` link both 404 for non-collaborators), so it must
+          # be un-drafted after each successful run.
+          if [ "$(gh release view nightly --json isDraft --jq '.isDraft' 2>/dev/null)" = "false" ]; then
+            echo "Existing nightly release is published — reverting to draft so assets can be replaced..."
+            gh release edit nightly --draft
+          fi
+
           if gh release view nightly 2>/dev/null; then
             echo "Updating existing nightly release..."
             gh release edit nightly \
@@ -459,6 +473,11 @@ jobs:
               --draft
             gh release upload nightly artifacts/* --clobber
           fi
+
+          # Publish (un-draft) now that all assets are uploaded — this is the step
+          # that was missing before, leaving nightly permanently draft.
+          echo "Publishing nightly release (un-drafting)..."
+          gh release edit nightly --draft=false
 
           echo ""
           echo "Nightly release published:"

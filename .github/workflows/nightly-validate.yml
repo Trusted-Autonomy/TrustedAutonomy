@@ -1,0 +1,109 @@
+name: Post-Nightly Validation
+
+# Runs after nightly.yml completes and validates the things a human would
+# otherwise have to notice by hand: the README badges actually render (not
+# "invalid"), the nightly release is publicly visible (published, not stuck
+# as a draft), and the version embedded in the freshly-built nightly assets
+# matches the workspace's source-of-truth version (Cargo.toml, which the
+# version-bump policy keeps aligned with the latest completed PLAN.md phase).
+#
+# This is net-new observability, not a fix for a known regression — it exists
+# so the next time either of these silently breaks, a job failure surfaces it
+# instead of a human noticing days later.
+on:
+  workflow_run:
+    workflows: ["Nightly Build"]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate badges + nightly release
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          # Pin to the exact commit nightly.yml built, in case main advanced
+          # between nightly running and this validation running.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Validate stable release badge renders
+        run: |
+          URL="https://img.shields.io/github/v/release/${{ github.repository }}?label=stable&color=blue&display_name=tag"
+          SVG=$(curl -sf "$URL")
+          echo "$SVG" | grep -o 'aria-label="[^"]*"' || true
+          if echo "$SVG" | grep -q 'aria-label="invalid"'; then
+            echo "ERROR: stable release badge renders 'invalid'."
+            echo "  URL: $URL"
+            echo "  This is the exact regression fixed in v0.17.0.12.10 — check README.md"
+            echo "  badge query params haven't regressed (e.g. an empty label combined"
+            echo "  with sort=date is known to break shields.io rendering)."
+            exit 1
+          fi
+          echo "OK: stable badge renders."
+
+      - name: Validate nightly badge renders
+        run: |
+          URL="https://img.shields.io/badge/nightly-latest-orange"
+          SVG=$(curl -sf "$URL")
+          if echo "$SVG" | grep -q 'aria-label="invalid"'; then
+            echo "ERROR: nightly badge renders 'invalid'. URL: $URL"
+            exit 1
+          fi
+          echo "OK: nightly badge renders."
+
+      - name: Validate nightly release is published (not draft)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IS_DRAFT=$(gh api "repos/${{ github.repository }}/releases/tags/nightly" --jq '.draft' 2>/dev/null || echo "unknown")
+          if [ "$IS_DRAFT" = "unknown" ]; then
+            echo "ERROR: could not fetch the nightly release from the GitHub API."
+            echo "  Run manually: gh api repos/${{ github.repository }}/releases/tags/nightly"
+            exit 1
+          fi
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "ERROR: nightly release is still a draft — it is invisible to anonymous/public"
+            echo "  viewers (the badge and releases/tag/nightly link both 404 for them)."
+            echo "  Fix: check the 'Create or update nightly GitHub release' step in"
+            echo "  .github/workflows/nightly.yml — it must end with"
+            echo "  'gh release edit nightly --draft=false' after uploading assets."
+            exit 1
+          fi
+          echo "OK: nightly release is published (draft=false)."
+
+      - name: Validate nightly asset version matches workspace version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CARGO_VER=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Workspace version (Cargo.toml, source of truth): $CARGO_VER"
+
+          ASSET="ta-nightly-x86_64-unknown-linux-musl.tar.gz"
+          gh release download nightly --repo "${{ github.repository }}" --pattern "$ASSET" --output "$ASSET" --clobber
+
+          mkdir -p nightly-extract
+          tar xzf "$ASSET" -C nightly-extract
+          chmod +x nightly-extract/ta
+
+          # `ta --version` prints "<version> (<short-sha> <date>)" — take the first field.
+          ASSET_VER=$(./nightly-extract/ta --version | awk '{print $1}')
+          echo "Nightly asset version: $ASSET_VER"
+
+          if [ "$ASSET_VER" != "$CARGO_VER" ]; then
+            echo ""
+            echo "ERROR: nightly asset version does not match the workspace version."
+            echo "  Cargo.toml (source of truth): $CARGO_VER"
+            echo "  Nightly asset reports:        $ASSET_VER"
+            echo ""
+            echo "  This means the nightly build was stale relative to the latest completed"
+            echo "  PLAN.md phase, or the version-bump-depth fix (v0.17.0.12.10) regressed."
+            echo "  Re-run the nightly workflow: gh workflow run nightly.yml -f force=true"
+            exit 1
+          fi
+          echo "OK: nightly asset version matches workspace version ($CARGO_VER)."

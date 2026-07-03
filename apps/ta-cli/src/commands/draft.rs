@@ -7086,6 +7086,8 @@ fn apply_package(
                 }
                 // If staging Cargo.toml is absent (staging GC'd), skip pre-copy check and
                 // fall through to the post-copy validate_cargo_version safety net below.
+            } else {
+                super::plan::warn_unparseable_phase_id_for_bump(last_phase);
             }
         }
 
@@ -7537,6 +7539,8 @@ fn apply_package(
                         );
                     }
                 }
+            } else {
+                super::plan::warn_unparseable_phase_id_for_bump(&last_phase_id);
             }
 
             // v0.12.5: Write plan phase completion into memory for future context injection.
@@ -7896,6 +7900,8 @@ fn apply_package(
                                     );
                                 }
                             }
+                        } else {
+                            super::plan::warn_unparseable_phase_id_for_bump(&last_phase_id);
                         }
 
                         for phase in &phase_ids {
@@ -8740,6 +8746,8 @@ fn apply_package(
                     println!("  Version: {} ✓", expected_ver);
                 }
             }
+        } else {
+            super::plan::warn_unparseable_phase_id_for_bump(last_phase);
         }
     }
 
