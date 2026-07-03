@@ -6293,6 +6293,63 @@ ta draft apply <draft-id> --conflict-resolution force-overwrite # Dangerous
 ta draft apply <draft-id> --conflict-resolution merge           # Git adapter
 ```
 
+### Parallel Work and Shared Files
+
+Some files are commonly edited both by a goal's staging copy *and* directly on
+the project — by a human, the Advisor dashboard, or a different goal — while
+the first goal is still running: `PLAN.md`, `CLAUDE.md`, `Cargo.toml`,
+`docs/USAGE.md`, and any `memory/*.md` file. These are treated as **shared
+files**.
+
+Previously, `ta draft apply` diffed staging against the project state
+captured when the goal *started*. If a shared file was also changed directly
+on the project in the meantime, the direct edit was silently lost when the
+draft applied — a real incident: `memory/work_queue.md` was deleted this way
+because it was created on the project after a goal's staging snapshot was
+taken.
+
+**Automatic merge.** `ta goal start` now snapshots the real content of every
+shared file that exists at goal-start time (stored in the staging directory).
+At apply time, if a shared file changed on **both** sides, `ta draft apply`
+always attempts a 3-way merge using that snapshot as the base — regardless of
+the `--conflict-resolution` flag. Non-overlapping edits (different lines/
+sections) merge automatically and apply without any extra steps:
+
+```bash
+ta draft apply <draft-id>
+# ℹ️  auto-merged shared file: PLAN.md (2 hunk(s), 0 conflicts)
+```
+
+**Real conflicts.** If both sides changed the *same* part of a shared file,
+the merge can't resolve automatically. The apply stops for that file only,
+conflict-marked content (`<<<<<<<`/`=======`/`>>>>>>>`) is written to
+`.ta/goals/<goal-id>/conflicts/`, and the goal moves to a `conflict_resolution`
+state:
+
+```bash
+ta draft apply <draft-id>
+# ⚠️  1 shared file(s) have unresolved merge conflicts: PLAN.md
+#     Conflict markers written to .ta/goals/<goal-id>/conflicts/
+#     Resolve manually, then re-run `ta draft apply <id>` (or resolve via Studio).
+```
+
+Resolve the conflict markers in the project file directly, then re-run
+`ta draft apply <draft-id>`. Studio's draft review panel also shows a
+read-only "Merge Conflicts" section with the conflict-marked content for any
+draft in this state — resolving still happens in the project files; Studio
+does not yet have an interactive diff editor for this (planned for v0.18).
+
+**Advisor patch queue.** When the Advisor dashboard makes a direct edit to a
+shared file (e.g. adding a plan phase) while any goal is in flight, the edit
+is queued to `.ta/advisor-patches/` instead of being written immediately —
+this avoids the same race in the other direction. Queued patches are
+replayed automatically the next time `ta draft apply` runs: if nothing else
+touched the file in the meantime, the patch fast-forwards; otherwise it goes
+through the same 3-way merge as above. An unresolved patch conflict leaves
+the patch queued for the next apply (or manual resolution) and does not fail
+the apply that triggered the replay. Studio's draft review panel lists any
+patches still queued under "Queued Advisor Changes."
+
 ### Pre-Apply Safety Checks
 
 Before copying files, `ta draft apply` runs safety checks to catch suspicious artifacts:

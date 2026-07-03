@@ -9258,7 +9258,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.7 — Merge Shared Files for Parallel Work
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.6
 
 **Goal**: When Advisor-triggered plan changes and in-flight goal drafts both modify the same files (PLAN.md, CLAUDE.md, Cargo.toml, memory/*.md), `ta draft apply` currently overwrites main with the staging snapshot — discarding any direct edits made while the goal was running. Fix with a 3-way merge and advisor patch queue.
@@ -9266,11 +9266,11 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 **Problem**: `ta draft apply` diffs staging vs source at the time the goal *started*, then copies changed files. If a file was also changed on main between goal-start and apply, the main changes are lost. Victims: PLAN.md, CLAUDE.md, Cargo.toml, memory/*.md. Observed: `memory/work_queue.md` was deleted by PR #519 because the file was created on main after the goal staged its snapshot.
 
 **Items**:
-1. [ ] **Apply-time 3-way merge for shared files**: When `ta draft apply` encounters a file changed in both staging and main since goal-start, perform a 3-way merge (base = pre-goal snapshot, ours = main, theirs = staging). Use `diffy` or `similar` crate. On clean merge, apply result. On conflict, transition to `ConflictResolution` state and surface to Studio.
-2. [ ] **Pre-apply snapshot**: At `ta goal start`, snapshot content hash of every file staged. Store in `.ta/staging/<goal-id>/apply-base.json`. Used as merge base at apply time.
-3. [ ] **Conflict resolution in Studio**: When apply encounters a merge conflict, show a diff editor for conflicted files in the draft review panel. User resolves, then applies.
-4. [ ] **Advisor patch queue**: When the Advisor makes a direct change to a shared file while a goal is running, write the change as a patch to `.ta/advisor-patches/<timestamp>-<description>.patch` instead of directly to disk. Apply advisor patches after the 3-way merge at apply time.
-5. [ ] USAGE.md: "Parallel Work and Shared Files" section.
+1. [x] **Apply-time 3-way merge for shared files**: When `ta draft apply` encounters a file changed in both staging and main since goal-start, perform a 3-way merge (base = pre-goal snapshot, ours = main, theirs = staging). Use `diffy` or `similar` crate. On clean merge, apply result. On conflict, transition to `ConflictResolution` state and surface to Studio.
+2. [x] **Pre-apply snapshot**: At `ta goal start`, snapshot content hash of every file staged. Store in `.ta/staging/<goal-id>/apply-base.json`. Used as merge base at apply time.
+3. [x] **Conflict resolution in Studio**: When apply encounters a merge conflict, show a diff editor for conflicted files in the draft review panel. User resolves, then applies.
+4. [x] **Advisor patch queue**: When the Advisor makes a direct change to a shared file while a goal is running, write the change as a patch to `.ta/advisor-patches/<timestamp>-<description>.patch` instead of directly to disk. Apply advisor patches after the 3-way merge at apply time.
+5. [x] USAGE.md: "Parallel Work and Shared Files" section.
 
 **Scope note**: Full 3-way merge + conflict UI may move to v0.18. Item 4 (advisor patch queue) can ship in v0.17.0.12.7 as a partial fix — prevents silent overwrites of advisor changes before the merge is built.
 

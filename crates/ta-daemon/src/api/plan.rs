@@ -458,7 +458,17 @@ pub async fn add_plan_phase(
         new_block.trim_start_matches('\n')
     );
 
-    if let Err(e) = std::fs::write(&plan_path, &new_content) {
+    // v0.17.0.12.7: If a goal is running, queue this write as an advisor
+    // patch instead of writing directly — a running goal's staging copy may
+    // also be editing PLAN.md, and `ta draft apply` would otherwise silently
+    // discard whichever side applies last.
+    if let Err(e) = ta_workspace::advisor_patch::queue_or_write(
+        &project_root,
+        "PLAN.md",
+        new_content.as_bytes(),
+        &format!("add plan phase: {}", body.title.trim()),
+        || ta_workspace::advisor_patch::has_active_goal_in_project(&project_root),
+    ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Could not write PLAN.md: {}", e)})),

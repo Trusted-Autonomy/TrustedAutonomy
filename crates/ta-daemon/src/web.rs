@@ -309,6 +309,104 @@ struct DraftDetailResponse {
     draft: DraftPackage,
     #[serde(skip_serializing_if = "Option::is_none")]
     initial_supervisor_review: Option<ta_changeset::supervisor_review::SupervisorReview>,
+    /// Unresolved shared-file merge conflicts from this goal's most recent
+    /// apply attempt (v0.17.0.12.7). Read-only in this phase — resolve the
+    /// listed file manually, then re-run `ta draft apply`. Full interactive
+    /// resolution is deferred to v0.18 per the phase's own scope note.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    conflicts: Vec<ConflictInfo>,
+    /// Advisor-triggered edits to shared files queued while a goal was
+    /// running, not yet replayed onto the project (v0.17.0.12.7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_advisor_patches: Vec<PendingAdvisorPatchInfo>,
+}
+
+/// A shared file with unresolved conflict-marked content, surfaced read-only
+/// in the draft review panel (v0.17.0.12.7).
+#[derive(Debug, Serialize)]
+struct ConflictInfo {
+    /// Relative path from the project root (e.g. "PLAN.md").
+    path: String,
+    /// Conflict-marked content (`<<<<<<<`/`=======`/`>>>>>>>`), as text.
+    content: String,
+}
+
+/// A queued advisor patch not yet replayed onto the project (v0.17.0.12.7).
+#[derive(Debug, Serialize)]
+struct PendingAdvisorPatchInfo {
+    /// Relative path from the project root (e.g. "PLAN.md").
+    path: String,
+    description: String,
+    queued_at: u64,
+}
+
+/// Derive the project root from `pr_packages_dir`: `.ta/pr_packages` → `.ta` → root.
+fn project_root_from_pr_packages_dir(pr_packages_dir: &std::path::Path) -> std::path::PathBuf {
+    pr_packages_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(pr_packages_dir)
+        .to_path_buf()
+}
+
+/// Read unresolved shared-file conflicts for the goal owning `package_id`
+/// (from `.ta/goals/<goal_id>/conflicts/`), and any advisor patches still
+/// queued project-wide (from `.ta/advisor-patches/`) — v0.17.0.12.7.
+fn find_conflicts_and_patches(
+    project_root: &std::path::Path,
+    package_id: Uuid,
+) -> (Vec<ConflictInfo>, Vec<PendingAdvisorPatchInfo>) {
+    let goals_dir = project_root.join(".ta").join("goals");
+
+    let mut conflicts = Vec::new();
+    if let Ok(store) = ta_goal::store::GoalRunStore::new(&goals_dir) {
+        if let Ok(goals) = store.list() {
+            if let Some(goal) = goals.iter().find(|g| g.pr_package_id == Some(package_id)) {
+                let conflicts_dir = goals_dir
+                    .join(goal.goal_run_id.to_string())
+                    .join("conflicts");
+                if let Ok(entries) = std::fs::read_dir(&conflicts_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("conflict") {
+                            continue;
+                        }
+                        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                            continue;
+                        };
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            conflicts.push(ConflictInfo {
+                                path: stem.replace("__", "/"),
+                                content,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut pending_advisor_patches = Vec::new();
+    let patches_dir = ta_workspace::advisor_patch::patches_dir(project_root);
+    if let Ok(entries) = std::fs::read_dir(&patches_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("patch") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(patch) = serde_json::from_str::<ta_workspace::AdvisorPatch>(&content) {
+                    pending_advisor_patches.push(PendingAdvisorPatchInfo {
+                        path: patch.path,
+                        description: patch.description,
+                        queued_at: patch.queued_at,
+                    });
+                }
+            }
+        }
+    }
+
+    (conflicts, pending_advisor_patches)
 }
 
 /// Find the first draft (`draft_seq == 1`) sharing the same `goal_shortref`
@@ -344,9 +442,14 @@ async fn get_draft(
         Ok(Some(draft)) => {
             let initial_supervisor_review =
                 find_initial_supervisor_review(&state.pr_packages_dir, &draft);
+            let project_root = project_root_from_pr_packages_dir(&state.pr_packages_dir);
+            let (conflicts, pending_advisor_patches) =
+                find_conflicts_and_patches(&project_root, uuid);
             Json(DraftDetailResponse {
                 draft,
                 initial_supervisor_review,
+                conflicts,
+                pending_advisor_patches,
             })
             .into_response()
         }
@@ -471,13 +574,7 @@ async fn apply_draft_endpoint(
         approve_patterns.push("rest".to_string());
     }
 
-    // Derive project root from pr_packages_dir: .ta/pr_packages → .ta → project root.
-    let project_root = state
-        .pr_packages_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or(&state.pr_packages_dir)
-        .to_path_buf();
+    let project_root = project_root_from_pr_packages_dir(&state.pr_packages_dir);
 
     let ta_bin = find_ta_binary_web();
     let short_id = id[..8.min(id.len())].to_string();
@@ -1255,6 +1352,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// v0.17.0.12.7: `find_conflicts_and_patches` must surface a conflict
+    /// sidecar for the goal owning `package_id` and any project-wide queued
+    /// advisor patches.
+    #[test]
+    fn find_conflicts_and_patches_reads_sidecars_and_patches() {
+        let project = tempfile::tempdir().unwrap();
+        let goals_dir = project.path().join(".ta").join("goals");
+        let store = ta_goal::store::GoalRunStore::new(&goals_dir).unwrap();
+
+        let package_id = Uuid::new_v4();
+        let mut goal = ta_goal::GoalRun::new(
+            "Test goal",
+            "test",
+            "test-agent",
+            PathBuf::from("/tmp/staging"),
+            goals_dir.join("placeholder"),
+        );
+        goal.pr_package_id = Some(package_id);
+        store.save(&goal).unwrap();
+
+        let conflicts_dir = goals_dir
+            .join(goal.goal_run_id.to_string())
+            .join("conflicts");
+        std::fs::create_dir_all(&conflicts_dir).unwrap();
+        std::fs::write(
+            conflicts_dir.join("memory__notes.md.conflict"),
+            "<<<<<<< ours\nfoo\n=======\nbar\n>>>>>>> theirs\n",
+        )
+        .unwrap();
+
+        let patches_dir = ta_workspace::advisor_patch::patches_dir(project.path());
+        std::fs::create_dir_all(&patches_dir).unwrap();
+        let patch = ta_workspace::AdvisorPatch {
+            path: "PLAN.md".to_string(),
+            old_content_b64: String::new(),
+            new_content_b64: String::new(),
+            description: "add plan phase v0.18.0".to_string(),
+            queued_at: 1735900000,
+        };
+        std::fs::write(
+            patches_dir.join("1735900000-add-plan-phase.patch"),
+            serde_json::to_string(&patch).unwrap(),
+        )
+        .unwrap();
+
+        let (conflicts, patches) = find_conflicts_and_patches(project.path(), package_id);
+
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].path, "memory/notes.md");
+        assert!(conflicts[0].content.contains("<<<<<<<"));
+
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].path, "PLAN.md");
+        assert_eq!(patches[0].description, "add plan phase v0.18.0");
+        assert_eq!(patches[0].queued_at, 1735900000);
     }
 
     #[tokio::test]

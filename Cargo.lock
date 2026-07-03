@@ -4171,6 +4171,7 @@ name = "ta-workspace"
 version = "0.17.0-alpha.12.3"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "libc",
  "reqwest 0.12.28",
@@ -4178,6 +4179,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ta-changeset",
+ "ta-goal",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",

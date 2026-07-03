@@ -29,7 +29,7 @@ use crate::error::GoalError;
 /// The lifecycle state of a GoalRun (v0.17.0.9: `#[non_exhaustive]` added).
 ///
 /// Downstream crates that match on this enum must add a `_` arm. Use
-/// `GoalRunState::Custom(tag)` when extending the state machine without
+/// `GoalRunState::Custom { tag }` when extending the state machine without
 /// forking this crate.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,8 +115,18 @@ pub enum GoalRunState {
     /// Extension state for plugins and external state machines (v0.17.0.9).
     ///
     /// Use this to attach arbitrary string tags without forking `ta-goal`.
-    /// Example: `GoalRunState::Custom("waiting_for_ci".into())`.
-    Custom(String),
+    /// Example: `GoalRunState::Custom { tag: "waiting_for_ci".into() }`.
+    ///
+    /// Note: this must be a struct-like variant (named field), not a bare
+    /// newtype (`Custom(String)`) — `#[serde(tag = "state")]` internal
+    /// tagging cannot serialize a newtype variant wrapping a primitive like
+    /// `String` (serde requires the payload to serialize as a map so the
+    /// tag field can be merged in). A bare `Custom(String)` compiles fine
+    /// but fails at serialization time with "cannot serialize tagged
+    /// newtype variant ... containing a string" the first time it's
+    /// actually persisted (v0.17.0.12.7 discovered this when adding the
+    /// first real `Custom` usage — `conflict_resolution`).
+    Custom { tag: String },
 }
 
 impl fmt::Display for GoalRunState {
@@ -135,7 +145,7 @@ impl fmt::Display for GoalRunState {
             GoalRunState::Finalizing { .. } => write!(f, "finalizing"),
             GoalRunState::DraftPending { .. } => write!(f, "draft_pending"),
             GoalRunState::Failed { .. } => write!(f, "failed"),
-            GoalRunState::Custom(tag) => write!(f, "custom:{}", tag),
+            GoalRunState::Custom { tag } => write!(f, "custom:{}", tag),
         }
     }
 }
@@ -151,6 +161,30 @@ impl GoalRunState {
         // Transition to Failed is always allowed.
         if matches!(next, GoalRunState::Failed { .. }) {
             return true;
+        }
+
+        // v0.17.0.12.7: `Custom { tag: "conflict_resolution" }` — entered when
+        // `ta draft apply` hits an unresolved shared-file merge conflict
+        // (PLAN.md, CLAUDE.md, Cargo.toml, memory/*.md). Uses the `Custom`
+        // extension point rather than a first-class variant, per the doc
+        // comment on `GoalRunState`.
+        const CONFLICT_RESOLUTION_TAG: &str = "conflict_resolution";
+        if let GoalRunState::Custom { tag } = next {
+            if tag == CONFLICT_RESOLUTION_TAG {
+                return matches!(
+                    self,
+                    GoalRunState::Approved { .. }
+                        | GoalRunState::PrReady
+                        | GoalRunState::UnderReview
+                );
+            }
+        }
+        if let GoalRunState::Custom { tag } = self {
+            if tag == CONFLICT_RESOLUTION_TAG {
+                // Human resolves the conflict, then either re-applies
+                // directly or sends it back for another review pass.
+                return matches!(next, GoalRunState::Applied | GoalRunState::PrReady);
+            }
         }
 
         matches!(
@@ -626,6 +660,94 @@ mod tests {
         let mut gr = test_goal_run();
         gr.transition(GoalRunState::Failed {
             reason: "test failure".to_string(),
+        })
+        .unwrap();
+        assert!(matches!(gr.state, GoalRunState::Failed { .. }));
+    }
+
+    #[test]
+    fn can_transition_from_approved_to_conflict_resolution() {
+        let mut gr = test_goal_run();
+        gr.transition(GoalRunState::Configured).unwrap();
+        gr.transition(GoalRunState::Running).unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        gr.transition(GoalRunState::UnderReview).unwrap();
+        gr.transition(GoalRunState::Approved {
+            approved_by: "reviewer".to_string(),
+        })
+        .unwrap();
+        gr.transition(GoalRunState::Custom {
+            tag: "conflict_resolution".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            gr.state,
+            GoalRunState::Custom {
+                tag: "conflict_resolution".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn can_transition_from_conflict_resolution_to_applied() {
+        let mut gr = test_goal_run();
+        gr.transition(GoalRunState::Configured).unwrap();
+        gr.transition(GoalRunState::Running).unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        gr.transition(GoalRunState::Custom {
+            tag: "conflict_resolution".to_string(),
+        })
+        .unwrap();
+        gr.transition(GoalRunState::Applied).unwrap();
+        assert_eq!(gr.state, GoalRunState::Applied);
+    }
+
+    #[test]
+    fn conflict_resolution_can_go_back_to_pr_ready() {
+        let mut gr = test_goal_run();
+        gr.transition(GoalRunState::Configured).unwrap();
+        gr.transition(GoalRunState::Running).unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        gr.transition(GoalRunState::Custom {
+            tag: "conflict_resolution".to_string(),
+        })
+        .unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        assert_eq!(gr.state, GoalRunState::PrReady);
+    }
+
+    #[test]
+    fn cannot_transition_from_created_to_conflict_resolution() {
+        let mut gr = test_goal_run();
+        let result = gr.transition(GoalRunState::Custom {
+            tag: "conflict_resolution".to_string(),
+        });
+        assert!(matches!(result, Err(GoalError::InvalidTransition { .. })));
+    }
+
+    #[test]
+    fn unrelated_custom_tags_do_not_use_conflict_resolution_rules() {
+        // A Custom tag other than "conflict_resolution" must not be reachable
+        // from Created — the special-case only applies to that exact tag.
+        let mut gr = test_goal_run();
+        let result = gr.transition(GoalRunState::Custom {
+            tag: "waiting_for_ci".to_string(),
+        });
+        assert!(matches!(result, Err(GoalError::InvalidTransition { .. })));
+    }
+
+    #[test]
+    fn can_still_transition_to_failed_from_conflict_resolution() {
+        let mut gr = test_goal_run();
+        gr.transition(GoalRunState::Configured).unwrap();
+        gr.transition(GoalRunState::Running).unwrap();
+        gr.transition(GoalRunState::PrReady).unwrap();
+        gr.transition(GoalRunState::Custom {
+            tag: "conflict_resolution".to_string(),
+        })
+        .unwrap();
+        gr.transition(GoalRunState::Failed {
+            reason: "could not resolve".to_string(),
         })
         .unwrap();
         assert!(matches!(gr.state, GoalRunState::Failed { .. }));

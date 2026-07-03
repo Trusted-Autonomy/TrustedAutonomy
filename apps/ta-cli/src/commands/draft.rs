@@ -5679,6 +5679,152 @@ impl Drop for ApplyRollbackGuard {
     }
 }
 
+/// Replay queued advisor patches (`.ta/advisor-patches/*.patch`) against
+/// `target_dir` (v0.17.0.12.7).
+///
+/// For each patch: if the file at `patch.path` still matches
+/// `patch.old_content` (nobody else touched it since the patch was queued),
+/// fast-forward — write `patch.new_content` directly. Otherwise, 3-way merge
+/// (base = `patch.old_content`, ours = current content, theirs =
+/// `patch.new_content`) using the same merge machinery as the shared-file
+/// apply-time merge. Clean merges apply and the patch is deleted. Unresolved
+/// conflicts (or a merge that can't even be attempted — binary content) write
+/// a conflict sidecar under `.ta/goals/<goal_id>/conflicts/` and leave the
+/// patch file in place for the next apply or human resolution via Studio.
+///
+/// Best-effort: errors here are logged, not propagated — an advisor patch
+/// replay failure must not fail the apply that triggered this call.
+fn replay_advisor_patches(target_dir: &Path, config: &GatewayConfig, goal_run_id: uuid::Uuid) {
+    let patches_dir = ta_workspace::advisor_patch::patches_dir(target_dir);
+    let entries = match std::fs::read_dir(&patches_dir) {
+        Ok(e) => e,
+        Err(_) => return, // No patches queued — nothing to do.
+    };
+
+    for entry in entries.flatten() {
+        let patch_path = entry.path();
+        if patch_path.extension().and_then(|e| e.to_str()) != Some("patch") {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&patch_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Could not read advisor patch {}: {}",
+                    patch_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+        let patch: ta_workspace::AdvisorPatch = match serde_json::from_str(&content) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    "Could not parse advisor patch {}: {}",
+                    patch_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        let target_file = target_dir.join(&patch.path);
+        let current_content = std::fs::read(&target_file).unwrap_or_default();
+        let old_content = patch.old_content();
+        let new_content = patch.new_content();
+
+        if current_content == old_content {
+            // Fast-forward: nobody else touched it since the patch was queued.
+            if let Some(parent) = target_file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&target_file, &new_content) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&patch_path);
+                    eprintln!(
+                        "[apply] Replayed advisor patch: {} ({})",
+                        patch.path, patch.description
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Could not write advisor patch target {}: {}",
+                        target_file.display(),
+                        e
+                    );
+                }
+            }
+            continue;
+        }
+
+        // Attempt a 3-way merge against whatever changed the file in the meantime.
+        let merged = tempfile::tempdir().ok().and_then(|tmp| {
+            let ours_path = tmp.path().join("ours");
+            let theirs_path = tmp.path().join("theirs");
+            std::fs::write(&ours_path, &current_content).ok()?;
+            std::fs::write(&theirs_path, &new_content).ok()?;
+            ta_workspace::overlay::three_way_merge(Some(&old_content), &ours_path, &theirs_path)
+                .ok()
+        });
+
+        let conflicted_content = match merged {
+            Some(ta_workspace::overlay::MergeResult::Clean { content, hunks }) => {
+                match std::fs::write(&target_file, &content) {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&patch_path);
+                        eprintln!(
+                            "[apply] Replayed advisor patch (auto-merged, {} hunk(s)): {} ({})",
+                            hunks, patch.path, patch.description
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Could not write merged advisor patch target {}: {}",
+                            target_file.display(),
+                            e
+                        );
+                    }
+                }
+                continue;
+            }
+            // Merge attempted but conflict markers remain.
+            Some(ta_workspace::overlay::MergeResult::Conflicted { content }) => content,
+            // Could not attempt a merge at all (binary content, tempdir failure).
+            None => current_content,
+        };
+
+        let conflicts_dir = config
+            .goals_dir
+            .join(goal_run_id.to_string())
+            .join("conflicts");
+        if let Err(e) = std::fs::create_dir_all(&conflicts_dir) {
+            tracing::warn!(
+                "Could not create conflicts dir {}: {}",
+                conflicts_dir.display(),
+                e
+            );
+        }
+        let sanitized = patch.path.replace('/', "__");
+        let sidecar = conflicts_dir.join(format!("{}.conflict", sanitized));
+        if let Err(e) = std::fs::write(&sidecar, &conflicted_content) {
+            tracing::warn!(
+                "Could not write advisor-patch conflict sidecar {}: {}",
+                sidecar.display(),
+                e
+            );
+        }
+        eprintln!(
+            "⚠️  Advisor patch for {} could not be auto-merged ({}); left queued at {}.\n    Conflict markers written to {}",
+            patch.path,
+            patch.description,
+            patch_path.display(),
+            sidecar.display()
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_package(
     config: &GatewayConfig,
@@ -6368,6 +6514,18 @@ fn apply_package(
             excludes,
         );
 
+        // v0.17.0.12.7: Load the shared-file apply-base (real goal-start content
+        // for PLAN.md, CLAUDE.md, Cargo.toml, memory/*.md) so shared-file
+        // conflicts can be 3-way merged against their real base instead of
+        // relying on git HEAD reconstruction.
+        let apply_base_path = goal.workspace_path.join(".ta").join("apply-base.json");
+        if apply_base_path.exists() {
+            match ta_workspace::shared_files::SharedFileBase::load(&apply_base_path) {
+                Ok(base) => overlay.set_apply_base(base),
+                Err(e) => tracing::warn!("Could not load apply-base.json: {}", e),
+            }
+        }
+
         // v0.2.1: Restore source snapshot from goal for conflict detection.
         // v0.4.1.2: Support rebase-on-apply for sequential draft applies.
         if let Some(snapshot_json) = &goal.source_snapshot {
@@ -6392,7 +6550,7 @@ fn apply_package(
                     // Rebase: re-snapshot the current source state so apply compares
                     // staging against the updated source (e.g., after a prior draft was applied).
                     let excludes = load_excludes_with_adapter(source_dir);
-                    if let Ok(fresh_snapshot) =
+                    if let Ok(mut fresh_snapshot) =
                         ta_workspace::SourceSnapshot::capture(&target_dir, |p| {
                             excludes.should_exclude(p)
                         })
@@ -6400,6 +6558,19 @@ fn apply_package(
                         println!(
                             "\n[info] Source changed since goal start — rebasing against current source."
                         );
+                        // v0.17.0.12.7: Shared files (PLAN.md, CLAUDE.md, Cargo.toml,
+                        // memory/*.md) must keep their TRUE goal-start baseline even
+                        // when rebasing — otherwise concurrent edits to these files
+                        // would be silently discarded by treating "now" as the base,
+                        // which is exactly the bug this phase exists to fix. Only
+                        // non-shared files get the rebased baseline.
+                        for (path, original_snap) in &snapshot.files {
+                            if ta_workspace::shared_files::is_shared_file(path) {
+                                fresh_snapshot
+                                    .files
+                                    .insert(path.clone(), original_snap.clone());
+                            }
+                        }
                         overlay.set_snapshot(fresh_snapshot);
                     }
                 } else if has_source_changes {
@@ -6919,9 +7090,72 @@ fn apply_package(
         }
 
         eprintln!("[apply] Diffing staging vs source and copying changes...");
-        let applied = overlay
-            .apply_with_conflict_check(&target_dir, conflict_resolution, &effective_uris)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let applied = match overlay.apply_with_conflict_check(
+            &target_dir,
+            conflict_resolution,
+            &effective_uris,
+        ) {
+            Ok(applied) => applied,
+            Err(ta_workspace::WorkspaceError::SharedFileConflicts { conflicts }) => {
+                // v0.17.0.12.7: One or more shared files (PLAN.md, CLAUDE.md,
+                // Cargo.toml, memory/*.md) could not be auto-merged. Write
+                // conflict-marked content for manual resolution instead of
+                // silently overwriting or aborting the whole apply with no
+                // actionable detail, and move the goal to a distinct state so
+                // Studio can surface it.
+                let conflicts_dir = config
+                    .goals_dir
+                    .join(goal.goal_run_id.to_string())
+                    .join("conflicts");
+                if let Err(e) = std::fs::create_dir_all(&conflicts_dir) {
+                    tracing::warn!(
+                        "Could not create conflicts dir {}: {}",
+                        conflicts_dir.display(),
+                        e
+                    );
+                }
+
+                let mut paths = Vec::new();
+                for conflict in &conflicts {
+                    let sanitized = conflict.path.replace('/', "__");
+                    let sidecar = conflicts_dir.join(format!("{}.conflict", sanitized));
+                    if let Err(e) = std::fs::write(&sidecar, &conflict.conflicted_content) {
+                        tracing::warn!(
+                            "Could not write conflict sidecar {}: {}",
+                            sidecar.display(),
+                            e
+                        );
+                    }
+                    paths.push(conflict.path.clone());
+                }
+
+                if let Err(e) = goal_store.transition(
+                    goal.goal_run_id,
+                    GoalRunState::Custom {
+                        tag: "conflict_resolution".to_string(),
+                    },
+                ) {
+                    tracing::warn!(
+                        "Could not transition goal {} to conflict_resolution state: {}",
+                        goal.goal_run_id,
+                        e
+                    );
+                }
+
+                let short_id = &goal.goal_run_id.to_string()[..8];
+                anyhow::bail!(
+                    "{n} shared file(s) have unresolved merge conflicts: {paths}\n\
+                     \n\
+                     Conflict markers written to {dir}\n\
+                     Resolve manually, then re-run `ta draft apply {short_id}` (or resolve via Studio).",
+                    n = conflicts.len(),
+                    paths = paths.join(", "),
+                    dir = conflicts_dir.display(),
+                    short_id = short_id,
+                );
+            }
+            Err(e) => return Err(anyhow::anyhow!("{}", e)),
+        };
 
         applied
             .into_iter()
@@ -6940,6 +7174,13 @@ fn apply_package(
             FsConnector::new(goal.goal_run_id.to_string(), staging, store, &goal.agent_id);
         connector.apply(&target_dir)?
     };
+
+    // v0.17.0.12.7: Replay any advisor patches queued while this (or another)
+    // goal was in flight, now that the apply above has settled the shared
+    // files. Best-effort — a failed/conflicted patch is left in place for the
+    // next apply or human resolution (Studio surfaces it), it does not fail
+    // this apply.
+    replay_advisor_patches(&target_dir, config, goal.goal_run_id);
 
     // v0.15.19.4: Track whether Cargo.toml is part of the applied changeset.
     // Used by the post-apply version check to distinguish a legitimate PR bump
@@ -12482,6 +12723,392 @@ fn run() {
         assert!(
             status_output.trim().is_empty(),
             "tracked files are dirty after rollback:\n{status_output}"
+        );
+    }
+
+    /// v0.17.0.12.7: A real conflict on a shared file (memory/notes.md — both
+    /// staging and source edit the same line differently) must not silently
+    /// overwrite or corrupt either side. `apply_package` should error, write a
+    /// conflict-marked sidecar under `.ta/goals/<id>/conflicts/`, and move the
+    /// goal to the `Custom("conflict_resolution")` state.
+    #[test]
+    fn apply_writes_conflict_sidecar_and_transitions_state_on_shared_file_conflict() {
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join("memory")).unwrap();
+        std::fs::write(
+            project.path().join("memory/notes.md"),
+            "line1\nline2\nline3\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Shared conflict test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test shared-file conflict handling".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Agent (staging) edits line 2.
+        std::fs::write(
+            goal.workspace_path.join("memory/notes.md"),
+            "line1\nline2-agent\nline3\n",
+        )
+        .unwrap();
+        // Concurrent direct edit on main to the SAME line — a real conflict.
+        std::fs::write(
+            project.path().join("memory/notes.md"),
+            "line1\nline2-external\nline3\n",
+        )
+        .unwrap();
+
+        build_package(&config, &goal_id, "Update notes", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+
+        let result = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false, // git_commit
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        );
+
+        assert!(
+            result.is_err(),
+            "apply_package should fail on an unresolved shared-file conflict"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unresolved merge conflicts"),
+            "unexpected error: {err_msg}"
+        );
+
+        // A conflict sidecar must exist for memory/notes.md.
+        let conflicts_dir = config.goals_dir.join(&goal_id).join("conflicts");
+        let sidecar = conflicts_dir.join("memory__notes.md.conflict");
+        assert!(
+            sidecar.exists(),
+            "expected conflict sidecar at {}",
+            sidecar.display()
+        );
+        let sidecar_content = std::fs::read_to_string(&sidecar).unwrap();
+        assert!(
+            sidecar_content.contains("<<<<<<<"),
+            "sidecar should contain conflict markers: {sidecar_content}"
+        );
+
+        // Goal must have moved to the conflict_resolution state.
+        let updated = goal_store.get(goal.goal_run_id).unwrap().unwrap();
+        assert_eq!(
+            updated.state,
+            GoalRunState::Custom {
+                tag: "conflict_resolution".to_string()
+            }
+        );
+    }
+
+    /// v0.17.0.12.7: Non-overlapping concurrent edits to a shared file
+    /// (memory/notes.md) must auto-merge and apply successfully — the whole
+    /// point of the apply-base snapshot + always-merge behavior.
+    #[test]
+    fn apply_auto_merges_shared_file_when_changes_are_non_overlapping() {
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join("memory")).unwrap();
+        std::fs::write(
+            project.path().join("memory/notes.md"),
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Shared auto-merge test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test shared-file auto-merge".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Agent (staging) edits line 2.
+        std::fs::write(
+            goal.workspace_path.join("memory/notes.md"),
+            "line1\nline2-agent\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n",
+        )
+        .unwrap();
+        // Concurrent direct edit on main to line 8 — non-overlapping.
+        std::fs::write(
+            project.path().join("memory/notes.md"),
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8-external\nline9\n",
+        )
+        .unwrap();
+
+        build_package(&config, &goal_id, "Update notes", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+
+        let result = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false, // git_commit
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        );
+
+        assert!(
+            result.is_ok(),
+            "apply should auto-merge: {:?}",
+            result.err()
+        );
+
+        let final_content =
+            std::fs::read_to_string(project.path().join("memory/notes.md")).unwrap();
+        assert!(
+            final_content.contains("line2-agent"),
+            "agent edit must survive: {final_content}"
+        );
+        assert!(
+            final_content.contains("line8-external"),
+            "concurrent main edit must survive: {final_content}"
+        );
+    }
+
+    /// v0.17.0.12.7: A queued advisor patch for an unrelated file (PLAN.md)
+    /// must be replayed and fast-forwarded after any successful `ta draft
+    /// apply` — even one for a goal that never touched PLAN.md itself.
+    #[test]
+    fn apply_replays_advisor_patch_after_merge() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        std::fs::write(project.path().join("PLAN.md"), "# Plan v1\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Advisor patch replay test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test advisor patch replay".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Agent's own change, unrelated to PLAN.md.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+
+        // Queue an advisor patch for PLAN.md (as ta-daemon would while this
+        // goal is running).
+        ta_workspace::advisor_patch::queue_or_write(
+            project.path(),
+            "PLAN.md",
+            b"# Plan v2 (advisor)\n",
+            "advisor test edit",
+            || true,
+        )
+        .unwrap();
+        let patches_dir = ta_workspace::advisor_patch::patches_dir(project.path());
+        assert_eq!(
+            std::fs::read_dir(&patches_dir).unwrap().count(),
+            1,
+            "patch should be queued before apply"
+        );
+
+        build_package(&config, &goal_id, "Modified README", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+
+        let result = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false, // git_commit
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        );
+
+        assert!(result.is_ok(), "apply should succeed: {:?}", result.err());
+
+        let plan_content = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert_eq!(
+            plan_content, "# Plan v2 (advisor)\n",
+            "advisor patch should have been replayed onto PLAN.md"
+        );
+        assert!(
+            !patches_dir.exists() || std::fs::read_dir(&patches_dir).unwrap().count() == 0,
+            "patch file should be deleted after successful replay"
+        );
+    }
+
+    /// v0.17.0.12.7: When a queued advisor patch can't be cleanly merged
+    /// against what the file looks like by apply time, the patch must be
+    /// left in place (for retry / human resolution) and a conflict sidecar
+    /// written — not silently dropped or force-applied.
+    #[test]
+    fn apply_leaves_advisor_patch_and_writes_conflict_when_unmergeable() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "line1\nline2\nline3\nline4\nline5\n",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Advisor patch conflict test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test advisor patch conflict handling".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Modified\n").unwrap();
+
+        // Queue an advisor patch whose base is the ORIGINAL line2, wanting to
+        // change it one way...
+        ta_workspace::advisor_patch::queue_or_write(
+            project.path(),
+            "PLAN.md",
+            b"line1\nline2-advisor\nline3\nline4\nline5\n",
+            "advisor conflicting edit",
+            || true,
+        )
+        .unwrap();
+
+        // ...but by apply time, someone else already changed the SAME line
+        // differently, directly on main.
+        std::fs::write(
+            project.path().join("PLAN.md"),
+            "line1\nline2-direct-edit\nline3\nline4\nline5\n",
+        )
+        .unwrap();
+
+        build_package(&config, &goal_id, "Modified README", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        approve_package(&config, &pkg_id, "tester", false).unwrap();
+
+        let result = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false, // git_commit
+            false, // git_push
+            false, // git_review
+            false, // skip_verify
+            false, // dry_run
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,  // phase_override
+            false, // force_apply
+            false, // validate_version
+            false, // auto_repair
+            false, // skip_plan_merge
+        );
+
+        // The goal's OWN apply must still succeed — an unrelated advisor
+        // patch conflict must not fail it.
+        assert!(result.is_ok(), "apply should succeed: {:?}", result.err());
+
+        let patches_dir = ta_workspace::advisor_patch::patches_dir(project.path());
+        assert_eq!(
+            std::fs::read_dir(&patches_dir).unwrap().count(),
+            1,
+            "unmergeable patch should be left queued for retry"
+        );
+
+        let conflicts_dir = config.goals_dir.join(&goal_id).join("conflicts");
+        let sidecar = conflicts_dir.join("PLAN.md.conflict");
+        assert!(
+            sidecar.exists(),
+            "expected conflict sidecar at {}",
+            sidecar.display()
+        );
+
+        // The direct edit on main must not have been silently overwritten.
+        let plan_content = std::fs::read_to_string(project.path().join("PLAN.md")).unwrap();
+        assert!(
+            plan_content.contains("line2-direct-edit"),
+            "direct main edit must survive an unresolved advisor-patch conflict: {plan_content}"
         );
     }
 
