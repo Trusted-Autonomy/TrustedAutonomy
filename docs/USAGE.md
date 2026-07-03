@@ -8871,7 +8871,7 @@ Then:
 
 2. **Set environment variables**:
    ```bash
-   export TA_DISCORD_TOKEN="your-bot-token-here"
+   export TA_DISCORD_TOKEN="<your-bot-token>"
    export TA_DISCORD_CHANNEL_ID="123456789012345678"
    ```
 
@@ -8945,8 +8945,8 @@ The Discord plugin supports a persistent **listen mode** that watches your chann
 
 2. Register the `/ta` slash command (run once):
    ```bash
-   export TA_DISCORD_TOKEN="your-bot-token"
-   export TA_DISCORD_APP_ID="your-application-id"   # from General Information tab
+   export TA_DISCORD_TOKEN="<your-bot-token>"
+   export TA_DISCORD_APP_ID="<your-application-id>"   # from General Information tab
    ta-channel-discord --register-commands
    # Registered: /ta — "Run a Trusted Autonomy command"
    ```
@@ -9059,7 +9059,7 @@ Then:
 
 2. **Set environment variables**:
    ```bash
-   export TA_SLACK_BOT_TOKEN="xoxb-your-bot-token"
+   export TA_SLACK_BOT_TOKEN="xoxb-<your-bot-token>"
    export TA_SLACK_CHANNEL_ID="C01ABC23DEF"
    # Optional: restrict who can respond
    export TA_SLACK_ALLOWED_USERS="U01ABC,U02DEF"
@@ -9145,7 +9145,7 @@ cp channel.toml .ta/plugins/channels/email/
 export TA_EMAIL_SMTP_HOST="smtp.gmail.com"   # SMTP server
 export TA_EMAIL_SMTP_PORT="587"              # SMTP port (default: 587, STARTTLS)
 export TA_EMAIL_USER="agent@company.com"     # Sender email / SMTP username
-export TA_EMAIL_PASSWORD="xxxx-xxxx-xxxx"    # SMTP password or app password
+export TA_EMAIL_PASSWORD="<your-app-password>"  # SMTP password or app password
 export TA_EMAIL_REVIEWER="reviewer@company.com,lead@company.com"  # Comma-separated
 ```
 
@@ -12810,7 +12810,7 @@ TA can react to VCS events automatically — no polling, no manual `ta run`. Whe
 
 ```toml
 [webhooks.github]
-secret = "your-webhook-secret"   # Set this to any random string
+secret = "<your-webhook-secret>"   # Set this to any random string
 ```
 
 **2. Add the webhook in GitHub:**
@@ -12898,7 +12898,7 @@ p4 triggers -i < /tmp/p4triggers.txt
 
 ```toml
 [webhooks.vcs]
-secret = "your-vcs-secret"
+secret = "<your-vcs-secret>"
 ```
 
 **4. Add trigger condition to `.ta/workflow.toml`:**
@@ -12992,7 +12992,7 @@ Configure in `.ta/daemon.toml`:
 ```toml
 [webhooks.relay]
 endpoint = "https://relay.secureautonomy.dev"
-secret = "your-relay-secret"
+secret = "<your-relay-secret>"
 poll_secs = 30      # How often the daemon reconnects (default: 30)
 ```
 
