@@ -9304,7 +9304,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.9 — Studio UX Cleanup (Systematic Fix Pass)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.8
 
 **Goal**: v0.17.0.12.6 shipped the Studio redesign, but several of its own spec items landed broken or regressed in real use, plus new issues surfaced (redundant Advisor widget, polling instead of reliable event-driven updates, tab navigation fighting on load). Systematically fix these rather than patching individually.
@@ -9312,23 +9312,23 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 **Items**:
 
 **Duplicate Advisor widget**:
-1. [ ] **Remove the redundant "Ask the Advisor" box at the top of the Dashboard tab** — keep only the Advisor dialog below the health/stat boxes (the one specified in v0.17.0.12.6 item 4). Find and delete the duplicate top-of-page widget/component and its wiring.
+1. [x] **Remove the redundant "Ask the Advisor" box at the top of the Dashboard tab** — keep only the Advisor dialog below the health/stat boxes (the one specified in v0.17.0.12.6 item 4). Find and delete the duplicate top-of-page widget/component and its wiring.
 
 **Dashboard refresh: event-driven, not fixed-interval polling**:
-2. [ ] **Replace the ~20s fixed-interval dashboard refresh with event-driven updates**: Dashboard currently re-fetches/re-renders on a timer regardless of whether anything changed. Migrate the dashboard's data source to the existing SSE `/api/events` stream (already used for goal state changes since v0.17.0.12.5) so it re-renders only when a relevant event arrives. Keep a background poll only as a reliability fallback (e.g. every 60–120s, or on SSE reconnect/gap detection) — not as the primary update mechanism. Must handle SSE disconnects/reconnects cleanly (no missed updates, no duplicate re-renders).
+2. [x] **Replace the ~20s fixed-interval dashboard refresh with event-driven updates**: Dashboard currently re-fetches/re-renders on a timer regardless of whether anything changed. Migrate the dashboard's data source to the existing SSE `/api/events` stream (already used for goal state changes since v0.17.0.12.5) so it re-renders only when a relevant event arrives. Keep a background poll only as a reliability fallback (e.g. every 60–120s, or on SSE reconnect/gap detection) — not as the primary update mechanism. Must handle SSE disconnects/reconnects cleanly (no missed updates, no duplicate re-renders).
 
 **Tab navigation instability on load**:
-3. [ ] **Fix tab navigation getting stuck on Dashboard for ~60s after load**: Clicking Plan/Review/Active/Stats during the first ~60 seconds after Studio loads shows Dashboard content instead, and the UI can land in a confused state with fields misplaced, apparently forced back to Dashboard. Root-cause this — likely a race between initial data-load/redirect logic and the polling/refresh cycle added in v0.17.0.12.5–12.6 fighting over route/component state. Fix so tab switches are immediate and stable regardless of in-flight background refreshes.
+3. [x] **Fix tab navigation getting stuck on Dashboard for ~60s after load**: Clicking Plan/Review/Active/Stats during the first ~60 seconds after Studio loads shows Dashboard content instead, and the UI can land in a confused state with fields misplaced, apparently forced back to Dashboard. Root-cause this — likely a race between initial data-load/redirect logic and the polling/refresh cycle added in v0.17.0.12.5–12.6 fighting over route/component state. Fix so tab switches are immediate and stable regardless of in-flight background refreshes.
 
 **Dashboard stats + Advisor panel size**:
-4. [ ] **Fix broken dashboard stat tiles**: Of the 8 health/stat boxes, only "Total Drafts", "System Health", and possibly "Plan Complete" currently show real data — the rest are broken/stubbed. Wire each stat tile to its real backend source (goal counts, velocity, active agents, etc.) and verify each one updates on the event-driven refresh from item 2.
-5. [ ] **Advisor panel: fix collapsed single-line rendering**: The Advisor dialog (v0.17.0.12.6 item 4) is currently rendering as a single line instead of the specified scrollable log window. Fix the container/layout so it's a proper scrollable chat shell — full conversation history visible, responses readable, input field pinned, matching the original v0.17.0.12.6 spec.
+4. [x] **Fix broken dashboard stat tiles**: Of the 8 health/stat boxes, only "Total Drafts", "System Health", and possibly "Plan Complete" currently show real data — the rest are broken/stubbed. Wire each stat tile to its real backend source (goal counts, velocity, active agents, etc.) and verify each one updates on the event-driven refresh from item 2.
+5. [x] **Advisor panel: fix collapsed single-line rendering**: The Advisor dialog (v0.17.0.12.6 item 4) is currently rendering as a single line instead of the specified scrollable log window. Fix the container/layout so it's a proper scrollable chat shell — full conversation history visible, responses readable, input field pinned, matching the original v0.17.0.12.6 spec.
 
 **Draft/goal review panel: fix regressed items + add bulk selection**:
-6. [ ] **Restore/fix "Why" summary + supervisor output on the draft review panel**: v0.17.0.12.6 items 7–8 (supervisor review section, "Why" summary) shipped but are not appearing when reviewing a goal's draft — verify against the current PrReady/review flow and fix whatever regressed (may be a different code path than the one 12.6 touched, e.g. the Plan tab's phase-run review view vs. the drafts list review view — reconcile so both go through the same component).
-7. [ ] **Fix approve/deny/apply action buttons with per-item checkboxes**: v0.17.0.12.6 item 9 (per-file checkboxes, default checked) shipped but the Approve/Deny/Apply actions and/or checkboxes are not present or not functioning in the current review flow. Fix so each change/file has a checkbox, defaulted on/off based on the draft's own recommendation (not blanket-checked), and Approve/Deny/Apply act on the selected subset.
-8. [ ] **Add Select All / Clear All controls**: Above the per-item checkbox list, add "Select All" and "Clear All" buttons that toggle every checkbox in the list at once.
-9. [ ] USAGE.md: update the Studio review-panel section to match the fixed behavior (event-driven dashboard, Select All/Clear All, checkbox defaults).
+6. [x] **Restore/fix "Why" summary + supervisor output on the draft review panel**: v0.17.0.12.6 items 7–8 (supervisor review section, "Why" summary) shipped but are not appearing when reviewing a goal's draft — verify against the current PrReady/review flow and fix whatever regressed (may be a different code path than the one 12.6 touched, e.g. the Plan tab's phase-run review view vs. the drafts list review view — reconcile so both go through the same component).
+7. [x] **Fix approve/deny/apply action buttons with per-item checkboxes**: v0.17.0.12.6 item 9 (per-file checkboxes, default checked) shipped but the Approve/Deny/Apply actions and/or checkboxes are not present or not functioning in the current review flow. Fix so each change/file has a checkbox, defaulted on/off based on the draft's own recommendation (not blanket-checked), and Approve/Deny/Apply act on the selected subset.
+8. [x] **Add Select All / Clear All controls**: Above the per-item checkbox list, add "Select All" and "Clear All" buttons that toggle every checkbox in the list at once.
+9. [x] USAGE.md: update the Studio review-panel section to match the fixed behavior (event-driven dashboard, Select All/Clear All, checkbox defaults).
 
 #### Version: `0.17.0-alpha.12.9`
 

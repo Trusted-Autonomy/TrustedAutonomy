@@ -316,6 +316,12 @@ pub struct VelocityAggregate {
     /// Average USD cost per goal.
     #[serde(default)]
     pub avg_cost_usd: f64,
+    /// Goals completed per week, computed as `total_goals / weeks spanned by
+    /// the entry set` (from the earliest `started_at` to now). Studio's
+    /// dashboard "Goals/Week" stat tile reads this field (v0.17.0.12.9 item 4)
+    /// — it was previously always 0.0 because this field didn't exist.
+    #[serde(default)]
+    pub goals_per_week: f64,
 }
 
 impl VelocityAggregate {
@@ -368,6 +374,20 @@ impl VelocityAggregate {
             0.0
         };
 
+        // Rate over the full tracked history: total goals divided by the number
+        // of weeks between the earliest `started_at` and now. Floored at one day
+        // so a handful of goals started within the same hour doesn't produce an
+        // absurdly high rate.
+        let goals_per_week = if total_goals == 0 {
+            0.0
+        } else {
+            let now = Utc::now();
+            let earliest = entries.iter().map(|e| e.started_at).min().unwrap_or(now);
+            let span_seconds = (now - earliest).num_seconds().max(86_400);
+            let span_weeks = span_seconds as f64 / (7.0 * 86_400.0);
+            total_goals as f64 / span_weeks
+        };
+
         Self {
             total_goals,
             applied,
@@ -380,6 +400,7 @@ impl VelocityAggregate {
             total_rework_seconds,
             total_cost_usd,
             avg_cost_usd,
+            goals_per_week,
         }
     }
 }
@@ -902,6 +923,27 @@ mod tests {
         assert_eq!(agg.applied, 3);
         assert_eq!(agg.failed, 1);
         assert!(agg.avg_build_seconds > 0);
+    }
+
+    #[test]
+    fn aggregate_goals_per_week_zero_when_empty() {
+        let agg = VelocityAggregate::from_entries(&[]);
+        assert_eq!(agg.goals_per_week, 0.0);
+    }
+
+    #[test]
+    fn aggregate_goals_per_week_positive_when_entries_present() {
+        // Studio's dashboard "Goals/Week" stat tile reads this field
+        // (v0.17.0.12.9 item 4) — it must be nonzero once any goals exist.
+        let dir = tempdir().unwrap();
+        let store = VelocityStore::new(dir.path().join("velocity-stats.jsonl"));
+        for _ in 0..3 {
+            let goal = make_goal();
+            let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied);
+            store.append(&entry).unwrap();
+        }
+        let agg = store.aggregate().unwrap();
+        assert!(agg.goals_per_week > 0.0);
     }
 
     #[test]

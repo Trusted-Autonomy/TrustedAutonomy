@@ -124,32 +124,7 @@
   .template-tile.selected { background: #1e2235; }
   .template-name { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.25rem; }
   .template-desc { font-size: 0.75rem; color: var(--muted); }
-  /* Global Intent Bar (v0.15.26) */
-  .intent-bar { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem;
-                background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-                padding: 0.4rem 0.75rem; transition: border-color 0.15s; }
-  .intent-bar:focus-within { border-color: var(--accent); }
-  .intent-bar input { flex: 1; background: transparent; border: none; color: var(--text);
-                      font-size: 0.9rem; outline: none; }
-  .intent-bar input::placeholder { color: var(--muted); }
-  .intent-bar .intent-shortcut { font-size: 0.7rem; color: var(--muted); white-space: nowrap;
-                                  border: 1px solid var(--border); border-radius: 4px;
-                                  padding: 0.1rem 0.35rem; }
-  .intent-bar .intent-send { background: var(--accent); color: #fff; border: none;
-                             border-radius: 4px; padding: 0.25rem 0.6rem; font-size: 0.8rem;
-                             cursor: pointer; transition: opacity 0.15s; }
-  .intent-bar .intent-send:hover { opacity: 0.85; }
-  /* Advisor Menu (v0.15.26) */
-  .advisor-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-                     background: rgba(0,0,0,0.6); z-index: 500; }
-  .advisor-overlay.visible { display: flex; align-items: flex-start; justify-content: center;
-                              padding-top: 6rem; }
-  .advisor-modal { background: var(--surface); border: 1px solid var(--accent);
-                   border-radius: 12px; padding: 1.5rem; max-width: 560px; width: 100%; }
-  .advisor-modal h3 { font-size: 0.9rem; color: var(--muted); margin-bottom: 0.75rem;
-                      text-transform: uppercase; letter-spacing: 0.05em; }
-  .advisor-response { color: var(--text); font-size: 0.95rem; margin-bottom: 1rem;
-                      line-height: 1.5; }
+  /* Advisor Menu (v0.15.26) — option-card styling shared with the Advisor tab (renderAdvisorOptions) */
   .advisor-options { display: flex; flex-direction: column; gap: 0.5rem; }
   .advisor-option { display: flex; align-items: center; gap: 0.75rem; background: var(--bg);
                     border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.9rem;
@@ -164,7 +139,6 @@
   .advisor-option.opt-apply .opt-num { background: var(--green); }
   .advisor-option.opt-deny .opt-num { background: var(--red); }
   .advisor-option.opt-auto .opt-num { background: var(--yellow); color: #000; }
-  .advisor-close { margin-top: 1rem; text-align: right; }
   /* Sub-phase nesting (v0.16.1.1) */
   .subphase-list { margin-top: 0.75rem; border-left: 2px solid var(--border); padding-left: 1rem; }
   .subphase-item-done { display: flex; align-items: center; gap: 0.5rem; padding: 0.2rem 0;
@@ -343,13 +317,6 @@
   <!-- Notification slide-in panel (v0.16.1.3) -->
   <div id="notif-panel" class="notif-panel" style="display:none"></div>
   <p class="subtitle" id="subtitle">Loading...</p>
-  <!-- Global Intent Bar (v0.15.26): Cmd+K to focus, routes to advisor from any tab -->
-  <div class="intent-bar" id="intent-bar">
-    <input type="text" id="intent-input" placeholder="Ask the advisor anything… (Cmd+K)"
-           onkeydown="intentBarKeydown(event)" oninput="intentBarInput(event)">
-    <span class="intent-shortcut">⌘K</span>
-    <button class="intent-send" onclick="submitIntentBar()">Ask</button>
-  </div>
   <!-- Advise Panel (v0.15.28): Cmd+Shift+K to focus, sends notes to active goal agent -->
   <div class="advise-panel" id="advise-panel">
     <div class="advise-panel-header">
@@ -373,34 +340,23 @@
     </div>
   </div>
   <div class="tabs">
-    <div class="tab active" onclick="switchTab('dashboard')">Dashboard</div>
-    <div class="tab" onclick="switchTab('active')" id="tab-active">Active</div>
-    <div class="tab" onclick="switchTab('plan')">Plan</div>
-    <div class="tab" onclick="switchTab('drafts')">Review Drafts</div>
-    <div class="tab" onclick="switchTab('questions')" id="tab-questions">Agent Questions</div>
-    <div class="tab" onclick="switchTab('memory')">Memory</div>
-    <div class="tab" onclick="switchTab('projects')" id="tab-projects">Projects</div>
-    <div class="tab" onclick="switchTab('workflows')">Workflows</div>
-    <div class="tab" onclick="switchTab('release')">Release</div>
-    <div class="tab" onclick="switchTab('agents')">Agents</div>
-    <div class="tab" onclick="switchTab('personas')">Personas</div>
-    <div class="tab" onclick="switchTab('advisor')">Advisor</div>
-    <div class="tab" onclick="switchTab('stats')">Stats</div>
-    <div class="tab" onclick="switchTab('health')" id="tab-health">Health</div>
-    <div class="tab" onclick="switchTab('settings')">Settings</div>
+    <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</div>
+    <div class="tab" data-tab="active" onclick="switchTab('active')" id="tab-active">Active</div>
+    <div class="tab" data-tab="plan" onclick="switchTab('plan')">Plan</div>
+    <div class="tab" data-tab="drafts" onclick="switchTab('drafts')">Review Drafts</div>
+    <div class="tab" data-tab="questions" onclick="switchTab('questions')" id="tab-questions">Agent Questions</div>
+    <div class="tab" data-tab="memory" onclick="switchTab('memory')">Memory</div>
+    <div class="tab" data-tab="projects" onclick="switchTab('projects')" id="tab-projects">Projects</div>
+    <div class="tab" data-tab="workflows" onclick="switchTab('workflows')">Workflows</div>
+    <div class="tab" data-tab="release" onclick="switchTab('release')">Release</div>
+    <div class="tab" data-tab="agents" onclick="switchTab('agents')">Agents</div>
+    <div class="tab" data-tab="personas" onclick="switchTab('personas')">Personas</div>
+    <div class="tab" data-tab="advisor" onclick="switchTab('advisor')">Advisor</div>
+    <div class="tab" data-tab="stats" onclick="switchTab('stats')">Stats</div>
+    <div class="tab" data-tab="health" onclick="switchTab('health')" id="tab-health">Health</div>
+    <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
   </div>
   <div id="app"><div class="loading">Loading...</div></div>
-  <!-- Advisor Menu Overlay (v0.15.26): numbered-option modal shown after intent bar submit -->
-  <div class="advisor-overlay" id="advisor-overlay" onclick="closeAdvisorOverlay(event)">
-    <div class="advisor-modal" id="advisor-modal">
-      <h3>Advisor</h3>
-      <div class="advisor-response" id="advisor-overlay-response"></div>
-      <div class="advisor-options" id="advisor-overlay-options"></div>
-      <div class="advisor-close">
-        <button class="btn btn-ghost btn-sm" onclick="closeAdvisorOverlayDirect()">Close (Esc)</button>
-      </div>
-    </div>
-  </div>
   <!-- Native dialog modal (v0.16.1.2) -->
   <dialog id="ta-dialog">
     <div id="ta-dialog-body"></div>
@@ -689,8 +645,19 @@ function morphChildren(oldParent, newParent) {
       oldParent.appendChild(newNode.cloneNode(true));
       continue;
     }
+    // Sections in dashboard/list renders come and go based on data (e.g. the
+    // "Running Goals" block disappears once nothing is running), which shifts
+    // every following sibling's index. Matching by tag name alone then morphs
+    // unrelated elements into each other — observed as the Advisor chat log
+    // losing its scrollable layout when it got attribute-stomped by whatever
+    // sibling happened to land at its old index. Treat differing `id`s as a
+    // hard identity mismatch so id-bearing nodes are replaced instead of
+    // silently reinterpreted as a different section.
+    const oldId = oldNode.nodeType === Node.ELEMENT_NODE ? oldNode.id : '';
+    const newId = newNode.nodeType === Node.ELEMENT_NODE ? newNode.id : '';
     const typeMismatch = oldNode.nodeType !== newNode.nodeType ||
-      (oldNode.nodeType === Node.ELEMENT_NODE && oldNode.tagName !== newNode.tagName);
+      (oldNode.nodeType === Node.ELEMENT_NODE && oldNode.tagName !== newNode.tagName) ||
+      oldId !== newId;
     if (typeMismatch) {
       oldParent.replaceChild(newNode.cloneNode(true), oldNode);
       continue;
@@ -728,9 +695,13 @@ function morphAttributes(oldEl, newEl) {
 // ── Tab navigation ─────────────────────────────────────────────
 function switchTab(tab) {
   currentTab = tab;
+  // Match by the explicit data-tab attribute rather than the tab's visible
+  // text — several tabs' labels don't match their tab key (e.g. "Review
+  // Drafts" -> 'drafts') or change at runtime (e.g. "Agent Questions (3)"
+  // once there are pending questions), which previously left the active-tab
+  // highlight stuck on the wrong tab.
   document.querySelectorAll('.tab').forEach(t => {
-    const label = t.textContent.trim().toLowerCase().replace(/ /g, '-');
-    t.classList.toggle('active', label === tab || (tab === 'dashboard' && label === 'dashboard'));
+    t.classList.toggle('active', t.dataset.tab === tab);
   });
   if (tab === 'dashboard') { loadDashboard(); startDashRefresh(); }
   else if (tab === 'active') loadActiveTab();
@@ -749,36 +720,30 @@ function switchTab(tab) {
   else if (tab === 'settings') loadSettings();
 }
 
-// ── Global Intent Bar (v0.15.26) ──────────────────────────────
-// Cmd+K / Ctrl+K focuses the intent bar from anywhere in the UI.
-// Cmd+Shift+K focuses the advise panel input (v0.15.28).
-document.addEventListener('keydown', function(e) {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-    if (e.shiftKey) {
-      e.preventDefault();
-      const adviseInput = document.getElementById('advise-input');
-      if (adviseInput) { adviseInput.focus(); adviseInput.select(); }
-    } else {
-      e.preventDefault();
-      const input = document.getElementById('intent-input');
-      if (input) { input.focus(); input.select(); }
-    }
-  }
-  if (e.key === 'Escape') closeAdvisorOverlayDirect();
-});
-
-function intentBarKeydown(e) {
-  if (e.key === 'Enter') submitIntentBar();
-  if (e.key === 'Escape') document.getElementById('intent-input').blur();
-}
-
-function intentBarInput(e) {
-  // Could do live suggestions in a future iteration.
+// Jump straight to a specific draft's detail view without going through
+// switchTab('drafts') first. switchTab('drafts') kicks off loadDrafts(),
+// which fetches and renders the full drafts *list* — if that fetch is
+// slower than the detail's own fetches (plausible with many drafts), it can
+// resolve after the detail view renders and silently replace it with the
+// list, making the "Why"/Supervisor Review sections look like they vanished.
+function viewDraftDetail(id) {
+  currentTab = 'drafts';
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === 'drafts');
+  });
+  showDraftDetail(id);
 }
 
 // ── Advise Panel (v0.15.28) ───────────────────────────────────
+// Cmd+Shift+K focuses the advise panel input from anywhere in the UI.
+document.addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k' && e.shiftKey) {
+    e.preventDefault();
+    const adviseInput = document.getElementById('advise-input');
+    if (adviseInput) { adviseInput.focus(); adviseInput.select(); }
+  }
+});
 // Shows above the tab bar. Sends a mid-run note to the active goal's agent.
-// Cmd+Shift+K focuses the input from anywhere in the UI.
 
 let adviseActiveGoalId = null;
 let adviseActiveAgentId = null;
@@ -874,55 +839,8 @@ async function submitAdviseNote() {
 // Load the advise panel on page init.
 loadAdvisePanel();
 
-async function submitIntentBar() {
-  const input = document.getElementById('intent-input');
-  const message = (input.value || '').trim();
-  if (!message) return;
-  input.value = '';
-
-  // Build context from current tab.
-  const context = { tab: currentTab, selection: null };
-
-  try {
-    const resp = await fetch('/api/advisor/message', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, context })
-    });
-    if (!resp.ok) { console.error('Advisor API error', resp.status); return; }
-    const data = await resp.json();
-    showAdvisorOverlay(message, data);
-    // Also record in advisor tab history.
-    advisorHistory.push({ role: 'user', text: message });
-    advisorHistory.push({ role: 'advisor', text: data.response, options: data.options || [] });
-  } catch (e) {
-    console.error('Advisor fetch failed', e);
-  }
-}
-
-// ── Advisor Menu Overlay (v0.15.26) ───────────────────────────
-// Shows after the intent bar sends a message — numbered options are interactive.
-function showAdvisorOverlay(message, data) {
-  const overlay = document.getElementById('advisor-overlay');
-  const responseEl = document.getElementById('advisor-overlay-response');
-  const optionsEl = document.getElementById('advisor-overlay-options');
-
-  responseEl.textContent = data.response || '';
-  optionsEl.innerHTML = renderAdvisorOptions(data.options || [], data);
-
-  overlay.classList.add('visible');
-}
-
-function closeAdvisorOverlay(e) {
-  // Only close if clicking the backdrop (not the modal itself).
-  if (e.target === document.getElementById('advisor-overlay')) closeAdvisorOverlayDirect();
-}
-
-function closeAdvisorOverlayDirect() {
-  const overlay = document.getElementById('advisor-overlay');
-  if (overlay) overlay.classList.remove('visible');
-}
-
+// ── Advisor option cards (v0.15.26) ────────────────────────────
+// Shared by the Advisor tab's chat log — numbered options are interactive.
 function renderAdvisorOptions(options, data) {
   if (!options.length) return '';
   return options.map(opt => {
@@ -947,16 +865,13 @@ async function handleAdvisorOption(num, optJson, dataJson) {
 
   switch (opt.action_type) {
     case 'apply':
-      closeAdvisorOverlayDirect();
       await applyLatestDraft();
       break;
     case 'deny':
-      closeAdvisorOverlayDirect();
       await denyLatestDraft();
       break;
     case 'auto_fire':
     case 'button':
-      closeAdvisorOverlayDirect();
       if (opt.command) await fireGoalCommand(opt.command);
       break;
     case 'text':
@@ -965,14 +880,12 @@ async function handleAdvisorOption(num, optJson, dataJson) {
         try { await navigator.clipboard.writeText(opt.command); } catch(_) {}
         showAlert('Copied to clipboard:\n' + opt.command);
       }
-      closeAdvisorOverlayDirect();
       break;
     case 'answer':
-      closeAdvisorOverlayDirect();
       switchTab('advisor');
       break;
     default:
-      closeAdvisorOverlayDirect();
+      break;
   }
 }
 
@@ -1255,6 +1168,7 @@ function clearAdvisorHistory() {
 // alignment scores.
 
 async function loadStatsTab() {
+  if (currentTab !== 'stats') return;
   if (!app.firstChild || app.querySelector('.loading, .empty')) {
     app.innerHTML = '<div class="loading">Loading stats...</div>';
   }
@@ -1262,9 +1176,14 @@ async function loadStatsTab() {
     const resp = await fetch('/api/stats/summary');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
+    // Bail if the user navigated away while this fetch was in flight —
+    // otherwise a slow response can stomp whatever tab is now showing.
+    if (currentTab !== 'stats') return;
     renderStatsTab(data);
   } catch (e) {
-    app.innerHTML = '<div class="empty">Failed to load stats. Is the daemon running?</div>';
+    if (currentTab === 'stats') {
+      app.innerHTML = '<div class="empty">Failed to load stats. Is the daemon running?</div>';
+    }
   }
 }
 
@@ -1324,6 +1243,7 @@ async function loadDashboard() {
   // Only show the loading placeholder on the very first render — subsequent
   // 30s/SSE-triggered refreshes patch the existing content in place instead
   // of flashing back to a blank "Loading..." state (item 1).
+  if (currentTab !== 'dashboard') return;
   if (!app.firstChild || app.querySelector('.loading, .empty')) {
     app.innerHTML = '<div class="loading">Loading dashboard...</div>';
   }
@@ -1378,6 +1298,12 @@ async function loadDashboard() {
       qTab.style.color = '';
     }
 
+    // A slow fetch above may have lost the race against the user clicking to
+    // another tab — bail before touching #app so we don't stomp whatever
+    // that tab has since rendered (root cause of tab switches getting stuck
+    // showing Dashboard content for up to ~60s after load).
+    if (currentTab !== 'dashboard') return;
+
     // Redirect to Projects tab if no active project is set (v0.14.18).
     if (status && status.active_project_path === null) {
       switchTab('projects');
@@ -1386,41 +1312,60 @@ async function loadDashboard() {
 
     renderDashboard(draftsData, questions, status, phases, velocity, advisorCtx, dialogEntries);
   } catch (e) {
-    app.innerHTML = '<div class="empty">Failed to load dashboard. Is the daemon running?</div>';
+    if (currentTab === 'dashboard') {
+      app.innerHTML = '<div class="empty">Failed to load dashboard. Is the daemon running?</div>';
+    }
   }
 }
 
-// Set up 30-second auto-refresh for Dashboard (fallback if SSE is unavailable).
+// Reliability-fallback refresh for Dashboard (item 2): SSE is the primary
+// update mechanism (see startDashEventStream below). This long-interval
+// timer only exists to self-heal if a browser can't do SSE at all, or if
+// events were somehow missed — it is not the primary refresh path anymore.
 let _dashRefreshTimer = null;
 function startDashRefresh() {
   if (_dashRefreshTimer) clearInterval(_dashRefreshTimer);
-  _dashRefreshTimer = setInterval(() => { if (currentTab === 'dashboard') loadDashboard(); }, 30000);
+  _dashRefreshTimer = setInterval(() => { if (currentTab === 'dashboard') loadDashboard(); }, 90000);
 }
 
-// Dashboard immediacy (v0.17.0.12.5 item 4): subscribe to the daemon's SSE
-// event stream so a newly-started goal appears on the dashboard within the
-// stream's ~2s server-side poll tick, instead of waiting up to 30s for the
-// next fallback timer refresh. `ta run` / `ta_goal_start` already emit
-// `goal_started` immediately on the Configured→Running transition.
+// Dashboard immediacy (v0.17.0.12.5 item 4, broadened in v0.17.0.12.9 item 2):
+// subscribe to the daemon's SSE event stream so dashboard-relevant state
+// changes (goal lifecycle, draft lifecycle, agent questions, plan phase
+// completion) appear within the stream's ~2s server-side poll tick, instead
+// of relying on a fixed-interval poll regardless of whether anything changed.
+const DASH_SSE_EVENT_TYPES = [
+  'goal_started', 'goal_completed', 'goal_failed',
+  'draft_built', 'draft_submitted', 'draft_approved', 'draft_denied', 'draft_applied',
+  'agent_needs_input', 'agent_question_answered',
+  'plan_phase_completed', 'review_requested',
+];
 let _dashEventSource = null;
 function startDashEventStream() {
   if (_dashEventSource) return;
   try {
-    _dashEventSource = new EventSource('/api/events?types=goal_started,goal_completed,goal_failed');
+    _dashEventSource = new EventSource('/api/events?types=' + DASH_SSE_EVENT_TYPES.join(','));
   } catch (e) {
-    return; // EventSource unsupported/unavailable — 30s fallback timer still covers us.
+    return; // EventSource unsupported/unavailable — the fallback timer still covers us.
   }
   const refreshIfOnDashboard = () => { if (currentTab === 'dashboard') loadDashboard(); };
-  _dashEventSource.addEventListener('goal_started', refreshIfOnDashboard);
-  _dashEventSource.addEventListener('goal_completed', refreshIfOnDashboard);
-  _dashEventSource.addEventListener('goal_failed', refreshIfOnDashboard);
-  // On error the browser auto-reconnects per the EventSource spec; nothing
-  // to do here besides letting the 30s timer keep working as a fallback.
+  for (const type of DASH_SSE_EVENT_TYPES) {
+    _dashEventSource.addEventListener(type, refreshIfOnDashboard);
+  }
+  // On reconnect (network blip, daemon restart), the browser resumes the
+  // stream automatically per the EventSource spec, but any events emitted
+  // during the gap were missed. Refresh once per reconnect to close that
+  // gap rather than waiting for the 90s fallback timer.
+  let everOpened = false;
+  _dashEventSource.onopen = () => {
+    if (everOpened) refreshIfOnDashboard();
+    everOpened = true;
+  };
 }
 
 function renderDashboard(allDrafts, questions, status, phases, velocity, advisorCtx, dialogEntries) {
   const pending = allDrafts.filter(d => d.status === 'PendingReview');
   const active = allDrafts.filter(d => d.status === 'Draft');
+  const runningAgents = status && status.active_agents ? status.active_agents.filter(a => a.state === 'running' || a.state === 'configured') : [];
 
   let html = '';
 
@@ -1429,7 +1374,9 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
   const pendingPhases = phases.filter(p => p.status === 'pending' || p.status === 'in_progress').length;
   const totalPhases = phases.length;
   const completionPct = totalPhases > 0 ? Math.round((donePhases / totalPhases) * 100) : 0;
-  const goalsPerWeek = velocity ? (velocity.goals_per_week || 0).toFixed(1) : '—';
+  // /api/stats/velocity nests the aggregate under `.aggregate` (it also
+  // returns by_contributor/phase_conflicts/local_only_count alongside it).
+  const goalsPerWeek = velocity && velocity.aggregate ? (velocity.aggregate.goals_per_week || 0).toFixed(1) : '—';
   const healthSignals = (advisorCtx && advisorCtx.health_signals_count > 0)
     ? `<span style="color:var(--yellow)">${advisorCtx.health_signals_count} signal${advisorCtx.health_signals_count !== 1 ? 's' : ''}</span>`
     : `<span style="color:var(--green)">Healthy</span>`;
@@ -1466,7 +1413,6 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
   }
 
   // ── Running Goals with expandable detail (v0.16.1.3) ──────────
-  const runningAgents = status && status.active_agents ? status.active_agents.filter(a => a.state === 'running' || a.state === 'configured') : [];
   if (runningAgents.length > 0) {
     html += '<div class="dash-section">';
     html += '<div class="dash-section-title">Running (' + runningAgents.length + ')</div>';
@@ -1499,7 +1445,7 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
     html += '<div class="dash-section">';
     html += '<div class="dash-section-title">Active Work</div>';
     html += active.slice(0, 3).map(d => `
-      <div class="card clickable" onclick="switchTab('drafts');setTimeout(()=>showDraftDetail('${d.package_id}'),100)">
+      <div class="card clickable" onclick="viewDraftDetail('${d.package_id}')">
         <div class="card-header">
           <span class="card-title">${esc(d.title)}</span>
           <span class="badge badge-active">In Progress</span>
@@ -1515,7 +1461,7 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
     html += '<div class="dash-section">';
     html += '<div class="dash-section-title">Ready to Review (' + pending.length + ')</div>';
     html += pending.slice(0, 5).map(d => `
-      <div class="card clickable" onclick="switchTab('drafts');setTimeout(()=>showDraftDetail('${d.package_id}'),100)">
+      <div class="card clickable" onclick="viewDraftDetail('${d.package_id}')">
         <div class="card-header">
           <span class="card-title">${esc(d.title)}</span>
           <span class="badge badge-pending">Needs Review</span>
@@ -1544,7 +1490,7 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
 
   // Summary stats.
   html += '<div class="stat-grid">';
-  html += `<div class="stat-card"><div class="stat-value">${pending.length}</div><div class="stat-label">Needs Review</div></div>`;
+  html += `<div class="stat-card"><div class="stat-value">${runningAgents.length}</div><div class="stat-label">Active Agents</div></div>`;
   html += `<div class="stat-card"><div class="stat-value">${active.length}</div><div class="stat-label">In Progress</div></div>`;
   html += `<div class="stat-card"><div class="stat-value">${questions.length}</div><div class="stat-label">Waiting for You</div></div>`;
   const total = allDrafts.length;
@@ -1563,7 +1509,7 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
 
   html += '<div style="margin-top:1rem;font-size:0.8rem;color:var(--muted);text-align:right">' +
     '<button class="btn btn-sm btn-ghost" onclick="loadDashboard()">Refresh</button>' +
-    ' <span style="margin-left:0.5rem">Auto-refreshes every 30s</span></div>';
+    ' <span style="margin-left:0.5rem">Live-updates on activity</span></div>';
 
   setAppContent(html);
 }
@@ -1729,15 +1675,20 @@ function askAdvisorAboutGoal(goalId, title) {
 let _activeRefreshTimer = null;
 
 async function loadActiveTab() {
+  if (currentTab !== 'active') return;
   if (!app.firstChild || app.querySelector('.loading, .empty')) {
     app.innerHTML = '<div class="loading">Loading active goals...</div>';
   }
   try {
     const resp = await fetch('/api/active/goals');
     const goals = resp.ok ? await resp.json().catch(() => []) : [];
+    // Bail if the user navigated away while this fetch was in flight.
+    if (currentTab !== 'active') return;
     renderActiveTab(goals);
   } catch (e) {
-    app.innerHTML = '<div class="empty">Failed to load active goals. Is the daemon running?</div>';
+    if (currentTab === 'active') {
+      app.innerHTML = '<div class="empty">Failed to load active goals. Is the daemon running?</div>';
+    }
   }
   if (_activeRefreshTimer) clearInterval(_activeRefreshTimer);
   _activeRefreshTimer = setInterval(() => {
@@ -1847,6 +1798,7 @@ function buildSubPhaseMap(phases) {
 }
 
 async function loadPlan() {
+  if (currentTab !== 'plan') return;
   app.innerHTML = '<div class="loading">Loading plan...</div>';
   try {
     const resp = await fetch('/api/plan/phases');
@@ -1855,6 +1807,8 @@ async function loadPlan() {
   } catch (e) {
     planPhases = [];
   }
+  // Bail if the user navigated away while this fetch was in flight.
+  if (currentTab !== 'plan') return;
   renderPlan();
 }
 
@@ -1997,7 +1951,7 @@ function renderPhaseCard(ph, subMap) {
   // Active button: pr_ready → link to specific draft detail; running → info
   const activeBtn = isPrReady
     ? (ph.draft_id
-        ? `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="switchTab('drafts');setTimeout(()=>showDraftDetail('${esc(ph.draft_id)}'),100)" title="Draft ready — click to review">Review Draft</button>`
+        ? `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="viewDraftDetail('${esc(ph.draft_id)}')" title="Draft ready — click to review">Review Draft</button>`
         : `<button class="btn btn-sm btn-primary" style="background:var(--yellow);color:#000" onclick="switchTab('drafts')" title="Draft ready — click to review">Review Draft</button>`)
     : `<button class="btn btn-sm btn-ghost" onclick="showAlert('A goal for this phase is already running. Use the Dashboard to monitor progress, or the Drafts tab to review the output.')" title="A goal for this phase is already active">Active &#9654;</button>`;
   return `<div class="card" id="phase-card-${esc(ph.id)}">
@@ -2240,14 +2194,19 @@ async function submitAddPhase() {
 
 // ── Draft Review ───────────────────────────────────────────────
 async function loadDrafts() {
+  if (currentTab !== 'drafts') return;
   app.innerHTML = '<div class="loading">Loading drafts...</div>';
   try {
     const resp = await fetch('/api/drafts');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     drafts = await resp.json();
+    // Bail if the user navigated away while this fetch was in flight.
+    if (currentTab !== 'drafts') return;
     renderDraftList();
   } catch (e) {
-    app.innerHTML = '<div class="empty">Failed to load drafts. Is the daemon running?</div>';
+    if (currentTab === 'drafts') {
+      app.innerHTML = '<div class="empty">Failed to load drafts. Is the daemon running?</div>';
+    }
   }
 }
 
@@ -2294,6 +2253,7 @@ function renderDraftList() {
 }
 
 async function showDraftDetail(id) {
+  if (currentTab !== 'drafts') return;
   app.innerHTML = '<div class="loading">Loading draft...</div>';
   try {
     const [draftResp, phasesResp, dialogResp] = await Promise.allSettled([
@@ -2301,7 +2261,15 @@ async function showDraftDetail(id) {
       fetch('/api/plan/phases'),
       fetch('/api/drafts/' + id + '/dialog'),
     ]);
-    if (draftResp.status !== 'fulfilled' || !draftResp.value.ok) { renderDraftList(); return; }
+    // Bail if the user navigated away while these fetches were in flight.
+    if (currentTab !== 'drafts') return;
+    if (draftResp.status !== 'fulfilled' || !draftResp.value.ok) {
+      const reason = draftResp.status === 'fulfilled' ? ('HTTP ' + draftResp.value.status) : draftResp.reason;
+      console.error('Failed to load draft ' + id + ':', reason);
+      showAlert('Failed to load draft details (' + reason + '). Showing the draft list instead.');
+      renderDraftList();
+      return;
+    }
     const d = await draftResp.value.json();
 
     let phaseDescription = '';
@@ -2314,8 +2282,14 @@ async function showDraftDetail(id) {
       ? (await dialogResp.value.json().catch(() => ({ entries: [] }))).entries || []
       : [];
 
+    if (currentTab !== 'drafts') return;
     renderDraftDetail(d, phaseDescription, dialogEntries);
-  } catch (e) { renderDraftList(); }
+  } catch (e) {
+    if (currentTab !== 'drafts') return;
+    console.error('Failed to load draft ' + id + ':', e);
+    showAlert('Failed to load draft details: ' + e.message);
+    renderDraftList();
+  }
 }
 
 // Per-file apply selection state, keyed by draft id → { [resource_uri]: boolean }.
@@ -2326,7 +2300,12 @@ function getDraftSelection(d) {
   const artifacts = (d.changes && d.changes.artifacts) || [];
   if (!window._draftSelection[d.package_id]) {
     const sel = {};
-    artifacts.forEach(a => { sel[a.resource_uri] = true; });
+    // Default each checkbox from the draft's own per-artifact disposition
+    // rather than blanket-checking everything: an artifact the agent/reviewer
+    // already marked "rejected" starts unchecked, everything else (pending,
+    // approved, discuss) starts checked — matching the common case where no
+    // disposition was set while still respecting one that was.
+    artifacts.forEach(a => { sel[a.resource_uri] = a.disposition !== 'rejected'; });
     window._draftSelection[d.package_id] = sel;
   }
   return window._draftSelection[d.package_id];
@@ -2336,6 +2315,15 @@ function toggleArtifactSelection(packageId, uri, checked) {
   if (!window._draftSelection[packageId]) window._draftSelection[packageId] = {};
   window._draftSelection[packageId][uri] = checked;
   const cached = window._draftDetailCache && window._draftDetailCache[packageId];
+  if (cached) renderDraftDetail(cached.draft, cached.phaseDescription, cached.dialogEntries);
+}
+
+// Select All / Clear All (item 8): bulk-set every artifact's checkbox at once.
+function setAllArtifactSelection(packageId, checked) {
+  const cached = window._draftDetailCache && window._draftDetailCache[packageId];
+  const artifacts = cached ? ((cached.draft.changes && cached.draft.changes.artifacts) || []) : [];
+  if (!window._draftSelection[packageId]) window._draftSelection[packageId] = {};
+  artifacts.forEach(a => { window._draftSelection[packageId][a.resource_uri] = checked; });
   if (cached) renderDraftDetail(cached.draft, cached.phaseDescription, cached.dialogEntries);
 }
 
@@ -2446,7 +2434,13 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
             ${a.explanation_tiers && a.explanation_tiers.summary ? '<br><span style="font-size:0.8rem;color:var(--muted)">' + esc(a.explanation_tiers.summary) + '</span>' : ''}
           </div>
         </div>`).join('');
-  const filesSection = `<details open class="section"><summary>Changes (${selectedCount}/${artifacts.length} selected)</summary><div class="detail-body">${filesBody}</div></details>`;
+  // Select All / Clear All (item 8): bulk-toggle every checkbox at once.
+  const selectAllControls = artifacts.length > 0 ? `
+    <div style="display:flex;gap:0.75rem;margin-bottom:0.6rem">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="setAllArtifactSelection('${d.package_id}', true)">Select All</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="setAllArtifactSelection('${d.package_id}', false)">Clear All</button>
+    </div>` : '';
+  const filesSection = `<details open class="section"><summary>Changes (${selectedCount}/${artifacts.length} selected)</summary><div class="detail-body">${selectAllControls}${filesBody}</div></details>`;
 
   // Dependency warnings (item 10): shown above the Approve/Apply buttons.
   const warningsSection = warnings.length > 0 ? `
@@ -2627,6 +2621,17 @@ async function doDraftAction(id, action) {
   runDraftAction(id, action, btn);
 }
 
+// Per-file selection (item 7/9): resource_uris still checked in the Changes
+// section for the given draft, or null if the draft was never opened (in
+// which case Approve/Deny/Apply act on the whole draft, unchanged).
+function getSelectedUris(id) {
+  const cached = window._draftDetailCache && window._draftDetailCache[id];
+  if (!cached) return null;
+  const selection = getDraftSelection(cached.draft);
+  const artifacts = (cached.draft.changes && cached.draft.changes.artifacts) || [];
+  return artifacts.filter(a => selection[a.resource_uri] !== false).map(a => a.resource_uri);
+}
+
 async function runDraftAction(id, action, btn) {
   if (action === 'apply') {
     // Kick off a background apply job and poll for progress (v0.17.0.12.5).
@@ -2638,13 +2643,7 @@ async function runDraftAction(id, action, btn) {
     statusEl.textContent = 'Starting apply…';
     if (btn && btn.parentElement) btn.parentElement.appendChild(statusEl);
     try {
-      // Per-file selection (item 9): only include files still checked in
-      // the Changes section; omitted files are excluded from this apply.
-      const cached = window._draftDetailCache && window._draftDetailCache[id];
-      const selection = cached ? getDraftSelection(cached.draft) : null;
-      const artifacts = cached ? ((cached.draft.changes && cached.draft.changes.artifacts) || []) : [];
-      const selectedUris = selection ? artifacts.filter(a => selection[a.resource_uri] !== false).map(a => a.resource_uri) : null;
-
+      const selectedUris = getSelectedUris(id);
       const r = await fetch('/api/drafts/' + id + '/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2671,10 +2670,13 @@ async function runDraftAction(id, action, btn) {
       if (reason === null) return;
       if (btn) btn.disabled = true;
       try {
+        const selectedUris = getSelectedUris(id);
+        const body = { reason: reason || 'denied via web UI' };
+        if (selectedUris) body.selected_uris = selectedUris;
         const resp = await fetch('/api/drafts/' + id + '/deny', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ reason: reason || 'denied via web UI' })
+          body: JSON.stringify(body)
         });
         if (resp.ok) {
           await loadDrafts();
@@ -2690,11 +2692,16 @@ async function runDraftAction(id, action, btn) {
     return;
   }
 
+  // Remaining action: 'approve'. Also acts on the selected subset (item 7) —
+  // deselected files are stamped `rejected` on the draft's own artifacts
+  // rather than silently ignored.
   if (btn) btn.disabled = true;
   try {
+    const selectedUris = getSelectedUris(id);
     const resp = await fetch('/api/drafts/' + id + '/' + action, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(selectedUris ? { selected_uris: selectedUris } : {}),
     });
     if (resp.ok) {
       await loadDrafts();
