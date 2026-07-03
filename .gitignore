@@ -97,6 +97,7 @@ result-*
 .ta/events.jsonl
 .ta/events/
 .ta/goal-history.jsonl
+.ta/goal-audit.jsonl
 .ta/memory.rvf
 .ta/memory/
 .ta/velocity-stats.jsonl
