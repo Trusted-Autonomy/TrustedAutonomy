@@ -346,6 +346,52 @@ fn run_meridian_no_path(binary: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+// ── Derived title (v0.17.0.12.8) ─────────────────────────────────────────────
+
+/// Resolve the meridian binary for `workspace_root` and summarize `text` (the
+/// goal's first user message / objective) into a concise title via
+/// `meridian summarize-title`.
+///
+/// Returns `None` when meridian is not installed, `text` is empty, or the call
+/// fails for any reason — callers treat a missing derived title as non-fatal
+/// (the plain goal title remains authoritative).
+pub fn summarize_title(workspace_root: &Path, text: &str) -> Option<String> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let binary = resolve_meridian_binary(workspace_root)?;
+    summarize_title_via(&binary, text)
+}
+
+/// Run `meridian summarize-title` with `text` piped to stdin, returning the
+/// trimmed stdout. Split out from `summarize_title` so tests can exercise the
+/// subprocess path with a known-missing binary without touching PATH resolution.
+fn summarize_title_via(binary: &str, text: &str) -> Option<String> {
+    use std::io::Write;
+
+    let mut child = std::process::Command::new(binary)
+        .arg("summarize-title")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    child.stdin.take()?.write_all(text.as_bytes()).ok()?;
+
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +490,20 @@ mod tests {
         let tmp = tempdir().unwrap();
         // No daemon.toml at all.
         assert!(read_meridian_binary_from_config(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn summarize_title_via_returns_none_for_missing_binary() {
+        let result = summarize_title_via("/nonexistent/meridian-binary-xyz", "some objective");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn summarize_title_empty_text_returns_none_without_resolving_binary() {
+        let tmp = tempdir().unwrap();
+        // Even if meridian were installed, empty text should short-circuit to None.
+        assert!(summarize_title(tmp.path(), "").is_none());
+        assert!(summarize_title(tmp.path(), "   ").is_none());
     }
 
     #[test]

@@ -1528,6 +1528,11 @@ pub struct GcConfig {
     /// Emit a one-line warning on `ta` startup if stale drafts exist. Default: true.
     #[serde(default = "default_health_check")]
     pub health_check: bool,
+
+    /// Size threshold in MB past which `ta doctor --fix` rotates `.ta/daemon.log`
+    /// (v0.17.0.12.8). Default: 500. Set to 0 to disable the rotation signal.
+    #[serde(default = "default_daemon_log_max_mb")]
+    pub daemon_log_max_mb: u64,
 }
 
 impl Default for GcConfig {
@@ -1536,6 +1541,7 @@ impl Default for GcConfig {
             stale_threshold_days: default_stale_threshold_days(),
             stale_hint_days: default_stale_hint_days(),
             health_check: default_health_check(),
+            daemon_log_max_mb: default_daemon_log_max_mb(),
         }
     }
 }
@@ -1546,6 +1552,10 @@ fn default_stale_threshold_days() -> u64 {
 
 fn default_stale_hint_days() -> u64 {
     3
+}
+
+fn default_daemon_log_max_mb() -> u64 {
+    500
 }
 
 /// Follow-up goal behavior configuration
@@ -2126,6 +2136,14 @@ adapter = "git"
         assert_eq!(config.stale_threshold_days, 7);
         assert_eq!(config.stale_hint_days, 3);
         assert!(config.health_check);
+        assert_eq!(config.daemon_log_max_mb, 500);
+    }
+
+    #[test]
+    fn gc_config_daemon_log_max_mb_overridable_via_toml() {
+        let toml_str = "[gc]\ndaemon_log_max_mb = 250\n";
+        let parsed: WorkflowConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.gc.daemon_log_max_mb, 250);
     }
 
     #[test]

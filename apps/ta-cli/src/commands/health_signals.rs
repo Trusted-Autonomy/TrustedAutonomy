@@ -82,6 +82,7 @@ pub fn compute_health_signals(config: &GatewayConfig) -> Vec<HealthSignal> {
     check_stale_drafts_signal(config, &mut signals);
     check_plugin_crash_loops(config, &mut signals);
     check_daemon_log_error_rate(config, &mut signals);
+    check_daemon_log_size(config, &mut signals);
 
     // Sort crit → warn → info.
     signals.sort_by_key(|s| std::cmp::Reverse(s.severity));
@@ -498,6 +499,42 @@ fn check_daemon_log_error_rate(config: &GatewayConfig, signals: &mut Vec<HealthS
     }
 }
 
+/// Signal when `.ta/daemon.log` has grown past the configured threshold (v0.17.0.12.8).
+///
+/// Unbounded daemon.log growth (e.g. from a plugin crash loop logging on every
+/// restart attempt) can consume many GB of disk with no automatic cleanup.
+/// Threshold is configurable via `[gc] daemon_log_max_mb` in `.ta/workflow.toml`;
+/// 0 disables the signal.
+fn check_daemon_log_size(config: &GatewayConfig, signals: &mut Vec<HealthSignal>) {
+    let log_path = config.workspace_root.join(".ta/daemon.log");
+    let size_bytes = match std::fs::metadata(&log_path) {
+        Ok(meta) => meta.len(),
+        Err(_) => return,
+    };
+
+    let wf = ta_submit::WorkflowConfig::load_or_default(
+        &config.workspace_root.join(".ta/workflow.toml"),
+    );
+    let max_mb = wf.gc.daemon_log_max_mb;
+    if max_mb == 0 {
+        return;
+    }
+    let threshold_bytes = max_mb * 1_048_576;
+
+    if size_bytes >= threshold_bytes {
+        signals.push(HealthSignal::new(
+            "daemon_log_oversized",
+            SignalSeverity::Warn,
+            format!(
+                "daemon.log is {} (threshold: {} MB)",
+                format_bytes(size_bytes),
+                max_mb
+            ),
+            "run `ta doctor --fix` to rotate the log".to_string(),
+        ));
+    }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn walkdir_size(path: &Path) -> u64 {
@@ -710,5 +747,51 @@ mod tests {
     fn parse_log_timestamp_invalid() {
         let line = "no timestamp here just text";
         assert!(parse_log_timestamp(line).is_none());
+    }
+
+    #[test]
+    fn daemon_log_size_signal_fires_past_threshold() {
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(
+            ta_dir.join("workflow.toml"),
+            "[gc]\ndaemon_log_max_mb = 1\n",
+        )
+        .unwrap();
+        // Write a daemon.log larger than the 1 MB threshold.
+        let big = vec![b'x'; 2 * 1_048_576];
+        std::fs::write(ta_dir.join("daemon.log"), &big).unwrap();
+
+        let config = GatewayConfig::for_project(dir.path());
+        let mut signals = Vec::new();
+        check_daemon_log_size(&config, &mut signals);
+
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].kind, "daemon_log_oversized");
+        assert_eq!(signals[0].severity, SignalSeverity::Warn);
+    }
+
+    #[test]
+    fn daemon_log_size_signal_silent_below_threshold() {
+        let dir = tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(ta_dir.join("daemon.log"), b"small log").unwrap();
+
+        let config = GatewayConfig::for_project(dir.path());
+        let mut signals = Vec::new();
+        check_daemon_log_size(&config, &mut signals);
+
+        assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn daemon_log_size_signal_no_file_no_signal() {
+        let dir = tempdir().unwrap();
+        let config = GatewayConfig::for_project(dir.path());
+        let mut signals = Vec::new();
+        check_daemon_log_size(&config, &mut signals);
+        assert!(signals.is_empty());
     }
 }

@@ -386,6 +386,8 @@ Running goals on the Dashboard can be expanded to show:
 
 Click **"Ask Advisor about this goal"** to pre-fill the Advisor tab with a question about that specific goal.
 
+Because the daemon's event log only records goal start/agent-spawn (not turn-level tool calls), a healthy goal can otherwise look silent for a long stretch. If a `Running` goal has gone 10+ minutes with no new event, the health-signals feed (polled every 30s) surfaces a reassuring "still working" signal — process-alive plus the time since the most recent file change in its staging workspace — instead of leaving the dashboard blank. If the agent process is no longer running, the signal escalates to a warning suggesting you check `ta daemon log`.
+
 ### Notification Feed
 
 A bell icon (🔔) in the top-right corner of the header shows a badge count when there are unread notifications. Click it to open the slide-in notification panel, which shows:
@@ -639,10 +641,14 @@ The wizard walks you through five steps in a terminal UI:
 1. **AI Provider** — choose Anthropic Claude (API key) or Ollama (local models). If `ANTHROPIC_API_KEY` is already set in your environment, the key is detected automatically.
 2. **Implementation Agent** — choose `claude-code`, `codex`, or a custom binary. TA detects which are already on your `$PATH`.
 3. **Planning Framework** — choose Default (single-pass), BMAD (multi-role structured planning), or GSD (goal-structured decomposition).
-4. **Optional Components** — optionally install `superpowers` (Claude Code plugin) and/or BMAD (cloned to `~/.bmad`).
+4. **Optional Components** — optionally install `superpowers` (Claude Code plugin), BMAD (cloned to `~/.bmad`), and/or [Meridian](#effort--kpi-analytics-meridian) (KPI analytics, via `cargo install`). Each entry shows a live "✓ installed" / "not installed" status and its description as you move the cursor.
 5. **Summary & Confirm** — review your selections and confirm.
 
 Configuration is written to `~/.config/ta/config.toml`. Your API key is stored securely in `~/.config/ta/secrets/` (mode 0600).
+
+Two prerequisite checks run before an install attempt rather than after a confusing failure:
+- Installing Meridian via `cargo install` first checks that `cargo` is on `PATH`; on Windows it points to `rustup.rs` and the MSVC C++ Build Tools (both required for the linker) before retrying.
+- Installing `superpowers` first checks that the `claude` CLI is on `PATH`, pointing to [claude.ai/code](https://claude.ai/code) if it's missing.
 
 #### Managing your configuration
 
@@ -12325,6 +12331,10 @@ Each entry in `velocity-history.jsonl` carries a `machine_id` (first 8 hex chars
 
 Migration is automatic — every `ta draft apply` promotes local entries into the committed history file before making the VCS commit, so the file stays in sync without any manual step.
 
+### Derived titles (Meridian)
+
+When [Meridian](#effort--kpi-analytics-meridian) is installed, `ta draft apply --git-commit` calls `meridian summarize-title` on the goal's objective (its first user message) and stores the result in the `derived_title` field alongside the plain `title` field in `velocity-history.jsonl`. The plain `title` field always remains authoritative — `derived_title` is `null` when Meridian isn't installed or the call fails, and is meant to give Meridian's reporting a more consistent, concise label to group goals by.
+
 ### Token cost tracking
 
 Each goal records the Claude API tokens used during the agent run. The cost is computed from a built-in rate table (Sonnet 4.6: $3/$15 per 1M input/output tokens; Opus 4.6: $15/$75; Haiku 4.5: $0.80/$4.0). Local models (Ollama) always show $0.00.
@@ -14064,6 +14074,18 @@ Run the full health check:
 ```bash
 ta doctor
 ```
+
+### `daemon.log` Rotation
+
+`.ta/daemon.log` can grow unbounded — most commonly from a plugin crash loop logging on every restart attempt. `ta doctor --fix` detects when it has grown past a configurable size threshold and rotates it:
+
+```bash
+ta doctor --fix
+```
+
+- Threshold defaults to 500 MB — configurable via `[gc] daemon_log_max_mb` in `.ta/workflow.toml` (set to `0` to disable the check).
+- The current log is moved to `.ta/daemon.log.1` (only one prior generation is kept — a second rotation overwrites it), and a fresh `daemon.log` is started with a marker line recording the rotation timestamp and the size that was rotated out.
+- Runs as one of the standard `ta doctor --fix` prompts, alongside stale PID cleanup and other maintenance fixes; pass `--yes` to apply automatically without prompting.
 
 ### Auto-Recovery on Daemon Startup
 

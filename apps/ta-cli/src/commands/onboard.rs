@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use super::tools::EXTERNAL_TOOLS;
+use super::tools::{check_tool_installed, ExternalTool, EXTERNAL_TOOLS};
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -676,6 +676,10 @@ struct WizardState {
     // Optionals checkboxes (one per EXTERNAL_TOOLS entry)
     optionals: Vec<bool>,
     optionals_cursor: usize,
+    // Live install status per EXTERNAL_TOOLS entry (v0.17.0.12.8), computed once
+    // when entering the Optionals step so Step 4 doesn't spawn a detection
+    // subprocess per tool on every render frame.
+    optionals_installed: Vec<bool>,
     // Available agent detection
     agent_available: [bool; 3], // claude-code, codex, claude-flow
     // Detected values
@@ -730,6 +734,7 @@ impl WizardState {
             framework_idx: 0,
             optionals: vec![false; EXTERNAL_TOOLS.len()],
             optionals_cursor: 0,
+            optionals_installed: Vec::new(),
             agent_available: [claude_code_ok, codex_ok, claude_flow_ok],
             detected_api_key,
             ollama_detected,
@@ -818,6 +823,10 @@ impl WizardState {
                         };
                     }
                 }
+                // Detect install status once per tool (subprocess-based for
+                // some tools) rather than on every render frame.
+                self.optionals_installed =
+                    EXTERNAL_TOOLS.iter().map(check_tool_installed).collect();
                 self.step = WizardStep::Optionals;
                 true
             }
@@ -1231,6 +1240,24 @@ fn render_framework_step(frame: &mut Frame, state: &WizardState, area: Rect) {
     frame.render_widget(help_text, chunks[2]);
 }
 
+/// Format a single Step 4 checklist line for one optional tool (v0.17.0.12.8).
+///
+/// Includes live install status alongside the checkbox and install hint so
+/// every tool — Meridian included — gets the same visibility BMAD already had
+/// via its Step 3 install-state line.
+fn format_optional_item(tool: &ExternalTool, checked: bool, installed: bool) -> String {
+    let checkbox = if checked { "x" } else { " " };
+    let status = if installed {
+        "✓ installed"
+    } else {
+        "not installed"
+    };
+    format!(
+        "[{checkbox}] {}  ({})  {status}",
+        tool.label, tool.install_hint
+    )
+}
+
 fn render_optionals_step(frame: &mut Frame, state: &WizardState, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(3),
@@ -1250,16 +1277,9 @@ fn render_optionals_step(frame: &mut Frame, state: &WizardState, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, tool)| {
-            ListItem::new(format!(
-                "[{}] {}  ({})",
-                if state.optionals.get(i).copied().unwrap_or(false) {
-                    "x"
-                } else {
-                    " "
-                },
-                tool.label,
-                tool.install_hint,
-            ))
+            let checked = state.optionals.get(i).copied().unwrap_or(false);
+            let installed = state.optionals_installed.get(i).copied().unwrap_or(false);
+            ListItem::new(format_optional_item(tool, checked, installed))
         })
         .collect();
 
@@ -1271,9 +1291,13 @@ fn render_optionals_step(frame: &mut Frame, state: &WizardState, area: Rect) {
         .highlight_style(Style::default().fg(Color::Cyan));
     frame.render_stateful_widget(list, chunks[1], &mut list_state);
 
-    let help = Paragraph::new(
-        "↑↓ move  Space toggle  Numbers 1-9 toggle by index.  These will be installed when you confirm.",
-    )
+    let selected_desc = EXTERNAL_TOOLS
+        .get(state.optionals_cursor)
+        .map(|t| t.description)
+        .unwrap_or("");
+    let help = Paragraph::new(format!(
+        "{selected_desc}\n↑↓ move  Space toggle  Numbers 1-9 toggle by index.  These will be installed when you confirm.",
+    ))
     .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(help, chunks[2]);
 }
@@ -1970,6 +1994,38 @@ fn enable_projfs_from_wizard() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Step 4 optional-tool visibility (v0.17.0.12.8) ─────────────────────
+
+    #[test]
+    fn external_tools_includes_meridian_for_step4() {
+        // Step 4 iterates EXTERNAL_TOOLS directly, so Meridian is only
+        // "offered" if it's present in the shared tool registry.
+        assert!(EXTERNAL_TOOLS.iter().any(|t| t.name == "meridian"));
+    }
+
+    #[test]
+    fn format_optional_item_shows_meridian_label_and_installed_status() {
+        let meridian = EXTERNAL_TOOLS
+            .iter()
+            .find(|t| t.name == "meridian")
+            .unwrap();
+        let line = format_optional_item(meridian, false, true);
+        assert!(line.contains("Meridian"));
+        assert!(line.contains("✓ installed"));
+        assert!(line.starts_with("[ ]"));
+    }
+
+    #[test]
+    fn format_optional_item_shows_not_installed_and_checked_marker() {
+        let meridian = EXTERNAL_TOOLS
+            .iter()
+            .find(|t| t.name == "meridian")
+            .unwrap();
+        let line = format_optional_item(meridian, true, false);
+        assert!(line.starts_with("[x]"));
+        assert!(line.contains("not installed"));
+    }
 
     // ── Thread-safe path-based helpers ────────────────────────────────────
 

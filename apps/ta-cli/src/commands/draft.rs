@@ -7997,7 +7997,10 @@ fn apply_package(
                         migrate_local_to_history, GoalOutcome, VelocityEntry, VelocityHistoryStore,
                         VelocityStore,
                     };
+                    let derived_title =
+                        super::meridian::summarize_title(&target_dir, &goal.objective);
                     let history_entry = VelocityEntry::from_goal(goal, GoalOutcome::Applied)
+                        .with_derived_title(derived_title)
                         .with_machine_id()
                         .with_committer(&target_dir)
                         .with_token_cost(goal.input_tokens, goal.output_tokens, &goal.agent_model);

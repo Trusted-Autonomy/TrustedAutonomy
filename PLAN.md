@@ -9278,7 +9278,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.8 — Doctor Log Hygiene + Advisor Progress Visibility + Onboarding Gaps
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.7
 
 **Goal**: Clear the accumulated maintenance work queue: bound `daemon.log` growth via `ta doctor --fix`, have the Advisor surface liveness for long-running goals that emit no progress events, wire the derived-title Meridian call into velocity records, and close onboarding gaps for Meridian/Windows/superpowers.
@@ -9286,19 +9286,19 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 **Items**:
 
 **Doctor: daemon.log hygiene**:
-1. [ ] **Rotate/truncate oversized `daemon.log` in `ta doctor --fix`**: Found 2026-07-02 — `.ta/daemon.log` grew to 5.39GB, almost entirely from the historical Discord listener crash loop (see PLAN.md Discord crash-loop notes / `project_discord_crash_loop` memory). `ta doctor --fix` should detect `daemon.log` past a configurable size threshold (default 500MB) and rotate it (e.g. `daemon.log` → `daemon.log.1.gz`, truncate live file) or hard-truncate with a marker line, same absorption pattern used for `ta gc`.
+1. [x] **Rotate/truncate oversized `daemon.log` in `ta doctor --fix`**: Found 2026-07-02 — `.ta/daemon.log` grew to 5.39GB, almost entirely from the historical Discord listener crash loop (see PLAN.md Discord crash-loop notes / `project_discord_crash_loop` memory). `ta doctor --fix` should detect `daemon.log` past a configurable size threshold (default 500MB) and rotate it (e.g. `daemon.log` → `daemon.log.1.gz`, truncate live file) or hard-truncate with a marker line, same absorption pattern used for `ta gc`.
 
 **Advisor: long-running goal visibility**:
-2. [ ] **Advisor flags long-running goals with no progress events**: Found 2026-07-02 debugging "no output after 23 minutes" in Studio for a healthy, actively-running goal. Root cause: the daemon's event log only emits `goal_started`/`agent_spawned` — no turn-level progress (tool calls, file writes, tokens) streams to Studio, so a healthy in-flight goal looks silent indefinitely. Rather than building full turn-level SSE streaming, have the Advisor periodically check goal health (process alive + CPU activity + staging diff) for goals running past a threshold with zero new events, and proactively tell the human "still working, last activity looked like X" instead of leaving Studio blank.
+2. [x] **Advisor flags long-running goals with no progress events**: Found 2026-07-02 debugging "no output after 23 minutes" in Studio for a healthy, actively-running goal. Root cause: the daemon's event log only emits `goal_started`/`agent_spawned` — no turn-level progress (tool calls, file writes, tokens) streams to Studio, so a healthy in-flight goal looks silent indefinitely. Rather than building full turn-level SSE streaming, have the Advisor periodically check goal health (process alive + CPU activity + staging diff) for goals running past a threshold with zero new events, and proactively tell the human "still working, last activity looked like X" instead of leaving Studio blank.
 
 **Velocity: derived titles**:
-3. [ ] **Inject derived title into velocity records**: Call `meridian summarize-title` on the first user message after goal completion, add a `derived_title: Option<String>` field to `VelocityEntry` (`crates/ta-goal/src/velocity.rs`), and write it alongside the existing `title` field in `velocity-history.jsonl`. `run.rs` already computes a local `derived_title` as a title fallback (line ~1315) but never persists it to the velocity record.
+3. [x] **Inject derived title into velocity records**: Call `meridian summarize-title` on the first user message after goal completion, add a `derived_title: Option<String>` field to `VelocityEntry` (`crates/ta-goal/src/velocity.rs`), and write it alongside the existing `title` field in `velocity-history.jsonl`. `run.rs` already computes a local `derived_title` as a title fallback (line ~1315) but never persists it to the velocity record.
 
 **Onboarding gaps**:
-4. [ ] **Offer Meridian in `ta onboard` Step 4**: `onboard.rs` has zero mentions of Meridian — the tool-selection step never surfaces it alongside superpowers/bmad.
-5. [ ] **Windows `cargo install` prerequisite guidance**: `ta onboard` gives no Rust-toolchain guidance on Windows before attempting `cargo install`.
-6. [ ] **Superpowers install: check `claude` CLI on PATH first**: The superpowers install step doesn't verify the `claude` CLI is on PATH before attempting `claude plugin install superpowers@superpowers-dev`, producing a confusing failure instead of an actionable "install Claude Code CLI first" message.
-7. [ ] USAGE.md: document the doctor log-rotation behavior and the derived-title velocity field.
+4. [x] **Offer Meridian in `ta onboard` Step 4**: `onboard.rs` has zero mentions of Meridian — the tool-selection step never surfaces it alongside superpowers/bmad.
+5. [x] **Windows `cargo install` prerequisite guidance**: `ta onboard` gives no Rust-toolchain guidance on Windows before attempting `cargo install`.
+6. [x] **Superpowers install: check `claude` CLI on PATH first**: The superpowers install step doesn't verify the `claude` CLI is on PATH before attempting `claude plugin install superpowers@superpowers-dev`, producing a confusing failure instead of an actionable "install Claude Code CLI first" message.
+7. [x] USAGE.md: document the doctor log-rotation behavior and the derived-title velocity field.
 
 #### Version: `0.17.0-alpha.12.8`
 
