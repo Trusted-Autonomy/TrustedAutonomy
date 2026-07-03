@@ -436,3 +436,4 @@
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.12.7","source":"daemon_claim","timestamp":"2026-07-03T07:06:03.962703+00:00"}
 {"new_status":"pending","note":"manual reset via `ta plan reset`","old_status":"in_progress","phase_id":"v0.17.0.12.7","timestamp":"2026-07-03T07:43:50.742359+00:00"}
 {"new_status":"in_progress","old_status":"pending","phase_id":"v0.17.0.12.7","source":"daemon_claim","timestamp":"2026-07-03T07:44:32.586454+00:00"}
+{"new_status":"done","old_status":"in_progress","phase_id":"v0.17.0.12.7","timestamp":"2026-07-03T09:27:43.776370+00:00"}

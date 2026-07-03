@@ -43,7 +43,7 @@ pub enum OverlayStagingMode {
 }
 
 use crate::conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
-use crate::error::WorkspaceError;
+use crate::error::{SharedFileConflict, WorkspaceError};
 
 // ── V1 copy-optimization excludes (remove when V2 VFS lands) ──────
 
@@ -223,6 +223,9 @@ pub struct OverlayWorkspace {
     staging_dir: PathBuf,
     excludes: ExcludePatterns,
     source_snapshot: Option<SourceSnapshot>, // v0.2.1: Conflict detection
+    /// Real base content of shared files at goal-start time (v0.17.0.12.7),
+    /// used as the merge base for apply-time 3-way merges of shared files.
+    apply_base: Option<crate::shared_files::SharedFileBase>,
     /// Statistics from staging creation (strategy, duration, file count).
     copy_stat: Option<CopyStat>,
     /// Active ProjFS virtualization provider (Windows only, v0.15.8).
@@ -410,6 +413,7 @@ impl OverlayWorkspace {
             staging_dir,
             excludes,
             source_snapshot: snapshot,
+            apply_base: None,
             copy_stat: Some(stat),
             #[cfg(all(target_os = "windows", feature = "projfs"))]
             projfs_provider,
@@ -429,6 +433,7 @@ impl OverlayWorkspace {
             staging_dir: staging_dir.as_ref().to_path_buf(),
             excludes,
             source_snapshot: None, // Snapshot must be loaded separately if needed.
+            apply_base: None,      // Must be loaded separately if needed — see set_apply_base.
             copy_stat: None,       // Not available when reopening an existing workspace.
             #[cfg(all(target_os = "windows", feature = "projfs"))]
             projfs_provider: None, // Not available when reopening an existing workspace.
@@ -443,6 +448,14 @@ impl OverlayWorkspace {
     /// Get the source snapshot, if available.
     pub fn snapshot(&self) -> Option<&SourceSnapshot> {
         self.source_snapshot.as_ref()
+    }
+
+    /// Set the shared-file base snapshot (v0.17.0.12.7), loaded from
+    /// `apply-base.json` at apply time. Used as the merge base for shared
+    /// files (PLAN.md, CLAUDE.md, Cargo.toml, memory/*.md) instead of
+    /// reconstructing from git HEAD.
+    pub fn set_apply_base(&mut self, base: crate::shared_files::SharedFileBase) {
+        self.apply_base = Some(base);
     }
 
     pub fn goal_id(&self) -> &str {
@@ -884,79 +897,131 @@ impl OverlayWorkspace {
                     }
 
                     if !true_conflicts.is_empty() {
-                        match resolution {
-                            ConflictResolution::Abort => {
-                                return Err(WorkspaceError::ConflictDetected {
-                                    conflicts: true_conflicts,
-                                });
-                            }
-                            ConflictResolution::ForceOverwrite => {
-                                eprintln!(
-                                    "⚠️  Warning: {} true conflict(s) detected, proceeding with force-overwrite",
-                                    true_conflicts.len()
-                                );
-                            }
-                            ConflictResolution::Merge => {
-                                // v0.14.3.5: Attempt three-way merge via `git merge-file`.
-                                // base = snapshot (goal-start content)
-                                // ours = staging (agent's version)
-                                // theirs = current source (external changes)
-                                //
-                                // For each true conflict file, run the merge. If it succeeds
-                                // cleanly (exit 0, no conflict markers), write the result and
-                                // remove the file from the apply list (it's already merged).
-                                // If conflicts remain, fall through to Abort.
-                                let snapshot = self.source_snapshot.as_ref();
-                                let mut still_conflicting = Vec::new();
+                        // v0.17.0.12.7: Shared files (PLAN.md, CLAUDE.md, Cargo.toml,
+                        // docs/USAGE.md, memory/*.md) always attempt an automatic 3-way
+                        // merge, regardless of the caller's requested `resolution` — this
+                        // is what stops `ta draft apply` from silently discarding
+                        // concurrent edits to these files. Other files keep the
+                        // existing resolution-gated behavior below.
+                        let (shared_conflicts, other_conflicts): (Vec<String>, Vec<String>) =
+                            true_conflicts.into_iter().partition(|desc| {
+                                extract_path_from_conflict(desc)
+                                    .map(|p| crate::shared_files::is_shared_file(&p))
+                                    .unwrap_or(false)
+                            });
 
-                                for conflict_desc in &true_conflicts {
-                                    // Extract path from conflict description.
-                                    // Descriptions have format: "File '<path>' was modified..."
-                                    let path = extract_path_from_conflict(conflict_desc);
-                                    if path.is_none() {
-                                        still_conflicting.push(conflict_desc.clone());
-                                        continue;
-                                    }
-                                    let path = path.unwrap();
+                        let mut shared_file_conflicts = Vec::new();
+                        for conflict_desc in &shared_conflicts {
+                            // Descriptions have format: "File '<path>' was modified...".
+                            // Filtered by is_shared_file above, so this always parses.
+                            let path = extract_path_from_conflict(conflict_desc)
+                                .expect("shared_conflicts filtered by is_shared_file, which requires a parsed path");
 
-                                    let merged = snapshot
-                                        .and_then(|s| s.files.get(&path))
-                                        .and_then(|snap| {
-                                            three_way_merge(
-                                                &snap.content_hash,
-                                                &self.staging_dir.join(&path),
-                                                &self.source_dir.join(&path),
-                                                snap,
-                                                &self.staging_dir,
-                                            )
-                                            .ok()
+                            match self.attempt_merge(&path) {
+                                Some(MergeResult::Clean { content, hunks }) => {
+                                    // Write merged content into staging so apply_selective
+                                    // picks it up as the file to copy to the target.
+                                    let staging_path = self.staging_dir.join(&path);
+                                    if fs::write(&staging_path, &content).is_ok() {
+                                        eprintln!(
+                                            "ℹ️  auto-merged shared file: {} ({} hunk(s), 0 conflicts)",
+                                            path, hunks
+                                        );
+                                    } else {
+                                        shared_file_conflicts.push(SharedFileConflict {
+                                            path,
+                                            conflicted_content: content,
                                         });
+                                    }
+                                }
+                                Some(MergeResult::Conflicted { content }) => {
+                                    shared_file_conflicts.push(SharedFileConflict {
+                                        path,
+                                        conflicted_content: content,
+                                    });
+                                }
+                                None => {
+                                    // Could not attempt a merge at all (binary file, no
+                                    // reconstructable base, git unavailable). Still refuse
+                                    // to silently overwrite — surface current source
+                                    // content for manual resolution.
+                                    let content =
+                                        fs::read(self.source_dir.join(&path)).unwrap_or_default();
+                                    shared_file_conflicts.push(SharedFileConflict {
+                                        path,
+                                        conflicted_content: content,
+                                    });
+                                }
+                            }
+                        }
 
-                                    match merged {
-                                        Some(MergeResult::Clean { content, hunks }) => {
-                                            // Write merged content directly to the source.
-                                            // We'll write to a temp location and let apply_selective
-                                            // pick it up from staging, so write to staging instead.
-                                            let staging_path = self.staging_dir.join(&path);
-                                            if fs::write(&staging_path, &content).is_ok() {
-                                                eprintln!(
-                                                    "ℹ️  auto-merged: {} ({} hunk(s), 0 conflicts)",
-                                                    path, hunks
-                                                );
-                                            } else {
+                        if !shared_file_conflicts.is_empty() {
+                            return Err(WorkspaceError::SharedFileConflicts {
+                                conflicts: shared_file_conflicts,
+                            });
+                        }
+
+                        if !other_conflicts.is_empty() {
+                            match resolution {
+                                ConflictResolution::Abort => {
+                                    return Err(WorkspaceError::ConflictDetected {
+                                        conflicts: other_conflicts,
+                                    });
+                                }
+                                ConflictResolution::ForceOverwrite => {
+                                    eprintln!(
+                                        "⚠️  Warning: {} true conflict(s) detected, proceeding with force-overwrite",
+                                        other_conflicts.len()
+                                    );
+                                }
+                                ConflictResolution::Merge => {
+                                    // v0.14.3.5: Attempt three-way merge via `git merge-file`.
+                                    // base = snapshot (goal-start content)
+                                    // ours = staging (agent's version)
+                                    // theirs = current source (external changes)
+                                    //
+                                    // For each true conflict file, run the merge. If it succeeds
+                                    // cleanly (exit 0, no conflict markers), write the result and
+                                    // remove the file from the apply list (it's already merged).
+                                    // If conflicts remain, fall through to Abort.
+                                    let mut still_conflicting = Vec::new();
+
+                                    for conflict_desc in &other_conflicts {
+                                        // Extract path from conflict description.
+                                        // Descriptions have format: "File '<path>' was modified..."
+                                        let path = extract_path_from_conflict(conflict_desc);
+                                        if path.is_none() {
+                                            still_conflicting.push(conflict_desc.clone());
+                                            continue;
+                                        }
+                                        let path = path.unwrap();
+
+                                        match self.attempt_merge(&path) {
+                                            Some(MergeResult::Clean { content, hunks }) => {
+                                                // Write merged content directly to the source.
+                                                // We'll write to a temp location and let apply_selective
+                                                // pick it up from staging, so write to staging instead.
+                                                let staging_path = self.staging_dir.join(&path);
+                                                if fs::write(&staging_path, &content).is_ok() {
+                                                    eprintln!(
+                                                        "ℹ️  auto-merged: {} ({} hunk(s), 0 conflicts)",
+                                                        path, hunks
+                                                    );
+                                                } else {
+                                                    still_conflicting.push(conflict_desc.clone());
+                                                }
+                                            }
+                                            Some(MergeResult::Conflicted { .. }) | None => {
                                                 still_conflicting.push(conflict_desc.clone());
                                             }
                                         }
-                                        Some(MergeResult::Conflicted { .. }) | None => {
-                                            still_conflicting.push(conflict_desc.clone());
-                                        }
                                     }
-                                }
 
-                                if !still_conflicting.is_empty() {
-                                    return Err(WorkspaceError::ConflictDetected {
-                                        conflicts: still_conflicting,
-                                    });
+                                    if !still_conflicting.is_empty() {
+                                        return Err(WorkspaceError::ConflictDetected {
+                                            conflicts: still_conflicting,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -967,6 +1032,25 @@ impl OverlayWorkspace {
 
         // Apply only the files from the (possibly filtered) artifact list.
         self.apply_selective(target_dir, &filtered_uris)
+    }
+
+    /// Attempt a 3-way merge for `path` (relative to the workspace root).
+    ///
+    /// Uses the shared-file apply-base (v0.17.0.12.7) as the merge base when
+    /// `path` was captured there — i.e. when it's a shared file that existed
+    /// at goal-start time — falling back to git-HEAD reconstruction
+    /// otherwise (`apply_base` only ever tracks shared-file paths, so this
+    /// is safe to call unconditionally). Returns `None` when the merge
+    /// cannot be attempted at all (binary file, no reconstructable base,
+    /// `git` unavailable).
+    fn attempt_merge(&self, path: &str) -> Option<MergeResult> {
+        let explicit_base = self.apply_base.as_ref().and_then(|b| b.get(path));
+        three_way_merge(
+            explicit_base.as_deref(),
+            &self.staging_dir.join(path),
+            &self.source_dir.join(path),
+        )
+        .ok()
     }
 
     /// Classify overlapping conflicts into true conflicts (agent changed the file)
@@ -1032,72 +1116,73 @@ pub enum MergeResult {
 
 /// Attempt a three-way merge of a file using `git merge-file --quiet`.
 ///
-/// - `base_hash`: SHA-256 of the base (goal-start snapshot) — used as sanity label only
+/// - `explicit_base`: the real base content (file as it was at goal start), when
+///   known — e.g. from `crate::shared_files::SharedFileBase` (v0.17.0.12.7). When
+///   `Some`, this is used directly and no git lookup is performed — this is what
+///   makes shared-file merges work even when the file was created/edited on main
+///   without a commit (git HEAD would not reflect it).
 /// - `staging_path`: ours (agent's version)
 /// - `source_path`: theirs (current source / external changes)
-/// - `snap`: the `FileSnapshot` at goal start — its content_hash identifies the base version
-/// - `staging_dir`: root of the staging workspace (used to reconstruct base content)
+///
+/// When `explicit_base` is `None`, falls back to reconstructing the base via
+/// `git show HEAD:<path>` from the source repository (pre-v0.17.0.12.7 behavior).
 ///
 /// Returns `Ok(MergeResult::Clean {...})` when merge succeeds without conflict markers.
 /// Returns `Ok(MergeResult::Conflicted {...})` when conflict markers remain.
 /// Returns `Err` when the base content cannot be reconstructed or `git` is unavailable.
 pub fn three_way_merge(
-    _base_hash: &str,
+    explicit_base: Option<&[u8]>,
     staging_path: &std::path::Path,
     source_path: &std::path::Path,
-    _snap: &crate::conflict::FileSnapshot,
-    _staging_dir: &std::path::Path,
 ) -> Result<MergeResult, Box<dyn std::error::Error>> {
-    // We need the base content (file as it was at goal start). We reconstruct it
-    // using `git show HEAD:<path>` from the source repository. This gives us the
-    // committed version before any external edit — the ideal 3-way merge base.
-    // The snapshot content hash is kept for documentation but not used directly
-    // since we can't reconstruct file content from a hash alone.
+    // Prefer the explicit base (real goal-start content) when available.
+    // Otherwise reconstruct via `git show HEAD:<path>` — the committed version
+    // before any external edit.
+    let base_content = match explicit_base {
+        Some(bytes) => Some(bytes.to_vec()),
+        None => {
+            // Find project root (git repo root) by walking up from source_path.
+            let mut dir = source_path.parent();
+            let git_root = loop {
+                match dir {
+                    Some(d) if d.join(".git").exists() => break Some(d.to_path_buf()),
+                    Some(d) => dir = d.parent(),
+                    None => break None,
+                }
+            };
 
-    // Try to recover base content using git show HEAD:<path>.
-    let base_content = {
-        // Find project root (git repo root) by walking up from source_path.
-        let mut dir = source_path.parent();
-        let git_root = loop {
-            match dir {
-                Some(d) if d.join(".git").exists() => break Some(d.to_path_buf()),
-                Some(d) => dir = d.parent(),
-                None => break None,
-            }
-        };
-
-        if let Some(root) = git_root {
-            // Path relative to git root.
-            let rel = source_path.strip_prefix(&root).unwrap_or(source_path);
-            let path_str = rel.to_string_lossy();
-            // git-only: no adapter equivalent (overlay has no adapter context)
-            // git show HEAD:<path> — the committed version = the base before any edits.
-            let out = std::process::Command::new("git")
-                .args(["show", &format!("HEAD:{}", path_str)])
-                .current_dir(&root)
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .output()
-                .ok();
-            if let Some(o) = out {
-                if o.status.success() {
-                    Some(o.stdout)
+            if let Some(root) = git_root {
+                // Path relative to git root.
+                let rel = source_path.strip_prefix(&root).unwrap_or(source_path);
+                let path_str = rel.to_string_lossy();
+                // git-only: no adapter equivalent (overlay has no adapter context)
+                // git show HEAD:<path> — the committed version = the base before any edits.
+                let out = std::process::Command::new("git")
+                    .args(["show", &format!("HEAD:{}", path_str)])
+                    .current_dir(&root)
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_WORK_TREE")
+                    .output()
+                    .ok();
+                if let Some(o) = out {
+                    if o.status.success() {
+                        Some(o.stdout)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             } else {
                 None
             }
-        } else {
-            None
         }
     };
 
     let base_bytes = match base_content {
         Some(b) => b,
         None => {
-            // No git or file not in HEAD — use the snapshot hash as proof we
-            // can't recover the base. Fall through: cannot merge.
+            // No explicit base, no git, or file not in HEAD — cannot merge.
             return Err(
                 "Cannot reconstruct base content for three-way merge (file not in git HEAD)".into(),
             );
@@ -2260,6 +2345,188 @@ mod tests {
         );
     }
 
+    /// v0.17.0.12.7: Shared files (PLAN.md, CLAUDE.md, Cargo.toml, memory/*.md)
+    /// must auto-merge non-overlapping concurrent edits even when the caller
+    /// requests `ConflictResolution::Abort` — this is the fix for
+    /// `ta draft apply` silently discarding direct main edits to these files.
+    #[test]
+    fn apply_with_conflict_check_auto_merges_clean_shared_file_conflict() {
+        let source = TempDir::new().unwrap();
+        let base_content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n";
+        fs::write(source.path().join("PLAN.md"), base_content).unwrap();
+
+        let staging_root = TempDir::new().unwrap();
+        let mut overlay = OverlayWorkspace::create(
+            "goal-shared-merge",
+            source.path(),
+            staging_root.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        // Capture the shared-file base at "goal start" time, before either
+        // side edits PLAN.md — mirrors what `ta goal start` writes to
+        // apply-base.json.
+        let apply_base = crate::shared_files::SharedFileBase::capture(source.path());
+
+        // Agent (staging) edits line 2.
+        fs::write(
+            overlay.staging_dir().join("PLAN.md"),
+            "line1\nline2-agent\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n",
+        )
+        .unwrap();
+        // Concurrent main edit (source) touches line 8 — non-overlapping.
+        fs::write(
+            source.path().join("PLAN.md"),
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8-external\nline9\n",
+        )
+        .unwrap();
+
+        overlay.set_apply_base(apply_base);
+
+        let artifact_uris = vec!["fs://workspace/PLAN.md".to_string()];
+        let result = overlay.apply_with_conflict_check(
+            source.path(),
+            ConflictResolution::Abort,
+            &artifact_uris,
+        );
+
+        assert!(
+            result.is_ok(),
+            "shared file should auto-merge even under Abort: {:?}",
+            result.err()
+        );
+
+        let final_content = fs::read_to_string(source.path().join("PLAN.md")).unwrap();
+        assert!(
+            final_content.contains("line2-agent"),
+            "agent edit must survive: {}",
+            final_content
+        );
+        assert!(
+            final_content.contains("line8-external"),
+            "concurrent main edit must survive: {}",
+            final_content
+        );
+    }
+
+    /// A real conflict (both sides edit the same line of a shared file) must
+    /// be reported as `WorkspaceError::SharedFileConflicts`, distinct from
+    /// the generic `ConflictDetected` used for non-shared files.
+    #[test]
+    fn apply_with_conflict_check_reports_shared_file_conflicts_distinctly() {
+        let source = TempDir::new().unwrap();
+        let base_content = "line1\nline2\nline3\n";
+        fs::write(source.path().join("PLAN.md"), base_content).unwrap();
+
+        let staging_root = TempDir::new().unwrap();
+        let mut overlay = OverlayWorkspace::create(
+            "goal-shared-conflict",
+            source.path(),
+            staging_root.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        let apply_base = crate::shared_files::SharedFileBase::capture(source.path());
+
+        // Both sides edit line 2 differently — a real conflict.
+        fs::write(
+            overlay.staging_dir().join("PLAN.md"),
+            "line1\nline2-agent\nline3\n",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("PLAN.md"),
+            "line1\nline2-external\nline3\n",
+        )
+        .unwrap();
+
+        overlay.set_apply_base(apply_base);
+
+        let artifact_uris = vec!["fs://workspace/PLAN.md".to_string()];
+        let result = overlay.apply_with_conflict_check(
+            source.path(),
+            ConflictResolution::Abort,
+            &artifact_uris,
+        );
+
+        match result {
+            Err(WorkspaceError::SharedFileConflicts { conflicts }) => {
+                assert_eq!(conflicts.len(), 1);
+                assert_eq!(conflicts[0].path, "PLAN.md");
+                let content = String::from_utf8_lossy(&conflicts[0].conflicted_content);
+                assert!(
+                    content.contains("<<<<<<<"),
+                    "expected conflict markers: {}",
+                    content
+                );
+            }
+            Ok(_) => panic!("expected SharedFileConflicts error, got Ok"),
+            Err(e) => panic!(
+                "expected SharedFileConflicts error, got different error: {}",
+                e
+            ),
+        }
+    }
+
+    /// Even `ConflictResolution::ForceOverwrite` must not blindly overwrite a
+    /// shared file with the (stale) staging copy — it must still attempt the
+    /// merge first, same as `Abort`/`Merge`. The `resolution` argument is
+    /// irrelevant for shared files (v0.17.0.12.7).
+    #[test]
+    fn apply_with_conflict_check_ignores_resolution_flag_for_shared_files() {
+        let source = TempDir::new().unwrap();
+        let base_content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n";
+        fs::write(source.path().join("PLAN.md"), base_content).unwrap();
+
+        let staging_root = TempDir::new().unwrap();
+        let mut overlay = OverlayWorkspace::create(
+            "goal-shared-force",
+            source.path(),
+            staging_root.path(),
+            ExcludePatterns::none(),
+        )
+        .unwrap();
+
+        let apply_base = crate::shared_files::SharedFileBase::capture(source.path());
+
+        fs::write(
+            overlay.staging_dir().join("PLAN.md"),
+            "line1\nline2-agent\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("PLAN.md"),
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8-external\nline9\n",
+        )
+        .unwrap();
+
+        overlay.set_apply_base(apply_base);
+
+        let artifact_uris = vec!["fs://workspace/PLAN.md".to_string()];
+        let result = overlay.apply_with_conflict_check(
+            source.path(),
+            ConflictResolution::ForceOverwrite,
+            &artifact_uris,
+        );
+
+        assert!(result.is_ok(), "merge should succeed: {:?}", result.err());
+        let final_content = fs::read_to_string(source.path().join("PLAN.md")).unwrap();
+        // If ForceOverwrite had blindly won, "line8-external" (the source's
+        // own change) would be gone, replaced entirely by the stale staging copy.
+        assert!(
+            final_content.contains("line8-external"),
+            "external edit must survive a shared-file merge even under ForceOverwrite: {}",
+            final_content
+        );
+        assert!(
+            final_content.contains("line2-agent"),
+            "agent edit must also survive: {}",
+            final_content
+        );
+    }
+
     #[test]
     fn agent_infra_dirs_excluded_from_copy_and_diff() {
         let source = create_source_project();
@@ -2726,20 +2993,8 @@ mod tests {
         fs::write(&staging_path, ours_content).unwrap();
         fs::write(&source_path, theirs_content).unwrap();
 
-        let snap = crate::conflict::FileSnapshot {
-            path: "shared.txt".to_string(),
-            mtime_secs: 0,
-            content_hash: "dummy".to_string(),
-            size_bytes: base_content.len() as u64,
-        };
-
-        let result = three_way_merge(
-            "dummy",
-            &staging_path,
-            &source_path,
-            &snap,
-            staging_dir.path(),
-        );
+        // explicit_base = None exercises the git-HEAD fallback reconstruction path.
+        let result = three_way_merge(None, &staging_path, &source_path);
 
         match result {
             Ok(MergeResult::Clean { content, hunks }) => {
@@ -2767,6 +3022,68 @@ mod tests {
             Err(e) => {
                 // git may not be available in all CI environments — treat as skip.
                 eprintln!("Skipping three_way_merge test: {}", e);
+            }
+        }
+    }
+
+    /// v0.17.0.12.7: An explicit base (e.g. from `SharedFileBase::capture`) must
+    /// be used directly instead of reconstructing via `git show HEAD:<path>`.
+    /// This is what makes shared-file merges work when the file was
+    /// created/edited on main without a commit — no git repo is involved here
+    /// at all, proving the explicit base path doesn't depend on git history.
+    #[test]
+    fn three_way_merge_uses_explicit_base_over_git_head() {
+        let staging_dir = TempDir::new().unwrap();
+        let source_dir = TempDir::new().unwrap();
+
+        let base_content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n";
+        let ours_content = "line1\nline2-agent\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n";
+        let theirs_content =
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8-external\nline9\n";
+
+        let staging_path = staging_dir.path().join("shared.txt");
+        let source_path = source_dir.path().join("shared.txt");
+        fs::write(&staging_path, ours_content).unwrap();
+        fs::write(&source_path, theirs_content).unwrap();
+
+        // Sanity: without an explicit base and no git repo present, merge must fail.
+        let no_base_result = three_way_merge(None, &staging_path, &source_path);
+        assert!(
+            no_base_result.is_err(),
+            "expected git-HEAD fallback to fail outside a git repo"
+        );
+
+        // With an explicit base (as SharedFileBase::capture would provide), the
+        // merge succeeds even with no git repo involved at all.
+        let result = three_way_merge(Some(base_content.as_bytes()), &staging_path, &source_path);
+        match result {
+            Ok(MergeResult::Clean { content, .. }) => {
+                let merged = String::from_utf8(content).unwrap();
+                assert!(
+                    merged.contains("line2-agent"),
+                    "agent change must be in merged result: {}",
+                    merged
+                );
+                assert!(
+                    merged.contains("line8-external"),
+                    "external change must be in merged result: {}",
+                    merged
+                );
+                assert!(!merged.contains("<<<<<<<"), "no conflict markers expected");
+            }
+            Ok(MergeResult::Conflicted { content }) => {
+                panic!(
+                    "expected clean merge with explicit base, got conflicts: {}",
+                    String::from_utf8_lossy(&content)
+                );
+            }
+            Err(e) => {
+                // git binary itself may be unavailable in some CI sandboxes —
+                // treat as skip, matching the convention of the sibling test.
+                eprintln!(
+                    "Skipping three_way_merge_uses_explicit_base_over_git_head: {}",
+                    e
+                );
             }
         }
     }

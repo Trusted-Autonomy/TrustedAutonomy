@@ -32,6 +32,7 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 libc = { workspace = true }
 reqwest = { workspace = true }
+tempfile = { workspace = true }
 rustyline = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
@@ -70,4 +71,3 @@ ta-governed-paths = { path = "../../crates/ta-governed-paths", version = "0.17.0
 winres = "0.1"
 
 [dev-dependencies]
-tempfile = { workspace = true }

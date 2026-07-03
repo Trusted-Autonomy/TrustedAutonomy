@@ -16,6 +16,7 @@
 //! - [`JsonFileStore`] — MVP implementation: one JSONL file per goal,
 //!   append-optimized, survives process restarts.
 
+pub mod advisor_patch;
 pub mod conflict;
 pub mod copy_strategy;
 pub mod error;
@@ -25,10 +26,12 @@ pub mod merge_tool;
 pub mod overlay;
 pub mod partitioning;
 pub mod projfs_strategy;
+pub mod shared_files;
 pub mod staging;
 pub mod store;
 pub mod windows_features;
 
+pub use advisor_patch::AdvisorPatch;
 pub use conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
 pub use copy_strategy::{CopyStat, CopyStrategy};
 pub use error::WorkspaceError;
@@ -39,5 +42,6 @@ pub use partitioning::{
     update_p4ignore, VcsBackend, GITIGNORE_MARKER, LOCAL_TA_PATHS, P4IGNORE_MARKER,
     SHARED_TA_PATHS,
 };
+pub use shared_files::{is_shared_file, SharedFileBase};
 pub use staging::StagingWorkspace;
 pub use store::{ChangeStore, JsonFileStore};

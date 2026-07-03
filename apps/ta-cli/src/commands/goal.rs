@@ -638,6 +638,19 @@ fn start_goal(
             }
         }
 
+        // v0.17.0.12.7: Snapshot real content of shared files (PLAN.md, CLAUDE.md,
+        // Cargo.toml, docs/USAGE.md, memory/*.md) as the 3-way merge base for
+        // apply-time conflict resolution — independent of git history so it still
+        // works when a file was edited/created on main without a commit.
+        // Stored under .ta/ inside the staging copy (like plan_base.md above) so
+        // it's excluded from artifact diffing — it must not appear as a draft
+        // change in its own right.
+        let apply_base = ta_workspace::shared_files::SharedFileBase::capture(&source_dir);
+        let apply_base_path = overlay.staging_dir().join(".ta").join("apply-base.json");
+        if let Err(e) = apply_base.save(&apply_base_path) {
+            tracing::warn!("Could not write apply-base.json: {}", e);
+        }
+
         // Transition: Created → Configured → Running.
         goal.transition(GoalRunState::Configured)?;
         goal.transition(GoalRunState::Running)?;
@@ -4232,5 +4245,48 @@ mod tests {
             "in_progress marker should be gone: {}",
             plan_after
         );
+    }
+
+    #[test]
+    fn goal_start_writes_apply_base_json_for_shared_files() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("PLAN.md"), "# Plan v1\n").unwrap();
+        std::fs::create_dir_all(project.path().join("memory")).unwrap();
+        std::fs::write(
+            project.path().join("memory").join("notes.md"),
+            "queued items",
+        )
+        .unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+        let store = GoalRunStore::new(&config.goals_dir).unwrap();
+
+        start_goal(
+            &config,
+            &store,
+            "Shared file snapshot test",
+            Some(project.path()),
+            "test",
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let goals = store.list().unwrap();
+        let staging = goals[0].workspace_path.clone();
+
+        // Stored under .ta/ (like plan_base.md) so it's excluded from artifact
+        // diffing — it must not itself show up as a draft change.
+        let apply_base_path = staging.join(".ta").join("apply-base.json");
+        assert!(
+            apply_base_path.exists(),
+            "apply-base.json should be written to the staging dir's .ta/ subfolder"
+        );
+
+        let base = ta_workspace::shared_files::SharedFileBase::load(&apply_base_path).unwrap();
+        assert_eq!(base.get("PLAN.md").unwrap(), b"# Plan v1\n");
+        assert_eq!(base.get("memory/notes.md").unwrap(), b"queued items");
     }
 }

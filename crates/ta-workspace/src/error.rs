@@ -36,4 +36,26 @@ pub enum WorkspaceError {
     /// A Windows Projected File System operation failed (v0.15.8).
     #[error("ProjFS error: {0}")]
     ProjFsError(String),
+
+    /// One or more shared files (PLAN.md, CLAUDE.md, Cargo.toml, memory/*.md)
+    /// have unresolved 3-way merge conflicts at apply time (v0.17.0.12.7).
+    ///
+    /// Unlike `ConflictDetected`, shared files always attempt an automatic
+    /// merge first regardless of the caller's `ConflictResolution` — this
+    /// variant is only returned when that merge left conflict markers.
+    #[error(
+        "{} shared file(s) have unresolved merge conflicts: {}",
+        .conflicts.len(),
+        .conflicts.iter().map(|c| c.path.as_str()).collect::<Vec<_>>().join(", ")
+    )]
+    SharedFileConflicts { conflicts: Vec<SharedFileConflict> },
+}
+
+/// A shared file whose apply-time 3-way merge left conflict markers.
+#[derive(Debug, Clone)]
+pub struct SharedFileConflict {
+    /// Relative path from the workspace root.
+    pub path: String,
+    /// Merged content with `<<<<<<<`/`=======`/`>>>>>>>` conflict markers.
+    pub conflicted_content: Vec<u8>,
 }

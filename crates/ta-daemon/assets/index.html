@@ -2454,6 +2454,34 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
       ${warnings.map(w => `<p style="font-size:0.85rem;color:var(--yellow);margin:0.2rem 0">⚠ ${esc(w)}</p>`).join('')}
     </div></details>` : '';
 
+  // Merge conflicts (v0.17.0.12.7): unresolved shared-file conflicts from
+  // this goal's most recent apply attempt. Read-only in this phase — resolve
+  // the listed file manually, then re-run `ta draft apply`. Full interactive
+  // resolution (diff editor) is deferred to v0.18 per the phase's own scope note.
+  const conflicts = Array.isArray(d.conflicts) ? d.conflicts : [];
+  const conflictsSection = conflicts.length > 0 ? `
+    <details open class="section" style="border-color:var(--red)"><summary style="color:var(--red)">⚠ Merge Conflicts (${conflicts.length})</summary><div class="detail-body">
+      <p style="font-size:0.85rem;color:var(--muted)">These shared files could not be auto-merged during apply. Resolve manually in the project files, then re-run <code>ta draft apply ${esc(String(d.package_id).slice(0, 8))}</code>.</p>
+      ${conflicts.map(c => `
+        <div class="artifact">
+          <span class="artifact-uri">${esc(c.path)}</span>
+          <pre style="white-space:pre-wrap;font-size:0.8rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:0.5rem;margin-top:0.3rem">${esc(c.content)}</pre>
+        </div>`).join('')}
+    </div></details>` : '';
+
+  // Advisor patches queued while a goal was running, not yet replayed onto
+  // the project (v0.17.0.12.7).
+  const advisorPatches = Array.isArray(d.pending_advisor_patches) ? d.pending_advisor_patches : [];
+  const advisorPatchesSection = advisorPatches.length > 0 ? `
+    <details class="section"><summary>Queued Advisor Changes (${advisorPatches.length})</summary><div class="detail-body">
+      <p style="font-size:0.85rem;color:var(--muted)">Advisor-triggered edits queued while a goal was running — replayed automatically on the next <code>ta draft apply</code>.</p>
+      ${advisorPatches.map(p => `
+        <div class="artifact">
+          <span class="artifact-uri">${esc(p.path)}</span>
+          &middot; ${esc(p.description)}
+        </div>`).join('')}
+    </div></details>` : '';
+
   // Constitution Check section.
   let constitutionBody = '';
   if (Array.isArray(d.validation_log) && d.validation_log.length > 0) {
@@ -2494,6 +2522,8 @@ function renderDraftDetail(d, phaseDescription, dialogEntries) {
       ${decisionSection}
       ${filesSection}
       ${warningsSection}
+      ${conflictsSection}
+      ${advisorPatchesSection}
       ${constitutionSection}
       ${pendingSection}
       <div class="actions">
