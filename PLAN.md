@@ -9222,7 +9222,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.6 — Studio Redesign + Smart Advisor
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.5
 
 **Goal**: Redesign the Studio main page to surface the Advisor dialog and running goals without replacing the existing nav/health layout. Add element-level DOM updates so Studio never does a full page refresh. Rebuild the draft review panel with supervisor context, per-file selection, dependency warnings, and an inline Q&A dialog. Ship the Smart Advisor backend.
@@ -9230,29 +9230,29 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 **Items**:
 
 **Studio element updates (no full page refresh)**:
-1. [ ] Replace full-page reloads with targeted DOM/component updates in Studio. On each status poll tick, only re-render fields that changed. Applies to all pages.
+1. [x] Replace full-page reloads with targeted DOM/component updates in Studio. On each status poll tick, only re-render fields that changed. Applies to all pages.
 
 **Main page layout redesign**:
-2. [ ] Top nav bar stays unchanged (Dashboard, Plan, Review Drafts, Settings, etc.).
-3. [ ] Project health section stays (8 stat boxes). No layout change.
-4. [ ] **Advisor dialog**: New section below the 8 health boxes on the main dashboard page. Shows ongoing conversation with the Smart Advisor. Input field always visible. Scrollable log of past exchanges. Dialog persisted per-project under `.ta/advisor-history.jsonl`.
-5. [ ] **Active tab**: New top-nav entry "Active". Lists all `Running`/`Configured` goals. Each row is expandable — shows: title, elapsed time, last event, and a free-text input ("Send info / ask this agent") that posts to the running agent via `ta_ask_human` MCP tool or `POST /api/goals/:id/message`.
-6. [ ] **Stats page**: New top-nav "Stats" page. Shows: total goals, completion rate, average duration, goals by phase, plan velocity. Integrates Meridian KPI data if `meridian.toml` is configured — shows per-category KPI alignment scores inline.
+2. [x] Top nav bar stays unchanged (Dashboard, Plan, Review Drafts, Settings, etc.).
+3. [x] Project health section stays (8 stat boxes). No layout change.
+4. [x] **Advisor dialog**: New section below the 8 health boxes on the main dashboard page. Shows ongoing conversation with the Smart Advisor. Input field always visible. Scrollable log of past exchanges. Dialog persisted per-project under `.ta/advisor-history.jsonl`.
+5. [x] **Active tab**: New top-nav entry "Active". Lists all `Running`/`Configured` goals. Each row is expandable — shows: title, elapsed time, last event, and a free-text input ("Send info / ask this agent") that posts to the running agent via `ta_ask_human` MCP tool or `POST /api/goals/:id/message`.
+6. [x] **Stats page**: New top-nav "Stats" page. Shows: total goals, completion rate, average duration, goals by phase, plan velocity. Integrates Meridian KPI data if `meridian.toml` is configured — shows per-category KPI alignment scores inline.
 
 **Draft review panel redesign**:
-7. [ ] **Supervisor review section**: Below the draft summary, add a collapsible "Supervisor Review" section (default open). Shows the initial supervisor review output from the goal's audit trail. Formatted with: risk level, issues list, recommendation.
-8. [ ] **Summary "why" section**: Draft summary rendered with a distinct "Why" subsection (pulled from goal title and phase description) above the list of changes.
-9. [ ] **Changes section with per-file selection**: Rename "Changed files" to "Changes." Each file entry has a checkbox (default: checked = selected for apply). User can deselect files to exclude them from the apply.
-10. [ ] **Dependency warnings**: Detect inter-file dependencies. If file A is selected but a dependency of A is not selected, surface a "Warnings" section above the Approve/Apply buttons. On Approve/Apply with active warnings, show an "Are you sure?" confirmation modal.
-11. [ ] **Per-draft Q&A dialog**: Each draft review panel has a chat window (styled like the Claude CLI sidebar) for questions to the advisor/supervisor about that draft. Stored in `.ta/drafts/<id>-dialog.jsonl`. Allows asking: "Is this safe to apply?", "What does change X do?", "Can I apply just the UI changes?"
-12. [ ] **Advisor actions from draft dialog**: The per-draft dialog also accepts commands: "add item X to the plan", "create a --follow-up goal to fix Y", "amend this draft to also include Z". Routed through the Smart Advisor.
+7. [x] **Supervisor review section**: Below the draft summary, add a collapsible "Supervisor Review" section (default open). Shows the initial supervisor review output from the goal's audit trail. Formatted with: risk level, issues list, recommendation.
+8. [x] **Summary "why" section**: Draft summary rendered with a distinct "Why" subsection (pulled from goal title and phase description) above the list of changes.
+9. [x] **Changes section with per-file selection**: Rename "Changed files" to "Changes." Each file entry has a checkbox (default: checked = selected for apply). User can deselect files to exclude them from the apply.
+10. [x] **Dependency warnings**: Detect inter-file dependencies. If file A is selected but a dependency of A is not selected, surface a "Warnings" section above the Approve/Apply buttons. On Approve/Apply with active warnings, show an "Are you sure?" confirmation modal.
+11. [x] **Per-draft Q&A dialog**: Each draft review panel has a chat window (styled like the Claude CLI sidebar) for questions to the advisor/supervisor about that draft. Stored in `.ta/drafts/<id>-dialog.jsonl`. Allows asking: "Is this safe to apply?", "What does change X do?", "Can I apply just the UI changes?"
+12. [x] **Advisor actions from draft dialog**: The per-draft dialog also accepts commands: "add item X to the plan", "create a --follow-up goal to fix Y", "amend this draft to also include Z". Routed through the Smart Advisor.
 
 **Smart Advisor backend**:
-13. [ ] **Intent classification** (`crates/ta-advisor/src/classify.rs`): Classify free-text input as: `queue_goal`, `info_request`, `draft_action` (amend/follow-up), or `ambiguous`. Reuse `ta advisor ask` classifier.
-14. [ ] **Unambiguous path**: For `queue_goal`, show confirmation card (title, phase, estimated duration) with Approve / Edit / Cancel. On Approve, call `ta goal start`.
-15. [ ] **Ambiguous path**: Show numbered clarification options. Re-classify (max 2 rounds), then surface "I need more info."
-16. [ ] **Info request**: Answer from daemon state (`/api/status`, goal list, plan phase) without spawning a goal.
-17. [ ] USAGE.md: "Studio Smart Advisor" section — what it can do, how to queue work, draft Q&A, --follow-up from dialog.
+13. [x] **Intent classification** (`crates/ta-advisor/src/classify.rs`): Classify free-text input as: `queue_goal`, `info_request`, `draft_action` (amend/follow-up), or `ambiguous`. Reuse `ta advisor ask` classifier.
+14. [x] **Unambiguous path**: For `queue_goal`, show confirmation card (title, phase, estimated duration) with Approve / Edit / Cancel. On Approve, call `ta goal start`.
+15. [x] **Ambiguous path**: Show numbered clarification options. Re-classify (max 2 rounds), then surface "I need more info."
+16. [x] **Info request**: Answer from daemon state (`/api/status`, goal list, plan phase) without spawning a goal.
+17. [x] USAGE.md: "Studio Smart Advisor" section — what it can do, how to queue work, draft Q&A, --follow-up from dialog.
 
 #### Version: `0.17.0-alpha.12.6`
 

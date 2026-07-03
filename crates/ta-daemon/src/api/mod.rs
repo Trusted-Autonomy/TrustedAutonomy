@@ -10,12 +10,15 @@
 //   /api/drafts   — draft review (existing, from web.rs)
 //   /api/memory   — memory store (existing, from web.rs)
 
+pub mod active;
 pub mod advisor;
 pub mod agent;
 pub mod agent_profiles;
 pub mod auth;
 pub mod cmd;
 pub mod context_upload;
+pub mod dashboard_advisor;
+pub mod draft_dialog;
 pub mod drain;
 pub mod events;
 pub mod goal_output;
@@ -398,6 +401,10 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
             "/api/goals/{id}/input",
             post(goal_output::goal_input_handler),
         )
+        // "Send info / ask this agent" from the Studio Active tab (v0.17.0.12.6 item 5).
+        .route("/api/goals/{id}/message", post(active::handle_goal_message))
+        // Active tab: Running/Configured goals with elapsed time + last event.
+        .route("/api/active/goals", get(active::list_active_goals))
         // Workflow routes (v0.9.8.2).
         .route("/api/workflows", get(workflow::list_workflows))
         .route("/api/workflow/{id}/input", post(workflow::workflow_input))
@@ -474,6 +481,8 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         // Velocity stats API (v0.15.14.2).
         .route("/api/stats/velocity", get(stats::velocity_aggregate))
         .route("/api/stats/velocity-detail", get(stats::velocity_detail))
+        // Studio "Stats" tab: goal stats + velocity + Meridian KPIs (v0.17.0.12.6 item 6).
+        .route("/api/stats/summary", get(stats::summary))
         // Studio Advisor API (v0.15.21 + v0.15.28 + v0.16.1.3).
         .route("/api/advisor/message", post(advisor::handle_message))
         .route("/api/advisor/tools", get(advisor::get_tools))
@@ -485,6 +494,16 @@ pub fn build_api_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/advisor/suggestions", get(advisor::get_suggestions))
         .route("/api/advisor/context", get(advisor::get_context))
+        // Dashboard Advisor dialog (v0.17.0.12.6 item 4): .ta/advisor-history.jsonl.
+        .route(
+            "/api/advisor/dialog",
+            get(dashboard_advisor::get_dialog).post(dashboard_advisor::post_dialog),
+        )
+        // Per-draft Q&A dialog (v0.17.0.12.6 items 11, 12): .ta/drafts/<id>-dialog.jsonl.
+        .route(
+            "/api/drafts/{id}/dialog",
+            get(draft_dialog::get_dialog).post(draft_dialog::post_dialog),
+        )
         // Context file upload for Studio --context flag (v0.15.30.7).
         .route("/api/context/upload", post(context_upload::upload_context))
         // Cross-project links (v0.16.1.5).

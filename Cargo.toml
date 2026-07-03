@@ -25,6 +25,7 @@ members = [
     "crates/ta-memory",
     "crates/ta-mediation",
     "crates/ta-session",
+    "crates/ta-advisor",
     "crates/ta-events",
     "crates/ta-workflow",
     "crates/ta-build",
