@@ -9222,7 +9222,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.6 — Studio Redesign + Smart Advisor
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.5
 
 **Goal**: Redesign the Studio main page to surface the Advisor dialog and running goals without replacing the existing nav/health layout. Add element-level DOM updates so Studio never does a full page refresh. Rebuild the draft review panel with supervisor context, per-file selection, dependency warnings, and an inline Q&A dialog. Ship the Smart Advisor backend.
