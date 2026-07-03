@@ -9334,7 +9334,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.10 — Version Bump Depth Fix + Release Badge/Nightly Repair + Continuous-Loop Reliability
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.9
 
 **Goal**: Root-caused 2026-07-03 while wrapping up v0.17.0.12.7–12.9: `ta --version` has been stuck at `0.17.0-alpha.12.3` through 6 merged phases because the version-bump code only understands 3- and 4-segment phase IDs, not the 5-segment sub-sub-phases (`v0.17.0.12.9`) this project actually uses. Separately, the README's "stable" release badge renders "invalid", the `nightly` GitHub release is stuck as a draft, and there's no scheduled check that would catch either. Also: `ta plan build --autonomous` needed a manual draft-apply intervention on every single phase this run (3-for-3), which directly undermines the "autonomous virtual team operating continuously" goal this whole 0.17 track exists for. Fix all four so 0.17 can wrap up clean.
