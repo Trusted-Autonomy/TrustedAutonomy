@@ -187,6 +187,11 @@ pub struct VelocityEntry {
     /// `None` when no token data was captured; `Some(n)` when captured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_output: Option<u64>,
+    /// A concise title derived from the goal's first user message via
+    /// `meridian summarize-title` (v0.17.0.12.8). `None` when Meridian is not
+    /// installed or the call failed — the plain `title` field remains authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_title: Option<String>,
 }
 
 impl VelocityEntry {
@@ -232,6 +237,7 @@ impl VelocityEntry {
             cost_estimated: false,
             tokens_input: None,
             tokens_output: None,
+            derived_title: None,
         }
     }
 
@@ -250,6 +256,13 @@ impl VelocityEntry {
     /// Set the workflow type.
     pub fn with_workflow(mut self, workflow: impl Into<String>) -> Self {
         self.workflow = workflow.into();
+        self
+    }
+
+    /// Set the Meridian-derived title (v0.17.0.12.8). Pass `None` when Meridian
+    /// is unavailable or the summarize-title call failed — leaves the field unset.
+    pub fn with_derived_title(mut self, derived_title: Option<String>) -> Self {
+        self.derived_title = derived_title;
         self
     }
 
@@ -1201,6 +1214,37 @@ mod tests {
         ];
         let conflicts = detect_phase_conflicts(&entries);
         assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn with_derived_title_sets_field() {
+        let goal = make_goal();
+        let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied)
+            .with_derived_title(Some("Fix login retry bug".to_string()));
+        assert_eq!(entry.derived_title.as_deref(), Some("Fix login retry bug"));
+    }
+
+    #[test]
+    fn derived_title_none_before_with_derived_title() {
+        let goal = make_goal();
+        let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied);
+        assert_eq!(entry.derived_title, None);
+    }
+
+    #[test]
+    fn derived_title_round_trips_through_store() {
+        let dir = tempdir().unwrap();
+        let store = VelocityHistoryStore::new(dir.path().join("velocity-history.jsonl"));
+        let goal = make_goal();
+        let entry = VelocityEntry::from_goal(&goal, GoalOutcome::Applied)
+            .with_derived_title(Some("Add retry backoff".to_string()));
+        store.append(&entry).unwrap();
+
+        let loaded = store.load_all().unwrap();
+        assert_eq!(
+            loaded[0].derived_title.as_deref(),
+            Some("Add retry backoff")
+        );
     }
 
     #[test]

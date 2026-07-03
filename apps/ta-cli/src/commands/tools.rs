@@ -166,6 +166,37 @@ fn check_claude_plugin_installed(plugin_name: &str) -> bool {
     }
 }
 
+/// Build the "cargo not found" guidance message (v0.17.0.12.8).
+///
+/// On Windows, `cargo install` commonly fails with a confusing linker error when
+/// the Rust toolchain (or the MSVC Build Tools it needs for linking) isn't
+/// installed. Front-load that guidance instead of letting the raw cargo error
+/// surface. Non-Windows platforms get the plain rustup pointer.
+fn cargo_missing_message(crate_name: &str, is_windows: bool) -> String {
+    if is_windows {
+        format!(
+            "cargo not found on PATH. Install the Rust toolchain first:\n\
+             \x20 1. Install rustup: https://rustup.rs (or `winget install Rustlang.Rustup`)\n\
+             \x20 2. Install the MSVC C++ Build Tools (required by the linker):\n\
+             \x20    https://visualstudio.microsoft.com/visual-cpp-build-tools/\n\
+             \x20 3. Restart your terminal, then re-run: ta tools install {crate_name}"
+        )
+    } else {
+        format!(
+            "cargo not found on PATH. Install the Rust toolchain first: https://rustup.rs\n\
+             Then re-run: ta tools install {crate_name}"
+        )
+    }
+}
+
+/// Build the "claude CLI not found" guidance message (v0.17.0.12.8).
+fn claude_cli_missing_message(tool_name: &str) -> String {
+    format!(
+        "The `claude` CLI is not on PATH — install Claude Code first: https://claude.ai/code\n\
+         Then re-run: ta tools install {tool_name}"
+    )
+}
+
 pub fn install_tool(name: &str) -> Result<()> {
     let tool = EXTERNAL_TOOLS
         .iter()
@@ -181,6 +212,12 @@ pub fn install_tool(name: &str) -> Result<()> {
 
     match &tool.install {
         ExternalToolInstall::Cargo(crate_name) => {
+            if which::which("cargo").is_err() {
+                anyhow::bail!(cargo_missing_message(
+                    crate_name,
+                    cfg!(target_os = "windows")
+                ));
+            }
             println!(
                 "Installing {} via cargo install {}...",
                 tool.label, crate_name
@@ -227,6 +264,9 @@ pub fn install_tool(name: &str) -> Result<()> {
             println!("{} installed to {}.", tool.label, expanded_dest);
         }
         ExternalToolInstall::ClaudePlugin(plugin_spec) => {
+            if which::which("claude").is_err() {
+                anyhow::bail!(claude_cli_missing_message(tool.name));
+            }
             println!(
                 "Installing {} via claude plugin install {}...",
                 tool.label, plugin_spec
@@ -234,12 +274,7 @@ pub fn install_tool(name: &str) -> Result<()> {
             let status = std::process::Command::new("claude")
                 .args(["plugin", "install", plugin_spec])
                 .status()
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "claude not found: {e}. \
-                         Install Claude Code first (https://claude.ai/code)."
-                    )
-                })?;
+                .map_err(|e| anyhow::anyhow!("Failed to run claude plugin install: {e}"))?;
             if !status.success() {
                 anyhow::bail!(
                     "claude plugin install failed.\nTry manually: {}",
@@ -250,4 +285,37 @@ pub fn install_tool(name: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_missing_message_windows_mentions_rustup_and_build_tools() {
+        let msg = cargo_missing_message("meridian", true);
+        assert!(msg.contains("rustup.rs"));
+        assert!(msg.contains("Build Tools"));
+        assert!(msg.contains("ta tools install meridian"));
+    }
+
+    #[test]
+    fn cargo_missing_message_non_windows_omits_build_tools() {
+        let msg = cargo_missing_message("meridian", false);
+        assert!(msg.contains("rustup.rs"));
+        assert!(!msg.contains("Build Tools"));
+        assert!(msg.contains("ta tools install meridian"));
+    }
+
+    #[test]
+    fn claude_cli_missing_message_is_actionable() {
+        let msg = claude_cli_missing_message("superpowers");
+        assert!(msg.contains("claude.ai/code"));
+        assert!(msg.contains("ta tools install superpowers"));
+    }
+
+    #[test]
+    fn external_tools_includes_meridian() {
+        assert!(EXTERNAL_TOOLS.iter().any(|t| t.name == "meridian"));
+    }
 }

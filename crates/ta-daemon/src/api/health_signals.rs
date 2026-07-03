@@ -176,9 +176,162 @@ fn compute_signals(
     check_plugin_crash_loops(project_root, &mut signals);
     check_daemon_log_error_rate(project_root, &mut signals);
     check_orphan_staging(project_root, goals_dir, &mut signals);
+    check_long_running_goal_liveness(project_root, goals_dir, &mut signals);
 
     signals.sort_by_key(|s| std::cmp::Reverse(s.severity));
     signals
+}
+
+// ── Long-running goal liveness (v0.17.0.12.8) ────────────────────────────────
+//
+// The daemon's event log only emits `goal_started`/`agent_spawned` — no
+// turn-level progress streams to Studio, so a healthy in-flight goal looks
+// silent indefinitely once it's been running a while. Rather than building
+// full turn-level SSE streaming, periodically check goal health (process
+// alive + most recent staging file activity) for goals quiet past a
+// threshold, and surface a reassuring "still working" signal instead of
+// leaving Studio blank.
+
+const QUIET_THRESHOLD_MINS: i64 = 10;
+
+fn check_long_running_goal_liveness(
+    project_root: &Path,
+    goals_dir: &Path,
+    signals: &mut Vec<HealthSignal>,
+) {
+    let _ = project_root;
+    let store = match GoalRunStore::new(goals_dir) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let goals = match store.list() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    let now = Utc::now();
+    let quiet_threshold = chrono::Duration::minutes(QUIET_THRESHOLD_MINS);
+
+    for goal in goals
+        .iter()
+        .filter(|g| matches!(g.state, GoalRunState::Running))
+    {
+        let quiet_for = now - goal.updated_at;
+        if quiet_for < quiet_threshold {
+            continue;
+        }
+
+        let process_alive = goal.agent_pid.map(is_pid_alive).unwrap_or(false);
+        let activity_desc = match most_recent_mtime(&goal.workspace_path) {
+            Some(mtime) => format!(
+                "last file activity {} ago",
+                format_duration_secs(now.signed_duration_since(mtime).num_seconds())
+            ),
+            None => "no file activity detected yet".to_string(),
+        };
+
+        if process_alive {
+            signals.push(HealthSignal::new(
+                "goal_quiet_but_alive",
+                SignalSeverity::Info,
+                format!(
+                    "\"{}\" has been running {} with no new events — still working ({}, agent process alive)",
+                    goal.title,
+                    format_duration_secs(quiet_for.num_seconds()),
+                    activity_desc
+                ),
+                "check `ta status` or Studio's Active tab for details".to_string(),
+            ));
+        } else {
+            signals.push(HealthSignal::new(
+                "goal_quiet_and_dead",
+                SignalSeverity::Warn,
+                format!(
+                    "\"{}\" has been running {} with no new events and its agent process is not running — {}",
+                    goal.title,
+                    format_duration_secs(quiet_for.num_seconds()),
+                    activity_desc
+                ),
+                "the agent may have crashed — check `ta daemon log` and consider re-running the goal".to_string(),
+            ));
+        }
+    }
+}
+
+/// Return true if a process with `pid` is currently alive.
+///
+/// On Unix, probes with `kill(pid, 0)` via libc — no signal is sent; the call
+/// only checks that the process exists and we have permission to signal it.
+/// On Windows, uses `tasklist /FI "PID eq <pid>"`.
+fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if ret == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output()
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.contains(&pid.to_string()) && !stdout.contains("No tasks")
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Find the most recent modification time among files under `path` (recursive,
+/// best-effort). Used as a proxy for "staging diff activity" when no
+/// turn-level event stream is available. Returns `None` if `path` doesn't
+/// exist or contains no files.
+fn most_recent_mtime(path: &Path) -> Option<DateTime<Utc>> {
+    let mut latest: Option<DateTime<Utc>> = None;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    let ts = DateTime::<Utc>::from(modified);
+                    if latest.map(|l| ts > l).unwrap_or(true) {
+                        latest = Some(ts);
+                    }
+                }
+            }
+        }
+    }
+    latest
+}
+
+/// Format a duration in seconds as a short human string: "45s", "12m", "1h5m".
+fn format_duration_secs(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 fn check_disk_pressure(project_root: &Path, signals: &mut Vec<HealthSignal>) {
@@ -571,6 +724,112 @@ mod tests {
     #[test]
     fn format_bytes_gb() {
         assert_eq!(format_bytes(2 * 1_073_741_824), "2.0 GB");
+    }
+
+    fn make_goal(dir: &std::path::Path) -> ta_goal::GoalRun {
+        ta_goal::GoalRun::new(
+            "Long-running goal",
+            "objective",
+            "claude-code",
+            dir.join("workspace"),
+            dir.join("store"),
+        )
+    }
+
+    #[test]
+    fn format_duration_secs_under_minute() {
+        assert_eq!(format_duration_secs(45), "45s");
+    }
+
+    #[test]
+    fn format_duration_secs_minutes() {
+        assert_eq!(format_duration_secs(125), "2m");
+    }
+
+    #[test]
+    fn format_duration_secs_hours() {
+        assert_eq!(format_duration_secs(3725), "1h2m");
+    }
+
+    #[test]
+    fn long_running_goal_with_alive_process_signals_info() {
+        let dir = tempdir().unwrap();
+        let goals_dir = dir.path().join(".ta/goals");
+        let store = ta_goal::GoalRunStore::new(&goals_dir).unwrap();
+
+        let mut goal = make_goal(dir.path());
+        goal.state = GoalRunState::Running;
+        goal.updated_at = Utc::now() - chrono::Duration::minutes(15);
+        goal.agent_pid = Some(std::process::id());
+        std::fs::create_dir_all(&goal.workspace_path).unwrap();
+        store.save(&goal).unwrap();
+
+        let mut signals = Vec::new();
+        check_long_running_goal_liveness(dir.path(), &goals_dir, &mut signals);
+
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].kind, "goal_quiet_but_alive");
+        assert_eq!(signals[0].severity, SignalSeverity::Info);
+        assert!(signals[0].message.contains("Long-running goal"));
+    }
+
+    #[test]
+    fn long_running_goal_with_dead_process_signals_warn() {
+        let dir = tempdir().unwrap();
+        let goals_dir = dir.path().join(".ta/goals");
+        let store = ta_goal::GoalRunStore::new(&goals_dir).unwrap();
+
+        let mut goal = make_goal(dir.path());
+        goal.state = GoalRunState::Running;
+        goal.updated_at = Utc::now() - chrono::Duration::minutes(15);
+        // A PID astronomically unlikely to be alive in any test environment.
+        goal.agent_pid = Some(2_147_483_647);
+        std::fs::create_dir_all(&goal.workspace_path).unwrap();
+        store.save(&goal).unwrap();
+
+        let mut signals = Vec::new();
+        check_long_running_goal_liveness(dir.path(), &goals_dir, &mut signals);
+
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].kind, "goal_quiet_and_dead");
+        assert_eq!(signals[0].severity, SignalSeverity::Warn);
+    }
+
+    #[test]
+    fn recently_updated_goal_produces_no_signal() {
+        let dir = tempdir().unwrap();
+        let goals_dir = dir.path().join(".ta/goals");
+        let store = ta_goal::GoalRunStore::new(&goals_dir).unwrap();
+
+        let mut goal = make_goal(dir.path());
+        goal.state = GoalRunState::Running;
+        goal.updated_at = Utc::now(); // fresh — under the quiet threshold
+        goal.agent_pid = Some(std::process::id());
+        std::fs::create_dir_all(&goal.workspace_path).unwrap();
+        store.save(&goal).unwrap();
+
+        let mut signals = Vec::new();
+        check_long_running_goal_liveness(dir.path(), &goals_dir, &mut signals);
+
+        assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn non_running_goal_produces_no_signal() {
+        let dir = tempdir().unwrap();
+        let goals_dir = dir.path().join(".ta/goals");
+        let store = ta_goal::GoalRunStore::new(&goals_dir).unwrap();
+
+        let mut goal = make_goal(dir.path());
+        goal.state = GoalRunState::PrReady;
+        goal.updated_at = Utc::now() - chrono::Duration::minutes(30);
+        std::fs::create_dir_all(&goal.workspace_path).unwrap();
+        store.save(&goal).unwrap();
+
+        let mut signals = Vec::new();
+        check_long_running_goal_liveness(dir.path(), &goals_dir, &mut signals);
+
+        assert!(signals.is_empty());
     }
 
     #[test]

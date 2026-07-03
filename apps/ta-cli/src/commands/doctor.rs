@@ -1120,6 +1120,7 @@ fn apply_fix(
             println!("  Run `ta daemon log` to inspect errors.");
             Ok("Manual action needed: ta daemon log".to_string())
         }
+        "daemon_log_oversized" => rotate_daemon_log(&config.workspace_root),
         "disk_free" => {
             // Run comprehensive GC.
             super::gc::execute(
@@ -1141,6 +1142,45 @@ fn apply_fix(
             signal.action
         )),
     }
+}
+
+// ── daemon.log rotation (v0.17.0.12.8) ───────────────────────────────────────
+
+/// Rotate `.ta/daemon.log` when it has grown past the configured size threshold.
+///
+/// Moves the current log to `daemon.log.1` (overwriting any previous backup —
+/// only one generation of history is kept) and starts a fresh `daemon.log`
+/// with a marker line recording the rotation. Mirrors the absorption pattern
+/// used by `ta gc` (drop the bulk, leave an explicit trace of what happened).
+fn rotate_daemon_log(workspace_root: &Path) -> anyhow::Result<String> {
+    let log_path = workspace_root.join(".ta/daemon.log");
+    let backup_path = workspace_root.join(".ta/daemon.log.1");
+
+    let size_bytes = std::fs::metadata(&log_path)
+        .map_err(|e| anyhow::anyhow!("Could not read {}: {}", log_path.display(), e))?
+        .len();
+
+    if backup_path.exists() {
+        std::fs::remove_file(&backup_path)?;
+    }
+    std::fs::rename(&log_path, &backup_path)?;
+
+    let marker = format!(
+        "[ta doctor --fix] rotated daemon.log ({}) to daemon.log.1 at {}\n",
+        super::health_signals::format_bytes(size_bytes),
+        chrono::Utc::now().to_rfc3339(),
+    );
+    std::fs::write(&log_path, marker)?;
+
+    println!(
+        "  Rotated daemon.log ({}) — old content moved to daemon.log.1",
+        super::health_signals::format_bytes(size_bytes)
+    );
+
+    Ok(format!(
+        "Rotated daemon.log ({}) to daemon.log.1; started fresh log",
+        super::health_signals::format_bytes(size_bytes)
+    ))
 }
 
 // ── Gemma 4 check (v0.16.2.1) ───────────────────────────────────────────────
@@ -2035,6 +2075,45 @@ mod tests {
                 "each check needs a detail field"
             );
         }
+    }
+
+    #[test]
+    fn rotate_daemon_log_moves_content_and_starts_fresh() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(ta_dir.join("daemon.log"), "old log content\n").unwrap();
+
+        let result = rotate_daemon_log(dir.path()).unwrap();
+        assert!(result.contains("Rotated daemon.log"));
+
+        let backup = std::fs::read_to_string(ta_dir.join("daemon.log.1")).unwrap();
+        assert_eq!(backup, "old log content\n");
+
+        let fresh = std::fs::read_to_string(ta_dir.join("daemon.log")).unwrap();
+        assert!(fresh.contains("rotated daemon.log"));
+        assert!(!fresh.contains("old log content"));
+    }
+
+    #[test]
+    fn rotate_daemon_log_overwrites_previous_backup() {
+        let dir = TempDir::new().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(ta_dir.join("daemon.log.1"), "stale backup\n").unwrap();
+        std::fs::write(ta_dir.join("daemon.log"), "current log\n").unwrap();
+
+        rotate_daemon_log(dir.path()).unwrap();
+
+        let backup = std::fs::read_to_string(ta_dir.join("daemon.log.1")).unwrap();
+        assert_eq!(backup, "current log\n");
+    }
+
+    #[test]
+    fn rotate_daemon_log_errors_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let result = rotate_daemon_log(dir.path());
+        assert!(result.is_err());
     }
 
     #[test]
