@@ -331,6 +331,39 @@ Above the input field, the advisor surfaces relevant actions as tappable chips b
 
 Click a chip to pre-fill the input with a relevant query.
 
+### Studio Smart Advisor
+
+Below the Project Health panel, the Dashboard tab has its own **Advisor dialog** — a persistent conversation thread scoped to your day-to-day work, separate from the full-tab Advisor chat above. It's backed by `.ta/advisor-history.jsonl` (one line per turn) and always shows an input field plus a scrollable log of past exchanges.
+
+Every message you send is classified into one of four intents:
+
+| Intent | What happens |
+|--------|--------------|
+| **queue_goal** | You get a confirmation card (title, phase, estimated duration) with **Approve** / **Edit** / **Cancel**. Approving calls `ta goal start` — nothing runs until you confirm. |
+| **info_request** | Answered directly from daemon state (active goals, pending drafts, plan phase counts, health signals) — no goal is spawned. |
+| **draft_action** | You're pointed at the relevant draft's own Q&A dialog (see below), which has the context needed to amend it, follow it up, or add it to the plan. |
+| **ambiguous** | You get up to two rounds of numbered clarification options before the advisor asks you to rephrase with more detail. |
+
+Type `"fix the flaky login test"` to see a confirmation card, or `"how many drafts need review?"` for a direct answer.
+
+#### Active tab
+
+The **Active** tab lists every `Running` or `Configured` goal. Each row shows the goal's title, elapsed time, and last output line, and expands (click the row) into a free-text **"Send info / ask this agent"** box. Messages are delivered to the agent as a mid-run human note — the same delivery channel used by the Advisor's inject panel — via `POST /api/goals/:id/message`. The tab refreshes every 10 seconds while it's open.
+
+#### Stats tab
+
+The **Stats** tab shows total goals, completion rate, average duration, and a goals-by-phase breakdown sourced from `.ta/velocity-history.jsonl`. If a `meridian.toml` file exists at your project root, the tab also calls `meridian analyze --format json` and shows per-category KPI alignment scores inline. Run `ta meridian init` to add `meridian.toml` if you want this section populated — it's purely informational and the rest of the tab works fine without it.
+
+#### Draft review panel
+
+Opening a draft from **Review Drafts** now shows:
+
+- **Supervisor Review** (renamed from "Supervisor Analysis") — risk level, issues, and recommendation for this draft. For a follow-up draft that didn't re-run the supervisor, an **"Initial Supervisor Review"** subsection shows the review from the goal's first draft, so you're never missing the original risk assessment.
+- **Summary**, with a distinct **"Why"** line (goal title + phase description) above the change description.
+- **Changes** (renamed from "Changed Files") — each file has a checkbox, checked by default. Uncheck a file to exclude it from Apply; the Apply button only applies the files still checked.
+- **Warnings** — if a checked file depends on an unchecked one, a warning banner appears above Approve/Apply, and clicking either button shows an "Are you sure?" confirmation before proceeding.
+- **Ask about this draft** — a per-draft Q&A dialog (persisted at `.ta/drafts/<id>-dialog.jsonl`) for questions like "Is this safe to apply?", "What does change X do?", or "Can I apply just the UI changes?" It also accepts advisor actions — "amend this draft to also include Z", "create a follow-up goal to fix Y", "add item X to the plan" — which are recorded as pending advisor actions (`.ta/advisor-pending-actions.jsonl`) for human follow-through rather than writing directly to PLAN.md or starting a goal automatically.
+
 ### Project Health Panel
 
 The **Dashboard** tab shows a health panel that refreshes every 30 seconds:

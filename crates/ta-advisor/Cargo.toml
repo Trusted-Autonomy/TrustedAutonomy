@@ -1,0 +1,18 @@
+[package]
+name = "ta-advisor"
+version.workspace = true
+edition = "2021"
+description = "Smart Advisor — intent classification and conversational routing for Studio"
+license = "Apache-2.0"
+repository = "https://github.com/trustedautonomy/ta"
+homepage = "https://github.com/trustedautonomy/ta"
+keywords = ["ai", "agent", "autonomy", "advisor"]
+categories = ["development-tools"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Reuses the existing heuristic classifier as the substrate for the new
+# 4-way taxonomy rather than duplicating keyword-matching logic.
+ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.3" }

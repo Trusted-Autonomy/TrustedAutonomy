@@ -3549,6 +3549,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ta-advisor"
+version = "0.17.0-alpha.12.3"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ta-session",
+]
+
+[[package]]
 name = "ta-agent-ollama"
 version = "0.17.0-alpha.12.3"
 dependencies = [
@@ -3826,6 +3835,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "ta-advisor",
  "ta-audit",
  "ta-changeset",
  "ta-connector-email",

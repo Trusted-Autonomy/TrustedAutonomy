@@ -383,34 +383,43 @@ pub async fn handle_inject(
             .into_response();
     }
 
+    match inject_note_for_goal(&state, body.goal_id.as_deref(), &message) {
+        Ok(resp) => Json(resp).into_response(),
+        Err((status, body)) => (status, Json(body)).into_response(),
+    }
+}
+
+/// Deliver a mid-run human note to a goal's agent via its `AgentContextChannel`.
+///
+/// Shared by `POST /api/advisor/inject` (resolves the goal from an optional
+/// hint, defaulting to "most recently running") and
+/// `POST /api/goals/:id/message` (item 5 — always targets an explicit goal id
+/// from the "Active" tab).
+pub fn inject_note_for_goal(
+    state: &AppState,
+    goal_id_hint: Option<&str>,
+    message: &str,
+) -> Result<InjectResponse, (StatusCode, serde_json::Value)> {
     // Load the goal store.
-    let store = match GoalRunStore::new(&state.goals_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("Failed to load goal store from {:?}: {}", state.goals_dir, e)
-                })),
-            )
-                .into_response();
-        }
-    };
+    let store = GoalRunStore::new(&state.goals_dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({
+                "error": format!("Failed to load goal store from {:?}: {}", state.goals_dir, e)
+            }),
+        )
+    })?;
 
     // Resolve the target goal.
-    let goal = match resolve_inject_goal(&store, body.goal_id.as_deref()) {
-        Ok(g) => g,
-        Err(e) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": e,
-                    "hint": "Start a goal with `ta run` or pass an explicit --goal <id>."
-                })),
-            )
-                .into_response();
-        }
-    };
+    let goal = resolve_inject_goal(&store, goal_id_hint).map_err(|e| {
+        (
+            StatusCode::NOT_FOUND,
+            json!({
+                "error": e,
+                "hint": "Start a goal with `ta run` or pass an explicit --goal <id>."
+            }),
+        )
+    })?;
 
     let goal_id_str = goal.goal_run_id.to_string();
     let staging_path = goal.workspace_path.clone();
@@ -429,7 +438,7 @@ pub async fn handle_inject(
     let channel = build_channel(&channel_type, staging_path.clone(), &context_file);
 
     // Build and inject the note.
-    let note = HumanNote::new(&goal_id_str, &message);
+    let note = HumanNote::new(&goal_id_str, message);
     match channel.inject_note(&note) {
         Ok(delivery) => {
             // Best-effort notes file path (ClaudeCode pattern).
@@ -447,28 +456,26 @@ pub async fn handle_inject(
                 delivery = %delivery,
                 agent_id = %goal.agent_id,
                 channel = %channel_type,
-                "Human note injected via POST /api/advisor/inject"
+                "Human note injected"
             );
 
-            Json(InjectResponse {
+            Ok(InjectResponse {
                 delivery: delivery.to_string(),
                 goal_id: goal_id_str,
                 notes_file,
-                message,
+                message: message.to_string(),
             })
-            .into_response()
         }
-        Err(e) => (
+        Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
+            json!({
                 "error": format!(
                     "Failed to inject note into goal {}: {}. \
                      Check that the staging directory exists: {:?}",
                     goal_id_str, e, staging_path
                 )
-            })),
-        )
-            .into_response(),
+            }),
+        )),
     }
 }
 
@@ -740,6 +747,14 @@ pub struct GoalSummary {
 /// Aggregates goals, drafts, plan phases, and health signals into a single context
 /// object the advisor frontend uses to answer check_status and question intents.
 pub async fn get_context(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(compute_live_context(&state)).into_response()
+}
+
+/// Aggregate goals, drafts, plan phases, and health signals into a single live
+/// context snapshot. Shared by `GET /api/advisor/context` and the dashboard
+/// advisor dialog's `info_request` answering (item 16 — "answer from daemon
+/// state ... without spawning a goal").
+pub fn compute_live_context(state: &AppState) -> AdvisorLiveContext {
     let now = Utc::now();
 
     let active_goals: Vec<GoalSummary> = GoalRunStore::new(&state.goals_dir)
@@ -793,15 +808,14 @@ pub async fn get_context(State(state): State<Arc<AppState>>) -> impl IntoRespons
         })
         .unwrap_or(0);
 
-    Json(AdvisorLiveContext {
+    AdvisorLiveContext {
         active_goals,
         pending_drafts,
         plan_pending_count,
         plan_done_count,
         health_signals_count,
         generated_at: now.to_rfc3339(),
-    })
-    .into_response()
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

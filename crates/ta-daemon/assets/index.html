@@ -374,6 +374,7 @@
   </div>
   <div class="tabs">
     <div class="tab active" onclick="switchTab('dashboard')">Dashboard</div>
+    <div class="tab" onclick="switchTab('active')" id="tab-active">Active</div>
     <div class="tab" onclick="switchTab('plan')">Plan</div>
     <div class="tab" onclick="switchTab('drafts')">Review Drafts</div>
     <div class="tab" onclick="switchTab('questions')" id="tab-questions">Agent Questions</div>
@@ -384,6 +385,7 @@
     <div class="tab" onclick="switchTab('agents')">Agents</div>
     <div class="tab" onclick="switchTab('personas')">Personas</div>
     <div class="tab" onclick="switchTab('advisor')">Advisor</div>
+    <div class="tab" onclick="switchTab('stats')">Stats</div>
     <div class="tab" onclick="switchTab('health')" id="tab-health">Health</div>
     <div class="tab" onclick="switchTab('settings')">Settings</div>
   </div>
@@ -653,6 +655,76 @@ window._nativeConfirm = window.confirm.bind(window);
 window._nativePrompt  = window.prompt.bind(window);
 window.alert   = (msg) => showAlert(String(msg || ''));
 
+// ── Targeted DOM updates (v0.17.0.12.6 item 1) ─────────────────
+// Studio previously replaced the entire `#app` container's innerHTML on
+// every poll tick, which reset scroll position, blurred focused inputs, and
+// collapsed open <details> elements. `setAppContent()` is a drop-in
+// replacement for `app.innerHTML = html` that diffs the new markup against
+// the live DOM and only touches nodes that actually changed. The very first
+// render into an empty/placeholder `#app` still ends up replacing
+// everything (there's nothing worth preserving yet); subsequent poll-driven
+// re-renders of the same page patch in place.
+function setAppContent(html) {
+  if (!app.firstChild) {
+    app.innerHTML = html;
+    return;
+  }
+  const scratch = document.createElement('div');
+  scratch.innerHTML = html;
+  morphChildren(app, scratch);
+}
+
+function morphChildren(oldParent, newParent) {
+  const oldNodes = Array.from(oldParent.childNodes);
+  const newNodes = Array.from(newParent.childNodes);
+  const max = Math.max(oldNodes.length, newNodes.length);
+  for (let i = 0; i < max; i++) {
+    const oldNode = oldParent.childNodes[i];
+    const newNode = newNodes[i];
+    if (!newNode) {
+      if (oldNode) oldParent.removeChild(oldNode);
+      continue;
+    }
+    if (!oldNode) {
+      oldParent.appendChild(newNode.cloneNode(true));
+      continue;
+    }
+    const typeMismatch = oldNode.nodeType !== newNode.nodeType ||
+      (oldNode.nodeType === Node.ELEMENT_NODE && oldNode.tagName !== newNode.tagName);
+    if (typeMismatch) {
+      oldParent.replaceChild(newNode.cloneNode(true), oldNode);
+      continue;
+    }
+    if (oldNode.nodeType === Node.TEXT_NODE || oldNode.nodeType === Node.COMMENT_NODE) {
+      if (oldNode.textContent !== newNode.textContent) oldNode.textContent = newNode.textContent;
+      continue;
+    }
+    if (oldNode.nodeType === Node.ELEMENT_NODE) {
+      morphAttributes(oldNode, newNode);
+      // Leave the user's live edits alone — don't diff into a focused input's subtree.
+      if (document.activeElement === oldNode && (oldNode.tagName === 'INPUT' || oldNode.tagName === 'TEXTAREA')) {
+        continue;
+      }
+      morphChildren(oldNode, newNode);
+    }
+  }
+}
+
+function morphAttributes(oldEl, newEl) {
+  const isLiveInput = (oldEl.tagName === 'INPUT' || oldEl.tagName === 'TEXTAREA') && document.activeElement === oldEl;
+  for (let i = oldEl.attributes.length - 1; i >= 0; i--) {
+    const name = oldEl.attributes[i].name;
+    if (!newEl.hasAttribute(name)) oldEl.removeAttribute(name);
+  }
+  for (const attr of newEl.attributes) {
+    if (isLiveInput && attr.name === 'value') continue;
+    if (oldEl.getAttribute(attr.name) !== attr.value) oldEl.setAttribute(attr.name, attr.value);
+  }
+  // Value/checked are live DOM properties, not reflected reliably via attributes.
+  if (!isLiveInput && 'value' in newEl && oldEl.value !== newEl.value) oldEl.value = newEl.value;
+  if ('checked' in newEl && oldEl.checked !== newEl.checked) oldEl.checked = newEl.checked;
+}
+
 // ── Tab navigation ─────────────────────────────────────────────
 function switchTab(tab) {
   currentTab = tab;
@@ -661,6 +733,7 @@ function switchTab(tab) {
     t.classList.toggle('active', label === tab || (tab === 'dashboard' && label === 'dashboard'));
   });
   if (tab === 'dashboard') { loadDashboard(); startDashRefresh(); }
+  else if (tab === 'active') loadActiveTab();
   else if (tab === 'plan') loadPlan();
   else if (tab === 'drafts') loadDrafts();
   else if (tab === 'questions') loadQuestions();
@@ -671,6 +744,7 @@ function switchTab(tab) {
   else if (tab === 'agents') loadAgents();
   else if (tab === 'personas') loadPersonas();
   else if (tab === 'advisor') loadAdvisor();
+  else if (tab === 'stats') loadStatsTab();
   else if (tab === 'health') loadHealthPage();
   else if (tab === 'settings') loadSettings();
 }
@@ -1036,7 +1110,7 @@ function renderAdvisorTab() {
     ? '<div class="empty" style="padding:2rem">Send a message to the advisor using the bar above (⌘K), or type below.<br><span style="font-size:0.8rem;color:var(--muted)">Try: "What should I work on next?" or "Check system health"</span></div>'
     : '';
 
-  app.innerHTML = `
+  setAppContent(`
     <div class="section">
       <div class="card-header" style="margin-bottom:0.75rem">
         <span class="card-title">Advisor Panel</span>
@@ -1051,7 +1125,7 @@ function renderAdvisorTab() {
         <button class="btn btn-ghost btn-sm" onclick="clearAdvisorHistory()">Clear</button>
       </div>
     </div>
-  `;
+  `);
 
   // Scroll to bottom.
   const hist = document.getElementById('advisor-chat-history');
@@ -1175,11 +1249,86 @@ function clearAdvisorHistory() {
   renderAdvisorTab();
 }
 
+// ── Stats tab (v0.17.0.12.6 item 6) ────────────────────────────
+// Total goals, completion rate, average duration, goals by phase, plan
+// velocity, and (when meridian.toml is configured) per-category Meridian KPI
+// alignment scores.
+
+async function loadStatsTab() {
+  if (!app.firstChild || app.querySelector('.loading, .empty')) {
+    app.innerHTML = '<div class="loading">Loading stats...</div>';
+  }
+  try {
+    const resp = await fetch('/api/stats/summary');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    renderStatsTab(data);
+  } catch (e) {
+    app.innerHTML = '<div class="empty">Failed to load stats. Is the daemon running?</div>';
+  }
+}
+
+function renderStatsTab(data) {
+  const completionPct = Math.round((data.completion_rate || 0) * 100);
+  const avgDurationMins = Math.round((data.avg_duration_secs || 0) / 60);
+
+  let html = '<div class="dash-section">';
+  html += '<div class="dash-section-title">Goal Stats</div>';
+  html += '<div class="stat-grid">';
+  html += `<div class="stat-card"><div class="stat-value">${data.total_goals || 0}</div><div class="stat-label">Total Goals</div></div>`;
+  html += `<div class="stat-card"><div class="stat-value">${completionPct}%</div><div class="stat-label">Completion Rate</div></div>`;
+  html += `<div class="stat-card"><div class="stat-value">${avgDurationMins}m</div><div class="stat-label">Avg Duration</div></div>`;
+  html += '</div></div>';
+
+  const byPhase = data.goals_by_phase || {};
+  const phaseEntries = Object.entries(byPhase).sort((a, b) => b[1] - a[1]);
+  html += '<div class="dash-section">';
+  html += '<div class="dash-section-title">Goals by Phase</div>';
+  if (phaseEntries.length === 0) {
+    html += '<div class="empty">No phase-linked goals yet.</div>';
+  } else {
+    html += '<div class="card">' + phaseEntries.map(([phase, count]) => `
+      <div class="card-meta" style="display:flex;justify-content:space-between;padding:0.25rem 0">
+        <span>${esc(phase)}</span><span>${count}</span>
+      </div>`).join('') + '</div>';
+  }
+  html += '</div>';
+
+  if (data.velocity) {
+    const v = data.velocity;
+    html += '<div class="dash-section">';
+    html += '<div class="dash-section-title">Plan Velocity</div>';
+    html += '<div class="stat-grid">';
+    html += `<div class="stat-card"><div class="stat-value">${v.applied || 0}</div><div class="stat-label">Applied</div></div>`;
+    html += `<div class="stat-card"><div class="stat-value">${v.denied || 0}</div><div class="stat-label">Denied</div></div>`;
+    html += `<div class="stat-card"><div class="stat-value">${v.failed || 0}</div><div class="stat-label">Failed</div></div>`;
+    html += `<div class="stat-card"><div class="stat-value">$${(v.total_cost_usd || 0).toFixed(2)}</div><div class="stat-label">Total Cost</div></div>`;
+    html += '</div></div>';
+  }
+
+  if (data.meridian_kpis) {
+    html += '<div class="dash-section">';
+    html += '<div class="dash-section-title">Meridian KPI Alignment</div>';
+    html += `<div class="card"><pre style="white-space:pre-wrap;font-size:0.8rem;margin:0">${esc(JSON.stringify(data.meridian_kpis, null, 2))}</pre></div>`;
+    html += '</div>';
+  } else {
+    html += '<div class="dash-section"><div class="dash-section-title">Meridian KPI Alignment</div>' +
+      '<div class="empty">Not configured. Run <code>ta meridian init</code> to add <code>meridian.toml</code> and see per-category KPI alignment here.</div></div>';
+  }
+
+  setAppContent(html);
+}
+
 // ── Dashboard ─────────────────────────────────────────────────
 async function loadDashboard() {
-  app.innerHTML = '<div class="loading">Loading dashboard...</div>';
+  // Only show the loading placeholder on the very first render — subsequent
+  // 30s/SSE-triggered refreshes patch the existing content in place instead
+  // of flashing back to a blank "Loading..." state (item 1).
+  if (!app.firstChild || app.querySelector('.loading, .empty')) {
+    app.innerHTML = '<div class="loading">Loading dashboard...</div>';
+  }
   try {
-    const [draftsResp, questionsResp, statusResp, planResp, velocityResp, advisorCtxResp, linksResp] = await Promise.allSettled([
+    const [draftsResp, questionsResp, statusResp, planResp, velocityResp, advisorCtxResp, linksResp, dialogResp] = await Promise.allSettled([
       fetch('/api/drafts'),
       fetch('/api/interactions/pending'),
       fetch('/api/status'),
@@ -1187,6 +1336,7 @@ async function loadDashboard() {
       fetch('/api/stats/velocity'),
       fetch('/api/advisor/context'),
       fetch('/api/links'),
+      fetch('/api/advisor/dialog'),
     ]);
 
     const draftsData = draftsResp.status === 'fulfilled' && draftsResp.value.ok
@@ -1210,6 +1360,9 @@ async function loadDashboard() {
     window._taLinks = linksResp.status === 'fulfilled' && linksResp.value.ok
       ? await linksResp.value.json().catch(() => [])
       : [];
+    const dialogEntries = dialogResp.status === 'fulfilled' && dialogResp.value.ok
+      ? (await dialogResp.value.json().catch(() => ({ entries: [] }))).entries || []
+      : [];
 
     // Update subtitle with timestamp.
     document.getElementById('subtitle').textContent =
@@ -1231,7 +1384,7 @@ async function loadDashboard() {
       return;
     }
 
-    renderDashboard(draftsData, questions, status, phases, velocity, advisorCtx);
+    renderDashboard(draftsData, questions, status, phases, velocity, advisorCtx, dialogEntries);
   } catch (e) {
     app.innerHTML = '<div class="empty">Failed to load dashboard. Is the daemon running?</div>';
   }
@@ -1265,7 +1418,7 @@ function startDashEventStream() {
   // to do here besides letting the 30s timer keep working as a fallback.
 }
 
-function renderDashboard(allDrafts, questions, status, phases, velocity, advisorCtx) {
+function renderDashboard(allDrafts, questions, status, phases, velocity, advisorCtx, dialogEntries) {
   const pending = allDrafts.filter(d => d.status === 'PendingReview');
   const active = allDrafts.filter(d => d.status === 'Draft');
 
@@ -1398,6 +1551,12 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
   html += `<div class="stat-card"><div class="stat-value">${total}</div><div class="stat-label">Total Drafts</div></div>`;
   html += '</div>';
 
+  // ── Advisor dialog (v0.17.0.12.6 item 4) ──────────────────────
+  // Sits below the 8 Project Health stat boxes. Persisted per-project at
+  // .ta/advisor-history.jsonl (separate from the full-tab Advisor's own
+  // .ta/advisor-history.json chat).
+  html += renderDashAdvisorDialog(dialogEntries || []);
+
   if (runningAgents.length === 0 && active.length === 0 && pending.length === 0 && questions.length === 0) {
     html += '<div class="empty">Everything is up to date. Start a new goal from the <strong>Plan</strong> tab.</div>';
   }
@@ -1406,7 +1565,118 @@ function renderDashboard(allDrafts, questions, status, phases, velocity, advisor
     '<button class="btn btn-sm btn-ghost" onclick="loadDashboard()">Refresh</button>' +
     ' <span style="margin-left:0.5rem">Auto-refreshes every 30s</span></div>';
 
-  app.innerHTML = html;
+  setAppContent(html);
+}
+
+// ── Dashboard Advisor dialog (v0.17.0.12.6 item 4) ─────────────
+
+function renderDashAdvisorMsg(entry) {
+  if (entry.role === 'user') {
+    return `<div class="advisor-msg user">${esc(entry.text)}</div>`;
+  }
+  let extra = '';
+  if (entry.confirmation_card) {
+    const c = entry.confirmation_card;
+    extra = `<div class="advisor-options" style="margin-top:0.5rem">
+      <div class="advisor-option opt-auto" style="cursor:default">
+        <span class="opt-num">?</span>
+        <span class="opt-label">${esc(c.title)}${c.phase ? ' &middot; phase ' + esc(c.phase) : ''} &middot; ~${c.estimated_duration_mins}m</span>
+      </div>
+      <div style="display:flex;gap:0.5rem;margin-top:0.25rem">
+        <button class="btn btn-sm btn-primary" onclick="approveDashAdvisorGoal(${JSON.stringify(c.title)}, ${JSON.stringify(c.phase || null)})">Approve</button>
+        <button class="btn btn-sm btn-ghost" onclick="editDashAdvisorGoal(${JSON.stringify(c.title)})">Edit</button>
+        <button class="btn btn-sm btn-ghost" onclick="this.closest('.advisor-msg').style.display='none'">Cancel</button>
+      </div>
+    </div>`;
+  } else if (entry.options && entry.options.length > 0) {
+    extra = '<div class="advisor-options" style="margin-top:0.5rem">' + entry.options.map((o, i) => `
+      <div class="advisor-option" onclick="document.getElementById('dash-advisor-input').value=${JSON.stringify(o)};submitDashAdvisorDialog()">
+        <span class="opt-num">${i + 1}</span>
+        <span class="opt-label">${esc(o)}</span>
+      </div>`).join('') + '</div>';
+  }
+  return `<div class="advisor-msg advisor">${esc(entry.text)}${extra}</div>`;
+}
+
+function renderDashAdvisorDialog(entries) {
+  const historyHtml = entries.map(renderDashAdvisorMsg).join('');
+  const emptyHint = entries.length === 0
+    ? '<div class="empty" style="padding:1.5rem">Ask the advisor to queue work, answer a question, or act on a draft.<br><span style="font-size:0.8rem;color:var(--muted)">Try: "What should I work on next?" or "fix the flaky login test"</span></div>'
+    : '';
+  return `<div class="dash-section">
+    <div class="dash-section-title">Advisor</div>
+    <div class="advisor-chat" id="dash-advisor-log" style="max-height:280px;overflow-y:auto">${emptyHint}${historyHtml}</div>
+    <div class="advisor-input-row">
+      <input type="text" id="dash-advisor-input" placeholder="Ask the advisor or describe work to queue…"
+             onkeydown="dashAdvisorKeydown(event)">
+      <button class="btn btn-primary" onclick="submitDashAdvisorDialog()">Send</button>
+    </div>
+  </div>`;
+}
+
+function dashAdvisorKeydown(e) {
+  if (e.key === 'Enter') submitDashAdvisorDialog();
+}
+
+async function submitDashAdvisorDialog() {
+  const input = document.getElementById('dash-advisor-input');
+  const message = input.value.trim();
+  if (!message) return;
+  input.value = '';
+  input.disabled = true;
+
+  const log = document.getElementById('dash-advisor-log');
+  if (log) {
+    log.querySelector('.empty')?.remove();
+    log.insertAdjacentHTML('beforeend', renderDashAdvisorMsg({ role: 'user', text: message }));
+    log.scrollTop = log.scrollHeight;
+  }
+
+  try {
+    const resp = await fetch('/api/advisor/dialog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+    const entry = await resp.json().catch(() => null);
+    if (resp.ok && entry && log) {
+      log.insertAdjacentHTML('beforeend', renderDashAdvisorMsg(entry));
+      log.scrollTop = log.scrollHeight;
+    } else if (log) {
+      log.insertAdjacentHTML('beforeend', renderDashAdvisorMsg({ role: 'advisor', text: 'Sorry, something went wrong answering that.' }));
+    }
+  } catch (e) {
+    if (log) log.insertAdjacentHTML('beforeend', renderDashAdvisorMsg({ role: 'advisor', text: 'Network error: ' + e.message }));
+  } finally {
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+function approveDashAdvisorGoal(title, phase) {
+  showPrompt('Confirm goal title:', title, async (confirmedTitle) => {
+    if (confirmedTitle === null) return;
+    try {
+      const resp = await fetch('/api/goal/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: confirmedTitle, phase_id: phase || undefined }),
+      });
+      if (resp.ok) {
+        showAlert('Goal queued: ' + confirmedTitle);
+        switchTab('active');
+      } else {
+        showAlert('Failed to queue goal: ' + await resp.text());
+      }
+    } catch (e) {
+      showAlert('Network error: ' + e.message);
+    }
+  });
+}
+
+function editDashAdvisorGoal(title) {
+  const input = document.getElementById('dash-advisor-input');
+  if (input) { input.value = title; input.focus(); }
 }
 
 // ── Active Goal Detail (v0.16.1.3) ────────────────────────────
@@ -1449,6 +1719,99 @@ function askAdvisorAboutGoal(goalId, title) {
       input.focus();
     }
   }, 200);
+}
+
+// ── Active tab (v0.17.0.12.6 item 5) ───────────────────────────
+// Lists Running/Configured goals with elapsed time + last event. Each row
+// expands to a free-text "Send info / ask this agent" input that posts to
+// the running agent via POST /api/goals/:id/message.
+
+let _activeRefreshTimer = null;
+
+async function loadActiveTab() {
+  if (!app.firstChild || app.querySelector('.loading, .empty')) {
+    app.innerHTML = '<div class="loading">Loading active goals...</div>';
+  }
+  try {
+    const resp = await fetch('/api/active/goals');
+    const goals = resp.ok ? await resp.json().catch(() => []) : [];
+    renderActiveTab(goals);
+  } catch (e) {
+    app.innerHTML = '<div class="empty">Failed to load active goals. Is the daemon running?</div>';
+  }
+  if (_activeRefreshTimer) clearInterval(_activeRefreshTimer);
+  _activeRefreshTimer = setInterval(() => {
+    if (currentTab === 'active') loadActiveTab();
+    else { clearInterval(_activeRefreshTimer); _activeRefreshTimer = null; }
+  }, 10000);
+}
+
+function renderActiveTab(goals) {
+  if (!goals || goals.length === 0) {
+    setAppContent('<div class="empty">No goals are currently running or configured. Start one from the <strong>Plan</strong> tab, or ask the Advisor on the Dashboard.</div>');
+    return;
+  }
+  const html = goals.map(g => {
+    const elapsedMins = Math.max(0, Math.round(g.elapsed_secs / 60));
+    const elapsedLabel = elapsedMins < 1 ? '<1m' : elapsedMins + 'm';
+    return `<div class="card" id="active-row-${esc(g.goal_id)}">
+      <div class="card-header clickable" onclick="toggleActiveRow('${esc(g.goal_id)}')">
+        <span class="card-title">${esc(g.title)}</span>
+        <span class="badge ${g.state === 'running' ? 'badge-success' : 'badge-info'}">${esc(g.state)}</span>
+      </div>
+      <div class="card-meta">
+        ${elapsedLabel} elapsed${g.phase ? ' &middot; phase ' + esc(g.phase) : ''} &middot;
+        <code style="font-size:0.75rem">${esc(g.goal_id.slice(0, 8))}</code>
+      </div>
+      <div class="card-meta" style="margin-top:0.25rem;color:var(--muted)">
+        ${g.last_event ? esc(g.last_event.slice(0, 160)) : 'No output yet.'}
+      </div>
+      <div id="active-expand-${esc(g.goal_id)}" style="display:none;margin-top:0.75rem">
+        <div class="advisor-input-row">
+          <input type="text" id="active-msg-${esc(g.goal_id)}" placeholder="Send info / ask this agent…"
+                 onkeydown="if(event.key==='Enter') sendActiveGoalMessage('${esc(g.goal_id)}')">
+          <button class="btn btn-primary btn-sm" onclick="sendActiveGoalMessage('${esc(g.goal_id)}')">Send</button>
+        </div>
+        <div id="active-msg-status-${esc(g.goal_id)}" style="font-size:0.8rem;color:var(--muted);margin-top:0.4rem"></div>
+      </div>
+    </div>`;
+  }).join('');
+  setAppContent(html);
+}
+
+function toggleActiveRow(goalId) {
+  const el = document.getElementById('active-expand-' + goalId);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  if (el.style.display === 'block') {
+    const input = document.getElementById('active-msg-' + goalId);
+    if (input) input.focus();
+  }
+}
+
+async function sendActiveGoalMessage(goalId) {
+  const input = document.getElementById('active-msg-' + goalId);
+  const statusEl = document.getElementById('active-msg-status-' + goalId);
+  const message = input ? input.value.trim() : '';
+  if (!message) return;
+  if (statusEl) { statusEl.style.color = 'var(--muted)'; statusEl.textContent = 'Sending…'; }
+  try {
+    const resp = await fetch('/api/goals/' + encodeURIComponent(goalId) + '/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) {
+      if (input) input.value = '';
+      if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = 'Delivered (' + (data.delivery || 'ok') + ').'; }
+    } else if (statusEl) {
+      statusEl.style.color = 'var(--red)';
+      statusEl.textContent = 'Failed: ' + (data.error || resp.status);
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = 'Network error: ' + e.message; }
+  }
 }
 
 // ── Plan Tab (v0.14.19) ────────────────────────────────────────
@@ -1598,7 +1961,7 @@ function renderPlan() {
     </div>
   </div>`;
 
-  app.innerHTML = html;
+  setAppContent(html);
 }
 
 function togglePlanQueue() {
@@ -1903,7 +2266,7 @@ function renderDraftList() {
   }
   const visible = draftShowAll ? drafts : drafts.filter(draftIsActive);
   const hiddenCount = drafts.length - visible.length;
-  app.innerHTML = `
+  setAppContent(`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
       <span style="color:var(--muted);font-size:0.85rem">${visible.length} draft${visible.length !== 1 ? 's' : ''}${hiddenCount > 0 ? ' <span style="color:var(--muted)">(+' + hiddenCount + ' closed/applied)</span>' : ''}</span>
       <div style="display:flex;gap:0.5rem">
@@ -1927,48 +2290,130 @@ function renderDraftList() {
         <code style="font-size:0.75rem">${d.package_id.slice(0, 8)}</code>
       </div>
     </div>
-  `).join(''));
+  `).join('')));
 }
 
 async function showDraftDetail(id) {
   app.innerHTML = '<div class="loading">Loading draft...</div>';
   try {
-    const resp = await fetch('/api/drafts/' + id);
-    if (!resp.ok) { renderDraftList(); return; }
-    const d = await resp.json();
-    renderDraftDetail(d);
+    const [draftResp, phasesResp, dialogResp] = await Promise.allSettled([
+      fetch('/api/drafts/' + id),
+      fetch('/api/plan/phases'),
+      fetch('/api/drafts/' + id + '/dialog'),
+    ]);
+    if (draftResp.status !== 'fulfilled' || !draftResp.value.ok) { renderDraftList(); return; }
+    const d = await draftResp.value.json();
+
+    let phaseDescription = '';
+    if (d.plan_phase && phasesResp.status === 'fulfilled' && phasesResp.value.ok) {
+      const phases = await phasesResp.value.json().catch(() => []);
+      const match = (phases || []).find(p => p.id === d.plan_phase);
+      if (match) phaseDescription = match.description || '';
+    }
+    const dialogEntries = dialogResp.status === 'fulfilled' && dialogResp.value.ok
+      ? (await dialogResp.value.json().catch(() => ({ entries: [] }))).entries || []
+      : [];
+
+    renderDraftDetail(d, phaseDescription, dialogEntries);
   } catch (e) { renderDraftList(); }
 }
 
-function renderDraftDetail(d) {
+// Per-file apply selection state, keyed by draft id → { [resource_uri]: boolean }.
+// Defaults to "everything selected" the first time a draft is opened.
+window._draftSelection = window._draftSelection || {};
+
+function getDraftSelection(d) {
+  const artifacts = (d.changes && d.changes.artifacts) || [];
+  if (!window._draftSelection[d.package_id]) {
+    const sel = {};
+    artifacts.forEach(a => { sel[a.resource_uri] = true; });
+    window._draftSelection[d.package_id] = sel;
+  }
+  return window._draftSelection[d.package_id];
+}
+
+function toggleArtifactSelection(packageId, uri, checked) {
+  if (!window._draftSelection[packageId]) window._draftSelection[packageId] = {};
+  window._draftSelection[packageId][uri] = checked;
+  const cached = window._draftDetailCache && window._draftDetailCache[packageId];
+  if (cached) renderDraftDetail(cached.draft, cached.phaseDescription, cached.dialogEntries);
+}
+
+// Returns warnings for artifacts that are selected but depend on a
+// deselected artifact (item 10).
+function computeDependencyWarnings(d, selection) {
+  const artifacts = (d.changes && d.changes.artifacts) || [];
+  const warnings = [];
+  for (const a of artifacts) {
+    if (selection[a.resource_uri] === false) continue; // not selected, nothing to warn about
+    for (const dep of (a.dependencies || [])) {
+      if (dep.kind !== 'depends_on') continue;
+      if (selection[dep.target_uri] === false) {
+        warnings.push(`${a.resource_uri} depends on ${dep.target_uri}, which is deselected.`);
+      }
+    }
+  }
+  return warnings;
+}
+
+function renderSupervisorReviewBody(sv) {
+  const verdict = (sv.verdict || sv.result || '').toLowerCase();
+  const verdictColor = verdict === 'pass' ? 'var(--green)' : verdict === 'block' ? 'var(--red)' : 'var(--yellow)';
+  const verdictIcon = verdict === 'pass' ? '✓' : verdict === 'block' ? '✗' : '⚠';
+  const findings = Array.isArray(sv.findings) ? sv.findings : (sv.notes ? [sv.notes] : []);
+  const recommendation = sv.summary || '';
+  return (verdict ? `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem">
+      <span style="font-weight:700;color:${verdictColor};font-size:1rem">${verdictIcon} Risk level: ${esc(verdict.toUpperCase())}</span>
+      ${sv.agent ? `<span style="font-size:0.8rem;color:var(--muted)">via ${esc(sv.agent)}</span>` : ''}
+    </div>` : '') +
+    (findings.length > 0 ? `<div style="font-weight:600;font-size:0.85rem;margin-bottom:0.25rem">Issues</div>` +
+      findings.map(f => `<p style="font-size:0.85rem;color:var(--muted);margin:0.15rem 0">• ${esc(typeof f === 'string' ? f : JSON.stringify(f))}</p>`).join('') : '') +
+    (recommendation ? `<div style="font-weight:600;font-size:0.85rem;margin-top:0.5rem;margin-bottom:0.25rem">Recommendation</div><p style="margin:0">${esc(recommendation)}</p>` : '');
+}
+
+function renderDraftDetail(d, phaseDescription, dialogEntries) {
+  phaseDescription = phaseDescription || '';
+  dialogEntries = dialogEntries || [];
+  // Cache the raw inputs so checkbox toggles (item 9) can re-render without
+  // an extra round-trip to the server.
+  window._draftDetailCache = window._draftDetailCache || {};
+  window._draftDetailCache[d.package_id] = { draft: d, phaseDescription, dialogEntries };
+
   const artifacts = (d.changes && d.changes.artifacts) || [];
   const pendingActions = (d.changes && d.changes.pending_actions) || [];
   const status = draftStatus(d);
   const isReviewable = status === 'pendingreview';
   const isApproved = status.includes('approved');
+  const selection = getDraftSelection(d);
+  const warnings = computeDependencyWarnings(d, selection);
 
-  // Summary section (open by default).
+  // Summary section with a distinct "Why" subsection (item 8), above the
+  // list of changes.
+  const goalTitle = (d.goal && d.goal.title) || '';
   let summaryBody = '';
+  if (goalTitle || phaseDescription) {
+    summaryBody += `<div style="font-weight:600;font-size:0.85rem;margin-bottom:0.25rem">Why</div>`;
+    summaryBody += `<p style="margin:0 0 0.75rem 0">${esc(goalTitle)}${phaseDescription ? ' — ' + esc(phaseDescription) : ''}</p>`;
+  }
   if (d.summary) {
     const text = d.summary.description || d.summary.what_changed || d.summary.why || '';
-    if (text) summaryBody = `<p>${esc(text)}</p>`;
+    if (text) summaryBody += `<p>${esc(text)}</p>`;
   }
   const summarySection = `<details open class="section"><summary>Summary</summary><div class="detail-body">${summaryBody || '<p style="color:var(--muted)">No summary.</p>'}</div></details>`;
 
-  // Supervisor Analysis section.
-  let supervisorBody = '';
-  if (d.supervisor_review) {
-    const sv = d.supervisor_review;
-    const verdict = (sv.verdict || sv.result || '').toLowerCase();
-    const verdictColor = verdict === 'pass' ? 'var(--green)' : verdict === 'block' ? 'var(--red)' : 'var(--yellow)';
-    const verdictIcon = verdict === 'pass' ? '✓' : verdict === 'block' ? '✗' : '⚠';
-    const findings = Array.isArray(sv.findings) ? sv.findings : (sv.notes ? [sv.notes] : []);
-    const summaryLine = sv.summary || '';
-    supervisorBody = (verdict ? `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem"><span style="font-weight:700;color:${verdictColor};font-size:1rem">${verdictIcon} ${esc(verdict.toUpperCase())}</span>${sv.agent ? `<span style="font-size:0.8rem;color:var(--muted)">via ${esc(sv.agent)}</span>` : ''}</div>` : '') +
-      (summaryLine ? `<p style="margin-bottom:0.5rem">${esc(summaryLine)}</p>` : '') +
-      findings.map(f => `<p style="font-size:0.85rem;color:var(--muted)">• ${esc(typeof f === 'string' ? f : JSON.stringify(f))}</p>`).join('');
+  // Supervisor Review section (item 7): this draft's own review, plus (when
+  // it differs — e.g. a follow-up draft that didn't re-run the supervisor)
+  // the initial review from the goal's first draft.
+  let supervisorBody = d.supervisor_review ? renderSupervisorReviewBody(d.supervisor_review) : '';
+  if (d.initial_supervisor_review) {
+    supervisorBody += `<div style="margin-top:${supervisorBody ? '1rem' : '0'};padding-top:${supervisorBody ? '0.75rem' : '0'};${supervisorBody ? 'border-top:1px solid var(--border)' : ''}">
+      <div style="font-weight:600;font-size:0.85rem;margin-bottom:0.25rem;color:var(--muted)">Initial Supervisor Review (from the goal's first draft)</div>
+      ${renderSupervisorReviewBody(d.initial_supervisor_review)}
+    </div>`;
   }
-  const supervisorSection = supervisorBody ? `<details open class="section"><summary>Supervisor Analysis</summary><div class="detail-body">${supervisorBody}</div></details>` : '';
+  const supervisorSection = supervisorBody
+    ? `<details open class="section"><summary>Supervisor Review</summary><div class="detail-body">${supervisorBody}</div></details>`
+    : `<details class="section"><summary>Supervisor Review</summary><div class="detail-body"><p style="color:var(--muted)">No supervisor review is attached to this draft.</p></div></details>`;
 
   // Agent Decision Log section.
   let decisionBody = '';
@@ -1986,16 +2431,28 @@ function renderDraftDetail(d) {
   }
   const decisionSection = decisionBody ? `<details class="section"><summary>Agent Decision Log</summary><div class="detail-body">${decisionBody}</div></details>` : '';
 
-  // Changed Files section (open by default).
+  // Changes section (item 9): renamed from "Changed Files", each row gets a
+  // checkbox (default checked) that excludes the file from Apply.
+  const selectedCount = artifacts.filter(a => selection[a.resource_uri] !== false).length;
   const filesBody = artifacts.length === 0
     ? '<p style="color:var(--muted)">No artifacts</p>'
     : artifacts.map(a => `
-        <div class="artifact">
-          <span class="artifact-uri">${esc(a.resource_uri)}</span>
-          <span style="color:var(--muted);margin-left:0.4rem">${esc(a.change_type || a.disposition || '')}</span>
-          ${a.explanation_tiers && a.explanation_tiers.summary ? '<br><span style="font-size:0.8rem;color:var(--muted)">' + esc(a.explanation_tiers.summary) + '</span>' : ''}
+        <div class="artifact" style="display:flex;align-items:flex-start;gap:0.5rem">
+          <input type="checkbox" style="margin-top:0.3rem" ${selection[a.resource_uri] !== false ? 'checked' : ''}
+                 onchange="toggleArtifactSelection('${d.package_id}', ${JSON.stringify(a.resource_uri)}, this.checked)">
+          <div>
+            <span class="artifact-uri">${esc(a.resource_uri)}</span>
+            <span style="color:var(--muted);margin-left:0.4rem">${esc(a.change_type || a.disposition || '')}</span>
+            ${a.explanation_tiers && a.explanation_tiers.summary ? '<br><span style="font-size:0.8rem;color:var(--muted)">' + esc(a.explanation_tiers.summary) + '</span>' : ''}
+          </div>
         </div>`).join('');
-  const filesSection = `<details open class="section"><summary>Changed Files (${artifacts.length})</summary><div class="detail-body">${filesBody}</div></details>`;
+  const filesSection = `<details open class="section"><summary>Changes (${selectedCount}/${artifacts.length} selected)</summary><div class="detail-body">${filesBody}</div></details>`;
+
+  // Dependency warnings (item 10): shown above the Approve/Apply buttons.
+  const warningsSection = warnings.length > 0 ? `
+    <details open class="section" style="border-color:var(--yellow)"><summary style="color:var(--yellow)">Warnings (${warnings.length})</summary><div class="detail-body">
+      ${warnings.map(w => `<p style="font-size:0.85rem;color:var(--yellow);margin:0.2rem 0">⚠ ${esc(w)}</p>`).join('')}
+    </div></details>` : '';
 
   // Constitution Check section.
   let constitutionBody = '';
@@ -2019,7 +2476,10 @@ function renderDraftDetail(d) {
         </div>`).join('')}
     </div></details>` : '';
 
-  app.innerHTML = `
+  // Per-draft Q&A dialog (items 11, 12).
+  const dialogSection = renderDraftDialogSection(d.package_id, dialogEntries);
+
+  setAppContent(`
     <span class="back" onclick="loadDrafts()">&larr; Back to drafts</span>
     <div class="detail">
       <div class="card-header">
@@ -2033,6 +2493,7 @@ function renderDraftDetail(d) {
       ${supervisorSection}
       ${decisionSection}
       ${filesSection}
+      ${warningsSection}
       ${constitutionSection}
       ${pendingSection}
       <div class="actions">
@@ -2047,13 +2508,96 @@ function renderDraftDetail(d) {
           <button class="btn btn-ghost" onclick="loadDrafts()">&larr; Back</button>
         `}
       </div>
+      ${dialogSection}
     </div>
-  `;
+  `);
+}
+
+// ── Per-draft Q&A dialog (v0.17.0.12.6 items 11, 12) ───────────
+
+function renderDraftDialogMsg(entry) {
+  if (entry.role === 'user') {
+    return `<div class="advisor-msg user">${esc(entry.text)}</div>`;
+  }
+  return `<div class="advisor-msg advisor">${esc(entry.text)}</div>`;
+}
+
+function renderDraftDialogSection(draftId, entries) {
+  const historyHtml = entries.map(renderDraftDialogMsg).join('');
+  const emptyHint = entries.length === 0
+    ? '<div class="empty" style="padding:1.5rem">Ask about this draft — "Is this safe to apply?", "What does change X do?", "Can I apply just the UI changes?" — or tell the advisor to amend it, follow it up, or add it to the plan.</div>'
+    : '';
+  return `<details open class="section"><summary>Ask about this draft</summary><div class="detail-body">
+    <div class="advisor-chat" id="draft-dialog-log-${esc(draftId)}" style="max-height:320px;overflow-y:auto">${emptyHint}${historyHtml}</div>
+    <div class="advisor-input-row">
+      <input type="text" id="draft-dialog-input-${esc(draftId)}" placeholder="Ask about this draft, or tell the advisor what to do…"
+             onkeydown="if(event.key==='Enter') submitDraftDialog('${esc(draftId)}')">
+      <button class="btn btn-primary" onclick="submitDraftDialog('${esc(draftId)}')">Send</button>
+    </div>
+  </div></details>`;
+}
+
+async function submitDraftDialog(draftId) {
+  const input = document.getElementById('draft-dialog-input-' + draftId);
+  const message = input ? input.value.trim() : '';
+  if (!message) return;
+  input.value = '';
+  input.disabled = true;
+
+  const log = document.getElementById('draft-dialog-log-' + draftId);
+  if (log) {
+    log.querySelector('.empty')?.remove();
+    log.insertAdjacentHTML('beforeend', renderDraftDialogMsg({ role: 'user', text: message }));
+    log.scrollTop = log.scrollHeight;
+  }
+
+  try {
+    const resp = await fetch('/api/drafts/' + draftId + '/dialog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+    const entry = await resp.json().catch(() => null);
+    if (resp.ok && entry) {
+      if (log) {
+        log.insertAdjacentHTML('beforeend', renderDraftDialogMsg(entry));
+        log.scrollTop = log.scrollHeight;
+      }
+      // "apply"/"deny" replies inside the dialog trigger the same action buttons.
+      if (entry.action === 'apply' || entry.action === 'deny') {
+        doDraftAction(draftId, entry.action);
+      }
+    } else if (log) {
+      log.insertAdjacentHTML('beforeend', renderDraftDialogMsg({ role: 'advisor', text: 'Sorry, something went wrong answering that.' }));
+    }
+  } catch (e) {
+    if (log) log.insertAdjacentHTML('beforeend', renderDraftDialogMsg({ role: 'advisor', text: 'Network error: ' + e.message }));
+  } finally {
+    input.disabled = false;
+    input.focus();
+  }
 }
 
 async function doDraftAction(id, action) {
   const btn = event && event.target;
 
+  if (action === 'approve' || action === 'apply') {
+    // Dependency warnings (item 10): if any selected file depends on a
+    // deselected one, require an explicit confirmation before proceeding.
+    const cached = window._draftDetailCache && window._draftDetailCache[id];
+    const warnings = cached ? computeDependencyWarnings(cached.draft, getDraftSelection(cached.draft)) : [];
+    if (warnings.length > 0) {
+      showConfirm(
+        `This draft has ${warnings.length} dependency warning(s):\n${warnings.join('\n')}\n\nProceed anyway?`,
+        () => runDraftAction(id, action, btn),
+      );
+      return;
+    }
+  }
+  runDraftAction(id, action, btn);
+}
+
+async function runDraftAction(id, action, btn) {
   if (action === 'apply') {
     // Kick off a background apply job and poll for progress (v0.17.0.12.5).
     // The endpoint returns immediately with a job_id instead of blocking on
@@ -2064,7 +2608,18 @@ async function doDraftAction(id, action) {
     statusEl.textContent = 'Starting apply…';
     if (btn && btn.parentElement) btn.parentElement.appendChild(statusEl);
     try {
-      const r = await fetch('/api/drafts/' + id + '/apply', { method: 'POST' });
+      // Per-file selection (item 9): only include files still checked in
+      // the Changes section; omitted files are excluded from this apply.
+      const cached = window._draftDetailCache && window._draftDetailCache[id];
+      const selection = cached ? getDraftSelection(cached.draft) : null;
+      const artifacts = cached ? ((cached.draft.changes && cached.draft.changes.artifacts) || []) : [];
+      const selectedUris = selection ? artifacts.filter(a => selection[a.resource_uri] !== false).map(a => a.resource_uri) : null;
+
+      const r = await fetch('/api/drafts/' + id + '/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(selectedUris ? { selected_uris: selectedUris } : {}),
+      });
       const data = await r.json().catch(() => ({}));
       if (r.ok && data.job_id) {
         pollApplyJob(data.job_id, statusEl, btn);
@@ -3024,7 +3579,7 @@ function renderProjects(projects) {
     </div>
   </div>`;
 
-  app.innerHTML = html;
+  setAppContent(html);
 }
 
 async function initNewProject() {
@@ -3201,7 +3756,7 @@ function renderWorkflows(workflows, templates) {
     </div>
   </div>`;
 
-  app.innerHTML = html;
+  setAppContent(html);
 }
 
 function useWorkflowTemplate(id, name, description) {
@@ -3360,7 +3915,7 @@ function renderAgents(profiles) {
     html += '<p style="color:var(--muted)">No agent profiles installed.</p>';
     html += '<p style="color:var(--muted);font-size:0.85rem">Install an Ollama profile: <code>ta agent install gemma4</code></p>';
     html += '</div>';
-    app.innerHTML = html;
+    setAppContent(html);
     return;
   }
 
@@ -3406,7 +3961,7 @@ function renderAgents(profiles) {
         + '</p>';
 
   html += '</div>';
-  app.innerHTML = html;
+  setAppContent(html);
 }
 
 async function loadPersonas() {
@@ -3471,7 +4026,7 @@ function renderPersonas(personas) {
     </div>
   </div>`;
 
-  app.innerHTML = html;
+  setAppContent(html);
 }
 
 async function savePersona() {
@@ -3850,17 +4405,17 @@ function renderHealthPageContent() {
   if (currentTab !== 'health') return;
   const signals = _healthSignals;
   if (signals.length === 0) {
-    app.innerHTML = `<div class="card"><div class="card-header"><span class="card-title">System Health</span></div>
+    setAppContent(`<div class="card"><div class="card-header"><span class="card-title">System Health</span></div>
       <p style="color:var(--green);margin-top:0.75rem">All systems healthy — no issues detected.</p>
       <button class="btn btn-ghost btn-sm" style="margin-top:0.75rem" onclick="pollHealthSignals()">Refresh</button>
-    </div>`;
+    </div>`);
     return;
   }
   const rows = signals.map(s => `<div class="health-bar ${esc(s.severity)}" style="margin-bottom:0.4rem">
     <span class="hb-msg"><strong>[${esc(s.severity)}]</strong> ${esc(s.message)}</span>
     <span class="hb-action">${esc(s.action)}</span>
   </div>`).join('');
-  app.innerHTML = `<div class="card">
+  setAppContent(`<div class="card">
     <div class="card-header">
       <span class="card-title">System Health</span>
       <div style="display:flex;gap:0.5rem;align-items:center">
@@ -3873,7 +4428,7 @@ function renderHealthPageContent() {
     </p>
     <div style="margin-top:0.75rem">${rows}</div>
     <div id="health-cleanup-log" class="health-log" style="display:none"></div>
-  </div>`;
+  </div>`);
 }
 
 async function loadHealthPage() {

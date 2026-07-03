@@ -298,6 +298,39 @@ async fn list_drafts(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     }
 }
 
+/// `GET /api/drafts/:id` response: the draft itself, plus (v0.17.0.12.6 item
+/// 7) the *first* draft's supervisor review for this goal when it differs
+/// from the current draft's own review — e.g. a follow-up draft that didn't
+/// re-run the supervisor still lets Studio show "the initial supervisor
+/// review output from the goal's audit trail."
+#[derive(Debug, Serialize)]
+struct DraftDetailResponse {
+    #[serde(flatten)]
+    draft: DraftPackage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    initial_supervisor_review: Option<ta_changeset::supervisor_review::SupervisorReview>,
+}
+
+/// Find the first draft (`draft_seq == 1`) sharing the same `goal_shortref`
+/// as `draft` and return its `supervisor_review`, if any. Returns `None` when
+/// `draft` has no `goal_shortref` (older drafts, or single-draft goals where
+/// `draft` itself is already the first) or the first draft can't be found.
+fn find_initial_supervisor_review(
+    pr_packages_dir: &std::path::Path,
+    draft: &DraftPackage,
+) -> Option<ta_changeset::supervisor_review::SupervisorReview> {
+    let shortref = draft.goal_shortref.as_deref()?;
+    if draft.draft_seq <= 1 {
+        // This draft already is the first — its own supervisor_review (if
+        // any) is the initial one; no separate lookup needed.
+        return None;
+    }
+    let all = load_all_drafts(pr_packages_dir).ok()?;
+    all.into_iter()
+        .find(|d| d.goal_shortref.as_deref() == Some(shortref) && d.draft_seq == 1)
+        .and_then(|d| d.supervisor_review)
+}
+
 async fn get_draft(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
@@ -308,7 +341,15 @@ async fn get_draft(
     };
 
     match load_draft(&state.pr_packages_dir, uuid) {
-        Ok(Some(draft)) => Json(draft).into_response(),
+        Ok(Some(draft)) => {
+            let initial_supervisor_review =
+                find_initial_supervisor_review(&state.pr_packages_dir, &draft);
+            Json(DraftDetailResponse {
+                draft,
+                initial_supervisor_review,
+            })
+            .into_response()
+        }
         Ok(None) => (StatusCode::NOT_FOUND, "draft not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -339,6 +380,20 @@ async fn approve_draft(
     }
 }
 
+/// Request body for `POST /api/drafts/:id/apply` (v0.17.0.12.6 item 9).
+///
+/// `selected_uris`, when present, is the set of artifact `resource_uri`s the
+/// human left checked in the Studio "Changes" panel. Artifacts *not* in this
+/// list are excluded from the apply via `--reject <uri>`; everything in the
+/// list (and anything unmentioned, when the list is absent) is approved via
+/// `--approve rest`. Omitting the field (or sending an empty body, as older
+/// callers do) preserves the original "apply everything" behavior.
+#[derive(Debug, Default, Deserialize)]
+struct ApplyDraftRequest {
+    #[serde(default)]
+    selected_uris: Option<Vec<String>>,
+}
+
 /// `POST /api/drafts/:id/apply` — Apply an approved or pending draft to the workspace.
 ///
 /// Spawns `ta draft apply <short_id> --git-commit` as a background task and
@@ -350,14 +405,32 @@ async fn approve_draft(
 async fn apply_draft_endpoint(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let uuid = match Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid UUID").into_response(),
     };
 
+    let apply_request: ApplyDraftRequest = if body.is_empty() {
+        ApplyDraftRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("Invalid JSON body for apply request: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
     // Verify the draft exists and is in an appliable state.
-    match load_draft(&state.pr_packages_dir, uuid) {
+    let draft = match load_draft(&state.pr_packages_dir, uuid) {
         Ok(None) => return (StatusCode::NOT_FOUND, "draft not found").into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         Ok(Some(draft)) => {
@@ -378,7 +451,24 @@ async fn apply_draft_endpoint(
                 )
                     .into_response();
             }
+            draft
         }
+    };
+
+    // Translate the checkbox selection into --approve/--reject URI patterns
+    // (item 9/10). Deselected files are excluded from the apply; everything
+    // else (selected + unmentioned) is approved.
+    let mut approve_patterns: Vec<String> = Vec::new();
+    let mut reject_patterns: Vec<String> = Vec::new();
+    if let Some(selected) = &apply_request.selected_uris {
+        let selected: std::collections::HashSet<&str> =
+            selected.iter().map(|s| s.as_str()).collect();
+        for artifact in &draft.changes.artifacts {
+            if !selected.contains(artifact.resource_uri.as_str()) {
+                reject_patterns.push(artifact.resource_uri.clone());
+            }
+        }
+        approve_patterns.push("rest".to_string());
     }
 
     // Derive project root from pr_packages_dir: .ta/pr_packages → .ta → project root.
@@ -423,16 +513,20 @@ async fn apply_draft_endpoint(
     let job_id_task = job_id.clone();
     let log_path_task = log_path.clone();
     tokio::spawn(async move {
-        let result = tokio::process::Command::new(&ta_bin)
-            .arg("--project-root")
+        let mut cmd = tokio::process::Command::new(&ta_bin);
+        cmd.arg("--project-root")
             .arg(&project_root)
             .arg("draft")
             .arg("apply")
             .arg(&short_id)
-            .arg("--git-commit")
-            .current_dir(&project_root)
-            .output()
-            .await;
+            .arg("--git-commit");
+        for pattern in &reject_patterns {
+            cmd.arg("--reject").arg(pattern);
+        }
+        for pattern in &approve_patterns {
+            cmd.arg("--approve").arg(pattern);
+        }
+        let result = cmd.current_dir(&project_root).output().await;
 
         let (status, combined) = match result {
             Ok(out) => {
@@ -1304,6 +1398,55 @@ mod tests {
         Uuid::parse_str(job_id).expect("job_id is a valid UUID");
     }
 
+    #[tokio::test]
+    async fn apply_draft_accepts_selected_uris_body() {
+        // v0.17.0.12.6 item 9: per-file selection body is accepted and still
+        // returns the same pending-job response shape.
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        write_draft_json(
+            &packages_dir,
+            id,
+            serde_json::json!({
+                "changes": {
+                    "artifacts": [
+                        {"resource_uri": "fs://workspace/a.rs", "change_type": "modify", "diff_ref": "diff-a"},
+                        {"resource_uri": "fs://workspace/b.rs", "change_type": "modify", "diff_ref": "diff-b"}
+                    ],
+                    "patch_sets": [],
+                    "pending_actions": []
+                }
+            }),
+        );
+
+        let app = build_router(packages_dir);
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/drafts/{}/apply", id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"selected_uris": ["fs://workspace/a.rs"]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status_code = resp.status();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            status_code,
+            StatusCode::ACCEPTED,
+            "body: {}",
+            String::from_utf8_lossy(&body_bytes)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json["status"], "pending");
+    }
+
     #[test]
     fn tail_lines_keeps_short_output_unchanged() {
         let s = "a\nb\nc";
@@ -1504,6 +1647,67 @@ mod tests {
         assert_eq!(
             val["supervisor_review"]["summary"],
             serde_json::json!("Changes are aligned with goal"),
+        );
+    }
+
+    #[tokio::test]
+    async fn draft_detail_returns_initial_supervisor_review_for_followup_draft() {
+        // v0.17.0.12.6 item 7: a follow-up draft (draft_seq 2) that didn't
+        // re-run the supervisor should still surface the *first* draft's
+        // supervisor review via `initial_supervisor_review`.
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+
+        let first_id = Uuid::new_v4();
+        write_draft_json(
+            &packages_dir,
+            first_id,
+            serde_json::json!({
+                "goal_shortref": "abc123",
+                "draft_seq": 1,
+                "supervisor_review": {
+                    "verdict": "pass",
+                    "scope_ok": true,
+                    "findings": ["Initial review"],
+                    "summary": "First draft looked fine",
+                    "agent": "builtin",
+                    "duration_secs": 1.0
+                }
+            }),
+        );
+
+        let followup_id = Uuid::new_v4();
+        write_draft_json(
+            &packages_dir,
+            followup_id,
+            serde_json::json!({
+                "goal_shortref": "abc123",
+                "draft_seq": 2,
+            }),
+        );
+
+        let app = build_router(packages_dir);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/drafts/{}", followup_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        // The follow-up draft has no supervisor_review of its own.
+        assert!(val["supervisor_review"].is_null());
+        // But the first draft's review is surfaced separately.
+        assert_eq!(
+            val["initial_supervisor_review"]["summary"],
+            serde_json::json!("First draft looked fine")
         );
     }
 
