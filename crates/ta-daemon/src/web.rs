@@ -32,7 +32,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 use chrono::Utc;
-use ta_changeset::draft_package::{DraftPackage, DraftStatus};
+use ta_changeset::draft_package::{ArtifactDisposition, DraftPackage, DraftStatus};
 use ta_memory::{FsMemoryStore, MemoryStore};
 
 // ── State ────────────────────────────────────────────────────────
@@ -148,6 +148,13 @@ struct DraftSummary {
 struct DenyRequest {
     #[serde(default = "default_deny_reason")]
     reason: String,
+    /// Artifact `resource_uri`s left checked in the Studio "Changes" panel
+    /// (v0.17.0.12.9 item 7). When present, stamps each artifact's
+    /// disposition the same way approve does, before marking the whole
+    /// draft Denied — a record of which files the human actually wanted,
+    /// even though none of them get applied from a denied draft.
+    #[serde(default)]
+    selected_uris: Option<Vec<String>>,
 }
 
 fn default_deny_reason() -> String {
@@ -458,20 +465,55 @@ async fn get_draft(
     }
 }
 
+/// Request body for `POST /api/drafts/:id/approve` (v0.17.0.12.9 item 7).
+///
+/// Mirrors `ApplyDraftRequest`: `selected_uris`, when present, is the set of
+/// artifact `resource_uri`s left checked in the Studio "Changes" panel.
+/// Omitting the field (or sending an empty body, as older callers do)
+/// approves the draft without touching any artifact's disposition.
+#[derive(Debug, Default, Deserialize)]
+struct ApproveDraftRequest {
+    #[serde(default)]
+    selected_uris: Option<Vec<String>>,
+}
+
 async fn approve_draft(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let uuid = match Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid UUID").into_response(),
     };
 
+    let approve_request: ApproveDraftRequest = if body.is_empty() {
+        ApproveDraftRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("Invalid JSON body for approve request: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
     let status = DraftStatus::Approved {
         approved_by: "web-ui".into(),
         approved_at: Utc::now(),
     };
-    match update_draft_status(&state.pr_packages_dir, uuid, status) {
+    match update_draft_status(
+        &state.pr_packages_dir,
+        uuid,
+        status,
+        approve_request.selected_uris.as_deref(),
+    ) {
         Ok(true) => Json(ActionResponse {
             package_id: id,
             status: "Approved".into(),
@@ -723,11 +765,17 @@ async fn deny_draft(
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid UUID").into_response(),
     };
 
+    let selected_uris = body.selected_uris;
     let status = DraftStatus::Denied {
         reason: body.reason,
         denied_by: "web-ui".into(),
     };
-    match update_draft_status(&state.pr_packages_dir, uuid, status) {
+    match update_draft_status(
+        &state.pr_packages_dir,
+        uuid,
+        status,
+        selected_uris.as_deref(),
+    ) {
         Ok(true) => Json(ActionResponse {
             package_id: id,
             status: "Denied".into(),
@@ -853,10 +901,17 @@ fn load_draft(dir: &std::path::Path, id: Uuid) -> Result<Option<DraftPackage>, s
     Ok(Some(draft))
 }
 
+/// Update a draft's status and, when `selected_uris` is given, stamp each
+/// artifact's `disposition` from the human's checkbox selection in Studio
+/// (v0.17.0.12.9 item 7): artifacts named in `selected_uris` are marked
+/// `Approved`, everything else `Rejected`. `None` leaves existing
+/// dispositions untouched, preserving old callers that approve/deny a whole
+/// draft without a per-file selection.
 fn update_draft_status(
     dir: &std::path::Path,
     id: Uuid,
     status: DraftStatus,
+    selected_uris: Option<&[String]>,
 ) -> Result<bool, std::io::Error> {
     let path = dir.join(format!("{}.json", id));
     if !path.exists() {
@@ -865,6 +920,17 @@ fn update_draft_status(
     let content = std::fs::read_to_string(&path)?;
     let mut draft: DraftPackage = serde_json::from_str(&content)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if let Some(selected) = selected_uris {
+        let selected: std::collections::HashSet<&str> =
+            selected.iter().map(|s| s.as_str()).collect();
+        for artifact in &mut draft.changes.artifacts {
+            artifact.disposition = if selected.contains(artifact.resource_uri.as_str()) {
+                ArtifactDisposition::Approved
+            } else {
+                ArtifactDisposition::Rejected
+            };
+        }
+    }
     draft.status = status;
     let updated =
         serde_json::to_string_pretty(&draft).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -1948,6 +2014,157 @@ mod tests {
             "on-disk status should reflect denied: {}",
             status_str
         );
+    }
+
+    #[tokio::test]
+    async fn approve_draft_stamps_disposition_from_selected_uris() {
+        // v0.17.0.12.9 item 7: Approve now acts on the same per-file checkbox
+        // selection Apply already respects — selected artifacts are marked
+        // Approved, deselected ones Rejected.
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        write_draft_json(
+            &packages_dir,
+            id,
+            serde_json::json!({
+                "changes": {
+                    "artifacts": [
+                        {"resource_uri": "fs://workspace/a.rs", "change_type": "modify", "diff_ref": "diff-a"},
+                        {"resource_uri": "fs://workspace/b.rs", "change_type": "modify", "diff_ref": "diff-b"}
+                    ],
+                    "patch_sets": [],
+                    "pending_actions": []
+                }
+            }),
+        );
+
+        let app = build_router(packages_dir.clone());
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/drafts/{}/approve", id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"selected_uris": ["fs://workspace/a.rs"]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let pkg_path = packages_dir.join(format!("{}.json", id));
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(pkg_path).unwrap()).unwrap();
+        let artifacts = on_disk["changes"]["artifacts"].as_array().unwrap();
+        let a = artifacts
+            .iter()
+            .find(|a| a["resource_uri"] == "fs://workspace/a.rs")
+            .unwrap();
+        let b = artifacts
+            .iter()
+            .find(|a| a["resource_uri"] == "fs://workspace/b.rs")
+            .unwrap();
+        assert_eq!(a["disposition"], serde_json::json!("approved"));
+        assert_eq!(b["disposition"], serde_json::json!("rejected"));
+    }
+
+    #[tokio::test]
+    async fn approve_draft_without_body_leaves_dispositions_untouched() {
+        // Back-compat: older callers (and the "approve everything" button)
+        // send no selection at all — dispositions stay at their default.
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        write_draft_json(
+            &packages_dir,
+            id,
+            serde_json::json!({
+                "changes": {
+                    "artifacts": [
+                        {"resource_uri": "fs://workspace/a.rs", "change_type": "modify", "diff_ref": "diff-a"}
+                    ],
+                    "patch_sets": [],
+                    "pending_actions": []
+                }
+            }),
+        );
+
+        let app = build_router(packages_dir.clone());
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/drafts/{}/approve", id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let pkg_path = packages_dir.join(format!("{}.json", id));
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(pkg_path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["changes"]["artifacts"][0]["disposition"],
+            serde_json::json!("pending")
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_draft_stamps_disposition_from_selected_uris() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_dir = dir.path().join("packages");
+        std::fs::create_dir_all(&packages_dir).unwrap();
+        let id = Uuid::new_v4();
+        write_draft_json(
+            &packages_dir,
+            id,
+            serde_json::json!({
+                "changes": {
+                    "artifacts": [
+                        {"resource_uri": "fs://workspace/a.rs", "change_type": "modify", "diff_ref": "diff-a"},
+                        {"resource_uri": "fs://workspace/b.rs", "change_type": "modify", "diff_ref": "diff-b"}
+                    ],
+                    "patch_sets": [],
+                    "pending_actions": []
+                }
+            }),
+        );
+
+        let app = build_router(packages_dir.clone());
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/drafts/{}/deny", id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "reason": "not what I asked for",
+                            "selected_uris": ["fs://workspace/b.rs"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let pkg_path = packages_dir.join(format!("{}.json", id));
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(pkg_path).unwrap()).unwrap();
+        let artifacts = on_disk["changes"]["artifacts"].as_array().unwrap();
+        let a = artifacts
+            .iter()
+            .find(|a| a["resource_uri"] == "fs://workspace/a.rs")
+            .unwrap();
+        let b = artifacts
+            .iter()
+            .find(|a| a["resource_uri"] == "fs://workspace/b.rs")
+            .unwrap();
+        assert_eq!(a["disposition"], serde_json::json!("rejected"));
+        assert_eq!(b["disposition"], serde_json::json!("approved"));
     }
 
     #[tokio::test]

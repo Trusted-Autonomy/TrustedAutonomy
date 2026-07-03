@@ -356,24 +356,28 @@ The **Stats** tab shows total goals, completion rate, average duration, and a go
 
 #### Draft review panel
 
-Opening a draft from **Review Drafts** now shows:
+Opening a draft from **Review Drafts** — or clicking a card on the Dashboard or a phase's "Review Draft" button on the **Plan** tab, which all route through the same detail view — shows:
 
 - **Supervisor Review** (renamed from "Supervisor Analysis") — risk level, issues, and recommendation for this draft. For a follow-up draft that didn't re-run the supervisor, an **"Initial Supervisor Review"** subsection shows the review from the goal's first draft, so you're never missing the original risk assessment.
 - **Summary**, with a distinct **"Why"** line (goal title + phase description) above the change description.
-- **Changes** (renamed from "Changed Files") — each file has a checkbox, checked by default. Uncheck a file to exclude it from Apply; the Apply button only applies the files still checked.
+- **Changes** (renamed from "Changed Files") — each file has a checkbox. It's checked by default unless the draft itself already marked that file `rejected` (e.g. from a prior partial approve/deny), in which case it starts unchecked. **Select All** / **Clear All** buttons above the list toggle every checkbox at once. Uncheck a file to exclude it — **Approve**, **Deny**, and **Apply** all act on the current selection: Approve/Deny stamp each artifact's disposition (`approved`/`rejected`) on the draft before changing its status, and Apply only writes the files still checked.
 - **Warnings** — if a checked file depends on an unchecked one, a warning banner appears above Approve/Apply, and clicking either button shows an "Are you sure?" confirmation before proceeding.
 - **Ask about this draft** — a per-draft Q&A dialog (persisted at `.ta/drafts/<id>-dialog.jsonl`) for questions like "Is this safe to apply?", "What does change X do?", or "Can I apply just the UI changes?" It also accepts advisor actions — "amend this draft to also include Z", "create a follow-up goal to fix Y", "add item X to the plan" — which are recorded as pending advisor actions (`.ta/advisor-pending-actions.jsonl`) for human follow-through rather than writing directly to PLAN.md or starting a goal automatically.
 
 ### Project Health Panel
 
-The **Dashboard** tab shows a health panel that refreshes every 30 seconds:
+The **Dashboard** tab shows a health panel that updates live: it subscribes to the daemon's `/api/events` stream and re-renders whenever a relevant event arrives (goal started/completed/failed, draft built/submitted/approved/denied/applied, agent question raised/answered, plan phase completed). A background poll every 90 seconds is a reliability fallback only — it self-heals if a browser can't do SSE or an event was somehow missed; it's not the primary refresh mechanism.
 
 | Stat | What it shows |
 |------|--------------|
-| **Completion** | Percentage of PLAN.md phases marked done |
-| **Velocity** | Goals completed this week |
-| **Open Drafts** | Drafts waiting for your review |
-| **Health** | Quick `ta doctor` summary (green / amber / red) |
+| **Plan Complete** | Percentage of PLAN.md phases marked done |
+| **Goals/Week** | `total_goals / weeks spanned by tracked velocity history` — rises as more goals complete |
+| **Needs Review** | Drafts in `PendingReview` status |
+| **System Health** | Count of active health signals, or "Healthy" (click through to the Health tab) |
+| **Active Agents** | Goals currently `Running` or `Configured` |
+| **In Progress** | Drafts still being built (`Draft` status) |
+| **Waiting for You** | Unanswered agent questions |
+| **Total Drafts** | All drafts regardless of status |
 
 ### Active Goal Detail
 
