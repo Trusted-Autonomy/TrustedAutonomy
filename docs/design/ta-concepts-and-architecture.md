@@ -99,33 +99,42 @@ For each concept: what it is, current abstraction, right abstraction, when to us
 
 This is the part confirmed **genuinely absent** — not partially built, not built-under-a-different-name. Traced the actual call paths: `--team <path>` only pulls the `reviewer` role for `agent_review` steps specifically; persona injection only fires on explicit `--persona <name>`. Zero automatic inference from goal/phase content to role, team, or constitution-rule-subset exists anywhere in `ta-advisor` or the supervisor.
 
-**What it should look like**, synthesizing everything above:
+**What it should look like**, synthesizing everything above and refined 2026-07-04: the Workflow Type node should be *a `workflow.toml` definition itself* (or a section within one), not a new parallel registry — reusing the config surface that already exists rather than adding a second one. Resolution has three modes, not a single default:
 
 ```
 Goal (title + phase context + objective)
   │
   ▼
-Workflow Type  ← classified from goal content/phase, OR explicitly set
-  │              (e.g. "code-implementation", "release-prep",
-  │               "consensus-panel-review", "content-generation")
+Workflow Type  ← a workflow.toml definition; selected explicitly,
+  │              or inferred from goal/phase content by extending
+  │              the existing ta-advisor intent classifier
+  │              (classify.rs, §2.6) rather than a new classifier
   │
-  ├──▶ Default Team  (which Roles this workflow type needs)
-  │        │
+  ├──▶ Default Team  (which Roles this workflow type needs, defined
+  │        │          IN the workflow definition, overridable)
   │        ▼
   │     Role → { Agent, Persona, Security level }
   │              (Persona = system_prompt + capabilities + style
   │               + constitution-extension + [future: KG ref, §4])
   │
   └──▶ Default ApprovalRule subset  (which constitution rules apply
-                                     to THIS workflow type — today,
-                                     rules are project-global, not
-                                     workflow-scoped)
+                                     to THIS workflow type)
 
-  User can override any node explicitly (--team/--persona/--agent,
-  exactly as today) — the tree provides *defaults*, not a lock-in.
+  Three resolution modes per node, not a single default:
+    1. Explicit override — user passes --team/--persona/--agent,
+       exactly as today.
+    2. Workflow-defined default — the workflow.toml definition's
+       own binding.
+    3. Supervisor/advisor recommendation, with an auto-select tier
+       reusing the EXISTING AdvisorSecurity tri-state
+       (read_only/suggest/auto) rather than a new trust-level
+       concept — "auto" already means "the advisor may act without
+       waiting for a human" for draft actions; extending that same
+       meaning to "the advisor may also pick the team/persona" is a
+       generalization of a mechanism that already exists.
 ```
 
-Today, every arrow in this tree requires an explicit flag from the user. Building this — a `WorkflowType` registry (itself data-defined, per §2.3's lesson) with default Team/Persona/ApprovalRule-subset bindings, resolved automatically but always overridable — is the concrete meaning of "the supervisor/advisor was intended to map teams/roles and workflows onto goals." It's also the single piece of work that most directly serves 0.17's stated goal of getting autonomous workflows to first-class: without it, "autonomous" still means "a human chooses the team/persona/security for every goal by hand."
+Today, only mode 1 exists — every arrow in this tree requires an explicit flag from the user. Building modes 2 and 3 — extending `workflow.toml` for defaults and `AdvisorSecurity` + `ta-advisor`'s classifier for the recommend/auto-select tier — is the concrete meaning of "the supervisor/advisor was intended to map teams/roles and workflows onto goals." It's also the single piece of work that most directly serves 0.17's stated goal of getting autonomous workflows to first-class: without it, "autonomous" still means "a human chooses the team/persona/security for every goal by hand."
 
 ---
 
@@ -207,7 +216,7 @@ Given "ship 0.17 soon" and everything confirmed above, in order:
 
 1. **Now / low-risk** — convert `TeamRole` from a closed enum to a data-defined role type. Confirmed small blast radius (52 usages, 6 files), and it's the precondition for everything else in this list. Also rename the "Adapter" naming collision (§2.2) while touching related code.
 2. **Now / already in motion** — unify the plugin/adapter/connector patterns into the 4-category model (§2.2), migrating `EXTERNAL_TOOLS`, `DbProxyPlugin`, and the planned `ReleaseAdapter` onto the "Plugin" category before any of them get more implementation baked in on the wrong foundation. This aligns with and should absorb yesterday's DB-proxy-redesign and adapter-unification findings rather than running as a separate effort.
-3. **0.17.x, new phase** — build the goal → workflow-type → team/role/persona → security mapping tree (§3). This is the concrete, highest-leverage piece for "autonomous workflows to first class" — extend the already-built consensus engine (§2.6) rather than reinventing multi-agent coordination.
+3. **0.17.x, new phase** — build modes 2 and 3 of the goal → workflow-type → team/role/persona → security mapping tree (§3): workflow-defined defaults (extending `workflow.toml`, not a new registry) and supervisor-recommended/auto-select resolution (extending the existing `AdvisorSecurity` tri-state and `ta-advisor`'s intent classifier). This is the concrete, highest-leverage piece for "autonomous workflows to first class" — extend existing mechanisms (workflow.toml, AdvisorSecurity, the consensus engine from §2.6) rather than inventing new ones.
 4. **0.17.x or immediate fast-follow** — CLI verb-set consolidation (§5), shipped with a deprecation/alias window, not a hard cutover.
 5. **After #1–3 land** — Studio IA redesign around the now-clean concept set. Building new UI against a still-fragmented backend just recreates the sprawl; sequence the backend fixes first.
 6. **0.18+, kept explicitly in the plan** — true concurrent sub-goal execution (already tracked at v0.13.16, no change needed, just don't lose it) and the knowledge-hierarchy/persona capability (§4) — needs a model decision (graphify-style clustering vs. leveled-context vs. novel ancestry design) before design work starts, but the plug-in point in `PersonaConfig` is already known and ready whenever that happens.

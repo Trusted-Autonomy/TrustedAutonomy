@@ -32,6 +32,13 @@ restore_fns = []
 patterns = []
 severity = "high"
 
+[rules.reuse-before-reinventing]
+description = "Before introducing a new protocol, trait, or enum for a category of pluggable/extensible behavior (an integration point, a plugin kind, a communication pattern), check docs/design/ta-concepts-and-architecture.md's concept catalog for an existing abstraction that already covers the need. Extend/reuse it, or justify in the PR/draft description why a new one is required. See TA-CONSTITUTION.md §1.7 — this rule exists because VCS, messaging, social, and agent-runtime plugins were each independently reimplemented as separate Rust types for the same external-process call/response idea, with no shared base, despite VCS plugins already existing first."
+inject_fns = []
+restore_fns = []
+patterns = []
+severity = "high"
+
 [rules.windows-platform-support]
 description = "All Windows-specific code must target Windows 10 (1507+) and Windows 11 — the two currently high-use versions. Win32 APIs used must be present in those versions. AppContainer (CreateAppContainerProfile), Job Objects (CreateJobObjectW), and WaitForSingleObject are all available from Win8+, which satisfies this rule. Exotic APIs requiring Win11 only, or deprecated APIs removed in Win10, are prohibited. The Windows CI runner (windows-latest on GitHub Actions) is Windows Server 2022, which is equivalent to Win11 for API availability. Tests that check platform-specific behavior must accept both WindowsAppContainer and WindowsJobObject as valid providers (AppContainer preferred, Job Object fallback for restricted environments). Never assert a single Windows provider in tests — always use an 'or' check."
 inject_fns = []
@@ -71,6 +78,21 @@ commands = [
     "bash -c 'untracked=$(git status --short | grep \"^?? .ta/\" | grep \"/$\"); if [ -n \"$untracked\" ]; then echo \"ERROR: Untracked .ta/ subdirectories not in .gitignore — add them:\"; echo \"$untracked\"; exit 1; fi'",
 ]
 on_failure = "block"
+
+[[validate]]
+# data-defined-entities (silent-catch-all half): flag NEW wildcard match arms
+# that silently swallow an unhandled case (return None/Ok(())/{}/empty
+# collection/Default) instead of failing loudly. Scoped to the current diff
+# only -- does not retroactively flag pre-existing code (74 instances exist
+# today). on_failure=warn, not block: not every flagged arm is actually a
+# bug, but each one should get a red-team-style review pass before merge
+# (surface as a supervisor review finding, not a hard gate). See
+# TA-CONSTITUTION.md #1.6.
+stage = "pre_draft_build"
+commands = [
+    "bash -c 'flagged=$(git diff --unified=0 -- \"*.rs\" | grep -E \"^\\+\\s*_\\s*=>\\s*(None|Ok\\(\\(\\)\\)|\\{\\}|Vec::new\\(\\)|vec!\\[\\]|Default::default\\(\\))\\s*[,}]?\\s*$\"); if [ -n \"$flagged\" ]; then echo \"WARN: new wildcard match arm(s) may silently swallow an unhandled case -- flag for red-team review (TA-CONSTITUTION.md #1.6):\"; echo \"$flagged\"; fi'",
+]
+on_failure = "warn"
 
 [[validate]]
 stage = "pre_draft_apply"

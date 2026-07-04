@@ -37,6 +37,11 @@ A silent catch-all (`_ => None`, `_ => unreachable!()`, or equivalent) that drop
 
 **Why this rule exists**: `phase_id_to_semver()`'s closed match arms (3-part and 4-part phase IDs only) silently skipped TA's own version-bump for every 5-segment phase ID, leaving `ta --version` stale through six merged releases before anyone noticed (fixed in v0.17.0.12.10). `TeamRole` was found to be a closed enum with the same latent risk. `EXTERNAL_TOOLS` was found hardcoded as a Rust array requiring a core PR to extend. This principle exists to stop this specific class of bug from recurring a fourth time. See `docs/design/ta-concepts-and-architecture.md` for the full audit that surfaced this pattern.
 
+### 1.7 Reuse Before Reinventing
+Before introducing a new protocol, trait, or enum for a category of pluggable/extensible behavior (an integration point, a plugin kind, a communication pattern), the implementer MUST check `docs/design/ta-concepts-and-architecture.md`'s concept catalog for an existing abstraction that already covers the need, and either extend/reuse it or justify in the PR/draft description why a new one is required.
+
+**Why this rule exists**: VCS, messaging, social, and agent-runtime plugins were each built as four fully independent Rust type definitions for the same "external process, call/response" idea, with no shared base trait or crate between them — despite VCS plugins already existing when the other three were written. This rule exists to stop a fifth independent reimplementation of the same pattern.
+
 ---
 
 ## 2. VCS & Branch Management
