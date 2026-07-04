@@ -1,6 +1,6 @@
 # TA Concepts & Architecture: Current State, Right Abstractions, and Refactor Path
 
-**Status**: Living design document, first written 2026-07-04
+**Status**: Living design document review, first written 2026-07-04
 **Purpose**: A single, honest inventory of every core concept TA has, what abstraction each one *should* use, whether it currently does, and a sequenced plan to close the gaps. Written in response to a direct architecture review request after the 0.17.0.12.x cleanup arc and the sage-lore/sage/graphify research (see [`sage-lore-review.md`](sage-lore-review.md)).
 
 **How to use this doc**: it's the reference for (a) what to refactor and when, (b) why Studio's UI is overly complex, (c) why the CLI command surface is overly complex, and (d) what "smallest clean verb set" TA should converge on. Update it as concepts change — don't let it go stale like the old `docs/design/sage-lore-review.md` reference did before this session existed.
@@ -13,7 +13,7 @@ TA's core differentiator — staged review (goal → draft → constitution chec
 
 1. **The same "hardcoded when it should be data" mistake has been made at least three times**: `phase_id_to_semver()`'s closed match arms (fixed 2026-07-03), `TeamRole` as a closed Rust enum (not yet fixed), and `EXTERNAL_TOOLS` as a hardcoded array (not yet fixed). This is a pattern, not a one-off — worth naming explicitly so it stops recurring.
 2. **TA has 12+ distinct "let something be swapped/extended" mechanisms** where it needs roughly 4. The word "Adapter" alone is used for two *opposite* trust models (in-process-core-only vs. intended-community-contributable) in different parts of the codebase.
-3. **The goal → workflow-type → team/role/persona → security-rule mapping the supervisor/advisor was meant to provide does not exist.** Everything is explicit, bottom-up, user-supplied every time (`--team`, `--persona`, `--agent`). There is no default resolution based on what kind of work a goal actually is.
+3. **The goal → workflow-type → team/role/persona → security-rule mapping the supervisor/advisor was meant to provide does not exist.** Everything is explicit, bottom-up, user-supplied every time (`--team`, `--persona`, `--agent`). There is no default resolution based on what kind of work a goal actually is. These should be definable in the configuration, e.g. in a workflow definition, but overridable. The supervisor/advisor will offer recommendations which can be set to supervisor automated selection where appropriate and desired.
 4. **Studio's 15-tab sprawl and the CLI's ~250-action surface are the same root cause wearing two costumes**: both surface every backend struct as its own top-level destination, with no information-architecture layer reconciling overlapping concepts. Fix the concept model first; both surfaces collapse substantially on their own.
 5. **Two capabilities you want kept in the plan for later are confirmed genuinely absent** (not just unbuilt-but-planned): data-defined (non-enum) roles, and any knowledge-graph/persona-hierarchy mechanism. Consensus-based multi-agent review, however, is **already built and shipped** (v0.15.15/v0.15.15.1) — a corrected finding from earlier in this review; it's the right foundation to extend rather than something to build from scratch.
 
