@@ -285,3 +285,85 @@ The reason today's social plugin has no `publish()` is a **policy default, not a
 **How this relates to the 4 extensibility categories (§2.2) — orthogonal, not competing**: the 4 categories answer *how* an implementation is built (external process / in-process / long-running / declarative config). This graph answers *what role* a node plays in the workflow. They compose: "VCS Commit" is a Backend today (built-in git) with Plugin variants (svn/perforce, external) — same graph role, different build mechanism. One correction surfaced while vetting: **Channel-Listener plugins (Discord/Slack/email-delivery) are not Commit implementations at all** — they deliver questions to humans (feed the Escalate/HumanGate path), an unrelated concern that happens to share the plugin-daemon infrastructure. Don't conflate the two.
 
 **Composability answer**: the simplest system is a DAG (not a fully general graph language — sage-lore's Scroll Assembly-level generality isn't justified yet, per the earlier sage-lore review) with explicit labeled back-edges for rework, defined inside `workflow.toml` (§3's mapping tree — Workflow Type already lives there), using the existing `WorkflowStepKind` as the node-kind vocabulary, extended with generic Write/Review/Decision/Commit/Reject roles and made data-defined per §1.6 rather than a further-closed Rust enum.
+
+---
+
+## 10. Worked Examples: Common Workflows in TA's Action Terms
+
+Every workflow below is the same graph — Goal → **Write** → **Review** → **Decision** → **Commit** / **Reject** / (rework loop back to Write) — with different components filling each role. Grouped to show the full spread: the most mature endpoint (VCS), the least mature (DB), one with a real policy gate but no publish yet (Social), and Review-as-Consensus already shipped (multi-agent code review).
+
+### 10.1 Standard code-implementation goal (canonical, most mature)
+e.g. `ta run "implement v0.17.0.12.11" --phase v0.17.0.12.11`
+
+| Graph role | Concrete translation | Real code today |
+|---|---|---|
+| Write | Agent edits files inside `.ta/staging/<goal-id>/`, diffed against source | staging overlay, `ta draft build` |
+| Review | Supervisor AI review produces a verdict (optionally a Consensus of parallel reviewers, see 10.4) | `crates/ta-changeset/src/supervisor_review.rs` |
+| Decision | Verdict alone today (Pass/Warn/Block) — no confidence/risk threshold yet (§2.1 gap) | `SupervisorVerdict` |
+| Commit | `SourceAdapter::commit()` + `push()` — feature branch, opens a PR | `crates/ta-submit/src/adapter.rs` |
+| Reject | `ta draft deny` — reason recorded | `DraftStatus::Denied` |
+| Rework | `DraftStatus::UnderReview → Running` — same staging, agent retries | goal state machine |
+
+CLI verbs in play: `ta run` (Write) → `ta draft view` (inspect Review) → `ta draft apply` (fire Commit) / `ta draft deny` (Reject).
+
+### 10.2 DB migration/mutation goal (least mature endpoint — Review/Decision don't exist yet)
+e.g. agent proposes a schema change or bulk data update
+
+| Graph role | Concrete translation | Real code today |
+|---|---|---|
+| Write | Agent's mutations captured as a log in the DB proxy's staging, never touching the live DB | `DbProxyPlugin` trait (`crates/ta-db-proxy/src/plugin.rs`) — needs migration to the Plugin category per yesterday's redesign |
+| Review | **Missing.** No confidence/risk gate exists for DB mutations at all, unlike social/email | gap |
+| Decision | **Missing.** Would reuse the generalized Decision logic lifted from `social_supervisor_check()` (§9), gated on row-count/schema-drop thresholds already spec'd (`[[rules.warn]]`/`[[rules.block]]`) but never implemented | PLAN.md v0.17.1 spec, not built |
+| Commit | `apply_mutation()` — replays the captured log against the real DB | `DbProxyPlugin::apply_mutation` (trait signature exists) |
+| Reject | Discard mutation log, drop replication slot | spec'd, not fully implemented |
+
+**This is the clearest illustration that DB is genuinely the least mature endpoint** — Write and Commit exist as trait methods, but the Review/Decision gating that VCS gets "for free" via supervisor review, and that social/email get via `min_confidence`, doesn't exist here at all.
+
+### 10.3 Social content posting goal (real policy gate, no `Commit` implementation yet)
+e.g. a content-creator goal produces a video + caption for posting
+
+| Graph role | Concrete translation | Real code today |
+|---|---|---|
+| Write | `ExternalSocialAdapter::create_draft()` / `create_scheduled()` — stages on the platform's own draft/schedule mechanism | `crates/ta-submit/src/social_adapter.rs` |
+| Review | `social_supervisor_check()` — confidence + flagged-substring + blocked-client-name checks | same file, already built |
+| Decision | `confidence >= min_confidence` (default 0.80) and no flags → pass; else → human review queue | `SocialSupervisorConfig` |
+| Commit | **`publish()` — is Commit() for this endpoint** (per the correction above), invoked exactly as generically as VCS's commit+push once it exists. Doesn't exist as a method yet; `post` sitting in `APPROVAL_REQUIRED_VERBS` means a human does the actual posting today, by policy, not by architectural necessity | gap: add `publish()`, gated the same way every other endpoint is |
+| Reject | Draft discarded on the platform, never scheduled/posted | implicit today |
+
+### 10.4 Multi-agent consensus code review (already built, real prior art for Review-as-Consensus)
+e.g. `code-review-consensus.toml` — 4 parallel specialist reviewers (architect/security/principal/PM)
+
+| Graph role | Concrete translation | Real code today |
+|---|---|---|
+| Write | Same as 10.1 | staging overlay |
+| Review | 4 parallel reviews (architect/security/principal/PM personas), each scoring independently | `code-review-consensus.toml` template |
+| Decision | `ConsensusAlgorithm` (Raft default / Paxos / Weighted) aggregates the 4 scores into one readiness verdict | `crates/ta-workflow/src/consensus/mod.rs` (v0.15.15, done, 37 tests) |
+| Commit / Reject | Same as 10.1 once consensus resolves | VCS |
+
+Proof that "Review can be a Consensus" (§9) isn't hypothetical — it's already shipped, just not yet generalized so any workflow's Review node can optionally be a Consensus rather than only this one built-in template.
+
+---
+
+## 11. The Reduced Instruction Set
+
+Two layers, meant to be the same vocabulary at different altitudes — the CLI verbs are the user-facing names for the underlying graph actions, not a separate language.
+
+**Internal graph semantics (§9)** — 5 actions, plus 2 reused (not new) mechanisms:
+- **Write, Review, Decision, Commit, Reject**
+- Reused: **Consensus** (one Review implementation, already built, §2.6/10.4) — **HumanGate** (a Decision's escalation target, already built, §2.6)
+
+**User-facing CLI verbs (§5)** — 10 verbs, nouns as subjects:
+- create, list, show, update, remove, run, approve, deny, apply, check, sync
+
+**The mapping between them:**
+
+| CLI verb | Graph action it triggers |
+|---|---|
+| `ta run <goal>` | Starts a Write |
+| `ta check <draft>` | Invokes/inspects a Review |
+| `ta approve` / `ta deny` | Supplies a human Decision output (HumanGate resolution) |
+| `ta apply` | Fires Commit |
+| *(implicit, on deny + retry)* | Reject → Rework loop back to Write |
+| `ta create/list/show/update/remove/sync <noun>` | CRUD on the entities the graph is built from (goals, drafts, teams, personas, workflows, plugins) — configuration, not graph actions |
+
+**The reduced instruction set, stated plainly**: 5 internal graph actions. 5 of the 10 CLI verbs (`run`/`check`/`approve`/`deny`/`apply`) are their direct user-facing expression. The other 5 (`create`/`list`/`show`/`update`/`remove`/`sync`) are generic CRUD any config-driven system needs regardless of domain — not TA-specific at all. That's the whole surface: **one small graph vocabulary for what happens to a goal, one small CRUD vocabulary for managing the configuration that shapes it.**
