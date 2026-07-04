@@ -25,6 +25,13 @@ restore_fns = []
 patterns = []
 severity = "high"
 
+[rules.data-defined-entities]
+description = "System entities representing a category of pluggable/extensible behavior (roles, personas, teams, workflow step kinds, plugin/adapter kinds, ID-to-version derivation rules, and similar) must be defined as data (TOML/YAML config loaded at runtime), not as closed Rust enums or hardcoded match arms, unless the variant set is genuinely fixed and finite by the domain itself (e.g. HTTP methods, a wire protocol's opcodes). When adding a new entity of this kind, the PR/draft description must justify (a) why it is enum/code-defined rather than data-defined if that choice is made, and (b) what its extensibility limit is. A silent catch-all (`_ => None`, `unreachable!()`, or equivalent) that drops an unhandled case without a loud, actionable error is prohibited regardless of which representation is chosen. See TA-CONSTITUTION.md §1.6 — this rule exists because `phase_id_to_semver()`'s closed match arms silently skipped TA's own version bump for 6 merged releases before anyone noticed."
+inject_fns = []
+restore_fns = []
+patterns = []
+severity = "high"
+
 [rules.windows-platform-support]
 description = "All Windows-specific code must target Windows 10 (1507+) and Windows 11 — the two currently high-use versions. Win32 APIs used must be present in those versions. AppContainer (CreateAppContainerProfile), Job Objects (CreateJobObjectW), and WaitForSingleObject are all available from Win8+, which satisfies this rule. Exotic APIs requiring Win11 only, or deprecated APIs removed in Win10, are prohibited. The Windows CI runner (windows-latest on GitHub Actions) is Windows Server 2022, which is equivalent to Win11 for API availability. Tests that check platform-specific behavior must accept both WindowsAppContainer and WindowsJobObject as valid providers (AppContainer preferred, Job Object fallback for restricted environments). Never assert a single Windows provider in tests — always use an 'or' check."
 inject_fns = []

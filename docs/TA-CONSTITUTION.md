@@ -4,7 +4,7 @@
 > Every command, subsystem, and integration must adhere to these rules.
 > Pre-release reviews validate conformance against this document.
 
-**Last updated**: v0.10.18-alpha
+**Last updated**: v0.17.0.12.10-alpha (added §1.6 Data-Defined Extensibility)
 **Status**: Living document — update when behavior changes.
 
 ---
@@ -25,6 +25,17 @@ Every outcome must be observable (logged with details) and actionable (user know
 
 ### 1.5 Append-Only Audit
 All significant actions are recorded in an append-only, hash-chained audit log. Each event links to the previous via `previous_hash`. The chain is verifiable via `ta audit verify`. No event may be deleted or modified after write.
+
+### 1.6 Data-Defined Extensibility
+System entities that represent a category of pluggable or extensible behavior — roles, personas, teams, workflow step kinds, plugin/adapter kinds, ID-to-version derivation rules, and similar — MUST be defined as data (TOML/YAML/JSON, loaded at runtime) rather than as closed Rust enums or hardcoded match arms, unless the set of variants is genuinely fixed and finite by the domain itself (e.g., HTTP methods, a wire protocol's opcode set).
+
+When introducing a new entity of this kind, the implementer MUST justify, in the PR or draft description:
+1. Why it should be enum/code-defined rather than data-defined, if that choice is made.
+2. What its extensibility limit is — how many variants exist today, and what happens when a caller needs one that doesn't exist yet.
+
+A silent catch-all (`_ => None`, `_ => unreachable!()`, or equivalent) that drops an unhandled case without producing a loud, actionable error is never acceptable, regardless of whether the entity is enum- or data-defined. Unhandled cases must fail visibly.
+
+**Why this rule exists**: `phase_id_to_semver()`'s closed match arms (3-part and 4-part phase IDs only) silently skipped TA's own version-bump for every 5-segment phase ID, leaving `ta --version` stale through six merged releases before anyone noticed (fixed in v0.17.0.12.10). `TeamRole` was found to be a closed enum with the same latent risk. `EXTERNAL_TOOLS` was found hardcoded as a Rust array requiring a core PR to extend. This principle exists to stop this specific class of bug from recurring a fourth time. See `docs/design/ta-concepts-and-architecture.md` for the full audit that surfaced this pattern.
 
 ---
 
