@@ -227,5 +227,22 @@ Given "ship 0.17 soon" and everything confirmed above, in order:
 4. **0.17.x or immediate fast-follow** — CLI verb-set consolidation (§5), shipped with a deprecation/alias window, not a hard cutover.
 5. **After #1–3 land** — Studio IA redesign around the now-clean concept set. Building new UI against a still-fragmented backend just recreates the sprawl; sequence the backend fixes first.
 6. **0.18+, kept explicitly in the plan** — true concurrent sub-goal execution (already tracked at v0.13.16, no change needed, just don't lose it) and the knowledge-hierarchy/persona capability (§4) — needs a model decision (graphify-style clustering vs. leveled-context vs. novel ancestry design) before design work starts, but the plug-in point in `PersonaConfig` is already known and ready whenever that happens.
+7. **Later, kept explicitly in the plan** — the community contribution security review workflow (§8). Build after the Plugin category (§2.2) and community constitution rules (§2.5) exist, since it governs both.
 
 This document should be the reference the next PLAN.md phase additions for items 1–5 cite back to, rather than re-deriving the rationale each time.
+
+---
+
+## 8. Community Contribution Security Review Workflow — flagged for later, kept in the plan
+
+Not designed yet — noted 2026-07-04 so it isn't lost, same treatment as §4. Governs any community-contributed Plugin (§2.2) or constitution rule (§2.5) once those categories exist.
+
+**The shape of the workflow, as specified:**
+
+1. **Initial security review before trust.** A community contribution (a Plugin per §2.2's category 1, or a constitution rule per §2.5's `gendigitalinc/sage`-modeled pipeline) goes through a security review before it's activated/trusted in a project. Findings are reported visibly — not a silent pass/fail (per Constitution §1.4, Observable & Actionable).
+2. **Re-review on every update, not just at submission.** An update to an already-trusted contribution re-triggers the review cycle. Trust is not permanent once granted.
+3. **Andon cord** (the manufacturing/lean concept — any worker can stop the line the moment they spot a problem, rather than waiting for it to reach the end): any community member can report a concern about a contribution at any time, not just maintainers or during a formal review window.
+4. **Report → admin yank.** A community report triggers an admin-initiated "yank" — suspending the contribution from active/trusted use pending investigation. This is a pull/quarantine action, not an immediate permanent removal; the contribution comes back if the report doesn't hold up.
+5. **Supervisor + security team review.** The actual investigation of a yanked contribution is done jointly by TA's own supervisor agent and a "security team" role, who produce advisory findings — reusing the existing `supervisor_review.rs` pipeline (per §1.7, Reuse Before Reinventing) rather than a new parallel review system. "Security team" as a role is exactly the kind of thing §2.3's TeamRole-as-data-defined fix (rather than a fixed 6-value enum with no security-team slot) needs to exist for before this can be assigned cleanly.
+
+**Where this plugs into what's already documented**: reuses the Plugin category (§2.2), the community constitution rules design modeled on `gendigitalinc/sage`'s `threats/*.yaml` + `pre-release`-branch pipeline (§2.5), the supervisor review pipeline (§2.1, §7 item 3b), and data-defined roles (§2.3/§1.6) for the "security team" assignment. No new mechanism needs inventing except the andon-cord report/yank state machine itself.
