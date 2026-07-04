@@ -218,12 +218,11 @@ Mapped every tab to its backend concept:
 
 ## 7. Refactor Recommendation & Sequencing
 
-Given "ship 0.17 soon" and everything confirmed above, in order:
+Given "ship 0.17 soon" and everything confirmed above, in order. Items 1–3b are now understood as facets of ONE unifying model (§9) rather than four separate efforts — sequence them together, not independently:
 
 1. **Now / low-risk** — convert `TeamRole` from a closed enum to a data-defined role type. Confirmed small blast radius (52 usages, 6 files), and it's the precondition for everything else in this list. Also rename the "Adapter" naming collision (§2.2) while touching related code.
-2. **Now / already in motion** — unify the plugin/adapter/connector patterns into the 4-category model (§2.2), migrating `EXTERNAL_TOOLS`, `DbProxyPlugin`, and the planned `ReleaseAdapter` onto the "Plugin" category before any of them get more implementation baked in on the wrong foundation. This aligns with and should absorb yesterday's DB-proxy-redesign and adapter-unification findings rather than running as a separate effort.
-3. **0.17.x, new phase** — build modes 2 and 3 of the goal → workflow-type → team/role/persona → security mapping tree (§3): workflow-defined defaults (extending `workflow.toml`, not a new registry) and supervisor-recommended/auto-select resolution (extending the existing `AdvisorSecurity` tri-state and `ta-advisor`'s intent classifier). This is the concrete, highest-leverage piece for "autonomous workflows to first class" — extend existing mechanisms (workflow.toml, AdvisorSecurity, the consensus engine from §2.6) rather than inventing new ones.
-3b. **Same phase or immediate companion** — composable threshold-based auto-approval for the core draft/apply pipeline (§2.1): a real, computed `confidence` on `SupervisorReview`, an actually-computed `risk_score` (not the hardcoded-`0` stub found today), and a workflow/team-declared rule (`verdict == pass && risk_score < N && confidence > 0.8`) gating `AdvisorSecurity::Auto`, generalizing the proven `min_confidence` pattern already used by `email_manager.rs`/`social_adapter.rs`. Sequence with #3 — both are needed before "autonomous" stops meaning "a human manually applies every draft," which today's entire session was a live demonstration of.
+2. **Now / already in motion** — unify the plugin/adapter/connector patterns into the 4-category model (§2.2), migrating `EXTERNAL_TOOLS`, `DbProxyPlugin`, and the planned `ReleaseAdapter` onto the "Plugin" category before any of them get more implementation baked in on the wrong foundation. Do this in terms of the §9 Commit contract, not independently — a new Plugin-category integration IS a Commit implementation for some application, so building the unified contract first means the unification happens automatically as each one lands, rather than needing a second pass.
+3. **0.17.x, new phase — build the §9 graph itself**: extract the generic Write → Review → Decision → Commit/Reject shape from its three existing independent instantiations (`DraftStatus`, `social_supervisor_check`, email's `supervisor_check`) into one model, fix the hardcoded `APPROVAL_REQUIRED_VERBS` array as part of it (§9), and build modes 2 and 3 of the goal → workflow-type → team/role/persona → security mapping tree (§3) on top of it: workflow-defined defaults (extending `workflow.toml`, not a new registry) and supervisor-recommended/auto-select resolution (extending `AdvisorSecurity` and `ta-advisor`'s intent classifier). The composable threshold-based auto-approval work (formerly listed as a separate 3b) is not separate — it IS the Decision node's core logic, generalized from `social_supervisor_check()`. This is the single highest-leverage phase for "autonomous workflows to first class" and for closing why today's entire session needed manual `ta draft apply` on every phase.
 4. **0.17.x or immediate fast-follow** — CLI verb-set consolidation (§5), shipped with a deprecation/alias window, not a hard cutover.
 5. **After #1–3 land** — Studio IA redesign around the now-clean concept set. Building new UI against a still-fragmented backend just recreates the sprawl; sequence the backend fixes first.
 6. **0.18+, kept explicitly in the plan** — true concurrent sub-goal execution (already tracked at v0.13.16, no change needed, just don't lose it) and the knowledge-hierarchy/persona capability (§4) — needs a model decision (graphify-style clustering vs. leveled-context vs. novel ancestry design) before design work starts, but the plug-in point in `PersonaConfig` is already known and ready whenever that happens.
@@ -246,3 +245,41 @@ Not designed yet — noted 2026-07-04 so it isn't lost, same treatment as §4. G
 5. **Supervisor + security team review.** The actual investigation of a yanked contribution is done jointly by TA's own supervisor agent and a "security team" role, who produce advisory findings — reusing the existing `supervisor_review.rs` pipeline (per §1.7, Reuse Before Reinventing) rather than a new parallel review system. "Security team" as a role is exactly the kind of thing §2.3's TeamRole-as-data-defined fix (rather than a fixed 6-value enum with no security-team slot) needs to exist for before this can be assigned cleanly.
 
 **Where this plugs into what's already documented**: reuses the Plugin category (§2.2), the community constitution rules design modeled on `gendigitalinc/sage`'s `threats/*.yaml` + `pre-release`-branch pipeline (§2.5), the supervisor review pipeline (§2.1, §7 item 3b), and data-defined roles (§2.3/§1.6) for the "security team" assignment. No new mechanism needs inventing except the andon-cord report/yank state machine itself.
+
+---
+
+## 9. The Write → Review → Decision → Commit/Reject Graph — Unifying Model
+
+Answers a direct question: is TA's core workflow a node-graph, where a Review connects to a Decision that routes to a Commit or Reject path, with VCS/DB/Social/etc. as pluggable Commit implementations? **Yes — and TA has already independently built this same four-stage shape at least three times, which is itself a live §1.7 violation worth fixing as part of adopting the unified model, not a hypothetical one.**
+
+**Evidence, verified against code**:
+- `DraftStatus` (`crates/ta-changeset/src/draft_package.rs`) — `Draft → PendingReview → Approved{..}/Denied{..} → Applied{..}/Superseded{..}` — the richest instantiation, for files/VCS.
+- `social_supervisor_check()` / `SocialSupervisorResult` (`crates/ta-submit/src/social_adapter.rs`) — confidence + flag-substring gate for social posts.
+- `supervisor_check()` / `SupervisorResult` (`apps/ta-cli/src/commands/email_manager.rs`) — structurally near-identical confidence gate for email replies, independently reimplemented.
+- DB proxy (`DbProxyPlugin`) has no equivalent gate at all yet (consistent with yesterday's finding it needs redesign). Release adapters aren't built yet either.
+
+**Five node roles** (not six — Escalate is not a new node, see below):
+
+| Node | Role | Reuse instead of reinventing |
+|---|---|---|
+| **Write** | Agent proposes a change, staged only, never touches the live target | Universal already (staging overlay) |
+| **Review** | Evaluates a Write, produces verdict + confidence + risk | `SupervisorVerdict` + the new `confidence` field (§2.1 gap). A Review MAY be a **Consensus** of parallel sub-reviews — reuse the already-built Raft/Paxos/Weighted engine (§2.6) as one Review implementation, not a new concept. |
+| **Decision** | Takes Review output(s), applies a threshold policy, routes to an outgoing edge (Commit / Reject / Rework-back-to-Write / Escalate) | `social_supervisor_check()` is already a working, application-agnostic template for this node's core logic — lift it out rather than writing it a fourth time. |
+| **Commit** | The one privileged, TA-mediated action that materializes a Write | `SourceAdapter::commit()`+`push()` (VCS, `crates/ta-submit/src/adapter.rs`) is the most complete existing example — generalize its shape, don't invent a new one. |
+| **Reject** | Discards the Write, audited | §7.4 Terminal Transition Auditing already covers this. |
+
+Escalate is not a sixth node — it's what Decision routes to when it can't confidently resolve, landing on the already-existing `HumanGate` workflow step (§2.6). Once a human resolves it, that's a fresh Decision input feeding back into the graph.
+
+**The per-Application ("adapter") contract**, generalizing `SourceAdapter`'s already-existing `prepare()`/`commit()`/`push()` shape past VCS to every application:
+- `write(proposed_change) -> WriteHandle` — stage only.
+- `describe_for_review(WriteHandle) -> ReviewableRepresentation` — unified diff / row-level before-after / post preview / message preview, per domain.
+- `commit(WriteHandle) -> CommitResult` — callable ONLY from TA's daemon-mediated pathway, never the agent process directly. This generalizes an *existing* constitutional invariant (§9.2 Daemon Mediates All Writes, currently stated in VCS-flavored terms) to every application, not a new rule.
+- `reject(WriteHandle)` — discard, no live effect ever occurred.
+
+**A real, deliberate exception to preserve, not paper over**: `ExternalSocialAdapter` has no `publish` method at all — "TA never publishes social media posts on behalf of the user" is an explicit comment in the code. Social's Commit is legitimately delegated entirely to the external platform; TA only ever reaches "drafted/scheduled." The contract needs an explicit `CommitCapability::Delegated` vs `CommitCapability::TaMediated` distinction, not an assumption that every application eventually commits through TA.
+
+**A concrete bug this generalization fixes**: `APPROVAL_REQUIRED_VERBS: &[&str] = &["apply", "commit", "send", "post"]` (`crates/ta-policy/src/engine.rs:83`) is a hardcoded array — the exact §1.6 pattern, in the single most security-critical location in the system. Every new application's commit-equivalent verb currently requires manually appending a string here. Once Commit is a first-class contract (per §1.6, itself data/trait-defined, not a closed enum), any application implementing it is automatically approval-required.
+
+**How this relates to the 4 extensibility categories (§2.2) — orthogonal, not competing**: the 4 categories answer *how* an implementation is built (external process / in-process / long-running / declarative config). This graph answers *what role* a node plays in the workflow. They compose: "VCS Commit" is a Backend today (built-in git) with Plugin variants (svn/perforce, external) — same graph role, different build mechanism. One correction surfaced while vetting: **Channel-Listener plugins (Discord/Slack/email-delivery) are not Commit implementations at all** — they deliver questions to humans (feed the Escalate/HumanGate path), an unrelated concern that happens to share the plugin-daemon infrastructure. Don't conflate the two.
+
+**Composability answer**: the simplest system is a DAG (not a fully general graph language — sage-lore's Scroll Assembly-level generality isn't justified yet, per the earlier sage-lore review) with explicit labeled back-edges for rework, defined inside `workflow.toml` (§3's mapping tree — Workflow Type already lives there), using the existing `WorkflowStepKind` as the node-kind vocabulary, extended with generic Write/Review/Decision/Commit/Reject roles and made data-defined per §1.6 rather than a further-closed Rust enum.
