@@ -9484,13 +9484,83 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12.17`
 
 ---
-### v0.17.0.12.18 — Trigger Layer + Workload-Routing Brain + Team Coordinator (not yet scoped)
+### v0.17.0.12.18 — Daemon Log Rotation Reliability Fix
 <!-- status: pending -->
-**Depends on**: v0.17.0.12.13 (agent-switching/mapping-tree groundwork)
+**Depends on**: none (independent, low-effort)
 
-**Goal**: Placeholder only, per `docs/design/ta-concepts-and-architecture.md` §13 (added 2026-07-05). Raised as a 3-tier gap: (1) no first-class trigger abstraction feeds goal creation today (everything is an explicit `ta run`/MCP call), (2) the §3 mapping tree needs to extend beyond agent selection into full workload classification + prioritization + privilege derivation ("the brain"), (3) whether a persistent "team coordinator" is a new role or a capability of the existing Advisor is undecided. Tier 3 (staged supervised execution) is already TA's strongest area and needs no new design here. Not detailed into items yet — user chose to finish v0.17.0.12.11–12.17 first (2026-07-05). Scope this phase properly before starting it.
+**Goal**: `daemon.log` has been repeatedly flagged at 5.2GB (threshold 500MB) by multiple `ta run` launches this session, requiring a manual `ta doctor --fix` each time. Make rotation automatic instead of a manual, easy-to-forget step — a small, concrete reliability win independent of the rest of the overhaul (per `docs/design/ta-concepts-and-architecture.md` §13.1).
+
+**Items**:
+1. [ ] Wire log rotation into the daemon's own lifecycle (e.g. size-checked on startup and on a periodic interval) rather than only via manually-invoked `ta doctor --fix`.
+2. [ ] Configurable rotation threshold and retention count in `daemon.toml`, with a sane default matching today's 500MB warning threshold.
+3. [ ] Tests: rotation triggers at threshold, old rotated logs beyond retention count are pruned, daemon continues logging uninterrupted across a rotation.
+4. [ ] USAGE.md: document the rotation config.
 
 #### Version: `0.17.0-alpha.12.18`
+
+---
+### v0.17.0.12.19 — Trigger Layer (`ta-intake`): Data-Defined Trigger Types
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.12 (data-defined-entity pattern established)
+
+**Goal**: Build tier 1 of the 3-tier model (`docs/design/ta-concepts-and-architecture.md` §13/§13.1) — a first-class trigger abstraction so goal creation can be fed by more than an explicit `ta run`/MCP call. Per-type trigger configs are data, not code, so the community can create/improve them the same way personas and (per v0.17.0.12.14) plugins are data-defined.
+
+**Items**:
+1. [ ] New library crate `ta-intake`, no CLI/daemon-specific glue: defines a `TriggerEvent` type (normalized payload + source metadata) and a `TriggerSource` trait producing them. Owns only "an event of type X arrived, here's its normalized payload" — nothing about what to do with it (that's v0.17.0.12.20's job).
+2. [ ] Per-type trigger configs as data: `.ta/triggers/<type>.toml`, discovery convention mirroring `plugin.toml` (v0.17.0.12.14). Ship 2 real, working trigger types end-to-end: schedule (cron-like) and inbound-email (reusing the existing email connector's fetch capability), each producing a `TriggerEvent` that results in a real goal being created.
+3. [ ] Explicit design decision, documented in-code: whether a fired trigger creates a goal directly, or queues data for later batch/regular processing — per the user's framing, this choice is data (part of the per-type config), not a hardcoded behavior.
+4. [ ] Tests: each of the 2 shipped trigger types fires and produces a correctly-formed `TriggerEvent`; a custom/community-authored trigger-type config round-trips through parse/discovery without code changes.
+5. [ ] USAGE.md: document `.ta/triggers/<type>.toml` and the 2 shipped trigger types as a template for authoring more.
+
+#### Version: `0.17.0-alpha.12.19`
+
+---
+### v0.17.0.12.20 — Routing Brain (`ta-brain`): Workload Classification + Privilege Derivation + Team Coordinator
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.13 (agent-switching tiers), v0.17.0.12.19 (`ta-intake`)
+
+**Goal**: Build tier 2 of the 3-tier model — extract the §3 mapping tree into one reusable library function, extending v0.17.0.12.13's agent-only `Switch` resolution into full workload classification, prioritization, and privilege derivation. Resolve the open §13 question: is the "team coordinator" a new persistent role, or a capability of the existing Advisor?
+
+**Items**:
+1. [ ] New library crate `ta-brain`, no CLI/daemon-specific glue: one pure function `route(input: RoutingInput) -> RoutingDecision` where `RoutingInput` is either an explicit goal request or a `ta-intake::TriggerEvent`, and `RoutingDecision = {team, persona, agent, security_tier, priority}`.
+2. [ ] Wire `ta run` (explicit path) and a new `ta-intake`-driven listener (triggered path) to both call this same function — no duplicated routing logic between the two entry points.
+3. [ ] Extend the agent-resolution tiers from v0.17.0.12.13 so `security_tier` and `priority` are derived the same way `agent` already is (including an `"auto"`-equivalent for security tier, gated by workload classification, not just role).
+4. [ ] Decide and implement the team-coordinator question: either (a) a new persistent, non-Write role that watches the incoming-request queue across concurrent goals and assigns/prioritizes via `ta-brain`, or (b) extend the existing Advisor with this capability. Document the decision and rationale in this phase's PLAN.md entry once made — don't leave it open.
+5. [ ] Tests: `route()` produces an identical `RoutingDecision` for equivalent explicit-vs-triggered inputs; priority ordering is correct when more than one request is pending; the team-coordinator path correctly surfaces its recommendation + rationale (Observable & Actionable).
+6. [ ] USAGE.md: document the routing/prioritization model and the team-coordinator role.
+
+#### Version: `0.17.0-alpha.12.20`
+
+---
+### v0.17.0.12.21 — Data-Format Specs + Studio Boundary Enforcement
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.19, v0.17.0.12.20
+
+**Goal**: Publish the versioned data-format specs that are the real interface boundary between TA's core, Studio, and community-authored trigger-configs/plugins (per §13.1) — the mechanism that lets the system stay a monorepo without becoming tightly coupled.
+
+**Items**:
+1. [ ] Publish `schemars`-derived JSON Schema for `Goal`, `Draft`/`Artifact`, `TriggerEvent`, `RoutingDecision`, `Persona`. Version each schema explicitly.
+2. [ ] Publish a human-readable spec doc (`docs/design/ta-data-format-spec.md` or similar) referencing the generated schemas, in the same reference style as `ta-action-reference.md`.
+3. [ ] Audit Studio's existing API usage for any direct coupling to internal `ta-*` crate types rather than the versioned spec; fix any found.
+4. [ ] Add a documented rule (and a lint/CI check if feasible) flagging new Studio code that imports internal `ta-*` crate types directly instead of going through the HTTP/SSE API + spec.
+5. [ ] Tests: schema round-trip / backward-compatibility check (a schema change that breaks an existing serialized example fails CI).
+6. [ ] USAGE.md: document the spec location and the "Studio only talks to the versioned spec" rule for future contributors.
+
+#### Version: `0.17.0-alpha.12.21`
+
+---
+### v0.17.0.12.22 — Documentation: Refreshed User Explainer + Maintainer Architecture Reference
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.11 through v0.17.0.12.21 (all of it — this is the final, doc-only phase for the whole overhaul)
+
+**Goal**: Per the user's explicit request (2026-07-05, "once this is done"): once the full v0.17.0.12.11–12.21 overhaul has landed, produce two fresh documents reflecting the real, final state of the system — not working notes, stable references.
+
+**Items**:
+1. [ ] Refresh `docs/guides/what-is-ta.md` (the plain-language, no-jargon user explainer, previously confirmed accurate 2026-07-04) to describe the system as it now actually works: data-defined roles, agent/model switching (including `"auto"`), the trigger layer, the routing brain, and the still-central staged-review/auto-approve/escalation model. Keep it just as jargon-free as the original.
+2. [ ] Write a new `docs/architecture/` doc for the user themselves (maintainer-level, not plain-language) — the "how it is set up" reference: the 3-tier model as actually built, the `ta-intake`/`ta-brain`/back-office library-crate boundaries, the data-format specs and how they gate Studio/community contributions, and why the codebase stays a single monorepo rather than split repos. This formalizes `docs/design/ta-concepts-and-architecture.md`'s working notes into a stable reference — the design doc can stay as historical record of how the decisions were reached; this new doc is the current-state reference.
+3. [ ] Cross-link both new/refreshed docs with `ta-action-reference.md` and the data-format spec from v0.17.0.12.21.
+
+#### Version: `0.17.0-alpha.12.22`
 
 ---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
