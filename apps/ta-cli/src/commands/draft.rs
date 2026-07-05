@@ -255,7 +255,10 @@ pub enum DraftCommands {
         id: String,
         /// Artifact URI to amend (e.g., "fs://workspace/src/main.rs").
         artifact_uri: String,
-        /// Replace the artifact content with a corrected file.
+        /// Replace the artifact content with a corrected file. If `artifact_uri` isn't
+        /// already in the draft, this adds it as a new artifact instead of erroring
+        /// (amend --add) — use this to recover a file an agent's description claimed
+        /// to touch but that never became a tracked artifact.
         #[arg(long)]
         file: Option<String>,
         /// Remove the artifact from the draft entirely.
@@ -4531,18 +4534,22 @@ fn deny_package(
             if let Ok(Some(goal)) = store.get(goal_id) {
                 if let Some(ref phase_id) = goal.plan_phase {
                     let note = "phase reset to pending — goal denied";
-                    if let Err(e) = super::plan::reset_phase_if_in_progress(
+                    match super::plan::reset_phase_if_in_progress(
                         &config.workspace_root,
                         phase_id,
                         note,
                     ) {
-                        tracing::warn!(
-                            phase = %phase_id,
-                            error = %e,
-                            "Failed to reset plan phase on denial"
-                        );
-                    } else {
-                        println!("Plan: phase {} reset to pending (goal denied)", phase_id);
+                        Ok(true) => {
+                            println!("Plan: phase {} reset to pending (goal denied)", phase_id);
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                phase = %phase_id,
+                                error = %e,
+                                "Failed to reset plan phase on denial"
+                            );
+                        }
                     }
                     // Best-effort: tell the daemon to release the in-memory phase claim.
                     release_phase_claim_via_daemon(&config.workspace_root, phase_id);
@@ -8948,19 +8955,22 @@ fn amend_package(
             pkg.changes.artifacts.len()
         );
     } else if let Some(corrected_file) = file_path {
-        // ── File replacement mode ──
+        // ── File replacement / addition mode ──
         let corrected_path = std::path::Path::new(corrected_file);
         if !corrected_path.exists() {
             anyhow::bail!("Corrected file not found: {}", corrected_file);
         }
 
-        // Find the artifact.
+        // Find the artifact, if one already exists for this URI. When absent,
+        // `--file` inserts a brand-new artifact (amend --add) instead of erroring —
+        // this recovers files an agent's change description claimed to touch
+        // (e.g. listed under `[deps: ...]`) that never became a tracked artifact.
         let artifact_idx = pkg
             .changes
             .artifacts
             .iter()
-            .position(|a| a.resource_uri == normalized_uri)
-            .ok_or_else(|| anyhow::anyhow!("Artifact not found in draft: {}", normalized_uri))?;
+            .position(|a| a.resource_uri == normalized_uri);
+        let is_new_artifact = artifact_idx.is_none();
 
         // Read the corrected content.
         let corrected_content = fs::read_to_string(corrected_path)?;
@@ -8997,10 +9007,14 @@ fn amend_package(
             None
         };
 
-        // Update the changeset in the store if we have a goal.
+        // Update the changeset in the store if we have a goal. Track the index the
+        // new/updated changeset lands at (JsonFileStore::save always appends), so a
+        // brand-new artifact's diff_ref resolves to real content instead of dangling.
+        let mut new_changeset_index: Option<usize> = None;
         if let Some(goal) = goal {
             let mut store = JsonFileStore::new(goal.store_path.clone())?;
             let goal_id_str = goal.goal_run_id.to_string();
+            new_changeset_index = store.list(&goal_id_str).ok().map(|l| l.len());
             let cs = if let Some(ref diff) = new_diff {
                 ChangeSet::new(
                     normalized_uri.clone(),
@@ -9034,12 +9048,42 @@ fn amend_package(
             fs::write(&staging_file, &corrected_content)?;
         }
 
-        // Update the artifact metadata.
-        let artifact = &mut pkg.changes.artifacts[artifact_idx];
+        // Update the artifact metadata — either the existing entry (replace) or a
+        // freshly-inserted one (add).
+        let (amendment_type, verb) = if is_new_artifact {
+            (AmendmentType::Added, "added")
+        } else {
+            (AmendmentType::FileReplaced, "amended")
+        };
+
+        let artifact = match artifact_idx {
+            Some(idx) => &mut pkg.changes.artifacts[idx],
+            None => {
+                pkg.changes.artifacts.push(Artifact {
+                    resource_uri: normalized_uri.clone(),
+                    change_type: ChangeType::Add,
+                    diff_ref: new_changeset_index
+                        .map(|i| format!("changeset:{}", i))
+                        .unwrap_or_else(|| normalized_uri.clone()),
+                    tests_run: vec![],
+                    disposition: ArtifactDisposition::Pending,
+                    rationale: None,
+                    dependencies: vec![],
+                    explanation_tiers: None,
+                    comments: None,
+                    amendment: None,
+                    kind: None,
+                });
+                pkg.changes
+                    .artifacts
+                    .last_mut()
+                    .expect("just pushed an artifact")
+            }
+        };
         artifact.amendment = Some(AmendmentRecord {
             amended_by: amended_by.to_string(),
             amended_at: Utc::now(),
-            amendment_type: AmendmentType::FileReplaced,
+            amendment_type,
             reason: reason.map(|s| s.to_string()),
         });
 
@@ -9048,9 +9092,13 @@ fn amend_package(
 
         // Record in decision log.
         pkg.plan.decision_log.push(DecisionLogEntry {
-            decision: format!("Human amended artifact: {}", normalized_uri),
+            decision: format!("Human {} artifact: {}", verb, normalized_uri),
             rationale: reason
-                .unwrap_or("Content replaced with corrected file")
+                .unwrap_or(if is_new_artifact {
+                    "Artifact inserted to match a description that referenced it but never tracked it"
+                } else {
+                    "Content replaced with corrected file"
+                })
                 .to_string(),
             alternatives: vec![],
             alternatives_considered: vec![],
@@ -9059,16 +9107,21 @@ fn amend_package(
         });
 
         save_package(config, &pkg)?;
-        println!(
-            "Amended artifact {} in draft {}",
-            normalized_uri, package_id
-        );
+        if is_new_artifact {
+            println!("Added artifact {} to draft {}", normalized_uri, package_id);
+        } else {
+            println!(
+                "Amended artifact {} in draft {}",
+                normalized_uri, package_id
+            );
+        }
         if new_diff.is_some() {
             println!("  Diff recomputed against source");
         }
         println!("  Disposition reset to: pending");
         println!(
-            "  Amended by: {} ({})",
+            "  {} by: {} ({})",
+            if is_new_artifact { "Added" } else { "Amended" },
             amended_by,
             Utc::now().format("%Y-%m-%d %H:%M UTC")
         );
@@ -9475,18 +9528,22 @@ fn close_package(
             if let Ok(Some(goal)) = store.get(goal_id) {
                 if let Some(ref phase_id) = goal.plan_phase {
                     let note = "phase reset to pending — draft closed";
-                    if let Err(e) = super::plan::reset_phase_if_in_progress(
+                    match super::plan::reset_phase_if_in_progress(
                         &config.workspace_root,
                         phase_id,
                         note,
                     ) {
-                        tracing::warn!(
-                            phase = %phase_id,
-                            error = %e,
-                            "Failed to reset plan phase on close"
-                        );
-                    } else {
-                        println!("Plan: phase {} reset to pending (draft closed)", phase_id);
+                        Ok(true) => {
+                            println!("Plan: phase {} reset to pending (draft closed)", phase_id);
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                phase = %phase_id,
+                                error = %e,
+                                "Failed to reset plan phase on close"
+                            );
+                        }
                     }
                     // Best-effort: tell the daemon to release the in-memory phase claim.
                     release_phase_claim_via_daemon(&config.workspace_root, phase_id);
@@ -10028,8 +10085,12 @@ pub fn apply_draft_build_context(
     let ctx_json = fs::read_to_string(ctx_path)?;
     let ctx: DraftBuildContext = serde_json::from_str(&ctx_json)?;
 
-    // Find the latest draft for this goal.
-    let Some(draft_id_str) = super::run::find_latest_draft_id(config, goal_id) else {
+    // Find the latest draft for this goal. Uses the raw package_id (UUID), not the
+    // canonical `<shortref>/<seq>` display form — draft.rs::build_package assigns a
+    // shortref/seq to every draft, so parsing that display form as a UUID always
+    // failed here previously, silently dropping verification_warnings/validation_log/
+    // supervisor_review for every draft (v0.17.0.12.11).
+    let Some(draft_uuid) = super::run::find_latest_draft_package_id(config, goal_id) else {
         tracing::warn!(
             goal_id = goal_id,
             "apply_draft_build_context: no draft found for goal"
@@ -10037,13 +10098,6 @@ pub fn apply_draft_build_context(
         // Remove the context file even on failure — it's stale either way.
         let _ = fs::remove_file(ctx_path);
         return Ok(());
-    };
-    let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id_str) else {
-        let _ = fs::remove_file(ctx_path);
-        anyhow::bail!(
-            "apply_draft_build_context: invalid draft UUID '{}'",
-            draft_id_str
-        );
     };
     let mut pkg = load_package(config, draft_uuid)?;
 
@@ -10053,7 +10107,10 @@ pub fn apply_draft_build_context(
     if !ctx.validation_log.is_empty() {
         pkg.validation_log = ctx.validation_log;
     }
-    if let Some(sup) = ctx.supervisor_review {
+    if let Some(mut sup) = ctx.supervisor_review {
+        // Pre-PASS consistency check: never let a PASS through when an artifact's
+        // own description references a file that isn't itself a tracked artifact.
+        ta_changeset::apply_artifact_consistency_gate(&mut sup, &pkg.changes.artifacts);
         pkg.supervisor_review = Some(sup);
     }
 
@@ -10142,7 +10199,9 @@ pub fn build_draft_inline(
             pkg.validation_log = validation_log.to_vec();
         }
         if let Some(sup) = supervisor_review {
-            pkg.supervisor_review = Some(sup.clone());
+            let mut sup = sup.clone();
+            ta_changeset::apply_artifact_consistency_gate(&mut sup, &pkg.changes.artifacts);
+            pkg.supervisor_review = Some(sup);
         }
         let _ = save_package(config, &pkg);
 
@@ -14041,6 +14100,182 @@ fn run() {
         let staging_content =
             std::fs::read_to_string(goal.workspace_path.join("README.md")).unwrap();
         assert_eq!(staging_content, "# Corrected version\n");
+    }
+
+    // ── v0.17.0.12.11 amend --add: --file inserts a missing artifact ──
+
+    #[test]
+    fn amend_file_adds_new_artifact_when_missing() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Amend add test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test amend --add".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Make a change in staging so the draft has one tracked artifact.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+
+        // Build draft.
+        build_package(&config, &goal_id, "Test changes", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        let pkg_id = packages[0].package_id.to_string();
+        assert_eq!(packages[0].changes.artifacts.len(), 1);
+
+        // A file the agent claimed to have changed but never became an artifact.
+        let missing = TempDir::new().unwrap();
+        let missing_path = missing.path().join("missing.md");
+        std::fs::write(&missing_path, "# CLAUDE.md fix\n").unwrap();
+
+        // amend --add: --file on a URI that isn't in the draft inserts it instead of erroring.
+        amend_package(
+            &config,
+            &pkg_id,
+            "CLAUDE.md",
+            Some(missing_path.to_str().unwrap()),
+            false,
+            Some("Recovering an artifact the agent described but never tracked"),
+            "human",
+        )
+        .unwrap();
+
+        let updated = load_package(&config, packages[0].package_id).unwrap();
+        assert_eq!(updated.changes.artifacts.len(), 2);
+
+        let added = updated
+            .changes
+            .artifacts
+            .iter()
+            .find(|a| a.resource_uri.contains("CLAUDE.md"))
+            .expect("CLAUDE.md should now be a tracked artifact");
+        assert_eq!(added.change_type, ChangeType::Add);
+        assert_eq!(added.disposition, ArtifactDisposition::Pending);
+        let amend = added.amendment.as_ref().expect("amendment record expected");
+        assert_eq!(amend.amendment_type, AmendmentType::Added);
+        assert_eq!(amend.amended_by, "human");
+
+        // Decision log entry should exist.
+        assert!(updated
+            .plan
+            .decision_log
+            .iter()
+            .any(|d| d.decision.contains("added") && d.decision.contains("CLAUDE.md")));
+
+        // New file should be written into the staging workspace.
+        let staging_content =
+            std::fs::read_to_string(goal.workspace_path.join("CLAUDE.md")).unwrap();
+        assert_eq!(staging_content, "# CLAUDE.md fix\n");
+    }
+
+    // ── v0.17.0.12.11 Pre-PASS artifact/description consistency check ──
+
+    #[test]
+    fn apply_draft_build_context_downgrades_inconsistent_pass_verdict() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Original\n").unwrap();
+
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Consistency gate test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test pre-PASS consistency gate".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        // Only README.md actually changes in staging — CLAUDE.md is never touched,
+        // so it never becomes its own tracked artifact.
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+
+        // But the agent's change_summary.json claims README.md's change depends on
+        // CLAUDE.md — the exact "[deps: ...] mentions a file that isn't tracked"
+        // inconsistency from the 2026-07-03 incident.
+        std::fs::create_dir_all(goal.workspace_path.join(".ta")).unwrap();
+        std::fs::write(
+            goal.workspace_path.join(".ta/change_summary.json"),
+            r#"{
+                "summary": "Updated README",
+                "changes": [
+                    {
+                        "path": "README.md",
+                        "action": "modified",
+                        "what": "Updated README",
+                        "why": "Test",
+                        "depends_on": ["CLAUDE.md"],
+                        "depended_by": [],
+                        "independent": false
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        build_package(&config, &goal_id, "Test changes", false).unwrap();
+        let packages = load_all_packages(&config).unwrap();
+        assert_eq!(packages[0].changes.artifacts.len(), 1);
+
+        // Simulate the async draft-build path attaching a PASS verdict via a
+        // deferred DraftBuildContext file.
+        let ctx = DraftBuildContext {
+            goal_id: goal_id.clone(),
+            verification_warnings: vec![],
+            validation_log: vec![],
+            supervisor_review: Some(ta_changeset::supervisor_review::SupervisorReview {
+                verdict: ta_changeset::supervisor_review::SupervisorVerdict::Pass,
+                scope_ok: true,
+                findings: vec![],
+                summary: "Looks aligned".to_string(),
+                agent: "claude-code".to_string(),
+                duration_secs: 1.0,
+            }),
+        };
+        let ctx_path = project.path().join("ctx.json");
+        std::fs::write(&ctx_path, serde_json::to_string(&ctx).unwrap()).unwrap();
+
+        apply_draft_build_context(&config, &goal_id, &ctx_path).unwrap();
+
+        let updated = load_package(&config, packages[0].package_id).unwrap();
+        let review = updated
+            .supervisor_review
+            .expect("supervisor review should be attached");
+        assert_eq!(
+            review.verdict,
+            ta_changeset::supervisor_review::SupervisorVerdict::Warn,
+            "PASS must be downgraded when a described file isn't tracked as an artifact"
+        );
+        assert!(review
+            .findings
+            .iter()
+            .any(|f| f.contains("described but not tracked") && f.contains("CLAUDE.md")));
     }
 
     #[test]

@@ -87,7 +87,8 @@ pub use sources::{
     CachedItem, ExternalSource, LockEntry, Lockfile, PackageManifest, SourceCache, SourceError,
 };
 pub use supervisor::{
-    DependencyGraph, SupervisorAgent, ValidationError, ValidationResult, ValidationWarning,
+    apply_artifact_consistency_gate, untracked_dependency_targets, DependencyGraph,
+    SupervisorAgent, ValidationError, ValidationResult, ValidationWarning,
 };
 pub use supervisor_review::{
     build_supervisor_prompt, fallback_supervisor_review, invoke_supervisor_agent,

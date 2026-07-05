@@ -3253,36 +3253,38 @@ pub fn execute(
 
                 // 7a. If there are verification warnings (warn mode), attach them to the draft.
                 if !verification_warnings.is_empty() {
-                    if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                        if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
-                            if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                                pkg.verification_warnings = verification_warnings;
-                                let _ = super::draft::save_package(config, &pkg);
-                            }
+                    if let Some(draft_uuid) = find_latest_draft_package_id(config, &goal_id) {
+                        if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                            pkg.verification_warnings = verification_warnings;
+                            let _ = super::draft::save_package(config, &pkg);
                         }
                     }
                 }
 
                 // 7b. Attach validation_log to the draft (v0.13.17).
                 if !validation_log.is_empty() {
-                    if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                        if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
-                            if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                                pkg.validation_log = validation_log;
-                                let _ = super::draft::save_package(config, &pkg);
-                            }
+                    if let Some(draft_uuid) = find_latest_draft_package_id(config, &goal_id) {
+                        if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                            pkg.validation_log = validation_log;
+                            let _ = super::draft::save_package(config, &pkg);
                         }
                     }
                 }
 
                 // 7c. Attach supervisor_review to the draft (v0.13.17.4).
                 if let Some(ref sup_review) = supervisor_review {
-                    if let Some(draft_id) = find_latest_draft_id(config, &goal_id) {
-                        if let Ok(draft_uuid) = uuid::Uuid::parse_str(&draft_id) {
-                            if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
-                                pkg.supervisor_review = Some(sup_review.clone());
-                                let _ = super::draft::save_package(config, &pkg);
-                            }
+                    if let Some(draft_uuid) = find_latest_draft_package_id(config, &goal_id) {
+                        if let Ok(mut pkg) = super::draft::load_package(config, draft_uuid) {
+                            let mut sup_review = sup_review.clone();
+                            // Pre-PASS consistency check (v0.17.0.12.11): never let a
+                            // PASS through when an artifact's own description references
+                            // a file that isn't itself a tracked artifact.
+                            ta_changeset::apply_artifact_consistency_gate(
+                                &mut sup_review,
+                                &pkg.changes.artifacts,
+                            );
+                            pkg.supervisor_review = Some(sup_review);
+                            let _ = super::draft::save_package(config, &pkg);
                         }
                     }
                 }
@@ -4296,13 +4298,12 @@ fn try_spawn_background_draft_build(
     Some(BackgroundBuildHandle::Background(bg_pid))
 }
 
-/// Find the most recent draft ID for a goal (headless output).
-///
-/// Returns the canonical display ID (`<shortref>/<seq>` when available, else UUID prefix)
-/// so that the ID shown in completion messages resolves via `ta draft view/approve/apply`.
-pub(crate) fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Option<String> {
+/// Load the most recently created draft package for a goal, if any.
+fn load_latest_draft_for_goal(
+    config: &GatewayConfig,
+    goal_id: &str,
+) -> Option<ta_changeset::draft_package::DraftPackage> {
     use ta_changeset::draft_package::DraftPackage;
-    use ta_changeset::draft_resolver::draft_canonical_id;
 
     let dir = &config.pr_packages_dir;
     if !dir.exists() {
@@ -4321,8 +4322,31 @@ pub(crate) fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Opt
         .collect();
 
     drafts.sort_by_key(|d| Reverse(d.created_at));
-    // Return the canonical display ID so the emitted string resolves via `ta draft view`.
-    drafts.first().map(draft_canonical_id)
+    drafts.into_iter().next()
+}
+
+/// Find the most recent draft ID for a goal (headless output).
+///
+/// Returns the canonical display ID (`<shortref>/<seq>` when available, else UUID prefix)
+/// so that the ID shown in completion messages resolves via `ta draft view/approve/apply`.
+pub(crate) fn find_latest_draft_id(config: &GatewayConfig, goal_id: &str) -> Option<String> {
+    use ta_changeset::draft_resolver::draft_canonical_id;
+    load_latest_draft_for_goal(config, goal_id).map(|pkg| draft_canonical_id(&pkg))
+}
+
+/// Find the raw `package_id` (UUID) of the most recent draft for a goal.
+///
+/// Unlike [`find_latest_draft_id`], this never returns the canonical `<shortref>/<seq>`
+/// display form — callers that need to `load_package`/`save_package` require the actual
+/// UUID, and parsing the display form as a UUID always fails once a draft has a shortref
+/// assigned (which happens unconditionally in `build_package`, i.e. for every real draft).
+/// That mismatch previously made verification_warnings/validation_log/supervisor_review
+/// attachment silently no-op for every draft (v0.17.0.12.11).
+pub(crate) fn find_latest_draft_package_id(
+    config: &GatewayConfig,
+    goal_id: &str,
+) -> Option<uuid::Uuid> {
+    load_latest_draft_for_goal(config, goal_id).map(|pkg| pkg.package_id)
 }
 
 /// Simple shell quoting for display purposes.
