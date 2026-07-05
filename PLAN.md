@@ -9380,6 +9380,110 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12.11`
 
 ---
+### v0.17.0.12.12 — Data-Defined Roles + Baseline Default-Agent Config
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.11
+
+**Goal**: Convert `TeamRole` from a closed Rust enum to a data-defined role type (per `TA-CONSTITUTION.md` §1.6, confirmed low-risk: 52 usages across 6 files, no exhaustive-match sprawl), rename the "Adapter" naming collision found in the architecture review, and add the minimum viable slice of the `Switch` action from `docs/design/ta-action-reference.md`: a baseline default-agent configuration setting. Full per-workload/workflow/persona-tier switching and supervisor auto-pick are explicitly deferred to v0.17.0.12.13 — this phase does not carry an open "remaining" list of its own.
+
+**Items**:
+1. [ ] **`TeamRole` enum → data-defined role type**: replace the closed enum (`Implementer, Reviewer, QA, Architect, ReleaseManager, Human(String)`) in `crates/ta-session/src/agent_action.rs` with an open representation (e.g. a newtype around `String`), preserving the 6 well-known names as constants so existing `team.toml` files parse identically. Update the fixed string→enum parser at `apps/ta-cli/src/commands/team.rs:112-118` (the actual hardcoding chokepoint) to accept any role name instead of erroring on unrecognized ones. Update all 52 usages across the 6 identified files.
+2. [ ] **Fix the "Adapter" naming collision**: rename `BuildAdapter` and the output-format renderers (in-process, core-only, correctly closed — `ta-changeset/src/output_adapters/`) to something that isn't "Adapter" (e.g. `BuildBackend`, `OutputRenderer`), reserving "Adapter" for the intended-community-contributable meaning (`SourceAdapter`, `ReleaseAdapter`). Rename only — no behavior change.
+3. [ ] **Baseline default-agent config**: add `[agent] default = "..."` to `daemon.toml`, data-defined, loaded once at daemon start. Resolution order: explicit `--agent` CLI flag (unchanged, highest precedence) → new `default` config setting → today's hardcoded `"claude-code"` fallback only if neither is set.
+4. [ ] Tests: `TeamRole` round-trips a custom/arbitrary role name (e.g. `"security-team"`, anticipating §8's community-review workflow) through `team.toml` parse/serialize; default-agent resolution order covers all three cases (flag > config > fallback); existing `team.toml` fixtures parse identically post-change (regression guard).
+5. [ ] USAGE.md: document the new `[agent] default` setting and its resolution order.
+
+#### Version: `0.17.0-alpha.12.12`
+
+---
+### v0.17.0.12.13 — Full Agent/Model Switching (Workload/Workflow/Persona Tiers + Supervisor Auto-Pick)
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.12
+
+**Goal**: Complete the `Switch` action (`docs/design/ta-action-reference.md`) on top of v0.17.0.12.12's baseline: agent/model selection configurable per workload, per workflow, or per persona, with an explicit `"auto"` declaration that hands the choice to the supervisor, and CLI args overriding every tier — matching the user's 2026-07-04 spec exactly.
+
+**Items**:
+1. [ ] Extend the resolution order from v0.17.0.12.12 with tiers evaluated most-specific-first: `--agent` CLI flag → persona-level `agent` binding (`.ta/personas/<name>.toml`) → workflow-level `agent` binding (`workflow.toml`, ties into the §3 mapping-tree work) → workload-type-level default → v0.17.0.12.12's baseline `default_agent` → hardcoded fallback.
+2. [ ] **`agent = "auto"`** at any tier: when resolved, the supervisor recommends an agent for this specific goal/workload using whatever signals are available (goal content, persona requirements, historical per-agent performance once v0.17.0.12.15's telemetry exists) rather than a fixed config value.
+3. [ ] Update `ta team assign` and persona/workflow config commands to accept and validate `"auto"` alongside real agent IDs.
+4. [ ] Tests: resolution order across all tiers including `"auto"`; the supervisor's recommendation (which agent, why) is logged and visible to a human, per the Observable & Actionable constitution principle — "auto" must never be a black box.
+5. [ ] USAGE.md: document the full tier hierarchy and `"auto"`.
+
+#### Version: `0.17.0-alpha.12.13`
+
+---
+### v0.17.0.12.14 — Plugin/Adapter/Connector Unification (4 Categories)
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.12
+
+**Goal**: Implement the 4-category extensibility model from `docs/design/ta-concepts-and-architecture.md` §2.2 — Plugin (external, call/response, community-contributable), Channel/Listener (external, long-running, supervised), Backend (in-process, core-only), Resource list (declarative registry) — replacing the 12 independently-evolved patterns found in the architecture review.
+
+**Items**:
+1. [ ] Extract one shared JSON-over-stdio protocol crate/trait from the currently-independent VCS/messaging/social/agent-runtime plugin implementations, matching VCS's existing `method: String` dispatch shape (most mature). Migrate all four onto it without changing external plugin-facing behavior.
+2. [ ] Define one shared `plugin.toml` manifest schema and `.ta/plugins/<kind>/<name>/` discovery convention used by every Plugin-category integration.
+3. [ ] Migrate `EXTERNAL_TOOLS` (hardcoded array, `apps/ta-cli/src/commands/tools.rs`) onto the Plugin category — a community member can add a new tool without a TA core PR.
+4. [ ] Migrate `DbProxyPlugin` onto the Plugin category per the 2026-07-03 DB proxy redesign (SQL/NoSQL facets, `.ta/db-adapters.toml` registry).
+5. [ ] Implement `ReleaseAdapter` (currently only planned in PLAN.md v0.17.2/17.3, never built) directly onto the Plugin category from the start.
+6. [ ] Tests: a synthetic community-authored plugin fixture is discovered and invoked identically for at least two different Plugin-category integrations via the shared protocol — proving the unification shares code, not just documentation.
+7. [ ] USAGE.md: one "Authoring a Plugin" guide replacing the currently-scattered per-family docs.
+
+#### Version: `0.17.0-alpha.12.14`
+
+---
+### v0.17.0.12.15 — The Write/Review/Decision/Commit/Reject Graph + Auto-Approval + Per-Action Telemetry
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.12
+
+**Goal**: Implement `docs/design/ta-action-reference.md`'s core graph — extract the generic Write → Review → Decision → Commit/Reject shape from its three independent instantiations (`DraftStatus`, `social_supervisor_check`, email's `supervisor_check`) into one reusable model, add real confidence/risk-threshold auto-approval, fix the hardcoded `APPROVAL_REQUIRED_VERBS` array, and add per-action telemetry (`Meter`, confirmed product requirement 2026-07-04).
+
+**Items**:
+1. [ ] Define the generic `Decision` gate (lifted from `social_supervisor_check()`, the most complete existing example) taking `{verdict, risk_score, confidence}` and a threshold config, returning `{Commit, Reject, Rework, Escalate}`. Reuse this one function from `DraftStatus`'s apply path, social's publish gate, and email's send gate.
+2. [ ] Add a real, computed `confidence` field to `SupervisorReview` (currently absent) and make `DraftPackage.risk_score` actually computed (currently hardcoded to `0` at every real call site).
+3. [ ] Generalize `APPROVAL_REQUIRED_VERBS` (`crates/ta-policy/src/engine.rs:83`, currently `&["apply", "commit", "send", "post"]`) so any application implementing the Commit contract is automatically approval-required.
+4. [ ] Wire `AdvisorSecurity::Auto` to consult the Decision gate's threshold instead of being an unconditional bypass.
+5. [ ] Add `publish()` to the social adapter contract, gated by the same Decision function — completing Social's Commit implementation (publish IS Commit for that endpoint, per the 2026-07-04 correction).
+6. [ ] Build the DB proxy's missing Review/Decision gate (currently absent entirely) using the same generic function.
+7. [ ] Per-action telemetry (`Meter`): record cost, tokens, duration, confidence, and risk per Write/Review/Decision/Commit action, queryable per-goal — build alongside items 1-2, same code path.
+8. [ ] Tests: the shared Decision gate produces identical results from every call site given equivalent inputs; telemetry round-trips and is queryable by goal ID; `AdvisorSecurity::Auto` correctly withholds approval when the gate would Reject/Escalate.
+9. [ ] USAGE.md: document the auto-approval threshold config and where to view per-action telemetry.
+
+#### Version: `0.17.0-alpha.12.15`
+
+---
+### v0.17.0.12.16 — CLI Verb-Set Consolidation
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.14, v0.17.0.12.15
+
+**Goal**: Collapse the ~250-action CLI surface onto the 10-verb set from `docs/design/ta-concepts-and-architecture.md` §5/§11 (create/list/show/update/remove/run/approve/deny/apply/check/sync), shipped with a deprecation/alias window, not a hard cutover.
+
+**Items**:
+1. [ ] Implement the 10 top-level verbs as the primary CLI surface, nouns as positional subjects (`ta list goal`, `ta show draft <id>`).
+2. [ ] Every existing subcommand becomes an alias forwarding to the new verb+noun form, printing a one-line deprecation notice (not an error).
+3. [ ] Fix the `ta goal delete` phase-reset-even-when-done bug (found 2026-07-03) as part of unifying delete/remove onto `remove` — don't carry it forward.
+4. [ ] USAGE.md: full rewrite of the command reference around the new verb structure, with an old→new lookup table.
+5. [ ] Tests: every old subcommand invocation produces identical behavior through its alias; the deprecation notice appears exactly once per invocation.
+
+#### Version: `0.17.0-alpha.12.16`
+
+---
+### v0.17.0.12.17 — Studio IA Redesign
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.12, v0.17.0.12.13, v0.17.0.12.14, v0.17.0.12.15, v0.17.0.12.16
+
+**Goal**: Collapse Studio's 15 nav tabs into the ~4 real destinations identified in `docs/design/ta-concepts-and-architecture.md` §6 (Attention, Activity, Configuration, Advisor). Sequenced last — building new UI against a still-fragmented backend recreates the sprawl.
+
+**Items**:
+1. [ ] One canonical "Attention Queue" merging Active/Agent Questions/Ready-to-Review/duplicate Dashboard cards into a single always-visible list.
+2. [ ] Merge the two separate, independently-persisted Advisor conversation histories (`.ta/advisor-history.json` and `.ta/advisor-history.jsonl`) into one.
+3. [ ] Build the missing team/role/persona-assignment UI (confirmed to not exist at all today) inside one "Configuration" destination, alongside the agent-switching tiers from v0.17.0.12.12/12.13.
+4. [ ] Move the per-draft Q&A dialog above the Approve/Apply/Deny action row (currently below it, backwards).
+5. [ ] Add visual preview rendering for image/video artifacts in the draft review panel (currently file-path-only despite backend `ArtifactKind::Image/Video` support existing).
+6. [ ] Plain-language copy pass: "Draft"→"Proposed Change", "Constitution Check"→"Safety Rules Check", "Supervisor Review"→"AI Safety Review" (or similar); fix the raw enum leak (`pendingreview` displaying unformatted).
+7. [ ] Verification: manual browser walkthrough, not just unit tests — this is UI.
+
+#### Version: `0.17.0-alpha.12.17`
+
+---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
 <!-- status: pending -->
 
