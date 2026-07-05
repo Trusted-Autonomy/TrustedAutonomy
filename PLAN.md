@@ -9484,6 +9484,15 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 #### Version: `0.17.0-alpha.12.17`
 
 ---
+### v0.17.0.12.18 — Trigger Layer + Workload-Routing Brain + Team Coordinator (not yet scoped)
+<!-- status: pending -->
+**Depends on**: v0.17.0.12.13 (agent-switching/mapping-tree groundwork)
+
+**Goal**: Placeholder only, per `docs/design/ta-concepts-and-architecture.md` §13 (added 2026-07-05). Raised as a 3-tier gap: (1) no first-class trigger abstraction feeds goal creation today (everything is an explicit `ta run`/MCP call), (2) the §3 mapping tree needs to extend beyond agent selection into full workload classification + prioritization + privilege derivation ("the brain"), (3) whether a persistent "team coordinator" is a new role or a capability of the existing Advisor is undecided. Tier 3 (staged supervised execution) is already TA's strongest area and needs no new design here. Not detailed into items yet — user chose to finish v0.17.0.12.11–12.17 first (2026-07-05). Scope this phase properly before starting it.
+
+#### Version: `0.17.0-alpha.12.18`
+
+---
 ### v0.17.0.13 — Meridian KPI Regression: Plan Phase Alignment Suggestions
 <!-- status: pending -->
 
