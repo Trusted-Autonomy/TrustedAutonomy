@@ -367,3 +367,25 @@ Two layers, meant to be the same vocabulary at different altitudes — the CLI v
 | `ta create/list/show/update/remove/sync <noun>` | CRUD on the entities the graph is built from (goals, drafts, teams, personas, workflows, plugins) — configuration, not graph actions |
 
 **The reduced instruction set, stated plainly**: 5 internal graph actions. 5 of the 10 CLI verbs (`run`/`check`/`approve`/`deny`/`apply`) are their direct user-facing expression. The other 5 (`create`/`list`/`show`/`update`/`remove`/`sync`) are generic CRUD any config-driven system needs regardless of domain — not TA-specific at all. That's the whole surface: **one small graph vocabulary for what happens to a goal, one small CRUD vocabulary for managing the configuration that shapes it.**
+
+---
+
+## 12. Input Connectors — the Mirror Direction, Mostly Unbuilt
+
+§9-11 modeled the *outbound* direction (agent proposes → world). Input connectors (Gmail, Slack, DB reads, web fetch, GitHub/Forgejo issues) are *inbound*, and the graph mirrors cleanly — same shape, opposite direction, mostly not built yet:
+
+**Fetch → Scan → Decision → Admit / Block**
+
+| Role | What it does | Mirrors | Real code today |
+|---|---|---|---|
+| **Fetch** | Connector retrieves external data | Write | `ta-connectors/*` traits exist but are oriented around writing patches, not a distinct "fetch" verb — not cleanly named yet |
+| **Scan** | Validate fetched content before it crosses into agent context | Review | **Only path-traversal is real** (`ta-policy/src/engine.rs`, step 1 of 6 in the evaluation order). Secret-scan exists only on the output side (`ta-changeset`) — nothing scans fetched content. Prompt-injection scanning doesn't exist in TA at all — `gendigitalinc/sage` has a real, working two-tier (heuristic + ML) implementation, `PreToolUse`-scoped to `WebFetch`, worth using as the model rather than inventing one |
+| **Decision** | Same node type as §9, reused | Decision | doesn't exist for this purpose yet |
+| **Admit** | Content crosses the trust boundary into agent context | Commit | implicit today (nothing blocks it) |
+| **Block** | Content withheld, agent never sees it, audited | Reject | doesn't exist |
+
+**Security is a signal source feeding Scan (or Review), not a separate node** — matching `gendigitalinc/sage`'s real decision pipeline exactly: independent sources (heuristic rules, URL reputation, package checks, AMSI, PI-check) each emit `(confidence, category)`, merged into one verdict, rather than each being its own graph stage. Output-side signal sources today: `ApprovalRule` pattern checks, secret-scan on draft artifacts, the §1.6/§1.7 lint checks. Input-side: only the path-traversal guard is real; secret-scan-on-fetch and PI-scan are gaps.
+
+**One more level, distinct from both**: §8's community contribution review (andon cord) reviews the *connector/adapter code itself*, once, at contribution/update time — not a per-instance runtime gate. Scan/Review run on every goal; §8 runs on every plugin update. Related, not the same mechanism.
+
+**How auto-approval extends to inputs**: the same threshold-gate mechanism from §2.1/§9 (lifted from `social_supervisor_check`), fed input-side signals instead of output-side ones — auto-Admit if Scan is clean **and** the fetch matches something already declared. The one genuinely new wrinkle: `AccessConstitution`'s `access: Vec<ConstitutionEntry>` (URI pattern + intent, `crates/ta-policy/src/constitution.rs`) already exists, but only as a **post-hoc drift check at `ta draft build` time** — it doesn't gate anything live today. Using it as a *live* confidence signal at fetch-time (matches declared pattern → strong "expected" signal → auto-admit candidate) is a natural extension, not something already wired that way. A fetch to an undeclared URI should never auto-admit regardless of how clean the content scan looks — Default-Deny (§1.2) wins over a clean scan.
