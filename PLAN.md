@@ -9365,7 +9365,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.11 — Draft Artifact Consistency: `amend --add` + Pre-PASS Description Check
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.10
 
 **Goal**: Root-caused 2026-07-03 finishing v0.17.0.12.10 (PR #529): an agent's decision-log/change-description text can claim a file was edited without that file ever becoming a tracked artifact in the draft package. This happened twice on the same draft — the original agent's `plan.rs` change entry listed `CLAUDE.md` under `[deps: ...]`, and a dedicated follow-up goal whose sole objective was "fix CLAUDE.md's version line" *also* completed successfully without adding CLAUDE.md to the artifact set. Both times the draft still reached supervisor verdict `PASS`. No existing tool could recover from this after the fact: editing the live staging directory does nothing (`ta draft apply` reads the frozen draft package, not staging files), and `ta draft amend --file` requires the artifact to already exist (`Error: Artifact not found in draft`). The only working fix was manually completing the goal's own feature-branch commit and opening the PR by hand, bypassing TA entirely for that step.
