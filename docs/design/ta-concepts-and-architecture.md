@@ -5,6 +5,8 @@
 
 **How to use this doc**: it's the reference for (a) what to refactor and when, (b) why Studio's UI is overly complex, (c) why the CLI command surface is overly complex, and (d) what "smallest clean verb set" TA should converge on. Update it as concepts change — don't let it go stale like the old `docs/design/sage-lore-review.md` reference did before this session existed.
 
+**Read this first if you want the plain-language version**: [`docs/guides/what-is-ta.md`](../guides/what-is-ta.md) — no jargon, meant as a sanity check on what TA actually is and does before committing to the refactor work this document lays out.
+
 ---
 
 ## 1. Executive Summary
