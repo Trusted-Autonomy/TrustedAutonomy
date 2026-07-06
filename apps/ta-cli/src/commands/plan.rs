@@ -1375,19 +1375,26 @@ pub fn mark_phase_in_source(project_root: &Path, phase_id: &str) -> anyhow::Resu
 
 /// Reset a phase from `in_progress` back to `pending` in the source PLAN.md.
 ///
-/// Called on `ta draft deny` and `ta goal delete` when the associated goal
-/// had a linked plan phase. Logs the transition to `.ta/plan_history.jsonl`
-/// with the provided `note`.
+/// Called on `ta draft deny`, `ta draft close`, and `ta goal delete` when the
+/// associated goal had a linked plan phase. Logs the transition to
+/// `.ta/plan_history.jsonl` with the provided `note`.
 ///
-/// No-ops if the phase is not currently `in_progress`.
+/// No-ops if the phase is not currently `in_progress`. In particular, a `done`
+/// phase is an explicit, defended invariant here (not just an accident of the
+/// match falling through): a stale/duplicate goal referencing already-completed,
+/// already-merged work must never revert it to pending (v0.17.0.12.11).
+///
+/// Returns `true` if the phase was actually reset, `false` if this was a no-op —
+/// callers use this to avoid printing a misleading "reset to pending" message
+/// when nothing changed.
 pub fn reset_phase_if_in_progress(
     project_root: &Path,
     phase_id: &str,
     note: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let plan_path = project_root.join("PLAN.md");
     if !plan_path.exists() {
-        return Ok(());
+        return Ok(false);
     }
     let content = std::fs::read_to_string(&plan_path)?;
     let phases = parse_plan(&content);
@@ -1398,12 +1405,13 @@ pub fn reset_phase_if_in_progress(
 
     match current_status {
         Some(PlanStatus::InProgress) => {}
-        _ => return Ok(()), // not in_progress — nothing to reset
+        Some(PlanStatus::Done) => return Ok(false), // never revert a completed phase
+        _ => return Ok(false),                      // pending/deferred/missing — nothing to reset
     }
 
     let updated = update_phase_status(&content, phase_id, PlanStatus::Pending);
     if updated == content {
-        return Ok(());
+        return Ok(false);
     }
     std::fs::write(&plan_path, &updated)?;
 
@@ -1429,7 +1437,7 @@ pub fn reset_phase_if_in_progress(
     // `ta run` calls succeed without requiring a daemon restart.
     release_daemon_phase_claim(project_root, phase_id);
 
-    Ok(())
+    Ok(true)
 }
 
 /// Fire-and-forget HTTP call to release the daemon's in-memory phase claim.
@@ -10471,6 +10479,39 @@ Build it.
         assert!(history.contains("\"old_status\":\"in_progress\""));
         assert!(history.contains("\"new_status\":\"pending\""));
         assert!(history.contains("goal denied"));
+    }
+
+    #[test]
+    fn reset_phase_if_in_progress_returns_true_when_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_content = "### v0.5.0 — Test Phase\n<!-- status: in_progress -->\n\n- item\n";
+        std::fs::write(dir.path().join("PLAN.md"), plan_content).unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+
+        let reset = reset_phase_if_in_progress(dir.path(), "v0.5.0", "note").unwrap();
+        assert!(reset, "should report that it actually reset the phase");
+    }
+
+    #[test]
+    fn reset_phase_if_in_progress_never_resets_a_done_phase() {
+        // v0.17.0.12.11: a stale/duplicate goal (e.g. re-tracked bookkeeping for
+        // already-merged work) must never revert a phase that already completed —
+        // this must be an explicit, defended invariant, not an implementation accident.
+        let dir = tempfile::tempdir().unwrap();
+        let plan_content = "### v0.5.0 — Test Phase\n<!-- status: done -->\n\n- [x] item\n";
+        std::fs::write(dir.path().join("PLAN.md"), plan_content).unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+
+        let reset = reset_phase_if_in_progress(
+            dir.path(),
+            "v0.5.0",
+            "phase reset to pending — goal cancelled",
+        )
+        .unwrap();
+
+        assert!(!reset, "a done phase must never be reported as reset");
+        let after = std::fs::read_to_string(dir.path().join("PLAN.md")).unwrap();
+        assert_eq!(after, plan_content, "done phase content must be untouched");
     }
 
     #[test]

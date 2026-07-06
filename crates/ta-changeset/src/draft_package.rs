@@ -244,6 +244,9 @@ pub enum AmendmentType {
     PatchApplied,
     /// Artifact was removed from the draft (--drop).
     Dropped,
+    /// A new artifact was inserted via --file on a URI not yet in the draft
+    /// (v0.17.0.12.11 — recovers files an agent described but never tracked).
+    Added,
 }
 
 /// Per-artifact review disposition.
@@ -1455,6 +1458,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AmendmentType::Dropped).unwrap(),
             "\"dropped\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AmendmentType::Added).unwrap(),
+            "\"added\""
         );
     }
 

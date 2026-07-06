@@ -2446,7 +2446,11 @@ When `--phase` is specified, TA marks the phase `in_progress` in the **source** 
 Phase status flow:
 - `pending` → `in_progress` when the goal starts (`ta run --phase <id>`)
 - `in_progress` → `done` when the draft is applied (`ta draft apply`)
-- `in_progress` → `pending` if the draft is denied (`ta draft deny`) or the goal is deleted (`ta goal delete`)
+- `in_progress` → `pending` if the draft is denied/closed (`ta draft deny` / `ta draft close`) or the goal is deleted (`ta goal delete`)
+
+A phase already marked `done` is never reset back to `pending` by any of the above — this
+guards against stale or duplicate goal bookkeeping (e.g. deleting a leftover goal record
+for work that already merged) accidentally reopening completed plan phases.
 
 Plan commands:
 
@@ -3017,6 +3021,28 @@ ta draft amend <draft-id> src/main.rs --file corrected_main.rs
 ta draft amend <draft-id> config.toml --drop
 ta draft amend <draft-id> src/lib.rs --file fixed.rs --reason "Fixed typo in function name"
 ```
+
+**Adding a missing artifact (`amend --add`)** -- sometimes an agent's decision log or
+change description claims a file was touched (e.g. it's listed under `[deps: ...]` on
+another artifact) but that file never became its own tracked artifact in the draft. Point
+`--file` at a URI that isn't in the draft yet and it's inserted as a new artifact instead
+of erroring:
+
+```bash
+# CLAUDE.md was described as changed but never became an artifact — add it directly.
+ta draft amend <draft-id> CLAUDE.md --file /path/to/corrected/CLAUDE.md \
+  --reason "Recovering an artifact the agent described but never tracked"
+```
+
+The new artifact starts `pending` review like any other. `ta draft amend` on a URI that
+*is* already in the draft still replaces its content as before — nothing changes for
+existing artifacts.
+
+TA also runs a pre-approval consistency check automatically: if any artifact's own
+dependency list references a file that isn't itself a tracked artifact, the supervisor's
+`PASS` verdict is downgraded to `WARN` with a "described but not tracked: `<path>`"
+finding, rather than silently passing a draft whose description and artifact list
+disagree.
 
 **Scoped agent fix** -- for logic changes that need agent help:
 
