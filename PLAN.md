@@ -9413,7 +9413,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.14 — Plugin/Adapter/Connector Unification (4 Categories)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.12
 
 **Goal**: Implement the 4-category extensibility model from `docs/design/ta-concepts-and-architecture.md` §2.2 — Plugin (external, call/response, community-contributable), Channel/Listener (external, long-running, supervised), Backend (in-process, core-only), Resource list (declarative registry) — replacing the 12 independently-evolved patterns found in the architecture review.
