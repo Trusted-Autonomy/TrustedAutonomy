@@ -9413,19 +9413,19 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.14 — Plugin/Adapter/Connector Unification (4 Categories)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12
 
 **Goal**: Implement the 4-category extensibility model from `docs/design/ta-concepts-and-architecture.md` §2.2 — Plugin (external, call/response, community-contributable), Channel/Listener (external, long-running, supervised), Backend (in-process, core-only), Resource list (declarative registry) — replacing the 12 independently-evolved patterns found in the architecture review.
 
 **Items**:
-1. [ ] Extract one shared JSON-over-stdio protocol crate/trait from the currently-independent VCS/messaging/social/agent-runtime plugin implementations, matching VCS's existing `method: String` dispatch shape (most mature). Migrate all four onto it without changing external plugin-facing behavior.
-2. [ ] Define one shared `plugin.toml` manifest schema and `.ta/plugins/<kind>/<name>/` discovery convention used by every Plugin-category integration.
-3. [ ] Migrate `EXTERNAL_TOOLS` (hardcoded array, `apps/ta-cli/src/commands/tools.rs`) onto the Plugin category — a community member can add a new tool without a TA core PR.
-4. [ ] Migrate `DbProxyPlugin` onto the Plugin category per the 2026-07-03 DB proxy redesign (SQL/NoSQL facets, `.ta/db-adapters.toml` registry).
-5. [ ] Implement `ReleaseAdapter` (currently only planned in PLAN.md v0.17.2/17.3, never built) directly onto the Plugin category from the start.
-6. [ ] Tests: a synthetic community-authored plugin fixture is discovered and invoked identically for at least two different Plugin-category integrations via the shared protocol — proving the unification shares code, not just documentation.
-7. [ ] USAGE.md: one "Authoring a Plugin" guide replacing the currently-scattered per-family docs.
+1. [x] Extract one shared JSON-over-stdio protocol crate/trait from the currently-independent VCS/messaging/social/agent-runtime plugin implementations, matching VCS's existing `method: String` dispatch shape (most mature). Migrate all four onto it without changing external plugin-facing behavior.
+2. [x] Define one shared `plugin.toml` manifest schema and `.ta/plugins/<kind>/<name>/` discovery convention used by every Plugin-category integration.
+3. [x] Migrate `EXTERNAL_TOOLS` (hardcoded array, `apps/ta-cli/src/commands/tools.rs`) onto the Plugin category — a community member can add a new tool without a TA core PR.
+4. [x] Migrate `DbProxyPlugin` onto the Plugin category per the 2026-07-03 DB proxy redesign (SQL/NoSQL facets, `.ta/db-adapters.toml` registry).
+5. [x] Implement `ReleaseAdapter` (currently only planned in PLAN.md v0.17.2/17.3, never built) directly onto the Plugin category from the start.
+6. [x] Tests: a synthetic community-authored plugin fixture is discovered and invoked identically for at least two different Plugin-category integrations via the shared protocol — proving the unification shares code, not just documentation.
+7. [x] USAGE.md: one "Authoring a Plugin" guide replacing the currently-scattered per-family docs.
 
 #### Version: `0.17.0-alpha.12.14`
 

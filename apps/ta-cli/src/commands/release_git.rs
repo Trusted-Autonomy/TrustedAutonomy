@@ -270,17 +270,201 @@ impl ReleaseAdapter for SvnAdapter {
     }
 }
 
+/// External-process `ReleaseAdapter` (§2.2 Plugin category), discovered via
+/// `.ta/plugins/release/<name>/plugin.toml`. Lets a community member ship a
+/// custom release adapter (e.g. `AppStoreReleaseAdapter`, `ItchIoReleaseAdapter`)
+/// without a TA core PR, per v0.17.0.12.14 item 5.
+#[allow(dead_code)]
+pub struct ExternalReleaseAdapter {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    timeout: std::time::Duration,
+}
+
+#[derive(serde::Serialize)]
+struct BumpVersionParams<'a> {
+    root: &'a str,
+    new_version: &'a str,
+}
+#[derive(serde::Serialize)]
+struct CommitAndTagParams<'a> {
+    root: &'a str,
+    message: &'a str,
+    tag: &'a str,
+}
+#[derive(serde::Serialize)]
+struct PushParams<'a> {
+    root: &'a str,
+    remote: &'a str,
+    args: &'a [&'a str],
+}
+#[derive(serde::Serialize)]
+struct CreateReleaseDraftParams<'a> {
+    root: &'a str,
+    tag: &'a str,
+    notes: &'a str,
+}
+#[derive(serde::Serialize)]
+struct TagOnlyParams<'a> {
+    root: &'a str,
+    tag: &'a str,
+}
+#[derive(serde::Serialize)]
+struct DispatchWorkflowParams<'a> {
+    root: &'a str,
+    tag: &'a str,
+    prerelease: bool,
+}
+
+#[allow(dead_code)]
+impl ExternalReleaseAdapter {
+    /// Resolve `name` via `.ta/plugins/release/<name>/plugin.toml` discovery.
+    pub fn discover(name: &str, project_root: &Path) -> Option<Self> {
+        let found = ta_plugin::find_plugin("release", name, project_root)?;
+        Some(Self {
+            name: found.manifest.name.clone(),
+            command: found
+                .plugin_dir
+                .join(&found.manifest.command)
+                .to_string_lossy()
+                .to_string(),
+            args: found.manifest.args.clone(),
+            timeout: found.manifest.timeout(60),
+        })
+    }
+
+    /// The adapter name this instance was discovered as (for tests/diagnostics).
+    pub fn adapter_name(&self) -> &str {
+        &self.name
+    }
+
+    fn call<Req: serde::Serialize>(
+        &self,
+        method: &str,
+        root: &Path,
+        params: &Req,
+    ) -> anyhow::Result<()> {
+        let request = ta_plugin::PluginRequest::new(method, serde_json::to_value(params)?);
+        let response: ta_plugin::PluginResponse = ta_plugin::transport::call_json(
+            &self.name,
+            method,
+            &self.command,
+            &self.args,
+            root,
+            &request,
+            self.timeout,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "release plugin '{}' method '{method}' failed: {e}",
+                self.name
+            )
+        })?;
+        if !response.ok {
+            anyhow::bail!(
+                "release plugin '{}' method '{method}' failed: {}",
+                self.name,
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown error".to_string())
+            );
+        }
+        Ok(())
+    }
+}
+
+impl ReleaseAdapter for ExternalReleaseAdapter {
+    fn bump_version(&self, root: &Path, new_version: &str) -> anyhow::Result<()> {
+        self.call(
+            "bump_version",
+            root,
+            &BumpVersionParams {
+                root: &root.to_string_lossy(),
+                new_version,
+            },
+        )
+    }
+
+    fn commit_and_tag(&self, root: &Path, message: &str, tag: &str) -> anyhow::Result<()> {
+        self.call(
+            "commit_and_tag",
+            root,
+            &CommitAndTagParams {
+                root: &root.to_string_lossy(),
+                message,
+                tag,
+            },
+        )
+    }
+
+    fn push(&self, root: &Path, remote: &str, args: &[&str]) -> anyhow::Result<()> {
+        self.call(
+            "push",
+            root,
+            &PushParams {
+                root: &root.to_string_lossy(),
+                remote,
+                args,
+            },
+        )
+    }
+
+    fn create_release_draft(&self, root: &Path, tag: &str, notes: &str) -> anyhow::Result<()> {
+        self.call(
+            "create_release_draft",
+            root,
+            &CreateReleaseDraftParams {
+                root: &root.to_string_lossy(),
+                tag,
+                notes,
+            },
+        )
+    }
+
+    fn publish_release(&self, root: &Path, tag: &str) -> anyhow::Result<()> {
+        self.call(
+            "publish_release",
+            root,
+            &TagOnlyParams {
+                root: &root.to_string_lossy(),
+                tag,
+            },
+        )
+    }
+
+    fn dispatch_workflow(&self, root: &Path, tag: &str, prerelease: bool) -> anyhow::Result<()> {
+        self.call(
+            "dispatch_workflow",
+            root,
+            &DispatchWorkflowParams {
+                root: &root.to_string_lossy(),
+                tag,
+                prerelease,
+            },
+        )
+    }
+}
+
 /// Resolve a `ReleaseAdapter` from an adapter name string.
 ///
 /// Used by the pipeline to select the right adapter based on `.ta/release.yaml`
-/// `adapter:` key. The git adapter is the default.
+/// `adapter:` key. Checks `.ta/plugins/release/<name>/plugin.toml` (Plugin
+/// category, community-contributable) before falling back to the built-in
+/// git/perforce/svn adapters. The git adapter is the default.
 #[allow(dead_code)]
-pub fn resolve_adapter(adapter_name: Option<&str>) -> Box<dyn ReleaseAdapter> {
-    match adapter_name.unwrap_or("git") {
-        "perforce" | "p4" => Box::new(PerforceAdapter),
-        "svn" | "subversion" => Box::new(SvnAdapter),
-        _ => Box::new(GitAdapter),
+pub fn resolve_adapter(adapter_name: Option<&str>, project_root: &Path) -> Box<dyn ReleaseAdapter> {
+    if let Some(name) = adapter_name {
+        if let Some(external) = ExternalReleaseAdapter::discover(name, project_root) {
+            return Box::new(external);
+        }
+        match name {
+            "perforce" | "p4" => return Box::new(PerforceAdapter),
+            "svn" | "subversion" => return Box::new(SvnAdapter),
+            _ => {}
+        }
     }
+    Box::new(GitAdapter)
 }
 
 /// Check whether the working tree has any uncommitted changes (staged or unstaged).
@@ -475,4 +659,73 @@ pub fn git_log_format(root: &Path, format: &str, range: Option<&str>) -> anyhow:
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_adapter_falls_back_to_git_without_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        // No adapter name, and no .ta/plugins/release/ manifests — must fall
+        // back to the default GitAdapter rather than panicking or erroring.
+        let _adapter = resolve_adapter(None, dir.path());
+    }
+
+    #[test]
+    fn resolve_adapter_falls_back_to_perforce_without_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let _adapter = resolve_adapter(Some("perforce"), dir.path());
+    }
+
+    #[test]
+    fn resolve_adapter_discovers_external_release_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join(".ta/plugins/release/custom");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            "name = \"custom\"\ntype = \"release\"\ncommand = \"custom-release-bin\"\n",
+        )
+        .unwrap();
+
+        let adapter = ExternalReleaseAdapter::discover("custom", dir.path()).unwrap();
+        assert_eq!(adapter.adapter_name(), "custom");
+
+        // resolve_adapter must pick the external plugin path over perforce/svn/git.
+        let _adapter = resolve_adapter(Some("custom"), dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_release_adapter_bump_version_via_mock_plugin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join(".ta/plugins/release/mockrelease");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let script_path = plugin_dir.join("mockrelease-plugin.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\nread -r line\necho '{\"ok\":true,\"result\":{}}'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            format!(
+                "name = \"mockrelease\"\ntype = \"release\"\ncommand = \"{}\"\n",
+                script_path.display()
+            ),
+        )
+        .unwrap();
+
+        let adapter = ExternalReleaseAdapter::discover("mockrelease", dir.path()).unwrap();
+        adapter.bump_version(dir.path(), "1.2.3").unwrap();
+    }
 }

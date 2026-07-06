@@ -1,5 +1,7 @@
 # Plugin Authoring Quickstart
 
+> **Note:** This guide covers **Channel/Listener**-category plugins specifically (long-running delivery adapters). For the **Plugin** category (VCS/messaging/social/agent/tool/db/release — call/response, `plugin.toml`, `.ta/plugins/<kind>/<name>/`), see `docs/USAGE.md` → "Authoring a Plugin".
+
 This guide walks you through building a TA channel plugin from scratch. By the end you will have a working plugin that delivers agent questions to an external service and integrates with the TA review workflow.
 
 ## Overview

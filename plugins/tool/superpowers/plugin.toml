@@ -1,0 +1,13 @@
+name = "superpowers"
+type = "tool"
+command = ""
+description = "Agent skills and orchestration plugin for Claude Code"
+
+[tool]
+label = "Superpowers Claude Code plugin"
+detect_command = "claude-plugin:superpowers"
+install_hint = "claude plugin install superpowers@superpowers-dev"
+
+[tool.install]
+kind = "claude_plugin"
+spec = "superpowers@superpowers-dev"

@@ -83,6 +83,7 @@ Both paths install the same `ta` binary. Studio and CLI work side-by-side — yo
    - [Channel Registry](#channel-registry)
    - [Multi-Channel Routing](#multi-channel-routing)
    - [Channel Plugins](#channel-plugins)
+   - [Authoring a Plugin](#authoring-a-plugin)
    - [Inspecting Channel Configuration](#inspecting-channel-configuration)
    - [API Mediation](#api-mediation)
    - [Project Setup](#project-setup)
@@ -9692,6 +9693,90 @@ min_daemon_version = "0.10.16"
 ```
 
 If the running daemon is older than the declared minimum, `ta plugin check` warns about the incompatibility.
+
+#### Authoring a Plugin
+
+TA's extensibility model has four categories (see `docs/design/ta-concepts-and-architecture.md` §2.2). Pick the right one before writing code:
+
+| Category | Shape | Use when |
+|---|---|---|
+| **Plugin** | External process, call/response, `plugin.toml` manifest, `.ta/plugins/<kind>/<name>/` discovery | The integration is optional, should be swappable without a TA release, and a community member should be able to author one — VCS, messaging, social, agent runtimes, optional tools, database adapters, release adapters |
+| **Channel/Listener** | External, long-running, supervised, `channel.toml` manifest, `.ta/plugins/channels/<name>/` discovery | The integration needs to maintain a persistent session (Discord, Slack, Email, Teams) rather than answer discrete calls — see [Channel Plugins](#channel-plugins) above |
+| **Backend** | In-process Rust trait, core-only | It's first-party, needs zero IPC overhead, or has no reason to be community-extensible (connectors, output renderers) |
+| **Resource list** | Declarative registry (TOML), no executable contract | There's nothing to execute, just configuration or a pointer to a Plugin/Backend (`.ta/community-resources.toml`, `.ta/db-adapters.toml`) |
+
+This section covers the **Plugin** category, unified onto one shared transport/manifest/discovery crate (`ta-plugin`) as of v0.17.0.12.14.
+
+**Kinds shipped today:**
+
+| Kind | Discovery dir | Example manifest `command` |
+|---|---|---|
+| `vcs` | `.ta/plugins/vcs/<name>/` | `ta-submit-perforce` |
+| `messaging` | `.ta/plugins/messaging/<name>/` | `ta-messaging-gmail` |
+| `social` | `.ta/plugins/social/<name>/` | `ta-social-linkedin` |
+| `agent` | `.ta/plugins/agent/<name>/` | `ta-agent-ollama` |
+| `tool` | `.ta/plugins/tool/<name>/` | (community-defined; see `plugins/tool/*/plugin.toml` for examples) |
+| `db` | `.ta/plugins/db/<name>/` | (community-defined DB proxy adapter) |
+| `release` | `.ta/plugins/release/<name>/` | (community-defined release adapter) |
+
+**Discovery order:** project-local (`.ta/plugins/<kind>/<name>/plugin.toml`) is checked first, then user-global (`~/.config/ta/plugins/<kind>/<name>/plugin.toml`).
+
+**Manifest schema (`plugin.toml`):**
+
+```toml
+name = "my-plugin"
+version = "0.1.0"
+type = "vcs"                 # the plugin kind — must match the discovery directory
+command = "my-plugin-binary" # executable to spawn (relative to the manifest's directory, or on PATH)
+args = []                    # extra args appended on every invocation
+capabilities = ["commit", "push"]
+description = "One-line description"
+timeout_secs = 30            # per-call timeout; defaults vary by kind (VCS: 30s, messaging/social: 60s)
+
+[staging_env]                # static env vars merged into the agent's spawn env (VCS only)
+MY_VAR = "value"
+```
+
+**Wire protocol:** newline-delimited JSON, one request line in, one response line out. New plugin kinds (`tool`, `db`, `release`) use the canonical envelope:
+
+```
+TA → plugin: {"method":"<name>","params":{...}}\n
+plugin → TA: {"ok":true,"result":{...}}\n
+         or  {"ok":false,"error":"..."}\n
+```
+
+If you're authoring a **new** VCS/messaging/social/agent-runtime plugin, use each family's existing request/response shape (documented in `docs/PLUGIN-AUTHORING.md` and `docs/plugin-traits.md`) — those wire formats did not change when the transport was unified. Only the underlying spawn/framing/timeout/manifest/discovery code is now shared across all seven kinds; each kind's protocol is otherwise untouched.
+
+**Minimal example — a `tool`-kind community plugin** (`.ta/plugins/tool/widget-cli/plugin.toml`):
+
+```toml
+name = "widget-cli"
+type = "tool"
+command = ""                 # declarative-only; nothing to spawn for `tool` kind
+description = "Community widget CLI"
+
+[tool]
+label = "Widget CLI"
+detect_command = "widget --version"
+install_hint = "cargo install widget-cli"
+
+[tool.install]
+kind = "cargo"
+package = "widget-cli"
+```
+
+Run `ta tools list` / `ta tools install widget-cli` — no TA core PR required.
+
+**Minimal example — a `db`/`release`-kind external plugin** (call/response, canonical envelope):
+
+```toml
+name = "my-db-adapter"
+type = "db"
+command = "my-db-adapter-binary"
+timeout_secs = 30
+```
+
+The binary reads one JSON line (`{"method":"classify_query","params":{"query":"..."}}`), and writes one JSON line back (`{"ok":true,"result":{"class":"read"}}`).
 
 #### Channel Access Control
 

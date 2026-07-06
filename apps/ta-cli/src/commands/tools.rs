@@ -1,15 +1,22 @@
 // tools.rs — `ta tools` command: list and install optional external tools.
 //
-// Optional tools are registered in this file as a static EXTERNAL_TOOLS list.
-// Adding a new tool requires:
-//   1. An entry in EXTERNAL_TOOLS below
-//   2. A corresponding plugins/<name>/plugin.toml manifest (documentation)
+// Built-in tools are registered in this file as a static EXTERNAL_TOOLS list
+// (used as-is by the onboard wizard's Step 4 checkbox list, which predates
+// any project context and only ever offers the built-ins). Adding a
+// *built-in* tool requires an entry in EXTERNAL_TOOLS below.
 //
-// The onboard wizard (onboard.rs) imports EXTERNAL_TOOLS to populate its
-// Step 4 "Optional Components" checkbox list dynamically.
+// Community-authored tools (v0.17.0.12.14, Plugin category §2.2) don't
+// require a TA core PR: `ta tools list`/`ta tools install` additionally
+// discover `.ta/plugins/tool/<name>/plugin.toml` manifests via
+// `ta_plugin::discover_plugins`, using a `[tool]` extension table for the
+// fields (label/detect_command/install_hint/install) that aren't part of
+// the shared `PluginManifest` schema.
+
+use std::path::Path;
 
 use anyhow::Result;
 use clap::Subcommand;
+use serde::Deserialize;
 
 /// An optional external tool that TA can use but does not require.
 pub struct ExternalTool {
@@ -78,6 +85,84 @@ pub const EXTERNAL_TOOLS: &[ExternalTool] = &[
     },
 ];
 
+// ---------------------------------------------------------------------------
+// Community-authored tools (Plugin category, §2.2) — `.ta/plugins/tool/<name>/plugin.toml`
+// ---------------------------------------------------------------------------
+
+/// A community-authored tool, discovered from a `.ta/plugins/tool/<name>/plugin.toml`
+/// manifest rather than compiled into `EXTERNAL_TOOLS`.
+struct DiscoveredTool {
+    name: String,
+    label: String,
+    description: String,
+    detect_command: String,
+    install_hint: String,
+    install: ToolInstallSpec,
+}
+
+/// The `[tool]` extension table parsed alongside the shared `PluginManifest`
+/// fields (name/type/command/description) for a `kind = "tool"` manifest.
+#[derive(Debug, Clone, Deserialize)]
+struct ToolManifestExtra {
+    tool: ToolExtraFields,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ToolExtraFields {
+    label: String,
+    #[serde(default)]
+    description: Option<String>,
+    detect_command: String,
+    install_hint: String,
+    install: ToolInstallSpec,
+}
+
+/// Same shape as `ExternalToolInstall`, but with owned fields since it comes
+/// from a parsed TOML manifest rather than a `&'static` compile-time const.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ToolInstallSpec {
+    Cargo { package: String },
+    Npm { package: String },
+    Git { url: String, dest: String },
+    ClaudePlugin { spec: String },
+}
+
+/// Discover community-authored tools from `.ta/plugins/tool/<name>/plugin.toml`
+/// (project-local then user-global). Manifests whose `name` collides with a
+/// built-in `EXTERNAL_TOOLS` entry are skipped — built-ins always win.
+fn discover_community_tools(project_root: &Path) -> Vec<DiscoveredTool> {
+    let mut tools = vec![];
+    for discovered in ta_plugin::discover_plugins("tool", project_root) {
+        if EXTERNAL_TOOLS
+            .iter()
+            .any(|t| t.name == discovered.manifest.name)
+        {
+            continue;
+        }
+        let manifest_path = discovered.plugin_dir.join("plugin.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(extra) = toml::from_str::<ToolManifestExtra>(&text) else {
+            continue;
+        };
+        tools.push(DiscoveredTool {
+            name: discovered.manifest.name,
+            label: extra.tool.label,
+            description: extra
+                .tool
+                .description
+                .or(discovered.manifest.description)
+                .unwrap_or_default(),
+            detect_command: extra.tool.detect_command,
+            install_hint: extra.tool.install_hint,
+            install: extra.tool.install,
+        });
+    }
+    tools
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ToolsCommands {
     /// Show all optional tools and whether they are installed.
@@ -107,6 +192,9 @@ pub fn execute(command: &ToolsCommands) -> Result<()> {
 }
 
 fn list_tools() -> Result<()> {
+    let project_root = std::env::current_dir().unwrap_or_default();
+    let community_tools = discover_community_tools(&project_root);
+
     println!("Optional tools for Trusted Autonomy:\n");
     for tool in EXTERNAL_TOOLS {
         let installed = check_tool_installed(tool);
@@ -120,7 +208,23 @@ fn list_tools() -> Result<()> {
         println!("  {:<20} {}", "", tool.install_hint);
         println!();
     }
-    if EXTERNAL_TOOLS.iter().any(|t| !check_tool_installed(t)) {
+    for tool in &community_tools {
+        let installed = check_detect_command(&tool.detect_command);
+        let status = if installed {
+            "✓ installed"
+        } else {
+            "✗ not found"
+        };
+        println!("  {:<20} {} (community)", tool.name, status);
+        println!("  {:<20} {}", "", tool.description);
+        println!("  {:<20} {}", "", tool.install_hint);
+        println!();
+    }
+    if EXTERNAL_TOOLS.iter().any(|t| !check_tool_installed(t))
+        || community_tools
+            .iter()
+            .any(|t| !check_detect_command(&t.detect_command))
+    {
         println!("Install missing tools with:  ta tools install <name>");
     }
     Ok(())
@@ -128,14 +232,20 @@ fn list_tools() -> Result<()> {
 
 /// Returns true if the tool's detect_command succeeds.
 pub fn check_tool_installed(tool: &ExternalTool) -> bool {
-    if let Some(path) = tool.detect_command.strip_prefix("test -d ") {
+    check_detect_command(tool.detect_command)
+}
+
+/// Shared detect-command evaluation for both built-in (`ExternalTool`) and
+/// community-authored (`DiscoveredTool`) tools.
+fn check_detect_command(detect_command: &str) -> bool {
+    if let Some(path) = detect_command.strip_prefix("test -d ") {
         let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
         return std::path::Path::new(&expanded).is_dir();
     }
-    if let Some(plugin_name) = tool.detect_command.strip_prefix("claude-plugin:") {
+    if let Some(plugin_name) = detect_command.strip_prefix("claude-plugin:") {
         return check_claude_plugin_installed(plugin_name);
     }
-    let parts: Vec<&str> = tool.detect_command.split_whitespace().collect();
+    let parts: Vec<&str> = detect_command.split_whitespace().collect();
     if parts.is_empty() {
         return false;
     }
@@ -198,92 +308,125 @@ fn claude_cli_missing_message(tool_name: &str) -> String {
 }
 
 pub fn install_tool(name: &str) -> Result<()> {
-    let tool = EXTERNAL_TOOLS
+    if let Some(tool) = EXTERNAL_TOOLS.iter().find(|t| t.name == name) {
+        if check_tool_installed(tool) {
+            println!("{} is already installed.", tool.label);
+            return Ok(());
+        }
+        return match &tool.install {
+            ExternalToolInstall::Cargo(crate_name) => {
+                install_via_cargo(tool.label, crate_name, tool.install_hint)
+            }
+            ExternalToolInstall::Npm(pkg) => install_via_npm(tool.label, pkg, tool.install_hint),
+            ExternalToolInstall::Git { url, dest } => {
+                install_via_git(tool.label, url, dest, tool.install_hint)
+            }
+            ExternalToolInstall::ClaudePlugin(plugin_spec) => {
+                install_via_claude_plugin(tool.name, tool.label, plugin_spec, tool.install_hint)
+            }
+        };
+    }
+
+    let project_root = std::env::current_dir().unwrap_or_default();
+    let community_tools = discover_community_tools(&project_root);
+    let tool = community_tools
         .iter()
         .find(|t| t.name == name)
         .ok_or_else(|| {
             anyhow::anyhow!("Unknown tool '{name}'. Run `ta tools list` to see available tools.")
         })?;
 
-    if check_tool_installed(tool) {
+    if check_detect_command(&tool.detect_command) {
         println!("{} is already installed.", tool.label);
         return Ok(());
     }
 
     match &tool.install {
-        ExternalToolInstall::Cargo(crate_name) => {
-            if which::which("cargo").is_err() {
-                anyhow::bail!(cargo_missing_message(
-                    crate_name,
-                    cfg!(target_os = "windows")
-                ));
-            }
-            println!(
-                "Installing {} via cargo install {}...",
-                tool.label, crate_name
-            );
-            let status = std::process::Command::new("cargo")
-                .args(["install", crate_name])
-                .status()
-                .map_err(|e| anyhow::anyhow!("Failed to run cargo: {e}"))?;
-            if !status.success() {
-                anyhow::bail!(
-                    "cargo install {crate_name} failed.\nTry manually: {}",
-                    tool.install_hint
-                );
-            }
-            println!("{} installed successfully.", tool.label);
+        ToolInstallSpec::Cargo { package } => {
+            install_via_cargo(&tool.label, package, &tool.install_hint)
         }
-        ExternalToolInstall::Npm(pkg) => {
-            println!("Installing {} via npm install -g {}...", tool.label, pkg);
-            let status = std::process::Command::new("npm")
-                .args(["install", "-g", pkg])
-                .status()
-                .map_err(|e| {
-                    anyhow::anyhow!("npm not found: {e}. Install Node.js from https://nodejs.org")
-                })?;
-            if !status.success() {
-                anyhow::bail!("npm install failed.\nTry manually: {}", tool.install_hint);
-            }
-            println!("{} installed successfully.", tool.label);
+        ToolInstallSpec::Npm { package } => {
+            install_via_npm(&tool.label, package, &tool.install_hint)
         }
-        ExternalToolInstall::Git { url, dest } => {
-            let expanded_dest = dest.replace('~', &std::env::var("HOME").unwrap_or_default());
-            if std::path::Path::new(&expanded_dest).exists() {
-                println!("{} is already installed at {}.", tool.label, expanded_dest);
-                return Ok(());
-            }
-            println!("Cloning {} to {}...", tool.label, expanded_dest);
-            let status = std::process::Command::new("git")
-                .args(["clone", "--depth=1", url, &expanded_dest])
-                .status()
-                .map_err(|e| anyhow::anyhow!("git not found: {e}. Install git first."))?;
-            if !status.success() {
-                anyhow::bail!("git clone failed.\nTry manually: {}", tool.install_hint);
-            }
-            println!("{} installed to {}.", tool.label, expanded_dest);
+        ToolInstallSpec::Git { url, dest } => {
+            install_via_git(&tool.label, url, dest, &tool.install_hint)
         }
-        ExternalToolInstall::ClaudePlugin(plugin_spec) => {
-            if which::which("claude").is_err() {
-                anyhow::bail!(claude_cli_missing_message(tool.name));
-            }
-            println!(
-                "Installing {} via claude plugin install {}...",
-                tool.label, plugin_spec
-            );
-            let status = std::process::Command::new("claude")
-                .args(["plugin", "install", plugin_spec])
-                .status()
-                .map_err(|e| anyhow::anyhow!("Failed to run claude plugin install: {e}"))?;
-            if !status.success() {
-                anyhow::bail!(
-                    "claude plugin install failed.\nTry manually: {}",
-                    tool.install_hint
-                );
-            }
-            println!("{} installed successfully.", tool.label);
+        ToolInstallSpec::ClaudePlugin { spec } => {
+            install_via_claude_plugin(&tool.name, &tool.label, spec, &tool.install_hint)
         }
     }
+}
+
+fn install_via_cargo(label: &str, crate_name: &str, install_hint: &str) -> Result<()> {
+    if which::which("cargo").is_err() {
+        anyhow::bail!(cargo_missing_message(
+            crate_name,
+            cfg!(target_os = "windows")
+        ));
+    }
+    println!("Installing {label} via cargo install {crate_name}...");
+    let status = std::process::Command::new("cargo")
+        .args(["install", crate_name])
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run cargo: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("cargo install {crate_name} failed.\nTry manually: {install_hint}");
+    }
+    println!("{label} installed successfully.");
+    Ok(())
+}
+
+fn install_via_npm(label: &str, pkg: &str, install_hint: &str) -> Result<()> {
+    println!("Installing {label} via npm install -g {pkg}...");
+    let status = std::process::Command::new("npm")
+        .args(["install", "-g", pkg])
+        .status()
+        .map_err(|e| {
+            anyhow::anyhow!("npm not found: {e}. Install Node.js from https://nodejs.org")
+        })?;
+    if !status.success() {
+        anyhow::bail!("npm install failed.\nTry manually: {install_hint}");
+    }
+    println!("{label} installed successfully.");
+    Ok(())
+}
+
+fn install_via_git(label: &str, url: &str, dest: &str, install_hint: &str) -> Result<()> {
+    let expanded_dest = dest.replace('~', &std::env::var("HOME").unwrap_or_default());
+    if std::path::Path::new(&expanded_dest).exists() {
+        println!("{label} is already installed at {expanded_dest}.");
+        return Ok(());
+    }
+    println!("Cloning {label} to {expanded_dest}...");
+    let status = std::process::Command::new("git")
+        .args(["clone", "--depth=1", url, &expanded_dest])
+        .status()
+        .map_err(|e| anyhow::anyhow!("git not found: {e}. Install git first."))?;
+    if !status.success() {
+        anyhow::bail!("git clone failed.\nTry manually: {install_hint}");
+    }
+    println!("{label} installed to {expanded_dest}.");
+    Ok(())
+}
+
+fn install_via_claude_plugin(
+    tool_name: &str,
+    label: &str,
+    plugin_spec: &str,
+    install_hint: &str,
+) -> Result<()> {
+    if which::which("claude").is_err() {
+        anyhow::bail!(claude_cli_missing_message(tool_name));
+    }
+    println!("Installing {label} via claude plugin install {plugin_spec}...");
+    let status = std::process::Command::new("claude")
+        .args(["plugin", "install", plugin_spec])
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run claude plugin install: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("claude plugin install failed.\nTry manually: {install_hint}");
+    }
+    println!("{label} installed successfully.");
     Ok(())
 }
 
@@ -317,5 +460,67 @@ mod tests {
     #[test]
     fn external_tools_includes_meridian() {
         assert!(EXTERNAL_TOOLS.iter().any(|t| t.name == "meridian"));
+    }
+
+    #[test]
+    fn discovers_community_authored_tool_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join(".ta/plugins/tool/widget-cli");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            r#"
+name = "widget-cli"
+type = "tool"
+command = ""
+description = "Community widget CLI"
+
+[tool]
+label = "Widget CLI"
+detect_command = "widget --version"
+install_hint = "cargo install widget-cli"
+
+[tool.install]
+kind = "cargo"
+package = "widget-cli"
+"#,
+        )
+        .unwrap();
+
+        let tools = discover_community_tools(dir.path());
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "widget-cli");
+        assert_eq!(tools[0].label, "Widget CLI");
+        assert!(
+            matches!(&tools[0].install, ToolInstallSpec::Cargo { package } if package == "widget-cli")
+        );
+    }
+
+    #[test]
+    fn community_tool_name_colliding_with_built_in_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join(".ta/plugins/tool/meridian");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            r#"
+name = "meridian"
+type = "tool"
+command = ""
+
+[tool]
+label = "Fake Meridian"
+detect_command = "true"
+install_hint = "n/a"
+
+[tool.install]
+kind = "cargo"
+package = "meridian"
+"#,
+        )
+        .unwrap();
+
+        let tools = discover_community_tools(dir.path());
+        assert!(tools.is_empty());
     }
 }

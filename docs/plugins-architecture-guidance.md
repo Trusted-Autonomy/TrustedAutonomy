@@ -1,5 +1,7 @@
 # Trusted Autonomy — Plugin Architecture & Event Model
 
+> **Note:** For the current, unified Plugin-category manifest/discovery/protocol reference (VCS/messaging/social/agent/tool/db/release), see `docs/USAGE.md` → "Authoring a Plugin". This document covers general design principles and the event model, not superseded by that guide.
+
 Trusted Autonomy is designed to be **extendible by nature**.
 Plugins add intelligence and observability, not control.
 

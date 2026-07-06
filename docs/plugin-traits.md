@@ -1,5 +1,7 @@
 # TA Plugin Trait Reference
 
+> **Note:** For the current, unified Plugin-category manifest/discovery/protocol reference (VCS/messaging/social/agent/tool/db/release — `plugin.toml`, `.ta/plugins/<kind>/<name>/`, shared `ta-plugin` transport crate), see `docs/USAGE.md` → "Authoring a Plugin".
+
 This document describes the stable extension surface that TA exposes to external plugins. Plugin authors implement these traits against a specific TA release and can rely on them not breaking without a major version bump.
 
 Plugin binaries communicate with TA through the `[plugins]` section of `daemon.toml`:

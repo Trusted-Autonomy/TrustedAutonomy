@@ -1,0 +1,13 @@
+name = "meridian"
+type = "tool"
+command = ""
+description = "Velocity reports, cost-per-phase, and goal-alignment scoring (cargo)"
+
+[tool]
+label = "Meridian KPI analytics"
+detect_command = "meridian --version"
+install_hint = "cargo install meridian"
+
+[tool.install]
+kind = "cargo"
+package = "meridian"
