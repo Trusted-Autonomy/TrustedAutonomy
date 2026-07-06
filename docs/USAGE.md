@@ -247,6 +247,7 @@ You are a financial analyst. Your outputs are always structured:
 executive summary, key metrics, risks, and recommended actions.
 Never speculate without data.
 """
+agent = "claude-opus-4-8"   # optional — persona-level agent binding, see below
 
 [capabilities]
 allowed_tools   = ["read", "bash"]   # empty = no restriction
@@ -269,7 +270,8 @@ ta persona new financial-analyst
 ta persona new financial-analyst \
   --description "Analyzes financial data" \
   --system-prompt "You are a financial analyst..." \
-  --forbidden-tools write
+  --forbidden-tools write \
+  --agent claude-opus-4-8
 ```
 
 **From Studio:** Open the **Personas** tab, fill in the form, and click **Save Persona**.
@@ -288,6 +290,17 @@ ta run "Analyze Q3 financials" --persona financial-analyst
 ```
 
 The persona's system prompt and tool restrictions are appended to CLAUDE.md in the staging workspace, after the plan context injection.
+
+### Persona-Level Agent Binding
+
+A persona can also pin which agent it runs on, so `--persona <name>` alone is enough to select both the identity and the runtime:
+
+```bash
+ta persona set-agent financial-analyst claude-opus-4-8
+ta persona set-agent financial-analyst auto   # hand the choice to the supervisor
+```
+
+This is the second-highest tier in the full agent resolution order — see [Full agent and model switching](#full-agent-and-model-switching-workload-workflow-and-persona-tiers) for the complete hierarchy and `"auto"` behavior.
 
 ---
 
@@ -1685,16 +1698,37 @@ default       = "qwen-coder"       # baseline default agent — used by ta run u
 qa_framework  = "claude-code"      # used by automated QA workflow roles
 ```
 
-`default` is the baseline default-agent setting: a single, data-defined config value with no built-in list of valid names — any installed agent/framework name works. The legacy `default_framework` key is still honored if `default` is left unset, so existing `.ta/daemon.toml` files keep working unchanged. Full per-workload/workflow/persona-tier agent switching (including `agent = "auto"` for supervisor auto-pick) builds on top of this baseline in a later phase.
+`default` is the baseline default-agent setting: a single, data-defined config value with no built-in list of valid names — any installed agent/framework name works. The legacy `default_framework` key is still honored if `default` is left unset, so existing `.ta/daemon.toml` files keep working unchanged.
 
-#### Framework selection order
+#### Full agent and model switching (workload, workflow, and persona tiers)
 
-`ta run` resolves the agent in priority order (highest wins):
+`ta run` resolves the effective agent through a full tier hierarchy, evaluated most-specific-first (highest wins):
 
 1. `--agent <name>` flag (explicit per-run override)
-2. `agent_framework` field in the workflow YAML (when `--workflow <file>` points to a YAML file)
-3. `[agent].default` in `.ta/daemon.toml` (falls back to the legacy `[agent].default_framework` if `default` is unset)
-4. Built-in default: `claude-code`
+2. **Persona-level binding**: the `agent` field in `.ta/personas/<name>.toml`, applied when `--persona <name>` is passed. Set it with:
+   ```bash
+   ta persona new financial-analyst --agent claude-opus-4-8
+   ta persona set-agent financial-analyst claude-opus-4-8   # or update an existing persona
+   ```
+3. **Workflow-level binding**:
+   - `agent_framework` field in the workflow YAML (when `--workflow <file>` points to a YAML file), or
+   - `[agent].default` in `.ta/workflow.toml`:
+     ```toml
+     [agent]
+     default = "codex"
+     ```
+4. **Workload-type-level default**: `[workload_agents].<type>` in `.ta/workflow.toml`, matched against the `--workload <type>` flag on `ta run`:
+   ```toml
+   [workload_agents]
+   bugfix = "claude-opus-4-8"
+   docs   = "claude-sonnet-4-6"
+   ```
+   ```bash
+   ta run "Fix the null-pointer crash" --workload bugfix
+   ```
+   Workload classification is manual/opt-in until v0.17.0.12.20's `ta-brain` routing layer ships automatic classification.
+5. `[agent].default` in `.ta/daemon.toml` (falls back to the legacy `[agent].default_framework` if `default` is unset)
+6. Built-in default: `claude-code`
 
 To inspect what `ta run` will use without actually running a goal:
 
@@ -1705,6 +1739,30 @@ ta daemon config
 Output includes the effective agent, the config file being used, and which source provided the value. `ta dev` applies the same resolution order.
 
 You can also add YAML agent configs (see [Agent Configuration](#agent-configuration)).
+
+#### `agent = "auto"` — supervisor auto-pick
+
+Any tier above (persona, workflow, workload-type, or daemon baseline) accepts the literal value `"auto"` instead of a fixed agent ID:
+
+```bash
+ta team assign reviewer auto --security auto
+ta persona set-agent financial-analyst auto
+```
+
+```toml
+# .ta/workflow.toml
+[agent]
+default = "auto"
+```
+
+When resolution reaches a tier set to `"auto"`, it stops there — it does **not** fall through to lower tiers — and hands the choice to the supervisor's recommendation instead of a fixed value. The v1 heuristic (no historical per-agent telemetry yet — that lands in v0.17.0.12.15) prefers the alphabetically-first entry in `.ta/daemon.toml`'s `[agent].trusted_binaries` allowlist, falling back to the legacy `default_framework`, then the hardcoded `claude-code` default.
+
+Per the Observable & Actionable constitution principle, `"auto"` is never a black box: every recommendation is logged and appended to `.ta/agent-recommendations.jsonl` with its rationale. View the history with:
+
+```bash
+ta agent recommendations
+ta agent recommendations --limit 10
+```
 
 ---
 
@@ -2644,8 +2702,11 @@ Team roles are data-defined, not a fixed list — `implementer`, `reviewer`, `qa
 ```bash
 ta team assign reviewer claude-sonnet-4-6 --security auto --persona strict-reviewer
 ta team assign security-team claude-opus-4-8   # custom role — no core change needed
+ta team assign reviewer auto --security auto    # hand agent choice to the supervisor
 ta team list
 ```
+
+`agent_id` is validated: it must be the literal `auto` (case-insensitive) or a non-empty identifier (letters, digits, `-`, `_`, `.`, `:`) — empty values and anything containing whitespace are rejected with an actionable error.
 
 Use `--no-auto-merge` to require a human to merge each PR after CI passes instead of letting the loop call `gh pr merge` automatically:
 

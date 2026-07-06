@@ -176,6 +176,17 @@ pub enum AgentCommands {
         /// Framework to migrate: "ollama".
         framework: String,
     },
+    /// Show the history of `agent = "auto"` supervisor recommendations (v0.17.0.12.13).
+    ///
+    /// Per the Observable & Actionable constitution principle, every time a
+    /// `Switch` action tier resolves to `"auto"`, the chosen agent and the
+    /// rationale behind it are appended to `.ta/agent-recommendations.jsonl`.
+    /// This command surfaces that history — `"auto"` is never a black box.
+    Recommendations {
+        /// Show only the last N recommendations (default: all).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Result<()> {
@@ -226,7 +237,41 @@ pub fn execute(command: &AgentCommands, config: &GatewayConfig) -> anyhow::Resul
         AgentCommands::Publish { path, registry } => framework_publish(path, registry.as_deref()),
         AgentCommands::InstallQwen { size } => install_qwen(size),
         AgentCommands::Migrate { framework } => migrate_agent_framework(framework, config),
+        AgentCommands::Recommendations { limit } => show_agent_recommendations(config, *limit),
     }
+}
+
+/// `ta agent recommendations` — show the `agent = "auto"` supervisor recommendation
+/// history from `.ta/agent-recommendations.jsonl` (v0.17.0.12.13).
+fn show_agent_recommendations(config: &GatewayConfig, limit: Option<usize>) -> anyhow::Result<()> {
+    let mut recs = super::run::read_agent_recommendations(&config.workspace_root);
+    if recs.is_empty() {
+        println!("No agent = \"auto\" recommendations recorded yet.");
+        println!(
+            "Recommendations are logged to .ta/agent-recommendations.jsonl whenever a Switch \
+             action tier resolves to \"auto\"."
+        );
+        return Ok(());
+    }
+    if let Some(n) = limit {
+        let skip = recs.len().saturating_sub(n);
+        recs.drain(..skip);
+    }
+    for rec in &recs {
+        println!("{}  tier={}  agent={}", rec.timestamp, rec.tier, rec.agent);
+        if let Some(p) = &rec.persona {
+            println!("  persona: {}", p);
+        }
+        if let Some(w) = &rec.workload_type {
+            println!("  workload_type: {}", w);
+        }
+        if let Some(t) = &rec.goal_title {
+            println!("  goal: {}", t);
+        }
+        println!("  rationale: {}", rec.rationale);
+        println!();
+    }
+    Ok(())
 }
 
 fn new_agent(name: &str, agent_type: &str, config: &GatewayConfig) -> anyhow::Result<()> {

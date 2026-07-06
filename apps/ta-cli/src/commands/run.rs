@@ -9,6 +9,7 @@
 // The user then reviews/approves/applies via `ta draft` commands.
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -519,9 +520,10 @@ fn resolve_workflow(explicit: Option<&str>, workspace_root: &std::path::Path) ->
     WorkflowKind::SingleAgent
 }
 
-// ── Agent runtime resolution (v0.17.0.8) ────────────────────────
+// ── Agent runtime resolution (v0.17.0.8, extended v0.17.0.12.12/.13) ─
 
-/// Minimal daemon.toml `[agent]` section for reading `default`/`default_framework`.
+/// Minimal daemon.toml `[agent]` section for reading `default`/`default_framework`/
+/// `trusted_binaries`.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
 struct DaemonTomlAgent {
@@ -535,6 +537,10 @@ struct AgentSection {
     /// legacy `default_framework` field below when both are set.
     default: String,
     default_framework: String,
+    /// Trusted agent binary allowlist (v0.17.0.9). Reused here as the signal
+    /// pool for `agent = "auto"` recommendations (v0.17.0.12.13) — see
+    /// `recommend_agent`.
+    trusted_binaries: HashMap<String, String>,
 }
 
 impl Default for AgentSection {
@@ -542,6 +548,7 @@ impl Default for AgentSection {
         Self {
             default: String::new(),
             default_framework: "claude-code".to_string(),
+            trusted_binaries: HashMap::new(),
         }
     }
 }
@@ -553,32 +560,105 @@ struct WorkflowYamlAgent {
     agent_framework: Option<String>,
 }
 
+/// Minimal `.ta/workflow.toml` shape for reading the workflow-level `[agent].default`
+/// binding and the workload-type-level `[workload_agents]` table (v0.17.0.12.13).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct WorkflowTomlAgent {
+    agent: WorkflowTomlAgentSection,
+    /// Per-workload-type agent default, e.g.:
+    /// ```toml
+    /// [workload_agents]
+    /// bugfix = "claude-opus-4-8"
+    /// docs = "claude-sonnet-4-6"
+    /// ```
+    workload_agents: HashMap<String, String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct WorkflowTomlAgentSection {
+    default: String,
+}
+
 /// Resolve the effective agent framework for a `ta run` invocation.
 ///
-/// Resolution order (highest-priority wins):
-/// 1. `--agent` CLI flag (explicit user override) — `cli_agent` is `Some(name)`
-/// 2. `agent_framework` field in the workflow YAML given by `--workflow <file>`
-/// 3. `[agent].default` in `.ta/daemon.toml` (baseline default-agent setting,
-///    v0.17.0.12.12) — falls back to the legacy `[agent].default_framework`
-///    field if `default` is unset, for backward compatibility.
-/// 4. Built-in fallback: `"claude-code"`
-///
-/// This is the "minimum viable slice" of the `Switch` action
-/// (`docs/design/ta-action-reference.md`); per-workload/workflow/persona
-/// tiers and `agent = "auto"` land in v0.17.0.12.13 on top of this baseline.
+/// Back-compat wrapper around [`resolve_effective_agent_full`] for callers
+/// that don't have persona/workload-type/goal-title context. Equivalent to
+/// calling the full resolver with `persona_name`, `workload_type`, and
+/// `goal_title` all `None`.
 pub fn resolve_effective_agent(
     cli_agent: Option<&str>,
     workflow_name_or_path: Option<&str>,
     workspace_root: &std::path::Path,
 ) -> String {
-    // Priority 1: explicit --agent flag.
+    resolve_effective_agent_full(
+        cli_agent,
+        workflow_name_or_path,
+        None,
+        None,
+        None,
+        workspace_root,
+    )
+}
+
+/// Resolve the effective agent framework for a `ta run` invocation, evaluating
+/// every `Switch` action tier from most to least specific (v0.17.0.12.13).
+///
+/// Resolution order (highest-priority wins):
+/// 1. `--agent` CLI flag (explicit user override) — `cli_agent` is `Some(name)`
+/// 2. Persona-level agent binding: `.ta/personas/<persona_name>.toml`'s
+///    `persona.agent` field.
+/// 3. Workflow-level agent binding:
+///    3a. `agent_framework` field in the workflow YAML given by `--workflow <file>`
+///    3b. `[agent].default` in `.ta/workflow.toml`
+/// 4. Workload-type-level default: `[workload_agents].<workload_type>` in
+///    `.ta/workflow.toml`
+/// 5. `[agent].default` in `.ta/daemon.toml` (baseline default-agent setting,
+///    v0.17.0.12.12) — falls back to the legacy `[agent].default_framework`
+///    field if `default` is unset, for backward compatibility.
+/// 6. Built-in fallback: `"claude-code"`
+///
+/// At **any** tier, a literal `"auto"` value (case-insensitive) stops tier
+/// evaluation and hands the choice to [`recommend_agent`] instead of falling
+/// through to lower tiers — `"auto"` is an explicit declaration, not an
+/// "unset" sentinel. The recommendation is always logged and persisted to
+/// `.ta/agent-recommendations.jsonl` (Observable & Actionable — `"auto"` must
+/// never be a black box).
+pub fn resolve_effective_agent_full(
+    cli_agent: Option<&str>,
+    workflow_name_or_path: Option<&str>,
+    persona_name: Option<&str>,
+    workload_type: Option<&str>,
+    goal_title: Option<&str>,
+    workspace_root: &std::path::Path,
+) -> String {
+    // Tier 1: explicit --agent flag.
     if let Some(agent) = cli_agent {
         if !agent.is_empty() {
             return agent.to_string();
         }
     }
 
-    // Priority 2: workflow YAML `agent_framework` field.
+    // Tier 2: persona-level agent binding.
+    if let Some(name) = persona_name {
+        if let Ok(persona) = ta_goal::PersonaConfig::load(workspace_root, name) {
+            if let Some(agent) = persona.persona.agent {
+                if !agent.is_empty() {
+                    return resolve_or_recommend(
+                        &agent,
+                        "persona",
+                        persona_name,
+                        workload_type,
+                        goal_title,
+                        workspace_root,
+                    );
+                }
+            }
+        }
+    }
+
+    // Tier 3a: workflow YAML `agent_framework` field.
     // The `--workflow` value can be a path to a YAML file or a built-in name.
     // We only attempt YAML reading when the value ends with .yaml/.yml or
     // the path exists on disk.
@@ -593,7 +673,14 @@ pub fn resolve_effective_agent(
                 if let Ok(parsed) = serde_yaml::from_str::<WorkflowYamlAgent>(&content) {
                     if let Some(ref fw) = parsed.agent_framework {
                         if !fw.is_empty() {
-                            return fw.clone();
+                            return resolve_or_recommend(
+                                fw,
+                                "workflow-yaml",
+                                persona_name,
+                                workload_type,
+                                goal_title,
+                                workspace_root,
+                            );
                         }
                     }
                 }
@@ -601,22 +688,238 @@ pub fn resolve_effective_agent(
         }
     }
 
-    // Priority 3: [agent].default from daemon.toml (new baseline setting),
+    // Tier 3b / 4: `.ta/workflow.toml`'s `[agent].default` (workflow-level),
+    // falling back to `[workload_agents].<workload_type>` (workload-type-level).
+    let workflow_toml = workspace_root.join(".ta").join("workflow.toml");
+    if let Ok(content) = std::fs::read_to_string(&workflow_toml) {
+        if let Ok(parsed) = toml::from_str::<WorkflowTomlAgent>(&content) {
+            if !parsed.agent.default.is_empty() {
+                return resolve_or_recommend(
+                    &parsed.agent.default,
+                    "workflow.toml",
+                    persona_name,
+                    workload_type,
+                    goal_title,
+                    workspace_root,
+                );
+            }
+            if let Some(wt) = workload_type {
+                if let Some(agent) = parsed.workload_agents.get(wt) {
+                    if !agent.is_empty() {
+                        return resolve_or_recommend(
+                            agent,
+                            "workload-type",
+                            persona_name,
+                            workload_type,
+                            goal_title,
+                            workspace_root,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Tier 5: [agent].default from daemon.toml (baseline setting),
     // falling back to the legacy [agent].default_framework field.
     let daemon_toml = workspace_root.join(".ta").join("daemon.toml");
     if let Ok(content) = std::fs::read_to_string(&daemon_toml) {
         if let Ok(parsed) = toml::from_str::<DaemonTomlAgent>(&content) {
             if !parsed.agent.default.is_empty() {
-                return parsed.agent.default;
+                return resolve_or_recommend(
+                    &parsed.agent.default,
+                    "daemon.toml-default",
+                    persona_name,
+                    workload_type,
+                    goal_title,
+                    workspace_root,
+                );
             }
             if !parsed.agent.default_framework.is_empty() {
-                return parsed.agent.default_framework;
+                return resolve_or_recommend(
+                    &parsed.agent.default_framework,
+                    "daemon.toml-default_framework",
+                    persona_name,
+                    workload_type,
+                    goal_title,
+                    workspace_root,
+                );
             }
         }
     }
 
-    // Priority 4: built-in fallback.
+    // Tier 6: built-in fallback.
     "claude-code".to_string()
+}
+
+/// If `candidate` is the literal `"auto"` (case-insensitive), hand off to
+/// [`recommend_agent`]; otherwise return `candidate` unchanged.
+fn resolve_or_recommend(
+    candidate: &str,
+    tier: &str,
+    persona_name: Option<&str>,
+    workload_type: Option<&str>,
+    goal_title: Option<&str>,
+    workspace_root: &std::path::Path,
+) -> String {
+    if candidate.trim().eq_ignore_ascii_case("auto") {
+        recommend_agent(
+            workspace_root,
+            tier,
+            persona_name,
+            workload_type,
+            goal_title,
+        )
+        .agent
+    } else {
+        candidate.to_string()
+    }
+}
+
+/// A supervisor's agent recommendation for an `agent = "auto"` declaration
+/// (v0.17.0.12.13). Every recommendation is logged via `tracing::warn!`,
+/// printed to stdout, and appended to `.ta/agent-recommendations.jsonl` so a
+/// human can see which agent was picked and why — per the Observable &
+/// Actionable constitution principle, `"auto"` must never be a black box.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentRecommendation {
+    pub timestamp: String,
+    /// Which resolution tier declared `"auto"` (e.g. `"persona"`, `"workflow.toml"`).
+    pub tier: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_title: Option<String>,
+    pub agent: String,
+    pub rationale: String,
+}
+
+/// Recommend an agent for an `agent = "auto"` declaration.
+///
+/// v1 heuristic (no historical per-agent telemetry yet — that lands in
+/// v0.17.0.12.15 per the plan): prefers the alphabetically-first entry in
+/// `.ta/daemon.toml`'s `[agent].trusted_binaries` allowlist, since those are
+/// the agent binaries a human has already locally verified. Falls back to
+/// the legacy `[agent].default_framework` setting, then the hardcoded
+/// `"claude-code"` fallback. Whatever is chosen, the recommendation and its
+/// rationale are always logged and persisted — never silently applied.
+pub fn recommend_agent(
+    workspace_root: &std::path::Path,
+    tier: &str,
+    persona_name: Option<&str>,
+    workload_type: Option<&str>,
+    goal_title: Option<&str>,
+) -> AgentRecommendation {
+    let daemon_toml = workspace_root.join(".ta").join("daemon.toml");
+    let parsed: DaemonTomlAgent = std::fs::read_to_string(&daemon_toml)
+        .ok()
+        .and_then(|c| toml::from_str(&c).ok())
+        .unwrap_or_default();
+
+    let (agent, rationale) = if !parsed.agent.trusted_binaries.is_empty() {
+        let mut names: Vec<&String> = parsed.agent.trusted_binaries.keys().collect();
+        names.sort();
+        let chosen = names[0].clone();
+        (
+            chosen.clone(),
+            format!(
+                "No per-agent performance telemetry available yet (lands in v0.17.0.12.15); \
+                 picked '{}', the alphabetically-first entry in daemon.toml's \
+                 [agent].trusted_binaries allowlist, as the safest locally-verified choice.",
+                chosen
+            ),
+        )
+    } else if !parsed.agent.default_framework.is_empty()
+        && parsed.agent.default_framework != "claude-code"
+    {
+        (
+            parsed.agent.default_framework.clone(),
+            format!(
+                "No trusted_binaries configured and no telemetry available yet; fell back to \
+                 daemon.toml's legacy [agent].default_framework ('{}').",
+                parsed.agent.default_framework
+            ),
+        )
+    } else {
+        (
+            "claude-code".to_string(),
+            "No trusted_binaries configured, no telemetry available, and no other signal \
+             found; defaulting to the built-in 'claude-code' agent."
+                .to_string(),
+        )
+    };
+
+    let recommendation = AgentRecommendation {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        tier: tier.to_string(),
+        persona: persona_name.map(str::to_string),
+        workload_type: workload_type.map(str::to_string),
+        goal_title: goal_title.map(str::to_string),
+        agent,
+        rationale,
+    };
+
+    log_agent_recommendation(workspace_root, &recommendation);
+    recommendation
+}
+
+/// Log and persist an `agent = "auto"` recommendation (Observable & Actionable).
+fn log_agent_recommendation(workspace_root: &std::path::Path, rec: &AgentRecommendation) {
+    tracing::warn!(
+        tier = %rec.tier,
+        agent = %rec.agent,
+        persona = ?rec.persona,
+        workload_type = ?rec.workload_type,
+        rationale = %rec.rationale,
+        "agent = \"auto\" resolved via supervisor recommendation"
+    );
+    println!(
+        "[agent-auto-pick] tier={} agent={} — {}",
+        rec.tier, rec.agent, rec.rationale
+    );
+
+    let log_path = workspace_root
+        .join(".ta")
+        .join("agent-recommendations.jsonl");
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(line) = serde_json::to_string(rec) else {
+        tracing::warn!("Failed to serialize agent recommendation for persistence");
+        return;
+    };
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(mut f) => {
+            use std::io::Write as _;
+            let _ = writeln!(f, "{}", line);
+        }
+        Err(e) => {
+            tracing::warn!(path = %log_path.display(), error = %e, "Failed to write agent recommendation log");
+        }
+    }
+}
+
+/// Read all recorded `agent = "auto"` recommendations from
+/// `.ta/agent-recommendations.jsonl`, most recent last.
+pub fn read_agent_recommendations(workspace_root: &std::path::Path) -> Vec<AgentRecommendation> {
+    let log_path = workspace_root
+        .join(".ta")
+        .join("agent-recommendations.jsonl");
+    let content = match std::fs::read_to_string(&log_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<AgentRecommendation>(l).ok())
+        .collect()
 }
 
 // ── Serial phases workflow (v0.13.7) ────────────────────────────
@@ -9313,5 +9616,221 @@ plan_pending_window = 7
             resolve_effective_agent(Some("claude-flow"), None, dir.path()),
             "claude-flow"
         );
+    }
+
+    // ── v0.17.0.12.13: full tier hierarchy ───────────────────────────
+
+    fn write_persona_with_agent(dir: &std::path::Path, name: &str, agent: &str) {
+        std::fs::create_dir_all(dir.join(".ta").join("personas")).unwrap();
+        std::fs::write(
+            dir.join(".ta").join("personas").join(format!("{name}.toml")),
+            format!(
+                "[persona]\nname = \"{name}\"\ndescription = \"\"\nsystem_prompt = \"\"\nagent = \"{agent}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_persona_tier_wins_over_daemon_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault = \"qwen-coder\"\n",
+        )
+        .unwrap();
+        write_persona_with_agent(dir.path(), "financial-analyst", "claude-opus-4-8");
+
+        assert_eq!(
+            resolve_effective_agent_full(
+                None,
+                None,
+                Some("financial-analyst"),
+                None,
+                None,
+                dir.path()
+            ),
+            "claude-opus-4-8"
+        );
+    }
+
+    #[test]
+    fn resolve_cli_flag_beats_persona_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        write_persona_with_agent(dir.path(), "financial-analyst", "claude-opus-4-8");
+
+        assert_eq!(
+            resolve_effective_agent_full(
+                Some("claude-flow"),
+                None,
+                Some("financial-analyst"),
+                None,
+                None,
+                dir.path()
+            ),
+            "claude-flow"
+        );
+    }
+
+    #[test]
+    fn resolve_persona_missing_falls_through_to_lower_tiers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault = \"qwen-coder\"\n",
+        )
+        .unwrap();
+        // Persona name given but no such persona file exists.
+        assert_eq!(
+            resolve_effective_agent_full(
+                None,
+                None,
+                Some("does-not-exist"),
+                None,
+                None,
+                dir.path()
+            ),
+            "qwen-coder"
+        );
+    }
+
+    #[test]
+    fn resolve_workflow_toml_tier_beats_daemon_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault = \"qwen-coder\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("workflow.toml"),
+            "[agent]\ndefault = \"codex\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_effective_agent_full(None, None, None, None, None, dir.path()),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn resolve_workload_type_tier_beats_daemon_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault = \"qwen-coder\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("workflow.toml"),
+            "[workload_agents]\nbugfix = \"claude-opus-4-8\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_effective_agent_full(None, None, None, Some("bugfix"), None, dir.path()),
+            "claude-opus-4-8"
+        );
+        // Unknown workload type falls through to the daemon.toml baseline.
+        assert_eq!(
+            resolve_effective_agent_full(None, None, None, Some("docs"), None, dir.path()),
+            "qwen-coder"
+        );
+    }
+
+    #[test]
+    fn resolve_workflow_toml_default_beats_workload_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("workflow.toml"),
+            "[agent]\ndefault = \"codex\"\n\n[workload_agents]\nbugfix = \"claude-opus-4-8\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_effective_agent_full(None, None, None, Some("bugfix"), None, dir.path()),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn resolve_auto_at_persona_tier_triggers_recommendation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent.trusted_binaries]\nclaude = \"/usr/local/bin/claude\"\ncodex = \"/usr/local/bin/codex\"\n",
+        )
+        .unwrap();
+        write_persona_with_agent(dir.path(), "auto-persona", "auto");
+
+        // Alphabetically-first trusted binary is "claude".
+        assert_eq!(
+            resolve_effective_agent_full(None, None, Some("auto-persona"), None, None, dir.path()),
+            "claude"
+        );
+
+        // The recommendation must be observable, not a black box.
+        let recs = read_agent_recommendations(dir.path());
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].tier, "persona");
+        assert_eq!(recs[0].agent, "claude");
+        assert!(!recs[0].rationale.is_empty());
+    }
+
+    #[test]
+    fn resolve_auto_does_not_fall_through_to_lower_tiers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault = \"qwen-coder\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("workflow.toml"),
+            "[agent]\ndefault = \"auto\"\n",
+        )
+        .unwrap();
+
+        // "auto" at the workflow.toml tier must NOT fall through to
+        // daemon.toml's "qwen-coder" — it must resolve via recommend_agent,
+        // which (with no trusted_binaries and no non-default legacy
+        // framework configured) falls back to "claude-code".
+        assert_eq!(
+            resolve_effective_agent_full(None, None, None, None, None, dir.path()),
+            "claude-code"
+        );
+        let recs = read_agent_recommendations(dir.path());
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].tier, "workflow.toml");
+    }
+
+    #[test]
+    fn recommend_agent_prefers_alphabetically_first_trusted_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent.trusted_binaries]\nzed = \"/usr/local/bin/zed\"\naider = \"/usr/local/bin/aider\"\n",
+        )
+        .unwrap();
+
+        let rec = recommend_agent(dir.path(), "test-tier", None, None, Some("fix the bug"));
+        assert_eq!(rec.agent, "aider");
+        assert_eq!(rec.goal_title, Some("fix the bug".to_string()));
+    }
+
+    #[test]
+    fn recommend_agent_falls_back_to_claude_code_with_no_signals() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = recommend_agent(dir.path(), "test-tier", None, None, None);
+        assert_eq!(rec.agent, "claude-code");
     }
 }

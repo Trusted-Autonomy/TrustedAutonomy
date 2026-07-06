@@ -8,6 +8,8 @@ use clap::Subcommand;
 use ta_goal::{PersonaCapabilities, PersonaConfig, PersonaInner, PersonaStyle};
 use ta_mcp_gateway::GatewayConfig;
 
+use super::team::validate_agent_id;
+
 #[derive(Debug, Subcommand)]
 pub enum PersonaCommands {
     /// List all agent personas in .ta/personas/.
@@ -28,11 +30,29 @@ pub enum PersonaCommands {
         /// Comma-separated list of forbidden tool names.
         #[arg(long, value_delimiter = ',')]
         forbidden_tools: Vec<String>,
+        /// Persona-level agent binding (v0.17.0.12.13 `Switch` action tiers).
+        ///
+        /// Any goal run with `--persona <name>` picks up this agent unless
+        /// `--agent` overrides it. Pass "auto" to hand the choice to the
+        /// supervisor's recommendation instead of a fixed agent ID.
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Show details of a specific persona.
     Show {
         /// Persona name.
         name: String,
+    },
+    /// Set or clear the persona-level agent binding (v0.17.0.12.13).
+    ///
+    /// Examples:
+    ///   ta persona set-agent financial-analyst claude-opus-4-8
+    ///   ta persona set-agent financial-analyst auto
+    SetAgent {
+        /// Persona name.
+        name: String,
+        /// Agent ID, or "auto" to hand the choice to the supervisor.
+        agent: String,
     },
 }
 
@@ -71,6 +91,7 @@ pub fn execute(command: &PersonaCommands, config: &GatewayConfig) -> anyhow::Res
             system_prompt,
             allowed_tools,
             forbidden_tools,
+            agent,
         } => {
             // Validate name.
             if name.contains('/') || name.contains('\\') || name.contains('.') {
@@ -78,6 +99,9 @@ pub fn execute(command: &PersonaCommands, config: &GatewayConfig) -> anyhow::Res
                     "Persona name '{}' is invalid. Use lowercase letters, numbers, and hyphens only.",
                     name
                 );
+            }
+            if let Some(a) = agent {
+                validate_agent_id(a)?;
             }
 
             let description = if description.is_empty() {
@@ -121,6 +145,7 @@ pub fn execute(command: &PersonaCommands, config: &GatewayConfig) -> anyhow::Res
                     description: description.clone(),
                     system_prompt,
                     constitution: None,
+                    agent: agent.clone(),
                 },
                 capabilities: PersonaCapabilities {
                     allowed_tools: allowed_tools.clone(),
@@ -134,6 +159,9 @@ pub fn execute(command: &PersonaCommands, config: &GatewayConfig) -> anyhow::Res
 
             let path = persona.save(project_root)?;
             println!("Persona '{}' saved to {}", name, path.display());
+            if let Some(a) = agent {
+                println!("Agent binding: {}", a);
+            }
             println!("Use it with: ta run \"your goal\" --persona {}", name);
             Ok(())
         }
@@ -157,7 +185,65 @@ pub fn execute(command: &PersonaCommands, config: &GatewayConfig) -> anyhow::Res
                     persona.capabilities.forbidden_tools.join(", ")
                 );
             }
+            if let Some(a) = &persona.persona.agent {
+                println!("Agent binding: {}", a);
+            }
             Ok(())
         }
+
+        PersonaCommands::SetAgent { name, agent } => {
+            validate_agent_id(agent)?;
+            let mut persona = PersonaConfig::load(project_root, name)?;
+            persona.persona.agent = Some(agent.clone());
+            persona.save(project_root)?;
+            println!("Persona '{}' agent binding set to '{}'.", name, agent);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn sample_persona(name: &str) -> PersonaConfig {
+        PersonaConfig {
+            persona: PersonaInner {
+                name: name.to_string(),
+                description: "Test persona".to_string(),
+                system_prompt: "You are a test persona.".to_string(),
+                constitution: None,
+                agent: None,
+            },
+            capabilities: PersonaCapabilities::default(),
+            style: PersonaStyle::default(),
+        }
+    }
+
+    // ── v0.17.0.12.13: `ta persona set-agent` ────────────────────────
+
+    #[test]
+    fn set_agent_updates_existing_persona() {
+        let dir = tempdir().unwrap();
+        sample_persona("reviewer-bot").save(dir.path()).unwrap();
+
+        let mut persona = PersonaConfig::load(dir.path(), "reviewer-bot").unwrap();
+        persona.persona.agent = Some("claude-opus-4-8".to_string());
+        persona.save(dir.path()).unwrap();
+
+        let loaded = PersonaConfig::load(dir.path(), "reviewer-bot").unwrap();
+        assert_eq!(loaded.persona.agent, Some("claude-opus-4-8".to_string()));
+    }
+
+    #[test]
+    fn set_agent_accepts_auto() {
+        assert!(validate_agent_id("auto").is_ok());
+    }
+
+    #[test]
+    fn set_agent_rejects_invalid_id() {
+        assert!(validate_agent_id("").is_err());
+        assert!(validate_agent_id("bad id").is_err());
     }
 }

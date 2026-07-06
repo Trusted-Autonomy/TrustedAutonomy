@@ -9397,17 +9397,17 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.13 — Full Agent/Model Switching (Workload/Workflow/Persona Tiers + Supervisor Auto-Pick)
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12
 
 **Goal**: Complete the `Switch` action (`docs/design/ta-action-reference.md`) on top of v0.17.0.12.12's baseline: agent/model selection configurable per workload, per workflow, or per persona, with an explicit `"auto"` declaration that hands the choice to the supervisor, and CLI args overriding every tier — matching the user's 2026-07-04 spec exactly.
 
 **Items**:
-1. [ ] Extend the resolution order from v0.17.0.12.12 with tiers evaluated most-specific-first: `--agent` CLI flag → persona-level `agent` binding (`.ta/personas/<name>.toml`) → workflow-level `agent` binding (`workflow.toml`, ties into the §3 mapping-tree work) → workload-type-level default → v0.17.0.12.12's baseline `default_agent` → hardcoded fallback.
-2. [ ] **`agent = "auto"`** at any tier: when resolved, the supervisor recommends an agent for this specific goal/workload using whatever signals are available (goal content, persona requirements, historical per-agent performance once v0.17.0.12.15's telemetry exists) rather than a fixed config value.
-3. [ ] Update `ta team assign` and persona/workflow config commands to accept and validate `"auto"` alongside real agent IDs.
-4. [ ] Tests: resolution order across all tiers including `"auto"`; the supervisor's recommendation (which agent, why) is logged and visible to a human, per the Observable & Actionable constitution principle — "auto" must never be a black box.
-5. [ ] USAGE.md: document the full tier hierarchy and `"auto"`.
+1. [x] Extend the resolution order from v0.17.0.12.12 with tiers evaluated most-specific-first: `--agent` CLI flag → persona-level `agent` binding (`.ta/personas/<name>.toml`) → workflow-level `agent` binding (`workflow.toml`, ties into the §3 mapping-tree work) → workload-type-level default → v0.17.0.12.12's baseline `default_agent` → hardcoded fallback.
+2. [x] **`agent = "auto"`** at any tier: when resolved, the supervisor recommends an agent for this specific goal/workload using whatever signals are available (goal content, persona requirements, historical per-agent performance once v0.17.0.12.15's telemetry exists) rather than a fixed config value.
+3. [x] Update `ta team assign` and persona/workflow config commands to accept and validate `"auto"` alongside real agent IDs.
+4. [x] Tests: resolution order across all tiers including `"auto"`; the supervisor's recommendation (which agent, why) is logged and visible to a human, per the Observable & Actionable constitution principle — "auto" must never be a black box.
+5. [x] USAGE.md: document the full tier hierarchy and `"auto"`.
 
 #### Version: `0.17.0-alpha.12.13`
 
