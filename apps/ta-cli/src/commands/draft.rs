@@ -20,8 +20,8 @@ use ta_changeset::draft_package::{
     VerificationWarning, WorkspaceRef,
 };
 use ta_changeset::explanation::ExplanationSidecar;
-use ta_changeset::output_adapters::{
-    get_adapter, DetailLevel, DiffProvider, OutputFormat, RenderContext,
+use ta_changeset::output_renderers::{
+    get_renderer, DetailLevel, DiffProvider, OutputFormat, RenderContext,
 };
 use ta_changeset::review_session::{ReviewSession, ReviewState};
 use ta_changeset::review_session_store::ReviewSessionStore;
@@ -3769,7 +3769,7 @@ fn view_package(
         .map_err(|e| anyhow::anyhow!(e))?;
     let section_filter = section_str
         .map(|s| {
-            s.parse::<ta_changeset::output_adapters::SectionFilter>()
+            s.parse::<ta_changeset::output_renderers::SectionFilter>()
                 .map_err(|e| anyhow::anyhow!(e))
         })
         .transpose()?;
@@ -3857,7 +3857,7 @@ fn view_package(
     };
 
     // Get the adapter and render.
-    let adapter = get_adapter(output_format, effective_color);
+    let adapter = get_renderer(output_format, effective_color);
     let output = adapter.render(&ctx).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     println!("{}", output);
@@ -5417,7 +5417,7 @@ fn assign_dispositions(
 /// Format: goal title as subject line, then the same medium-detail rendering
 /// used by `ta draft view` (no color, no ANSI escapes).
 fn build_commit_message(goal: &ta_goal::GoalRun, pkg: &DraftPackage) -> String {
-    use ta_changeset::output_adapters::{get_adapter, DetailLevel, OutputFormat, RenderContext};
+    use ta_changeset::output_renderers::{get_renderer, DetailLevel, OutputFormat, RenderContext};
 
     // Render using the terminal adapter with no color — same output as `ta draft view`.
     let ctx = RenderContext {
@@ -5427,7 +5427,7 @@ fn build_commit_message(goal: &ta_goal::GoalRun, pkg: &DraftPackage) -> String {
         diff_provider: None,
         section_filter: None,
     };
-    let adapter = get_adapter(OutputFormat::Terminal, false);
+    let adapter = get_renderer(OutputFormat::Terminal, false);
     let rendered = adapter
         .render(&ctx)
         .unwrap_or_else(|_| format!("{}\n\n{}", goal.title, pkg.summary.what_changed));
@@ -16501,7 +16501,7 @@ fn run() {
 
     #[test]
     fn matches_file_filters_always_shows_ta_memory_uri() {
-        use ta_changeset::output_adapters::matches_file_filters;
+        use ta_changeset::output_renderers::matches_file_filters;
         // ta://memory/ URIs should always pass through, even with file filters active.
         assert!(matches_file_filters(
             "ta://memory/some-goal-id",

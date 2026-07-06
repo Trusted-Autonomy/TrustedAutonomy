@@ -12,28 +12,67 @@ use crate::advisor_agent::AdvisorOutcome;
 // ── TeamRole ──────────────────────────────────────────────────────────────────
 
 /// Role of the agent/team member producing or consuming an action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TeamRole {
-    Implementer,
-    Reviewer,
-    QA,
-    Architect,
-    ReleaseManager,
-    /// A human member identified by a label.
-    Human(String),
+///
+/// Data-defined (per `TA-CONSTITUTION.md` §1.6): this is an open role name, not a
+/// closed enum, so a `team.toml` can declare any role (e.g. `"security-team"`)
+/// without a TA core change. The five well-known names below are recognized as
+/// constants/constructors for defaults and documentation but are not exhaustive.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TeamRole(String);
+
+impl TeamRole {
+    pub const IMPLEMENTER: &'static str = "implementer";
+    pub const REVIEWER: &'static str = "reviewer";
+    pub const QA: &'static str = "qa";
+    pub const ARCHITECT: &'static str = "architect";
+    pub const RELEASE_MANAGER: &'static str = "release_manager";
+    const HUMAN_PREFIX: &'static str = "human:";
+
+    /// Construct a role from an arbitrary name — the data-defined escape hatch
+    /// for custom/community roles.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn implementer() -> Self {
+        Self(Self::IMPLEMENTER.to_string())
+    }
+
+    pub fn reviewer() -> Self {
+        Self(Self::REVIEWER.to_string())
+    }
+
+    pub fn qa() -> Self {
+        Self(Self::QA.to_string())
+    }
+
+    pub fn architect() -> Self {
+        Self(Self::ARCHITECT.to_string())
+    }
+
+    pub fn release_manager() -> Self {
+        Self(Self::RELEASE_MANAGER.to_string())
+    }
+
+    /// A human member identified by a label (serialized as `human:<id>`).
+    pub fn human(id: impl Into<String>) -> Self {
+        Self(format!("{}{}", Self::HUMAN_PREFIX, id.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The human label, if this role is a `human:<id>` reference.
+    pub fn human_id(&self) -> Option<&str> {
+        self.0.strip_prefix(Self::HUMAN_PREFIX)
+    }
 }
 
 impl std::fmt::Display for TeamRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TeamRole::Implementer => write!(f, "implementer"),
-            TeamRole::Reviewer => write!(f, "reviewer"),
-            TeamRole::QA => write!(f, "qa"),
-            TeamRole::Architect => write!(f, "architect"),
-            TeamRole::ReleaseManager => write!(f, "release_manager"),
-            TeamRole::Human(id) => write!(f, "human:{}", id),
-        }
+        write!(f, "{}", self.0)
     }
 }
 
@@ -235,14 +274,14 @@ pub fn advisor_outcome_to_envelope(
         AdvisorOutcome::TimedOut => AgentAction::Escalate {
             question: "Advisor timed out waiting for human response. Manual review required."
                 .to_string(),
-            escalate_to: RoleRef::Role(TeamRole::Human("primary".to_string())),
+            escalate_to: RoleRef::Role(TeamRole::human("primary")),
         },
         AdvisorOutcome::SpawnFailed { reason } => AgentAction::Escalate {
             question: format!(
                 "Advisor subprocess failed to start: {}. Manual review required.",
                 reason
             ),
-            escalate_to: RoleRef::Role(TeamRole::Human("primary".to_string())),
+            escalate_to: RoleRef::Role(TeamRole::human("primary")),
         },
         AdvisorOutcome::ReviewerBusy {
             active_advisor_goal_id,
@@ -252,7 +291,7 @@ pub fn advisor_outcome_to_envelope(
                  Wait for it to complete or manually review the draft.",
                 active_advisor_goal_id
             ),
-            escalate_to: RoleRef::Role(TeamRole::Human("primary".to_string())),
+            escalate_to: RoleRef::Role(TeamRole::human("primary")),
         },
     };
     ActionEnvelope::new(agent_id, role, action)
@@ -319,7 +358,7 @@ mod tests {
     fn agent_action_escalate_round_trip() {
         let action = AgentAction::Escalate {
             question: "Is this change safe?".to_string(),
-            escalate_to: RoleRef::Role(TeamRole::Architect),
+            escalate_to: RoleRef::Role(TeamRole::architect()),
         };
         let json = serde_json::to_string(&action).unwrap();
         let restored: AgentAction = serde_json::from_str(&json).unwrap();
@@ -357,33 +396,30 @@ mod tests {
     fn action_envelope_round_trip() {
         let env = ActionEnvelope::new(
             "claude-sonnet-4-6",
-            TeamRole::Reviewer,
+            TeamRole::reviewer(),
             AgentAction::Continue,
         );
         let json = serde_json::to_string(&env).unwrap();
         let restored: ActionEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.agent_id, "claude-sonnet-4-6");
-        assert_eq!(restored.role, TeamRole::Reviewer);
+        assert_eq!(restored.role, TeamRole::reviewer());
         assert_eq!(restored.action, AgentAction::Continue);
         assert_eq!(restored.action_id, env.action_id);
     }
 
     #[test]
     fn team_role_display() {
-        assert_eq!(TeamRole::Implementer.to_string(), "implementer");
-        assert_eq!(TeamRole::Reviewer.to_string(), "reviewer");
-        assert_eq!(TeamRole::QA.to_string(), "qa");
-        assert_eq!(TeamRole::Architect.to_string(), "architect");
-        assert_eq!(TeamRole::ReleaseManager.to_string(), "release_manager");
-        assert_eq!(
-            TeamRole::Human("alice".to_string()).to_string(),
-            "human:alice"
-        );
+        assert_eq!(TeamRole::implementer().to_string(), "implementer");
+        assert_eq!(TeamRole::reviewer().to_string(), "reviewer");
+        assert_eq!(TeamRole::qa().to_string(), "qa");
+        assert_eq!(TeamRole::architect().to_string(), "architect");
+        assert_eq!(TeamRole::release_manager().to_string(), "release_manager");
+        assert_eq!(TeamRole::human("alice").to_string(), "human:alice");
     }
 
     #[test]
     fn team_role_serialization() {
-        let role = TeamRole::Human("bob".to_string());
+        let role = TeamRole::human("bob");
         let json = serde_json::to_string(&role).unwrap();
         let restored: TeamRole = serde_json::from_str(&json).unwrap();
         assert_eq!(role, restored);
@@ -392,7 +428,7 @@ mod tests {
     #[test]
     fn role_ref_display() {
         assert_eq!(
-            RoleRef::Role(TeamRole::Reviewer).to_string(),
+            RoleRef::Role(TeamRole::reviewer()).to_string(),
             "role:reviewer"
         );
         assert_eq!(
@@ -423,7 +459,7 @@ mod tests {
         let env = advisor_outcome_to_envelope(
             &AdvisorOutcome::Applied,
             "claude",
-            TeamRole::Reviewer,
+            TeamRole::reviewer(),
             draft_id,
         );
         assert!(matches!(
@@ -434,7 +470,7 @@ mod tests {
             }
         ));
         assert_eq!(env.agent_id, "claude");
-        assert_eq!(env.role, TeamRole::Reviewer);
+        assert_eq!(env.role, TeamRole::reviewer());
     }
 
     #[test]
@@ -443,7 +479,7 @@ mod tests {
         let env = advisor_outcome_to_envelope(
             &AdvisorOutcome::Denied,
             "claude",
-            TeamRole::Reviewer,
+            TeamRole::reviewer(),
             draft_id,
         );
         assert!(matches!(env.action, AgentAction::Deny { .. }));
@@ -455,7 +491,7 @@ mod tests {
         let env = advisor_outcome_to_envelope(
             &AdvisorOutcome::TimedOut,
             "claude",
-            TeamRole::Reviewer,
+            TeamRole::reviewer(),
             draft_id,
         );
         assert!(matches!(env.action, AgentAction::Escalate { .. }));
@@ -469,7 +505,7 @@ mod tests {
                 reason: "binary not found".to_string(),
             },
             "claude",
-            TeamRole::Implementer,
+            TeamRole::implementer(),
             draft_id,
         );
         if let AgentAction::Escalate { question, .. } = &env.action {
@@ -482,7 +518,7 @@ mod tests {
     #[test]
     fn action_envelope_with_metadata() {
         use serde_json::json;
-        let env = ActionEnvelope::new("agent", TeamRole::QA, AgentAction::Continue)
+        let env = ActionEnvelope::new("agent", TeamRole::qa(), AgentAction::Continue)
             .with_metadata(json!({"session_id": "abc"}));
         assert_eq!(env.metadata["session_id"], "abc");
     }

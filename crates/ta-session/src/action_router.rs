@@ -297,7 +297,7 @@ mod tests {
     }
 
     fn envelope(action: AgentAction) -> ActionEnvelope {
-        ActionEnvelope::new("test-agent", TeamRole::Reviewer, action)
+        ActionEnvelope::new("test-agent", TeamRole::reviewer(), action)
     }
 
     // ── Router matching ───────────────────────────────────────────────────────
@@ -335,7 +335,7 @@ mod tests {
         let ctx = make_ctx(&tmp, AdvisorSecurity::ReadOnly);
         let env = envelope(AgentAction::Escalate {
             question: "Is this safe?".to_string(),
-            escalate_to: RoleRef::Role(TeamRole::Architect),
+            escalate_to: RoleRef::Role(TeamRole::architect()),
         });
         assert!(router.route(&env, &ctx).is_ok());
     }

@@ -13,14 +13,18 @@ pub enum TeamCommands {
     List,
     /// Assign an agent to a team role in .ta/team.toml.
     ///
-    /// Roles: implementer, reviewer, qa, architect, release_manager.
+    /// Roles are data-defined — any name is valid. Well-known roles:
+    /// implementer, reviewer, qa, architect, release_manager. Custom roles
+    /// (e.g. security-team) work identically.
     /// Security levels: read_only (default), suggest, auto.
     ///
     /// Examples:
     ///   ta team assign reviewer claude-sonnet-4-6 --security auto --persona strict-reviewer
     ///   ta team assign implementer claude-opus-4-8
+    ///   ta team assign security-team claude-opus-4-8
     Assign {
-        /// Role to assign (implementer, reviewer, qa, architect, release_manager).
+        /// Role to assign — any name (e.g. implementer, reviewer, qa, architect,
+        /// release_manager, or a custom role like security-team).
         role: String,
         /// Agent ID (e.g., claude-sonnet-4-6).
         agent_id: String,
@@ -107,20 +111,21 @@ fn cmd_assign(
     Ok(())
 }
 
+/// Parse a role name into a `TeamRole`.
+///
+/// Roles are data-defined (`TA-CONSTITUTION.md` §1.6): any non-empty name is
+/// accepted, not just the well-known ones, so teams can declare custom roles
+/// (e.g. `security-team`) without a TA core change. `releasemanager` is kept
+/// as an alias for `release_manager` for backward compatibility.
 fn parse_role(s: &str) -> anyhow::Result<TeamRole> {
-    match s.to_lowercase().as_str() {
-        "implementer" => Ok(TeamRole::Implementer),
-        "reviewer" => Ok(TeamRole::Reviewer),
-        "qa" => Ok(TeamRole::QA),
-        "architect" => Ok(TeamRole::Architect),
-        "release_manager" | "releasemanager" => Ok(TeamRole::ReleaseManager),
+    let normalized = s.to_lowercase();
+    match normalized.as_str() {
+        "" => anyhow::bail!("Role name cannot be empty."),
+        "releasemanager" => Ok(TeamRole::release_manager()),
         other if other.starts_with("human:") => {
-            Ok(TeamRole::Human(other.trim_start_matches("human:").to_string()))
+            Ok(TeamRole::human(other.trim_start_matches("human:")))
         }
-        other => anyhow::bail!(
-            "Unknown role '{}'. Valid roles: implementer, reviewer, qa, architect, release_manager.",
-            other
-        ),
+        other => Ok(TeamRole::new(other)),
     }
 }
 
@@ -133,5 +138,46 @@ fn parse_security(s: &str) -> anyhow::Result<AdvisorSecurity> {
             "Unknown security level '{}'. Valid levels: read_only, suggest, auto.",
             other
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_role_well_known_names() {
+        assert_eq!(parse_role("implementer").unwrap(), TeamRole::implementer());
+        assert_eq!(parse_role("reviewer").unwrap(), TeamRole::reviewer());
+        assert_eq!(parse_role("qa").unwrap(), TeamRole::qa());
+        assert_eq!(parse_role("architect").unwrap(), TeamRole::architect());
+        assert_eq!(
+            parse_role("release_manager").unwrap(),
+            TeamRole::release_manager()
+        );
+        assert_eq!(
+            parse_role("releasemanager").unwrap(),
+            TeamRole::release_manager()
+        );
+    }
+
+    #[test]
+    fn parse_role_human_reference() {
+        assert_eq!(parse_role("human:alice").unwrap(), TeamRole::human("alice"));
+    }
+
+    #[test]
+    fn parse_role_accepts_custom_data_defined_role() {
+        // Data-defined roles (TA-CONSTITUTION.md §1.6): any non-empty name is
+        // valid, not just the well-known ones.
+        assert_eq!(
+            parse_role("security-team").unwrap(),
+            TeamRole::new("security-team")
+        );
+    }
+
+    #[test]
+    fn parse_role_rejects_empty() {
+        assert!(parse_role("").is_err());
     }
 }

@@ -175,7 +175,7 @@ mod tests {
     }
 
     fn sample_envelope() -> ActionEnvelope {
-        ActionEnvelope::new("agent-1", TeamRole::Reviewer, AgentAction::Continue)
+        ActionEnvelope::new("agent-1", TeamRole::reviewer(), AgentAction::Continue)
     }
 
     #[test]
@@ -233,7 +233,7 @@ mod tests {
                     let log = ActionAuditLog::new(&root);
                     let env = ActionEnvelope::new(
                         format!("agent-{}", i),
-                        TeamRole::Implementer,
+                        TeamRole::implementer(),
                         AgentAction::Continue,
                     );
                     b.wait(); // release all threads simultaneously

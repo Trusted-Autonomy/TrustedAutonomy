@@ -1,11 +1,11 @@
 //! terminal.rs — Terminal output adapter with configurable color support.
 //!
-//! Color is off by default. Enable with `TerminalAdapter::with_color()` or `--color` CLI flag.
+//! Color is off by default. Enable with `TerminalRenderer::with_color()` or `--color` CLI flag.
 
 use crate::artifact_kind::ArtifactKind;
 use crate::error::ChangeSetError;
-use crate::output_adapters::{
-    default_summary, matches_file_filters, DetailLevel, OutputAdapter, RenderContext,
+use crate::output_renderers::{
+    default_summary, matches_file_filters, DetailLevel, OutputRenderer, RenderContext,
 };
 use crate::pr_package::{Artifact, ChangeType};
 
@@ -26,11 +26,11 @@ fn format_byte_size(bytes: u64) -> String {
 }
 
 #[derive(Default)]
-pub struct TerminalAdapter {
+pub struct TerminalRenderer {
     color: bool,
 }
 
-impl TerminalAdapter {
+impl TerminalRenderer {
     pub fn new() -> Self {
         Self::default()
     }
@@ -786,9 +786,9 @@ impl TerminalAdapter {
     }
 }
 
-impl OutputAdapter for TerminalAdapter {
+impl OutputRenderer for TerminalRenderer {
     fn render(&self, ctx: &RenderContext) -> Result<String, ChangeSetError> {
-        use crate::output_adapters::SectionFilter;
+        use crate::output_renderers::SectionFilter;
 
         let mut output = String::new();
         let bold = self.bold();
@@ -1028,7 +1028,7 @@ mod tests {
 
     #[test]
     fn render_top_level() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1050,7 +1050,7 @@ mod tests {
 
     #[test]
     fn render_with_color() {
-        let adapter = TerminalAdapter::with_color(true);
+        let adapter = TerminalRenderer::with_color(true);
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1068,7 +1068,7 @@ mod tests {
 
     #[test]
     fn render_medium_level() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1085,7 +1085,7 @@ mod tests {
 
     #[test]
     fn file_filter_works() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1101,7 +1101,7 @@ mod tests {
 
     #[test]
     fn file_filter_no_match_returns_error() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn terminal_output_contains_no_html_tags() {
         // Regression test for the garbled HTML bug (ÆpendingÅ in terminal output).
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1145,34 +1145,34 @@ mod tests {
     #[test]
     fn strip_html_removes_tags() {
         assert_eq!(
-            TerminalAdapter::strip_html(r#"<span class="status">pending</span>"#).as_ref(),
+            TerminalRenderer::strip_html(r#"<span class="status">pending</span>"#).as_ref(),
             "pending"
         );
         assert_eq!(
-            TerminalAdapter::strip_html("no tags here").as_ref(),
+            TerminalRenderer::strip_html("no tags here").as_ref(),
             "no tags here"
         );
-        assert_eq!(TerminalAdapter::strip_html("").as_ref(), "");
+        assert_eq!(TerminalRenderer::strip_html("").as_ref(), "");
     }
 
     #[test]
     fn strip_html_preserves_code_placeholders() {
         // Angle brackets in code-style text (e.g. <id>, <path>, <T>) should be preserved.
         assert_eq!(
-            TerminalAdapter::strip_html("ta session show <id>").as_ref(),
+            TerminalRenderer::strip_html("ta session show <id>").as_ref(),
             "ta session show <id>"
         );
         assert_eq!(
-            TerminalAdapter::strip_html("Vec<String>").as_ref(),
+            TerminalRenderer::strip_html("Vec<String>").as_ref(),
             "Vec<String>"
         );
         assert_eq!(
-            TerminalAdapter::strip_html("list [--all] and show <id>").as_ref(),
+            TerminalRenderer::strip_html("list [--all] and show <id>").as_ref(),
             "list [--all] and show <id>"
         );
         // But actual HTML is still stripped.
         assert_eq!(
-            TerminalAdapter::strip_html(r#"text <span class="x">inner</span> more"#).as_ref(),
+            TerminalRenderer::strip_html(r#"text <span class="x">inner</span> more"#).as_ref(),
             "text inner more"
         );
     }
@@ -1184,7 +1184,7 @@ mod tests {
         package.summary.what_changed =
             r#"Updated <span class="bold">auth</span> system"#.to_string();
 
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Top,
@@ -1204,7 +1204,7 @@ mod tests {
 
     #[test]
     fn render_grouped_changes_by_module() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.changes.artifacts.push(Artifact {
             resource_uri: "fs://workspace/tests/auth_test.rs".to_string(),
@@ -1234,7 +1234,7 @@ mod tests {
 
     #[test]
     fn render_design_decisions() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.summary.alternatives_considered = vec![
             DesignAlternative {
@@ -1265,7 +1265,7 @@ mod tests {
 
     #[test]
     fn render_no_design_decisions_when_empty() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1280,7 +1280,7 @@ mod tests {
 
     #[test]
     fn render_medium_shows_artifacts_section() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1301,7 +1301,7 @@ mod tests {
     fn render_agent_decision_log() {
         use crate::draft_package::DecisionLogEntry;
 
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.agent_decision_log = vec![DecisionLogEntry {
             decision: "Used Ed25519 instead of RSA".to_string(),
@@ -1330,7 +1330,7 @@ mod tests {
 
     #[test]
     fn render_agent_decision_log_empty() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1346,9 +1346,9 @@ mod tests {
     #[test]
     fn section_filter_decisions() {
         use crate::draft_package::DecisionLogEntry;
-        use crate::output_adapters::SectionFilter;
+        use crate::output_renderers::SectionFilter;
 
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.agent_decision_log = vec![DecisionLogEntry {
             decision: "Chose async over sync".to_string(),
@@ -1373,9 +1373,9 @@ mod tests {
 
     #[test]
     fn section_filter_summary() {
-        use crate::output_adapters::SectionFilter;
+        use crate::output_renderers::SectionFilter;
 
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1392,9 +1392,9 @@ mod tests {
 
     #[test]
     fn section_filter_files() {
-        use crate::output_adapters::SectionFilter;
+        use crate::output_renderers::SectionFilter;
 
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1414,7 +1414,7 @@ mod tests {
         // Verify context is shown as "▸ [context] → [decision]" (v0.14.9.2).
         use crate::draft_package::DecisionLogEntry;
 
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.agent_decision_log = vec![DecisionLogEntry {
             decision: "Use Ed25519 keys".to_string(),
@@ -1444,7 +1444,7 @@ mod tests {
         // verify only the matching src-level file appears (v0.14.9.2).
         use crate::pr_package::*;
 
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         // The default test_package has src/auth.rs — add a file in a different directory.
         package.changes.artifacts.push(Artifact {
@@ -1480,7 +1480,7 @@ mod tests {
     #[test]
     fn file_filter_unmatched_returns_error() {
         // Filter with non-matching pattern should return an error (v0.14.9.2).
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let package = test_package();
         let ctx = RenderContext {
             package: &package,
@@ -1522,7 +1522,7 @@ mod tests {
     fn image_artifact_full_view_suppresses_diff() {
         // An image artifact in full detail should show image metadata,
         // not attempt to render a binary text diff.
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.changes.artifacts = vec![image_artifact(
             "fs://workspace/render_output/day/beauty/frame_0000.png",
@@ -1530,7 +1530,7 @@ mod tests {
         )];
 
         struct AlwaysPanic;
-        impl crate::output_adapters::DiffProvider for AlwaysPanic {
+        impl crate::output_renderers::DiffProvider for AlwaysPanic {
             fn get_diff(&self, _: &str) -> Result<String, ChangeSetError> {
                 panic!("get_diff must not be called for image artifacts");
             }
@@ -1573,7 +1573,7 @@ mod tests {
             .map(|i| image_artifact(&format!("fs://workspace/render/frame_{:04}.png", i), i))
             .collect();
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_image_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_image_artifact_set_summary(&refs);
         assert!(
             summary.contains("42"),
             "should contain frame count; got: {}",
@@ -1595,7 +1595,7 @@ mod tests {
     fn image_artifact_set_summary_single_frame() {
         let artifacts = [image_artifact("fs://workspace/render/frame_0000.png", 0)];
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_image_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_image_artifact_set_summary(&refs);
         assert!(
             summary.contains("1 PNG frame"),
             "singular 'frame' for single image; got: {}",
@@ -1609,7 +1609,7 @@ mod tests {
         let mut package = test_package();
         package.changes.artifacts[0].kind = None;
         let refs: Vec<&Artifact> = package.changes.artifacts.iter().collect();
-        let summary = TerminalAdapter::render_image_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_image_artifact_set_summary(&refs);
         assert_eq!(summary, "", "no images → empty summary");
     }
 
@@ -1656,7 +1656,7 @@ mod tests {
     #[test]
     fn binary_artifact_full_view_suppresses_diff() {
         // Binary artifact in full detail should show size info, not call diff provider.
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.changes.artifacts = vec![binary_artifact(
             "fs://workspace/output/model.bin",
@@ -1665,7 +1665,7 @@ mod tests {
         )];
 
         struct AlwaysPanic;
-        impl crate::output_adapters::DiffProvider for AlwaysPanic {
+        impl crate::output_renderers::DiffProvider for AlwaysPanic {
             fn get_diff(&self, _: &str) -> Result<String, ChangeSetError> {
                 panic!("get_diff must not be called for binary artifacts");
             }
@@ -1699,7 +1699,7 @@ mod tests {
 
     #[test]
     fn binary_artifact_full_view_shows_mime() {
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.changes.artifacts = vec![binary_artifact(
             "fs://workspace/output/archive.zip",
@@ -1735,7 +1735,7 @@ mod tests {
             binary_artifact("fs://workspace/c.bin", None, Some(1_024)),
         ];
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_binary_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_binary_artifact_set_summary(&refs);
         assert!(
             summary.contains("3 binary files"),
             "should say '3 binary files'; got: {}",
@@ -1756,7 +1756,7 @@ mod tests {
             binary_artifact("fs://workspace/b.bin", None, None),
         ];
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_binary_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_binary_artifact_set_summary(&refs);
         assert!(
             summary.contains("2 binary files"),
             "should say '2 binary files'; got: {}",
@@ -1774,7 +1774,7 @@ mod tests {
     fn binary_artifact_set_summary_single() {
         let artifacts = [binary_artifact("fs://workspace/x.bin", None, Some(256))];
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_binary_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_binary_artifact_set_summary(&refs);
         assert!(
             summary.contains("1 binary file"),
             "singular form; got: {}",
@@ -1790,7 +1790,7 @@ mod tests {
     #[test]
     fn binary_artifact_set_summary_empty() {
         let refs: Vec<&Artifact> = vec![];
-        let summary = TerminalAdapter::render_binary_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_binary_artifact_set_summary(&refs);
         assert_eq!(summary, "", "no binaries → empty summary");
     }
 
@@ -1799,7 +1799,7 @@ mod tests {
     #[test]
     fn text_artifact_full_view_renders_diff() {
         // Text artifact should fall through to diff rendering.
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.changes.artifacts = vec![text_artifact(
             "fs://workspace/scripts/setup.sh",
@@ -1808,7 +1808,7 @@ mod tests {
         )];
 
         struct FixedDiff;
-        impl crate::output_adapters::DiffProvider for FixedDiff {
+        impl crate::output_renderers::DiffProvider for FixedDiff {
             fn get_diff(&self, _: &str) -> Result<String, ChangeSetError> {
                 Ok("+#!/bin/bash\n+echo hello\n".to_string())
             }
@@ -1853,7 +1853,7 @@ mod tests {
             text_artifact("fs://workspace/b.sh", None, None),
         ];
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_text_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_text_artifact_set_summary(&refs);
         assert_eq!(summary, "2 text files");
     }
 
@@ -1861,14 +1861,14 @@ mod tests {
     fn text_artifact_set_summary_single() {
         let artifacts = [text_artifact("fs://workspace/a.conf", None, None)];
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_text_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_text_artifact_set_summary(&refs);
         assert_eq!(summary, "1 text file");
     }
 
     #[test]
     fn text_artifact_set_summary_empty() {
         let refs: Vec<&Artifact> = vec![];
-        let summary = TerminalAdapter::render_text_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_text_artifact_set_summary(&refs);
         assert_eq!(summary, "");
     }
 
@@ -1933,7 +1933,7 @@ mod tests {
     #[test]
     fn video_artifact_full_view_suppresses_diff() {
         // Video artifact in full detail should show metadata, not attempt to render a text diff.
-        let adapter = TerminalAdapter::new();
+        let adapter = TerminalRenderer::new();
         let mut package = test_package();
         package.changes.artifacts = vec![video_artifact(
             "fs://workspace/output/clip.mp4",
@@ -1945,7 +1945,7 @@ mod tests {
         )];
 
         struct AlwaysPanic;
-        impl crate::output_adapters::DiffProvider for AlwaysPanic {
+        impl crate::output_renderers::DiffProvider for AlwaysPanic {
             fn get_diff(&self, _: &str) -> Result<String, ChangeSetError> {
                 panic!("get_diff must not be called for video artifacts");
             }
@@ -2008,7 +2008,7 @@ mod tests {
             ),
         ];
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_video_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_video_artifact_set_summary(&refs);
         assert!(
             summary.contains("2 MP4 video files"),
             "should say '2 MP4 video files'; got: {}",
@@ -2037,7 +2037,7 @@ mod tests {
             Some("MOV"),
         )];
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_video_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_video_artifact_set_summary(&refs);
         assert!(
             summary.contains("1 MOV video file"),
             "singular form; got: {}",
@@ -2053,7 +2053,7 @@ mod tests {
     #[test]
     fn video_artifact_set_summary_empty() {
         let refs: Vec<&Artifact> = vec![];
-        let summary = TerminalAdapter::render_video_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_video_artifact_set_summary(&refs);
         assert_eq!(summary, "", "no videos → empty summary");
     }
 
@@ -2068,7 +2068,7 @@ mod tests {
             None,
         )];
         let refs: Vec<&Artifact> = artifacts.iter().collect();
-        let summary = TerminalAdapter::render_video_artifact_set_summary(&refs);
+        let summary = TerminalRenderer::render_video_artifact_set_summary(&refs);
         assert!(
             summary.contains("1 video file"),
             "should say '1 video file' without format; got: {}",

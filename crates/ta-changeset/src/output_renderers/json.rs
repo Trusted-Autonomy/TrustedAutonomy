@@ -1,18 +1,18 @@
 //! json.rs — JSON output adapter for machine-readable output.
 
 use crate::error::ChangeSetError;
-use crate::output_adapters::{OutputAdapter, RenderContext};
+use crate::output_renderers::{OutputRenderer, RenderContext};
 
 #[derive(Default)]
-pub struct JsonAdapter {}
+pub struct JsonRenderer {}
 
-impl JsonAdapter {
+impl JsonRenderer {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl OutputAdapter for JsonAdapter {
+impl OutputRenderer for JsonRenderer {
     fn render(&self, ctx: &RenderContext) -> Result<String, ChangeSetError> {
         // For JSON output, we serialize the entire PRPackage
         // The detail_level and file_filters are ignored — the consumer can filter client-side
@@ -32,7 +32,7 @@ impl OutputAdapter for JsonAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output_adapters::DetailLevel;
+    use crate::output_renderers::DetailLevel;
     use crate::pr_package::*;
     use chrono::Utc;
     use uuid::Uuid;
@@ -124,7 +124,7 @@ mod tests {
             plan_md_base: None,
         };
 
-        let adapter = JsonAdapter::new();
+        let adapter = JsonRenderer::new();
         let ctx = RenderContext {
             package: &package,
             detail_level: DetailLevel::Full,

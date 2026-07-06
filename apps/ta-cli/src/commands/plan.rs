@@ -6312,7 +6312,7 @@ fn plan_build_autonomous(
 
         match tc_result {
             Ok(tc) => {
-                let reviewer = tc.find_by_role(&TeamRole::Reviewer).cloned();
+                let reviewer = tc.find_by_role(&TeamRole::reviewer()).cloned();
                 if team_path.is_some() && reviewer.is_none() {
                     eprintln!(
                         "[warn] --team file loaded but no 'reviewer' role found. \
@@ -11897,7 +11897,7 @@ More content here that is part of a second paragraph.
 
         let env = ActionEnvelope::new(
             "test-agent",
-            TeamRole::Implementer,
+            TeamRole::implementer(),
             AgentAction::Apply {
                 draft_id: uuid::Uuid::new_v4(),
                 confidence: Some(90),
@@ -11922,7 +11922,7 @@ More content here that is part of a second paragraph.
 
         let env = ActionEnvelope::new(
             "test-agent",
-            TeamRole::Reviewer,
+            TeamRole::reviewer(),
             AgentAction::Apply {
                 draft_id: uuid::Uuid::new_v4(),
                 confidence: Some(90),
@@ -11939,11 +11939,7 @@ More content here that is part of a second paragraph.
         use ta_session::agent_action::{ActionEnvelope, AgentAction, TeamRole};
         use ta_session::workflow_session::AdvisorSecurity;
 
-        let env = ActionEnvelope::new(
-            "test-agent",
-            TeamRole::Human("ops".to_string()),
-            AgentAction::Continue,
-        );
+        let env = ActionEnvelope::new("test-agent", TeamRole::human("ops"), AgentAction::Continue);
         let result = validate_action_envelope(&env, &AdvisorSecurity::ReadOnly);
         assert!(result.is_ok(), "Continue should be allowed under ReadOnly");
     }

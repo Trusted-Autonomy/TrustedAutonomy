@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::adapter::{BuildAdapter, BuildError, BuildResult, Result};
+use crate::backend::{BuildBackend, BuildError, BuildResult, Result};
 
 /// Build adapter that triggers builds via HTTP webhooks.
 ///
@@ -37,7 +37,7 @@ impl WebhookAdapter {
     }
 }
 
-impl BuildAdapter for WebhookAdapter {
+impl BuildBackend for WebhookAdapter {
     fn build(&self) -> Result<BuildResult> {
         tracing::info!(adapter = "webhook", url = %self.build_url, "Webhook build not yet implemented");
         Err(BuildError::WebhookError(

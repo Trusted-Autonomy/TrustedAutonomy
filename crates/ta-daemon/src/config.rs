@@ -1049,9 +1049,25 @@ pub struct AgentConfig {
     pub max_sessions: usize,
     pub idle_timeout_secs: u64,
     pub default_agent: String,
+    /// Baseline default agent for goal execution (`ta run`), added in
+    /// v0.17.0.12.12 as the minimum viable slice of the `Switch` action
+    /// (`docs/design/ta-action-reference.md`).
+    ///
+    /// Resolution order: `--agent` CLI flag (highest) → workflow YAML
+    /// `agent_framework` → this field (falls back to the legacy
+    /// `default_framework` field below if unset) → hardcoded `"claude-code"`
+    /// fallback. Full per-workload/workflow/persona tiers and `agent = "auto"`
+    /// land in v0.17.0.12.13 on top of this baseline.
+    ///
+    /// Example in daemon.toml:
+    ///   [agent]
+    ///   default = "codex"
+    #[serde(default)]
+    pub default: String,
     /// Default agent framework for goal execution (`ta run`).
     ///
-    /// Used when no `--agent` flag is provided and no workflow specifies a framework.
+    /// Legacy field, superseded by `default` above but still honored for
+    /// backward compatibility when `default` is unset.
     /// Resolution order: goal --agent flag → workflow agent_framework → this field → "claude-code".
     ///
     /// Example in daemon.toml:
@@ -1130,6 +1146,7 @@ impl Default for AgentConfig {
             max_sessions: 3,
             idle_timeout_secs: 3600,
             default_agent: "claude-code".to_string(),
+            default: String::new(),
             default_framework: "claude-code".to_string(),
             qa_framework: "claude-code".to_string(),
             qa_agent: "claude-code".to_string(),
