@@ -9381,7 +9381,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.12 — Data-Defined Roles + Baseline Default-Agent Config
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.11
 
 **Goal**: Convert `TeamRole` from a closed Rust enum to a data-defined role type (per `TA-CONSTITUTION.md` §1.6, confirmed low-risk: 52 usages across 6 files, no exhaustive-match sprawl), rename the "Adapter" naming collision found in the architecture review, and add the minimum viable slice of the `Switch` action from `docs/design/ta-action-reference.md`: a baseline default-agent configuration setting. Full per-workload/workflow/persona-tier switching and supervisor auto-pick are explicitly deferred to v0.17.0.12.13 — this phase does not carry an open "remaining" list of its own.
