@@ -40,6 +40,15 @@ pub struct PersonaInner {
     /// Path to an optional constitution file to extend.
     #[serde(default)]
     pub constitution: Option<String>,
+    /// Persona-level agent binding (v0.17.0.12.13 — `Switch` action tiers).
+    ///
+    /// When set, this is the second-highest-priority tier in the CLI's agent
+    /// resolution order (only the `--agent` CLI flag outranks it): any goal
+    /// run with `--persona <name>` picks up this agent unless the flag
+    /// overrides it. A literal `"auto"` value hands the choice to the
+    /// supervisor's agent recommendation instead of a fixed agent ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Full persona config loaded from `.ta/personas/<name>.toml`.
@@ -172,6 +181,7 @@ mod tests {
                 description: "Analyzes financial data".to_string(),
                 system_prompt: "You are a financial analyst.".to_string(),
                 constitution: None,
+                agent: None,
             },
             capabilities: PersonaCapabilities {
                 allowed_tools: vec!["read".to_string(), "bash".to_string()],
@@ -221,5 +231,39 @@ mod tests {
         let dir = tempdir().unwrap();
         let list = PersonaConfig::list_all(dir.path());
         assert!(list.is_empty());
+    }
+
+    // ── v0.17.0.12.13: persona-level agent binding ──────────────────
+
+    #[test]
+    fn persona_agent_binding_roundtrip() {
+        let dir = tempdir().unwrap();
+        let mut persona = sample_persona();
+        persona.persona.agent = Some("claude-opus-4-8".to_string());
+        persona.save(dir.path()).unwrap();
+
+        let loaded = PersonaConfig::load(dir.path(), "financial-analyst").unwrap();
+        assert_eq!(loaded.persona.agent, Some("claude-opus-4-8".to_string()));
+    }
+
+    #[test]
+    fn persona_agent_binding_absent_by_default() {
+        let dir = tempdir().unwrap();
+        let persona = sample_persona();
+        persona.save(dir.path()).unwrap();
+
+        let loaded = PersonaConfig::load(dir.path(), "financial-analyst").unwrap();
+        assert_eq!(loaded.persona.agent, None);
+    }
+
+    #[test]
+    fn persona_agent_binding_accepts_auto() {
+        let dir = tempdir().unwrap();
+        let mut persona = sample_persona();
+        persona.persona.agent = Some("auto".to_string());
+        persona.save(dir.path()).unwrap();
+
+        let loaded = PersonaConfig::load(dir.path(), "financial-analyst").unwrap();
+        assert_eq!(loaded.persona.agent, Some("auto".to_string()));
     }
 }

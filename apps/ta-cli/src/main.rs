@@ -97,9 +97,15 @@ enum Commands {
         /// filled in automatically.
         title: Option<String>,
         /// Agent system to use (claude-code, codex, etc.).
-        /// When omitted, resolves from: workflow YAML agent_framework →
-        /// [agent].default in daemon.toml (falls back to legacy
-        /// [agent].default_framework) → "claude-code".
+        ///
+        /// When omitted, resolves through the full `Switch` action tier
+        /// hierarchy (v0.17.0.12.13): persona-level `agent` binding →
+        /// workflow YAML `agent_framework` → [agent].default in
+        /// .ta/workflow.toml → [workload_agents].<--workload> in
+        /// .ta/workflow.toml → [agent].default in daemon.toml (falls back to
+        /// legacy [agent].default_framework) → "claude-code". A literal
+        /// "auto" at any tier hands the choice to the supervisor's
+        /// recommendation (logged to .ta/agent-recommendations.jsonl).
         #[arg(long)]
         agent: Option<String>,
         /// Source directory to overlay (defaults to project root).
@@ -212,6 +218,14 @@ enum Commands {
         ///   cargo test 2>&1 | ta run "fix failing tests" --context -
         #[arg(long, value_name = "PATH")]
         context: Option<PathBuf>,
+        /// Workload type for the workload-type-level agent tier (v0.17.0.12.13).
+        ///
+        /// Looked up in .ta/workflow.toml's [workload_agents] table (e.g.
+        /// `bugfix = "claude-opus-4-8"`). Full automatic workload
+        /// classification lands in v0.17.0.12.20 (`ta-brain`); until then this
+        /// is an explicit, opt-in override.
+        #[arg(long)]
+        workload: Option<String>,
     },
     /// Review and manage draft packages.
     Draft {
@@ -1086,6 +1100,7 @@ fn main() -> anyhow::Result<()> {
             integrate,
             skip_onboard_check,
             context,
+            workload,
         } => {
             // First-run gate: warn if provider is not yet configured.
             commands::onboard::check_provider_configured(*skip_onboard_check)?;
@@ -1095,10 +1110,16 @@ fn main() -> anyhow::Result<()> {
             // look it up in PLAN.md and use the phase title + set --phase.
             let (resolved_title, resolved_phase) = resolve_phase_title(title, phase, &project_root);
 
-            // Agent runtime resolution (v0.17.0.8): --agent → workflow YAML → daemon.toml → "claude-code".
-            let resolved_agent = commands::run::resolve_effective_agent(
+            // Agent runtime resolution (v0.17.0.12.13): --agent → persona
+            // binding → workflow YAML/workflow.toml → workload type →
+            // daemon.toml → "claude-code" ("auto" at any tier hands off to
+            // the supervisor's recommendation).
+            let resolved_agent = commands::run::resolve_effective_agent_full(
                 agent.as_deref(),
                 workflow.as_deref(),
+                persona.as_deref(),
+                workload.as_deref(),
+                resolved_title.as_deref(),
                 &project_root,
             );
 
