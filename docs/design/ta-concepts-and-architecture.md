@@ -447,3 +447,21 @@ New standing principle (`TA-CONSTITUTION.md` §1.8): before building a new capab
 - **Red Team Review** (new) and the **mock stakeholder review panel** (v0.17.0.12.23, queued) — workflow, not code, per the worked example above.
 
 **Visual node-based workflow builder in Studio** — raised 2026-07-06, plausible and a natural fit given the graph-shaped architecture (§9, `ta-brain`, `workflow.toml`), but explicitly scoped to **v0.18+, as an add-on to 0.17, and must not delay 0.17.0.12.x completion**. Needs v0.17.0.12.21's data-format specs to exist first (the builder needs a stable schema to serialize to/from) — sequencing, not scope, is why it's deferred.
+
+---
+
+## 15. Where Maintenance Tools (`ta doctor`, `ta gc`) Fit — Tier 0, Not Part of the Graph
+
+Raised 2026-07-06: this wasn't addressed anywhere in §1-14. Working through it plainly:
+
+**`ta doctor` isn't a Trigger, isn't the Brain, and isn't part of the Write/Review/Decision/Commit/Reject graph at all.** What it actually checks — daemon health, disk pressure, stale goals/staging dirs/drafts, gitignore coverage, version/plan drift, log size — is the health of **the substrate the three tiers run on top of**, not anything about a specific goal or a specific routing decision. Every other concept in this doc (§9's graph, §13's 3-tier model, `ta-intake`/`ta-brain`) is about *doing work correctly*. `ta doctor` is about *keeping the workshop itself in good repair* so that work can happen at all.
+
+**In plain terms** (matching `what-is-ta.md`'s "contractor" framing): if the AI worker is a contractor and the staging copy is their private jobsite, `ta doctor` is facility maintenance for the office building the contractors work out of — checking the lights, the plumbing, whether the parking lot is full. It has nothing to do with any particular job; it's what keeps the building usable for the next one. Call this **Tier 0**, orthogonal to Triggers/Brain/Back-office, not a fourth tier stacked on top of them.
+
+**Where it sits in the 4-category extensibility model (§2.2)**: `ta doctor`'s checks are in-process, core-only diagnostics — a **Backend**, same category as build backends (v0.17.0.12.12's rename). Not a Plugin (nothing external/community-contributable about disk-space checks), not a Channel/Listener, not a Resource-list.
+
+**Should it be a workflow, per §1.8/§14?** No — and this is a useful *contrasting* example to the Red Team Review one. §1.8's workflow-first lens applies to capabilities that benefit from an LLM agent's judgment or multi-perspective composition. `ta doctor`'s checks are fast, deterministic, mechanical (file exists? process alive? disk bytes free?) with no judgment call involved — there's nothing an agent's reasoning would add. This is a legitimate, non-performance reason to stay code: **the task has no judgment component**, distinct from "it might be slow" (the one justification §1.8 explicitly rejects without measurement).
+
+**`ta gc`** is the same Tier-0 backend, just the non-interactive alias (`doctor --fix --yes`) for cron/unattended use — not a separate concept.
+
+**Action taken**: none needed to the already-queued phases — this doesn't change any of v0.17.0.12.14-22's scope. Worth a one-line mention in the `what-is-ta.md` refresh (v0.17.0.12.22) so a reader doesn't wonder where housekeeping fits after reading about Triggers/Brain/Back-office.
