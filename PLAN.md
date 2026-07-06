@@ -9397,7 +9397,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.13 — Full Agent/Model Switching (Workload/Workflow/Persona Tiers + Supervisor Auto-Pick)
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.12
 
 **Goal**: Complete the `Switch` action (`docs/design/ta-action-reference.md`) on top of v0.17.0.12.12's baseline: agent/model selection configurable per workload, per workflow, or per persona, with an explicit `"auto"` declaration that hands the choice to the supervisor, and CLI args overriding every tier — matching the user's 2026-07-04 spec exactly.
