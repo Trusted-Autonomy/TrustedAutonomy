@@ -2,9 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, refactor/agent-switching-and-3-tier]
   pull_request:
-    branches: [main]
+    branches: [main, refactor/agent-switching-and-3-tier]
+  # SCOPED, TEMPORARY (2026-07-06): the v0.17.0.12.x agent-switching/3-tier overhaul
+  # lands on refactor/agent-switching-and-3-tier instead of main so it can be tested
+  # as a whole before merging (see .ta/workflow.toml). Without this, PRs against that
+  # branch got zero GitHub Actions CI (no cross-platform matrix), relying only on the
+  # local `ta draft apply` pre-submit verify gate. Remove the second branch from both
+  # lists once that overhaul merges to main and the integration branch is deleted.
 
 env:
   CARGO_TERM_COLOR: always
