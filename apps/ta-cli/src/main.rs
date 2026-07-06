@@ -98,7 +98,8 @@ enum Commands {
         title: Option<String>,
         /// Agent system to use (claude-code, codex, etc.).
         /// When omitted, resolves from: workflow YAML agent_framework →
-        /// [agent].default_framework in daemon.toml → "claude-code".
+        /// [agent].default in daemon.toml (falls back to legacy
+        /// [agent].default_framework) → "claude-code".
         #[arg(long)]
         agent: Option<String>,
         /// Source directory to overlay (defaults to project root).

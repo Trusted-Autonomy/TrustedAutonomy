@@ -165,6 +165,7 @@ fn agent_config_to_json(config: &DaemonConfig) -> Value {
         "max_sessions": config.agent.max_sessions,
         "idle_timeout_secs": config.agent.idle_timeout_secs,
         "default_agent": config.agent.default_agent,
+        "default": config.agent.default,
         "default_framework": config.agent.default_framework,
         "qa_framework": config.agent.qa_framework,
         "qa_agent": config.agent.qa_agent,
@@ -294,6 +295,9 @@ pub async fn put_settings(
             }
             if let Some(v) = data.get("default_agent").and_then(|v| v.as_str()) {
                 config.agent.default_agent = v.to_string();
+            }
+            if let Some(v) = data.get("default").and_then(|v| v.as_str()) {
+                config.agent.default = v.to_string();
             }
             if let Some(v) = data.get("default_framework").and_then(|v| v.as_str()) {
                 config.agent.default_framework = v.to_string();

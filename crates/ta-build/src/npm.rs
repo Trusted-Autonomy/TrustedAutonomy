@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use crate::adapter::{BuildAdapter, BuildError, BuildResult, Result};
+use crate::backend::{BuildBackend, BuildError, BuildResult, Result};
 
 /// Build adapter for Node.js projects using npm.
 pub struct NpmAdapter {
@@ -68,7 +68,7 @@ impl NpmAdapter {
     }
 }
 
-impl BuildAdapter for NpmAdapter {
+impl BuildBackend for NpmAdapter {
     fn build(&self) -> Result<BuildResult> {
         let cmd = self.build_command.as_deref().unwrap_or("npm run build");
         tracing::info!(adapter = "npm", command = cmd, "Running build");

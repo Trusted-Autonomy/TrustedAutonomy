@@ -1681,9 +1681,11 @@ Set per-project defaults in `.ta/daemon.toml`:
 
 ```toml
 [agent]
-default_framework = "qwen-coder"   # used by ta run unless overridden
-qa_framework      = "claude-code"  # used by automated QA workflow roles
+default       = "qwen-coder"       # baseline default agent — used by ta run unless overridden
+qa_framework  = "claude-code"      # used by automated QA workflow roles
 ```
+
+`default` is the baseline default-agent setting: a single, data-defined config value with no built-in list of valid names — any installed agent/framework name works. The legacy `default_framework` key is still honored if `default` is left unset, so existing `.ta/daemon.toml` files keep working unchanged. Full per-workload/workflow/persona-tier agent switching (including `agent = "auto"` for supervisor auto-pick) builds on top of this baseline in a later phase.
 
 #### Framework selection order
 
@@ -1691,7 +1693,7 @@ qa_framework      = "claude-code"  # used by automated QA workflow roles
 
 1. `--agent <name>` flag (explicit per-run override)
 2. `agent_framework` field in the workflow YAML (when `--workflow <file>` points to a YAML file)
-3. `[agent].default_framework` in `.ta/daemon.toml`
+3. `[agent].default` in `.ta/daemon.toml` (falls back to the legacy `[agent].default_framework` if `default` is unset)
 4. Built-in default: `claude-code`
 
 To inspect what `ta run` will use without actually running a goal:
@@ -2636,6 +2638,14 @@ ta plan build --autonomous --team .ta/team.toml
 ```
 
 If `--team` is passed but the file has no `reviewer` role, a warning is emitted and the loop falls back to the default advisor agent.
+
+Team roles are data-defined, not a fixed list — `implementer`, `reviewer`, `qa`, `architect`, and `release_manager` are recognized names, but any custom role (e.g. `security-team`) works identically and round-trips through `.ta/team.toml` unchanged. Manage roles directly with `ta team`:
+
+```bash
+ta team assign reviewer claude-sonnet-4-6 --security auto --persona strict-reviewer
+ta team assign security-team claude-opus-4-8   # custom role — no core change needed
+ta team list
+```
 
 Use `--no-auto-merge` to require a human to merge each PR after CI passes instead of letting the loop call `gh pr merge` automatically:
 

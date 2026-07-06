@@ -1,6 +1,6 @@
-//! `ta build` — Run project build/test through the BuildAdapter.
+//! `ta build` — Run project build/test through the BuildBackend.
 //!
-//! Calls the configured `BuildAdapter::build()` (and optionally `test()`),
+//! Calls the configured `BuildBackend::build()` (and optionally `test()`),
 //! emits `build_completed` or `build_failed` events through the TA event system,
 //! and exits with the build tool's exit code.
 

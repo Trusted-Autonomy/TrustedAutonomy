@@ -9381,17 +9381,17 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.12 — Data-Defined Roles + Baseline Default-Agent Config
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.11
 
 **Goal**: Convert `TeamRole` from a closed Rust enum to a data-defined role type (per `TA-CONSTITUTION.md` §1.6, confirmed low-risk: 52 usages across 6 files, no exhaustive-match sprawl), rename the "Adapter" naming collision found in the architecture review, and add the minimum viable slice of the `Switch` action from `docs/design/ta-action-reference.md`: a baseline default-agent configuration setting. Full per-workload/workflow/persona-tier switching and supervisor auto-pick are explicitly deferred to v0.17.0.12.13 — this phase does not carry an open "remaining" list of its own.
 
 **Items**:
-1. [ ] **`TeamRole` enum → data-defined role type**: replace the closed enum (`Implementer, Reviewer, QA, Architect, ReleaseManager, Human(String)`) in `crates/ta-session/src/agent_action.rs` with an open representation (e.g. a newtype around `String`), preserving the 6 well-known names as constants so existing `team.toml` files parse identically. Update the fixed string→enum parser at `apps/ta-cli/src/commands/team.rs:112-118` (the actual hardcoding chokepoint) to accept any role name instead of erroring on unrecognized ones. Update all 52 usages across the 6 identified files.
-2. [ ] **Fix the "Adapter" naming collision**: rename `BuildAdapter` and the output-format renderers (in-process, core-only, correctly closed — `ta-changeset/src/output_adapters/`) to something that isn't "Adapter" (e.g. `BuildBackend`, `OutputRenderer`), reserving "Adapter" for the intended-community-contributable meaning (`SourceAdapter`, `ReleaseAdapter`). Rename only — no behavior change.
-3. [ ] **Baseline default-agent config**: add `[agent] default = "..."` to `daemon.toml`, data-defined, loaded once at daemon start. Resolution order: explicit `--agent` CLI flag (unchanged, highest precedence) → new `default` config setting → today's hardcoded `"claude-code"` fallback only if neither is set.
-4. [ ] Tests: `TeamRole` round-trips a custom/arbitrary role name (e.g. `"security-team"`, anticipating §8's community-review workflow) through `team.toml` parse/serialize; default-agent resolution order covers all three cases (flag > config > fallback); existing `team.toml` fixtures parse identically post-change (regression guard).
-5. [ ] USAGE.md: document the new `[agent] default` setting and its resolution order.
+1. [x] **`TeamRole` enum → data-defined role type**: replace the closed enum (`Implementer, Reviewer, QA, Architect, ReleaseManager, Human(String)`) in `crates/ta-session/src/agent_action.rs` with an open representation (e.g. a newtype around `String`), preserving the 6 well-known names as constants so existing `team.toml` files parse identically. Update the fixed string→enum parser at `apps/ta-cli/src/commands/team.rs:112-118` (the actual hardcoding chokepoint) to accept any role name instead of erroring on unrecognized ones. Update all 52 usages across the 6 identified files.
+2. [x] **Fix the "Adapter" naming collision**: rename `BuildAdapter` and the output-format renderers (in-process, core-only, correctly closed — `ta-changeset/src/output_adapters/`) to something that isn't "Adapter" (e.g. `BuildBackend`, `OutputRenderer`), reserving "Adapter" for the intended-community-contributable meaning (`SourceAdapter`, `ReleaseAdapter`). Rename only — no behavior change.
+3. [x] **Baseline default-agent config**: add `[agent] default = "..."` to `daemon.toml`, data-defined, loaded once at daemon start. Resolution order: explicit `--agent` CLI flag (unchanged, highest precedence) → new `default` config setting → today's hardcoded `"claude-code"` fallback only if neither is set.
+4. [x] Tests: `TeamRole` round-trips a custom/arbitrary role name (e.g. `"security-team"`, anticipating §8's community-review workflow) through `team.toml` parse/serialize; default-agent resolution order covers all three cases (flag > config > fallback); existing `team.toml` fixtures parse identically post-change (regression guard).
+5. [x] USAGE.md: document the new `[agent] default` setting and its resolution order.
 
 #### Version: `0.17.0-alpha.12.12`
 

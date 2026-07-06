@@ -521,7 +521,7 @@ fn resolve_workflow(explicit: Option<&str>, workspace_root: &std::path::Path) ->
 
 // ── Agent runtime resolution (v0.17.0.8) ────────────────────────
 
-/// Minimal daemon.toml `[agent]` section for reading `default_framework`.
+/// Minimal daemon.toml `[agent]` section for reading `default`/`default_framework`.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
 struct DaemonTomlAgent {
@@ -531,12 +531,16 @@ struct DaemonTomlAgent {
 #[derive(Debug, serde::Deserialize)]
 #[serde(default)]
 struct AgentSection {
+    /// Baseline default-agent setting (v0.17.0.12.12). Takes priority over the
+    /// legacy `default_framework` field below when both are set.
+    default: String,
     default_framework: String,
 }
 
 impl Default for AgentSection {
     fn default() -> Self {
         Self {
+            default: String::new(),
             default_framework: "claude-code".to_string(),
         }
     }
@@ -554,8 +558,14 @@ struct WorkflowYamlAgent {
 /// Resolution order (highest-priority wins):
 /// 1. `--agent` CLI flag (explicit user override) — `cli_agent` is `Some(name)`
 /// 2. `agent_framework` field in the workflow YAML given by `--workflow <file>`
-/// 3. `[agent].default_framework` in `.ta/daemon.toml`
+/// 3. `[agent].default` in `.ta/daemon.toml` (baseline default-agent setting,
+///    v0.17.0.12.12) — falls back to the legacy `[agent].default_framework`
+///    field if `default` is unset, for backward compatibility.
 /// 4. Built-in fallback: `"claude-code"`
+///
+/// This is the "minimum viable slice" of the `Switch` action
+/// (`docs/design/ta-action-reference.md`); per-workload/workflow/persona
+/// tiers and `agent = "auto"` land in v0.17.0.12.13 on top of this baseline.
 pub fn resolve_effective_agent(
     cli_agent: Option<&str>,
     workflow_name_or_path: Option<&str>,
@@ -591,10 +601,14 @@ pub fn resolve_effective_agent(
         }
     }
 
-    // Priority 3: [agent].default_framework from daemon.toml.
+    // Priority 3: [agent].default from daemon.toml (new baseline setting),
+    // falling back to the legacy [agent].default_framework field.
     let daemon_toml = workspace_root.join(".ta").join("daemon.toml");
     if let Ok(content) = std::fs::read_to_string(&daemon_toml) {
         if let Ok(parsed) = toml::from_str::<DaemonTomlAgent>(&content) {
+            if !parsed.agent.default.is_empty() {
+                return parsed.agent.default;
+            }
             if !parsed.agent.default_framework.is_empty() {
                 return parsed.agent.default_framework;
             }
@@ -9247,6 +9261,56 @@ plan_pending_window = 7
                 Some(workflow_file.to_str().unwrap()),
                 dir.path()
             ),
+            "claude-flow"
+        );
+    }
+
+    // ── v0.17.0.12.12: baseline [agent].default setting ──────────────
+
+    #[test]
+    fn resolve_effective_agent_daemon_toml_default_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault = \"qwen-coder\"\n",
+        )
+        .unwrap();
+        // No --agent → daemon.toml [agent].default should provide "qwen-coder".
+        assert_eq!(
+            resolve_effective_agent(None, None, dir.path()),
+            "qwen-coder"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_agent_default_setting_beats_legacy_default_framework() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault = \"qwen-coder\"\ndefault_framework = \"codex\"\n",
+        )
+        .unwrap();
+        // New `default` setting takes priority over the legacy `default_framework`.
+        assert_eq!(
+            resolve_effective_agent(None, None, dir.path()),
+            "qwen-coder"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_agent_cli_flag_beats_default_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ta")).unwrap();
+        std::fs::write(
+            dir.path().join(".ta").join("daemon.toml"),
+            "[agent]\ndefault = \"qwen-coder\"\n",
+        )
+        .unwrap();
+        // --agent flag still wins over [agent].default (unchanged, highest precedence).
+        assert_eq!(
+            resolve_effective_agent(Some("claude-flow"), None, dir.path()),
             "claude-flow"
         );
     }

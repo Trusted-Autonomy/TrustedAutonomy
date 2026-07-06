@@ -21,8 +21,8 @@ reqwest = { workspace = true }
 anyhow = { workspace = true }
 sha2 = "0.10"
 base64 = { workspace = true }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.11" }
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.11" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.12" }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.12" }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

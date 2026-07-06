@@ -1,15 +1,15 @@
 //! markdown.rs — Markdown output adapter for GitHub PR bodies.
 
 use crate::error::ChangeSetError;
-use crate::output_adapters::{
-    default_summary, matches_file_filters, DetailLevel, OutputAdapter, RenderContext,
+use crate::output_renderers::{
+    default_summary, matches_file_filters, DetailLevel, OutputRenderer, RenderContext,
 };
 use crate::pr_package::{Artifact, ChangeType};
 
 #[derive(Default)]
-pub struct MarkdownAdapter {}
+pub struct MarkdownRenderer {}
 
-impl MarkdownAdapter {
+impl MarkdownRenderer {
     pub fn new() -> Self {
         Self {}
     }
@@ -24,7 +24,7 @@ impl MarkdownAdapter {
     }
 }
 
-impl OutputAdapter for MarkdownAdapter {
+impl OutputRenderer for MarkdownRenderer {
     fn render(&self, ctx: &RenderContext) -> Result<String, ChangeSetError> {
         let pkg = ctx.package;
         let mut output = String::new();

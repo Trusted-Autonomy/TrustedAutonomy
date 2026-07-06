@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use crate::adapter::{BuildAdapter, BuildError, BuildResult, Result};
+use crate::backend::{BuildBackend, BuildError, BuildResult, Result};
 
 /// Build adapter that runs arbitrary user-defined commands.
 ///
@@ -63,7 +63,7 @@ impl ScriptAdapter {
     }
 }
 
-impl BuildAdapter for ScriptAdapter {
+impl BuildBackend for ScriptAdapter {
     fn build(&self) -> Result<BuildResult> {
         tracing::info!(
             adapter = "script",
