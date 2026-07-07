@@ -205,11 +205,11 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-#[cfg(test)]
+// All tests in this module spawn a `#!/bin/sh` mock plugin script — unix-only.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     fn write_mock_script(dir: &Path, body: &str) -> String {
         let path = dir.join("mock-plugin.sh");
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -219,7 +219,6 @@ mod tests {
         path.to_string_lossy().to_string()
     }
 
-    #[cfg(unix)]
     #[test]
     fn call_raw_round_trips_one_line() {
         let dir = tempfile::tempdir().unwrap();
@@ -240,7 +239,6 @@ mod tests {
         assert_eq!(result, "{\"ok\":true,\"result\":{}}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn call_json_deserializes_response() {
         use crate::envelope::{PluginRequest, PluginResponse};
@@ -264,7 +262,6 @@ mod tests {
         assert_eq!(resp.result["pong"], serde_json::json!(true));
     }
 
-    #[cfg(unix)]
     #[test]
     fn call_raw_reports_nonzero_exit() {
         let dir = tempfile::tempdir().unwrap();
@@ -285,7 +282,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn call_raw_kills_on_timeout() {
         let dir = tempfile::tempdir().unwrap();
