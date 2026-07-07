@@ -15,4 +15,4 @@ serde_json = { workspace = true }
 
 # Reuses the existing heuristic classifier as the substrate for the new
 # 4-way taxonomy rather than duplicating keyword-matching logic.
-ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.15" }
+ta-session = { path = "../ta-session", version = "0.17.0-alpha.12.16" }

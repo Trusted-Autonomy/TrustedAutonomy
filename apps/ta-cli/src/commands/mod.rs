@@ -62,6 +62,7 @@ pub mod terms;
 pub mod token;
 pub mod tools;
 pub mod upgrade;
+pub mod verb;
 pub mod verify;
 pub mod version_guard;
 pub mod webhook;

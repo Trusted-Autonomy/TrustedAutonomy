@@ -19,7 +19,7 @@ use ta_mcp_gateway::GatewayConfig;
 
 // ── CLI surface ───────────────────────────────────────────────────────────────
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum AnalysisCommands {
     /// Run the configured static analysis tool for the current workspace.
     ///

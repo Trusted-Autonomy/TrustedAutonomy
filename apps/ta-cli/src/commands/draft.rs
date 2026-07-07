@@ -50,7 +50,7 @@ pub fn load_excludes_with_adapter(source_dir: &std::path::Path) -> ExcludePatter
     excludes
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum DraftCommands {
     /// Build a draft package from overlay workspace diffs.
     Build {
@@ -392,7 +392,7 @@ pub enum DraftCommands {
 }
 
 /// Review session subcommands for multi-turn artifact review.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ReviewCommands {
     /// Start or resume a review session for a draft package.
     Start {

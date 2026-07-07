@@ -29,7 +29,7 @@ use ta_session::{
 };
 use uuid::Uuid;
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum SessionCommands {
     /// List interactive sessions.
     List {

@@ -7,7 +7,7 @@ use clap::Subcommand;
 use ta_mcp_gateway::GatewayConfig;
 use ta_session::{AdvisorSecurity, TeamConfig, TeamRole};
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum TeamCommands {
     /// Show configured team members from .ta/team.toml.
     List,
