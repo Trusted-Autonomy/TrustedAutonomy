@@ -1,21 +1,24 @@
 [package]
-name = "ta-sandbox"
+name = "ta-plugin"
 version.workspace = true
 edition = "2021"
-description = "Allowlisted command execution sandbox for Trusted Autonomy"
+description = "Shared JSON-over-stdio plugin transport, manifest, and discovery for Trusted Autonomy Plugin-category integrations"
 license = "Apache-2.0"
 repository = "https://github.com/trustedautonomy/ta"
 homepage = "https://github.com/trustedautonomy/ta"
-keywords = ["ai", "agent", "autonomy", "sandbox", "security"]
+keywords = ["ai", "agent", "autonomy", "plugin"]
 categories = ["development-tools"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
-sha2 = { workspace = true }
-ta-policy = { path = "../ta-policy", version = "0.17.0-alpha.12.14" }
+toml = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ta-submit = { path = "../ta-submit" }
+ta-runtime = { path = "../ta-runtime" }

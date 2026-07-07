@@ -22,9 +22,7 @@
 //! retrieve them via the `keyring` crate or by calling
 //! `ta adapter credentials get <key>`.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -372,122 +370,46 @@ impl ExternalMessagingAdapter {
     // Internal
     // -----------------------------------------------------------------------
 
+    /// Spawn the plugin, send one JSON request, read one JSON response.
+    ///
+    /// Delegates spawn/framing/timeout to the shared `ta_plugin::transport`
+    /// crate (also used by VCS/social/agent-runtime plugins) — this method
+    /// only maps the shared `PluginError` back onto `MessagingPluginError`.
     fn call_plugin(
         &self,
         req: &MessagingPluginRequest,
         op: &str,
     ) -> Result<MessagingPluginResponse, MessagingPluginError> {
-        let req_json = serde_json::to_string(req)?;
-
-        let mut parts = self.command.split_whitespace();
-        let program = parts
-            .next()
-            .ok_or_else(|| MessagingPluginError::SpawnFailed {
-                command: self.command.clone(),
-                reason: "command string is empty".to_string(),
-            })?;
-
-        let mut cmd = Command::new(program);
-        for arg in parts {
-            cmd.arg(arg);
-        }
-        for arg in &self.args {
-            cmd.arg(arg);
-        }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        // Retry on ETXTBSY (os error 26) — the kernel marks an inode busy while a write fd
-        // is open; the condition is always transient and clears within a few milliseconds.
-        // Seen on GitHub Actions Ubuntu runners even when using /dev/shm.
-        let mut child = {
-            let mut last_err = None;
-            let mut spawned = None;
-            for attempt in 0u8..4 {
-                match cmd.spawn() {
-                    Ok(c) => {
-                        spawned = Some(c);
-                        break;
-                    }
-                    Err(ref e) if e.raw_os_error() == Some(26) => {
-                        last_err = Some(e.to_string());
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            10u64 * (1 << attempt),
-                        ));
-                    }
-                    Err(e) => {
-                        last_err = Some(e.to_string());
-                        break;
-                    }
-                }
+        let resp: MessagingPluginResponse = ta_plugin::transport::call_json(
+            &self.provider,
+            op,
+            &self.command,
+            &self.args,
+            Path::new("."),
+            req,
+            self.timeout,
+        )
+        .map_err(|e| match e {
+            ta_plugin::PluginError::Timeout { timeout_secs, .. } => MessagingPluginError::Timeout {
+                name: self.provider.clone(),
+                op: op.to_string(),
+                timeout_secs,
+            },
+            ta_plugin::PluginError::SpawnFailed { command, reason } => {
+                MessagingPluginError::SpawnFailed { command, reason }
             }
-            spawned.ok_or_else(|| MessagingPluginError::SpawnFailed {
-                command: self.command.clone(),
-                reason: last_err.unwrap_or_default(),
-            })?
-        };
-
-        // Write request to stdin.
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(req_json.as_bytes())
-                .and_then(|_| stdin.write_all(b"\n"))
-                .map_err(|e| {
-                    MessagingPluginError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("failed to write to plugin stdin: {}", e),
-                    ))
-                })?;
-        }
-
-        // Wait with timeout.
-        let timeout_ms = self.timeout.as_millis() as u64;
-        let output =
-            wait_with_timeout(child, timeout_ms).map_err(|_| MessagingPluginError::Timeout {
+            ta_plugin::PluginError::CallFailed { reason, .. } => MessagingPluginError::OpFailed {
                 name: self.provider.clone(),
                 op: op.to_string(),
-                timeout_secs: self.timeout.as_secs(),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(MessagingPluginError::OpFailed {
+                reason,
+            },
+            ta_plugin::PluginError::Io(io_err) => MessagingPluginError::Io(io_err),
+            ta_plugin::PluginError::Json(json_err) => MessagingPluginError::Json(json_err),
+            other => MessagingPluginError::InvalidResponse {
                 name: self.provider.clone(),
                 op: op.to_string(),
-                reason: format!(
-                    "plugin exited with status {}. stderr: {}",
-                    output.status,
-                    stderr.trim()
-                ),
-            });
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let first_line = stdout.lines().next().unwrap_or("").trim();
-
-        if first_line.is_empty() {
-            return Err(MessagingPluginError::InvalidResponse {
-                name: self.provider.clone(),
-                op: op.to_string(),
-                reason: "plugin produced no output (expected one JSON line)".to_string(),
-            });
-        }
-
-        let resp: MessagingPluginResponse = serde_json::from_str(first_line).map_err(|e| {
-            MessagingPluginError::InvalidResponse {
-                name: self.provider.clone(),
-                op: op.to_string(),
-                reason: format!(
-                    "invalid JSON: {}. Got: '{}'",
-                    e,
-                    if first_line.len() > 200 {
-                        &first_line[..200]
-                    } else {
-                        first_line
-                    }
-                ),
-            }
+                reason: other.to_string(),
+            },
         })?;
 
         if !resp.ok {
@@ -496,6 +418,7 @@ impl ExternalMessagingAdapter {
                 op: op.to_string(),
                 reason: resp
                     .error
+                    .clone()
                     .unwrap_or_else(|| "plugin returned ok=false".to_string()),
             });
         }
@@ -523,41 +446,6 @@ fn user_config_dir() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
         .map(|home| PathBuf::from(home).join(".config"))
-}
-
-/// Wait for a child process to exit, killing it after `timeout_ms` milliseconds.
-fn wait_with_timeout(
-    child: std::process::Child,
-    timeout_ms: u64,
-) -> std::result::Result<std::process::Output, String> {
-    use std::sync::mpsc;
-
-    let child_id = child.id();
-    let (tx, rx) = mpsc::channel::<()>();
-
-    let watchdog =
-        std::thread::spawn(
-            move || match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-                Ok(()) => {}
-                Err(_) => {
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::kill(child_id as libc::pid_t, libc::SIGKILL);
-                    }
-                    #[cfg(not(unix))]
-                    let _ = child_id;
-                }
-            },
-        );
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("wait_with_output failed: {}", e))?;
-
-    let _ = tx.send(());
-    let _ = watchdog.join();
-
-    Ok(output)
 }
 
 // ---------------------------------------------------------------------------

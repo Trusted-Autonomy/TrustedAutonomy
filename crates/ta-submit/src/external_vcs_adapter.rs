@@ -20,9 +20,7 @@
 //! validate protocol compatibility. An incompatible protocol version causes
 //! construction to fail with `SubmitError::ConfigError`.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use ta_changeset::DraftPackage;
@@ -60,7 +58,6 @@ pub struct ExternalVcsAdapter {
     /// Plugin's self-reported adapter name (from handshake).
     adapter_name: String,
     /// Plugin version (from handshake; retained for diagnostics/logging).
-    #[allow(dead_code)]
     plugin_version: String,
     /// Per-call process timeout.
     timeout: Duration,
@@ -142,6 +139,11 @@ impl ExternalVcsAdapter {
             capabilities: result.capabilities,
             staging_env: manifest.staging_env.clone(),
         })
+    }
+
+    /// Plugin version string (from handshake).
+    pub fn plugin_version(&self) -> &str {
+        &self.plugin_version
     }
 
     /// Auto-detect using the plugin's `detect` method.
@@ -548,8 +550,11 @@ impl SourceAdapter for ExternalVcsAdapter {
 
 /// Spawn the plugin, send one JSON request, read one JSON response.
 ///
-/// Returns `SubmitError::IoError` / `SubmitError::VcsError` on infrastructure
-/// failures. Never panics.
+/// Delegates spawn/framing/timeout to the shared `ta_plugin::transport`
+/// crate (also used by messaging/social/agent-runtime plugins) — this
+/// function only maps the shared `PluginError` back onto `SubmitError`.
+///
+/// Returns `SubmitError::VcsError` on infrastructure failures. Never panics.
 fn call_plugin(
     command: &str,
     extra_args: &[String],
@@ -557,179 +562,16 @@ fn call_plugin(
     request: &VcsPluginRequest,
     timeout: Duration,
 ) -> Result<VcsPluginResponse> {
-    let request_json = serde_json::to_string(request).map_err(|e| {
-        SubmitError::VcsError(format!(
-            "Failed to serialize VCS plugin request for method '{}': {}",
-            request.method, e
-        ))
-    })?;
-
-    // Split command into program + built-in args.
-    let mut parts = command.split_whitespace();
-    let program = parts.next().ok_or_else(|| {
-        SubmitError::ConfigError(format!(
-            "VCS plugin command is empty for method '{}'",
-            request.method
-        ))
-    })?;
-
-    let mut cmd = Command::new(program);
-    for arg in parts {
-        cmd.arg(arg);
-    }
-    for arg in extra_args {
-        cmd.arg(arg);
-    }
-
-    cmd.current_dir(work_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    // Retry on ETXTBSY (os error 26): on Linux the kernel can return this when a
-    // freshly-written executable has not yet been fully flushed through the page
-    // cache / copy-up layer (common on overlayfs in Nix CI). A short backoff is
-    // sufficient; real plugin binaries never trigger this in production.
-    let mut child = {
-        const ETXTBSY: i32 = 26;
-        let mut last_err: Option<std::io::Error> = None;
-        let mut spawned = None;
-        for delay_ms in [0u64, 20, 80, 200] {
-            if delay_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            }
-            match cmd.spawn() {
-                Ok(c) => {
-                    spawned = Some(c);
-                    break;
-                }
-                Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
-                    last_err = Some(e);
-                }
-                Err(e) => {
-                    return Err(SubmitError::VcsError(format!(
-                        "Failed to spawn VCS plugin '{}' for method '{}': {}. \
-                         Ensure the plugin is installed and on PATH.",
-                        command, request.method, e
-                    )));
-                }
-            }
-        }
-        spawned.ok_or_else(|| {
-            let e = last_err.unwrap();
-            SubmitError::VcsError(format!(
-                "Failed to spawn VCS plugin '{}' for method '{}': {}. \
-                 Ensure the plugin is installed and on PATH.",
-                command, request.method, e
-            ))
-        })?
-    };
-
-    // Write request to stdin.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(request_json.as_bytes())
-            .and_then(|_| stdin.write_all(b"\n"))
-            .map_err(|e| {
-                SubmitError::VcsError(format!(
-                    "Failed to write to VCS plugin '{}' stdin: {}",
-                    command, e
-                ))
-            })?;
-    }
-
-    // Wait with timeout (blocking — VCS operations are called synchronously).
-    // We use a thread with a join timeout since std::process::Child has no
-    // built-in timeout.
-    let timeout_millis = timeout.as_millis() as u64;
-    let output = wait_with_timeout(child, timeout_millis).map_err(|e| {
-        SubmitError::VcsError(format!(
-            "VCS plugin '{}' timed out or failed for method '{}': {}. \
-             Increase timeout_secs in plugin.toml.",
-            command, request.method, e
-        ))
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(SubmitError::VcsError(format!(
-            "VCS plugin '{}' exited with status {} for method '{}'. stderr: {}",
-            command,
-            output.status,
-            request.method,
-            stderr.trim()
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout.lines().next().unwrap_or("").trim();
-
-    if first_line.is_empty() {
-        return Err(SubmitError::VcsError(format!(
-            "VCS plugin '{}' produced no output for method '{}'. \
-             Plugin must write one JSON line to stdout.",
-            command, request.method
-        )));
-    }
-
-    serde_json::from_str(first_line).map_err(|e| {
-        SubmitError::VcsError(format!(
-            "VCS plugin '{}' produced invalid JSON for method '{}': {}. Got: '{}'",
-            command,
-            request.method,
-            e,
-            if first_line.len() > 200 {
-                &first_line[..200]
-            } else {
-                first_line
-            }
-        ))
-    })
-}
-
-/// Wait for a child process to exit, killing it after `timeout_ms` milliseconds.
-///
-/// Uses an `mpsc` channel to signal the watchdog thread as soon as the child
-/// exits, so `join()` returns immediately rather than blocking for the full
-/// `timeout_ms` on every successful (fast) invocation.
-fn wait_with_timeout(
-    child: std::process::Child,
-    timeout_ms: u64,
-) -> std::result::Result<std::process::Output, String> {
-    use std::sync::mpsc;
-
-    let child_id = child.id();
-    let (tx, rx) = mpsc::channel::<()>();
-
-    // Watchdog thread: waits for the "done" signal or the timeout, then kills.
-    let watchdog = std::thread::spawn(move || {
-        match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-            Ok(()) => {
-                // Child exited normally — nothing to do.
-            }
-            Err(_) => {
-                // Timeout expired (or sender dropped on early `?` return) — kill the child.
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(child_id as libc::pid_t, libc::SIGKILL);
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = child_id;
-                }
-            }
-        }
-    });
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("wait_with_output failed: {}", e))?;
-
-    // Signal the watchdog that the child has exited — it will wake immediately.
-    let _ = tx.send(());
-    let _ = watchdog.join();
-
-    Ok(output)
+    ta_plugin::transport::call_json(
+        "vcs-plugin",
+        &request.method,
+        command,
+        extra_args,
+        work_dir,
+        request,
+        timeout,
+    )
+    .map_err(|e| SubmitError::VcsError(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -885,7 +727,7 @@ exit 1
 
         let err = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap_err();
         assert!(
-            err.to_string().contains("exited with status"),
+            err.to_string().contains("some error to stderr"),
             "Got: {}",
             err
         );
@@ -906,6 +748,11 @@ echo "this is not json"
         let manifest = mock_manifest(&plugin_path.display().to_string(), dir.path());
 
         let err = ExternalVcsAdapter::new(&manifest, dir.path(), "0.13.5-alpha").unwrap_err();
-        assert!(err.to_string().contains("invalid JSON"), "Got: {}", err);
+        assert!(
+            err.to_string().contains("invalid response")
+                || err.to_string().contains("invalid JSON"),
+            "Got: {}",
+            err
+        );
     }
 }

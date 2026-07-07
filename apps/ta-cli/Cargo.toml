@@ -43,28 +43,29 @@ which = { workspace = true }
 arboard = { workspace = true }
 
 # Internal crates — version kept in sync with workspace by bump-version.sh
-ta-audit = { path = "../../crates/ta-audit", version = "0.17.0-alpha.12.13" }
-ta-credentials = { path = "../../crates/ta-credentials", version = "0.17.0-alpha.12.13" }
-ta-memory = { path = "../../crates/ta-memory", version = "0.17.0-alpha.12.13" }
-ta-changeset = { path = "../../crates/ta-changeset", version = "0.17.0-alpha.12.13" }
-ta-connector-fs = { path = "../../crates/ta-connectors/fs", version = "0.17.0-alpha.12.13" }
-ta-connector-unreal = { path = "../../crates/ta-connectors/unreal", version = "0.17.0-alpha.12.13" }
-ta-connector-comfyui = { path = "../../crates/ta-connectors/comfyui", version = "0.17.0-alpha.12.13" }
-ta-connector-unity = { path = "../../crates/ta-connectors/unity", version = "0.17.0-alpha.12.13" }
-ta-goal = { path = "../../crates/ta-goal", version = "0.17.0-alpha.12.13" }
-ta-mcp-gateway = { path = "../../crates/ta-mcp-gateway", version = "0.17.0-alpha.12.13" }
-ta-policy = { path = "../../crates/ta-policy", version = "0.17.0-alpha.12.13" }
-ta-mediation = { path = "../../crates/ta-mediation", version = "0.17.0-alpha.12.13" }
-ta-session = { path = "../../crates/ta-session", version = "0.17.0-alpha.12.13" }
-ta-events = { path = "../../crates/ta-events", version = "0.17.0-alpha.12.13" }
-ta-submit = { path = "../../crates/ta-submit", version = "0.17.0-alpha.12.13" }
-ta-workspace = { path = "../../crates/ta-workspace", version = "0.17.0-alpha.12.13" }
-ta-workflow = { path = "../../crates/ta-workflow", version = "0.17.0-alpha.12.13" }
-ta-build = { path = "../../crates/ta-build", version = "0.17.0-alpha.12.13" }
-ta-output-schema = { path = "../../crates/ta-output-schema", version = "0.17.0-alpha.12.13" }
-ta-runtime = { path = "../../crates/ta-runtime", version = "0.17.0-alpha.12.13" }
-ta-init = { path = "../../crates/ta-init", version = "0.17.0-alpha.12.13" }
-ta-governed-paths = { path = "../../crates/ta-governed-paths", version = "0.17.0-alpha.12.13" }
+ta-audit = { path = "../../crates/ta-audit", version = "0.17.0-alpha.12.14" }
+ta-credentials = { path = "../../crates/ta-credentials", version = "0.17.0-alpha.12.14" }
+ta-memory = { path = "../../crates/ta-memory", version = "0.17.0-alpha.12.14" }
+ta-changeset = { path = "../../crates/ta-changeset", version = "0.17.0-alpha.12.14" }
+ta-connector-fs = { path = "../../crates/ta-connectors/fs", version = "0.17.0-alpha.12.14" }
+ta-connector-unreal = { path = "../../crates/ta-connectors/unreal", version = "0.17.0-alpha.12.14" }
+ta-connector-comfyui = { path = "../../crates/ta-connectors/comfyui", version = "0.17.0-alpha.12.14" }
+ta-connector-unity = { path = "../../crates/ta-connectors/unity", version = "0.17.0-alpha.12.14" }
+ta-goal = { path = "../../crates/ta-goal", version = "0.17.0-alpha.12.14" }
+ta-mcp-gateway = { path = "../../crates/ta-mcp-gateway", version = "0.17.0-alpha.12.14" }
+ta-policy = { path = "../../crates/ta-policy", version = "0.17.0-alpha.12.14" }
+ta-mediation = { path = "../../crates/ta-mediation", version = "0.17.0-alpha.12.14" }
+ta-session = { path = "../../crates/ta-session", version = "0.17.0-alpha.12.14" }
+ta-events = { path = "../../crates/ta-events", version = "0.17.0-alpha.12.14" }
+ta-submit = { path = "../../crates/ta-submit", version = "0.17.0-alpha.12.14" }
+ta-workspace = { path = "../../crates/ta-workspace", version = "0.17.0-alpha.12.14" }
+ta-workflow = { path = "../../crates/ta-workflow", version = "0.17.0-alpha.12.14" }
+ta-build = { path = "../../crates/ta-build", version = "0.17.0-alpha.12.14" }
+ta-output-schema = { path = "../../crates/ta-output-schema", version = "0.17.0-alpha.12.14" }
+ta-runtime = { path = "../../crates/ta-runtime", version = "0.17.0-alpha.12.14" }
+ta-init = { path = "../../crates/ta-init", version = "0.17.0-alpha.12.14" }
+ta-governed-paths = { path = "../../crates/ta-governed-paths", version = "0.17.0-alpha.12.14" }
+ta-plugin = { path = "../../crates/ta-plugin", version = "0.17.0-alpha.12.14" }
 
 
 [target.'cfg(windows)'.build-dependencies]

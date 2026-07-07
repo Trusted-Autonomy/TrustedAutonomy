@@ -1,0 +1,14 @@
+name = "bmad"
+type = "tool"
+command = ""
+description = "Structured multi-role planning: Analyst, Architect, PM roles"
+
+[tool]
+label = "BMAD planning library"
+detect_command = "test -d ~/.bmad/agents"
+install_hint = "git clone --depth=1 https://github.com/bmadcode/bmad-method ~/.bmad"
+
+[tool.install]
+kind = "git"
+url = "https://github.com/bmadcode/bmad-method"
+dest = "~/.bmad"
