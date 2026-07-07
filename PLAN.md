@@ -9431,7 +9431,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.15 — The Write/Review/Decision/Commit/Reject Graph + Auto-Approval + Per-Action Telemetry
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.12
 
 **Goal**: Implement `docs/design/ta-action-reference.md`'s core graph — extract the generic Write → Review → Decision → Commit/Reject shape from its three independent instantiations (`DraftStatus`, `social_supervisor_check`, email's `supervisor_check`) into one reusable model, add real confidence/risk-threshold auto-approval, fix the hardcoded `APPROVAL_REQUIRED_VERBS` array, and add per-action telemetry (`Meter`, confirmed product requirement 2026-07-04).
