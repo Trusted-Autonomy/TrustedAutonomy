@@ -9451,7 +9451,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.16 — CLI Verb-Set Consolidation
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.14, v0.17.0.12.15
 
 **Goal**: Collapse the ~250-action CLI surface onto the 10-verb set from `docs/design/ta-concepts-and-architecture.md` §5/§11 (create/list/show/update/remove/run/approve/deny/apply/check/sync), shipped with a deprecation/alias window, not a hard cutover.
