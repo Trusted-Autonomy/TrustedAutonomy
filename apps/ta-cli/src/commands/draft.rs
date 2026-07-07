@@ -13,10 +13,10 @@ use ta_changeset::changeset::{ChangeKind, ChangeSet, CommitIntent};
 use ta_changeset::diff::DiffContent;
 use ta_changeset::diff_handlers::DiffHandlersConfig;
 use ta_changeset::draft_package::{
-    AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType, ApplyProvenance,
-    ApprovalRecord, Artifact, ArtifactDisposition, ChangeDependency, ChangeType, Changes,
-    DecisionLogEntry, DependencyKind, DraftPackage, DraftStatus, ExplanationTiers, Goal, Iteration,
-    Plan, Provenance, RequestedAction, ReviewRequests, Risk, Signatures, Summary,
+    assess_risk, AgentIdentity, AlternativeConsidered, AmendmentRecord, AmendmentType,
+    ApplyProvenance, ApprovalRecord, Artifact, ArtifactDisposition, ChangeDependency, ChangeType,
+    Changes, DecisionLogEntry, DependencyKind, DraftPackage, DraftStatus, ExplanationTiers, Goal,
+    Iteration, Plan, Provenance, RequestedAction, ReviewRequests, Signatures, Summary,
     VerificationWarning, WorkspaceRef,
 };
 use ta_changeset::explanation::ExplanationSidecar;
@@ -2389,15 +2389,11 @@ pub(crate) fn build_package(
             next_steps: vec!["Review and apply changes".to_string()],
             decision_log,
         },
+        risk: assess_risk(&artifacts),
         changes: Changes {
             artifacts,
             patch_sets: vec![],
             pending_actions: vec![],
-        },
-        risk: Risk {
-            risk_score: 0,
-            findings: vec![],
-            policy_decisions: vec![],
         },
         provenance: Provenance {
             inputs: vec![],
@@ -2853,7 +2849,7 @@ fn build_memory_only_draft(
 ) -> anyhow::Result<()> {
     use ta_changeset::draft_package::{
         AgentIdentity, Changes, Goal, Iteration, Plan, Provenance, RequestedAction, ReviewRequests,
-        Risk, Signatures, Summary, WorkspaceRef,
+        Signatures, Summary, WorkspaceRef,
     };
 
     let goal_store = GoalRunStore::new(&config.goals_dir)?;
@@ -2979,15 +2975,11 @@ fn build_memory_only_draft(
             next_steps: vec!["Review memory entries and approve or deny".to_string()],
             decision_log: vec![],
         },
+        risk: assess_risk(std::slice::from_ref(&artifact)),
         changes: Changes {
             artifacts: vec![artifact],
             patch_sets: vec![],
             pending_actions: vec![],
-        },
-        risk: Risk {
-            risk_score: 0,
-            findings: vec![],
-            policy_decisions: vec![],
         },
         provenance: Provenance {
             inputs: vec![],
@@ -6014,17 +6006,19 @@ fn apply_package(
             );
         }
 
-        // Load workflow config to check approval_required.
-        let approval_required = {
+        // Load workflow config to check approval_required and auto-approval thresholds.
+        let (approval_required, auto_approval_thresholds) = {
             // Determine source_dir: look up the goal first, or fall back to target param.
             let wf_dir = match target {
                 Some(t) => std::path::PathBuf::from(t),
                 None => config.workspace_root.clone(),
             };
             let wf_path = wf_dir.join(".ta/workflow.toml");
-            ta_submit::WorkflowConfig::load_or_default(&wf_path)
-                .draft
-                .approval_required
+            let draft_cfg = ta_submit::WorkflowConfig::load_or_default(&wf_path).draft;
+            (
+                draft_cfg.approval_required,
+                ta_decision::DecisionThresholds::from(draft_cfg.auto_approval),
+            )
         };
 
         if matches!(pkg.status, DraftStatus::PendingReview) {
@@ -6039,6 +6033,42 @@ fn apply_package(
                     id,
                     id
                 );
+            }
+            // `approval_required = false` means "apply implies approval" — but that must
+            // not bypass the shared Decision gate when a supervisor review is present.
+            // Elevated risk or a non-Commit verdict still requires a human even in the
+            // single-author flow (v0.17.0.12.15).
+            if let Some(review) = &pkg.supervisor_review {
+                let verdict = match review.verdict {
+                    ta_changeset::SupervisorVerdict::Pass => ta_decision::Verdict::Pass,
+                    ta_changeset::SupervisorVerdict::Warn => ta_decision::Verdict::Warn,
+                    ta_changeset::SupervisorVerdict::Block => ta_decision::Verdict::Block,
+                };
+                let decision = ta_decision::decide(
+                    &ta_decision::DecisionInput {
+                        verdict,
+                        risk_score: pkg.risk.risk_score,
+                        confidence: review.confidence,
+                    },
+                    &auto_approval_thresholds,
+                );
+                record_decision_telemetry(config, &pkg, decision, review.confidence);
+                if !decision.is_auto_approvable() {
+                    anyhow::bail!(
+                        "Draft \"{}\" cannot be auto-approved on apply: the Decision gate \
+                         returned {:?} (supervisor verdict {:?}, confidence {:.2}, risk score {}).\n\
+                         \n\
+                         Run `ta draft approve {}` after review, then re-run `ta draft apply {}`.\n\
+                         (Adjust `[draft.auto_approval]` thresholds in workflow.toml to change this.)",
+                        pkg.goal.title,
+                        decision,
+                        review.verdict,
+                        review.confidence,
+                        pkg.risk.risk_score,
+                        id,
+                        id
+                    );
+                }
             }
             pkg.status = DraftStatus::Approved {
                 approved_by: "auto (apply)".to_string(),
@@ -10060,6 +10090,35 @@ pub fn save_package(config: &GatewayConfig, pkg: &DraftPackage) -> anyhow::Resul
     let json = serde_json::to_string_pretty(pkg)?;
     fs::write(&path, json)?;
     Ok(())
+}
+
+/// Per-action telemetry (v0.17.0.12.15): record the Decision gate's outcome so
+/// it's queryable per-goal via `ta_decision::Meter`, at `.ta/telemetry.jsonl`.
+///
+/// Best-effort — a telemetry write failure must never block `ta draft apply`.
+fn record_decision_telemetry(
+    config: &GatewayConfig,
+    pkg: &DraftPackage,
+    decision: ta_decision::Decision,
+    confidence: f64,
+) {
+    let goal_id = Uuid::parse_str(&pkg.goal.goal_id).unwrap_or(pkg.package_id);
+    let record = ta_decision::ActionRecord::new(
+        goal_id,
+        ta_decision::ActionKind::Decision,
+        "draft apply gate",
+    )
+    .with_confidence(confidence)
+    .with_risk_score(pkg.risk.risk_score)
+    .with_decision(decision);
+    let meter = ta_decision::Meter::new(config.workspace_root.join(".ta/telemetry.jsonl"));
+    if let Err(e) = meter.record(&record) {
+        tracing::warn!(
+            error = %e,
+            goal_id = %goal_id,
+            "Failed to record per-action telemetry for draft apply gate — apply proceeds regardless"
+        );
+    }
 }
 
 /// Serializable context produced by `ta run` before spawning an async draft build
@@ -14256,6 +14315,7 @@ fn run() {
                 summary: "Looks aligned".to_string(),
                 agent: "claude-code".to_string(),
                 duration_secs: 1.0,
+                confidence: 0.95,
             }),
         };
         let ctx_path = project.path().join("ctx.json");
@@ -16732,6 +16792,182 @@ fn run() {
             "error should suggest ta draft approve: {}",
             msg
         );
+    }
+
+    /// v0.17.0.12.15: even with `approval_required = false` ("apply implies
+    /// approval"), a supervisor review with a low-confidence Warn verdict must
+    /// still be escalated to a human via the shared Decision gate, not silently
+    /// auto-approved.
+    #[test]
+    fn apply_blocked_when_supervisor_review_signals_escalate() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Decision gate escalate test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test the decision gate".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "Decision gate escalate test", false).unwrap();
+
+        let packages = load_all_packages(&config).unwrap();
+        let mut pkg = packages[0].clone();
+        pkg.supervisor_review = Some(ta_changeset::supervisor_review::SupervisorReview {
+            verdict: ta_changeset::supervisor_review::SupervisorVerdict::Warn,
+            scope_ok: true,
+            findings: vec!["Minor scope drift".to_string()],
+            summary: "Some concerns".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 1.0,
+            confidence: 0.2, // below min_confidence — Warn + low confidence => Escalate
+        });
+        save_package(&config, &pkg).unwrap();
+        let pkg_id = pkg.package_id.to_string();
+
+        let err = apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Decision gate"),
+            "error should mention the Decision gate: {}",
+            msg
+        );
+        assert!(
+            msg.contains("ta draft approve"),
+            "error should suggest ta draft approve: {}",
+            msg
+        );
+
+        // Draft must remain in PendingReview — the gate must not have mutated state.
+        let reloaded = load_all_packages(&config)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.package_id.to_string() == pkg_id)
+            .unwrap();
+        assert!(matches!(reloaded.status, DraftStatus::PendingReview));
+
+        // Per-action telemetry (v0.17.0.12.15): the Decision gate's outcome
+        // must be recorded and queryable by goal ID.
+        let meter = ta_decision::Meter::new(config.workspace_root.join(".ta/telemetry.jsonl"));
+        let records = meter
+            .query_by_goal(Uuid::parse_str(&goal_id).unwrap())
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, ta_decision::ActionKind::Decision);
+        assert_eq!(records[0].decision, Some(ta_decision::Decision::Escalate));
+        assert_eq!(records[0].confidence, Some(0.2));
+    }
+
+    /// v0.17.0.12.15: a supervisor review with a clean Pass verdict, high
+    /// confidence, and low risk score must still auto-approve on apply —
+    /// the Decision gate should not regress the existing single-author flow.
+    #[test]
+    fn apply_auto_approves_when_supervisor_review_signals_commit() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("README.md"), "# Test\n").unwrap();
+        let config = GatewayConfig::for_project(project.path());
+
+        super::super::goal::execute(
+            &super::super::goal::GoalCommands::Start {
+                title: "Decision gate commit test".to_string(),
+                source: Some(project.path().to_path_buf()),
+                objective: "Test the decision gate".to_string(),
+                agent: "test-agent".to_string(),
+                phase: None,
+                follow_up: None,
+                objective_file: None,
+            },
+            &config,
+        )
+        .unwrap();
+
+        let goal_store = GoalRunStore::new(&config.goals_dir).unwrap();
+        let goals = goal_store.list().unwrap();
+        let goal = &goals[0];
+        let goal_id = goal.goal_run_id.to_string();
+
+        std::fs::write(goal.workspace_path.join("README.md"), "# Updated\n").unwrap();
+        build_package(&config, &goal_id, "Decision gate commit test", false).unwrap();
+
+        let packages = load_all_packages(&config).unwrap();
+        let mut pkg = packages[0].clone();
+        pkg.supervisor_review = Some(ta_changeset::supervisor_review::SupervisorReview {
+            verdict: ta_changeset::supervisor_review::SupervisorVerdict::Pass,
+            scope_ok: true,
+            findings: vec![],
+            summary: "Looks good".to_string(),
+            agent: "claude-code".to_string(),
+            duration_secs: 1.0,
+            confidence: 0.95,
+        });
+        save_package(&config, &pkg).unwrap();
+        let pkg_id = pkg.package_id.to_string();
+
+        apply_package(
+            &config,
+            &pkg_id,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            ta_workspace::ConflictResolution::Abort,
+            SelectiveReviewPatterns::default(),
+            None,
+            false,
+            false,
+            false, // auto_repair
+            false, // skip_plan_merge
+        )
+        .unwrap();
+
+        let reloaded = load_all_packages(&config)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.package_id.to_string() == pkg_id)
+            .unwrap();
+        assert!(matches!(reloaded.status, DraftStatus::Applied { .. }));
+
+        let meter = ta_decision::Meter::new(config.workspace_root.join(".ta/telemetry.jsonl"));
+        let records = meter
+            .query_by_goal(Uuid::parse_str(&goal_id).unwrap())
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].decision, Some(ta_decision::Decision::Commit));
     }
 
     // ── v0.15.14.1: ta draft <unknown> clap dispatch boundary ────────────────

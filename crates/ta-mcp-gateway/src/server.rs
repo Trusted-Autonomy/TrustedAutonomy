@@ -526,9 +526,16 @@ impl GatewayState {
         // channel(s) via ChannelRegistry instead of hardcoding AutoApproveChannel.
         let review_channel = Self::build_review_channel(&config);
 
+        // Any application implementing the Commit contract registers its own
+        // verb here instead of requiring a core-crate edit to a hardcoded
+        // array (v0.17.0.12.15). "publish" is Commit for the social endpoint.
+        let mut policy_engine = PolicyEngine::new();
+        policy_engine.register_commit_verb("publish"); // social
+        policy_engine.register_commit_verb("apply_mutation"); // DB proxy
+
         Ok(Self {
             config,
-            policy_engine: PolicyEngine::new(),
+            policy_engine,
             goal_store,
             connectors: HashMap::new(),
             pr_packages: HashMap::new(),

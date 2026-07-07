@@ -913,6 +913,7 @@ mod tests {
             summary: "Looks good".to_string(),
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
+            confidence: 0.95,
         };
 
         let downgraded = apply_artifact_consistency_gate(&mut review, &artifacts);
@@ -942,6 +943,7 @@ mod tests {
             summary: "Looks good".to_string(),
             agent: "claude-code".to_string(),
             duration_secs: 1.0,
+            confidence: 0.95,
         };
 
         let downgraded = apply_artifact_consistency_gate(&mut review, &artifacts);

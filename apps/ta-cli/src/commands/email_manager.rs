@@ -878,10 +878,24 @@ pub fn run_email_manager_with_ops<M: MessagingOps, G: ReplyGoalRunner>(
                     }
                 };
 
-                // Supervisor check.
+                // Supervisor check, routed through the shared Decision gate
+                // (v0.17.0.12.15) — same function DraftStatus's apply path and
+                // social's publish gate use, instead of a bespoke pass/fail check.
                 let sv_result = supervisor_check(&reply, &config.supervisor);
+                let decision = ta_decision::decide(
+                    &ta_decision::DecisionInput {
+                        verdict: if sv_result.passed {
+                            ta_decision::Verdict::Pass
+                        } else {
+                            ta_decision::Verdict::Block
+                        },
+                        risk_score: 0,
+                        confidence: sv_result.confidence,
+                    },
+                    &ta_decision::DecisionThresholds::default(),
+                );
 
-                if sv_result.passed {
+                if decision.is_auto_approvable() {
                     // Push draft to email Drafts folder.
                     let draft_env = DraftEnvelope {
                         to: reply.to.clone(),

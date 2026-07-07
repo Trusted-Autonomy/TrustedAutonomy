@@ -14,7 +14,7 @@
 // policy rules (role templates, budget tracking, etc.) but the default-deny
 // invariant must always hold.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
@@ -78,8 +78,9 @@ pub struct EvaluationTrace {
     pub matching_grant: Option<String>,
 }
 
-/// Verbs that always require human approval, regardless of grants.
-/// These represent irreversible side effects.
+/// Built-in verbs that always require human approval, regardless of grants.
+/// These represent irreversible side effects in TA's own core (fs apply,
+/// VCS commit).
 const APPROVAL_REQUIRED_VERBS: &[&str] = &["apply", "commit", "send", "post"];
 
 /// The policy engine — evaluates requests against capability manifests.
@@ -87,6 +88,14 @@ const APPROVAL_REQUIRED_VERBS: &[&str] = &["apply", "commit", "send", "post"];
 /// `HashMap` is Rust's hash map type. We map agent_id → manifest.
 pub struct PolicyEngine {
     manifests: HashMap<String, CapabilityManifest>,
+    /// Verbs beyond `APPROVAL_REQUIRED_VERBS` that also require approval.
+    ///
+    /// Any application implementing the Write/Review/Decision/Commit contract
+    /// (social `publish`, DB proxy `apply_mutation`, email `send_reply`, a
+    /// future community-contributed adapter, ...) registers its own commit
+    /// verb here instead of requiring a core-crate edit to the fixed array
+    /// above (v0.17.0.12.15).
+    commit_verbs: HashSet<String>,
 }
 
 impl PolicyEngine {
@@ -94,7 +103,24 @@ impl PolicyEngine {
     pub fn new() -> Self {
         Self {
             manifests: HashMap::new(),
+            commit_verbs: HashSet::new(),
         }
+    }
+
+    /// Register an additional verb that always requires human approval.
+    ///
+    /// Call this once per Commit-contract implementation at setup time (e.g.
+    /// `engine.register_commit_verb("publish")` for the social adapter) so
+    /// approval-required status follows from implementing the contract,
+    /// rather than from a hardcoded verb list in this crate.
+    pub fn register_commit_verb(&mut self, verb: impl Into<String>) -> &mut Self {
+        self.commit_verbs.insert(verb.into());
+        self
+    }
+
+    /// Whether a verb always requires human approval — built-in or registered.
+    fn is_commit_verb(&self, verb: &str) -> bool {
+        APPROVAL_REQUIRED_VERBS.contains(&verb) || self.commit_verbs.contains(verb)
     }
 
     /// Load a capability manifest for an agent.
@@ -140,7 +166,7 @@ impl PolicyEngine {
         }
 
         // Step 4: Check if this verb always requires approval.
-        if APPROVAL_REQUIRED_VERBS.contains(&request.verb.as_str()) {
+        if self.is_commit_verb(&request.verb) {
             // Still need to verify the agent has a matching grant.
             if has_matching_grant(manifest, request) {
                 return PolicyDecision::RequireApproval {
@@ -272,7 +298,7 @@ impl PolicyEngine {
         }
 
         // Step 4: Approval-required verbs
-        if APPROVAL_REQUIRED_VERBS.contains(&request.verb.as_str()) {
+        if self.is_commit_verb(&request.verb) {
             if matching_grant.is_some() {
                 steps.push(EvaluationStep {
                     check: "approval_required_verb".to_string(),
@@ -680,6 +706,55 @@ mod tests {
         match decision {
             PolicyDecision::RequireApproval { .. } => {} // expected
             other => panic!("expected RequireApproval, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn registered_commit_verb_requires_approval() {
+        // A verb not in the built-in APPROVAL_REQUIRED_VERBS list (e.g. a social
+        // adapter's "publish") is not gated until it registers itself.
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(test_manifest(
+            "agent-1",
+            vec![grant("social", "publish", "social://linkedin/**")],
+        ));
+
+        let before = engine.evaluate(&PolicyRequest {
+            agent_id: "agent-1".to_string(),
+            tool: "social".to_string(),
+            verb: "publish".to_string(),
+            target_uri: "social://linkedin/post/1".to_string(),
+        });
+        assert_eq!(before, PolicyDecision::Allow);
+
+        engine.register_commit_verb("publish");
+        let after = engine.evaluate(&PolicyRequest {
+            agent_id: "agent-1".to_string(),
+            tool: "social".to_string(),
+            verb: "publish".to_string(),
+            target_uri: "social://linkedin/post/1".to_string(),
+        });
+        match after {
+            PolicyDecision::RequireApproval { .. } => {} // expected
+            other => panic!("expected RequireApproval, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn registered_commit_verb_without_grant_is_denied_not_allowed() {
+        let mut engine = PolicyEngine::new();
+        engine.load_manifest(test_manifest("agent-1", vec![]));
+        engine.register_commit_verb("apply_mutation");
+
+        let decision = engine.evaluate(&PolicyRequest {
+            agent_id: "agent-1".to_string(),
+            tool: "db".to_string(),
+            verb: "apply_mutation".to_string(),
+            target_uri: "db://sqlite/main".to_string(),
+        });
+        match decision {
+            PolicyDecision::Deny { .. } => {} // expected
+            other => panic!("expected Deny, got {:?}", other),
         }
     }
 

@@ -1,21 +1,19 @@
 [package]
-name = "ta-sandbox"
+name = "ta-decision"
 version.workspace = true
 edition = "2021"
-description = "Allowlisted command execution sandbox for Trusted Autonomy"
+description = "Generic Write/Review/Decision/Commit/Reject gate shared across TA's approval surfaces"
 license = "Apache-2.0"
 repository = "https://github.com/trustedautonomy/ta"
 homepage = "https://github.com/trustedautonomy/ta"
-keywords = ["ai", "agent", "autonomy", "sandbox", "security"]
+keywords = ["ai", "agent", "autonomy", "approval", "governance"]
 categories = ["development-tools"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-sha2 = { workspace = true }
-ta-policy = { path = "../ta-policy", version = "0.17.0-alpha.12.15" }
+chrono = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
