@@ -9485,7 +9485,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.18 — Daemon Log Rotation Reliability Fix
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: none (independent, low-effort)
 
 **Goal**: `daemon.log` has been repeatedly flagged at 5.2GB (threshold 500MB) by multiple `ta run` launches this session, requiring a manual `ta doctor --fix` each time. Make rotation automatic instead of a manual, easy-to-forget step — a small, concrete reliability win independent of the rest of the overhaul (per `docs/design/ta-concepts-and-architecture.md` §13.1).
