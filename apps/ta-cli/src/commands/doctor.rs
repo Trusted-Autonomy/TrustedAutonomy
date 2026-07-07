@@ -1144,43 +1144,76 @@ fn apply_fix(
     }
 }
 
-// ── daemon.log rotation (v0.17.0.12.8) ───────────────────────────────────────
+// ── daemon.log rotation (v0.17.0.12.8, made reliable in v0.17.0.12.18) ───────
 
-/// Rotate `.ta/daemon.log` when it has grown past the configured size threshold.
+/// Rotate `.ta/daemon.log` unconditionally (the caller — health-signal-driven
+/// `ta doctor --fix`, or a direct manual invocation — has already decided
+/// rotation should happen).
 ///
-/// Moves the current log to `daemon.log.1` (overwriting any previous backup —
-/// only one generation of history is kept) and starts a fresh `daemon.log`
-/// with a marker line recording the rotation. Mirrors the absorption pattern
-/// used by `ta gc` (drop the bulk, leave an explicit trace of what happened).
+/// Delegates to `ta_workspace::log_rotation`'s copy-truncate implementation,
+/// which is safe even while the daemon has the file open as its OS-redirected
+/// stdout/stderr target (a plain rename is not — see that module's docs for
+/// why the original v0.17.0.12.8 behavior could silently stop rotating a live
+/// daemon's log). Retention count comes from `[log_rotation] retention_count`
+/// in `.ta/daemon.toml` (default 3), keeping this manual path and the
+/// daemon's own automatic startup/periodic rotation (v0.17.0.12.18) in sync.
 fn rotate_daemon_log(workspace_root: &Path) -> anyhow::Result<String> {
-    let log_path = workspace_root.join(".ta/daemon.log");
-    let backup_path = workspace_root.join(".ta/daemon.log.1");
+    let retention_count = daemon_log_retention_count(workspace_root);
 
-    let size_bytes = std::fs::metadata(&log_path)
-        .map_err(|e| anyhow::anyhow!("Could not read {}: {}", log_path.display(), e))?
-        .len();
-
-    if backup_path.exists() {
-        std::fs::remove_file(&backup_path)?;
-    }
-    std::fs::rename(&log_path, &backup_path)?;
-
-    let marker = format!(
-        "[ta doctor --fix] rotated daemon.log ({}) to daemon.log.1 at {}\n",
-        super::health_signals::format_bytes(size_bytes),
-        chrono::Utc::now().to_rfc3339(),
-    );
-    std::fs::write(&log_path, marker)?;
+    let outcome = ta_workspace::force_rotate_daemon_log(workspace_root, retention_count)?;
+    let ta_workspace::RotationOutcome::Rotated { size_bytes, pruned } = outcome else {
+        unreachable!("force_rotate_daemon_log always returns Rotated on success")
+    };
 
     println!(
         "  Rotated daemon.log ({}) — old content moved to daemon.log.1",
         super::health_signals::format_bytes(size_bytes)
     );
+    if pruned > 0 {
+        println!(
+            "  Pruned {} rotated generation(s) beyond retention_count={}",
+            pruned, retention_count
+        );
+    }
 
     Ok(format!(
         "Rotated daemon.log ({}) to daemon.log.1; started fresh log",
         super::health_signals::format_bytes(size_bytes)
     ))
+}
+
+/// Read `[log_rotation] retention_count` from `.ta/daemon.toml`, defaulting to
+/// 3 (matching `ta_daemon::config::LogRotationConfig`'s default) when the file
+/// or field is absent/invalid.
+fn daemon_log_retention_count(workspace_root: &Path) -> u32 {
+    #[derive(serde::Deserialize, Default)]
+    struct Partial {
+        #[serde(default)]
+        log_rotation: PartialLogRotation,
+    }
+    #[derive(serde::Deserialize)]
+    struct PartialLogRotation {
+        #[serde(default = "default_retention_count")]
+        retention_count: u32,
+    }
+    impl Default for PartialLogRotation {
+        fn default() -> Self {
+            Self {
+                retention_count: default_retention_count(),
+            }
+        }
+    }
+    fn default_retention_count() -> u32 {
+        3
+    }
+
+    let config_path = workspace_root.join(".ta/daemon.toml");
+    std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|content| toml::from_str::<Partial>(&content).ok())
+        .unwrap_or_default()
+        .log_rotation
+        .retention_count
 }
 
 // ── Gemma 4 check (v0.16.2.1) ───────────────────────────────────────────────
