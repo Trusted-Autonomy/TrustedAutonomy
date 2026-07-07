@@ -274,15 +274,11 @@ impl<S: ChangeStore> FsConnector<S> {
                 next_steps: vec!["Await human review".to_string()],
                 decision_log: vec![],
             },
+            risk: assess_risk(&artifacts),
             changes: Changes {
                 artifacts,
                 patch_sets: vec![],
                 pending_actions: vec![],
-            },
-            risk: Risk {
-                risk_score: 0,
-                findings: vec![],
-                policy_decisions: vec![],
             },
             provenance: Provenance {
                 inputs: vec![],

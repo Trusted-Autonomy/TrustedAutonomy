@@ -9431,21 +9431,21 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.15 — The Write/Review/Decision/Commit/Reject Graph + Auto-Approval + Per-Action Telemetry
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12
 
 **Goal**: Implement `docs/design/ta-action-reference.md`'s core graph — extract the generic Write → Review → Decision → Commit/Reject shape from its three independent instantiations (`DraftStatus`, `social_supervisor_check`, email's `supervisor_check`) into one reusable model, add real confidence/risk-threshold auto-approval, fix the hardcoded `APPROVAL_REQUIRED_VERBS` array, and add per-action telemetry (`Meter`, confirmed product requirement 2026-07-04).
 
 **Items**:
-1. [ ] Define the generic `Decision` gate (lifted from `social_supervisor_check()`, the most complete existing example) taking `{verdict, risk_score, confidence}` and a threshold config, returning `{Commit, Reject, Rework, Escalate}`. Reuse this one function from `DraftStatus`'s apply path, social's publish gate, and email's send gate.
-2. [ ] Add a real, computed `confidence` field to `SupervisorReview` (currently absent) and make `DraftPackage.risk_score` actually computed (currently hardcoded to `0` at every real call site).
-3. [ ] Generalize `APPROVAL_REQUIRED_VERBS` (`crates/ta-policy/src/engine.rs:83`, currently `&["apply", "commit", "send", "post"]`) so any application implementing the Commit contract is automatically approval-required.
-4. [ ] Wire `AdvisorSecurity::Auto` to consult the Decision gate's threshold instead of being an unconditional bypass.
-5. [ ] Add `publish()` to the social adapter contract, gated by the same Decision function — completing Social's Commit implementation (publish IS Commit for that endpoint, per the 2026-07-04 correction).
-6. [ ] Build the DB proxy's missing Review/Decision gate (currently absent entirely) using the same generic function.
-7. [ ] Per-action telemetry (`Meter`): record cost, tokens, duration, confidence, and risk per Write/Review/Decision/Commit action, queryable per-goal — build alongside items 1-2, same code path.
-8. [ ] Tests: the shared Decision gate produces identical results from every call site given equivalent inputs; telemetry round-trips and is queryable by goal ID; `AdvisorSecurity::Auto` correctly withholds approval when the gate would Reject/Escalate.
-9. [ ] USAGE.md: document the auto-approval threshold config and where to view per-action telemetry.
+1. [x] Define the generic `Decision` gate (lifted from `social_supervisor_check()`, the most complete existing example) taking `{verdict, risk_score, confidence}` and a threshold config, returning `{Commit, Reject, Rework, Escalate}`. Reuse this one function from `DraftStatus`'s apply path, social's publish gate, and email's send gate.
+2. [x] Add a real, computed `confidence` field to `SupervisorReview` (currently absent) and make `DraftPackage.risk_score` actually computed (currently hardcoded to `0` at every real call site).
+3. [x] Generalize `APPROVAL_REQUIRED_VERBS` (`crates/ta-policy/src/engine.rs:83`, currently `&["apply", "commit", "send", "post"]`) so any application implementing the Commit contract is automatically approval-required.
+4. [x] Wire `AdvisorSecurity::Auto` to consult the Decision gate's threshold instead of being an unconditional bypass.
+5. [x] Add `publish()` to the social adapter contract, gated by the same Decision function — completing Social's Commit implementation (publish IS Commit for that endpoint, per the 2026-07-04 correction).
+6. [x] Build the DB proxy's missing Review/Decision gate (currently absent entirely) using the same generic function.
+7. [x] Per-action telemetry (`Meter`): record cost, tokens, duration, confidence, and risk per Write/Review/Decision/Commit action, queryable per-goal — build alongside items 1-2, same code path.
+8. [x] Tests: the shared Decision gate produces identical results from every call site given equivalent inputs; telemetry round-trips and is queryable by goal ID; `AdvisorSecurity::Auto` correctly withholds approval when the gate would Reject/Escalate.
+9. [x] USAGE.md: document the auto-approval threshold config and where to view per-action telemetry.
 
 #### Version: `0.17.0-alpha.12.15`
 

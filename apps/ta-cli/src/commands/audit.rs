@@ -143,6 +143,21 @@ pub enum AuditCommands {
         #[arg(short = 'n', long, default_value = "0")]
         limit: usize,
     },
+    /// Show per-action telemetry recorded by the shared Decision gate (v0.17.0.12.15).
+    ///
+    /// Prints every `Write`/`Review`/`Decision`/`Commit`/`Reject` action recorded
+    /// for a goal — cost, tokens, duration, confidence, and risk score, from
+    /// `.ta/telemetry.jsonl`.
+    ///
+    /// Example:
+    ///   ta audit telemetry <goal-id>
+    Telemetry {
+        /// Goal ID to show telemetry for.
+        goal_id: String,
+        /// Path to telemetry log (defaults to .ta/telemetry.jsonl).
+        #[arg(long)]
+        log: Option<String>,
+    },
 }
 
 /// Subcommands for the goal audit ledger.
@@ -372,8 +387,65 @@ pub fn execute(cmd: &AuditCommands, config: &GatewayConfig) -> anyhow::Result<()
                 *limit,
             )?;
         }
+
+        AuditCommands::Telemetry { goal_id, log } => {
+            show_telemetry(config, goal_id, log.as_deref())?;
+        }
     }
 
+    Ok(())
+}
+
+// ── Telemetry subcommand (v0.17.0.12.15) ──
+
+fn show_telemetry(config: &GatewayConfig, goal_id: &str, log: Option<&str>) -> anyhow::Result<()> {
+    let path = log
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| config.workspace_root.join(".ta/telemetry.jsonl"));
+    let id = uuid::Uuid::parse_str(goal_id)
+        .map_err(|e| anyhow::anyhow!("'{}' is not a valid goal ID (UUID): {}", goal_id, e))?;
+
+    let meter = ta_decision::Meter::new(&path);
+    let records = meter.query_by_goal(id).map_err(|e| {
+        anyhow::anyhow!("Failed to read telemetry log at {}: {}", path.display(), e)
+    })?;
+
+    if records.is_empty() {
+        println!(
+            "No telemetry recorded for goal {} in {}.",
+            goal_id,
+            path.display()
+        );
+        return Ok(());
+    }
+
+    println!("Per-action telemetry for goal {}:\n", goal_id);
+    for r in &records {
+        println!(
+            "  [{:?}] {} — recorded {}",
+            r.action, r.label, r.recorded_at
+        );
+        if let Some(decision) = &r.decision {
+            println!("    decision:   {:?}", decision);
+        }
+        if let Some(confidence) = r.confidence {
+            println!("    confidence: {:.2}", confidence);
+        }
+        if let Some(risk_score) = r.risk_score {
+            println!("    risk_score: {}", risk_score);
+        }
+        if r.cost_usd > 0.0 || r.input_tokens > 0 || r.output_tokens > 0 {
+            println!(
+                "    cost_usd:   {:.4}  (tokens in={} out={})",
+                r.cost_usd, r.input_tokens, r.output_tokens
+            );
+        }
+        if r.duration_secs > 0.0 {
+            println!("    duration:   {:.2}s", r.duration_secs);
+        }
+        println!();
+    }
+    println!("{} action(s) total.", records.len());
     Ok(())
 }
 
@@ -1351,4 +1423,45 @@ fn social_audit(
     println!("{} social post record(s)", records.len());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ta_decision::{ActionKind, ActionRecord, Decision, Meter};
+    use uuid::Uuid;
+
+    #[test]
+    fn show_telemetry_reports_recorded_actions() {
+        let project = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let goal_id = Uuid::new_v4();
+
+        let meter = Meter::new(config.workspace_root.join(".ta/telemetry.jsonl"));
+        meter
+            .record(
+                &ActionRecord::new(goal_id, ActionKind::Decision, "draft apply gate")
+                    .with_confidence(0.9)
+                    .with_risk_score(10)
+                    .with_decision(Decision::Commit),
+            )
+            .unwrap();
+
+        show_telemetry(&config, &goal_id.to_string(), None).unwrap();
+    }
+
+    #[test]
+    fn show_telemetry_handles_no_records() {
+        let project = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        show_telemetry(&config, &Uuid::new_v4().to_string(), None).unwrap();
+    }
+
+    #[test]
+    fn show_telemetry_rejects_invalid_goal_id() {
+        let project = tempfile::tempdir().unwrap();
+        let config = GatewayConfig::for_project(project.path());
+        let err = show_telemetry(&config, "not-a-uuid", None).unwrap_err();
+        assert!(err.to_string().contains("not a valid goal ID"));
+    }
 }

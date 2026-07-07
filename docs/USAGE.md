@@ -4194,6 +4194,56 @@ agents:
           max_files: 3        # tighter than project default
 ```
 
+### Decision Gate Auto-Approval Thresholds
+
+Separate from the condition-based policy above, `ta draft apply` also runs every `PendingReview` draft through a shared **Decision gate** whenever a supervisor review is present. This is what decides whether "apply implies approval" (`[draft] approval_required = false`, the default single-author flow) is actually safe for *this* draft, based on the supervisor's verdict, its confidence, and the draft's risk score — not just a blanket yes.
+
+Configure the thresholds in `.ta/workflow.toml`:
+
+```toml
+[draft.auto_approval]
+min_confidence = 0.7      # below this, escalate to a human instead of auto-approving
+max_risk_score = 40       # above this (but below escalate_risk_score), rework instead of commit
+escalate_risk_score = 75  # at or above this, always escalate regardless of verdict
+```
+
+How it routes:
+- Supervisor verdict `block` → always **Reject** (never overridden by confidence or risk).
+- Risk score at or above `escalate_risk_score` → always **Escalate** to a human.
+- Verdict `warn` → **Rework** if confidence is sufficient, otherwise **Escalate**.
+- Verdict `pass` → **Commit** (auto-approve) unless risk is elevated (**Rework**) or confidence is too low (**Escalate**).
+
+Only **Commit** proceeds without a human. If the gate withholds approval, `ta draft apply` errors with the gate's reasoning and points you at `ta draft approve <id>`:
+
+```
+Draft "..." cannot be auto-approved on apply: the Decision gate returned Escalate
+(supervisor verdict Warn, confidence 0.45, risk score 20).
+
+Run `ta draft approve <id>` after review, then re-run `ta draft apply <id>`.
+(Adjust `[draft.auto_approval]` thresholds in workflow.toml to change this.)
+```
+
+The same gate also governs `advisor_security = "auto"`: an advisor may only fire `ta draft apply` without explicit human confirmation when its reported intent confidence is at least 80%. Below that, the advisor is told to ask the human directly.
+
+### Per-Action Telemetry
+
+Every Decision-gate evaluation is recorded to `.ta/telemetry.jsonl` — one JSON line per action, with cost, tokens, duration, confidence, risk score, and the resulting decision. View it per-goal with:
+
+```bash
+ta audit telemetry <goal-id>
+```
+
+```
+Per-action telemetry for goal 9f2c4b1a-...:
+
+  [Decision] draft apply gate — recorded 2026-07-06T18:04:21Z
+    decision:   Commit
+    confidence: 0.95
+    risk_score: 10
+
+1 action(s) total.
+```
+
 ---
 
 ## Game Engine Projects

@@ -14,6 +14,7 @@ exclude = [
 members = [
     "crates/ta-audit",
     "crates/ta-changeset",
+    "crates/ta-decision",
     "crates/ta-daemon",
     "crates/ta-goal",
     "crates/ta-mcp-gateway",
@@ -56,7 +57,7 @@ members = [
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.17.0-alpha.12.14"
+version = "0.17.0-alpha.12.15"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.

@@ -27,9 +27,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::social_plugin_protocol::{
-    CreateScheduledParams, CreateSocialDraftParams, SocialDraftStatusParams, SocialHealthParams,
-    SocialPluginError, SocialPluginRequest, SocialPluginResponse, SocialPostContent,
-    SocialPostState, SOCIAL_PROTOCOL_VERSION,
+    CreateScheduledParams, CreateSocialDraftParams, PublishSocialParams, SocialDraftStatusParams,
+    SocialHealthParams, SocialPluginError, SocialPluginRequest, SocialPluginResponse,
+    SocialPostContent, SocialPostState, SOCIAL_PROTOCOL_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -306,9 +306,6 @@ impl ExternalSocialAdapter {
     /// Create a draft in the platform's native draft state.
     ///
     /// Returns the platform-assigned draft ID (e.g., "linkedin-draft-abc123").
-    ///
-    /// NOTE: There is intentionally no `publish` method on this type.
-    /// TA never publishes social media posts on behalf of the user.
     pub fn create_draft(&self, post: SocialPostContent) -> Result<String, SocialPluginError> {
         let req = SocialPluginRequest::CreateDraft(CreateSocialDraftParams { post });
         let resp = self.call_plugin(&req, "create_draft")?;
@@ -346,6 +343,52 @@ impl ExternalSocialAdapter {
             .scheduled_at
             .unwrap_or_else(|| scheduled_at.to_string());
         Ok((id, at))
+    }
+
+    /// Publish a previously created draft — Commit for the social endpoint
+    /// (corrected 2026-07-04: `publish` is Commit, not a permanent
+    /// architectural exception; see `social_plugin_protocol` module docs).
+    ///
+    /// Gated by the shared Decision function (`ta-decision::decide`): the
+    /// call is only forwarded to the plugin when `decision.is_auto_approvable()`.
+    /// Otherwise, this returns an error explaining that the post was withheld
+    /// pending human approval, and never touches the plugin process — the
+    /// platform-side draft is left exactly as `create_draft` left it.
+    pub fn publish(
+        &self,
+        draft_id: &str,
+        review: &SocialSupervisorResult,
+        thresholds: &ta_decision::DecisionThresholds,
+    ) -> Result<SocialPostState, SocialPluginError> {
+        let verdict = if review.passed {
+            ta_decision::Verdict::Pass
+        } else {
+            ta_decision::Verdict::Block
+        };
+        let decision = ta_decision::decide(
+            &ta_decision::DecisionInput {
+                verdict,
+                risk_score: 0,
+                confidence: review.confidence,
+            },
+            thresholds,
+        );
+        if !decision.is_auto_approvable() {
+            return Err(SocialPluginError::OpFailed {
+                name: self.platform.clone(),
+                op: "publish".to_string(),
+                reason: format!(
+                    "Decision gate returned {:?} (confidence {:.2}) — publish withheld \
+                     pending human approval. The draft remains open on the platform.",
+                    decision, review.confidence
+                ),
+            });
+        }
+        let req = SocialPluginRequest::Publish(PublishSocialParams {
+            draft_id: draft_id.to_string(),
+        });
+        let resp = self.call_plugin(&req, "publish")?;
+        Ok(resp.state.unwrap_or(SocialPostState::Published))
     }
 
     /// Poll the current state of a previously created draft or scheduled post.
@@ -791,6 +834,7 @@ read -r line
 case "$line" in
   *create_draft*)    echo '{"ok":true,"draft_id":"linkedin-draft-abc123"}' ;;
   *create_scheduled*) echo '{"ok":true,"scheduled_id":"buffer-post-xyz","scheduled_at":"2026-04-07T14:00:00Z"}' ;;
+  *publish*)         echo '{"ok":true,"state":"published"}' ;;
   *)                 echo '{"ok":true,"handle":"@testuser","provider":"mock"}' ;;
 esac
 "#,
@@ -885,5 +929,102 @@ esac
             .unwrap();
         assert_eq!(scheduled_id, "buffer-post-xyz");
         assert_eq!(scheduled_at, "2026-04-07T14:00:00Z");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_adapter_publish_commits_when_review_passes() {
+        let plugin_path = shared_mock_social_plugin_path();
+        let manifest = SocialPluginManifest {
+            name: "mock".to_string(),
+            version: "0.1.0".to_string(),
+            plugin_type: "social".to_string(),
+            command: plugin_path.display().to_string(),
+            args: vec![],
+            capabilities: vec!["publish".to_string()],
+            description: None,
+            timeout_secs: 30,
+            protocol_version: SOCIAL_PROTOCOL_VERSION,
+        };
+
+        let adapter = ExternalSocialAdapter::new(&manifest);
+        let review = SocialSupervisorResult {
+            passed: true,
+            flag_reason: None,
+            confidence: 0.95,
+        };
+        let state = adapter
+            .publish(
+                "linkedin-draft-abc123",
+                &review,
+                &ta_decision::DecisionThresholds::default(),
+            )
+            .unwrap();
+        assert_eq!(state, SocialPostState::Published);
+    }
+
+    /// v0.17.0.12.15: publish is Commit for social — a failed review (Block
+    /// verdict) must withhold the publish and never reach the plugin process.
+    #[test]
+    fn publish_withheld_when_review_failed() {
+        let manifest = SocialPluginManifest {
+            name: "mock".to_string(),
+            version: "0.1.0".to_string(),
+            plugin_type: "social".to_string(),
+            command: "/nonexistent/binary/should-not-be-spawned".to_string(),
+            args: vec![],
+            capabilities: vec!["publish".to_string()],
+            description: None,
+            timeout_secs: 30,
+            protocol_version: SOCIAL_PROTOCOL_VERSION,
+        };
+        let adapter = ExternalSocialAdapter::new(&manifest);
+        let review = SocialSupervisorResult {
+            passed: false,
+            flag_reason: Some("blocked client name detected".to_string()),
+            confidence: 0.9,
+        };
+        let err = adapter
+            .publish(
+                "linkedin-draft-abc123",
+                &review,
+                &ta_decision::DecisionThresholds::default(),
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Decision gate") && msg.contains("withheld"),
+            "error should explain the withheld publish: {}",
+            msg
+        );
+    }
+
+    /// A passing review with confidence below the threshold must also
+    /// withhold, not silently commit.
+    #[test]
+    fn publish_withheld_when_confidence_too_low() {
+        let manifest = SocialPluginManifest {
+            name: "mock".to_string(),
+            version: "0.1.0".to_string(),
+            plugin_type: "social".to_string(),
+            command: "/nonexistent/binary/should-not-be-spawned".to_string(),
+            args: vec![],
+            capabilities: vec!["publish".to_string()],
+            description: None,
+            timeout_secs: 30,
+            protocol_version: SOCIAL_PROTOCOL_VERSION,
+        };
+        let adapter = ExternalSocialAdapter::new(&manifest);
+        let review = SocialSupervisorResult {
+            passed: true,
+            flag_reason: None,
+            confidence: 0.3,
+        };
+        let result = adapter.publish(
+            "linkedin-draft-abc123",
+            &review,
+            &ta_decision::DecisionThresholds::default(),
+        );
+        assert!(result.is_err());
     }
 }

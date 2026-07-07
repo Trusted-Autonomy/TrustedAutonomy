@@ -3,6 +3,8 @@ use std::path::Path;
 
 use crate::classification::QueryClass;
 use crate::error::Result;
+use ta_db_overlay::OverlayEntry;
+use ta_decision::Decision;
 
 /// Configuration for starting a database proxy.
 #[derive(Debug, Clone)]
@@ -48,8 +50,24 @@ pub trait DbProxyPlugin: Send + Sync {
     /// Used for policy enforcement before forwarding.
     fn classify_query(&self, query: &str) -> QueryClass;
 
+    /// Review/Decision gate for a staged mutation (v0.17.0.12.15).
+    ///
+    /// Uses the same shared `ta-decision::decide()` function every other
+    /// Commit-contract endpoint (VCS apply, social publish) uses — DDL and
+    /// deletions never auto-approve; a missing pre-image on an update/delete
+    /// downgrades confidence. Callers MUST call this and check
+    /// `.is_auto_approvable()` before calling `apply_mutation` — this
+    /// replaces the previously entirely-absent gate on this trait.
+    fn review_mutation(&self, entry: &OverlayEntry) -> Decision {
+        crate::review::review_mutation(entry, &ta_decision::DecisionThresholds::default())
+    }
+
     /// Replay staged mutations against the real DB on `ta draft apply`.
     /// Called once per mutation in `DraftOverlay::list_mutations()` order.
+    ///
+    /// Callers must call `review_mutation()` first and only invoke this when
+    /// the result is `is_auto_approvable()` — otherwise the mutation must go
+    /// through a human (`Rework`/`Escalate`) or be discarded (`Reject`).
     fn apply_mutation(
         &self,
         upstream_dsn: &str,

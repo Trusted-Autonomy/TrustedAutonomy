@@ -343,6 +343,126 @@ pub struct Risk {
     pub policy_decisions: Vec<PolicyDecisionRecord>,
 }
 
+/// Substrings in a resource URI that indicate the file may hold credentials.
+/// Not exhaustive secret-content scanning — a path-based heuristic that costs
+/// nothing to run on every draft build and catches the common cases.
+const SECRET_PATH_HINTS: &[&str] = &[
+    ".env",
+    "credentials",
+    "secret",
+    "id_rsa",
+    ".pem",
+    ".key",
+    "private_key",
+];
+
+/// Substrings indicating a change touches release/CI machinery, where a
+/// mistake has a larger blast radius than an ordinary source file.
+const SENSITIVE_INFRA_HINTS: &[&str] = &[
+    ".github/workflows",
+    ".release.toml",
+    "Cargo.toml",
+    "install_local.sh",
+];
+
+/// Derive a `Risk` from the artifacts in a draft, instead of the historical
+/// hardcoded `risk_score: 0`. This is a path/shape heuristic (no content
+/// scanning) — cheap enough to run on every `ta draft build`, and a strict
+/// improvement over a constant that never reflected the actual change.
+pub fn assess_risk(artifacts: &[Artifact]) -> Risk {
+    let mut findings = Vec::new();
+
+    let secret_hits: Vec<&str> = artifacts
+        .iter()
+        .filter(|a| {
+            let lower = a.resource_uri.to_lowercase();
+            SECRET_PATH_HINTS.iter().any(|hint| lower.contains(hint))
+        })
+        .map(|a| a.resource_uri.as_str())
+        .collect();
+    if !secret_hits.is_empty() {
+        findings.push(RiskFinding {
+            category: RiskCategory::Secrets,
+            severity: Severity::High,
+            description: format!(
+                "{} artifact(s) match credential-like path patterns",
+                secret_hits.len()
+            ),
+            evidence_refs: secret_hits.into_iter().map(String::from).collect(),
+            mitigation: Some(
+                "Confirm no real secret values are present before approving".to_string(),
+            ),
+        });
+    }
+
+    let infra_hits: Vec<&str> = artifacts
+        .iter()
+        .filter(|a| {
+            SENSITIVE_INFRA_HINTS
+                .iter()
+                .any(|hint| a.resource_uri.contains(hint))
+        })
+        .map(|a| a.resource_uri.as_str())
+        .collect();
+    if !infra_hits.is_empty() {
+        findings.push(RiskFinding {
+            category: RiskCategory::PolicyViolation,
+            severity: Severity::Medium,
+            description: format!(
+                "{} artifact(s) touch release/CI configuration",
+                infra_hits.len()
+            ),
+            evidence_refs: infra_hits.into_iter().map(String::from).collect(),
+            mitigation: None,
+        });
+    }
+
+    if artifacts.len() > 20 {
+        findings.push(RiskFinding {
+            category: RiskCategory::Unknown,
+            severity: Severity::Medium,
+            description: format!("Large changeset ({} artifacts)", artifacts.len()),
+            evidence_refs: vec![],
+            mitigation: Some("Consider reviewing in smaller batches".to_string()),
+        });
+    }
+
+    let deletions = artifacts
+        .iter()
+        .filter(|a| matches!(a.change_type, ChangeType::Delete))
+        .count();
+    if deletions > 0 {
+        findings.push(RiskFinding {
+            category: RiskCategory::Unknown,
+            severity: Severity::Low,
+            description: format!("{deletions} file(s) deleted"),
+            evidence_refs: vec![],
+            mitigation: None,
+        });
+    }
+
+    let risk_score = score_findings(&findings);
+    Risk {
+        risk_score,
+        findings,
+        policy_decisions: vec![],
+    }
+}
+
+/// Weight findings by severity into a single 0-100 risk score.
+fn score_findings(findings: &[RiskFinding]) -> u32 {
+    let total: u32 = findings
+        .iter()
+        .map(|f| match f.severity {
+            Severity::Critical => 40,
+            Severity::High => 25,
+            Severity::Medium => 10,
+            Severity::Low => 3,
+        })
+        .sum();
+    total.min(100)
+}
+
 /// A single risk finding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskFinding {
@@ -1773,5 +1893,64 @@ mod tests {
         // No artifacts at all.
         let warn = check_missing_decisions(&pkg);
         assert!(warn.is_none());
+    }
+
+    #[test]
+    fn assess_risk_clean_changeset_scores_zero() {
+        let artifacts = vec![make_artifact("fs://workspace/src/lib.rs")];
+        let risk = assess_risk(&artifacts);
+        assert_eq!(risk.risk_score, 0);
+        assert!(risk.findings.is_empty());
+    }
+
+    #[test]
+    fn assess_risk_flags_credential_like_paths() {
+        let artifacts = vec![
+            make_artifact("fs://workspace/.env"),
+            make_artifact("fs://workspace/src/lib.rs"),
+        ];
+        let risk = assess_risk(&artifacts);
+        assert!(risk.risk_score > 0);
+        assert!(risk
+            .findings
+            .iter()
+            .any(|f| f.category == RiskCategory::Secrets));
+    }
+
+    #[test]
+    fn assess_risk_flags_release_infra_changes() {
+        let artifacts = vec![make_artifact("fs://workspace/.github/workflows/ci.yml")];
+        let risk = assess_risk(&artifacts);
+        assert!(risk
+            .findings
+            .iter()
+            .any(|f| f.category == RiskCategory::PolicyViolation));
+    }
+
+    #[test]
+    fn assess_risk_flags_large_changesets() {
+        let artifacts: Vec<Artifact> = (0..25)
+            .map(|i| make_artifact(&format!("fs://workspace/src/file{i}.rs")))
+            .collect();
+        let risk = assess_risk(&artifacts);
+        assert!(risk.risk_score > 0);
+    }
+
+    #[test]
+    fn assess_risk_flags_deletions() {
+        let mut deleted = make_artifact("fs://workspace/src/old.rs");
+        deleted.change_type = ChangeType::Delete;
+        let risk = assess_risk(&[deleted]);
+        assert!(risk.risk_score > 0);
+    }
+
+    #[test]
+    fn assess_risk_score_is_capped_at_100() {
+        let mut artifacts: Vec<Artifact> = (0..30)
+            .map(|i| make_artifact(&format!("fs://workspace/.env.{i}")))
+            .collect();
+        artifacts.push(make_artifact("fs://workspace/Cargo.toml"));
+        let risk = assess_risk(&artifacts);
+        assert!(risk.risk_score <= 100);
     }
 }
