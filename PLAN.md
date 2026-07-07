@@ -9500,7 +9500,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.19 — Trigger Layer (`ta-intake`): Data-Defined Trigger Types
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.12 (data-defined-entity pattern established)
 
 **Goal**: Build tier 1 of the 3-tier model (`docs/design/ta-concepts-and-architecture.md` §13/§13.1) — a first-class trigger abstraction so goal creation can be fed by more than an explicit `ta run`/MCP call. Per-type trigger configs are data, not code, so the community can create/improve them the same way personas and (per v0.17.0.12.14) plugins are data-defined.
