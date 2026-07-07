@@ -52,12 +52,13 @@ members = [
     "crates/ta-extension",
     "crates/ta-init",
     "crates/ta-governed-paths",
+    "crates/ta-intake",
 ]
 
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.17.0-alpha.12.15"
+version = "0.17.0-alpha.12.19"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.

@@ -24,20 +24,20 @@ regex = { workspace = true }
 which = { workspace = true }
 
 # Internal crates
-ta-audit = { path = "../ta-audit", version = "0.17.0-alpha.12.15" }
-ta-events = { path = "../ta-events", version = "0.17.0-alpha.12.15" }
-ta-memory = { path = "../ta-memory", version = "0.17.0-alpha.12.15" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.15" }
-ta-connector-fs = { path = "../ta-connectors/fs", version = "0.17.0-alpha.12.15" }
-ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.17.0-alpha.12.15" }
-ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.17.0-alpha.12.15" }
-ta-connector-unity = { path = "../ta-connectors/unity", version = "0.17.0-alpha.12.15" }
-ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.15" }
-ta-policy = { path = "../ta-policy", version = "0.17.0-alpha.12.15" }
-ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.15" }
-ta-workflow = { path = "../ta-workflow", version = "0.17.0-alpha.12.15" }
-ta-actions = { path = "../ta-actions", version = "0.17.0-alpha.12.15" }
-ta-submit = { path = "../ta-submit", version = "0.17.0-alpha.12.15" }
+ta-audit = { path = "../ta-audit", version = "0.17.0-alpha.12.19" }
+ta-events = { path = "../ta-events", version = "0.17.0-alpha.12.19" }
+ta-memory = { path = "../ta-memory", version = "0.17.0-alpha.12.19" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.19" }
+ta-connector-fs = { path = "../ta-connectors/fs", version = "0.17.0-alpha.12.19" }
+ta-connector-unreal = { path = "../ta-connectors/unreal", version = "0.17.0-alpha.12.19" }
+ta-connector-comfyui = { path = "../ta-connectors/comfyui", version = "0.17.0-alpha.12.19" }
+ta-connector-unity = { path = "../ta-connectors/unity", version = "0.17.0-alpha.12.19" }
+ta-goal = { path = "../ta-goal", version = "0.17.0-alpha.12.19" }
+ta-policy = { path = "../ta-policy", version = "0.17.0-alpha.12.19" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.19" }
+ta-workflow = { path = "../ta-workflow", version = "0.17.0-alpha.12.19" }
+ta-actions = { path = "../ta-actions", version = "0.17.0-alpha.12.19" }
+ta-submit = { path = "../ta-submit", version = "0.17.0-alpha.12.19" }
 
 
 [dev-dependencies]

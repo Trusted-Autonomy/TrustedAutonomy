@@ -15321,6 +15321,90 @@ The Windows `.msi` installer includes an optional "Enable context compression (h
 
 ---
 
+## Trigger Layer (`ta-intake`)
+
+Every goal has historically started from an explicit call — `ta run` or the MCP `ta_goal_start` tool. The trigger layer adds a first-class way for goal creation to be *fed* instead: a clock tick, an inbound email, or (in the future) a webhook can fire a goal without a human typing `ta run`.
+
+Trigger types are **data, not code** — the same pattern already used for personas and plugins. Each type is one TOML file at `.ta/triggers/<type>.toml`; a community member can add a new trigger type by writing a config (and, for a genuinely new kind of source, a small Rust `TriggerSource` implementation), without touching `ta-intake` itself.
+
+### Configuring a trigger
+
+```toml
+# .ta/triggers/schedule.toml
+type = "schedule"
+enabled = true
+dispatch = "direct"
+description = "Fires a goal on a recurring interval."
+
+[settings]
+interval_secs = 3600
+goal_title = "Nightly health check"
+```
+
+```toml
+# .ta/triggers/inbound-email.toml
+type = "inbound-email"
+enabled = true
+dispatch = "queue"
+description = "Polls the configured messaging plugin for new inbound emails."
+
+[settings]
+provider = "gmail"            # matches a discovered messaging plugin's name
+account = "intake@example.com"
+max_messages_per_poll = 25
+```
+
+Fields common to every trigger type:
+
+| Field | Meaning |
+|---|---|
+| `type` | Trigger type identifier — must match the config filename (`<type>.toml`). |
+| `enabled` | Whether `ta intake fire` will act on this trigger (default `true`). |
+| `dispatch` | `"direct"` or `"queue"` — see below. |
+| `description` | Free-text, shown by `ta intake list`. |
+| `[settings]` | Trigger-type-specific keys (interpreted by that type's `TriggerSource`, not by `ta-intake` itself). |
+
+### The 2 shipped trigger types
+
+- **`schedule`** — fires once at least `settings.interval_secs` has elapsed since the last fire (a plain recurring interval; not a full cron-expression parser). `settings.goal_title` sets the created goal's title.
+- **`inbound-email`** — polls the messaging plugin named by `settings.provider` (the same plugin discovery `ta workflow run email-manager` uses) for messages since the last watermark, and normalizes each into one event. `settings.account` and `settings.max_messages_per_poll` are optional.
+
+Both are real, working implementations — not stubs — in `crates/ta-intake` (`schedule.rs`, `email.rs`), each with unit tests covering firing behavior.
+
+### `dispatch`: direct goal vs. queue — a data-defined choice
+
+Whether a fired event should turn into a goal *right away*, or be appended to a queue for later batch/regular processing, is configured per trigger type, not hardcoded in Rust. The two shipped defaults illustrate both:
+
+- `schedule` → `dispatch = "direct"`: one event per interval tick maps naturally onto "create one goal now".
+- `inbound-email` → `dispatch = "queue"`: mirrors the existing `ta workflow run email-manager` batch-fetch-then-process model.
+
+A community-authored trigger type can pick either value regardless of its type — `ta-intake` never special-cases the two built-ins.
+
+### Firing a trigger
+
+```bash
+# See what's configured.
+ta intake list
+
+# Poll a trigger once. Direct-dispatch events create a goal immediately
+# (via `ta run --headless`, the same mechanism email-manager uses for reply
+# goals); queued events are appended to .ta/intake-queue.jsonl.
+ta intake fire schedule
+ta intake fire inbound-email
+
+# Preview without side effects (no goal, no queue write, no watermark advance).
+ta intake fire schedule --dry-run
+
+# See what's waiting in the queue.
+ta intake queue
+```
+
+Each trigger type tracks its own watermark (last-fired timestamp) at `.ta/triggers/.state/<type>.watermark`, so repeated `ta intake fire` calls only act on genuinely new events.
+
+`ta-intake` itself is a library crate with no CLI or daemon glue — `ta intake fire`'s dispatch behavior (shell out to `ta run`, or append to the queue file) is a thin, swappable consumer of `TriggerEvent`s. The routing brain (`ta-brain`, a later phase) will become the primary consumer, deriving not just "create a goal" but also team/persona/security-tier from the same normalized event.
+
+---
+
 ## Getting Help
 
 - **Source and documentation**: [github.com/trustedautonomy/ta](https://github.com/trustedautonomy/ta)
