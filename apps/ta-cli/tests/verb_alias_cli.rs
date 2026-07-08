@@ -10,8 +10,18 @@
 // correct but breaks the real CLI surface.
 
 use std::process::Command;
+use std::sync::Mutex;
 
 use tempfile::TempDir;
+
+// Each test spawns the real `ta` binary as a subprocess. Observed flaky on
+// Windows CI when all 4 tests' subprocesses run concurrently (cargo test's
+// default per-test-thread parallelism) -- the same exact invocation
+// (`ta goal list`) succeeded in one test's run and crashed with a stack
+// overflow in another's, pointing at resource contention on a constrained
+// CI runner rather than a deterministic bug in any single invocation.
+// Serialize this file's tests so at most one real subprocess runs at a time.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 fn ta_cmd(project_root: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ta"))
@@ -25,6 +35,7 @@ fn ta_cmd(project_root: &std::path::Path, args: &[&str]) -> std::process::Output
 
 #[test]
 fn new_and_legacy_goal_list_produce_identical_stdout() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let project = TempDir::new().unwrap();
 
     let legacy = ta_cmd(project.path(), &["goal", "list"]);
@@ -40,6 +51,7 @@ fn new_and_legacy_goal_list_produce_identical_stdout() {
 
 #[test]
 fn legacy_invocation_prints_deprecation_notice_exactly_once() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let project = TempDir::new().unwrap();
 
     let legacy = ta_cmd(project.path(), &["goal", "list"]);
@@ -58,6 +70,7 @@ fn legacy_invocation_prints_deprecation_notice_exactly_once() {
 
 #[test]
 fn new_verb_form_never_prints_a_deprecation_notice() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let project = TempDir::new().unwrap();
 
     let via_verb = ta_cmd(project.path(), &["list", "goal"]);
@@ -71,6 +84,7 @@ fn new_verb_form_never_prints_a_deprecation_notice() {
 
 #[test]
 fn unmapped_new_verb_noun_pair_is_a_clean_error() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let project = TempDir::new().unwrap();
 
     // "team" has no mapped "create" verb (see commands::verb::NOUN_TABLE) —
