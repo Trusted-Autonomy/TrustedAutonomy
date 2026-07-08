@@ -620,6 +620,20 @@ enum Commands {
         #[command(subcommand)]
         command: commands::plugin::PluginCommands,
     },
+    /// Trigger layer (v0.17.0.12.19): data-defined trigger types that feed goal creation.
+    ///
+    /// Per-type trigger configs live at `.ta/triggers/<type>.toml`, the same
+    /// data-defined pattern used for plugins and personas.
+    ///
+    /// Examples:
+    ///   ta intake list
+    ///   ta intake fire schedule
+    ///   ta intake fire inbound-email --dry-run
+    ///   ta intake queue
+    Intake {
+        #[command(subcommand)]
+        command: commands::intake::IntakeCommands,
+    },
     /// Manage creative project templates (install, list, remove, publish, search).
     ///
     /// Templates provide project scaffolding including workflow.toml, .taignore,
@@ -1247,6 +1261,7 @@ fn main() -> anyhow::Result<()> {
             commands::plugin::run_plugin(&project_root, command)?;
             Ok(())
         }
+        Commands::Intake { command } => commands::intake::run_intake(&project_root, command),
         Commands::Template { command } => commands::template::execute(command, &config),
         Commands::Publish { message, yes } => {
             commands::publish::execute(&project_root, message.as_deref(), *yes)

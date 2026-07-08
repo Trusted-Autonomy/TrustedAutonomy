@@ -18,8 +18,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 # Workspace crates for FsMediator
-ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.18" }
-ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.18" }
+ta-workspace = { path = "../ta-workspace", version = "0.17.0-alpha.12.19" }
+ta-changeset = { path = "../ta-changeset", version = "0.17.0-alpha.12.19" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
