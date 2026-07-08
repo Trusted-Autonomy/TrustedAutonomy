@@ -115,8 +115,20 @@ pub fn call_raw(
                 method: method.to_string(),
                 reason: "plugin process has no stdin".to_string(),
             })?;
-        stdin.write_all(request_line.as_bytes())?;
-        stdin.write_all(b"\n")?;
+        // A plugin that exits immediately without reading stdin (e.g. a fast
+        // failure) can close its end of the pipe before this write lands,
+        // producing BrokenPipe. That's not a transport failure — it means the
+        // child already exited — so fall through to wait_with_timeout and let
+        // the real exit status/stderr classify the outcome instead of
+        // short-circuiting here on an unrelated write error.
+        let write_result = stdin
+            .write_all(request_line.as_bytes())
+            .and_then(|()| stdin.write_all(b"\n"));
+        if let Err(e) = write_result {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(e.into());
+            }
+        }
     }
     let output = wait_with_timeout(child, timeout).map_err(|e| match e {
         PluginError::Timeout { .. } => PluginError::Timeout {
