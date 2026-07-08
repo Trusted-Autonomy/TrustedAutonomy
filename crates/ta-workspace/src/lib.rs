@@ -22,6 +22,7 @@ pub mod copy_strategy;
 pub mod error;
 pub mod link_cache;
 pub mod links;
+pub mod log_rotation;
 pub mod merge_tool;
 pub mod overlay;
 pub mod partitioning;
@@ -36,6 +37,10 @@ pub use conflict::{Conflict, ConflictResolution, FileSnapshot, SourceSnapshot};
 pub use copy_strategy::{CopyStat, CopyStrategy};
 pub use error::WorkspaceError;
 pub use links::{Link, LinkStatus, Relationship};
+pub use log_rotation::{
+    force_rotate as force_rotate_daemon_log, rotate_if_needed as rotate_daemon_log_if_needed,
+    RotationOutcome,
+};
 pub use overlay::{ExcludePatterns, OverlayStagingMode, OverlayWorkspace};
 pub use partitioning::{
     git_is_ignored, gitignore_block, p4_is_ignored, p4ignore_block, update_gitignore,

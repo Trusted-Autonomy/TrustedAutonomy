@@ -1438,6 +1438,34 @@ pub fn startup_gc_pass(
     (removed, freed_bytes)
 }
 
+/// Startup/periodic `.ta/daemon.log` rotation check (v0.17.0.12.18).
+///
+/// Rotates via copy-truncate (`ta_workspace::log_rotation`) so it's safe even
+/// while this same process has the file open as its OS-redirected
+/// stdout/stderr target. Called once on daemon start and periodically
+/// thereafter (`[log_rotation] check_interval_secs`).
+pub fn check_log_rotation(
+    project_root: &Path,
+    max_size_mb: u64,
+    retention_count: u32,
+) -> ta_workspace::RotationOutcome {
+    match ta_workspace::rotate_daemon_log_if_needed(project_root, max_size_mb, retention_count) {
+        Ok(outcome @ ta_workspace::RotationOutcome::Rotated { size_bytes, pruned }) => {
+            tracing::info!(
+                size_bytes = size_bytes,
+                pruned = pruned,
+                "daemon.log rotated automatically"
+            );
+            outcome
+        }
+        Ok(outcome) => outcome,
+        Err(e) => {
+            tracing::warn!("daemon.log rotation check failed: {}", e);
+            ta_workspace::RotationOutcome::NotNeeded
+        }
+    }
+}
+
 /// Check whether the draft package with `id` has `Denied` status.
 ///
 /// Reads the package JSON file directly to avoid a dependency on ta-cli from
@@ -1484,6 +1512,32 @@ pub fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn check_log_rotation_rotates_at_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(ta_dir.join("daemon.log"), "x".repeat(2 * 1_048_576)).unwrap();
+
+        let outcome = check_log_rotation(dir.path(), 1, 3);
+        assert!(matches!(
+            outcome,
+            ta_workspace::RotationOutcome::Rotated { .. }
+        ));
+        assert!(ta_dir.join("daemon.log.1").exists());
+    }
+
+    #[test]
+    fn check_log_rotation_not_needed_under_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let ta_dir = dir.path().join(".ta");
+        std::fs::create_dir_all(&ta_dir).unwrap();
+        std::fs::write(ta_dir.join("daemon.log"), "small").unwrap();
+
+        let outcome = check_log_rotation(dir.path(), 500, 3);
+        assert_eq!(outcome, ta_workspace::RotationOutcome::NotNeeded);
+    }
 
     #[test]
     fn truncate_preview_short() {

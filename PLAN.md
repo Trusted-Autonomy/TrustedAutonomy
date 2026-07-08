@@ -9485,32 +9485,32 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.18 — Daemon Log Rotation Reliability Fix
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none (independent, low-effort)
 
 **Goal**: `daemon.log` has been repeatedly flagged at 5.2GB (threshold 500MB) by multiple `ta run` launches this session, requiring a manual `ta doctor --fix` each time. Make rotation automatic instead of a manual, easy-to-forget step — a small, concrete reliability win independent of the rest of the overhaul (per `docs/design/ta-concepts-and-architecture.md` §13.1).
 
 **Items**:
-1. [ ] Wire log rotation into the daemon's own lifecycle (e.g. size-checked on startup and on a periodic interval) rather than only via manually-invoked `ta doctor --fix`.
-2. [ ] Configurable rotation threshold and retention count in `daemon.toml`, with a sane default matching today's 500MB warning threshold.
-3. [ ] Tests: rotation triggers at threshold, old rotated logs beyond retention count are pruned, daemon continues logging uninterrupted across a rotation.
-4. [ ] USAGE.md: document the rotation config.
+1. [x] Wire log rotation into the daemon's own lifecycle (e.g. size-checked on startup and on a periodic interval) rather than only via manually-invoked `ta doctor --fix`.
+2. [x] Configurable rotation threshold and retention count in `daemon.toml`, with a sane default matching today's 500MB warning threshold.
+3. [x] Tests: rotation triggers at threshold, old rotated logs beyond retention count are pruned, daemon continues logging uninterrupted across a rotation.
+4. [x] USAGE.md: document the rotation config.
 
 #### Version: `0.17.0-alpha.12.18`
 
 ---
 ### v0.17.0.12.19 — Trigger Layer (`ta-intake`): Data-Defined Trigger Types
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: v0.17.0.12.12 (data-defined-entity pattern established)
 
 **Goal**: Build tier 1 of the 3-tier model (`docs/design/ta-concepts-and-architecture.md` §13/§13.1) — a first-class trigger abstraction so goal creation can be fed by more than an explicit `ta run`/MCP call. Per-type trigger configs are data, not code, so the community can create/improve them the same way personas and (per v0.17.0.12.14) plugins are data-defined.
 
 **Items**:
-1. [ ] New library crate `ta-intake`, no CLI/daemon-specific glue: defines a `TriggerEvent` type (normalized payload + source metadata) and a `TriggerSource` trait producing them. Owns only "an event of type X arrived, here's its normalized payload" — nothing about what to do with it (that's v0.17.0.12.20's job).
-2. [ ] Per-type trigger configs as data: `.ta/triggers/<type>.toml`, discovery convention mirroring `plugin.toml` (v0.17.0.12.14). Ship 2 real, working trigger types end-to-end: schedule (cron-like) and inbound-email (reusing the existing email connector's fetch capability), each producing a `TriggerEvent` that results in a real goal being created.
-3. [ ] Explicit design decision, documented in-code: whether a fired trigger creates a goal directly, or queues data for later batch/regular processing — per the user's framing, this choice is data (part of the per-type config), not a hardcoded behavior.
-4. [ ] Tests: each of the 2 shipped trigger types fires and produces a correctly-formed `TriggerEvent`; a custom/community-authored trigger-type config round-trips through parse/discovery without code changes.
-5. [ ] USAGE.md: document `.ta/triggers/<type>.toml` and the 2 shipped trigger types as a template for authoring more.
+1. [x] New library crate `ta-intake`, no CLI/daemon-specific glue: defines a `TriggerEvent` type (normalized payload + source metadata) and a `TriggerSource` trait producing them. Owns only "an event of type X arrived, here's its normalized payload" — nothing about what to do with it (that's v0.17.0.12.20's job).
+2. [x] Per-type trigger configs as data: `.ta/triggers/<type>.toml`, discovery convention mirroring `plugin.toml` (v0.17.0.12.14). Ship 2 real, working trigger types end-to-end: schedule (cron-like) and inbound-email (reusing the existing email connector's fetch capability), each producing a `TriggerEvent` that results in a real goal being created.
+3. [x] Explicit design decision, documented in-code: whether a fired trigger creates a goal directly, or queues data for later batch/regular processing — per the user's framing, this choice is data (part of the per-type config), not a hardcoded behavior.
+4. [x] Tests: each of the 2 shipped trigger types fires and produces a correctly-formed `TriggerEvent`; a custom/community-authored trigger-type config round-trips through parse/discovery without code changes.
+5. [x] USAGE.md: document `.ta/triggers/<type>.toml` and the 2 shipped trigger types as a template for authoring more.
 
 #### Version: `0.17.0-alpha.12.19`
 

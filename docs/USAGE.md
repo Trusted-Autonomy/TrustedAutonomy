@@ -14313,15 +14313,23 @@ ta doctor
 
 ### `daemon.log` Rotation
 
-`.ta/daemon.log` can grow unbounded — most commonly from a plugin crash loop logging on every restart attempt. `ta doctor --fix` detects when it has grown past a configurable size threshold and rotates it:
+`.ta/daemon.log` can grow unbounded — most commonly from a plugin crash loop logging on every restart attempt. The daemon rotates it automatically, so there's normally nothing to do: it checks the log's size once on startup and again on a periodic interval, no manual step required.
 
-```bash
-ta doctor --fix
+```toml
+# .ta/daemon.toml
+[log_rotation]
+max_size_mb = 500          # rotate when daemon.log reaches this size (default: 500; 0 disables)
+retention_count = 3        # keep this many rotated generations, daemon.log.1 .. daemon.log.N (default: 3)
+check_interval_secs = 300  # periodic size-check cadence in seconds (default: 300 = 5 min)
 ```
 
-- Threshold defaults to 500 MB — configurable via `[gc] daemon_log_max_mb` in `.ta/workflow.toml` (set to `0` to disable the check).
-- The current log is moved to `.ta/daemon.log.1` (only one prior generation is kept — a second rotation overwrites it), and a fresh `daemon.log` is started with a marker line recording the rotation timestamp and the size that was rotated out.
-- Runs as one of the standard `ta doctor --fix` prompts, alongside stale PID cleanup and other maintenance fixes; pass `--yes` to apply automatically without prompting.
+- Rotation uses copy-truncate rather than rename: the current content is copied out to `daemon.log.1` (older generations shift to `.2`, `.3`, ... up to `retention_count`, and anything beyond that is pruned) and the live `daemon.log` is truncated to zero length **in place**. This matters because the daemon's stdout/stderr are OS-redirected into `daemon.log` at process-spawn time — a plain rename doesn't move that redirect, so a naive rotation while the daemon is running silently stopped working until the next restart. Copy-truncate keeps the same file open and valid, so logging continues uninterrupted across a rotation.
+- A marker line records the rotation timestamp and the size that was rotated out.
+- `ta doctor --fix` still offers manual/forced rotation (e.g. to reclaim space immediately without waiting for the next periodic check) using the same copy-truncate logic and the `retention_count` from `.ta/daemon.toml`:
+
+  ```bash
+  ta doctor --fix
+  ```
 
 ### Auto-Recovery on Daemon Startup
 
@@ -15318,6 +15326,90 @@ Active Prompt-Optimizer Plugin  (built-in headroom default)
 ### Windows installer
 
 The Windows `.msi` installer includes an optional "Enable context compression (headroom)" checkbox that runs `pip install headroom-ai[all]` during setup. The checkbox is checked by default.
+
+---
+
+## Trigger Layer (`ta-intake`)
+
+Every goal has historically started from an explicit call — `ta run` or the MCP `ta_goal_start` tool. The trigger layer adds a first-class way for goal creation to be *fed* instead: a clock tick, an inbound email, or (in the future) a webhook can fire a goal without a human typing `ta run`.
+
+Trigger types are **data, not code** — the same pattern already used for personas and plugins. Each type is one TOML file at `.ta/triggers/<type>.toml`; a community member can add a new trigger type by writing a config (and, for a genuinely new kind of source, a small Rust `TriggerSource` implementation), without touching `ta-intake` itself.
+
+### Configuring a trigger
+
+```toml
+# .ta/triggers/schedule.toml
+type = "schedule"
+enabled = true
+dispatch = "direct"
+description = "Fires a goal on a recurring interval."
+
+[settings]
+interval_secs = 3600
+goal_title = "Nightly health check"
+```
+
+```toml
+# .ta/triggers/inbound-email.toml
+type = "inbound-email"
+enabled = true
+dispatch = "queue"
+description = "Polls the configured messaging plugin for new inbound emails."
+
+[settings]
+provider = "gmail"            # matches a discovered messaging plugin's name
+account = "intake@example.com"
+max_messages_per_poll = 25
+```
+
+Fields common to every trigger type:
+
+| Field | Meaning |
+|---|---|
+| `type` | Trigger type identifier — must match the config filename (`<type>.toml`). |
+| `enabled` | Whether `ta intake fire` will act on this trigger (default `true`). |
+| `dispatch` | `"direct"` or `"queue"` — see below. |
+| `description` | Free-text, shown by `ta intake list`. |
+| `[settings]` | Trigger-type-specific keys (interpreted by that type's `TriggerSource`, not by `ta-intake` itself). |
+
+### The 2 shipped trigger types
+
+- **`schedule`** — fires once at least `settings.interval_secs` has elapsed since the last fire (a plain recurring interval; not a full cron-expression parser). `settings.goal_title` sets the created goal's title.
+- **`inbound-email`** — polls the messaging plugin named by `settings.provider` (the same plugin discovery `ta workflow run email-manager` uses) for messages since the last watermark, and normalizes each into one event. `settings.account` and `settings.max_messages_per_poll` are optional.
+
+Both are real, working implementations — not stubs — in `crates/ta-intake` (`schedule.rs`, `email.rs`), each with unit tests covering firing behavior.
+
+### `dispatch`: direct goal vs. queue — a data-defined choice
+
+Whether a fired event should turn into a goal *right away*, or be appended to a queue for later batch/regular processing, is configured per trigger type, not hardcoded in Rust. The two shipped defaults illustrate both:
+
+- `schedule` → `dispatch = "direct"`: one event per interval tick maps naturally onto "create one goal now".
+- `inbound-email` → `dispatch = "queue"`: mirrors the existing `ta workflow run email-manager` batch-fetch-then-process model.
+
+A community-authored trigger type can pick either value regardless of its type — `ta-intake` never special-cases the two built-ins.
+
+### Firing a trigger
+
+```bash
+# See what's configured.
+ta intake list
+
+# Poll a trigger once. Direct-dispatch events create a goal immediately
+# (via `ta run --headless`, the same mechanism email-manager uses for reply
+# goals); queued events are appended to .ta/intake-queue.jsonl.
+ta intake fire schedule
+ta intake fire inbound-email
+
+# Preview without side effects (no goal, no queue write, no watermark advance).
+ta intake fire schedule --dry-run
+
+# See what's waiting in the queue.
+ta intake queue
+```
+
+Each trigger type tracks its own watermark (last-fired timestamp) at `.ta/triggers/.state/<type>.watermark`, so repeated `ta intake fire` calls only act on genuinely new events.
+
+`ta-intake` itself is a library crate with no CLI or daemon glue — `ta intake fire`'s dispatch behavior (shell out to `ta run`, or append to the queue file) is a thin, swappable consumer of `TriggerEvent`s. The routing brain (`ta-brain`, a later phase) will become the primary consumer, deriving not just "create a goal" but also team/persona/security-tier from the same normalized event.
 
 ---
 
