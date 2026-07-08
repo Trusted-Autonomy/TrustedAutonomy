@@ -14313,15 +14313,23 @@ ta doctor
 
 ### `daemon.log` Rotation
 
-`.ta/daemon.log` can grow unbounded — most commonly from a plugin crash loop logging on every restart attempt. `ta doctor --fix` detects when it has grown past a configurable size threshold and rotates it:
+`.ta/daemon.log` can grow unbounded — most commonly from a plugin crash loop logging on every restart attempt. The daemon rotates it automatically, so there's normally nothing to do: it checks the log's size once on startup and again on a periodic interval, no manual step required.
 
-```bash
-ta doctor --fix
+```toml
+# .ta/daemon.toml
+[log_rotation]
+max_size_mb = 500          # rotate when daemon.log reaches this size (default: 500; 0 disables)
+retention_count = 3        # keep this many rotated generations, daemon.log.1 .. daemon.log.N (default: 3)
+check_interval_secs = 300  # periodic size-check cadence in seconds (default: 300 = 5 min)
 ```
 
-- Threshold defaults to 500 MB — configurable via `[gc] daemon_log_max_mb` in `.ta/workflow.toml` (set to `0` to disable the check).
-- The current log is moved to `.ta/daemon.log.1` (only one prior generation is kept — a second rotation overwrites it), and a fresh `daemon.log` is started with a marker line recording the rotation timestamp and the size that was rotated out.
-- Runs as one of the standard `ta doctor --fix` prompts, alongside stale PID cleanup and other maintenance fixes; pass `--yes` to apply automatically without prompting.
+- Rotation uses copy-truncate rather than rename: the current content is copied out to `daemon.log.1` (older generations shift to `.2`, `.3`, ... up to `retention_count`, and anything beyond that is pruned) and the live `daemon.log` is truncated to zero length **in place**. This matters because the daemon's stdout/stderr are OS-redirected into `daemon.log` at process-spawn time — a plain rename doesn't move that redirect, so a naive rotation while the daemon is running silently stopped working until the next restart. Copy-truncate keeps the same file open and valid, so logging continues uninterrupted across a rotation.
+- A marker line records the rotation timestamp and the size that was rotated out.
+- `ta doctor --fix` still offers manual/forced rotation (e.g. to reclaim space immediately without waiting for the next periodic check) using the same copy-truncate logic and the `retention_count` from `.ta/daemon.toml`:
+
+  ```bash
+  ta doctor --fix
+  ```
 
 ### Auto-Recovery on Daemon Startup
 

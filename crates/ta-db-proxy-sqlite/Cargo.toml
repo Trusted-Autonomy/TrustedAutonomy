@@ -18,8 +18,8 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 
-ta-db-overlay = { path = "../ta-db-overlay", version = "0.17.0-alpha.12.15" }
-ta-db-proxy = { path = "../ta-db-proxy", version = "0.17.0-alpha.12.15" }
+ta-db-overlay = { path = "../ta-db-overlay", version = "0.17.0-alpha.12.18" }
+ta-db-proxy = { path = "../ta-db-proxy", version = "0.17.0-alpha.12.18" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

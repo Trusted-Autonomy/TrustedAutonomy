@@ -277,6 +277,36 @@ async fn main() -> Result<()> {
         });
     }
 
+    // daemon.log rotation (v0.17.0.12.18): size-checked once on startup and
+    // periodically thereafter, replacing the manual `ta doctor --fix` step.
+    // Runs in both API and MCP modes since both write to the same daemon.log.
+    {
+        watchdog::check_log_rotation(
+            &project_root,
+            daemon_config.log_rotation.max_size_mb,
+            daemon_config.log_rotation.retention_count,
+        );
+
+        let interval_secs = daemon_config.log_rotation.check_interval_secs;
+        if interval_secs > 0 && daemon_config.log_rotation.max_size_mb > 0 {
+            let lr_project_root = project_root.clone();
+            let max_size_mb = daemon_config.log_rotation.max_size_mb;
+            let retention_count = daemon_config.log_rotation.retention_count;
+            let lr_shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                let interval = std::time::Duration::from_secs(interval_secs);
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {
+                            watchdog::check_log_rotation(&lr_project_root, max_size_mb, retention_count);
+                        }
+                        _ = lr_shutdown.notified() => break,
+                    }
+                }
+            });
+        }
+    }
+
     // Start Discord listener manager if configured (v0.12.1).
     // Runs in both API and MCP modes so Discord is available regardless of how
     // the daemon is started.
