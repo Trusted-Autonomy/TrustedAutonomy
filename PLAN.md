@@ -9485,16 +9485,16 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.18 — Daemon Log Rotation Reliability Fix
-<!-- status: in_progress -->
+<!-- status: done -->
 **Depends on**: none (independent, low-effort)
 
 **Goal**: `daemon.log` has been repeatedly flagged at 5.2GB (threshold 500MB) by multiple `ta run` launches this session, requiring a manual `ta doctor --fix` each time. Make rotation automatic instead of a manual, easy-to-forget step — a small, concrete reliability win independent of the rest of the overhaul (per `docs/design/ta-concepts-and-architecture.md` §13.1).
 
 **Items**:
-1. [ ] Wire log rotation into the daemon's own lifecycle (e.g. size-checked on startup and on a periodic interval) rather than only via manually-invoked `ta doctor --fix`.
-2. [ ] Configurable rotation threshold and retention count in `daemon.toml`, with a sane default matching today's 500MB warning threshold.
-3. [ ] Tests: rotation triggers at threshold, old rotated logs beyond retention count are pruned, daemon continues logging uninterrupted across a rotation.
-4. [ ] USAGE.md: document the rotation config.
+1. [x] Wire log rotation into the daemon's own lifecycle (e.g. size-checked on startup and on a periodic interval) rather than only via manually-invoked `ta doctor --fix`.
+2. [x] Configurable rotation threshold and retention count in `daemon.toml`, with a sane default matching today's 500MB warning threshold.
+3. [x] Tests: rotation triggers at threshold, old rotated logs beyond retention count are pruned, daemon continues logging uninterrupted across a rotation.
+4. [x] USAGE.md: document the rotation config.
 
 #### Version: `0.17.0-alpha.12.18`
 

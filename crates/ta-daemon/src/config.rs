@@ -103,6 +103,21 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub gc: GcConfig,
 
+    /// `.ta/daemon.log` rotation policy (v0.17.0.12.18).
+    ///
+    /// The daemon checks its own log size on startup and on a periodic
+    /// interval, rotating automatically instead of relying on a manually
+    /// run `ta doctor --fix`.
+    ///
+    /// ```toml
+    /// [log_rotation]
+    /// max_size_mb = 500     # rotate when daemon.log reaches this size (0 disables)
+    /// retention_count = 3   # keep this many rotated generations (daemon.log.1..N)
+    /// check_interval_secs = 300   # periodic size check cadence
+    /// ```
+    #[serde(default)]
+    pub log_rotation: LogRotationConfig,
+
     /// Context compression via headroom proxy (v0.17.0.7).
     ///
     /// When enabled, the daemon spawns `headroom proxy --port <port>` and sets
@@ -266,6 +281,54 @@ impl Default for GcConfig {
             failed_staging_retention_hours: default_failed_staging_retention_hours(),
             max_staging_gb: default_max_staging_gb(),
             gc_interval_hours: default_gc_interval_hours(),
+        }
+    }
+}
+
+/// `.ta/daemon.log` rotation policy (v0.17.0.12.18).
+///
+/// Rotation uses copy-truncate (not rename) so it's safe to run while the
+/// daemon's own stdout/stderr are OS-redirected into this same file — see
+/// `ta_workspace::log_rotation` for why a naive rename breaks a live writer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogRotationConfig {
+    /// Size in MB past which `daemon.log` is rotated (default: 500, matching
+    /// the pre-existing `daemon_log_oversized` health-signal threshold).
+    /// Set to 0 to disable automatic rotation.
+    #[serde(default = "default_log_rotation_max_size_mb")]
+    pub max_size_mb: u64,
+
+    /// How many rotated generations to retain (`daemon.log.1` .. `daemon.log.N`)
+    /// before the oldest is pruned (default: 3).
+    #[serde(default = "default_log_rotation_retention_count")]
+    pub retention_count: u32,
+
+    /// How often (in seconds) the daemon checks `daemon.log`'s size for
+    /// rotation, independent of the one-time startup check (default: 300 = 5 min).
+    /// Set to 0 to disable the periodic check (startup check still runs).
+    #[serde(default = "default_log_rotation_check_interval_secs")]
+    pub check_interval_secs: u64,
+}
+
+fn default_log_rotation_max_size_mb() -> u64 {
+    500
+}
+
+fn default_log_rotation_retention_count() -> u32 {
+    3
+}
+
+fn default_log_rotation_check_interval_secs() -> u64 {
+    300
+}
+
+impl Default for LogRotationConfig {
+    fn default() -> Self {
+        Self {
+            max_size_mb: default_log_rotation_max_size_mb(),
+            retention_count: default_log_rotation_retention_count(),
+            check_interval_secs: default_log_rotation_check_interval_secs(),
         }
     }
 }
@@ -2138,6 +2201,32 @@ mod tests {
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: DaemonConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.server.port, config.server.port);
+    }
+
+    #[test]
+    fn log_rotation_config_defaults() {
+        let config = LogRotationConfig::default();
+        assert_eq!(config.max_size_mb, 500);
+        assert_eq!(config.retention_count, 3);
+        assert_eq!(config.check_interval_secs, 300);
+    }
+
+    #[test]
+    fn log_rotation_config_defaults_when_section_absent() {
+        // daemon.toml files predating v0.17.0.12.18 have no [log_rotation] section.
+        let parsed: DaemonConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.log_rotation.max_size_mb, 500);
+        assert_eq!(parsed.log_rotation.retention_count, 3);
+    }
+
+    #[test]
+    fn log_rotation_config_overridable_via_toml() {
+        let toml_str =
+            "[log_rotation]\nmax_size_mb = 100\nretention_count = 5\ncheck_interval_secs = 60\n";
+        let parsed: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.log_rotation.max_size_mb, 100);
+        assert_eq!(parsed.log_rotation.retention_count, 5);
+        assert_eq!(parsed.log_rotation.check_interval_secs, 60);
     }
 
     #[test]
