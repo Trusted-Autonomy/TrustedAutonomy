@@ -9516,7 +9516,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.20 — Routing Brain (`ta-brain`): Workload Classification + Privilege Derivation + Team Coordinator
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.13 (agent-switching tiers), v0.17.0.12.19 (`ta-intake`)
 
 **Goal**: Build tier 2 of the 3-tier model — extract the §3 mapping tree into one reusable library function, extending v0.17.0.12.13's agent-only `Switch` resolution into full workload classification, prioritization, and privilege derivation. Resolve the open §13 question: is the "team coordinator" a new persistent role, or a capability of the existing Advisor?
