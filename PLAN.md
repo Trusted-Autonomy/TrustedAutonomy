@@ -9533,7 +9533,7 @@ Each phase: `ta run --headless --phase X` → draft → `agent_review` → if Ap
 
 ---
 ### v0.17.0.12.21 — Data-Format Specs + Studio Boundary Enforcement
-<!-- status: pending -->
+<!-- status: in_progress -->
 **Depends on**: v0.17.0.12.19, v0.17.0.12.20
 
 **Goal**: Publish the versioned data-format specs that are the real interface boundary between TA's core, Studio, and community-authored trigger-configs/plugins (per §13.1) — the mechanism that lets the system stay a monorepo without becoming tightly coupled.
