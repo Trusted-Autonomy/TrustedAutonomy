@@ -1,0 +1,50 @@
+{
+  "$id": "https://trustedautonomy.dev/schema/trigger_event.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A single normalized event fired by a `TriggerSource`.",
+  "properties": {
+    "dedupe_key": {
+      "description": "Stable key for idempotency (e.g. a provider message ID, or a fired\ntimestamp) — lets a consumer skip an event it has already acted on.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "description": "Unique identifier for this event instance.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "occurred_at": {
+      "description": "When the underlying event actually happened (not when it was polled).",
+      "format": "date-time",
+      "type": "string"
+    },
+    "payload": {
+      "description": "Trigger-type-specific normalized data. Deliberately untyped at this\nlayer — `ta-intake` doesn't know or care what a consumer will do with\nit, only that it round-trips as JSON."
+    },
+    "source": {
+      "description": "Human-readable origin of this specific event (e.g. a sender address\nfor `inbound-email`, or the trigger's config name for `schedule`).",
+      "type": "string"
+    },
+    "suggested_goal_title": {
+      "description": "A ready-to-use goal title, so a direct-dispatch consumer doesn't need\nto know how to turn a given trigger type's payload into a title.",
+      "type": "string"
+    },
+    "trigger_type": {
+      "description": "The trigger type that produced this event (matches the `type` field\nin `.ta/triggers/<type>.toml` and the config's discovery filename).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "trigger_type",
+    "source",
+    "occurred_at",
+    "payload",
+    "suggested_goal_title"
+  ],
+  "title": "TriggerEvent",
+  "type": "object",
+  "x-ta-schema-version": 1
+}

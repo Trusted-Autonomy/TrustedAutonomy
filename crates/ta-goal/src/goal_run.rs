@@ -32,7 +32,7 @@ use crate::error::GoalError;
 /// `GoalRunState::Custom { tag }` when extending the state machine without
 /// forking this crate.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum GoalRunState {
     /// Just created, not yet configured with manifest/workspace.
@@ -236,7 +236,7 @@ impl GoalRunState {
 ///
 /// This is the top-level execution unit introduced by the Plan Revision doc.
 /// It replaces ad-hoc goal tracking with a formal lifecycle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GoalRun {
     /// Unique identifier for this goal run.
     pub goal_run_id: Uuid,

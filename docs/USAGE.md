@@ -15495,6 +15495,21 @@ ta intake coordinate --dispatch
 
 ---
 
+## Data-Format Specs & Studio Boundary
+
+TA publishes versioned JSON Schema for five core wire types — `Goal`, `Draft`/`Artifact`, `TriggerEvent`, `RoutingDecision`, and `Persona` — under `schema/*.schema.json`. This is what lets Studio (and community trigger-configs/plugins) build against TA without compiling Rust: the schema is the contract, generated directly from the real Rust types (`crates/ta-data-spec`), not a hand-maintained mirror.
+
+Full reference, including the versioning scheme and how to regenerate the schemas after changing one of the five types: [`docs/design/ta-data-format-spec.md`](design/ta-data-format-spec.md).
+
+```bash
+# Regenerate schema/*.schema.json from the current Rust types.
+cargo run -p ta-data-spec --bin gen-schema
+```
+
+**The Studio boundary rule**: Studio (the daemon's built-in web UI) only ever talks to TA over its HTTP/SSE API — it never special-cases an internal `ta-*` Rust type, only the versioned spec above. This is enforced by an automated check (`crates/ta-data-spec/tests/studio_boundary.rs`, part of `cargo test --workspace`) that flags any daemon API response exposing an internal type without going through the spec.
+
+---
+
 ## Getting Help
 
 - **Source and documentation**: [github.com/trustedautonomy/ta](https://github.com/trustedautonomy/ta)

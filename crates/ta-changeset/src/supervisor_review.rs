@@ -7,7 +7,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 /// Verdict from the supervisor agent review.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SupervisorVerdict {
     /// Changes are aligned with the goal and constitution.
@@ -37,7 +37,7 @@ impl Default for SupervisorVerdict {
 
 /// The result of an AI supervisor reviewing staged changes.
 /// Embedded in `DraftPackage.supervisor_review`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SupervisorReview {
     /// Overall verdict: pass, warn, or block.
     pub verdict: SupervisorVerdict,

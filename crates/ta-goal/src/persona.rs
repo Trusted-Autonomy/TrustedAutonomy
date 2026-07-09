@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Capabilities section of a persona config.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PersonaCapabilities {
     /// Tool names the agent may use. Empty = no restriction.
     #[serde(default)]
@@ -19,7 +19,7 @@ pub struct PersonaCapabilities {
 }
 
 /// Style/output preferences for a persona.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PersonaStyle {
     /// Preferred output format (e.g., "markdown", "json", "plain").
     #[serde(default)]
@@ -30,7 +30,7 @@ pub struct PersonaStyle {
 }
 
 /// Inner [persona] table in the TOML file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PersonaInner {
     pub name: String,
     #[serde(default)]
@@ -52,7 +52,7 @@ pub struct PersonaInner {
 }
 
 /// Full persona config loaded from `.ta/personas/<name>.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PersonaConfig {
     pub persona: PersonaInner,
     #[serde(default)]

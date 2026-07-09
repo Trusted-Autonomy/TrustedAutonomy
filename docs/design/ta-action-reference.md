@@ -3,6 +3,7 @@
 **Status**: canonical reference, distilled from [`ta-concepts-and-architecture.md`](ta-concepts-and-architecture.md) §1–12, 2026-07-04.
 **Purpose**: the complete instruction set TA operates in — every action, grouped, and how real flows compose them. Deliberately mirrors [kwg/sage-lore](https://github.com/kwg/sage-lore)'s own README shape (Execution Model → grouped Primitives → composed Flows) since that presentation is exactly what was asked for — without adopting sage-lore itself (see [`sage-lore-review.md`](sage-lore-review.md): complement, don't depend on it).
 **Read first if you want the plain version**: [`docs/guides/what-is-ta.md`](../guides/what-is-ta.md).
+**Data shapes for these actions**: [`ta-data-format-spec.md`](ta-data-format-spec.md) — the versioned JSON Schema for `Goal`, `Draft`/`Artifact`, `TriggerEvent`, `RoutingDecision`, and `Persona`, the data these actions actually operate on.
 
 ---
 

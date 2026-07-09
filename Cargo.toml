@@ -54,12 +54,13 @@ members = [
     "crates/ta-governed-paths",
     "crates/ta-intake",
     "crates/ta-brain",
+    "crates/ta-data-spec",
 ]
 
 # Single source of truth for all crate versions.
 # Each crate's Cargo.toml uses `version.workspace = true` to inherit this.
 [workspace.package]
-version = "0.17.0-alpha.12.20"
+version = "0.17.0-alpha.12.21"
 
 # Shared dependency versions — crate Cargo.tomls use `dep.workspace = true`
 # to inherit these versions, keeping everything in sync across all crates.
@@ -104,8 +105,11 @@ rmcp = { version = "0.14", features = ["server", "transport-io", "transport-asyn
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 
-# JSON Schema generation — used by rmcp for MCP tool parameter schemas.
-schemars = "1"
+# JSON Schema generation — used by rmcp for MCP tool parameter schemas, and
+# (v0.17.0.12.21) for the versioned data-format specs in `ta-data-spec`.
+# `uuid1`/`chrono04` enable JsonSchema impls for `uuid::Uuid` and
+# `chrono::DateTime<Utc>`, both pervasive in the spec types.
+schemars = { version = "1", features = ["uuid1", "chrono04"] }
 
 # YAML configuration parsing — used for agent launch configs.
 serde_yaml = "0.9"

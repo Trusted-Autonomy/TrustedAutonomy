@@ -17,7 +17,7 @@ use crate::advisor_agent::AdvisorOutcome;
 /// closed enum, so a `team.toml` can declare any role (e.g. `"security-team"`)
 /// without a TA core change. The five well-known names below are recognized as
 /// constants/constructors for defaults and documentation but are not exhaustive.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct TeamRole(String);
 
