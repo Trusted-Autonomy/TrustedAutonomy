@@ -1494,7 +1494,7 @@ fn dispatch_raw(
                 priority.as_deref(),
                 workflow.as_deref(),
                 workload.as_deref(),
-                &project_root,
+                project_root,
             );
 
             // serial-phases: dispatch to execute_serial_phases when --phases is provided.
