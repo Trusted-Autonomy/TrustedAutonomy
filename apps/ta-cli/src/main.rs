@@ -1100,7 +1100,32 @@ fn try_resolve_phase(candidate: &str, project_root: &std::path::Path) -> Option<
     Some((title, phase.id.clone()))
 }
 
+/// Windows' default main-thread stack (1MB) is far smaller than
+/// Linux/macOS's (8MB default). Debug builds' uninlined stack frames for
+/// clap's generated subcommand dispatch can exceed that 1MB limit on
+/// Windows even though the same code path is fine elsewhere — confirmed by
+/// `scripts/diagnose-windows-stack-overflow.ps1` (PR #537): the crash is
+/// 100% deterministic at the default stack and 100% clean at 64MB, with no
+/// signs of unbounded/infinite recursion. Running the real work on a
+/// spawned thread with an explicit larger stack fixes it for every
+/// invocation of the binary, not just the two tests that first exposed it.
 fn main() -> anyhow::Result<()> {
+    match std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn ta worker thread")
+        .join()
+    {
+        Ok(result) => result,
+        Err(_) => {
+            // The worker thread's own panic hook already printed the
+            // panic message/backtrace; just propagate a nonzero exit.
+            std::process::exit(101);
+        }
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let startup_begin = std::time::Instant::now();
     let cli = Cli::parse();
     let t_parse = startup_begin.elapsed();
