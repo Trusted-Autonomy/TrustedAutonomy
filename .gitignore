@@ -109,6 +109,7 @@ result-*
 .ta/heartbeats/
 .ta/action-log.jsonl
 .ta/autonomous-loop-state.json
+.ta/telemetry.jsonl
 .ta/logs/
 .ta/routing-decisions.jsonl
 
